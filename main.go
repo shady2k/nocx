@@ -9,7 +9,6 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/shady2k/nocx/internal/app"
 )
@@ -35,6 +34,9 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
+		Debug: options.Debug{
+			OpenInspectorOnStartup: true,
+		},
 		OnStartup:  wailsApp.startup,
 		OnShutdown: wailsApp.shutdown,
 		Bind: []interface{}{
@@ -57,12 +59,14 @@ func (w *WailsApp) startup(ctx context.Context) {
 	w.backend.Logger.Info("Wails app starting up")
 	if err := w.backend.Start(ctx); err != nil {
 		w.backend.Logger.Error("failed to start backend", "error", err)
-		return
 	}
-	wailsRuntime.EventsEmit(ctx, "ws:port", w.backend.WSPort())
 }
 
 func (w *WailsApp) shutdown(ctx context.Context) {
 	w.backend.Logger.Info("Wails app shutting down")
 	w.backend.Shutdown(ctx)
+}
+
+func (w *WailsApp) GetWSPort() int {
+	return w.backend.WSPort()
 }

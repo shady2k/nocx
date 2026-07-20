@@ -1,6 +1,7 @@
 import './style.css'
 import { Terminal } from './terminal'
 import { WSClient } from './ipc'
+import { GetWSPort } from '../wailsjs/go/main/WailsApp'
 
 declare global {
   interface Window {
@@ -17,14 +18,7 @@ async function main() {
   const terminal = new Terminal()
   const ws = new WSClient()
 
-  const port = await new Promise<number>((resolve) => {
-    const eventsOn = window.runtime?.EventsOn
-    if (eventsOn) {
-      eventsOn('ws:port', (p: unknown) => resolve(p as number))
-    } else {
-      resolve(9876)
-    }
-  })
+  const port = await GetWSPort().catch(() => 9876)
 
   await terminal.mount(container)
   await ws.connect(port)

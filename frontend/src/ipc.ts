@@ -44,6 +44,10 @@ export class WSClient {
     this.onOpenCallback = cb
   }
 
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
   close(): void {
     this.ws?.close()
     this.ws = null

@@ -3,6 +3,8 @@ import { init, Terminal as GhosttyTerminal, FitAddon } from 'ghostty-web'
 export type ResizeCallback = (cols: number, rows: number) => void
 export type DataCallback = (data: string) => void
 
+export type WheelHandler = (event: WheelEvent) => boolean
+
 export class Terminal {
   private term: GhosttyTerminal | null = null
   private fitAddon: FitAddon | null = null
@@ -47,5 +49,17 @@ export class Terminal {
 
   get rows(): number {
     return this.term?.rows ?? 24
+  }
+
+  get isAlternateScreen(): boolean {
+    return this.term?.buffer.active.type === 'alternate'
+  }
+
+  get hasMouseTracking(): boolean {
+    return this.term?.wasmTerm?.hasMouseTracking() ?? false
+  }
+
+  attachCustomWheelEventHandler(handler?: WheelHandler): void {
+    this.term?.attachCustomWheelEventHandler(handler)
   }
 }

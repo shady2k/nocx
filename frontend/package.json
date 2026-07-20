@@ -1,0 +1,19 @@
+{
+  "name": "nocx-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ghostty-org/ghostty-web": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "@types/dom-urls": "^2.0.0"
+  }
+}

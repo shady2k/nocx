@@ -26,7 +26,25 @@ Thumbs.db
 /bin/
 node_modules/
 
-# Beads / Dolt files (added by bd init)
+# --- Go ---
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/go/build/
+vendor/
+
+# --- Wails ---
+frontend/dist/*
+!frontend/dist/index.html
+
+# --- Node / frontend ---
+frontend/node_modules/
+
+# --- Beads / Dolt files (added by bd init) ---
 .dolt/
 *.db
 .beads-credential-key

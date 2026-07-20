@@ -1,51 +1,45 @@
-# --- Personal / per-contributor (never shared) ---
-.claude/settings.local.json
-**/config.user.toml
-**/config.user.yaml
-.env
-.env.*
 
-# --- BMAD resolved config: installer-generated, bakes in personal identity ---
-# Source of truth is the committed *.toml. Regenerate via the BMAD installer.
-_bmad/core/config.yaml
-_bmad/bmm/config.yaml
-
-# --- BMAD working scratch: canonical outputs are promoted to docs/ ---
 _bmad-output/
-
-# --- OS / editor noise ---
-.DS_Store
-Thumbs.db
-*.swp
-.idea/
-.vscode/
-
-# --- Build output (grows with the app) ---
-/build/
-/dist/
-/bin/
-node_modules/
-
-# --- Go ---
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-*.test
-*.out
-/go/build/
-vendor/
-
-# --- Wails ---
-frontend/dist/*
+_bmad/bmm/config.yaml
+_bmad/core/config.yaml
 !frontend/dist/index.html
-
-# --- Node / frontend ---
-frontend/node_modules/
-
-# --- Beads / Dolt files (added by bd init) ---
-.dolt/
-*.db
 .beads-credential-key
 .beads/proxieddb/
+.claude/settings.local.json
+.dolt/
+.DS_Store
+.env
+.env.*
+.idea/
+.vscode/
+*.db
+*.dll
+*.dylib
+*.exe
+*.exe~
+*.out
+*.so
+*.swp
+*.test
+**/config.user.toml
+**/config.user.yaml
+/bin/
+/build/
+/dist/
+/go/build/
+# --- Beads / Dolt files (added by bd init) ---
+# --- BMAD resolved config: installer-generated, bakes in personal identity ---
+# --- BMAD working scratch: canonical outputs are promoted to docs/ ---
+# --- Build output (grows with the app) ---
+# --- Go ---
+# --- Node / frontend ---
+# --- OS / editor noise ---
+# --- Personal / per-contributor (never shared) ---
+# --- Wails ---
+# Source of truth is the committed *.toml. Regenerate via the BMAD installer.
+frontend/dist/*
+frontend/node_modules/
+nocx
+node_modules/
+Thumbs.db
+vendor/

@@ -27,6 +27,10 @@ async function main() {
   terminal.onData((data: string) => ws.send(data))
   terminal.onResize((cols: number, rows: number) => ws.sendResize(cols, rows))
 
+  // Sync PTY winsize to the actual rendered grid at startup
+  terminal.fit()
+  ws.sendResize(terminal.cols, terminal.rows)
+
   window.addEventListener('resize', () => terminal.fit())
 
   window.runtime?.EventsOn('window:resize', () => {

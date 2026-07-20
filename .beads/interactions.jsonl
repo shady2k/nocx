@@ -1,3 +1,4 @@
 {"id":"int-c366895a9f23734d73e6cd5f7efe618c","kind":"field_change","created_at":"2026-07-20T17:44:11.743909Z","actor":"shady","issue_id":"nocx-pxq.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-fb46b898b867f71c51ad9626663f1aa7","kind":"field_change","created_at":"2026-07-20T17:44:12.235858Z","actor":"shady","issue_id":"nocx-2ho.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-c5836afaba4101ae332a1db64548d05e","kind":"field_change","created_at":"2026-07-20T17:44:12.754978Z","actor":"shady","issue_id":"nocx-pxq.2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-410519d4b05ec695723254e5faa453bd","kind":"field_change","created_at":"2026-07-20T18:12:09.194415Z","actor":"shady","issue_id":"nocx-shx","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}

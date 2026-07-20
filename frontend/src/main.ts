@@ -1,3 +1,4 @@
+import './console-filter'
 import './style.css'
 import { Terminal } from './terminal'
 import { WSClient } from './ipc'

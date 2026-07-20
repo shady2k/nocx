@@ -6,3 +6,4 @@
 {"id":"int-fc6bd0295e4d1391bc6442d81b1491e9","kind":"field_change","created_at":"2026-07-20T18:26:19.481198Z","actor":"shady","issue_id":"nocx-5zg","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-7faef2995c00d0bb8fbae3da3f5d3af9","kind":"field_change","created_at":"2026-07-20T18:31:18.650137Z","actor":"shady","issue_id":"nocx-5zg","extra":{"field":"status","new_value":"open","old_value":"closed"}}
 {"id":"int-23758c2973bcb53de01f29bf79c22629","kind":"field_change","created_at":"2026-07-20T18:31:37.233627Z","actor":"shady","issue_id":"nocx-5zg","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-9b0daa1e0844f2cfb37baab3160769a0","kind":"field_change","created_at":"2026-07-20T20:07:29.302213Z","actor":"shady","issue_id":"nocx-55l","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}

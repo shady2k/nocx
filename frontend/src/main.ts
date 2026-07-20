@@ -55,6 +55,13 @@ async function main() {
     return true // prevent ghostty-web viewport scroll
   })
 
+  // When entering alt screen, reset viewportY so writes don't snap to bottom
+  terminal.onBufferChange(() => {
+    if (terminal.isAlternateScreen) {
+      terminal.fit()
+    }
+  })
+
   console.log('nocx: terminal connected')
 }
 

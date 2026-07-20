@@ -59,6 +59,10 @@ export class Terminal {
     return this.term?.wasmTerm?.hasMouseTracking() ?? false
   }
 
+  onBufferChange(cb: () => void): void {
+    this.term?.buffer.onBufferChange(cb)
+  }
+
   attachCustomWheelEventHandler(handler?: WheelHandler): void {
     this.term?.attachCustomWheelEventHandler(handler)
   }

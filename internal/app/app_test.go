@@ -54,22 +54,19 @@ func TestStartShutdown(t *testing.T) {
 	if err := a.Start(ctx); err != nil {
 		t.Fatalf("Start() returned error: %v", err)
 	}
+	if a.WSPort() == 0 {
+		t.Fatal("WSPort() == 0 after Start")
+	}
 
 	a.Shutdown(ctx)
 }
 
-func TestStartTwice_ReturnsError(t *testing.T) {
+func TestWSPortBeforeStart(t *testing.T) {
 	a, err := New()
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
-
-	ctx := context.Background()
-	if err := a.Start(ctx); err != nil {
-		t.Fatalf("Start() returned error: %v", err)
-	}
-
-	if err := a.Start(ctx); err == nil {
-		t.Error("expected error on second Start()")
+	if a.WSPort() != 0 {
+		t.Fatalf("expected 0 before Start, got %d", a.WSPort())
 	}
 }

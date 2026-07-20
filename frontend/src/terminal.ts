@@ -1,29 +1,51 @@
+import { init, Terminal as GhosttyTerminal, FitAddon } from 'ghostty-web'
+
+export type ResizeCallback = (cols: number, rows: number) => void
+export type DataCallback = (data: string) => void
+
 export class Terminal {
-  private element: HTMLElement | null = null;
+  private term: GhosttyTerminal | null = null
+  private fitAddon: FitAddon | null = null
 
-  mount(container: HTMLElement): void {
-    this.element = document.createElement("pre");
-    this.element.style.fontFamily =
-      '"SF Mono", "Fira Code", "Cascadia Code", monospace';
-    this.element.style.background = "#1a1b26";
-    this.element.style.color = "#c0caf5";
-    this.element.style.padding = "12px";
-    this.element.style.margin = "0";
-    this.element.style.overflow = "auto";
-    this.element.style.height = "100%";
-    this.element.style.whiteSpace = "pre-wrap";
-    this.element.style.wordBreak = "break-all";
-    this.element.textContent = "";
-    container.appendChild(this.element);
+  async mount(container: HTMLElement): Promise<void> {
+    await init()
+
+    this.term = new GhosttyTerminal({
+      fontSize: 14,
+      theme: {
+        background: '#1a1b26',
+        foreground: '#c0caf5',
+      },
+    })
+
+    this.fitAddon = new FitAddon()
+    this.term.loadAddon(this.fitAddon)
+    this.term.open(container)
+
+    requestAnimationFrame(() => this.fitAddon?.fit())
   }
 
-  write(text: string): void {
-    if (!this.element) return;
-    this.element.textContent += text;
+  write(data: string): void {
+    this.term?.write(data)
   }
 
-  clear(): void {
-    if (!this.element) return;
-    this.element.textContent = "";
+  onData(cb: DataCallback): void {
+    this.term?.onData(cb)
+  }
+
+  onResize(cb: ResizeCallback): void {
+    this.term?.onResize(({ cols, rows }) => cb(cols, rows))
+  }
+
+  fit(): void {
+    this.fitAddon?.fit()
+  }
+
+  get cols(): number {
+    return this.term?.cols ?? 80
+  }
+
+  get rows(): number {
+    return this.term?.rows ?? 24
   }
 }

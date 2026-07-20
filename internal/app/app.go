@@ -19,7 +19,7 @@ type App struct {
 	Pty              *pty.Stub
 	SSH              *ssh.Stub
 	Session          *session.Stub
-	Transport        *transport.Stub
+	Transport        *transport.WSServer
 	Config           *config.Stub
 	ShellIntegration *shellintegration.Stub
 }
@@ -33,7 +33,7 @@ func New() (*App, error) {
 	sshClient := ssh.NewStub(logger)
 	sess := session.NewStub(logger, pt, sshClient)
 	shint := shellintegration.NewStub(logger)
-	tp := transport.NewStub(logger, sess)
+	tp := transport.NewWSServer(logger)
 
 	app := &App{
 		Logger:           logger,
@@ -60,4 +60,8 @@ func (a *App) Shutdown(ctx context.Context) {
 		a.Logger.Error("transport shutdown error", "error", err)
 	}
 	a.Logger.Info("application stopped")
+}
+
+func (a *App) WSPort() int {
+	return a.Transport.Port()
 }

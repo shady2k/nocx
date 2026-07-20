@@ -5,11 +5,20 @@ export type DataCallback = (data: string) => void
 
 export type WheelHandler = (event: WheelEvent) => boolean
 
+function disableCanvasSmoothing(container: HTMLElement): void {
+  const canvas = container.querySelector('canvas')
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (ctx) ctx.imageSmoothingEnabled = false
+}
+
 export class Terminal {
   private term: GhosttyTerminal | null = null
   private fitAddon: FitAddon | null = null
+  private container: HTMLElement | null = null
 
   async mount(container: HTMLElement): Promise<void> {
+    this.container = container
     await init()
 
     this.term = new GhosttyTerminal({
@@ -24,7 +33,11 @@ export class Terminal {
     this.term.loadAddon(this.fitAddon)
     this.term.open(container)
 
-    requestAnimationFrame(() => this.fitAddon?.fit())
+    requestAnimationFrame(() => {
+      this.fitAddon?.fit()
+      this.clampRows()
+      disableCanvasSmoothing(container)
+    })
   }
 
   write(data: string): void {
@@ -41,6 +54,29 @@ export class Terminal {
 
   fit(): void {
     this.fitAddon?.fit()
+    this.clampRows()
+    if (this.container) disableCanvasSmoothing(this.container)
+  }
+
+  private clampRows(): void {
+    if (!this.term || !this.container) return
+    const canvas = this.container.querySelector('canvas')
+    if (!canvas) return
+    const renderer = this.term.renderer
+    if (!renderer) return
+    const metrics = renderer.getMetrics?.()
+    if (!metrics || metrics.height === 0) return
+
+    const containerHeight = this.container.clientHeight
+    const canvasHeight = canvas.clientHeight
+
+    if (canvasHeight > containerHeight) {
+      const maxRows = Math.floor(containerHeight / metrics.height)
+      if (maxRows > 0 && maxRows < this.rows) {
+        this.term.resize(this.cols, maxRows)
+        disableCanvasSmoothing(this.container)
+      }
+    }
   }
 
   get cols(): number {

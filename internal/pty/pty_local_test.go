@@ -149,3 +149,43 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestScrubLauncherSession(t *testing.T) {
+	// nocx is developed from inside a coding agent, so its own process carries
+	// that agent's session markers. Handing them to a user's shell made
+	// `claude` in a tab think it was a child session and turn transcript
+	// saving off — a terminal must not leak its launcher's identity.
+	env := []string{
+		"PATH=/usr/bin",
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_CHILD_SESSION=1",
+		"CLAUDE_CODE_SESSION_ID=abc",
+		"CLAUDE_PID=123",
+		"HOME=/Users/someone",
+		// Not a session marker: stripping a credential would break the very
+		// tool this fix exists for.
+		"CLAUDE_API_KEY=secret",
+	}
+
+	got := scrubLauncherSession(env)
+
+	for _, unwanted := range []string{"CLAUDECODE=", "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ID=", "CLAUDE_PID="} {
+		for _, kv := range got {
+			if strings.HasPrefix(kv, unwanted) {
+				t.Errorf("launcher session marker survived: %q", kv)
+			}
+		}
+	}
+
+	for _, wanted := range []string{"PATH=/usr/bin", "HOME=/Users/someone", "CLAUDE_API_KEY=secret"} {
+		found := false
+		for _, kv := range got {
+			if kv == wanted {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("scrub removed something it should have kept: %q", wanted)
+		}
+	}
+}

@@ -25,6 +25,43 @@ type LocalPty struct {
 // means the environment already states a locale.
 var localeVars = []string{"LC_ALL=", "LC_CTYPE=", "LANG="}
 
+// launcherSessionVars identify the SESSION that launched nocx, not the user's
+// environment. A terminal hands out shells; it must not hand out its
+// launcher's identity with them. When nocx is started from inside a coding
+// agent — which is exactly how it gets developed — every shell it spawns
+// inherited that agent's session markers, and a `claude` run in a tab saw
+// CLAUDE_CODE_CHILD_SESSION and silently disabled transcript saving.
+//
+// Deliberately a precise list rather than a CLAUDE* wildcard: stripping
+// something like an API key would break the very tool we are trying to fix.
+// It grows as other launchers are found.
+var launcherSessionVars = []string{
+	"CLAUDECODE=",
+	"CLAUDE_CODE_ENTRYPOINT=",
+	"CLAUDE_CODE_EXECPATH=",
+	"CLAUDE_CODE_SESSION_ID=",
+	"CLAUDE_CODE_CHILD_SESSION=",
+	"CLAUDE_PID=",
+	"CLAUDE_EFFORT=",
+}
+
+func scrubLauncherSession(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		drop := false
+		for _, prefix := range launcherSessionVars {
+			if strings.HasPrefix(kv, prefix) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // withUTF8Locale guarantees the child shell knows it is on a UTF-8 terminal.
 // A GUI app launched from Finder or the Dock inherits none of the shell's
 // environment, so without this the shell has no locale, and any Python/Rich
@@ -43,6 +80,20 @@ func withUTF8Locale(env []string) []string {
 	return append(env, "LANG=en_US.UTF-8")
 }
 
+// resolveCwd picks where the shell starts. A GUI app launched from Finder or
+// the Dock inherits "/" as its working directory, which is useless as a
+// starting point and useless as a tab name, so an unset Cwd falls back to the
+// user's home the way Terminal.app and iTerm do.
+func resolveCwd(cwd string) string {
+	if cwd != "" {
+		return cwd
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return ""
+}
+
 func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -50,8 +101,9 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	}
 
 	cmd := exec.Command(shell) //nolint:gosec // shell is from SHELL env or fallback
+	cmd.Dir = resolveCwd(cfg.Cwd)
 	cmd.Env = withUTF8Locale(append(
-		os.Environ(),
+		scrubLauncherSession(os.Environ()),
 		"TERM=xterm-256color",
 	))
 

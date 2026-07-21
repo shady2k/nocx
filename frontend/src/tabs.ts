@@ -184,6 +184,7 @@ export class TabManager {
   private readonly client: WSClient
   private readonly rendererName: RendererName
   private readonly addBtn: HTMLButtonElement
+  private readonly tabsContainer: HTMLElement
 
   constructor(bar: HTMLElement, panes: HTMLElement, client: WSClient) {
     this.bar = bar
@@ -194,13 +195,23 @@ export class TabManager {
     bar.setAttribute('role', 'tablist')
     bar.classList.add('tabbar')
 
-    // + button at the end of the strip, always visible.
+    // Non-growing tabs container — holds tab buttons.
+    this.tabsContainer = document.createElement('div')
+    this.tabsContainer.className = 'tabs-container'
+    bar.append(this.tabsContainer)
+
+    // + button — sits immediately after the last tab, before the spacer.
     this.addBtn = document.createElement('button')
     this.addBtn.className = 'tab-add'
     this.addBtn.textContent = '+'
     this.addBtn.setAttribute('aria-label', 'New tab')
     this.addBtn.addEventListener('click', () => this.newTab())
     bar.append(this.addBtn)
+
+    // Flexible spacer — absorbs leftover width so tabs never stretch.
+    const spacer = document.createElement('div')
+    spacer.className = 'tabbar-spacer'
+    bar.append(spacer)
 
     // Open the initial tab — the window is never empty.
     this.newTab()
@@ -218,8 +229,8 @@ export class TabManager {
     const tab = new Tab(this.client, this.rendererName, this.nextTabId++)
 
     this.tabs.push(tab)
-    // Insert before the + button so addBtn stays at the end.
-    this.bar.insertBefore(tab.button, this.addBtn)
+    // Append to the tabs container (addBtn sits after the container).
+    this.tabsContainer.append(tab.button)
     this.panes.append(tab.pane)
 
     // Click → activate. The close button's own handler calls stopPropagation,

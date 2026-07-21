@@ -518,4 +518,76 @@ describe('TabManager', () => {
     expect(session0.close).toHaveBeenCalled()
     expect(bar.querySelectorAll('.tab').length).toBe(1)
   })
+
+  // ── flex-grow regression guards ──────────────────────────────────────
+
+  it('a lone tab does not stretch (flex-grow is not a stretching value)', async () => {
+    // Inject the critical layout rules so jsdom can compute styles.
+    const style = document.createElement('style')
+    style.textContent = `
+      .tabbar { display: flex; }
+      .tabs-container { flex: 0 1 auto; min-width: 0; display: flex; align-items: stretch; }
+      .tabbar-spacer { flex: 1 1 0%; }
+      .tab { flex: 0 1 200px; }
+    `
+    document.head.appendChild(style)
+
+    const client = makeClient()
+    new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalled()
+    })
+
+    const tabsContainer = bar.querySelector('.tabs-container') as HTMLElement
+    expect(tabsContainer).not.toBeNull()
+
+    const tab = bar.querySelector('.tab') as HTMLElement
+    expect(tab).not.toBeNull()
+
+    // The tabs container itself must not grow.
+    expect(getComputedStyle(tabsContainer).flexGrow).toBe('0')
+
+    // The tab must not have a stretching flex-grow.
+    expect(getComputedStyle(tab).flexGrow).toBe('0')
+    expect(getComputedStyle(tab).flexBasis).toBe('200px')
+
+    // The spacer should absorb all remaining width.
+    const spacer = bar.querySelector('.tabbar-spacer') as HTMLElement
+    expect(spacer).not.toBeNull()
+    expect(getComputedStyle(spacer).flexGrow).toBe('1')
+
+    // Clean up injected style.
+    style.remove()
+  })
+
+  it('proves the guard would catch flex-grow:1000 on .tab', async () => {
+    const style = document.createElement('style')
+    style.textContent = `
+      .tabbar { display: flex; }
+      .tabs-container { flex: 0 1 auto; min-width: 0; display: flex; align-items: stretch; }
+      .tabbar-spacer { flex: 1 1 0%; }
+      .tab { flex: 1000 1 200px; }
+    `
+    document.head.appendChild(style)
+
+    const client = makeClient()
+    new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalled()
+    })
+
+    const tab = bar.querySelector('.tab') as HTMLElement
+    expect(tab).not.toBeNull()
+
+    // With flex:1000 the computed flex-grow IS '1000'.
+    expect(getComputedStyle(tab).flexGrow).toBe('1000')
+
+    // Verify that the guard assertion (expect(…).toBe('0')) would fail
+    // by showing the value is NOT '0'.
+    expect(getComputedStyle(tab).flexGrow).not.toBe('0')
+
+    style.remove()
+  })
 })

@@ -9,6 +9,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
 
 	"github.com/shady2k/nocx/internal/app"
 )
@@ -35,6 +36,14 @@ func main() {
 			Assets: assets,
 		},
 		EnableDefaultContextMenu: false,
+		// The tab strip IS the title bar, Tabby-style: no title text and no
+		// second row stealing ~28px of terminal. TitleBarHiddenInset keeps the
+		// traffic lights and insets them, so the strip needs left padding to
+		// clear them and a drag region on its empty part — see .tabbar in
+		// frontend/src/style.css, which is the other half of this decision.
+		Mac: &mac.Options{
+			TitleBar: mac.TitleBarHiddenInset(),
+		},
 		Debug: options.Debug{
 			OpenInspectorOnStartup: true,
 		},

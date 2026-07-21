@@ -23,12 +23,24 @@ body {
 
 /* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
 
+/* The strip doubles as the window's title bar (mac.TitleBarHiddenInset in
+   main.go), so it starts clear of the inset traffic lights. In a plain
+   browser at :34115 there are none, and the padding is simply empty space.
+
+   Dragging the window is --wails-draggable, NOT -webkit-app-region: that is
+   an Electron/Chromium feature and Wails renders in WKWebView on macOS, where
+   it does nothing. Wails hooks mousedown and reads this custom property off
+   the element under the cursor. Custom properties inherit, so every
+   interactive child below must set it back to no-drag or it stops taking
+   clicks — with the title bar gone, this rule is the only way to move the
+   window. */
 .tabbar {
+  --wails-draggable: drag;
   flex: 0 0 auto;
   display: flex;
   align-items: stretch;
   height: 38px;
-  padding: 0;
+  padding: 0 0 0 78px;
   background: #16161e;
   border-bottom: 1px solid #2a2b3d;
   font:
@@ -60,6 +72,7 @@ body {
 /* ── Individual tab ──────────────────────────────────────────────────── */
 
 .tab {
+  --wails-draggable: no-drag;
   position: relative;
   display: flex;
   align-items: center;
@@ -142,6 +155,7 @@ body {
 /* ── Close button ────────────────────────────────────────────────────── */
 
 .tab-close {
+  --wails-draggable: no-drag;
   position: absolute;
   right: 4px;
   top: 50%;
@@ -215,6 +229,7 @@ body {
 /* ── + (new tab) button ──────────────────────────────────────────────── */
 
 .tab-add {
+  --wails-draggable: no-drag;
   flex: none;
   display: flex;
   align-items: center;
@@ -239,6 +254,9 @@ body {
 /* ── Terminal panes ──────────────────────────────────────────────────── */
 
 #panes {
+  /* The terminal is never a drag handle — selecting text must not move the
+     window (see the --wails-draggable note on .tabbar). */
+  --wails-draggable: no-drag;
   position: relative;
   flex: 1 1 auto;
   min-height: 0;

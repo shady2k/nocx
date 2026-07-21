@@ -336,7 +336,6 @@ func TestConnect_PTY_RequestedSize(t *testing.T) {
 		t.Fatalf("Connect: %v", err)
 	}
 
-	// Note: x/crypto/ssh v0.51.0 computes pixel values as cols*8 / rows*8.
 	cols, rows, xp, yp := srv.getPTYSize()
 	if cols != 100 {
 		t.Errorf("expected cols=100, got %d", cols)
@@ -347,8 +346,8 @@ func TestConnect_PTY_RequestedSize(t *testing.T) {
 	if xp != 800 {
 		t.Errorf("expected xp=800, got %d", xp)
 	}
-	if yp != 320 {
-		t.Errorf("expected yp=320 (rows*8), got %d", yp)
+	if yp != 600 {
+		t.Errorf("expected yp=600, got %d", yp)
 	}
 }
 
@@ -383,8 +382,8 @@ func TestResize_ReachesServer(t *testing.T) {
 	// Wait for the shell to be ready before resizing.
 	<-srv.shellReady
 
-	// Resize the channel. Note: x/crypto/ssh v0.51.0 computes pixel values
-	// as cols*8 / rows*8 internally.
+	// Resize the channel. Pixel dimensions should reach the server via the
+	// manual window-change wire message.
 	err = ch.Resize(context.Background(), 132, 43, 1056, 860)
 	if err != nil {
 		t.Fatalf("Resize: %v", err)
@@ -402,10 +401,10 @@ func TestResize_ReachesServer(t *testing.T) {
 		t.Errorf("expected rows=43 after resize, got %d", rows)
 	}
 	if xp != 1056 {
-		t.Errorf("expected xp=1056 (132*8), got %d", xp)
+		t.Errorf("expected xp=1056 after resize, got %d", xp)
 	}
-	if yp != 344 {
-		t.Errorf("expected yp=344 (43*8), got %d", yp)
+	if yp != 860 {
+		t.Errorf("expected yp=860 after resize, got %d", yp)
 	}
 }
 

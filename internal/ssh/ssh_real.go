@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -433,15 +434,23 @@ func (rc *RealClient) openShell(gclient *gossh.Client, resolved *resolvedConfig)
 
 	// Request PTY at the requested size — per AD-1/AD-7 the channel is
 	// created at this size, never spawned-then-resized.
-	ptyErr := session.RequestPty("xterm-256color", int(resolved.rows), int(resolved.cols),
-		gossh.TerminalModes{
-			gossh.ECHO:          1,
-			gossh.TTY_OP_ISPEED: 14400,
-			gossh.TTY_OP_OSPEED: 14400,
-		})
-	if ptyErr != nil {
+	//
+	// We send the pty-req manually rather than using session.RequestPty,
+	// because that high-level API drops the pixel dimensions (xpixel/ypixel).
+	// The SSH wire protocol (RFC 4254 §6.2) carries them, and our own
+	// interface contract promises they reach the remote end (AD-1).
+	ptyReq := ptyReqMsg{
+		Term:     "xterm-256color",
+		Columns:  uint32(resolved.cols),
+		Rows:     uint32(resolved.rows),
+		Width:    uint32(resolved.xpixel),
+		Height:   uint32(resolved.ypixel),
+		Modelist: buildTerminalModes(),
+	}
+	_, err = session.SendRequest("pty-req", true, gossh.Marshal(&ptyReq))
+	if err != nil {
 		_ = session.Close()
-		return nil, fmt.Errorf("request pty: %w", ptyErr)
+		return nil, fmt.Errorf("pty-req: %w", err)
 	}
 
 	// StdinPipe / StdoutPipe give us the raw channel for io.ReadWriteCloser.
@@ -521,8 +530,65 @@ func (c *RealChannel) Done() <-chan struct{} {
 }
 
 // Resize sends a window-change request to the remote end.
+//
+// We send the request manually rather than using session.WindowChange,
+// because that high-level API drops the pixel dimensions (xpixel/ypixel).
+// The SSH wire protocol (RFC 4254 §6.7) carries them, and our interface
+// contract promises they reach the remote end (AD-1).
 func (c *RealChannel) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
-	return c.session.WindowChange(int(rows), int(cols))
+	wcMsg := ptyWindowChangeMsg{
+		Columns: uint32(cols),
+		Rows:    uint32(rows),
+		Width:   uint32(xpixel),
+		Height:  uint32(ypixel),
+	}
+	_, err := c.session.SendRequest("window-change", false, gossh.Marshal(&wcMsg))
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// Wire-format message types for SSH protocol requests.
+// These mirror the unexported types in x/crypto/ssh/session.go.
+// ---------------------------------------------------------------------------
+
+// ptyReqMsg matches RFC 4254 §6.2.
+type ptyReqMsg struct {
+	Term     string
+	Columns  uint32
+	Rows     uint32
+	Width    uint32
+	Height   uint32
+	Modelist string
+}
+
+// ptyWindowChangeMsg matches RFC 4254 §6.7.
+type ptyWindowChangeMsg struct {
+	Columns uint32
+	Rows    uint32
+	Width   uint32
+	Height  uint32
+}
+
+// buildTerminalModes returns the SSH-encoded terminal modes string.
+// The modes are encoded as repeated {byte opcode, uint32 value} terminated
+// by TTY_OP_END (0).
+func buildTerminalModes() string {
+	buf := make([]byte, 0, 64)
+	for _, m := range []struct {
+		opcode byte
+		value  uint32
+	}{
+		{gossh.ECHO, 1},
+		{gossh.TTY_OP_ISPEED, 14400},
+		{gossh.TTY_OP_OSPEED, 14400},
+	} {
+		buf = append(buf, m.opcode)
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, m.value)
+		buf = append(buf, b...)
+	}
+	buf = append(buf, 0) // TTY_OP_END
+	return string(buf)
 }
 
 // ---------------------------------------------------------------------------

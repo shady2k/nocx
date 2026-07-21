@@ -15,7 +15,6 @@ export interface TabSpec {
 const RESIZE_SETTLE_MS = 80
 
 export const TABS: readonly TabSpec[] = [
-  { id: 'ghostty', label: 'ghostty-web', engine: 'WASM VT → canvas' },
   { id: 'xterm', label: 'xterm.js', engine: 'WebGL (GPU) → canvas' },
   { id: 'wterm', label: 'wterm', engine: 'DOM nodes (no canvas)' },
 ]

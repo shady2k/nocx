@@ -1,43 +1,149 @@
 # nocx
 
-A local-first, Warp-style terminal — no cloud, no login, no telemetry. Built on
-[ghostty-web](https://github.com/coder/ghostty-web) (WASM VT engine), Wails (Go + WebView),
-and a custom Go backend (PTY, SSH).
+A local-first, Warp-style terminal — no cloud, no login, no telemetry.
+**Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
+Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
+plane and a JSON-RPC 2.0 control plane.
 
-> **Status:** early planning. See [`docs/vision.md`](docs/vision.md) for the product vision,
-> MVP scope, and roadmap.
+**Status:** MVP in progress. Local PTY over WebSocket works; SSH client, tabs,
+and cwd features are under active development. macOS-first.
 
 ## What makes it different
 
-Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stakes; the wedge is
-the *combination*, all local in one app: Ghostty-grade rendering + an integrated SSH manager +
-(later) a secrets vault + (later) Warpify-style UX — with no cloud dependency.
+Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stakes;
+the wedge is the *combination*, all local in one app: Ghostty-grade rendering +
+an integrated SSH manager + (later) a secrets vault + (later) Warpify-style UX —
+with no cloud dependency.
+
+## Prerequisites
+
+| Tool | Version | Install |
+|------|---------|---------|
+| Go | 1.26 | [go.dev](https://go.dev/dl/) |
+| Node | 22 | [nodejs.org](https://nodejs.org/) |
+| Wails CLI | v2 | `go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
+| gofumpt | latest | `go install mvdan.cc/gofumpt@latest` |
+| golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
+| bd (beads) | 1.x | `brew install beads` |
+
+> ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
+> schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
+
+## Getting started
+
+```bash
+git clone <repo-url> && cd nocx
+
+# 1. Install the pre-commit hook (REQUIRED first step)
+make hooks
+
+# 2. Install frontend dependencies
+cd frontend && npm ci && cd ..
+
+# 3. Run in development mode
+wails dev
+```
+
+The pre-commit hook runs on every `git commit` and enforces:
+- `gofumpt` — format check (fails if any file needs formatting)
+- `golangci-lint` — lint
+- `go test -race -count=1 ./...` — tests with race detector
+- `npx tsc --noEmit` — frontend type check (skipped if `node_modules` absent)
+
+Run locally without committing: `make ci` (close mirror of CI — runs the same static analysis and tests, but validates against your existing `node_modules` rather than reinstalling).
+
+## Quality gates
+
+Every commit must pass:
+
+| Gate | Pre-commit | `make ci` | CI (GitHub Actions) |
+|------|-----------|-----------|---------------------|
+| gofumpt (format) | ✓ | ✓ | ✓ |
+| golangci-lint | v1.64.8 | v1.64.8 | v1.64.8 |
+| `go test -race` | ✓ | ✓ | ✓ |
+| `go build ./...` | — | ✓ | ✓ (macos-latest) |
+| `npx tsc --noEmit` | ✓ | ✓ | ✓ |
+| `npm run build` | — | ✓ | ✓ |
+
+CI runs on push/PR to `main` (GitHub Actions, macos-latest for Go job,
+ubuntu-latest for frontend). No merge without green.
+
+## Task tracking — beads (bd)
+
+The executable backlog lives in beads, not markdown:
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+See `AGENTS.md` for the full workflow.
+
+## Sources of truth
+
+| File | What it contains |
+|------|------------------|
+| `AGENTS.md` | Binding engineering rules for all contributors (human and AI) |
+| `docs/architecture.md` | Architecture spine with AD-1..AD-10 invariants |
+| `docs/vision.md` | Product vision, MVP scope, roadmap |
+| `docs/decisions/` | Architecture Decision Records (append-only) |
 
 ## Repository layout
 
-- `docs/` — living, framework-neutral source-of-truth documents.
-  - `vision.md` — product vision, MVP scope, roadmap.
-  - `architecture.md` — high-level architecture *(coming next)*.
-  - `decisions/` — architecture decision records (append-only).
-- `AGENTS.md` — rules for AI agents working in this repo *(coming next)*.
-- `_bmad/`, `.claude/`, `.agents/`, `.opencode/` — vendored AI-agent tooling (the BMAD
-  workflow), so contributors can develop with agents out of the box.
+```
+AGENTS.md               — binding contributor contract
+Makefile                — lint, format, test, build, dev, ci, hooks
+.githooks/pre-commit    — pre-commit hook (POSIX sh)
+.github/workflows/      — CI workflows
+
+docs/                   — living docs (vision, architecture, decisions/)
+
+internal/               — Go backend
+  app/                    composition root
+  config/                 settings, themes
+  log/                    structured logging (slog adapter)
+  pty/                    local pseudo-terminals
+  session/                session registry and lifecycle
+  ssh/                    SSH client (x/crypto/ssh)
+  shellintegration/       OSC 7/133 substrate
+  transport/              WebSocket server
+
+frontend/               — TypeScript frontend (xterm.js + Wails)
+  src/
+    renderers/            xterm.js, wterm (switchable)
+    tabs.ts               tab manager + WS client
+    ipc.ts                WebSocket protocol
+    main.ts               app entry
+  package.json
+
+_bmad/, .claude/,
+.agents/, .opencode/    — vendored agent tooling
+```
 
 ## Built by AI agents
 
-Development is driven by AI coding agents using the BMAD workflow, with task tracking in
-[beads](https://github.com/steveyegge/beads). The living docs in `docs/` are the source of
-truth; the executable backlog lives in beads (not in prose).
+Development is driven by AI coding agents using the BMAD workflow. The agent
+tooling is vendored — clone and go.
 
-## Getting started (contributors)
+### Set your BMAD identity
 
-1. **Clone** — the agent tooling is vendored, so your agent shares the same workflow.
-2. **Set your BMAD identity** (not committed): edit `_bmad/config.user.toml` (your
-   `user_name` / `communication_language`) or re-run the BMAD installer to regenerate your
-   local `config.yaml`.
-3. **Read** [`docs/vision.md`](docs/vision.md), then `AGENTS.md` for how we work.
+```bash
+# If you have the BMAD CLI installed:
+#   bmad setup
+# Otherwise, edit _bmad/config.user.toml with your user_name and
+# communication_language (not committed).
+```
 
 ## License
 
-TBD. Dependencies are MIT — preserve their copyright notices (ghostty-web © 2025 Coder;
-Ghostty © 2024 Mitchell Hashimoto and contributors).
+TBD. Dependencies are MIT and Apache 2.0 — preserve their copyright notices:
+
+- `@xterm/xterm` — MIT, copyright:
+  - © 2017–2019 The xterm.js authors
+  - © 2014–2016 SourceLair Private Company
+  - © 2012–2013 Christopher Jeffrey
+- `@xterm/addon-*` — MIT, © The xterm.js authors (each addon LICENSE repeats its own line)
+- `@wterm/dom` — Apache 2.0 (no explicit copyright holder declared in package metadata or LICENSE)
+- `vite` — MIT, © 2019–present VoidZero Inc. and Vite contributors (devDependency, build-time only)

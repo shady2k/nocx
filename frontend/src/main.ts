@@ -1,4 +1,3 @@
-import './console-filter'
 import './style.css'
 import { GetWSPort } from '../wailsjs/go/main/WailsApp'
 import { TabManager } from './tabs'
@@ -18,8 +17,8 @@ async function main() {
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
 
-  // ?r=ghostty|xterm|wterm picks which tab opens first; the others mount on
-  // demand when clicked (or Cmd/Ctrl+1..3).
+  // ?r=xterm|wterm picks which tab opens first; the others mount on demand
+  // when clicked (or Cmd/Ctrl+1..N).
   const tabs = new TabManager(bar, panes, port)
   await tabs.activate(resolveRendererName())
 }

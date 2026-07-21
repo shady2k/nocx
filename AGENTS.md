@@ -47,19 +47,16 @@ OpenCode, …) contributing to the repo. Read it before writing code.
 - **Backend:** Go — `pty`, `ssh` (via `golang.org/x/crypto/ssh`), `session`, `transport`,
   `config`. One core, multiple build targets.
 - **Frontend:** xterm.js (WebGL) + TypeScript UI. Terminal render state lives here (AD-6).
-  ghostty-web and wterm stay switchable behind `TerminalRenderer` for re-testing — see
+  wterm remains switchable behind `TerminalRenderer` for re-testing — see
   [ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md).
 - **Desktop shell:** Wails v2 (macOS first).
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control plane (AD-1).
 
 ## Current top risk
 
-~~ghostty-web OSC surface unverified~~ — **RESOLVED 2026-07-21** (`nocx-dej`,
-[ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md)). ghostty-web exposes no OSC
-handler registration; xterm.js does, and OSC 7 + OSC 133 (incl. exit codes) were captured
-end-to-end. AD-5 / AD-6 hold with no backend sniffing — cwd / OSC features are unblocked.
-
-Next risk to watch: nothing is load-bearing-unverified right now. Run `bd ready`.
+The VT-frontend risk was settled in
+[ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md).
+Next risk to watch: run `bd ready`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker

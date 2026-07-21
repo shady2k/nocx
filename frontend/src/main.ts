@@ -2,7 +2,6 @@ import './style.css'
 import { GetWSPort } from '../wailsjs/go/main/WailsApp'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
-import { resolveRendererName } from './renderers'
 
 async function main() {
   const bar = document.getElementById('tabbar')
@@ -21,10 +20,9 @@ async function main() {
   const client = new WSClient()
   await client.connect(port)
 
-  // ?r=xterm|wterm picks which tab opens first; the others mount on demand
-  // when clicked (or Cmd/Ctrl+1..N).
-  const tabs = new TabManager(bar, panes, client)
-  await tabs.activate(resolveRendererName())
+  // TabManager opens the first tab and activates it in the constructor.
+  // The renderer is selected via ?r=xterm|wterm inside TabManager.
+  new TabManager(bar, panes, client)
 }
 
 main().catch(console.error)

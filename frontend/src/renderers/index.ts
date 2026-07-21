@@ -15,8 +15,10 @@ export function createRenderer(name: RendererName): TerminalRenderer {
   }
 }
 
-// Picks the tab that opens first, via ?r=xterm|wterm. Every renderer is
-// reachable from the tab bar regardless — this only sets the entry point.
+// Picks the renderer used by all tabs in this window, via ?r=xterm|wterm.
+// The tab bar is no longer a renderer bake-off — ADR-0001 settled on xterm.js.
+// `?r=wterm` is kept as a diagnostics escape hatch for re-testing the
+// switchable renderer seam (ADR-0001 contract).
 export function resolveRendererName(): RendererName {
   const r = new URLSearchParams(location.search).get('r')
   return r === 'wterm' || r === 'xterm' ? r : DEFAULT

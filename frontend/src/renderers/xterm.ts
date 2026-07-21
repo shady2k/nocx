@@ -5,7 +5,7 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
-import type { DataCallback, ResizeCallback, TerminalRenderer } from './types'
+import type { DataCallback, ResizeCallback, TitleCallback, TerminalRenderer } from './types'
 
 // xterm.js (VS Code's engine, stable 5.x) with the WebGL (GPU) renderer,
 // hardened the way Tabby runs it: recover from a lost GPU context and clear the
@@ -130,6 +130,10 @@ export class XtermRenderer implements TerminalRenderer {
 
   onResize(cb: ResizeCallback): void {
     this.term?.onResize(({ cols, rows }) => cb(cols, rows))
+  }
+
+  onTitle(cb: TitleCallback): void {
+    this.term?.onTitleChange(cb)
   }
 
   focus(): void {

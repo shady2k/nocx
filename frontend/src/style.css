@@ -21,14 +21,14 @@ body {
   height: 100%;
 }
 
-/* Bake-off tab bar: one tab per renderer, each with its own live shell. */
-#tabbar {
+/* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
+
+.tabbar {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: 2px;
-  height: 34px;
-  padding: 0 10px;
+  align-items: stretch;
+  height: 38px;
+  padding: 0;
   background: #16161e;
   border-bottom: 1px solid #2a2b3d;
   font:
@@ -39,35 +39,181 @@ body {
     sans-serif;
   -webkit-user-select: none;
   user-select: none;
+  overflow: hidden;
 }
 
+/* ── Individual tab ──────────────────────────────────────────────────── */
+
 .tab {
-  appearance: none;
-  border: 0;
-  border-radius: 5px;
-  padding: 6px 12px;
-  font: inherit;
-  color: #565f89;
-  background: transparent;
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1000 1 200px;
+  width: 200px;
+  min-width: 0;
+  padding: 0 10px;
   cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid transparent;
+  color: #565f89;
+  overflow: hidden;
 }
 
 .tab:hover {
+  background: #1f2030;
+  color: #a9b1d6;
+}
+
+.tab.active {
+  background: #1a1b26;
+  color: #c0caf5;
+}
+
+/* Index number — bold, rounded box */
+.tab-index {
+  flex: none;
+  font-weight: 700;
+  font-size: 11px;
+  width: 22px;
+  height: 22px;
+  line-height: 22px;
+  border-radius: 10px;
+  text-align: center;
+  color: #565f89;
+  align-self: center;
+}
+
+.tab.active .tab-index {
+  color: #7aa2f7;
+  background: rgba(122, 162, 247, 0.1);
+}
+
+.tab:hover .tab-index {
+  color: #a9b1d6;
+}
+
+/* Tab title — flex: auto with ellipsis overflow */
+.tab-title {
+  flex: auto;
+  margin: 0 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+  align-self: center;
+}
+
+/* Title fade under close button on hover (Tabby mask-image trick) */
+.tab:hover .tab-title {
+  -webkit-mask-image:
+    linear-gradient(black 0 0),
+    linear-gradient(to left, transparent 0%, transparent 50%, black 100%);
+  -webkit-mask-size:
+    calc(100% - 80px) auto,
+    80px auto;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: left, right;
+}
+
+/* ── Close button ────────────────────────────────────────────────────── */
+
+.tab-close {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #565f89;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.tab:hover .tab-close {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #a9b1d6;
+}
+
+/* ── Indicators (active top bar / activity bottom bar) ───────────────── */
+
+.tab-indicator {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+
+/* Active tab: top bar */
+.tab.active .tab-indicator {
+  display: block;
+  top: 0;
+  height: 2px;
+  background: #7aa2f7;
+}
+
+/* Background tab activity indicator: bottom dot */
+.tab-indicator.tab-activity {
+  display: block;
+  bottom: 4px;
+  top: auto;
+  height: 2px;
+  background: #7aa2f7;
+  border-radius: 1px;
+  left: 10px;
+  right: 10px;
+  opacity: 0.6;
+}
+
+.tab.active .tab-indicator.tab-activity {
+  display: none;
+}
+
+/* Active indicator never shows activity state */
+.tab.active .tab-indicator:not(.tab-activity) {
+  display: block;
+}
+
+/* ── + (new tab) button ──────────────────────────────────────────────── */
+
+.tab-add {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: #565f89;
+  font-size: 18px;
+  font-weight: 300;
+  cursor: pointer;
+}
+
+.tab-add:hover {
   color: #a9b1d6;
   background: #1f2030;
 }
 
-.tab.active {
-  color: #7aa2f7;
-  background: #1a1b26;
-  box-shadow: inset 0 0 0 1px #2a2b3d;
-}
-
-.status {
-  margin-left: auto;
-  color: #414868;
-  font-variant-numeric: tabular-nums;
-}
+/* ── Terminal panes ──────────────────────────────────────────────────── */
 
 #panes {
   position: relative;

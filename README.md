@@ -50,7 +50,12 @@ The pre-commit hook runs on every `git commit` and enforces:
 - `gofumpt` — format check (fails if any file needs formatting)
 - `golangci-lint` — lint
 - `go test -race -count=1 ./...` — tests with race detector
-- `npx tsc --noEmit` — frontend type check (skipped if `node_modules` absent)
+- `prettier --check` — frontend format check
+- `eslint` — frontend lint
+- `tsc --noEmit` — frontend type check
+- `vitest` — frontend tests
+
+All four frontend gates FAIL with an actionable message if `node_modules` is absent (run `cd frontend && npm ci`).
 
 Run locally without committing: `make ci` (close mirror of CI — runs the same static analysis and tests, but validates against your existing `node_modules` rather than reinstalling).
 
@@ -64,7 +69,10 @@ Every commit must pass:
 | golangci-lint | v1.64.8 | v1.64.8 | v1.64.8 |
 | `go test -race` | ✓ | ✓ | ✓ |
 | `go build ./...` | — | ✓ | ✓ (macos-latest) |
-| `npx tsc --noEmit` | ✓ | ✓ | ✓ |
+| `prettier --check` | ✓ | ✓ | ✓ |
+| `eslint` | ✓ | ✓ | ✓ |
+| `tsc --noEmit` | ✓ | ✓ | ✓ |
+| `vitest` | ✓ | ✓ | ✓ |
 | `npm run build` | — | ✓ | ✓ |
 
 CI runs on release branches (`release/**`), version tags (`v*`), and manual

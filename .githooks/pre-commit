@@ -16,10 +16,12 @@ check_cmd() {
 check_cmd gofumpt "go install mvdan.cc/gofumpt@latest"
 check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
 check_cmd go "install Go from https://go.dev/dl/"
-if [ -d frontend/node_modules ]; then
-    check_cmd npx "install Node.js from https://nodejs.org/"
-else
-    printf "SKIP: tsc --noEmit (frontend/node_modules not found)\n"
+check_cmd node "install Node.js from https://nodejs.org/"
+check_cmd npm "install Node.js from https://nodejs.org/"
+
+if [ ! -d frontend/node_modules ]; then
+    warn "frontend/node_modules not found — run: cd frontend && npm ci"
+    CHECK_CMD_TRUE=false
 fi
 
 if [ "$CHECK_CMD_TRUE" = false ]; then
@@ -51,13 +53,32 @@ if ! go test -race -count=1 ./... 2>&1; then
 fi
 ok "go test -race"
 
-# --- 4. frontend typecheck --------------------------------------------------
-if [ -d frontend/node_modules ]; then
-    if ! (cd frontend && npx tsc --noEmit 2>&1); then
-        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
-        exit 1
-    fi
-    ok "tsc --noEmit"
+# --- 4. frontend format check -----------------------------------------------
+if ! (cd frontend && npm run format:check 2>&1); then
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
 fi
+ok "prettier --check"
+
+# --- 5. frontend lint -------------------------------------------------------
+if ! (cd frontend && npm run lint 2>&1); then
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+ok "eslint"
+
+# --- 6. frontend typecheck --------------------------------------------------
+if ! (cd frontend && npm run typecheck 2>&1); then
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+ok "tsc --noEmit"
+
+# --- 7. frontend test -------------------------------------------------------
+if ! (cd frontend && npm test 2>&1); then
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+ok "vitest"
 
 printf "\nAll checks passed.\n"

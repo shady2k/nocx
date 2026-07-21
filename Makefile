@@ -51,4 +51,13 @@ build-ci:
 frontend-ci:
 	@echo "=== frontend ==="
 	@if [ ! -d frontend/node_modules ]; then echo "FAIL: frontend/node_modules not found — run 'cd frontend && npm ci' first"; exit 1; fi
-	cd frontend && npx tsc --noEmit && npm run build
+	@echo "--- prettier check ---"
+	cd frontend && npm run format:check
+	@echo "--- eslint ---"
+	cd frontend && npm run lint
+	@echo "--- tsc --noEmit ---"
+	cd frontend && npm run typecheck
+	@echo "--- vitest ---"
+	cd frontend && npm test
+	@echo "--- vite build ---"
+	cd frontend && npm run build

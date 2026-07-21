@@ -105,8 +105,15 @@ body {
   color: #c0caf5;
 }
 
-/* Index number — bold, rounded box */
+/* Index number — bold, rounded box. Taken out of the flow like the close
+   button: while it occupied layout space the label was centred in what was
+   left over, which reads as off-centre. Now the label spans the whole tab and
+   its symmetric margins keep the text clear of both. */
 .tab-index {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   flex: none;
   font-weight: 700;
   font-size: 11px;
@@ -128,10 +135,21 @@ body {
   color: #a9b1d6;
 }
 
-/* Tab title — flex: auto with ellipsis overflow */
-.tab-title {
+/* Status icon and title travel together as one centred unit, as Warp does:
+   the index badge sits left and the close button only appears on hover, so a
+   left-aligned label would drift away from the tab's visual middle. */
+.tab-label {
   flex: auto;
-  margin: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  /* Symmetric, and wide enough to clear the 22px badge and the 22px close
+     button — symmetry is what makes the centre the tab's centre. */
+  margin: 0 26px;
+}
+
+.tab-title {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -293,4 +311,52 @@ body {
     Menlo,
     monospace;
   white-space: pre-wrap;
+}
+
+/* ── Agent status (derived from the terminal title) ──────────────────── */
+
+/* A coding agent runs as one long shell command, so OSC 133 cannot see
+   inside it — but it publishes its state in the title, which we already
+   receive. Working spins; waiting sits still and coloured. */
+.tab-status {
+  flex: none;
+  width: 0;
+  height: 10px;
+  margin: 0;
+  border-radius: 50%;
+  align-self: center;
+  transition: width 0.15s;
+}
+
+/* The gap lives on the icon rather than on .tab-label, because a flex `gap`
+   would still reserve space when the icon is collapsed to zero width and the
+   title would sit off-centre on every ordinary tab. */
+.tab.working .tab-status,
+.tab.waiting .tab-status {
+  width: 10px;
+  margin: 0 7px 0 0;
+}
+
+.tab.waiting .tab-status {
+  background: #9ece6a;
+}
+
+.tab.working .tab-status {
+  border: 2px solid rgba(122, 162, 247, 0.25);
+  border-top-color: #7aa2f7;
+  animation: tab-spin 0.7s linear infinite;
+}
+
+@keyframes tab-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab.working .tab-status {
+    animation: none;
+    background: #7aa2f7;
+    border-color: transparent;
+  }
 }

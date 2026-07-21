@@ -1,6 +1,7 @@
 import { WSClient, type SessionHandle } from './ipc'
 import { createRenderer, resolveRendererName, type RendererName } from './renderers'
 import type { TerminalRenderer } from './renderers/types'
+import { detectAgentStatus, type AgentStatus } from './agent-status'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -11,8 +12,23 @@ import type { TerminalRenderer } from './renderers/types'
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
 
-// Shown until the shell sends a title, and restored when it clears one.
+// Shown only until the session reports where it started; a tab named after a
+// generic word tells the user nothing once there are three of them.
 const FALLBACK_TITLE = 'Terminal'
+
+/**
+ * Names a tab after its directory, the way every other terminal does. Keeps
+ * the tail, which is the informative end of a path — the CSS ellipsis cuts
+ * from the right, so handing it a long path would hide exactly the part worth
+ * reading. '~' stays as itself: that is already the shortest true answer.
+ */
+function directoryLabel(cwd: string): string {
+  const path = cwd.trim().replace(/\/+$/, '')
+  if (!path) return FALLBACK_TITLE
+  const parts = path.split('/').filter(Boolean)
+  if (path === '~' || parts.length === 0) return path || FALLBACK_TITLE
+  return parts.slice(-2).join('/')
+}
 
 const DEFAULT_RENDERER: RendererName = resolveRendererName()
 
@@ -24,11 +40,17 @@ class Tab {
   readonly closeBtn = document.createElement('button')
   readonly indexLabel = document.createElement('span')
   readonly titleSpan = document.createElement('span')
+  /** Agent state icon: spinner while working, dot when waiting on the user. */
+  readonly statusIcon = document.createElement('span')
+  /** Centres the status icon and the title as one unit, the way Warp does. */
+  readonly label = document.createElement('span')
   /** Active-tab indicator (top bar) / activity indicator (bottom bar) */
   readonly indicator = document.createElement('div')
 
   private _title = FALLBACK_TITLE
+  private _defaultTitle = FALLBACK_TITLE
   private _hasActivity = false
+  private _agentStatus: AgentStatus | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
@@ -58,6 +80,9 @@ class Tab {
     this.indexLabel.className = 'tab-index'
     this.indexLabel.textContent = String(id)
 
+    this.statusIcon.className = 'tab-status'
+    this.label.className = 'tab-label'
+
     this.titleSpan.className = 'tab-title'
     this.titleSpan.textContent = this._title
 
@@ -65,7 +90,8 @@ class Tab {
     this.closeBtn.textContent = '×'
     this.closeBtn.setAttribute('aria-label', 'Close tab')
 
-    this.button.append(this.indexLabel, this.titleSpan, this.closeBtn, this.indicator)
+    this.label.append(this.statusIcon, this.titleSpan)
+    this.button.append(this.indexLabel, this.label, this.closeBtn, this.indicator)
     this.setActive(false)
   }
 
@@ -95,11 +121,42 @@ class Tab {
     }
   }
 
+  get agentStatus(): AgentStatus | null {
+    return this._agentStatus
+  }
+
+  /**
+   * A coding agent runs as a single shell command, so OSC 133 command
+   * boundaries (nocx-5mn.4) cannot see inside it — but the agent publishes its
+   * state in the title, and we already receive that. When the title says
+   * nothing about an agent the status clears and the byte-level activity rule
+   * takes over again.
+   */
+  private updateAgentStatus(title: string): void {
+    const next = detectAgentStatus(title)
+    if (next === this._agentStatus) return
+    this._agentStatus = next
+    this.button.classList.toggle('working', next === 'working')
+    this.button.classList.toggle('waiting', next === 'idle')
+
+    // An agent that stopped working is asking for you — the one event the
+    // activity underline exists to announce. The byte-level rule cannot see
+    // it: the agent repaints inside the alternate buffer, which is exactly
+    // what that rule suppresses (nocx-5mf).
+    if (next === 'idle' && !this.button.classList.contains('active')) {
+      this.markActivity()
+    }
+  }
+
   updateTitle(title: string): void {
     // A TUI clears the title on the way out by emitting OSC 0/2 with an empty
     // string. Taken literally that blanks the tab; kept as-is it would leave a
     // plain shell still labelled "Claude Code". Fall back to the default name.
-    const next = title.trim() || FALLBACK_TITLE
+    // Classify before falling back: the marker lives in the raw title, and an
+    // empty title is the shell clearing it, which is not an agent state.
+    this.updateAgentStatus(title)
+
+    const next = title.trim() || this._defaultTitle
     this._title = next
     this.titleSpan.textContent = next
   }
@@ -124,6 +181,12 @@ class Tab {
       // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
       // the PTY is created at this size — never spawn-then-resize.
       const session = await this.client.openSession(this.cols, this.rows)
+
+      // The directory names the tab until a program sets a title. It does not
+      // follow `cd` — that needs the OSC 7 events in nocx-5mn.2.
+      this._defaultTitle = directoryLabel(session.cwd)
+      this.titleSpan.textContent = this._title = this._defaultTitle
+      this.button.title = session.cwd || ''
 
       session.onData((data: string) => {
         renderer.write(data)

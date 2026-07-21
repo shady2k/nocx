@@ -38,6 +38,8 @@ type testSSHServer struct {
 	ptyY       uint16
 	shellCh    gossh.Channel
 	shellReady chan struct{}
+	// windowChanged carries one signal per processed window-change request.
+	windowChanged chan struct{}
 }
 
 func startTestSSHServer(t *testing.T) *testSSHServer {
@@ -62,12 +64,13 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 	}
 
 	srv := &testSSHServer{
-		t:          t,
-		hostSigner: hostKey,
-		userSigner: userKey,
-		listener:   listener,
-		addr:       listener.Addr().String(),
-		shellReady: make(chan struct{}),
+		t:             t,
+		hostSigner:    hostKey,
+		userSigner:    userKey,
+		listener:      listener,
+		addr:          listener.Addr().String(),
+		shellReady:    make(chan struct{}),
+		windowChanged: make(chan struct{}, 8),
 	}
 
 	go srv.acceptLoop(config)
@@ -129,6 +132,12 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				s.ptyY = yp
 				s.mu.Unlock()
 				_ = req.Reply(true, nil)
+				// Signal the test rather than making it sleep: a fixed wait
+				// is a flake on a loaded machine, and a slow one here.
+				select {
+				case s.windowChanged <- struct{}{}:
+				default:
+				}
 
 			case "shell":
 				_ = req.Reply(true, nil)
@@ -384,14 +393,19 @@ func TestResize_ReachesServer(t *testing.T) {
 
 	// Resize the channel. Pixel dimensions should reach the server via the
 	// manual window-change wire message.
-	err = ch.Resize(context.Background(), 132, 43, 1056, 860)
+	// xpixel is deliberately NOT cols*8: the high-level WindowChange API we
+	// replaced computed pixels with exactly that formula, so 1056 would pass
+	// whether or not our value crossed the wire.
+	err = ch.Resize(context.Background(), 132, 43, 1000, 860)
 	if err != nil {
 		t.Fatalf("Resize: %v", err)
 	}
 
-	// Wait for the window-change to be processed by the server's request
-	// goroutine.
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-srv.windowChanged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never processed the window-change request")
+	}
 
 	cols, rows, xp, yp := srv.getPTYSize()
 	if cols != 132 {
@@ -400,8 +414,8 @@ func TestResize_ReachesServer(t *testing.T) {
 	if rows != 43 {
 		t.Errorf("expected rows=43 after resize, got %d", rows)
 	}
-	if xp != 1056 {
-		t.Errorf("expected xp=1056 after resize, got %d", xp)
+	if xp != 1000 {
+		t.Errorf("expected xp=1000 after resize, got %d", xp)
 	}
 	if yp != 860 {
 		t.Errorf("expected yp=860 after resize, got %d", yp)

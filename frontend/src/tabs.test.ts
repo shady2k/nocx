@@ -1,146 +1,53 @@
 // @vitest-environment jsdom
-/* eslint-disable @typescript-eslint/unbound-method */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { TabManager } from './tabs'
-import type {
-  TerminalRenderer,
-  DataCallback,
-  ResizeCallback,
-  TitleCallback,
-} from './renderers/types'
-import type { WSClient } from './ipc'
+import {
+  createRendererMock,
+  resetSessionCounter,
+  mountTabManager,
+  FIXTURE_DIRECTORY_LABEL,
+  type RendererMock,
+} from './test-support/tabs-fixtures'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
 // Mock the renderer module before any imports use it.
 vi.mock('./renderers', () => ({
-  createRenderer: vi.fn(() => {
-    const cbs: {
-      onData?: DataCallback
-      onResize?: ResizeCallback
-      onTitle?: TitleCallback
-      onBell?: () => void
-      onBufferChange?: (type: 'normal' | 'alternate') => void
-    } = {}
-    const mock: Record<string, unknown> = {
-      mount: vi.fn().mockResolvedValue(undefined),
-      write: vi.fn(),
-      reset: vi.fn(),
-      onData: vi.fn((cb: DataCallback) => {
-        cbs.onData = cb
-      }),
-      onResize: vi.fn((cb: ResizeCallback) => {
-        cbs.onResize = cb
-      }),
-      onTitle: vi.fn((cb: TitleCallback) => {
-        cbs.onTitle = cb
-      }),
-      onBell: vi.fn((cb: () => void) => {
-        cbs.onBell = cb
-      }),
-      onBufferChange: vi.fn((cb: (type: 'normal' | 'alternate') => void) => {
-        cbs.onBufferChange = cb
-      }),
-      refreshAtlas: vi.fn(),
-      focus: vi.fn(),
-      cols: 80,
-      rows: 24,
-      _cbs: cbs,
-      _fireBufferChange(type: 'normal' | 'alternate') {
-        cbs.onBufferChange?.(type)
-      },
-    }
-    return mock
-  }),
+  createRenderer: vi.fn(createRendererMock),
   resolveRendererName: vi.fn(() => 'xterm' as const),
 }))
 
-let mockSessionIdCounter = 0
+// ── Helpers ───────────────────────────────────────────────────────────────
 
-/** Create a mock session with stored callbacks so tests can fire them. */
-function makeSession() {
-  let dataCb: ((data: string) => void) | null = null
-  const session = {
-    sessionId: `mock-sid-${++mockSessionIdCounter}`,
-    send: vi.fn(),
-    sendResize: vi.fn(),
-    close: vi.fn(),
-    onData: vi.fn((cb: (data: string) => void) => {
-      dataCb = cb
-    }),
-    onExit: vi.fn(),
-    onReset: vi.fn(),
-    // Helper for tests to fire the registered data callback
-    fireData: (data: string) => {
-      dataCb?.(data)
-    },
-  }
-  return session
-}
-
-/** Create a mock client that returns distinct sessions per call. */
-function makeClient() {
-  const sessions: ReturnType<typeof makeSession>[] = []
-  const client = {
-    connect: vi.fn().mockResolvedValue(undefined),
-    openSession: vi.fn(() => {
-      const s = makeSession()
-      sessions.push(s)
-      return Promise.resolve(s)
-    }),
-    close: vi.fn(),
-    sendToSession: vi.fn(),
-    sendResize: vi.fn(),
-    closeSession: vi.fn(),
-    onSessionData: vi.fn(),
-    onSessionExit: vi.fn(),
-    onSessionReset: vi.fn(),
-    get connected() {
-      return true
-    },
-    // Test access to sessions
-    _sessions: sessions,
-  }
-  return client as unknown as WSClient & { _sessions: ReturnType<typeof makeSession>[] }
+/**
+ * Returns all renderer mocks created so far by the mocked createRenderer.
+ */
+async function getRendererMocks(): Promise<RendererMock[]> {
+  const { createRenderer } = await import('./renderers')
+  return vi.mocked(createRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('TabManager', () => {
-  let bar: HTMLElement
-  let panes: HTMLElement
-
   beforeEach(() => {
-    document.body.innerHTML = ''
-    bar = document.createElement('div')
-    panes = document.createElement('div')
-    document.body.append(bar, panes)
+    resetSessionCounter()
     vi.clearAllMocks()
   })
 
   // ── opening a tab creates a session and a pane ────────────────────────
 
   it('opens a session when a tab is created and activated', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, bar, panes } = await mountTabManager()
 
     expect(bar.querySelectorAll('.tab').length).toBe(1)
     expect(panes.querySelectorAll('.pane').length).toBe(1)
+    expect(client.openSession).toHaveBeenCalled()
   })
 
   it('creates a session for each new tab', async () => {
-    const client = makeClient()
-    const tm = new TabManager(bar, panes, client)
+    const { client, manager, bar, panes } = await mountTabManager()
 
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
-
-    tm.newTab()
+    manager.newTab()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -152,12 +59,7 @@ describe('TabManager', () => {
   // ── closing closes the session and activates a neighbour ──────────────
 
   it('closes the session when the active tab is closed', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, manager } = await mountTabManager()
 
     const session = client._sessions[0]
     manager.closeActiveTab()
@@ -167,12 +69,7 @@ describe('TabManager', () => {
   })
 
   it('activates a neighbour tab when the active tab is closed', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     manager.newTab()
@@ -198,12 +95,7 @@ describe('TabManager', () => {
   // ── closing the last tab leaves exactly one fresh tab ─────────────────
 
   it('closing the last tab opens a fresh tab immediately', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar, panes } = await mountTabManager()
 
     // Close the only tab
     manager.closeActiveTab()
@@ -219,13 +111,8 @@ describe('TabManager', () => {
 
   // ── fallback title consistency (badge vs title after close) ───────────
 
-  it('fallback title drops the number so it never disagrees with the positional badge', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+  it('fallback title is the directory, not a number that would disagree with the badge', async () => {
+    const { client, manager, bar } = await mountTabManager()
 
     // Open tabs until the badge says 4.
     manager.newTab()
@@ -238,12 +125,12 @@ describe('TabManager', () => {
     const labels = bar.querySelectorAll('.tab-index')
     const titles = bar.querySelectorAll('.tab-title')
 
-    // Before close: badge = 1..4, fallback title is always 'Terminal'.
+    // Before close: badge = 1..4, fallback title is the directory label.
     expect(labels[0].textContent).toBe('1')
     expect(labels[1].textContent).toBe('2')
     expect(labels[2].textContent).toBe('3')
     expect(labels[3].textContent).toBe('4')
-    titles.forEach((t) => expect(t.textContent).toBe('Terminal'))
+    titles.forEach((t) => expect(t.textContent).toBe(FIXTURE_DIRECTORY_LABEL))
 
     // Close the first two tabs via public API: activate then close.
     manager.activateByIndex(0)
@@ -254,21 +141,16 @@ describe('TabManager', () => {
     // Re-query after DOM mutations; stale references reflect removed elements.
     const afterLabels = bar.querySelectorAll('.tab-index')
     const afterTitles = bar.querySelectorAll('.tab-title')
-    // After close: badge = 1..2, titles stay 'Terminal'.
+    // After close: badge = 1..2, titles stay the directory label.
     expect(afterLabels[0].textContent).toBe('1')
     expect(afterLabels[1].textContent).toBe('2')
-    afterTitles.forEach((t) => expect(t.textContent).toBe('Terminal'))
+    afterTitles.forEach((t) => expect(t.textContent).toBe(FIXTURE_DIRECTORY_LABEL))
   })
 
   // ── switching focuses the right renderer ──────────────────────────────
 
   it('switches between tabs on activateByIndex', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -295,12 +177,7 @@ describe('TabManager', () => {
   // ── a title event updates that tab's label and no other ───────────────
 
   it('updates the title of the correct tab when onTitle fires', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -312,73 +189,52 @@ describe('TabManager', () => {
 
     const titles = bar.querySelectorAll('.tab-title')
     expect(titles.length).toBe(2)
-    expect(titles[0].textContent).toBe('Terminal')
-    expect(titles[1].textContent).toBe('Terminal')
+    expect(titles[0].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
+    expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
-    // Each call to createRenderer returned a mock with _cbs.onTitle.
-    const { createRenderer } = await import('./renderers')
-    const results = vi.mocked(createRenderer).mock.results
-    expect(results.length).toBe(2)
-
-    const r0 = results[0].value as TerminalRenderer & { _cbs: { onTitle?: TitleCallback } }
-    const r1 = results[1].value as TerminalRenderer & { _cbs: { onTitle?: TitleCallback } }
+    const renderers = await getRendererMocks()
+    expect(renderers.length).toBe(2)
 
     // Fire title for first tab only
-    expect(r0._cbs.onTitle).toBeDefined()
-    r0._cbs.onTitle!('~/project')
+    renderers[0]._fireTitle('~/project')
     expect(titles[0].textContent).toBe('~/project')
-    expect(titles[1].textContent).toBe('Terminal')
+    expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
     // Fire title for second tab only
-    expect(r1._cbs.onTitle).toBeDefined()
-    r1._cbs.onTitle!('bash-3.2')
+    renderers[1]._fireTitle('bash-3.2')
     expect(titles[1].textContent).toBe('bash-3.2')
     expect(titles[0].textContent).toBe('~/project')
   })
 
   // ── empty / whitespace title is ignored ──────────────────────────────
 
-  it('falls back to the default name when the shell clears the title', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+  it('falls back to the directory when the shell clears the title', async () => {
+    const { bar } = await mountTabManager()
 
     await Promise.resolve()
 
-    const { createRenderer } = await import('./renderers')
-    const results = vi.mocked(createRenderer).mock.results
-    const r0 = results[0].value as TerminalRenderer & { _cbs: { onTitle?: TitleCallback } }
-
+    const renderers = await getRendererMocks()
     const titleEl = bar.querySelector('.tab-title')!
-    expect(r0._cbs.onTitle).toBeDefined()
 
     // Set a real title first.
-    r0._cbs.onTitle!('~/projects')
+    renderers[0]._fireTitle('~/projects')
     expect(titleEl.textContent).toBe('~/projects')
 
     // A TUI clears the title on exit with an empty OSC 0/2. Neither blank the
     // tab nor keep the stale name — a plain shell must not stay labelled with
     // the program that just exited.
-    r0._cbs.onTitle!('')
-    expect(titleEl.textContent).toBe('Terminal')
+    renderers[0]._fireTitle('')
+    expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
-    r0._cbs.onTitle!('~/projects')
-    r0._cbs.onTitle!('   ')
-    expect(titleEl.textContent).toBe('Terminal')
+    renderers[0]._fireTitle('~/projects')
+    renderers[0]._fireTitle('   ')
+    expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
   })
 
   // ── activity indicator ────────────────────────────────────────────────
 
   it('shows activity indicator on a background tab receiving output', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -401,12 +257,7 @@ describe('TabManager', () => {
   })
 
   it('clears activity indicator when activated', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -425,12 +276,7 @@ describe('TabManager', () => {
   // ── activity indicator: alternate-buffer suppression ─────────────────
 
   it('does not mark activity for alternate-buffer output on a background tab', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -442,12 +288,8 @@ describe('TabManager', () => {
 
     // Put the background tab's renderer into the alternate buffer via the
     // onBufferChange callback — this is the real path xterm.js takes.
-    const { createRenderer } = await import('./renderers')
-    const results = vi.mocked(createRenderer).mock.results
-    const r1 = results[1].value as ReturnType<typeof createRenderer> & {
-      _fireBufferChange: (type: 'normal' | 'alternate') => void
-    }
-    r1._fireBufferChange('alternate')
+    const renderers = await getRendererMocks()
+    renderers[1]._fireBufferChange('alternate')
 
     // Output on the background tab while in alternate buffer.
     const bgSession = client._sessions[1]
@@ -458,12 +300,7 @@ describe('TabManager', () => {
   })
 
   it('marks activity for normal-buffer output on a background tab', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -481,12 +318,7 @@ describe('TabManager', () => {
   })
 
   it('marks activity on bell in the alternate buffer', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -497,38 +329,22 @@ describe('TabManager', () => {
     manager.activateByIndex(0)
 
     // Put the background tab into the alternate buffer via onBufferChange.
-    const { createRenderer } = await import('./renderers')
-    const results = vi.mocked(createRenderer).mock.results
-    const r1 = results[1].value as ReturnType<typeof createRenderer> & {
-      _cbs: { onBell?: () => void }
-      _fireBufferChange: (type: 'normal' | 'alternate') => void
-    }
-    r1._fireBufferChange('alternate')
+    const renderers = await getRendererMocks()
+    renderers[1]._fireBufferChange('alternate')
 
     // Fire bell on the background tab's renderer.
-    expect(r1._cbs.onBell).toBeDefined()
-    r1._cbs.onBell!()
+    renderers[1]._fireBell()
 
     const indicators = bar.querySelectorAll('.tab-indicator')
     expect(indicators[1].classList.contains('tab-activity')).toBe(true)
   })
 
   it('does not mark activity on bell for the active tab', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { bar } = await mountTabManager()
 
     // Only one tab, and it is active. Fire bell on it.
-    const { createRenderer } = await import('./renderers')
-    const results = vi.mocked(createRenderer).mock.results
-    const r0 = results[0].value as ReturnType<typeof createRenderer> & {
-      _cbs: { onBell?: () => void }
-    }
-    expect(r0._cbs.onBell).toBeDefined()
-    r0._cbs.onBell!()
+    const renderers = await getRendererMocks()
+    renderers[0]._fireBell()
 
     const indicators = bar.querySelectorAll('.tab-indicator')
     expect(indicators[0].classList.contains('tab-activity')).toBe(false)
@@ -537,12 +353,7 @@ describe('TabManager', () => {
   // ── keyboard shortcuts ────────────────────────────────────────────────
 
   it('opens a new tab on Cmd+T', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, bar } = await mountTabManager()
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true, bubbles: true }))
 
@@ -553,12 +364,7 @@ describe('TabManager', () => {
   })
 
   it('opens a new tab on Ctrl+T', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client } = await mountTabManager()
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 't', ctrlKey: true, bubbles: true }))
 
@@ -568,12 +374,7 @@ describe('TabManager', () => {
   })
 
   it('closes the active tab on Cmd+W', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, bar } = await mountTabManager()
 
     const session = client._sessions[0]
 
@@ -585,12 +386,7 @@ describe('TabManager', () => {
   })
 
   it('switches tabs on Cmd+1..9', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     manager.newTab()
@@ -618,12 +414,7 @@ describe('TabManager', () => {
   })
 
   it('ignores keyboard shortcuts when alt is held', async () => {
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { bar } = await mountTabManager()
 
     window.dispatchEvent(
       new KeyboardEvent('keydown', { key: 't', metaKey: true, altKey: true, bubbles: true }),
@@ -633,12 +424,7 @@ describe('TabManager', () => {
   })
 
   it('ignores Cmd+0 (not a valid tab index)', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(1)
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     manager.newTab()
@@ -657,12 +443,7 @@ describe('TabManager', () => {
   // ── close by middle-click ─────────────────────────────────────────────
 
   it('closes a tab on middle-click', async () => {
-    const client = makeClient()
-    const manager = new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { client, manager, bar } = await mountTabManager()
 
     manager.newTab()
     await vi.waitFor(() => {
@@ -695,12 +476,7 @@ describe('TabManager', () => {
     `
     document.head.appendChild(style)
 
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { bar } = await mountTabManager()
 
     const tabsContainer = bar.querySelector('.tabs-container') as HTMLElement
     expect(tabsContainer).not.toBeNull()
@@ -734,12 +510,7 @@ describe('TabManager', () => {
     `
     document.head.appendChild(style)
 
-    const client = makeClient()
-    new TabManager(bar, panes, client)
-
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalled()
-    })
+    const { bar } = await mountTabManager()
 
     const tab = bar.querySelector('.tab') as HTMLElement
     expect(tab).not.toBeNull()

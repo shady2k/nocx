@@ -13,6 +13,31 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 )
 
+// sessionRx wraps a session's output ring together with the current attached
+// subscriber. It lives connection-independently so the ring survives a
+// disconnect and a reattached connection becomes the new subscriber. Exactly
+// one monitorExit goroutine is started per session (via monitorOnce).
+type sessionRx struct {
+	ring        *outputRing
+	mu          sync.Mutex // protects subscriber, subState
+	subscriber  *wsConn    // current attached connection (nil if none)
+	subState    *connState // subscriber's connection-scoped state
+	monitorOnce sync.Once
+}
+
+func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	rx.subscriber = wconn
+	rx.subState = state
+}
+
+func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	return rx.subscriber, rx.subState
+}
+
 type WSServer struct {
 	log      log.Logger
 	registry session.Registry
@@ -20,6 +45,13 @@ type WSServer struct {
 	port     int
 	listener net.Listener
 	upgrader websocket.Upgrader
+
+	// ringsMu protects rx and stopped. One sessionRx per session;
+	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
+	// so no new rings are created after the server begins shutting down.
+	ringsMu sync.Mutex
+	rx      map[session.ID]*sessionRx
+	stopped bool
 }
 
 func NewWSServer(logger log.Logger, reg session.Registry) *WSServer {
@@ -29,6 +61,7 @@ func NewWSServer(logger log.Logger, reg session.Registry) *WSServer {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		rx: make(map[session.ID]*sessionRx),
 	}
 }
 
@@ -63,18 +96,75 @@ func (s *WSServer) Start(ctx context.Context) error {
 }
 
 func (s *WSServer) Stop(ctx context.Context) error {
-	if s.server == nil {
-		return nil
+	// Mark stopped first so getOrCreateRx refuses new rings while
+	// hijacked WebSocket handlers are still running. Do NOT nil s.rx —
+	// the map stays usable for lookups until the final goroutine exits.
+	s.ringsMu.Lock()
+	s.stopped = true
+	s.ringsMu.Unlock()
+
+	// Shutdown stops accepting new connections but hijacked WebSocket
+	// handlers can still run after it returns. That is why the stopped
+	// flag, not map-nilling, is the safety mechanism.
+	var shutdownErr error
+	if s.server != nil {
+		shutdownErr = s.server.Shutdown(ctx)
 	}
-	return s.server.Shutdown(ctx)
+
+	// Close all rings so blocked writers and waiters unblock.
+	s.ringsMu.Lock()
+	for _, rx := range s.rx {
+		rx.ring.close()
+	}
+	s.ringsMu.Unlock()
+
+	for _, sess := range s.registry.List() {
+		_ = s.registry.Close(sess.ID())
+	}
+
+	return shutdownErr
 }
 
 func (s *WSServer) Port() int {
 	return s.port
 }
 
+// --- ring helpers (connection-independent, keyed by session.ID) ----------
+
+func (s *WSServer) getRx(id session.ID) *sessionRx {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	return s.rx[id]
+}
+
+func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+
+	if s.stopped {
+		return nil
+	}
+
+	if rx, ok := s.rx[id]; ok {
+		return rx
+	}
+	rx := &sessionRx{ring: newOutputRing()}
+	s.rx[id] = rx
+	return rx
+}
+
+func (s *WSServer) removeRx(id session.ID) {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	delete(s.rx, id)
+}
+
+// --- WebSocket connection -------------------------------------------------
+
 // wsConn wraps a gorilla/websocket.Conn with a mutex to serialize writes.
-// The gorilla package does not support concurrent writes.
+// The gorilla package does not support concurrent writes — callers must
+// serialize writes to a single *websocket.Conn. The mutex here provides that
+// serialization across ringToConn, monitorExit, and handleOpen/handleAttach.
 type wsConn struct {
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -96,8 +186,10 @@ func (w *wsConn) writeMessage(msgType int, data []byte) error {
 	return w.conn.WriteMessage(msgType, data)
 }
 
-// connState tracks sessions opened on a single WebSocket connection so they
-// can be closed when the connection drops (no goroutine or PTY leak).
+// connState tracks sessions this connection is attached to (opened or
+// reattached). On disconnect the entries are discarded — sessions and their
+// rings survive (AD-9). It still gates data-frame/resize/close so a
+// connection cannot touch a session it has not opened or reattached to.
 type connState struct {
 	mu       sync.Mutex
 	sessions map[session.ID]session.Session
@@ -126,24 +218,7 @@ func (c *connState) has(id session.ID) bool {
 	return ok
 }
 
-func (c *connState) snapshot() []session.ID {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ids := make([]session.ID, 0, len(c.sessions))
-	for id := range c.sessions {
-		ids = append(ids, id)
-	}
-	return ids
-}
-
-func (c *connState) closeAll(reg session.Registry, logger log.Logger) {
-	ids := c.snapshot()
-	for _, id := range ids {
-		if err := reg.Close(id); err != nil {
-			logger.Debug("error closing session on disconnect", "session_id", string(id), "error", err)
-		}
-	}
-}
+// --- JSON-RPC types -------------------------------------------------------
 
 // jsonrpcRequest is a JSON-RPC 2.0 request.
 type jsonrpcRequest struct {
@@ -181,7 +256,8 @@ func newJSONRPCResult(id json.RawMessage, result json.RawMessage) jsonrpcRespons
 	}
 }
 
-// isJSONObject returns true if data starts with '{', ignoring leading whitespace.
+// isJSONObject returns true if data, ignoring leading whitespace, starts with
+// an opening brace ('{').
 func isJSONObject(data []byte) bool {
 	for _, b := range data {
 		switch b {
@@ -218,6 +294,20 @@ type closeParams struct {
 	SessionID string `json:"sessionId"`
 }
 
+// attachParams is the payload of the "attach" RPC method (AD-9 reconnect).
+type attachParams struct {
+	SessionID string `json:"sessionId"`
+	Offset    uint64 `json:"offset"`
+}
+
+// ackParams is the payload of the "ack" notification (AD-9 trimming).
+type ackParams struct {
+	SessionID string `json:"sessionId"`
+	Offset    uint64 `json:"offset"`
+}
+
+// --- HTTP handler ---------------------------------------------------------
+
 func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -226,15 +316,31 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Derive a cancel context so that when handleSession returns,
+	// ringToConn goroutines blocked in waitForData receive ctx.Done()
+	// and exit. r.Context() is NOT reliably cancelled for hijacked
+	// WebSocket connections.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
 	wconn := newWSConn(conn)
-	ctx := r.Context()
 	state := newConnState()
-	defer state.closeAll(s.registry, s.log)
 
 	readErr := make(chan error, 1)
 	go s.readLoop(ctx, wconn, state, readErr)
 
 	<-readErr
+
+	// Connection dropped. Wake any ring waiters blocked on this
+	// connection's sessions. The cancel above also fires (via defer)
+	// which is the primary exit signal for ringToConn.
+	state.mu.Lock()
+	for sid := range state.sessions {
+		if rx := s.getRx(sid); rx != nil {
+			rx.ring.wake()
+		}
+	}
+	state.mu.Unlock()
 }
 
 func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState, readErr chan<- error) {
@@ -290,17 +396,23 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleResize(wconn, state, req)
 	case "close":
 		s.handleClose(wconn, state, req)
+	case "attach":
+		s.handleAttach(ctx, wconn, state, req)
+	case "ack":
+		s.handleAck(req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = wconn.writeJSON(resp)
 	}
 }
 
-// handleOpen creates a new session.
+// --- control-plane handlers -----------------------------------------------
+
+// handleOpen creates a new session and output ring.
 //
 // Per AD-7: the server assigns the authoritative session-id. The JSON-RPC
-// request id serves as the correlation-id — we do not add a second
-// correlationId field because two correlation identifiers for one exchange
+// request id serves as the correlation-id — we do NOT add a second
+// correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
 func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
 	var params openParams
@@ -326,19 +438,35 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 
 	state.add(sess)
 
+	rx := s.getOrCreateRx(sess.ID())
+	if rx == nil {
+		state.remove(sess.ID())
+		_ = s.registry.Close(sess.ID())
+		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+	rx.setSubscriber(wconn, state)
+
 	result := map[string]string{"sessionId": string(sess.ID())}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = wconn.writeJSON(resp)
 
-	// Start the output pump and exit monitor only after the ack is
-	// sent. AD-7: the ack must precede the session's own traffic in both
+	// Start the PTY → ring output pump only after the ack is sent.
+	// AD-7: the ack must precede the session's own traffic in both
 	// directions, otherwise the first prompt races the open result and
 	// the client drops it (its sessionId is still null).
-	sidBytes, _ := session.IDToBytes(sess.ID())
-	go s.sessionOutput(ctx, wconn, sess, sidBytes)
+	// Uses background context so the pump outlives the connection (AD-9).
+	go s.pumpToRing(context.Background(), sess, rx.ring)
 
-	go s.monitorExit(ctx, wconn, sess, state)
+	// Start exactly one monitorExit goroutine per session (DEFECT 2).
+	rx.monitorOnce.Do(func() {
+		go s.monitorExit(rx, sess)
+	})
+
+	sidBytes, _ := session.IDToBytes(sess.ID())
+	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, 0)
 }
 
 func (s *WSServer) handleResize(wconn *wsConn, state *connState, req jsonrpcRequest) {
@@ -389,11 +517,7 @@ func (s *WSServer) handleClose(wconn *wsConn, state *connState, req jsonrpcReque
 		return
 	}
 
-	if err := s.registry.Close(sid); err != nil {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = wconn.writeJSON(resp)
-		return
-	}
+	s.closeSession(sid)
 
 	state.remove(sid)
 
@@ -402,6 +526,114 @@ func (s *WSServer) handleClose(wconn *wsConn, state *connState, req jsonrpcReque
 	_ = wconn.writeJSON(resp)
 }
 
+// handleAttach reattaches a connection to a session's output ring at the
+// given byte offset (AD-9 reconnect).
+//
+//	--> {"jsonrpc":"2.0","id":N,"method":"attach","params":{"sessionId":"...","offset":1234}}
+//
+// Result when offset is still in the ring:
+//
+//	<-- {"jsonrpc":"2.0","id":N,"result":{"resumed":true,"from":1234}}
+//
+// Result when offset is too old (ring has advanced past it):
+//
+//	<-- {"jsonrpc":"2.0","id":N,"result":{"reset":true,"from":5678}}
+//
+// Unknown sessionId → JSON-RPC error.
+// Offset ahead of written → JSON-RPC error (DEFECT 4).
+// Duplicate attach on the same connection → JSON-RPC error (DEFECT 3).
+func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+	var params attachParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and offset required")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	sid := session.ID(params.SessionID)
+
+	sess, err := s.registry.Get(sid)
+	if err != nil {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	// Reject duplicate attach on the same connection (DEFECT 3).
+	// Without this guard, handleOpen already started a ringToConn for the
+	// open connection; a second attach on the same session would start
+	// another ringToConn, doubling every output byte for that subscriber.
+	if state.has(sid) {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: already attached to this session")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	rx := s.getRx(sid)
+	if rx == nil {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	// Reject offsets that run ahead of what the ring has produced (DEFECT 4).
+	// ring.ack already validates this; attach must be equally distrustful.
+	// An offset > written means the client claims to have received bytes
+	// that were never produced — a silent data skip waiting to happen.
+	// Uses the locking accessor rather than reaching into the ring's mu.
+	w := rx.ring.writtenLocked()
+	if params.Offset > w {
+		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: offset %d exceeds written %d", params.Offset, w))
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	_, from, needsReset := rx.ring.snapshot(params.Offset)
+
+	state.add(sess)
+	rx.setSubscriber(wconn, state)
+
+	if needsReset {
+		respJSON, _ := json.Marshal(map[string]any{"reset": true, "from": from})
+		resp := newJSONRPCResult(req.ID, respJSON)
+		_ = wconn.writeJSON(resp)
+	} else {
+		respJSON, _ := json.Marshal(map[string]any{"resumed": true, "from": from})
+		resp := newJSONRPCResult(req.ID, respJSON)
+		_ = wconn.writeJSON(resp)
+	}
+
+	sidBytes, _ := session.IDToBytes(sid)
+	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, from)
+}
+
+// handleAck processes an ack notification (AD-9 trimming).
+//
+//	<-- {"jsonrpc":"2.0","method":"ack","params":{"sessionId":"...","offset":1234}}
+//
+// Offsets that run ahead of what was produced or go backwards are rejected
+// with a warn — the server never trusts the client blindly.
+func (s *WSServer) handleAck(req jsonrpcRequest) {
+	var params ackParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
+		s.log.Warn("ack invalid params")
+		return
+	}
+
+	sid := session.ID(params.SessionID)
+
+	rx := s.getRx(sid)
+	if rx == nil {
+		s.log.Warn("ack for unknown session", "session_id", string(sid))
+		return
+	}
+
+	if err := rx.ring.ack(params.Offset); err != nil {
+		s.log.Warn("ack rejected", "session_id", string(sid), "error", err)
+	}
+}
+
+// handleDataFrame routes an inbound binary frame to the correct session.
 func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 	frame, err := DecodeFrame(data)
 	if err != nil {
@@ -431,32 +663,71 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 	}
 }
 
-func (s *WSServer) sessionOutput(ctx context.Context, wconn *wsConn, sess session.Session, sidBytes [16]byte) {
+// --- session / ring plumbing ----------------------------------------------
+
+// pumpToRing reads PTY output and writes it into the replay ring.
+// Uses background context so the pump outlives any single WebSocket
+// connection (AD-9). Blocks on ring.write when the ring is full and
+// nothing has been acked — that is the AD-10 backpressure seam.
+func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *outputRing) {
 	err := sess.StartOutput(ctx, func(data []byte) error {
-		f := Frame{
-			Version:   FrameVersion,
-			MsgType:   MsgTypeData,
-			SessionID: sidBytes,
-			Payload:   data,
-		}
-		return wconn.writeMessage(websocket.BinaryMessage, f.Encode())
+		return ring.write(data)
 	})
 	if err != nil {
 		s.log.Debug("session output ended", "session_id", string(sess.ID()), "error", err)
 	}
 }
 
-// monitorExit watches the session's Done channel and sends an exit notification
-// when the PTY process exits.
-func (s *WSServer) monitorExit(ctx context.Context, wconn *wsConn, sess session.Session, state *connState) {
-	select {
-	case <-sess.Done():
-	case <-ctx.Done():
+// ringToConn streams the output ring to a WebSocket connection starting at
+// the given byte offset. Exits when the connection drops or the ring closes.
+func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64) {
+	pos := startOffset
+
+	for {
+		data, _, _ := ring.snapshot(pos)
+		if len(data) > 0 {
+			f := Frame{
+				Version:   FrameVersion,
+				MsgType:   MsgTypeData,
+				SessionID: sidBytes,
+				Payload:   data,
+			}
+			if err := wconn.writeMessage(websocket.BinaryMessage, f.Encode()); err != nil {
+				return
+			}
+			pos += uint64(len(data))
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if ring.waitForData(ctx, pos) {
+			return
+		}
+	}
+}
+
+// monitorExit waits for the PTY to exit, then cleans up the ring and
+// session and notifies the current subscriber. Exactly one instance runs
+// per session (enforced by sessionRx.monitorOnce). Uses background context
+// so it fires even after the WebSocket connection drops (AD-9).
+func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
+	<-sess.Done()
+
+	wconn, state := rx.getSubscriber()
+	if state != nil {
+		state.remove(sess.ID())
+	}
+	rx.ring.close()
+	s.removeRx(sess.ID())
+	_ = s.registry.Close(sess.ID())
+
+	if wconn == nil {
 		return
 	}
-
-	state.remove(sess.ID())
-	_ = s.registry.Close(sess.ID())
 
 	notif := map[string]any{
 		"jsonrpc": "2.0",
@@ -473,4 +744,16 @@ func (s *WSServer) monitorExit(ctx context.Context, wconn *wsConn, sess session.
 	if err := wconn.writeMessage(websocket.TextMessage, notifJSON); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
+}
+
+// closeSession tears down the session and its ring. Looks up the ring
+// instead of creating one — closing a session that has no ring is a no-op
+// for the ring path (DEFECT 6).
+func (s *WSServer) closeSession(sid session.ID) {
+	rx := s.getRx(sid)
+	if rx != nil {
+		rx.ring.close()
+	}
+	s.removeRx(sid)
+	_ = s.registry.Close(sid)
 }

@@ -31,9 +31,9 @@
 //
 // # Control plane (JSON-RPC 2.0)
 //
-// Methods: open, close, resize. The server assigns the authoritative session-id
-// (AD-7) and returns it in the open result. The JSON-RPC request id serves as
-// the correlation-id — we do not add a second correlationId field (AD-7).
+// Methods: open, close, resize, attach. The server assigns the authoritative
+// session-id (AD-7) and returns it in the open result. The JSON-RPC request id
+// serves as the correlation-id — we do not add a second correlationId field (AD-7).
 //
 //	open:   --> {"jsonrpc":"2.0","id":1,"method":"open","params":{"cols":132,"rows":43,"xpixel":0,"ypixel":0}}
 //	        <-- {"jsonrpc":"2.0","id":1,"result":{"sessionId":"<32 lowercase hex chars>"}}
@@ -41,7 +41,20 @@
 //	        <-- {"jsonrpc":"2.0","id":2,"result":{}}
 //	close:  --> {"jsonrpc":"2.0","id":3,"method":"close","params":{"sessionId":"..."}}
 //	        <-- {"jsonrpc":"2.0","id":3,"result":{}}
-//	exit:   <-- {"jsonrpc":"2.0","method":"exit","params":{"sessionId":"..."}}   (notification)
+//	attach: --> {"jsonrpc":"2.0","id":4,"method":"attach","params":{"sessionId":"...","offset":1234}}
+//	        <-- {"jsonrpc":"2.0","id":4,"result":{"resumed":true,"from":1234}}
+//	        <-- {"jsonrpc":"2.0","id":4,"result":{"reset":true,"from":5678}}
+//	ack:    <-- {"jsonrpc":"2.0","method":"ack","params":{"sessionId":"...","offset":1234}}   (notification, no id)
+//	exit:   <-- {"jsonrpc":"2.0","method":"exit","params":{"sessionId":"..."}}                 (notification)
+//
+// The attach method (AD-9 reconnect) requests replay from a byte offset. If
+// the offset is still in the ring the result is {resumed:true,from:<offset>}
+// followed by replayed binary frames. If the offset predates the ring the
+// result is {reset:true,from:<current offset>} and the client must clear its
+// terminal. The ack notification trims the ring: the server discards bytes
+// up to the acked offset, freeing space for new output without growing
+// unbounded. Offset semantics: the client counts received payload bytes per
+// session; the binary frame header carries no offset field (no wire break).
 //
 // Errors use standard JSON-RPC 2.0 codes: -32700 parse error, -32600 invalid
 // request, -32601 method not found, -32602 invalid params, -32603 internal error.

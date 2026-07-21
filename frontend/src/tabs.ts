@@ -11,6 +11,9 @@ import type { TerminalRenderer } from './renderers/types'
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
 
+// Shown until the shell sends a title, and restored when it clears one.
+const FALLBACK_TITLE = 'Terminal'
+
 const DEFAULT_RENDERER: RendererName = resolveRendererName()
 
 class Tab {
@@ -24,7 +27,7 @@ class Tab {
   /** Active-tab indicator (top bar) / activity indicator (bottom bar) */
   readonly indicator = document.createElement('div')
 
-  private _title = 'Terminal'
+  private _title = FALLBACK_TITLE
   private _hasActivity = false
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
@@ -92,10 +95,12 @@ class Tab {
   }
 
   updateTitle(title: string): void {
-    // Ignore empty or whitespace-only titles (e.g. OSC 0/2 with "" on exit).
-    if (!title.trim()) return
-    this._title = title
-    this.titleSpan.textContent = title
+    // A TUI clears the title on the way out by emitting OSC 0/2 with an empty
+    // string. Taken literally that blanks the tab; kept as-is it would leave a
+    // plain shell still labelled "Claude Code". Fall back to the default name.
+    const next = title.trim() || FALLBACK_TITLE
+    this._title = next
+    this.titleSpan.textContent = next
   }
 
   /**

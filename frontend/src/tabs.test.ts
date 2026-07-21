@@ -322,7 +322,7 @@ describe('TabManager', () => {
 
   // ── empty / whitespace title is ignored ──────────────────────────────
 
-  it('ignores empty or whitespace-only titles', async () => {
+  it('falls back to the default name when the shell clears the title', async () => {
     const client = makeClient()
     new TabManager(bar, panes, client)
 
@@ -343,13 +343,15 @@ describe('TabManager', () => {
     r0._cbs.onTitle!('~/projects')
     expect(titleEl.textContent).toBe('~/projects')
 
-    // Empty string should be ignored — fallback stays.
+    // A TUI clears the title on exit with an empty OSC 0/2. Neither blank the
+    // tab nor keep the stale name — a plain shell must not stay labelled with
+    // the program that just exited.
     r0._cbs.onTitle!('')
-    expect(titleEl.textContent).toBe('~/projects')
+    expect(titleEl.textContent).toBe('Terminal')
 
-    // Whitespace-only should be ignored.
+    r0._cbs.onTitle!('~/projects')
     r0._cbs.onTitle!('   ')
-    expect(titleEl.textContent).toBe('~/projects')
+    expect(titleEl.textContent).toBe('Terminal')
   })
 
   // ── activity indicator ────────────────────────────────────────────────

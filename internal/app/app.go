@@ -10,15 +10,13 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
-	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
 )
 
 type App struct {
 	Logger           log.Logger
-	Pty              *pty.Stub
-	SSH              *ssh.Stub
-	Session          *session.Stub
+	Pty              session.PTYFactory
+	Session          *session.Reg
 	Transport        *transport.WSServer
 	Config           *config.Stub
 	ShellIntegration *shellintegration.Stub
@@ -29,16 +27,14 @@ func New() (*App, error) {
 	logger := log.NewSlogAdapter(slogger)
 
 	cfg := config.NewStub(logger)
-	pt := pty.NewStub(logger)
-	sshClient := ssh.NewStub(logger)
-	sess := session.NewStub(logger, pt, sshClient)
+	ptf := &localPTYFactory{log: logger}
+	sess := session.New(logger, ptf)
 	shint := shellintegration.NewStub(logger)
-	tp := transport.NewWSServer(logger)
+	tp := transport.NewWSServer(logger, sess)
 
 	app := &App{
 		Logger:           logger,
-		Pty:              pt,
-		SSH:              sshClient,
+		Pty:              ptf,
 		Session:          sess,
 		Transport:        tp,
 		Config:           cfg,
@@ -47,6 +43,12 @@ func New() (*App, error) {
 
 	logger.Info("application initialized")
 	return app, nil
+}
+
+type localPTYFactory struct{ log log.Logger }
+
+func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	return pty.NewLocal(f.log, cfg)
 }
 
 func (a *App) Start(ctx context.Context) error {

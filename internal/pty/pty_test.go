@@ -48,3 +48,21 @@ func TestStub_Resize(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestStub_DoneOpenBeforeClose(t *testing.T) {
+	p := NewStub(log.NewSlogAdapter(nil))
+
+	select {
+	case <-p.Done():
+		t.Fatal("Done() should be open before Close()")
+	default:
+	}
+
+	_ = p.Close()
+
+	select {
+	case <-p.Done():
+	default:
+		t.Fatal("Done() should be closed after Close()")
+	}
+}

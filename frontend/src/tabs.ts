@@ -68,6 +68,7 @@ class Tab {
       await ws.connect(this.port)
 
       ws.onData((data) => renderer.write(data))
+      ws.onExit((sid) => console.log('nocx: session exited:', sid))
       renderer.onData((data) => ws.send(data))
       // Dragging a window edge walks the grid through every intermediate size,
       // and each one forwarded straight to the PTY is another SIGWINCH — the
@@ -86,10 +87,14 @@ class Tab {
 
       this.cols = renderer.cols
       this.rows = renderer.rows
-      ws.sendResize(this.cols, this.rows)
+
+      // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
+      // the PTY is created at this size — never spawn-then-resize.
+      await ws.openSession(this.cols, this.rows)
+
       this.renderer = renderer
       this.onGrid(this)
-      console.log(`nocx: tab ready (renderer=${this.spec.id})`, { port: this.port })
+      console.log(`nocx: tab ready (renderer=${this.spec.id})`, { port: this.port, sid: ws.sid })
     } catch (err) {
       // A renderer that cannot start is itself a bake-off result: report it in
       // place instead of taking the whole window down.

@@ -10,6 +10,7 @@ import (
 type Pty interface {
 	io.ReadWriteCloser
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
+	Done() <-chan struct{}
 }
 
 type Config struct {
@@ -23,11 +24,12 @@ type Config struct {
 }
 
 type Stub struct {
-	log log.Logger
+	log  log.Logger
+	done chan struct{}
 }
 
 func NewStub(logger log.Logger) *Stub {
-	return &Stub{log: logger}
+	return &Stub{log: logger, done: make(chan struct{})}
 }
 
 func (s *Stub) Read(p []byte) (int, error) {
@@ -42,10 +44,19 @@ func (s *Stub) Write(p []byte) (int, error) {
 
 func (s *Stub) Close() error {
 	s.log.Debug("pty stub: Close called")
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
 	return nil
 }
 
 func (s *Stub) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
 	s.log.Debug("pty stub: Resize called", "cols", cols, "rows", rows, "xpixel", xpixel, "ypixel", ypixel)
 	return nil
+}
+
+func (s *Stub) Done() <-chan struct{} {
+	return s.done
 }

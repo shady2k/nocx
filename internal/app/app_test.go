@@ -27,9 +27,6 @@ func TestNew_AllModulesInjected(t *testing.T) {
 	if a.Pty == nil {
 		t.Error("Pty is nil")
 	}
-	if a.SSH == nil {
-		t.Error("SSH is nil")
-	}
 	if a.Session == nil {
 		t.Error("Session is nil")
 	}

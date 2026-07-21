@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -20,6 +21,28 @@ type LocalPty struct {
 	closed bool
 }
 
+// localeVars are checked in POSIX precedence order; any one of them present
+// means the environment already states a locale.
+var localeVars = []string{"LC_ALL=", "LC_CTYPE=", "LANG="}
+
+// withUTF8Locale guarantees the child shell knows it is on a UTF-8 terminal.
+// A GUI app launched from Finder or the Dock inherits none of the shell's
+// environment, so without this the shell has no locale, and any Python/Rich
+// TUI downstream encodes its output with errors="replace" — turning every
+// non-ASCII glyph into a literal '?'. That failure is invisible when launched
+// from a terminal, where LANG is inherited, and it masquerades as a font bug.
+// Only fills a gap: an inherited locale, UTF-8 or not, is left alone.
+func withUTF8Locale(env []string) []string {
+	for _, kv := range env {
+		for _, prefix := range localeVars {
+			if strings.HasPrefix(kv, prefix) {
+				return env
+			}
+		}
+	}
+	return append(env, "LANG=en_US.UTF-8")
+}
+
 func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	shell := os.Getenv("SHELL")
 	if shell == "" {
@@ -27,10 +50,10 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 	}
 
 	cmd := exec.Command(shell) //nolint:gosec // shell is from SHELL env or fallback
-	cmd.Env = append(
+	cmd.Env = withUTF8Locale(append(
 		os.Environ(),
 		"TERM=xterm-256color",
-	)
+	))
 
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: cfg.Cols,

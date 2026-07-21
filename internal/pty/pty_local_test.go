@@ -79,3 +79,73 @@ func mustSpawn(t testing.TB, cols, rows uint16) *LocalPty {
 	}
 	return lp
 }
+
+// A macOS .app launched from Finder inherits no locale at all. The child shell
+// then computes a non-UTF-8 stdout encoding and every Python/Rich/prompt_toolkit
+// TUI silently downgrades non-ASCII output to '?' — which looks exactly like a
+// font bug in the renderer. Fill the gap, but never override a deliberate choice.
+func TestWithUTF8Locale(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want string // expected LANG entry, "" = must not be added
+	}{
+		{
+			name: "adds LANG when the environment carries no locale at all (Finder launch)",
+			env:  []string{"PATH=/usr/bin", "TERM=xterm-256color"},
+			want: "LANG=en_US.UTF-8",
+		},
+		{
+			name: "keeps an inherited LANG untouched",
+			env:  []string{"LANG=ru_RU.UTF-8"},
+			want: "",
+		},
+		{
+			name: "respects a deliberate non-UTF-8 LANG",
+			env:  []string{"LANG=C"},
+			want: "",
+		},
+		{
+			name: "LC_ALL alone is enough — do not add LANG",
+			env:  []string{"LC_ALL=en_GB.UTF-8"},
+			want: "",
+		},
+		{
+			name: "LC_CTYPE alone is enough — do not add LANG",
+			env:  []string{"LC_CTYPE=en_US.UTF-8"},
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withUTF8Locale(tt.env)
+
+			var added []string
+			for _, kv := range got {
+				if !contains(tt.env, kv) {
+					added = append(added, kv)
+				}
+			}
+
+			if tt.want == "" {
+				if len(added) != 0 {
+					t.Fatalf("expected no additions, got %v", added)
+				}
+				return
+			}
+			if len(added) != 1 || added[0] != tt.want {
+				t.Fatalf("expected exactly %q to be added, got %v", tt.want, added)
+			}
+		})
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

@@ -2,11 +2,15 @@ export class WSClient {
   private ws: WebSocket | null = null
   private onDataCallback: ((data: string) => void) | null = null
   private onOpenCallback: (() => void) | null = null
+  private decoder = new TextDecoder()
 
   connect(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(`ws://127.0.0.1:${port}/session`)
       this.ws.binaryType = 'arraybuffer'
+      // Fresh decoder per connection: it carries the partial-sequence state
+      // below, which must not survive into a new session.
+      this.decoder = new TextDecoder()
 
       this.ws.onopen = () => {
         this.onOpenCallback?.()
@@ -17,7 +21,13 @@ export class WSClient {
 
       this.ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
-          const data = new TextDecoder().decode(event.data)
+          // A PTY read ends wherever the kernel happened to stop, so a
+          // multi-byte UTF-8 sequence routinely straddles two frames. Decoding
+          // each frame with its own decoder severs those sequences and yields
+          // U+FFFD on both halves — rendered as '?' in a diamond, identically
+          // in every renderer, which makes it look like a font bug. One
+          // streaming decoder holds the tail until its continuation arrives.
+          const data = this.decoder.decode(event.data, { stream: true })
           this.onDataCallback?.(data)
         }
       }

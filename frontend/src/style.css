@@ -8,17 +8,86 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  background: #1a1b26;
 }
 
 #app {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
 }
 
-#terminal {
+/* Bake-off tab bar: one tab per renderer, each with its own live shell. */
+#tabbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 34px;
+  padding: 0 10px;
+  background: #16161e;
+  border-bottom: 1px solid #2a2b3d;
+  font: 12px/1 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tab {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 12px;
+  font: inherit;
+  color: #565f89;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: #a9b1d6;
+  background: #1f2030;
+}
+
+.tab.active {
+  color: #7aa2f7;
+  background: #1a1b26;
+  box-shadow: inset 0 0 0 1px #2a2b3d;
+}
+
+.status {
+  margin-left: auto;
+  color: #414868;
+  font-variant-numeric: tabular-nums;
+}
+
+#panes {
   position: relative;
-  width: 100%;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Inactive panes stay laid out (visibility, not display) so their renderers
+   keep measuring a real size — a zero-size container makes every fit addon
+   compute a bogus grid and reflow the shell on the way back. */
+.pane {
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   background: #1a1b26;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.pane.active {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.pane-error {
+  margin: 0;
+  padding: 16px;
+  color: #f7768e;
+  font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
 }

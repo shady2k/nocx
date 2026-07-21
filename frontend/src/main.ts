@@ -1,32 +1,27 @@
 import './console-filter'
 import './style.css'
-import { Terminal } from './terminal'
-import { WSClient } from './ipc'
 import { GetWSPort } from '../wailsjs/go/main/WailsApp'
+import { TabManager } from './tabs'
+import { resolveRendererName } from './renderers'
 
 async function main() {
-  const container = document.getElementById('terminal')
-  if (!container) throw new Error('#terminal not found')
+  const bar = document.getElementById('tabbar')
+  const panes = document.getElementById('panes')
+  if (!bar || !panes) throw new Error('#tabbar / #panes not found')
 
-  const terminal = new Terminal()
-  const ws = new WSClient()
+  // Bound Go method — no startup-event race. Guarded so the renderers still
+  // mount without a Wails runtime (plain browser), where GetWSPort throws.
+  let port = 9876
+  try {
+    port = await GetWSPort()
+  } catch {
+    console.warn('nocx: no Wails runtime, using fallback WS port', port)
+  }
 
-  // Pull the backend WS port (bound Go method — no startup-event race).
-  const port = await GetWSPort().catch(() => 9876)
-
-  await terminal.mount(container)
-  await ws.connect(port)
-
-  // Wire terminal <-> PTY data both ways.
-  ws.onData((data) => terminal.write(data))
-  terminal.onData((data) => ws.send(data))
-
-  // Keep the PTY window size in sync with the rendered grid.
-  // The FitAddon drives resizes; we forward each one, plus the initial size.
-  terminal.onResize((cols, rows) => ws.sendResize(cols, rows))
-  ws.sendResize(terminal.cols, terminal.rows)
-
-  console.log('nocx: terminal connected')
+  // ?r=ghostty|xterm|wterm picks which tab opens first; the others mount on
+  // demand when clicked (or Cmd/Ctrl+1..3).
+  const tabs = new TabManager(bar, panes, port)
+  await tabs.activate(resolveRendererName())
 }
 
 main().catch(console.error)

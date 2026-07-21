@@ -1,14 +1,11 @@
 import { init, Terminal as GhosttyTerminal, FitAddon } from 'ghostty-web'
+import { FONT_FAMILY, FONT_SIZE } from './font'
+import type { DataCallback, ResizeCallback, TerminalRenderer } from './types'
 
-export type ResizeCallback = (cols: number, rows: number) => void
-export type DataCallback = (data: string) => void
-
-// Thin wrapper over ghostty-web, used the canonical way (see the library README):
-// `new Terminal` + `FitAddon` + `open`. The library owns sizing, DPR and rendering —
-// we deliberately do NOT hand-tweak the canvas, devicePixelRatio, imageSmoothing or
-// wheel behaviour. Every past attempt to "improve" those fought the library and made
-// things worse (blur / broken line-wrap / scroll snap).
-export class Terminal {
+// Original ghostty-web (WASM VT) renderer, kept as the baseline so it stays
+// switchable via ?r=ghostty. Its blur was a canvas/DPR issue, not a font one —
+// the shared font just clears the tofu glyphs, it will not un-blur the canvas.
+export class GhosttyRenderer implements TerminalRenderer {
   private term: GhosttyTerminal | null = null
   private fitAddon: FitAddon | null = null
 
@@ -16,7 +13,8 @@ export class Terminal {
     await init()
 
     this.term = new GhosttyTerminal({
-      fontSize: 14,
+      fontFamily: FONT_FAMILY,
+      fontSize: FONT_SIZE,
       theme: {
         background: '#1a1b26',
         foreground: '#c0caf5',
@@ -27,7 +25,6 @@ export class Terminal {
     this.term.loadAddon(this.fitAddon)
     this.term.open(container)
 
-    // Initial fit, then let the addon auto-fit whenever the container resizes.
     requestAnimationFrame(() => this.fitAddon?.fit())
     this.fitAddon.observeResize()
   }
@@ -36,12 +33,19 @@ export class Terminal {
     this.term?.write(data)
   }
 
+  // No response pumping needed here: ghostty-web's writeInternal() already
+  // calls processTerminalResponses() after every write, so DSR 5/6 replies
+  // reach us through onData like any other input.
   onData(cb: DataCallback): void {
     this.term?.onData(cb)
   }
 
   onResize(cb: ResizeCallback): void {
     this.term?.onResize(({ cols, rows }) => cb(cols, rows))
+  }
+
+  focus(): void {
+    ;(this.term as { focus?: () => void } | null)?.focus?.()
   }
 
   get cols(): number {

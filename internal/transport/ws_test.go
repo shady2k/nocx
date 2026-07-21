@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1634,3 +1635,530 @@ func TestWSServer_RingToConnExitsOnDisconnect(t *testing.T) {
 		}
 	}
 }
+
+// --- AD-10 credit / backpressure tests ------------------------------------
+
+// wsReader drains a connection in the background so a test can collect
+// output in batches.
+//
+// Do NOT collect by reading with a deadline and letting it expire:
+// gorilla/websocket stores the first read error — a timeout included — in
+// c.readErr and returns it from every subsequent read (see NextReader's
+// `for c.readErr == nil`). A helper that reads until timeout therefore
+// poisons its own connection: the first batch arrives, and every batch
+// after it is empty no matter what the server does. That failure looks
+// exactly like a broken feature, which is why this is a background reader
+// with no deadlines and a quiescence-based collector instead.
+type wsReader struct {
+	frames chan Frame
+}
+
+func newWSReader(conn *websocket.Conn) *wsReader {
+	r := &wsReader{frames: make(chan Frame, 8192)}
+	go func() {
+		for {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				close(r.frames)
+				return
+			}
+			if mt != websocket.BinaryMessage {
+				continue
+			}
+			if f, derr := DecodeFrame(data); derr == nil {
+				r.frames <- f
+			}
+		}
+	}()
+	return r
+}
+
+// collect gathers payload bytes for sid until no frame for it has arrived
+// for `quiet`, or until `budget` elapses overall. Returns the concatenated
+// payload and its byte count.
+func (r *wsReader) collect(sid string, quiet, budget time.Duration) (string, uint64) {
+	var buf strings.Builder
+	var total uint64
+
+	overall := time.NewTimer(budget)
+	defer overall.Stop()
+	idle := time.NewTimer(quiet)
+	defer idle.Stop()
+
+	for {
+		select {
+		case f, ok := <-r.frames:
+			if !ok {
+				return buf.String(), total
+			}
+			if string(session.IDFromBytes(f.SessionID)) != sid {
+				continue
+			}
+			buf.Write(f.Payload)
+			total += uint64(len(f.Payload))
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(quiet)
+		case <-idle.C:
+			return buf.String(), total
+		case <-overall.C:
+			return buf.String(), total
+		}
+	}
+}
+
+// sendAck writes an ack notification for sid at offset.
+func sendAck(t *testing.T, conn *websocket.Conn, sid string, offset uint64) {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "ack",
+		"params":  map[string]any{"sessionId": sid, "offset": offset},
+	})
+	if err != nil {
+		t.Fatalf("marshal ack: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+}
+
+// drainWithAcks reads the rest of a session's output, acking as it goes so
+// the credit window keeps reopening. Without this a reader gets exactly one
+// window per ack and the stream appears to stop early — which is correct
+// AD-10 behaviour, not a bug.
+func drainWithAcks(t *testing.T, conn *websocket.Conn, reader *wsReader, sid string, offset uint64) string {
+	t.Helper()
+	var out strings.Builder
+	for {
+		sendAck(t, conn, sid, offset)
+		chunk, n := reader.collect(sid, 2*time.Second, 30*time.Second)
+		if n == 0 {
+			return out.String()
+		}
+		out.WriteString(chunk)
+		offset += n
+	}
+}
+
+// assertSeq checks that content carries a contiguous run of numbers ending
+// at upTo, with none missing, reordered or repeated. Counting bytes cannot
+// catch a duplicated or reordered chunk; this can.
+//
+// The run is anchored on the first parsable number rather than assumed to
+// start at 1: the shell prints its prompt before the command's output, so
+// the very first line is typically "<prompt>1" and is not parsable on its
+// own. The anchor must still be near the start, or we silently lost a chunk.
+func assertSeq(t *testing.T, content string, upTo int) {
+	t.Helper()
+
+	lines := strings.Split(content, "\n")
+	if !strings.HasSuffix(content, "\n") && len(lines) > 0 {
+		// The stream can end mid-number when a credit window closes; that
+		// fragment is not a sequence entry.
+		lines = lines[:len(lines)-1]
+	}
+
+	const maxAnchor = 10
+	want := 0
+	for _, line := range lines {
+		n, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil {
+			continue // shell noise (prompt, stty, echoed command)
+		}
+		if want == 0 {
+			if n > maxAnchor {
+				t.Fatalf("sequence starts at %d: the first %d numbers were lost", n, n-1)
+			}
+			want = n
+		}
+		if n != want {
+			t.Fatalf("sequence broken: got %d, want %d (gap, reorder or duplicate)", n, want)
+		}
+		want++
+	}
+
+	if want == 0 {
+		t.Fatal("no sequence numbers in the received stream")
+	}
+	if want-1 != upTo {
+		t.Fatalf("sequence truncated: reached %d, want %d", want-1, upTo)
+	}
+}
+
+// TestWSServer_CreditStopsSendingAtBoundary verifies AD-10 credit control:
+// the subscriber stops sending when unacked bytes reach CreditLimit,
+// resumes after ack, and bytes are lossless, ordered, not duplicated.
+// Uses numbered output so the sequence can be verified exactly.
+func TestWSServer_CreditStopsSendingAtBoundary(t *testing.T) {
+	sess := newRegWithReal(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+
+	var r struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(resp, &r)
+	sid := r.Result.SessionID
+	sidBytes, _ := session.IDToBytes(session.ID(sid))
+
+	reader := newWSReader(conn)
+
+	// A numbered sequence, so the received stream can be checked for gaps,
+	// reordering and duplication — byte counts alone cannot see those.
+	// seq 1..25000 is ~138 KB, comfortably past CreditLimit so the window
+	// must bind; if it did not, this test would prove nothing.
+	const seqTo = 25000
+	cmd := "stty -echo; seq 1 25000\n"
+	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte(cmd)}
+	if err := conn.WriteMessage(websocket.BinaryMessage, f.Encode()); err != nil {
+		t.Fatalf("write cmd: %v", err)
+	}
+
+	// Without any ack, the subscriber must stall at the credit window.
+	// The upper bound is the assertion that matters: a subscriber ignoring
+	// credit entirely would stream the whole sequence and fail here.
+	content1, batch1 := reader.collect(sid, 1500*time.Millisecond, 15*time.Second)
+	if batch1 < CreditLimit/2 {
+		t.Fatalf("too few bytes before the stall: %d", batch1)
+	}
+	if batch1 > CreditLimit+FairChunk {
+		t.Fatalf("credit did not bind: %d bytes arrived unacked, limit is %d (+ one %d chunk)",
+			batch1, CreditLimit, FairChunk)
+	}
+
+	// Still nothing acked, so nothing further may arrive.
+	_, pause := reader.collect(sid, 500*time.Millisecond, 2*time.Second)
+	if pause != 0 {
+		t.Fatalf("subscriber kept sending while the credit window was full: %d extra bytes", pause)
+	}
+
+	// Ack what was received; the window must reopen. The client can never
+	// ack more than it got — which is what made an earlier implementation,
+	// one that waited for *everything* to be acked, stall forever.
+	content2 := drainWithAcks(t, conn, reader, sid, batch1)
+	if content2 == "" {
+		t.Fatal("credit did not reopen after ack: no bytes resumed")
+	}
+
+	// Lossless, ordered, no duplicates — across several credit stalls.
+	assertSeq(t, content1+content2, seqTo)
+}
+
+// TestWSServer_CreditCloseUnblocksWriter verifies that closing a session
+// whose subscriber is parked on the credit window unblocks cleanly.
+func TestWSServer_CreditCloseUnblocksWriter(t *testing.T) {
+	sess := newRegWithReal(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+
+	var r struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(resp, &r)
+	sid := r.Result.SessionID
+	sidBytes, _ := session.IDToBytes(session.ID(sid))
+
+	// Flood so credit fills.
+	cmd := "dd if=/dev/zero bs=1024 count=128 2>/dev/null\n"
+	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte(cmd)}
+	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
+
+	// Read enough to fill credit partially.
+	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	for i := 0; i < 10; i++ {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	// Close must succeed — ring.close() signals waitForCredit.
+	closeResp := jsonrpcCallWithID(t, conn, "close", map[string]string{
+		"sessionId": sid,
+	}, 2)
+	var cr struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(closeResp, &cr)
+	if cr.Error != nil {
+		t.Fatalf("close returned error: %v", cr.Error)
+	}
+}
+
+// TestWSServer_FairnessTwoFloodingOneQuiet verifies AD-10 cross-session
+// fairness: a session flooding the shared WebSocket must not block another
+// session's output behind it.
+//
+// The assertion is deliberately not "the quiet echo eventually arrives" —
+// that is true even under total head-of-line blocking, as long as the flood
+// finishes within the deadline. What is asserted instead is that the quiet
+// session's output arrives *while the flood is still streaming*: flood
+// frames keep coming after it. If the writer were monopolised, the echo
+// could only appear once the flood had drained. The second assertion covers
+// the mechanism itself — no single frame exceeds FairChunk, so the shared
+// write mutex is released between chunks.
+func TestWSServer_FairnessTwoFloodingOneQuiet(t *testing.T) {
+	sess := newRegWithReal(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	openSess := func(id int) (string, [16]byte) {
+		resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+			"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		}, id)
+		var r struct {
+			Result struct {
+				SessionID string `json:"sessionId"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(resp, &r); err != nil {
+			t.Fatalf("open %d: %v", id, err)
+		}
+		b, err := session.IDToBytes(session.ID(r.Result.SessionID))
+		if err != nil {
+			t.Fatalf("session id: %v", err)
+		}
+		return r.Result.SessionID, b
+	}
+
+	sidFlood, floodBytes := openSess(1)
+	sidQuiet, quietBytes := openSess(2)
+
+	reader := newWSReader(conn)
+
+	// Far more output than the flood can finish while the echo round-trips,
+	// so "flood still streaming afterwards" is a meaningful check.
+	writeCmd := func(sb [16]byte, cmd string) {
+		f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sb, Payload: []byte(cmd)}
+		if err := conn.WriteMessage(websocket.BinaryMessage, f.Encode()); err != nil {
+			t.Fatalf("write cmd: %v", err)
+		}
+	}
+	writeCmd(floodBytes, "stty -echo; seq 1 400000\n")
+
+	var floodSeen uint64
+	var floodAfterEcho int
+	echoSent := false
+	echoAt := time.Time{}
+	deadline := time.After(30 * time.Second)
+
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out: echoSent=%v floodSeen=%d floodAfterEcho=%d",
+				echoSent, floodSeen, floodAfterEcho)
+		case f, ok := <-reader.frames:
+			if !ok {
+				t.Fatal("connection closed before the echo arrived")
+			}
+			sid := string(session.IDFromBytes(f.SessionID))
+
+			// The FairChunk cap is what releases the shared write mutex
+			// between chunks; a frame larger than it means no yield point.
+			if len(f.Payload) > FairChunk {
+				t.Fatalf("frame of %d bytes exceeds FairChunk %d — no yield point for other sessions",
+					len(f.Payload), FairChunk)
+			}
+
+			switch sid {
+			case sidFlood:
+				floodSeen += uint64(len(f.Payload))
+				// Keep the flood's credit window open, otherwise it stalls
+				// on its own and the test would prove nothing about fairness.
+				sendAck(t, conn, sidFlood, floodSeen)
+				if !echoSent {
+					// Wait for real flood data, not the shell's own startup
+					// noise: several full chunks prove seq is mid-stream.
+					// This is an observed condition, not a sleep.
+					if floodSeen < 4*FairChunk {
+						continue
+					}
+					writeCmd(quietBytes, "echo FAIRNESS-OK\n")
+					echoSent = true
+					echoAt = time.Now()
+				} else {
+					floodAfterEcho++
+				}
+			case sidQuiet:
+				if !strings.Contains(string(f.Payload), "FAIRNESS-OK") {
+					continue
+				}
+				if floodAfterEcho == 0 {
+					t.Fatal("no flood frames between the echo request and its reply — cannot tell interleaving from a drained flood")
+				}
+				// Confirm the flood had not finished: more must follow.
+				more, n := reader.collect(sidFlood, 2*time.Second, 10*time.Second)
+				if n == 0 {
+					t.Fatalf("the echo only arrived after the flood drained (%d bytes) — head-of-line blocking", floodSeen)
+				}
+				_ = more
+				t.Logf("echo interleaved after %d flood bytes in %s; flood still streaming",
+					floodSeen, time.Since(echoAt))
+				return
+			}
+		}
+	}
+}
+
+// TestWSServer_CreditDropAndReattachKeepsSequence verifies that after
+// a disconnect mid-flood, reattach replays the exact continuation of the
+// numbered output with no gap and no duplication.
+func TestWSServer_CreditDropAndReattachKeepsSequence(t *testing.T) {
+	sess := newRegWithReal(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+
+	var r struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(resp, &r)
+	sid := r.Result.SessionID
+	sidBytes, _ := session.IDToBytes(session.ID(sid))
+
+	// Produce numbered output, suppressing command echo.
+	cmd := "stty -echo; seq 1 25000\n"
+	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte(cmd)}
+	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
+
+	// Take a first slice of the stream, then drop the connection while the
+	// command is still producing. The ring must keep the rest.
+	readerA := newWSReader(conn)
+	beforeStr, offset := readerA.collect(sid, 1500*time.Millisecond, 15*time.Second)
+	if offset == 0 {
+		t.Fatal("no output before the disconnect")
+	}
+
+	// Disconnect — seq continues and the ring accumulates what we missed.
+	_ = conn.Close()
+
+	// Reattach at the recorded offset.
+	connB := connectWS(t, ws)
+	defer func() { _ = connB.Close() }()
+
+	respB := jsonrpcCallWithID(t, connB, "attach", map[string]any{
+		"sessionId": sid,
+		"offset":    offset,
+	}, 2)
+
+	var at struct {
+		Result struct {
+			Resumed bool `json:"resumed"`
+		} `json:"result"`
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(respB, &at)
+	if at.Error != nil {
+		t.Fatalf("attach failed: %v", at.Error)
+	}
+
+	// Drain the rest, acking as it arrives so the window keeps reopening.
+	readerB := newWSReader(connB)
+	afterStr := drainWithAcks(t, connB, readerB, sid, offset)
+	if afterStr == "" {
+		t.Fatal("zero bytes received after reattach")
+	}
+	afterBytes := uint64(len(afterStr))
+
+	// Clean up: strip shell prompt echo and trailing \r from the
+	// combined stream. jsonrpcCallWithID consumed early prompt output
+	// during open, so the first few sequence numbers may be missing.
+	// Validate the CONTIGUOUS segment we do have.
+	clean := func(s string) []string {
+		lines := strings.Split(s, "\n")
+		var out []string
+		for _, l := range lines {
+			l = strings.TrimRight(l, "\r")
+			if _, err := strconv.Atoi(l); err != nil || l == "" {
+				continue
+			}
+			out = append(out, l)
+		}
+		return out
+	}
+	lines := clean(beforeStr + afterStr)
+	if len(lines) < 10 {
+		t.Fatalf("too few numeric lines: %d", len(lines))
+	}
+	first, err := strconv.Atoi(lines[0])
+	if err != nil {
+		t.Fatalf("first line not numeric: %q", lines[0])
+	}
+	for i, line := range lines {
+		expected := strconv.Itoa(first + i)
+		if line != expected {
+			t.Fatalf("sequence corrupt after drop/reattach at idx %d (first=%d): got %q expected %q",
+				i, first, line, expected)
+		}
+	}
+	// Must have recovered a significant portion of the sequence.
+	if first > 100 || len(lines) < 10000 {
+		t.Fatalf("too few lines recovered: first=%d count=%d", first, len(lines))
+	}
+	t.Logf("drop/reattach: offset=%d afterBytes=%d lines=[%d..%d]",
+		offset, afterBytes, first, first+len(lines)-1)
+}
+
+// TestWSServer_CreditCloseUnblocksWriter verifies that closing a session
+// whose subscriber is parked on credit unblocks cleanly (duplicate name —
+// see above for the actual test).
+// TestWSServer_FairnessTwoFloodingOneQuiet is above.
+// TestWSServer_CreditDropAndReattachKeepsSequence is above.

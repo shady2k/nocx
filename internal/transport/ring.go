@@ -13,6 +13,23 @@ import (
 // while keeping per-session memory bounded across many tabs.
 const RingCapacity = 256 * 1024
 
+// CreditLimit is the per-session in-flight byte cap (AD-10). A subscriber
+// stops sending once unacked bytes reach this bound and resumes when an
+// ack frees room. Must be less than RingCapacity, otherwise the credit
+// never binds and AD-10 is dead code. 64 KB fits two 32 KB PTY reads and
+// is ~250 ms of output at 256 KB/s — well within the frontend's 100 ms
+// ack throttle so the window drains before it starves.
+const CreditLimit = 64 * 1024
+
+// FairChunk bounds the number of bytes one session writes per WebSocket
+// message before releasing the shared wsConn mutex (AD-10 fairness).
+// A 32 KB PTY read is split into at most 4 frames; between frames any
+// other session on the same connection can grab the mutex and send, so a
+// flooding tab cannot stall an interactive one by more than one frame
+// write. A shared-writer round-robin across sessions is the thorough
+// version planned for nocx-2ho.5.
+const FairChunk = 8 * 1024
+
 // outputRing is a bounded, byte-offset-keyed replay buffer sitting between
 // the session output pump and the WebSocket (AD-9). One ring per session,
 // owned by WSServer and stored connection-independently so the ring survives
@@ -171,6 +188,40 @@ func (r *outputRing) ack(offset uint64) error {
 
 	r.signal()
 	return nil
+}
+
+// waitForCredit blocks until fewer than limit of the bytes sent up to pos
+// are still unacked, the ring is closed, or ctx is cancelled.
+//
+// The predicate lives here, in one place, rather than being split between
+// the ring and its subscriber. An earlier version waited for the client to
+// ack *everything* sent — a condition the client can never satisfy, since
+// it can only ack bytes it has received, which is at most pos. The window
+// therefore never reopened: one burst past the credit limit wedged that
+// session's output permanently. Credit is a sliding window, not
+// stop-and-wait: it reopens as soon as enough has been acked, not once all
+// of it has.
+func (r *outputRing) waitForCredit(ctx context.Context, pos, limit uint64) (closed bool) {
+	r.mu.Lock()
+
+	for !r.closed && r.acked < pos && pos-r.acked >= limit {
+		ch := r.changed
+		r.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			r.mu.Lock()
+			closed = r.closed
+			r.mu.Unlock()
+			return closed
+		case <-ch:
+			r.mu.Lock()
+		}
+	}
+
+	closed = r.closed
+	r.mu.Unlock()
+	return closed
 }
 
 func (r *outputRing) close() {

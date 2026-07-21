@@ -680,33 +680,60 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 
 // ringToConn streams the output ring to a WebSocket connection starting at
 // the given byte offset. Exits when the connection drops or the ring closes.
+//
+// Enforces AD-10 credit-based flow control: a subscriber stops sending once
+// unacked bytes reach CreditLimit and resumes when an ack frees room. Each
+// send is capped at FairChunk bytes so a flooding session releases the
+// shared wsConn write mutex between chunks, giving other sessions a chance
+// to send (cross-tab fairness).
 func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64) {
+	var pending []byte
 	pos := startOffset
 
 	for {
-		data, _, _ := ring.snapshot(pos)
-		if len(data) > 0 {
-			f := Frame{
-				Version:   FrameVersion,
-				MsgType:   MsgTypeData,
-				SessionID: sidBytes,
-				Payload:   data,
-			}
-			if err := wconn.writeMessage(websocket.BinaryMessage, f.Encode()); err != nil {
-				return
-			}
-			pos += uint64(len(data))
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		if ring.waitForData(ctx, pos) {
+		// Wait until the in-flight window has room (AD-10). The ring owns
+		// the predicate; acked may legitimately exceed pos after a large
+		// ack on reattach, which counts as no bytes unacked.
+		if ring.waitForCredit(ctx, pos, CreditLimit) {
 			return
 		}
+
+		if len(pending) == 0 {
+			var data []byte
+			data, _, _ = ring.snapshot(pos)
+			if len(data) == 0 {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				if ring.waitForData(ctx, pos) {
+					return
+				}
+				continue
+			}
+			pending = data
+		}
+
+		// Cap each frame at FairChunk for cross-session fairness (AD-10).
+		// Splitting one PTY read (~32 KB) into ≤4 frames lets other
+		// sessions grab the wsConn mutex between chunks.
+		chunk := pending
+		if len(chunk) > FairChunk {
+			chunk = chunk[:FairChunk]
+		}
+
+		f := Frame{
+			Version:   FrameVersion,
+			MsgType:   MsgTypeData,
+			SessionID: sidBytes,
+			Payload:   chunk,
+		}
+		if err := wconn.writeMessage(websocket.BinaryMessage, f.Encode()); err != nil {
+			return
+		}
+		pos += uint64(len(chunk))
+		pending = pending[len(chunk):]
 	}
 }
 

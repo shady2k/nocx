@@ -1,0 +1,74 @@
+# CI — quality gates for nocx.
+#
+# Runner decision: back-end job runs on macos-latest because:
+#   - darwin is the target platform for this macOS-first MVP (see
+#     docs/architecture.md § "Operational / Environmental Envelope"), so CI
+#     should build and test what ships to users;
+#   - internal/pty exercises creack/pty, and PTY semantics differ between macOS
+#     and Linux — those tests are only meaningful on the target OS;
+#   - the repo is public, so macos-latest runner minutes are free.
+# (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
+# on the target-OS argument alone, without measuring ubuntu.)
+# The pre-commit hook and the Makefile `ci` target mirror this same set of
+# checks so "green" is identical locally and in CI.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Install gofumpt
+        run: go install mvdan.cc/gofumpt@latest
+
+      - name: Check formatting
+        run: |
+          UNFMT=$(gofumpt -l .)
+          if [ -n "$UNFMT" ]; then
+            echo "gofumpt: the following files need formatting:"
+            echo "$UNFMT"
+            exit 1
+          fi
+          echo "gofumpt: all files formatted"
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: v1.64.8
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build

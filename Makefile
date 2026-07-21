@@ -1,4 +1,4 @@
-.PHONY: all build dev lint format test clean
+.PHONY: all build dev lint format test clean hooks ci lint-ci test-ci build-ci frontend-ci
 
 GO ?= go
 GOFUMPT ?= gofumpt
@@ -25,3 +25,30 @@ test:
 clean:
 	$(GO) clean -cache
 	rm -rf build/
+
+hooks:
+	git config core.hooksPath .githooks
+	@echo "git hooks installed from .githooks/"
+
+ci: lint-ci test-ci build-ci frontend-ci
+
+lint-ci:
+	@echo "=== gofumpt check ==="
+	$(GOFUMPT) -l .
+	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
+	@echo ""
+	@echo "=== golangci-lint ==="
+	$(GOLANGCI_LINT) run ./...
+
+test-ci:
+	@echo "=== go test -race ==="
+	$(GO) test -race -count=1 ./...
+
+build-ci:
+	@echo "=== go build ./... ==="
+	$(GO) build ./...
+
+frontend-ci:
+	@echo "=== frontend ==="
+	@if [ ! -d frontend/node_modules ]; then echo "FAIL: frontend/node_modules not found — run 'cd frontend && npm ci' first"; exit 1; fi
+	cd frontend && npx tsc --noEmit && npm run build

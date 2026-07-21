@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+warn() { printf "FAIL: %s\n" "$1"; }
+ok()   { printf "OK:   %s\n" "$1"; }
+
+# --- check all binaries first, report all missing together ------------------
+CHECK_CMD_TRUE=true
+check_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        warn "$1 not found — install: $2"
+        CHECK_CMD_TRUE=false
+    fi
+}
+
+check_cmd gofumpt "go install mvdan.cc/gofumpt@latest"
+check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
+check_cmd go "install Go from https://go.dev/dl/"
+if [ -d frontend/node_modules ]; then
+    check_cmd npx "install Node.js from https://nodejs.org/"
+else
+    printf "SKIP: tsc --noEmit (frontend/node_modules not found)\n"
+fi
+
+if [ "$CHECK_CMD_TRUE" = false ]; then
+    printf "\nPre-commit hook FAILED — install missing tools above and try again.\n"
+    exit 1
+fi
+
+# --- 1. gofumpt -------------------------------------------------------------
+UNFMT=$(gofumpt -l . 2>&1) || true
+if [ -n "$UNFMT" ]; then
+    warn "gofumpt — the following files need formatting:"
+    printf "%s\n" "$UNFMT"
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+ok "gofumpt"
+
+# --- 2. golangci-lint -------------------------------------------------------
+if ! golangci-lint run ./... 2>&1; then
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+ok "golangci-lint"
+
+# --- 3. go test -------------------------------------------------------------
+if ! go test -race -count=1 ./... 2>&1; then
+    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+ok "go test -race"
+
+# --- 4. frontend typecheck --------------------------------------------------
+if [ -d frontend/node_modules ]; then
+    if ! (cd frontend && npx tsc --noEmit 2>&1); then
+        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+        exit 1
+    fi
+    ok "tsc --noEmit"
+fi
+
+printf "\nAll checks passed.\n"

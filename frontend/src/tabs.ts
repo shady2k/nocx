@@ -29,6 +29,7 @@ class Tab {
 
   private _title = FALLBACK_TITLE
   private _hasActivity = false
+  private _bufferType: 'normal' | 'alternate' = 'normal'
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private started = false
@@ -129,7 +130,7 @@ class Tab {
         // Normal-buffer output on a background tab lights the indicator.
         // Full-screen TUIs repaint constantly in the alternate buffer —
         // that is not news. A bell in either buffer still counts.
-        if (!this.button.classList.contains('active') && !renderer.isAlternateBuffer) {
+        if (this._bufferType === 'normal' && !this.button.classList.contains('active')) {
           this.markActivity()
         }
       })
@@ -139,6 +140,9 @@ class Tab {
       renderer.onData((data: string) => session.send(data))
       renderer.onTitle((title: string) => {
         this.updateTitle(title)
+      })
+      renderer.onBufferChange((type) => {
+        this._bufferType = type
       })
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.

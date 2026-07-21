@@ -30,13 +30,18 @@ export interface TerminalRenderer {
   // equivalent event. The fallback title is set by the tab bar.
   onTitle(cb: TitleCallback): void
 
-  // isAlternateBuffer is true when the terminal is in the alternate screen
-  // buffer. The tab bar uses this to suppress the activity indicator for
-  // full-screen TUIs whose constant repainting is not news — only normal-
-  // buffer output and bell events deserve attention. The renderer reports
-  // the current state; the tab decides the policy. xterm.js reads this
-  // from buffer.active.type; @wterm/dom reads TerminalCore.usingAltScreen().
-  readonly isAlternateBuffer: boolean
+  // onBufferChange fires whenever the active screen buffer changes (normal ↔
+  // alternate). xterm.js fires this from buffer.onBufferChange with the new
+  // buffer type. @wterm/dom has no equivalent event — the callback is never
+  // fired; callers must assume 'normal'.
+  //
+  // This event-driven approach is preferred over a polling getter because
+  // xterm.js Terminal.buffer is a lazy-initialized getter that wraps an
+  // internal _core reference, and accessing it through vite/esbuild's dev
+  // transform can produce incorrect results when multiple Terminal instances
+  // exist (each tab has its own). onBufferChange is a first-class xterm.js
+  // API that fires reliably regardless of how the getter chain resolves.
+  onBufferChange(cb: (type: 'normal' | 'alternate') => void): void
 
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the

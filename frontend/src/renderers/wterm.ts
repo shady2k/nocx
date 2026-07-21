@@ -58,8 +58,11 @@ export class WtermRenderer implements TerminalRenderer {
     this.titleCb = cb
   }
 
-  get isAlternateBuffer(): boolean {
-    return this.term?.bridge?.usingAltScreen() ?? false
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onBufferChange(_cb: (type: 'normal' | 'alternate') => void): void {
+    // @wterm/dom has no buffer-change event. The tab bar defaults to 'normal'
+    // and the callback is never fired — alternate-buffer suppression requires
+    // xterm.js.
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

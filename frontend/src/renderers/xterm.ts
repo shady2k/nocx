@@ -138,8 +138,8 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.onTitleChange(cb)
   }
 
-  get isAlternateBuffer(): boolean {
-    return this.term?.buffer.active.type === 'alternate'
+  onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
+    this.term?.buffer.onBufferChange((buf) => cb(buf.type))
   }
 
   onBell(cb: BellCallback): void {

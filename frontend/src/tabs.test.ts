@@ -20,6 +20,7 @@ vi.mock('./renderers', () => ({
       onResize?: ResizeCallback
       onTitle?: TitleCallback
       onBell?: () => void
+      onBufferChange?: (type: 'normal' | 'alternate') => void
     } = {}
     const mock: Record<string, unknown> = {
       mount: vi.fn().mockResolvedValue(undefined),
@@ -37,16 +38,16 @@ vi.mock('./renderers', () => ({
       onBell: vi.fn((cb: () => void) => {
         cbs.onBell = cb
       }),
+      onBufferChange: vi.fn((cb: (type: 'normal' | 'alternate') => void) => {
+        cbs.onBufferChange = cb
+      }),
       refreshAtlas: vi.fn(),
       focus: vi.fn(),
       cols: 80,
       rows: 24,
-      // isAlternateBuffer defaults to false (normal buffer) — tests that
-      // need the alternate buffer set it via _setAlt(true).
-      isAlternateBuffer: false,
       _cbs: cbs,
-      _setAlt(v: boolean) {
-        mock.isAlternateBuffer = v
+      _fireBufferChange(type: 'normal' | 'alternate') {
+        cbs.onBufferChange?.(type)
       },
     }
     return mock
@@ -439,17 +440,18 @@ describe('TabManager', () => {
     // Tab 1 active, tab 2 is background.
     manager.activateByIndex(0)
 
-    // Put the background tab's renderer into the alternate buffer.
+    // Put the background tab's renderer into the alternate buffer via the
+    // onBufferChange callback — this is the real path xterm.js takes.
     const { createRenderer } = await import('./renderers')
     const results = vi.mocked(createRenderer).mock.results
     const r1 = results[1].value as ReturnType<typeof createRenderer> & {
-      _setAlt: (v: boolean) => void
+      _fireBufferChange: (type: 'normal' | 'alternate') => void
     }
-    r1._setAlt(true)
+    r1._fireBufferChange('alternate')
 
     // Output on the background tab while in alternate buffer.
     const bgSession = client._sessions[1]
-    bgSession.fireData('\x1b[?1049hspinner repaint')
+    bgSession.fireData('spinner repaint')
 
     const indicators = bar.querySelectorAll('.tab-indicator')
     expect(indicators[1].classList.contains('tab-activity')).toBe(false)
@@ -468,7 +470,7 @@ describe('TabManager', () => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
 
-    // Tab 1 active, tab 2 is background. Default mock has isAlternateBuffer=false.
+    // Tab 1 active, tab 2 is background. Default _bufferType is 'normal'.
     manager.activateByIndex(0)
 
     const bgSession = client._sessions[1]
@@ -494,14 +496,14 @@ describe('TabManager', () => {
     // Tab 1 active, tab 2 is background.
     manager.activateByIndex(0)
 
-    // Put the background tab into the alternate buffer.
+    // Put the background tab into the alternate buffer via onBufferChange.
     const { createRenderer } = await import('./renderers')
     const results = vi.mocked(createRenderer).mock.results
     const r1 = results[1].value as ReturnType<typeof createRenderer> & {
       _cbs: { onBell?: () => void }
-      _setAlt: (v: boolean) => void
+      _fireBufferChange: (type: 'normal' | 'alternate') => void
     }
-    r1._setAlt(true)
+    r1._fireBufferChange('alternate')
 
     // Fire bell on the background tab's renderer.
     expect(r1._cbs.onBell).toBeDefined()

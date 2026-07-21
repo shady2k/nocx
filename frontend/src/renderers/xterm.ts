@@ -59,8 +59,10 @@ export class XtermRenderer implements TerminalRenderer {
       pending = false
       last = Date.now()
       this.safeFit()
-      this.webgl?.clearTextureAtlas()
-      this.canvas?.clearTextureAtlas()
+      // refreshAtlas clears the texture atlas and repaints every row so that
+      // glyphs rendered before the atlas was cleared don't stay on screen
+      // referencing stale atlas positions (root cause of nocx-d1f).
+      this.refreshAtlas()
     }
     new ResizeObserver(() => {
       if (pending) return

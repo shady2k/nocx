@@ -29,6 +29,22 @@ export interface TerminalRenderer {
   // others may leave it unfired if the engine does not expose an
   // equivalent event. The fallback title is set by the tab bar.
   onTitle(cb: TitleCallback): void
+
+  // isAlternateBuffer is true when the terminal is in the alternate screen
+  // buffer. The tab bar uses this to suppress the activity indicator for
+  // full-screen TUIs whose constant repainting is not news — only normal-
+  // buffer output and bell events deserve attention. The renderer reports
+  // the current state; the tab decides the policy. xterm.js reads this
+  // from buffer.active.type; @wterm/dom reads TerminalCore.usingAltScreen().
+  readonly isAlternateBuffer: boolean
+
+  // onBell registers a callback that fires when the terminal receives BEL
+  // (\x07). Bell always deserves attention regardless of buffer, so the
+  // tab bar always lights the activity indicator on bell. xterm.js fires
+  // this natively; @wterm/dom does not expose a bell event — callers that
+  // need it must use xterm.js.
+  onBell(cb: () => void): void
+
   // refreshAtlas is called when the renderer becomes visible after being
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.

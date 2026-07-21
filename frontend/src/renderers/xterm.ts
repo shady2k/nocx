@@ -7,6 +7,8 @@ import '@xterm/xterm/css/xterm.css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
 import type { DataCallback, ResizeCallback, TitleCallback, TerminalRenderer } from './types'
 
+type BellCallback = () => void
+
 // xterm.js (VS Code's engine, stable 5.x) with the WebGL (GPU) renderer,
 // hardened the way Tabby runs it: recover from a lost GPU context and clear the
 // glyph atlas on every reflow. WebGL → Canvas → built-in DOM as fallbacks.
@@ -134,6 +136,14 @@ export class XtermRenderer implements TerminalRenderer {
 
   onTitle(cb: TitleCallback): void {
     this.term?.onTitleChange(cb)
+  }
+
+  get isAlternateBuffer(): boolean {
+    return this.term?.buffer.active.type === 'alternate'
+  }
+
+  onBell(cb: BellCallback): void {
+    this.term?.onBell(cb)
   }
 
   refreshAtlas(): void {

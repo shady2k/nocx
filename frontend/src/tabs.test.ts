@@ -15,8 +15,13 @@ import type { WSClient } from './ipc'
 // Mock the renderer module before any imports use it.
 vi.mock('./renderers', () => ({
   createRenderer: vi.fn(() => {
-    const cbs: { onData?: DataCallback; onResize?: ResizeCallback; onTitle?: TitleCallback } = {}
-    return {
+    const cbs: {
+      onData?: DataCallback
+      onResize?: ResizeCallback
+      onTitle?: TitleCallback
+      onBell?: () => void
+    } = {}
+    const mock: Record<string, unknown> = {
       mount: vi.fn().mockResolvedValue(undefined),
       write: vi.fn(),
       reset: vi.fn(),
@@ -29,12 +34,22 @@ vi.mock('./renderers', () => ({
       onTitle: vi.fn((cb: TitleCallback) => {
         cbs.onTitle = cb
       }),
+      onBell: vi.fn((cb: () => void) => {
+        cbs.onBell = cb
+      }),
       refreshAtlas: vi.fn(),
       focus: vi.fn(),
       cols: 80,
       rows: 24,
+      // isAlternateBuffer defaults to false (normal buffer) — tests that
+      // need the alternate buffer set it via _setAlt(true).
+      isAlternateBuffer: false,
       _cbs: cbs,
+      _setAlt(v: boolean) {
+        mock.isAlternateBuffer = v
+      },
     }
+    return mock
   }),
   resolveRendererName: vi.fn(() => 'xterm' as const),
 }))
@@ -404,6 +419,117 @@ describe('TabManager', () => {
 
     const indicators = bar.querySelectorAll('.tab-indicator')
     expect(indicators[1].classList.contains('tab-activity')).toBe(false)
+  })
+
+  // ── activity indicator: alternate-buffer suppression ─────────────────
+
+  it('does not mark activity for alternate-buffer output on a background tab', async () => {
+    const client = makeClient()
+    const manager = new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+    })
+
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+
+    // Tab 1 active, tab 2 is background.
+    manager.activateByIndex(0)
+
+    // Put the background tab's renderer into the alternate buffer.
+    const { createRenderer } = await import('./renderers')
+    const results = vi.mocked(createRenderer).mock.results
+    const r1 = results[1].value as ReturnType<typeof createRenderer> & {
+      _setAlt: (v: boolean) => void
+    }
+    r1._setAlt(true)
+
+    // Output on the background tab while in alternate buffer.
+    const bgSession = client._sessions[1]
+    bgSession.fireData('\x1b[?1049hspinner repaint')
+
+    const indicators = bar.querySelectorAll('.tab-indicator')
+    expect(indicators[1].classList.contains('tab-activity')).toBe(false)
+  })
+
+  it('marks activity for normal-buffer output on a background tab', async () => {
+    const client = makeClient()
+    const manager = new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+    })
+
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+
+    // Tab 1 active, tab 2 is background. Default mock has isAlternateBuffer=false.
+    manager.activateByIndex(0)
+
+    const bgSession = client._sessions[1]
+    bgSession.fireData('normal output')
+
+    const indicators = bar.querySelectorAll('.tab-indicator')
+    expect(indicators[1].classList.contains('tab-activity')).toBe(true)
+  })
+
+  it('marks activity on bell in the alternate buffer', async () => {
+    const client = makeClient()
+    const manager = new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+    })
+
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+
+    // Tab 1 active, tab 2 is background.
+    manager.activateByIndex(0)
+
+    // Put the background tab into the alternate buffer.
+    const { createRenderer } = await import('./renderers')
+    const results = vi.mocked(createRenderer).mock.results
+    const r1 = results[1].value as ReturnType<typeof createRenderer> & {
+      _cbs: { onBell?: () => void }
+      _setAlt: (v: boolean) => void
+    }
+    r1._setAlt(true)
+
+    // Fire bell on the background tab's renderer.
+    expect(r1._cbs.onBell).toBeDefined()
+    r1._cbs.onBell!()
+
+    const indicators = bar.querySelectorAll('.tab-indicator')
+    expect(indicators[1].classList.contains('tab-activity')).toBe(true)
+  })
+
+  it('does not mark activity on bell for the active tab', async () => {
+    const client = makeClient()
+    new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+    })
+
+    // Only one tab, and it is active. Fire bell on it.
+    const { createRenderer } = await import('./renderers')
+    const results = vi.mocked(createRenderer).mock.results
+    const r0 = results[0].value as ReturnType<typeof createRenderer> & {
+      _cbs: { onBell?: () => void }
+    }
+    expect(r0._cbs.onBell).toBeDefined()
+    r0._cbs.onBell!()
+
+    const indicators = bar.querySelectorAll('.tab-indicator')
+    expect(indicators[0].classList.contains('tab-activity')).toBe(false)
   })
 
   // ── keyboard shortcuts ────────────────────────────────────────────────

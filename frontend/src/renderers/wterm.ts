@@ -6,6 +6,10 @@ import type { DataCallback, ResizeCallback, TitleCallback, TerminalRenderer } fr
 // DOM-rendering candidate (vercel-labs/wterm). Text is real DOM nodes rendered
 // by the browser's native font engine, so there is no canvas/DPR blur to fight.
 // Uses the built-in lite Zig/WASM core (inlined, ~12KB — no asset to serve).
+//
+// Limitations vs. xterm.js:
+//   - No onBell event: TerminalCore has no bell hook. Callers that need bell
+//     signalling must use xterm.js.
 export class WtermRenderer implements TerminalRenderer {
   private term: WTerm | null = null
   private dataCb: DataCallback | null = null
@@ -52,6 +56,16 @@ export class WtermRenderer implements TerminalRenderer {
 
   onTitle(cb: TitleCallback): void {
     this.titleCb = cb
+  }
+
+  get isAlternateBuffer(): boolean {
+    return this.term?.bridge?.usingAltScreen() ?? false
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onBell(_cb: () => void): void {
+    // @wterm/dom does not expose a bell event. TerminalCore has no hook for
+    // BEL — callers that need bell-driven activity signalling must use xterm.js.
   }
 
   refreshAtlas(): void {

@@ -126,9 +126,10 @@ class Tab {
 
       session.onData((data: string) => {
         renderer.write(data)
-        // Activity tracking: background tab that receives output
-        // gets the activity indicator, cleared when it becomes active.
-        if (!this.button.classList.contains('active')) {
+        // Normal-buffer output on a background tab lights the indicator.
+        // Full-screen TUIs repaint constantly in the alternate buffer —
+        // that is not news. A bell in either buffer still counts.
+        if (!this.button.classList.contains('active') && !renderer.isAlternateBuffer) {
           this.markActivity()
         }
       })
@@ -138,6 +139,12 @@ class Tab {
       renderer.onData((data: string) => session.send(data))
       renderer.onTitle((title: string) => {
         this.updateTitle(title)
+      })
+      renderer.onBell(() => {
+        // Bell is always attention-worthy, even in the alternate buffer.
+        if (!this.button.classList.contains('active')) {
+          this.markActivity()
+        }
       })
       renderer.onResize((cols: number, rows: number) => {
         if (cols === this.cols && rows === this.rows) return
@@ -180,8 +187,9 @@ class Tab {
  * Behaviour invariants:
  *  - Closing the last tab immediately opens a fresh one, so the window
  *    is never empty (no start page — see tabs.ts newTab()).
- *  - A background tab receiving output shows an activity indicator,
- *    cleared when that tab is activated.
+ *  - A background tab shows the activity indicator on normal-buffer
+ *    output or on bell (BEL). Alternate-buffer repaints (full-screen
+ *    TUIs) do not light it — a bell is the TUI's way to ask for attention.
  *  - Titles come live from the shell via TerminalRenderer.onTitle().
  *    They are untrusted: set via textContent, never innerHTML, and
  *    truncated with CSS, never by cutting the string.

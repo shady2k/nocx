@@ -33,6 +33,13 @@ export class WtermRenderer implements TerminalRenderer {
     this.term?.write(data)
   }
 
+  reset(): void {
+    // WTerm has no explicit reset() method; RIS (ESC c) is the
+    // equivalent full terminal reset, clearing the screen, scrollback,
+    // and all modes.
+    this.term?.write('\x1bc')
+  }
+
   onData(cb: DataCallback): void {
     this.dataCb = cb
   }

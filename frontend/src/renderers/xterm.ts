@@ -120,6 +120,10 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.write(data)
   }
 
+  reset(): void {
+    this.term?.reset()
+  }
+
   onData(cb: DataCallback): void {
     this.term?.onData(cb)
   }

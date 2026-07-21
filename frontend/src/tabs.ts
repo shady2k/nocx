@@ -79,6 +79,7 @@ class Tab {
 
       session.onData((data) => renderer.write(data))
       session.onExit((sid) => console.log('nocx: session exited:', sid))
+      session.onReset(() => renderer.reset())
       renderer.onData((data) => session.send(data))
       renderer.onResize((cols, rows) => {
         if (cols === this.cols && rows === this.rows) return

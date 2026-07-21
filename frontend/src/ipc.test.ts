@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
 
+// Must match the un-exported constants in ipc.ts.
+const ACK_INTERVAL_MS = 100
+const MIN_BACKOFF_MS = 250
+
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
 
@@ -542,5 +546,389 @@ describe('multi-session', () => {
     sessionB.onData((d) => seenB.push(d))
     ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('B alive\n')))
     expect(seenB).toEqual(['B alive\n'])
+  })
+})
+
+// --- offset tracking (AD-9 reconnect client contract) ----------------------
+
+describe('offset tracking', () => {
+  it('advances per-session offset by payload byteLength, not decoded string length', async () => {
+    const { client, session, ws } = await connectedSession()
+
+    // Expose offset for assertion: read via internal map cast.
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> }).sessions
+    expect(state.get(session.sessionId)?.offset).toBe(0)
+
+    // Multi-byte runes: '€' is 3 bytes in UTF-8.
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('€')))
+    expect(state.get(session.sessionId)?.offset).toBe(3)
+
+    // ASCII: 1 byte per character.
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
+    expect(state.get(session.sessionId)?.offset).toBe(6)
+  })
+
+  it('tracks offset independently across sessions', async () => {
+    const { client, sessionA, sessionB, ws } = await twoSessions()
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> })
+      .sessions as unknown as Map<string, { offset: number }>
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('aaaa')))
+    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('bb')))
+
+    expect(state.get(sessionA.sessionId)?.offset).toBe(4)
+    expect(state.get(sessionB.sessionId)?.offset).toBe(2)
+  })
+})
+
+// --- ack throttling --------------------------------------------------------
+
+describe('ack throttling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('sends an ack notification with the correct offset after the throttle interval', async () => {
+    const { session, ws } = await connectedSession()
+
+    // Deliver data to trigger ack scheduling.
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('hello')))
+
+    // No ack yet — timer is pending.
+    const before = ws.requests().filter((r) => r.method === 'ack')
+    expect(before).toHaveLength(0)
+
+    // Advance past the throttle interval.
+    vi.advanceTimersByTime(ACK_INTERVAL_MS)
+
+    const acks = ws.requests().filter((r) => r.method === 'ack')
+    expect(acks).toHaveLength(1)
+    expect(acks[0].params).toEqual({ sessionId: session.sessionId, offset: 5 })
+  })
+
+  it('throttles multiple frames into a single ack', async () => {
+    const { session, ws } = await connectedSession()
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
+    // Only 50ms passed — timer not yet fired.
+    vi.advanceTimersByTime(50)
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('def')))
+    vi.advanceTimersByTime(50) // total 100ms — timer fires
+
+    const acks = ws.requests().filter((r) => r.method === 'ack')
+    expect(acks).toHaveLength(1)
+    // Offset should be the total of both frames.
+    expect(acks[0].params).toEqual({ sessionId: session.sessionId, offset: 6 })
+  })
+
+  it('does not send an ack when the connection is not open', async () => {
+    const { ws } = await connectedSession()
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('data')))
+
+    // Close the WS before the ack timer fires.
+    ws.readyState = MockWebSocket.CLOSED
+
+    vi.advanceTimersByTime(ACK_INTERVAL_MS)
+
+    // No ack should have been sent (ws.readyState !== OPEN).
+    const acks = ws.requests().filter((r) => r.method === 'ack')
+    expect(acks).toHaveLength(0)
+  })
+})
+
+// --- reconnect and reattach ------------------------------------------------
+
+describe('reconnect and reattach', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function connectedSessionWithBackoff(client: WSClient): Promise<{
+    session: SessionHandle
+    firstWS: MockWebSocket
+  }> {
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+
+    const opening = client.openSession(80, 24)
+    const openID = socket().requests()[0].id
+    socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
+    const session = await opening
+    return { session, firstWS: socket() }
+  }
+
+  it('retries with exponential backoff on unexpected socket drop', async () => {
+    const client = new WSClient()
+    const { firstWS } = await connectedSessionWithBackoff(client)
+
+    // Connection drops unexpectedly.
+    firstWS.serverHangsUp()
+    expect(client.reconnectPending).toBe(true)
+
+    // Advance just past the first backoff window. 475ms > 250+125(max jitter).
+    vi.advanceTimersByTime(475)
+
+    // The reconnect attempt creates a new WebSocket. Accept it.
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+
+    // Flush microtasks so _tryReconnect's continuation resets backoff.
+    await Promise.resolve()
+
+    // After a successful reconnect, backoff resets to initial value.
+    expect(client.backoffMs).toBe(MIN_BACKOFF_MS)
+    expect(client.connected).toBe(true)
+  })
+
+  it('stops retrying when close() is called deliberately', async () => {
+    const client = new WSClient()
+    const { firstWS } = await connectedSessionWithBackoff(client)
+
+    firstWS.serverHangsUp()
+    expect(client.reconnectPending).toBe(true)
+
+    // Deliberate close must cancel the pending reconnect.
+    client.close()
+    expect(client.reconnectPending).toBe(false)
+
+    // Advance well past any backoff — no reconnect should fire.
+    vi.advanceTimersByTime(10000)
+    // The original instance should still be the last (no new WS created).
+    expect(MockWebSocket.last).toBe(firstWS)
+  })
+
+  it('sends attach for each known session after reconnect', async () => {
+    const client = new WSClient()
+    const { firstWS } = await connectedSessionWithBackoff(client)
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 0 })
+  })
+
+  it('sends attach with the last received byte offset', async () => {
+    const client = new WSClient()
+    const { firstWS } = await connectedSessionWithBackoff(client)
+
+    firstWS.deliverBinary(encodeFrame(SID, new TextEncoder().encode('12345')))
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> })
+      .sessions as unknown as Map<string, { offset: number }>
+    expect(state.get(SID)?.offset).toBe(5)
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 5 })
+  })
+
+  it('continues without resetting on resumed response', async () => {
+    const client = new WSClient()
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+
+    let resetFired = false
+    session.onReset(() => {
+      resetFired = true
+    })
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: attaches[0].id,
+      result: { resumed: true, from: 5 },
+    })
+
+    expect(resetFired).toBe(false)
+  })
+
+  it('fires reset callback and renames decoder on reset response', async () => {
+    const client = new WSClient()
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+
+    let resetFired = false
+    session.onReset(() => {
+      resetFired = true
+    })
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: attaches[0].id,
+      result: { reset: true, from: 100 },
+    })
+    await Promise.resolve()
+
+    expect(resetFired).toBe(true)
+  })
+
+  // DEFECT 1 regression: recreating the decoder on reset prevents stale
+  // mid-rune bytes from splicing onto the resynced stream (nocx-ao7).
+  it('recreates the per-session decoder on reset so stale mid-rune bytes are discarded', async () => {
+    const client = new WSClient()
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+
+    // Feed the session a frame that ends mid-rune: the first byte of '€'
+    // (UTF-8 E2 82 AC). The decoder now holds 0xE2, waiting for
+    // continuation bytes.
+    const euro = new TextEncoder().encode('€')
+    firstWS.deliverBinary(encodeFrame(SID, euro.slice(0, 1))) // just E2
+    expect(
+      (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(SID)
+        ?.offset,
+    ).toBe(1)
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: attaches[0].id,
+      result: { reset: true, from: 0 },
+    })
+    await Promise.resolve()
+
+    // After reset, deliver 'ñ' (UTF-8 C3 B1). If the stale E2 leaked,
+    // the decoder would try E2 C3 → invalid → U+FFFD, then B1 (lonely
+    // continuation) → U+FFFD. A clean decoder produces just 'ñ'.
+    const seen: string[] = []
+    session.onData((d) => seen.push(d))
+    const nTilde = new TextEncoder().encode('ñ')
+    reconnectedWS.deliverBinary(encodeFrame(SID, nTilde))
+    await Promise.resolve()
+
+    expect(seen.join('')).toBe('ñ')
+    expect(seen.join('')).not.toContain('\uFFFD')
+  })
+
+  it('updates offset from reset response', async () => {
+    const client = new WSClient()
+    const { firstWS } = await connectedSessionWithBackoff(client)
+
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> })
+      .sessions as unknown as Map<string, { offset: number }>
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: attaches[0].id,
+      result: { reset: true, from: 99 },
+    })
+    await Promise.resolve()
+
+    expect(state.get(SID)?.offset).toBe(99)
+  })
+
+  it('drops session locally on attach error', async () => {
+    const client = new WSClient()
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+
+    const exited: string[] = []
+    session.onExit((sid) => exited.push(sid))
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+
+    // Flush _tryReconnect's microtask continuation (sends attaches).
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+
+    // Deliver the error response. handleControlMessage calls reject()
+    // which schedules the Promise rejection chain as microtasks:
+    //   P1 reject → P2 (then) reject → P3 (catch) handler
+    // Each step is one microtask tick.
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: attaches[0].id,
+      error: { code: -32602, message: 'unknown sessionId' },
+    })
+
+    await Promise.resolve() // P1 rejection → P2 rejection
+    await Promise.resolve() // P2 rejection → catch handler fires
+    expect(exited).toEqual([SID])
+  })
+
+  it('sends attach for multiple sessions on reconnect', async () => {
+    const client = new WSClient()
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+
+    const openingA = client.openSession(80, 24)
+    const openIdA = socket()
+      .requests()
+      .find((r) => r.method === 'open')!.id!
+    socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
+    await openingA
+
+    const openingB = client.openSession(80, 24)
+    const reqsAfterB = socket().requests()
+    const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
+    socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })
+    await openingB
+
+    const firstWS = socket()
+    firstWS.deliverBinary(encodeFrame(SID, new TextEncoder().encode('AAAA')))
+    firstWS.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('BB')))
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(2)
+
+    const offsets = new Map(attaches.map((a) => [a.params?.sessionId, a.params?.offset]))
+    expect(offsets.get(SID)).toBe(4)
+    expect(offsets.get(OTHER_SID)).toBe(2)
   })
 })

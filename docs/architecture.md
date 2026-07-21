@@ -9,7 +9,7 @@ updated: 2026-07-20
 
 ## Overview
 
-nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from a **ghostty-web** (WASM VT) frontend, hosted by a **Wails v2** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote helper from additional build outputs.
+nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from an **xterm.js** (WebGL) frontend ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md); ghostty-web and wterm remain switchable behind the renderer interface), hosted by a **Wails v2** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote helper from additional build outputs.
 
 ## Component Diagram
 
@@ -63,7 +63,7 @@ graph LR
     outbytes --> tpb["transport: WS binary frame"]
     tpb --> render["ghostty-web: parse VT + render grid"]
 
-    render --> osc["ghostty-web surfaces<br/>OSC 7 / OSC 133 [ASSUMPTION]"]
+    render --> osc["frontend surfaces<br/>OSC 7 / OSC 133 (verified)"]
     osc --> ev["terminal→ui event (frontend-side ONLY):<br/>cwd {host, path} · marker {A|B|C|D, exitCode?}"]
     ev --> app["ui / app layer"]
     app --> act["actions: copy-folder-path,<br/>duplicate-tab-in-cwd<br/>(routes on originating session)"]
@@ -90,7 +90,7 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 
 | Module | SRP responsibility |
 | --- | --- |
-| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events [ASSUMPTION: ghostty-web exposes OSC handlers — see Risks]. |
+| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events via `parser.registerOscHandler` (verified — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). |
 | `ui` | Render tabs, menus, config, and map OSC/cwd events to user actions. |
 | `ipc` | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9). |
 
@@ -130,13 +130,13 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Rule: Tier A = OSC 7/133 markers via shell hooks (zero remote install; local + over SSH) is the MVP substrate; Tier B = a cross-compiled Go helper scp'd to a remote host **augments** (never replaces) the remote shell and feeds richer metadata to the local terminal — a designed seam, not built now.
   - The OSC-7 cwd event payload = `{host, path}` (percent-decoded). Ownership: the **backend** owns "local vs remote + host" and validates the host; the frontend only supplies the desired path.
   - Fallback: when the shell emits no OSC 7, cwd falls back to `$HOME` — **surfaced to the user, not applied silently.**
-  - [ASSUMPTION] Tier A relies on ghostty-web surfacing OSC 7/133 as events — unverified; see Risks (top item).
+  - Tier A relies on the VT frontend surfacing OSC 7/133 as events — **verified on xterm.js** (`nocx-dej`, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).
 
 **AD-6 — Single-owner state ownership.**
 - Binds: where terminal vs. session state lives.
 - Prevents: dual-ownership drift and byte-stream sniffing in the backend.
-- Rule: ghostty-web owns render state (grid, scrollback, selection) and parses OSC 7/133, surfacing them as events [ASSUMPTION — unverified, see Risks]; the Go backend owns PTY/session lifecycle, SSH connections, and config/vault. The backend does **not** sniff the byte stream.
-  - Conditional dependency: this "backend does not sniff" invariant holds only if ghostty-web exposes OSC 7 and OSC 133 handlers. If it does not, the fallback of having the **backend parse OSC would break this invariant** — the de-risk spike (see Risks) must settle this before AD-5/AD-6 are treated as final.
+- Rule: the VT frontend (xterm.js — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)) owns render state (grid, scrollback, selection) and parses OSC 7/133, surfacing them as events via `parser.registerOscHandler` (verified, `nocx-dej`); the Go backend owns PTY/session lifecycle, SSH connections, and config/vault. The backend does **not** sniff the byte stream.
+  - ~~Conditional dependency~~ **DISCHARGED** ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)): the VT frontend is xterm.js, whose `parser.registerOscHandler` was verified to deliver OSC 7 and OSC 133 frontend-side. The backend never parses OSC.
 
 **AD-7 — Session model: one PTY/channel per tab.**
 - Binds: concurrency and session bookkeeping.
@@ -192,14 +192,15 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 ## Risks / Open Questions
 
-- **TOP RISK — ghostty-web OSC / API surface is UNVERIFIED.** AD-5/AD-6 assume ghostty-web surfaces OSC 7 and OSC 133 as events, but this is undocumented: xterm.js-compatibility does **not** imply OSC 7/133 handling (xterm.js requires custom OSC-handler registration; ghostty-web's README documents only `write()`/`onData()`). A de-risk spike **must confirm ghostty-web exposes an OSC 7 AND an OSC 133 handler/event API — plus scrollback, selection, and resize APIs (also undocumented) — before AD-5/AD-6 are treated as settled.** Fallback if absent: patch ghostty-web (it already builds from Ghostty source with a patch), or have the backend parse OSC — which would **break AD-6's "backend does not sniff"** invariant (see the conditional note in AD-6).
+- ~~**TOP RISK — ghostty-web OSC / API surface is UNVERIFIED.**~~ **RESOLVED 2026-07-21 (`nocx-dej`) — see [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md).** ghostty-web exposes no OSC handler registration at all; xterm.js does, and OSC 7 + OSC 133 (incl. exit codes) were captured end-to-end. The VT frontend is now **xterm.js**, so AD-5/AD-6 hold with no backend sniffing. Original risk text kept for the record:
+  - **TOP RISK — ghostty-web OSC / API surface is UNVERIFIED.** AD-5/AD-6 assume ghostty-web surfaces OSC 7 and OSC 133 as events, but this is undocumented: xterm.js-compatibility does **not** imply OSC 7/133 handling (xterm.js requires custom OSC-handler registration; ghostty-web's README documents only `write()`/`onData()`). A de-risk spike **must confirm ghostty-web exposes an OSC 7 AND an OSC 133 handler/event API — plus scrollback, selection, and resize APIs (also undocumented) — before AD-5/AD-6 are treated as settled.** Fallback if absent: patch ghostty-web (it already builds from Ghostty source with a patch), or have the backend parse OSC — which would **break AD-6's "backend does not sniff"** invariant (see the conditional note in AD-6).
 - **ghostty-web maturity / WASM performance.** ghostty-web is early and its WASM parser is not yet optimized (per Mitchell Hashimoto), yet the hero promise — flawless modern agent-TUI rendering — rides entirely on it. Note on the host: WKWebView on macOS runs out-of-process **with JIT** (the no-JIT limitation is the iOS third-party-browser case), so it is essentially Safari's engine; the real bottleneck is ghostty-web's unoptimized WASM itself, independent of the WebView. **Recommendation:** the spike should measure ghostty-web parser throughput with representative agent TUIs; WKWebView-vs-Chrome is a smaller factor.
 - **Wails v2 vs v3.** v2 is stable and MVP-sufficient; v3 remains alpha. Open question: whether any Phase-2 feature (e.g. multi-window) forces an earlier v3 migration.
 - **Config format** — JSON vs TOML for settings/themes/keybindings is unresolved. [ASSUMPTION: either; leaning JSON/TOML per module.]
 
 ### Assumptions to confirm
 
-- [ASSUMPTION] ghostty-web exposes OSC 7 and OSC 133 handler/event APIs (plus scrollback/selection/resize APIs). Unverified — the top-risk de-risk spike must confirm before AD-5/AD-6 are final.
+- ~~[ASSUMPTION] ghostty-web exposes OSC 7 and OSC 133 handler/event APIs.~~ **CONFIRMED FALSE for ghostty-web, CONFIRMED TRUE for xterm.js** (`nocx-dej`, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). AD-5/AD-6 are final on xterm.js.
 - [ASSUMPTION] `google/wire` was archived read-only (2025-08-25); manual constructor injection at the composition root is the default, and any compile-time DI tool is an optional convenience only.
 - [ASSUMPTION] Persisted config format (JSON or TOML) not yet fixed.
 - [ASSUMPTION] Frontend log forwarding to the backend is desired but its transport/verbosity is unspecified.

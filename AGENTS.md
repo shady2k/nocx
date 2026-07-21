@@ -23,16 +23,17 @@ OpenCode, …) contributing to the repo. Read it before writing code.
 1. Take a `ready` task from beads (`bd ready`); mark it in-progress.
 2. Read the relevant `AD`(s) in `docs/architecture.md` before touching a boundary.
 3. **TDD**: red → green → refactor. Write the failing test first.
-4. Keep it green: `golangci-lint`, `gofumpt`, and tests all pass (pre-commit runs them).
-   No merge without green CI (GitHub Actions).
+4. Keep it green: language-specific format, lint, and tests all pass (pre-commit runs them).
+   The pre-commit hook is the gate on every commit; CI validates release branches and tags.
 5. Update the task in beads; record any non-obvious decision as an ADR in `docs/decisions/`.
 
 ## Engineering rules (non-negotiable)
 
 - **Interface-first + DI.** Every module lives behind an interface, wired at a single
   composition root. Depend on abstractions, obey SRP, keep modules trivially replaceable.
-- **Quality gates from every commit:** strict `golangci-lint`, `gofumpt` formatting,
-  pre-commit hooks (lint + format + test), mandatory tests.
+- **Quality gates from every commit:** language-specific formatting, linting, and test,
+  enforced by the pre-commit hook. Mandatory tests for every language — Go and TypeScript
+  are held to the same bar.
 - **Observability:** structured logging via Go `log/slog` behind the logging interface —
   no ad-hoc `fmt.Println`.
 - **Clean-only:** no backward-compatibility shims (greenfield — break & refactor freely),

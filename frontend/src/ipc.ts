@@ -1,6 +1,4 @@
-const FRAME_VERSION = 0x01
-const MSG_TYPE_DATA = 0x01
-const FRAME_HEADER_SIZE = 18
+import { decodeFrame, encodeFrame, isSessionID } from './frame'
 
 let requestID = 0
 
@@ -9,47 +7,15 @@ function nextID(): number {
   return requestID
 }
 
-function hexToBytes(hex: string): Uint8Array {
-  if (hex.length !== 32 || !/^[0-9a-f]{32}$/.test(hex)) {
-    throw new Error(`nocx: invalid session-id: ${hex}`)
-  }
-  const bytes = new Uint8Array(16)
-  for (let i = 0; i < 32; i += 2) {
-    bytes[i >> 1] = parseInt(hex.substring(i, i + 2), 16)
-  }
-  return bytes
-}
-
-function encodeFrame(sessionIDHex: string, payload: Uint8Array): ArrayBuffer {
-  const sidBytes = hexToBytes(sessionIDHex)
-  const buf = new ArrayBuffer(FRAME_HEADER_SIZE + payload.byteLength)
-  const view = new Uint8Array(buf)
-  view[0] = FRAME_VERSION
-  view[1] = MSG_TYPE_DATA
-  view.set(sidBytes, 2)
-  view.set(payload, FRAME_HEADER_SIZE)
-  return buf
-}
-
-function decodeFrame(data: ArrayBuffer): { sessionId: string; payload: ArrayBuffer } | null {
-  if (data.byteLength < FRAME_HEADER_SIZE) {
-    console.warn('nocx: frame too short:', data.byteLength)
-    return null
-  }
-  const view = new Uint8Array(data)
-  if (view[0] !== FRAME_VERSION) {
-    console.warn('nocx: unknown frame version:', view[0])
-    return null
-  }
-  if (view[1] !== MSG_TYPE_DATA) {
-    console.warn('nocx: unexpected msg-type:', view[1])
-    return null
-  }
-  const sidHex = Array.from(view.slice(2, 18))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-  const payload = data.slice(FRAME_HEADER_SIZE)
-  return { sessionId: sidHex, payload }
+// The control-plane messages we receive, mirroring the JSON-RPC 2.0 contract
+// documented in internal/transport/frame.go. Every field is optional: this is
+// untrusted input off the socket, narrowed at each use.
+interface ControlMessage {
+  id?: number
+  method?: string
+  params?: { sessionId?: string }
+  result?: { sessionId?: string }
+  error?: { code?: number; message?: string }
 }
 
 interface PendingOpen {
@@ -99,9 +65,9 @@ export class WSClient {
   }
 
   private handleControlMessage(data: string): void {
-    let msg: any
+    let msg: ControlMessage
     try {
-      msg = JSON.parse(data)
+      msg = JSON.parse(data) as ControlMessage
     } catch {
       return
     }
@@ -122,10 +88,10 @@ export class WSClient {
         this.pendingOpen = null
         return
       }
-      if (msg.result?.sessionId) {
-        const sid = String(msg.result.sessionId)
-        if (!/^[0-9a-f]{32}$/.test(sid)) {
-          this.pendingOpen?.reject(new Error(`nocx: invalid session-id from server: ${sid}`))
+      const sid = msg.result?.sessionId
+      if (sid) {
+        if (!isSessionID(sid)) {
+          this.pendingOpen.reject(new Error(`nocx: invalid session-id from server: ${sid}`))
           this.pendingOpen = null
           return
         }

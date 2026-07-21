@@ -2,6 +2,7 @@ package transport
 
 import (
 	"crypto/rand"
+	"fmt"
 	"testing"
 )
 
@@ -121,6 +122,54 @@ func TestDecodeFrameAtMinimumSize(t *testing.T) {
 	}
 	if len(f.Payload) != 0 {
 		t.Errorf("expected empty payload for minimum-size frame")
+	}
+}
+
+// Golden vector shared with frontend/src/frame.test.ts.
+// Any unilateral change to the wire layout that breaks parity between Go and
+// TypeScript codecs must fail a test on this side, on the other side, or both.
+func TestGoldenVector(t *testing.T) {
+	// "0123456789abcdef0011223344556677" in raw bytes.
+	sid := [16]byte{
+		0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+	}
+	payload := []byte("hi\n")
+
+	const want = "01010123456789abcdef001122334455667768690a"
+
+	f := Frame{
+		Version:   FrameVersion,
+		MsgType:   MsgTypeData,
+		SessionID: sid,
+		Payload:   payload,
+	}
+
+	encoded := f.Encode()
+	if len(encoded) != len(want)/2 {
+		t.Fatalf("encoded length %d, want %d", len(encoded), len(want)/2)
+	}
+	got := fmt.Sprintf("%x", encoded)
+	if got != want {
+		t.Errorf("golden vector mismatch:\n got  %s\n want %s", got, want)
+	}
+
+	// Decode back.
+	decoded, err := DecodeFrame(encoded)
+	if err != nil {
+		t.Fatalf("DecodeFrame(golden): %v", err)
+	}
+	if decoded.Version != f.Version {
+		t.Errorf("version mismatch: %d != %d", decoded.Version, f.Version)
+	}
+	if decoded.MsgType != f.MsgType {
+		t.Errorf("msgType mismatch: %d != %d", decoded.MsgType, f.MsgType)
+	}
+	if decoded.SessionID != f.SessionID {
+		t.Errorf("sessionId mismatch")
+	}
+	if string(decoded.Payload) != string(f.Payload) {
+		t.Errorf("payload mismatch: %q != %q", decoded.Payload, f.Payload)
 	}
 }
 

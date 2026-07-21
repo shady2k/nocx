@@ -1,8 +1,11 @@
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-html, body {
+html,
+body {
   margin: 0;
   padding: 0;
   width: 100%;
@@ -28,7 +31,12 @@ html, body {
   padding: 0 10px;
   background: #16161e;
   border-bottom: 1px solid #2a2b3d;
-  font: 12px/1 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  font:
+    12px/1 ui-sans-serif,
+    -apple-system,
+    'SF Pro Text',
+    system-ui,
+    sans-serif;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -88,6 +96,10 @@ html, body {
   margin: 0;
   padding: 16px;
   color: #f7768e;
-  font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  font:
+    13px/1.5 ui-monospace,
+    'SF Mono',
+    Menlo,
+    monospace;
   white-space: pre-wrap;
 }

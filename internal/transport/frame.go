@@ -11,6 +11,10 @@
 //
 // # Binary frame layout (data plane)
 //
+// The TS half of this codec lives in frontend/src/frame.ts; a golden-vector
+// test on each side (frame_test.go / frame.test.ts) pins the layout so a
+// unilateral change to either codec fails before reaching a user.
+//
 //	byte 0      version        = 0x01
 //	byte 1      msg-type       0x01 = data (PTY I/O, both directions)
 //	                           0x02 = metadata (reserved for Phase-2 Tier-B helper)

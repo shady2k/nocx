@@ -64,6 +64,13 @@ body {
   display: flex;
   align-items: center;
   flex: 0 1 200px;
+  /* The explicit width is load-bearing, not redundant with the flex-basis.
+     .tabs-container is flex-basis:auto, so it sizes to its content — and a
+     shrinkable child does not defend its basis during that measurement, so
+     the strip collapsed to the label width (~107px) instead of 200px.
+     Tabby carries the same width alongside the same basis, for the same
+     reason. */
+  width: 200px;
   min-width: 0;
   padding: 0 10px;
   cursor: pointer;

@@ -34,6 +34,7 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
+		EnableDefaultContextMenu: false,
 		Debug: options.Debug{
 			OpenInspectorOnStartup: true,
 		},

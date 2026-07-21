@@ -92,6 +92,8 @@ class Tab {
   }
 
   updateTitle(title: string): void {
+    // Ignore empty or whitespace-only titles (e.g. OSC 0/2 with "" on exit).
+    if (!title.trim()) return
     this._title = title
     this.titleSpan.textContent = title
   }
@@ -150,6 +152,10 @@ class Tab {
       this.pane.replaceChildren(notice)
       console.error(`nocx: tab ${this.id} failed`, err)
     }
+  }
+
+  refreshAtlas(): void {
+    this.renderer?.refreshAtlas()
   }
 
   focus(): void {
@@ -302,6 +308,7 @@ export class TabManager {
     tab.setActive(true)
 
     await tab.start()
+    tab.refreshAtlas()
     tab.focus()
   }
 

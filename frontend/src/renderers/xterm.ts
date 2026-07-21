@@ -136,6 +136,14 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.onTitleChange(cb)
   }
 
+  refreshAtlas(): void {
+    this.webgl?.clearTextureAtlas()
+    this.canvas?.clearTextureAtlas()
+    if (this.term) {
+      this.term.refresh(0, this.term.rows - 1)
+    }
+  }
+
   focus(): void {
     this.term?.focus()
   }

@@ -126,14 +126,15 @@ body {
   align-self: center;
 }
 
-/* Title fade under close button on hover (Tabby mask-image trick) */
+/* Title fade under close button on hover — mask sized to the single
+   22px close button (plus a few px of gap), not Tabby's 80px cluster. */
 .tab:hover .tab-title {
   -webkit-mask-image:
     linear-gradient(black 0 0),
-    linear-gradient(to left, transparent 0%, transparent 50%, black 100%);
+    linear-gradient(to left, transparent 0%, transparent 40%, black 100%);
   -webkit-mask-size:
-    calc(100% - 80px) auto,
-    80px auto;
+    calc(100% - 30px) auto,
+    30px auto;
   -webkit-mask-repeat: no-repeat;
   -webkit-mask-position: left, right;
 }

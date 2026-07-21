@@ -29,6 +29,7 @@ vi.mock('./renderers', () => ({
       onTitle: vi.fn((cb: TitleCallback) => {
         cbs.onTitle = cb
       }),
+      refreshAtlas: vi.fn(),
       focus: vi.fn(),
       cols: 80,
       rows: 24,
@@ -317,6 +318,38 @@ describe('TabManager', () => {
     r1._cbs.onTitle!('bash-3.2')
     expect(titles[1].textContent).toBe('bash-3.2')
     expect(titles[0].textContent).toBe('~/project')
+  })
+
+  // ── empty / whitespace title is ignored ──────────────────────────────
+
+  it('ignores empty or whitespace-only titles', async () => {
+    const client = makeClient()
+    new TabManager(bar, panes, client)
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalled()
+    })
+
+    await Promise.resolve()
+
+    const { createRenderer } = await import('./renderers')
+    const results = vi.mocked(createRenderer).mock.results
+    const r0 = results[0].value as TerminalRenderer & { _cbs: { onTitle?: TitleCallback } }
+
+    const titleEl = bar.querySelector('.tab-title')!
+    expect(r0._cbs.onTitle).toBeDefined()
+
+    // Set a real title first.
+    r0._cbs.onTitle!('~/projects')
+    expect(titleEl.textContent).toBe('~/projects')
+
+    // Empty string should be ignored — fallback stays.
+    r0._cbs.onTitle!('')
+    expect(titleEl.textContent).toBe('~/projects')
+
+    // Whitespace-only should be ignored.
+    r0._cbs.onTitle!('   ')
+    expect(titleEl.textContent).toBe('~/projects')
   })
 
   // ── activity indicator ────────────────────────────────────────────────

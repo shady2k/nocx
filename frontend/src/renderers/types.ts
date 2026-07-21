@@ -29,6 +29,10 @@ export interface TerminalRenderer {
   // others may leave it unfired if the engine does not expose an
   // equivalent event. The fallback title is set by the tab bar.
   onTitle(cb: TitleCallback): void
+  // refreshAtlas is called when the renderer becomes visible after being
+  // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
+  // while hidden; this gives the renderer a chance to clear and repaint.
+  refreshAtlas(): void
   focus(): void
   readonly cols: number
   readonly rows: number

@@ -54,6 +54,10 @@ export class WtermRenderer implements TerminalRenderer {
     this.titleCb = cb
   }
 
+  refreshAtlas(): void {
+    // WTerm renders via DOM, not a GPU texture atlas — nothing to clear.
+  }
+
   focus(): void {
     this.term?.focus()
   }

@@ -19,43 +19,79 @@ interface ControlMessage {
 }
 
 interface PendingOpen {
-  resolve: () => void
+  resolve: (sessionId: string) => void
   reject: (err: Error) => void
-  id: number
+}
+
+interface SessionState {
+  // Per-session streaming TextDecoder. A frame can end mid-rune; one shared
+  // decoder would splice bytes across interleaved sessions and corrupt both
+  // — that is bead nocx-ao7 reborn in a new form.
+  decoder: TextDecoder
+  dataCallback: ((data: string) => void) | null
+  exitCallback: ((sessionId: string) => void) | null
+}
+
+export class SessionHandle {
+  constructor(
+    private client: WSClient,
+    readonly sessionId: string,
+  ) {}
+
+  send(data: string): void {
+    this.client.sendToSession(this.sessionId, data)
+  }
+
+  sendResize(cols: number, rows: number): void {
+    this.client.sendResize(this.sessionId, cols, rows)
+  }
+
+  close(): void {
+    this.client.closeSession(this.sessionId)
+  }
+
+  onData(cb: (data: string) => void): void {
+    this.client.onSessionData(this.sessionId, cb)
+  }
+
+  onExit(cb: (sessionId: string) => void): void {
+    this.client.onSessionExit(this.sessionId, cb)
+  }
 }
 
 export class WSClient {
   private ws: WebSocket | null = null
-  private onDataCallback: ((data: string) => void) | null = null
-  private onExitCallback: ((sessionId: string) => void) | null = null
-  private decoder = new TextDecoder()
-  private sessionId: string | null = null
-  private pendingOpen: PendingOpen | null = null
+  private sessions = new Map<string, SessionState>()
+  private pendingOpens = new Map<number, PendingOpen>()
 
-  // connect resolves when the WebSocket handshake completes. The session
-  // is not open yet — call openSession() next to get the sessionId.
+  // connect resolves when the WebSocket handshake completes. Sessions are
+  // not open yet — call openSession() next to get a SessionHandle.
   connect(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(`ws://127.0.0.1:${port}/session`)
       this.ws.binaryType = 'arraybuffer'
-      this.decoder = new TextDecoder()
+      this.sessions.clear()
+      this.pendingOpens.clear()
 
       this.ws.onopen = () => resolve()
       this.ws.onerror = () => {
-        this.rejectPending('ws connection failed')
+        this.rejectAllPending('ws connection failed')
         reject(new Error('ws connection failed'))
       }
       this.ws.onclose = () => {
         console.log('ws closed')
-        this.rejectPending('ws closed')
+        this.rejectAllPending('ws closed')
       }
 
       this.ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
           const frame = decodeFrame(event.data)
-          if (frame && frame.sessionId === this.sessionId) {
-            const data = this.decoder.decode(frame.payload, { stream: true })
-            this.onDataCallback?.(data)
+          if (frame) {
+            const state = this.sessions.get(frame.sessionId)
+            if (state) {
+              const text = state.decoder.decode(frame.payload, { stream: true })
+              state.dataCallback?.(text)
+            }
           }
         } else if (typeof event.data === 'string') {
           this.handleControlMessage(event.data)
@@ -75,73 +111,60 @@ export class WSClient {
     // exit notification (has method, no id).
     if (msg.method === 'exit' && msg.id === undefined) {
       const sid = msg.params?.sessionId
-      if (sid && sid === this.sessionId) {
-        this.onExitCallback?.(sid)
+      if (sid) {
+        this.sessions.get(sid)?.exitCallback?.(sid)
+        this.sessions.delete(sid)
       }
       return
     }
 
-    // Response to the pending openSession request.
-    if (this.pendingOpen && msg.id === this.pendingOpen.id) {
-      if (msg.error) {
-        this.pendingOpen.reject(new Error(msg.error.message || 'open failed'))
-        this.pendingOpen = null
-        return
-      }
-      const sid = msg.result?.sessionId
-      if (sid) {
-        if (!isSessionID(sid)) {
-          this.pendingOpen.reject(new Error(`nocx: invalid session-id from server: ${sid}`))
-          this.pendingOpen = null
+    // Response to a pending openSession request.
+    if (msg.id !== undefined) {
+      const pending = this.pendingOpens.get(msg.id)
+      if (pending) {
+        if (msg.error) {
+          pending.reject(new Error(msg.error.message || 'open failed'))
+          this.pendingOpens.delete(msg.id)
           return
         }
-        this.sessionId = sid
-        console.log('nocx: session opened:', this.sessionId)
-        this.pendingOpen.resolve()
-        this.pendingOpen = null
+        const sid = msg.result?.sessionId
+        if (sid) {
+          if (!isSessionID(sid)) {
+            pending.reject(new Error(`nocx: invalid session-id from server: ${sid}`))
+            this.pendingOpens.delete(msg.id)
+            return
+          }
+          this.sessions.set(sid, {
+            decoder: new TextDecoder(),
+            dataCallback: null,
+            exitCallback: null,
+          })
+          console.log('nocx: session opened:', sid)
+          pending.resolve(sid)
+          this.pendingOpens.delete(msg.id)
+        }
       }
     }
   }
 
-  private rejectPending(reason: string): void {
-    if (this.pendingOpen) {
-      this.pendingOpen.reject(new Error(reason))
-      this.pendingOpen = null
+  private rejectAllPending(reason: string): void {
+    for (const pending of this.pendingOpens.values()) {
+      pending.reject(new Error(reason))
     }
+    this.pendingOpens.clear()
   }
 
-  // send queues raw PTY input for the open session. Drops silently if the
-  // sessionId has not arrived yet (AD-7: the client MUST NOT send data frames
-  // for a session before the open result arrives).
-  send(data: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    if (!this.sessionId) return
-    const payload = new TextEncoder().encode(data)
-    const frame = encodeFrame(this.sessionId, payload)
-    this.ws.send(frame)
-  }
-
-  sendResize(cols: number, rows: number): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    if (!this.sessionId) return
-    const id = nextID()
-    this.ws.send(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        id,
-        method: 'resize',
-        params: { sessionId: this.sessionId, cols, rows, xpixel: 0, ypixel: 0 },
-      }),
-    )
-  }
-
-  // openSession sends the JSON-RPC open request and resolves when the
-  // server returns the authoritative sessionId. Per AD-7, nothing may be
-  // sent on the data plane before this resolves.
-  openSession(cols: number, rows: number): Promise<void> {
+  // openSession sends the JSON-RPC open request and resolves with a
+  // SessionHandle carrying the server-assigned sessionId. Per AD-7, the
+  // server assigns the authoritative id — nothing may be sent on the data
+  // plane for this session before this resolves.
+  openSession(cols: number, rows: number): Promise<SessionHandle> {
     return new Promise((resolve, reject) => {
       const id = nextID()
-      this.pendingOpen = { resolve, reject, id }
+      this.pendingOpens.set(id, {
+        resolve: (sid: string) => resolve(new SessionHandle(this, sid)),
+        reject,
+      })
       this.ws!.send(
         JSON.stringify({
           jsonrpc: '2.0',
@@ -153,37 +176,68 @@ export class WSClient {
     })
   }
 
-  onData(cb: (data: string) => void): void {
-    this.onDataCallback = cb
+  // sendToSession frames raw PTY input for one session. Drops silently if
+  // the session is not in the map (AD-7: the client MUST NOT send data
+  // frames for a session before the open result arrives, or after exit).
+  sendToSession(sessionId: string, data: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    if (!this.sessions.has(sessionId)) return
+    const payload = new TextEncoder().encode(data)
+    const frame = encodeFrame(sessionId, payload)
+    this.ws.send(frame)
   }
 
-  onExit(cb: (sessionId: string) => void): void {
-    this.onExitCallback = cb
+  sendResize(sessionId: string, cols: number, rows: number): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    if (!this.sessions.has(sessionId)) return
+    const id = nextID()
+    this.ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'resize',
+        params: { sessionId, cols, rows, xpixel: 0, ypixel: 0 },
+      }),
+    )
   }
 
-  get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN
-  }
-
-  get sid(): string | null {
-    return this.sessionId
-  }
-
-  close(): void {
-    if (this.ws && this.sessionId) {
+  closeSession(sessionId: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const id = nextID()
       this.ws.send(
         JSON.stringify({
           jsonrpc: '2.0',
           id,
           method: 'close',
-          params: { sessionId: this.sessionId },
+          params: { sessionId },
         }),
       )
     }
+    this.sessions.delete(sessionId)
+  }
+
+  onSessionData(sessionId: string, cb: (data: string) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.dataCallback = cb
+    }
+  }
+
+  onSessionExit(sessionId: string, cb: (sessionId: string) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.exitCallback = cb
+    }
+  }
+
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
+  close(): void {
     this.ws?.close()
     this.ws = null
-    this.sessionId = null
-    this.pendingOpen = null
+    this.sessions.clear()
+    this.pendingOpens.clear()
   }
 }

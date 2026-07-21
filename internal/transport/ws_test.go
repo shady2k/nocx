@@ -772,6 +772,137 @@ func TestWSServer_CrossConnectionIsolation(t *testing.T) {
 	}
 }
 
+// TestWSServer_TwoSessionsOneConnection_Isolation proves two concurrent
+// sessions on ONE WebSocket are isolated: input written to session A echoes
+// only in frames addressed to A, and closing A leaves B alive.
+func TestWSServer_TwoSessionsOneConnection_Isolation(t *testing.T) {
+	sess := newRegWithReal(log.NewSlogAdapter(nil))
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	respA := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 1)
+	var ra struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(respA, &ra)
+	sidA := ra.Result.SessionID
+	if sidA == "" {
+		t.Fatal("expected sessionId A")
+	}
+
+	respB := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+	}, 2)
+	var rb struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	_ = json.Unmarshal(respB, &rb)
+	sidB := rb.Result.SessionID
+	if sidB == "" {
+		t.Fatal("expected sessionId B")
+	}
+	if sidA == sidB {
+		t.Fatal("two opens on same connection must return distinct sessionIds")
+	}
+
+	sidABytes, _ := session.IDToBytes(session.ID(sidA))
+	sidBBytes, _ := session.IDToBytes(session.ID(sidB))
+
+	fA := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidABytes, Payload: []byte("echo session-A\n")}
+	_ = conn.WriteMessage(websocket.BinaryMessage, fA.Encode())
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		frame, derr := DecodeFrame(data)
+		if derr != nil {
+			continue
+		}
+		sid := string(session.IDFromBytes(frame.SessionID))
+		output := string(frame.Payload)
+		if strings.Contains(output, "session-A") {
+			if sid != sidA {
+				t.Fatalf("session-A echo arrived on wrong sid: got %s, want %s", sid, sidA)
+			}
+			break
+		}
+	}
+
+	fB := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBBytes, Payload: []byte("echo session-B\n")}
+	_ = conn.WriteMessage(websocket.BinaryMessage, fB.Encode())
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		frame, derr := DecodeFrame(data)
+		if derr != nil {
+			continue
+		}
+		sid := string(session.IDFromBytes(frame.SessionID))
+		output := string(frame.Payload)
+		if strings.Contains(output, "session-B") {
+			if sid != sidB {
+				t.Fatalf("session-B echo arrived on wrong sid: got %s, want %s", sid, sidB)
+			}
+			break
+		}
+	}
+
+	respClose := jsonrpcCallWithID(t, conn, "close", map[string]string{"sessionId": sidA}, 3)
+	var cr struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(respClose, &cr)
+	if cr.Error != nil {
+		t.Fatalf("close A returned error: %v", cr.Error)
+	}
+
+	fB2 := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBBytes, Payload: []byte("echo still-alive\n")}
+	_ = conn.WriteMessage(websocket.BinaryMessage, fB2.Encode())
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read after close: %v", err)
+		}
+		frame, derr := DecodeFrame(data)
+		if derr != nil {
+			continue
+		}
+		sid := string(session.IDFromBytes(frame.SessionID))
+		output := string(frame.Payload)
+		if strings.Contains(output, "still-alive") {
+			if sid != sidB {
+				t.Fatalf("session-B data on wrong sid after A closed: got %s, want %s", sid, sidB)
+			}
+			return
+		}
+	}
+}
+
 func TestWSServer_DisconnectClosesSessions(t *testing.T) {
 	sess := newRegWithStub(log.NewSlogAdapter(nil))
 	ws := NewWSServer(log.NewSlogAdapter(nil), sess)

@@ -1,12 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { WSClient } from './ipc'
+import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
 
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
 
-// A WebSocket stand-in with a manual clock: nothing happens until the test says
-// so, which is what makes the ordering invariants (AD-7) assertable.
 class MockWebSocket {
   static readonly CONNECTING = 0
   static readonly OPEN = 1
@@ -37,7 +35,6 @@ class MockWebSocket {
     this.readyState = MockWebSocket.CLOSED
   }
 
-  // --- test-side triggers ---------------------------------------------------
   serverAccepts(): void {
     this.readyState = MockWebSocket.OPEN
     this.onopen?.()
@@ -60,7 +57,6 @@ class MockWebSocket {
     this.onmessage?.({ data })
   }
 
-  // The JSON-RPC requests this socket has been asked to send, parsed.
   requests(): { id?: number; method?: string; params?: Record<string, unknown> }[] {
     return this.sent
       .filter((m): m is string => typeof m === 'string')
@@ -82,9 +78,11 @@ function socket(): MockWebSocket {
   return ws
 }
 
-// Drives the client to the state it reaches after a successful handshake plus
-// an open result: connected, sessionId known, data plane usable.
-async function connectedClient(): Promise<{ client: WSClient; ws: MockWebSocket }> {
+async function connectedSession(): Promise<{
+  client: WSClient
+  session: SessionHandle
+  ws: MockWebSocket
+}> {
   const client = new WSClient()
   const connecting = client.connect(9876)
   socket().serverAccepts()
@@ -93,9 +91,35 @@ async function connectedClient(): Promise<{ client: WSClient; ws: MockWebSocket 
   const opening = client.openSession(80, 24)
   const openID = socket().requests()[0].id
   socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
-  await opening
+  const session = await opening
 
-  return { client, ws: socket() }
+  return { client, session, ws: socket() }
+}
+
+async function twoSessions(): Promise<{
+  client: WSClient
+  sessionA: SessionHandle
+  sessionB: SessionHandle
+  ws: MockWebSocket
+}> {
+  const client = new WSClient()
+  const connecting = client.connect(9876)
+  socket().serverAccepts()
+  await connecting
+
+  const openingA = client.openSession(80, 24)
+  const reqsAfterA = socket().requests()
+  const idA = reqsAfterA[reqsAfterA.length - 1].id
+  socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID } })
+  const sessionA = await openingA
+
+  const openingB = client.openSession(80, 24)
+  const reqsAfterB = socket().requests()
+  const idB = reqsAfterB.find((r) => r.method === 'open' && r.id !== idA)!.id
+  socket().deliverText({ jsonrpc: '2.0', id: idB, result: { sessionId: OTHER_SID } })
+  const sessionB = await openingB
+
+  return { client, sessionA, sessionB, ws: socket() }
 }
 
 let consoleLog: ReturnType<typeof vi.spyOn>
@@ -115,9 +139,6 @@ afterEach(() => {
 })
 
 describe('connect', () => {
-  // The nocx-2ho.2 regression: connect() returned a promise that never
-  // resolved, so every caller awaiting it hung and no terminal ever appeared.
-  // Nothing in tsc, eslint or `npm run build` can catch that — only this.
   it('resolves once the handshake completes', async () => {
     const client = new WSClient()
     let resolved = false
@@ -154,12 +175,12 @@ describe('connect', () => {
     await expect(connecting).rejects.toThrow('ws connection failed')
   })
 
-  it('leaves the session unopened — connect is not openSession', async () => {
+  it('leaves the connection usable but with no sessions yet', async () => {
     const client = new WSClient()
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
-    expect(client.sid).toBeNull()
+    expect(client.connected).toBe(true)
   })
 })
 
@@ -175,13 +196,12 @@ describe('openSession', () => {
 
     expect(req.method).toBe('open')
     expect(typeof req.id).toBe('number')
-    // AD-1: the PTY is created at this size. Never spawn-then-resize.
     expect(req.params).toEqual({ cols: 132, rows: 43, xpixel: 0, ypixel: 0 })
   })
 
-  it('resolves with the server-assigned session-id (AD-7)', async () => {
-    const { client } = await connectedClient()
-    expect(client.sid).toBe(SID)
+  it('resolves with a SessionHandle carrying the server-assigned id (AD-7)', async () => {
+    const { session } = await connectedSession()
+    expect(session.sessionId).toBe(SID)
   })
 
   it('rejects on a JSON-RPC error response', async () => {
@@ -199,7 +219,6 @@ describe('openSession', () => {
     })
 
     await expect(opening).rejects.toThrow('pty spawn failed')
-    expect(client.sid).toBeNull()
   })
 
   it('rejects a session-id the server should never have sent', async () => {
@@ -213,7 +232,6 @@ describe('openSession', () => {
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: 'not-a-session-id' } })
 
     await expect(opening).rejects.toThrow(/invalid session-id/)
-    expect(client.sid).toBeNull()
   })
 
   it('rejects — rather than hanging forever — when the socket dies mid-open', async () => {
@@ -241,7 +259,6 @@ describe('openSession', () => {
     await Promise.resolve()
 
     expect(settled).toBe(false)
-    expect(client.sid).toBeNull()
 
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
     await opening
@@ -263,20 +280,9 @@ describe('openSession', () => {
 })
 
 describe('send', () => {
-  // AD-7: the client MUST NOT send data frames before the open result arrives.
-  it('drops input until the session-id is known', async () => {
-    const client = new WSClient()
-    const connecting = client.connect(9876)
-    socket().serverAccepts()
-    await connecting
-
-    client.send('ls\n')
-    expect(socket().binaryFrames()).toHaveLength(0)
-  })
-
-  it('frames input for the open session once it is', async () => {
-    const { client, ws } = await connectedClient()
-    client.send('ls\n')
+  it('frames input for the open session', async () => {
+    const { session, ws } = await connectedSession()
+    session.send('ls\n')
 
     const [frame] = ws.binaryFrames()
     expect(frame[0]).toBe(FRAME_VERSION)
@@ -289,53 +295,49 @@ describe('send', () => {
     expect(new TextDecoder().decode(frame.slice(FRAME_HEADER_SIZE))).toBe('ls\n')
   })
 
-  it('drops input after close', async () => {
-    const { client, ws } = await connectedClient()
-    client.close()
-    client.send('ls\n')
+  it('drops input after the session is closed', async () => {
+    const { session, ws } = await connectedSession()
+    session.close()
+    session.send('ls\n')
     expect(ws.binaryFrames()).toHaveLength(0)
   })
 })
 
 describe('inbound data', () => {
   it('delivers the payload of a frame for this session', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws } = await connectedSession()
     const seen: string[] = []
-    client.onData((d) => seen.push(d))
+    session.onData((d) => seen.push(d))
 
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('hello\r\n')))
     expect(seen).toEqual(['hello\r\n'])
   })
 
   it('ignores a frame addressed to another session', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws } = await connectedSession()
     const seen: string[] = []
-    client.onData((d) => seen.push(d))
+    session.onData((d) => seen.push(d))
 
     ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('not mine')))
     expect(seen).toEqual([])
   })
 
   it('ignores a malformed frame without tearing down the connection', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws, client } = await connectedSession()
     const seen: string[] = []
-    client.onData((d) => seen.push(d))
+    session.onData((d) => seen.push(d))
 
     ws.deliverBinary(new Uint8Array([FRAME_VERSION, MSG_TYPE_DATA, 0x00]).buffer)
     expect(seen).toEqual([])
     expect(client.connected).toBe(true)
   })
 
-  // nocx-ao7: a PTY read can end mid-rune, so a multi-byte character arrives
-  // split across two frames. A fresh TextDecoder per frame turns the halves
-  // into two U+FFFD replacement characters — the streaming decoder must carry
-  // the partial rune across frames instead.
   it('reassembles a UTF-8 rune split across two frames', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws } = await connectedSession()
     const seen: string[] = []
-    client.onData((d) => seen.push(d))
+    session.onData((d) => seen.push(d))
 
-    const euro = new TextEncoder().encode('€') // e2 82 ac
+    const euro = new TextEncoder().encode('€')
     ws.deliverBinary(encodeFrame(SID, euro.slice(0, 1)))
     ws.deliverBinary(encodeFrame(SID, euro.slice(1)))
 
@@ -344,11 +346,11 @@ describe('inbound data', () => {
   })
 
   it('reassembles a rune split three ways, one byte per frame', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws } = await connectedSession()
     const seen: string[] = []
-    client.onData((d) => seen.push(d))
+    session.onData((d) => seen.push(d))
 
-    const emoji = new TextEncoder().encode('🚀') // f0 9f 9a 80
+    const emoji = new TextEncoder().encode('🚀')
     for (const byte of emoji) {
       ws.deliverBinary(encodeFrame(SID, new Uint8Array([byte])))
     }
@@ -369,8 +371,6 @@ describe('inbound data', () => {
     })
     await opening
 
-    // A truncated rune left over from a dead connection must not bleed into
-    // the next one's first character.
     socket().deliverBinary(encodeFrame(SID, new TextEncoder().encode('€').slice(0, 1)))
 
     const reconnected = client.connect(9876)
@@ -380,10 +380,10 @@ describe('inbound data', () => {
     const reqs = socket().requests()
     const id = reqs[reqs.length - 1]?.id
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
-    await reopening
+    const second = await reopening
 
     const seen: string[] = []
-    client.onData((d) => seen.push(d))
+    second.onData((d) => seen.push(d))
     socket().deliverBinary(encodeFrame(SID, new TextEncoder().encode('ok')))
 
     expect(seen.join('')).toBe('ok')
@@ -392,57 +392,155 @@ describe('inbound data', () => {
 
 describe('exit notification', () => {
   it('fires onExit for this session', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws } = await connectedSession()
     const exited: string[] = []
-    client.onExit((sid) => exited.push(sid))
+    session.onExit((sid) => exited.push(sid))
 
     ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
     expect(exited).toEqual([SID])
   })
 
   it('ignores an exit for another session', async () => {
-    const { client, ws } = await connectedClient()
+    const { session, ws } = await connectedSession()
     const exited: string[] = []
-    client.onExit((sid) => exited.push(sid))
+    session.onExit((sid) => exited.push(sid))
 
     ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: OTHER_SID } })
     expect(exited).toEqual([])
+  })
+
+  it('removes the session so no further input is framed after exit', async () => {
+    const { session, ws } = await connectedSession()
+    session.onExit(() => {})
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+
+    session.send('echo leak\n')
+    expect(ws.binaryFrames()).toHaveLength(0)
   })
 })
 
 describe('sendResize', () => {
   it('sends the new grid size for the open session', async () => {
-    const { client, ws } = await connectedClient()
-    client.sendResize(100, 30)
+    const { session, ws } = await connectedSession()
+    session.sendResize(100, 30)
 
     const resize = ws.requests().find((r) => r.method === 'resize')
     expect(resize?.params).toEqual({ sessionId: SID, cols: 100, rows: 30, xpixel: 0, ypixel: 0 })
   })
-
-  it('stays quiet before the session is open', async () => {
-    const client = new WSClient()
-    const connecting = client.connect(9876)
-    socket().serverAccepts()
-    await connecting
-
-    client.sendResize(100, 30)
-    expect(socket().requests()).toHaveLength(0)
-  })
 })
 
 describe('close', () => {
-  it('tells the server before hanging up, then forgets the session', async () => {
-    const { client, ws } = await connectedClient()
-    client.close()
+  it('tells the server about the session, then forgets it', async () => {
+    const { session, ws } = await connectedSession()
+    session.close()
 
     const closeReq = ws.requests().find((r) => r.method === 'close')
     expect(closeReq?.params).toEqual({ sessionId: SID })
+  })
+
+  it('closes the WebSocket connection and clears state', async () => {
+    const { client, ws } = await connectedSession()
+    client.close()
+
     expect(ws.closeCalled).toBe(true)
-    expect(client.sid).toBeNull()
     expect(client.connected).toBe(false)
   })
 
   it('is safe on a client that never connected', () => {
     expect(() => new WSClient().close()).not.toThrow()
+  })
+})
+
+describe('multi-session', () => {
+  it('assigns distinct session-ids for two opens on one connection', async () => {
+    const { sessionA, sessionB } = await twoSessions()
+    expect(sessionA.sessionId).toBe(SID)
+    expect(sessionB.sessionId).toBe(OTHER_SID)
+    expect(sessionA.sessionId).not.toBe(sessionB.sessionId)
+  })
+
+  it('routes a data frame for session A only to callback A', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    const seenA: string[] = []
+    const seenB: string[] = []
+    sessionA.onData((d) => seenA.push(d))
+    sessionB.onData((d) => seenB.push(d))
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('hello from A\r\n')))
+    expect(seenA).toEqual(['hello from A\r\n'])
+    expect(seenB).toEqual([])
+  })
+
+  it('routes a data frame for session B only to callback B', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    const seenA: string[] = []
+    const seenB: string[] = []
+    sessionA.onData((d) => seenA.push(d))
+    sessionB.onData((d) => seenB.push(d))
+
+    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('hello from B\r\n')))
+    expect(seenA).toEqual([])
+    expect(seenB).toEqual(['hello from B\r\n'])
+  })
+
+  it('reassembles a UTF-8 rune split across two frames of A when a B frame is interleaved between the halves', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    const seenA: string[] = []
+    const seenB: string[] = []
+    sessionA.onData((d) => seenA.push(d))
+    sessionB.onData((d) => seenB.push(d))
+
+    const euro = new TextEncoder().encode('€')
+    ws.deliverBinary(encodeFrame(SID, euro.slice(0, 1)))
+    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('X')))
+    ws.deliverBinary(encodeFrame(SID, euro.slice(1)))
+
+    expect(seenA.join('')).toBe('€')
+    expect(seenA.join('')).not.toContain('�')
+    expect(seenB.join('')).toBe('X')
+  })
+
+  it('closing session A leaves session B usable', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    sessionA.close()
+
+    const seenB: string[] = []
+    sessionB.onData((d) => seenB.push(d))
+
+    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('still alive\r\n')))
+    expect(seenB).toEqual(['still alive\r\n'])
+
+    const seenA: string[] = []
+    sessionA.onData((d) => seenA.push(d))
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('should not arrive')))
+    expect(seenA).toEqual([])
+  })
+
+  it('fires onExit only for the session specified in the notification', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    const exitedA: string[] = []
+    const exitedB: string[] = []
+    sessionA.onExit((sid) => exitedA.push(sid))
+    sessionB.onExit((sid) => exitedB.push(sid))
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+    expect(exitedA).toEqual([SID])
+    expect(exitedB).toEqual([])
+  })
+
+  it('after exit of A, input for A is not framed but B is unaffected', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    sessionA.onExit(() => {})
+
+    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+
+    sessionA.send('echo should not send\n')
+    expect(ws.binaryFrames()).toHaveLength(0)
+
+    const seenB: string[] = []
+    sessionB.onData((d) => seenB.push(d))
+    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('B alive\n')))
+    expect(seenB).toEqual(['B alive\n'])
   })
 })

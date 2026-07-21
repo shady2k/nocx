@@ -1,5 +1,6 @@
 import './style.css'
 import { GetWSPort } from '../wailsjs/go/main/WailsApp'
+import { WSClient } from './ipc'
 import { TabManager } from './tabs'
 import { resolveRendererName } from './renderers'
 
@@ -17,9 +18,12 @@ async function main() {
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
 
+  const client = new WSClient()
+  await client.connect(port)
+
   // ?r=xterm|wterm picks which tab opens first; the others mount on demand
   // when clicked (or Cmd/Ctrl+1..N).
-  const tabs = new TabManager(bar, panes, port)
+  const tabs = new TabManager(bar, panes, client)
   await tabs.activate(resolveRendererName())
 }
 

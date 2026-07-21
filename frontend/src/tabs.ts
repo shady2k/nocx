@@ -2,9 +2,9 @@ import { WSClient } from './ipc'
 import { createRenderer, type RendererName } from './renderers'
 import type { TerminalRenderer } from './renderers/types'
 
-// The renderer bake-off. Each tab drives its own WebSocket, and the backend
-// spawns one PTY per connection (transport.handleSession), so every tab is an
-// independent live shell. Run the same command in each and compare.
+// The renderer bake-off. All tabs share one WSClient per AD-1, each tab
+// owning its own session on it. The bake-off still gives each tab its own
+// renderer — run the same command in each and compare.
 export interface TabSpec {
   id: RendererName
   label: string
@@ -12,6 +12,12 @@ export interface TabSpec {
 }
 
 // How long the grid must hold still before the PTY is told about it.
+// Dragging a window edge walks the grid through every intermediate size,
+// and each one forwarded straight to the PTY is another SIGWINCH — the
+// TUI repaints itself from scratch for a size that is already stale,
+// dozens of times per drag, which is what shreds the screen. Repaint
+// locally as fast as the renderer likes, but only tell the PTY the size
+// the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
 
 export const TABS: readonly TabSpec[] = [
@@ -31,7 +37,7 @@ class Tab {
 
   constructor(
     readonly spec: TabSpec,
-    private readonly port: number,
+    private readonly client: WSClient,
     private readonly onGrid: (tab: Tab) => void,
   ) {
     this.pane.className = 'pane'
@@ -64,37 +70,28 @@ class Tab {
       const renderer = createRenderer(this.spec.id)
       await renderer.mount(this.pane)
 
-      const ws = new WSClient()
-      await ws.connect(this.port)
+      this.cols = renderer.cols
+      this.rows = renderer.rows
 
-      ws.onData((data) => renderer.write(data))
-      ws.onExit((sid) => console.log('nocx: session exited:', sid))
-      renderer.onData((data) => ws.send(data))
-      // Dragging a window edge walks the grid through every intermediate size,
-      // and each one forwarded straight to the PTY is another SIGWINCH — the
-      // TUI repaints itself from scratch for a size that is already stale,
-      // dozens of times per drag, which is what shreds the screen. Repaint
-      // locally as fast as the renderer likes, but only tell the PTY the size
-      // the drag actually settled on.
+      // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
+      // the PTY is created at this size — never spawn-then-resize.
+      const session = await this.client.openSession(this.cols, this.rows)
+
+      session.onData((data) => renderer.write(data))
+      session.onExit((sid) => console.log('nocx: session exited:', sid))
+      renderer.onData((data) => session.send(data))
       renderer.onResize((cols, rows) => {
         if (cols === this.cols && rows === this.rows) return
         this.cols = cols
         this.rows = rows
         this.onGrid(this)
         clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => ws.sendResize(cols, rows), RESIZE_SETTLE_MS)
+        this.resizeTimer = window.setTimeout(() => session.sendResize(cols, rows), RESIZE_SETTLE_MS)
       })
-
-      this.cols = renderer.cols
-      this.rows = renderer.rows
-
-      // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
-      // the PTY is created at this size — never spawn-then-resize.
-      await ws.openSession(this.cols, this.rows)
 
       this.renderer = renderer
       this.onGrid(this)
-      console.log(`nocx: tab ready (renderer=${this.spec.id})`, { port: this.port, sid: ws.sid })
+      console.log(`nocx: tab ready (renderer=${this.spec.id})`, { sid: session.sessionId })
     } catch (err) {
       // A renderer that cannot start is itself a bake-off result: report it in
       // place instead of taking the whole window down.
@@ -124,11 +121,11 @@ export class TabManager {
   private readonly status = document.createElement('span')
   private active: Tab | null = null
 
-  constructor(bar: HTMLElement, panes: HTMLElement, port: number) {
+  constructor(bar: HTMLElement, panes: HTMLElement, client: WSClient) {
     this.status.className = 'status'
 
     for (const spec of TABS) {
-      const tab = new Tab(spec, port, (t) => {
+      const tab = new Tab(spec, client, (t) => {
         if (t === this.active) this.renderStatus()
       })
       tab.button.addEventListener('click', () => void this.activate(spec.id))

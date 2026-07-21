@@ -3,6 +3,7 @@
     "playwright-test": {
       "command": "npx",
       "args": [
+        "--no-install",
         "playwright",
         "run-test-mcp-server"
       ]

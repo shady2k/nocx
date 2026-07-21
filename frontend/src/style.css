@@ -272,6 +272,10 @@ body {
   background: #1a1b26;
   visibility: hidden;
   pointer-events: none;
+  /* Breathing room, as every other terminal has: text hard against the window
+     edge reads as broken. The renderer measures this padded box, so the grid
+     shrinks to match instead of being clipped. */
+  padding: 6px 10px;
 }
 
 .pane.active {

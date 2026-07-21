@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -24,6 +26,7 @@ const (
 
 type Config struct {
 	Kind   Kind
+	Cwd    string
 	Host   string
 	Local  *pty.Config
 	Remote *ssh.ConnectConfig
@@ -42,6 +45,10 @@ type OutputHandler func(data []byte) error
 type Session interface {
 	ID() ID
 	Kind() Kind
+	// Cwd is where the session's shell was started. It is the tab's name
+	// until a program sets a title; it does NOT follow `cd`, which needs the
+	// OSC 7 events in nocx-5mn.2.
+	Cwd() string
 	Write(p []byte) (int, error)
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
 	Close() error
@@ -101,6 +108,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	}
 
 	pt, err := r.ptf.NewPTY(ctx, pty.Config{
+		Cwd:    cfg.Cwd,
 		Cols:   cfg.Cols,
 		Rows:   cfg.Rows,
 		XPixel: cfg.XPixel,
@@ -114,6 +122,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	s := &realSession{
 		id:   id,
 		kind: cfg.Kind,
+		cwd:  resolveSessionCwd(cfg.Cwd),
 		pty:  pt,
 		log:  r.log.With("session_id", string(id)),
 	}
@@ -164,9 +173,40 @@ func (r *Reg) List() []Session {
 	return sessions
 }
 
+// resolveSessionCwd mirrors what the PTY layer will actually do, so the value
+// the client is told matches the directory the shell really starts in, and
+// renders it the way a terminal user expects to read it. Only this side knows
+// the home directory, so the ~ abbreviation happens here rather than in the UI.
+func resolveSessionCwd(cwd string) string {
+	dir := cwd
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = home
+	}
+	return abbreviateHome(dir)
+}
+
+func abbreviateHome(dir string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return dir
+	}
+	if dir == home {
+		return "~"
+	}
+	if strings.HasPrefix(dir, home+string(os.PathSeparator)) {
+		return "~" + dir[len(home):]
+	}
+	return dir
+}
+
 type realSession struct {
 	id        ID
 	kind      Kind
+	cwd       string
 	pty       pty.Pty
 	log       log.Logger
 	handler   OutputHandler
@@ -174,8 +214,9 @@ type realSession struct {
 	closeOnce sync.Once
 }
 
-func (s *realSession) ID() ID     { return s.id }
-func (s *realSession) Kind() Kind { return s.kind }
+func (s *realSession) ID() ID      { return s.id }
+func (s *realSession) Kind() Kind  { return s.kind }
+func (s *realSession) Cwd() string { return s.cwd }
 
 func (s *realSession) Write(p []byte) (int, error) {
 	return s.pty.Write(p)

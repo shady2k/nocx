@@ -448,7 +448,13 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	}
 	rx.setSubscriber(wconn, state)
 
-	result := map[string]string{"sessionId": string(sess.ID())}
+	// cwd rides the open result so the tab has a name before any program sets
+	// a title (nocx-9vr). It is the starting directory only — following `cd`
+	// needs OSC 7 (nocx-5mn.2).
+	result := map[string]string{
+		"sessionId": string(sess.ID()),
+		"cwd":       sess.Cwd(),
+	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = wconn.writeJSON(resp)

@@ -30,6 +30,7 @@ interface ControlMessage {
   params?: { sessionId?: string }
   result?: {
     sessionId?: string
+    cwd?: string
     resumed?: boolean
     reset?: boolean
     from?: number
@@ -38,7 +39,7 @@ interface ControlMessage {
 }
 
 interface PendingOpen {
-  resolve: (sessionId: string) => void
+  resolve: (sessionId: string, cwd: string) => void
   reject: (err: Error) => void
 }
 
@@ -78,6 +79,9 @@ export class SessionHandle {
   constructor(
     private client: WSClient,
     readonly sessionId: string,
+    /** Where the shell started, ~-abbreviated. Names the tab until a program
+     *  sets a title; does not follow `cd` (that needs OSC 7, nocx-5mn.2). */
+    readonly cwd: string,
   ) {}
 
   send(data: string): void {
@@ -326,7 +330,7 @@ export class WSClient {
             exitCallback: null,
             resetCallback: null,
           })
-          pendingOpen.resolve(sid)
+          pendingOpen.resolve(sid, msg.result?.cwd ?? '')
           this.pendingOpens.delete(msg.id)
         }
         return
@@ -371,7 +375,7 @@ export class WSClient {
     return new Promise((resolve, reject) => {
       const id = nextID()
       this.pendingOpens.set(id, {
-        resolve: (sid: string) => resolve(new SessionHandle(this, sid)),
+        resolve: (sid: string, cwd: string) => resolve(new SessionHandle(this, sid, cwd)),
         reject,
       })
       this.ws!.send(

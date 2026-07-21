@@ -17,10 +17,14 @@ type Config struct {
 	Command string
 	Args    []string
 	Env     []string
-	Cols    uint16
-	Rows    uint16
-	XPixel  uint16
-	YPixel  uint16
+	// Cwd is where the shell starts. Empty means inherit the process's
+	// directory — which for a GUI launched from Finder is "/", so callers
+	// that care should pass something.
+	Cwd    string
+	Cols   uint16
+	Rows   uint16
+	XPixel uint16
+	YPixel uint16
 }
 
 type Stub struct {

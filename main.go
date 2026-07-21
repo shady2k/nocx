@@ -41,8 +41,13 @@ func main() {
 		// traffic lights and insets them, so the strip needs left padding to
 		// clear them and a drag region on its empty part — see .tabbar in
 		// frontend/src/style.css, which is the other half of this decision.
+		// TitleBarHidden, not TitleBarHiddenInset: the two differ only by
+		// UseToolbar, and that NSToolbar left the window unrestorable after
+		// minimising (nocx-dqg; cf. wailsapp/wails#1319). We keep the hidden
+		// title and full-size content, and lose only the extra inset of the
+		// traffic lights.
 		Mac: &mac.Options{
-			TitleBar: mac.TitleBarHiddenInset(),
+			TitleBar: mac.TitleBarHidden(),
 		},
 		Debug: options.Debug{
 			OpenInspectorOnStartup: true,

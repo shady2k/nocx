@@ -1,6 +1,7 @@
 # nocx
 
-A local-first, Warp-style terminal — no cloud, no login, no telemetry.
+A local-first terminal with GPU-accelerated rendering and a built-in SSH
+manager — no cloud, no login, no telemetry.
 **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
 Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
@@ -12,8 +13,9 @@ and cwd features are under active development. macOS-first.
 
 Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stakes;
 the wedge is the *combination*, all local in one app: Ghostty-grade rendering +
-an integrated SSH manager + (later) a secrets vault + (later) Warpify-style UX —
-with no cloud dependency.
+an integrated SSH manager + (later) a secrets vault + (later) shell-integration
+blocks, completions, and input-editor in nested shells — with no cloud
+dependency.
 
 ## Prerequisites
 

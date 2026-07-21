@@ -43,3 +43,8 @@ nocx
 node_modules/
 Thumbs.db
 vendor/
+
+# --- Playwright e2e ---
+/node_modules/
+/test-results/
+/playwright-report/

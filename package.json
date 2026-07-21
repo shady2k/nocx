@@ -1,0 +1,27 @@
+{
+  "name": "nocx",
+  "version": "1.0.0",
+  "description": "A local-first terminal with GPU-accelerated rendering and a built-in SSH manager — no cloud, no login, no telemetry. **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend + Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data plane and a JSON-RPC 2.0 control plane.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shady2k/nocx.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/shady2k/nocx/issues"
+  },
+  "homepage": "https://github.com/shady2k/nocx#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

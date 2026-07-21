@@ -11,14 +11,18 @@
 # on the target-OS argument alone, without measuring ubuntu.)
 # The pre-commit hook and the Makefile `ci` target mirror this same set of
 # checks so "green" is identical locally and in CI.
+#
+# Trigger decision: CI runs on release branches (release/**), version tags
+# (v*), and manual workflow_dispatch. Everyday protection on main comes from
+# the local pre-commit hook and make ci, which run the same checks.
 
 name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches: ['release/**']
+    tags: ['v*']
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -44,10 +48,10 @@ jobs:
           fi
           echo "gofumpt: all files formatted"
 
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
       - name: Lint
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: v1.64.8
+        run: golangci-lint run ./...
 
       - name: Build
         run: go build ./...

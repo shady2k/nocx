@@ -65,8 +65,10 @@ Every commit must pass:
 | `npx tsc --noEmit` | ✓ | ✓ | ✓ |
 | `npm run build` | — | ✓ | ✓ |
 
-CI runs on push/PR to `main` (GitHub Actions, macos-latest for Go job,
-ubuntu-latest for frontend). No merge without green.
+CI runs on release branches (`release/**`), version tags (`v*`), and manual
+dispatch (GitHub Actions, macos-latest for Go job, ubuntu-latest for frontend).
+Everyday gating on `main` is enforced locally by the pre-commit hook and
+`make ci` — they run the identical set of checks.
 
 ## Task tracking — beads (bd)
 

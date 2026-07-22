@@ -6,8 +6,11 @@
 # shims never run, and the tracker only syncs when somebody remembers to do it
 # by hand (nocx-lte). Calling them from here keeps a single hook root.
 #
-# Always `bd hooks run <name>`, never a hand-rolled `bd dolt push`: the shim is
-# the CLI's own entry point, so a bd upgrade brings its fixes with it.
+# The obvious call here would be `bd hooks run pre-push`, the CLI's own shim.
+# Measured on bd 1.0.5 it is a silent no-op: it exits 0 and refs/dolt/data on the
+# remote does not move. `bd dolt push` moves it. So this calls the command that
+# demonstrably works — worth re-testing on the next bd upgrade, since the shim is
+# the interface the tool documents.
 
 # Failure policy, deliberately unlike the stock beads shim — that one ends in
 # `exit $_bd_exit` and so blocks git on any error at all:
@@ -18,10 +21,7 @@
 #     is the case worth interrupting for — everything looks fine locally while
 #     the remote silently rots, which is how a colleague ends up re-fixing a
 #     bug that was closed days ago.
-run_beads_hook() {
-    hook_name=$1
-    shift
-
+push_beads_state() {
     command -v bd >/dev/null 2>&1 || return 0
 
     BD_GIT_HOOK=1
@@ -31,11 +31,11 @@ run_beads_hook() {
     # Never call bd bare here: these hooks run under `set -eu`, and a nonzero
     # exit would kill the script before the policy below could look at it.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout_secs" bd hooks run "$hook_name" "$@" && bd_exit=0 || bd_exit=$?
+        timeout "$timeout_secs" bd dolt push && bd_exit=0 || bd_exit=$?
     elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$timeout_secs" bd hooks run "$hook_name" "$@" && bd_exit=0 || bd_exit=$?
+        gtimeout "$timeout_secs" bd dolt push && bd_exit=0 || bd_exit=$?
     else
-        bd hooks run "$hook_name" "$@" && bd_exit=0 || bd_exit=$?
+        bd dolt push && bd_exit=0 || bd_exit=$?
     fi
 
     case $bd_exit in
@@ -48,13 +48,13 @@ run_beads_hook() {
             ;;
         124 | 142)
             # 124 from timeout, 142 when a shell reports SIGALRM instead.
-            printf "\nWARN: beads '%s' timed out after %ss — continuing without it.\n" \
-                "$hook_name" "$timeout_secs" >&2
+            printf "\nWARN: beads sync timed out after %ss — continuing without it.\n" \
+                "$timeout_secs" >&2
             return 0
             ;;
     esac
 
-    printf "\nFAIL: beads '%s' exited %s.\n" "$hook_name" "$bd_exit" >&2
+    printf "\nFAIL: bd dolt push exited %s.\n" "$bd_exit" >&2
     printf "      Issue state did NOT sync. A fresh clone would see a stale backlog,\n" >&2
     printf "      because bd bootstrap prefers the Dolt remote over the tracked JSONL.\n" >&2
     printf "      Fix it (often: bd dolt pull, resolve, bd dolt push) and retry.\n" >&2

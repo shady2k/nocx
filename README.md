@@ -69,8 +69,8 @@ It then writes `.beads/issues.jsonl` and stages it, so a commit carries the issu
 state it describes. That step runs last, so a failed gate never leaves the
 tracker export staged for a commit that does not happen.
 
-The pre-push hook pushes the issue database itself (`bd dolt push`). That is what
-a fresh clone reads — the tracked JSONL is only bootstrap's last resort — so
+The pre-push hook pushes the issue database itself with `bd dolt push`. That is
+what a fresh clone reads — the tracked JSONL is only bootstrap's last resort — so
 skipping it leaves collaborators on a backlog that looks current and is not. If
 `bd` is missing or this clone has no database, both hooks step aside silently; a
 genuine sync failure stops the push and says so, and `git push --no-verify`

@@ -27,9 +27,9 @@ func New() (*App, error) {
 	logger := log.NewSlogAdapter(slogger)
 
 	cfg := config.NewStub(logger)
-	ptf := &localPTYFactory{log: logger}
+	shint := shellintegration.New(logger)
+	ptf := &localPTYFactory{log: logger, shint: shint}
 	sess := session.New(logger, ptf)
-	shint := shellintegration.NewStub(logger)
 	tp := transport.NewWSServer(logger, sess)
 
 	app := &App{
@@ -45,14 +45,26 @@ func New() (*App, error) {
 	return app, nil
 }
 
-type localPTYFactory struct{ log log.Logger }
+type localPTYFactory struct {
+	log   log.Logger
+	shint shellintegration.ShellIntegration
+}
 
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
-	return pty.NewLocal(f.log, cfg)
+	env := f.shint.ActivationEnv()
+	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
 }
 
 func (a *App) Start(ctx context.Context) error {
 	a.Logger.Info("starting application services")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		a.Logger.Warn("shellintegration: could not determine home dir", "error", err)
+	} else if err := a.ShellIntegration.EnsureInstalled(home); err != nil {
+		a.Logger.Warn("shellintegration: install failed", "error", err)
+	}
+
 	return a.Transport.Start(ctx)
 }
 

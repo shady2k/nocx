@@ -94,7 +94,11 @@ func resolveCwd(cwd string) string {
 	return ""
 }
 
-func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
+func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) {
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "/bin/sh"
@@ -102,10 +106,12 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 
 	cmd := exec.Command(shell) //nolint:gosec // shell is from SHELL env or fallback
 	cmd.Dir = resolveCwd(cfg.Cwd)
-	cmd.Env = withUTF8Locale(append(
+	env := withUTF8Locale(append(
 		scrubLauncherSession(os.Environ()),
 		"TERM=xterm-256color",
 	))
+	env = append(env, cfg.Env...)
+	cmd.Env = env
 
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: cfg.Cols,

@@ -27,6 +27,16 @@ type Config struct {
 	YPixel uint16
 }
 
+// Option configures a Config before PTY creation.
+type Option func(*Config)
+
+// WithExtraEnv appends extra environment variables to the PTY process.
+func WithExtraEnv(env []string) Option {
+	return func(cfg *Config) {
+		cfg.Env = append(cfg.Env, env...)
+	}
+}
+
 type Stub struct {
 	log  log.Logger
 	done chan struct{}

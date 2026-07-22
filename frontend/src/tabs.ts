@@ -70,6 +70,7 @@ class Tab {
   private _agentStatus: AgentStatus | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private _cwdFromOSC7 = false
+  private _lastExitCode: number | null = null
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private started = false
@@ -143,6 +144,10 @@ class Tab {
 
   get agentStatus(): AgentStatus | null {
     return this._agentStatus
+  }
+
+  get lastExitCode(): number | null {
+    return this._lastExitCode
   }
 
   /**
@@ -255,6 +260,14 @@ class Tab {
         // Bell is always attention-worthy, even in the alternate buffer.
         if (!this.button.classList.contains('active')) {
           this.markActivity()
+        }
+      })
+      renderer.onCommandMarker((marker) => {
+        // OSC 133 D carries the exit code of the just-finished command.
+        // Stored for future consumers: command blocks, success/failure
+        // colouring, activity indicator refinement.
+        if (marker.kind === 'D' && marker.exitCode !== undefined) {
+          this._lastExitCode = marker.exitCode
         }
       })
       renderer.onResize((cols: number, rows: number) => {

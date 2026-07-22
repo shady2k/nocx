@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { parseOsc7 } from './xterm'
+import { parseOsc7, parseOsc133 } from './xterm'
 
 describe('parseOsc7', () => {
   it('parses a local file:/// path (empty host)', () => {
@@ -58,5 +58,55 @@ describe('parseOsc7', () => {
   it('handles root path', () => {
     const result = parseOsc7('file:///')
     expect(result).toEqual({ host: '', path: '/' })
+  })
+})
+
+describe('parseOsc133', () => {
+  it('parses A (prompt start)', () => {
+    expect(parseOsc133('A')).toEqual({ kind: 'A' })
+  })
+
+  it('parses B (prompt end)', () => {
+    expect(parseOsc133('B')).toEqual({ kind: 'B' })
+  })
+
+  it('parses C (command output start)', () => {
+    expect(parseOsc133('C')).toEqual({ kind: 'C' })
+  })
+
+  it('parses D without exit code', () => {
+    expect(parseOsc133('D')).toEqual({ kind: 'D' })
+  })
+
+  it('parses D with exit code 0', () => {
+    expect(parseOsc133('D;0')).toEqual({ kind: 'D', exitCode: 0 })
+  })
+
+  it('parses D with exit code 127', () => {
+    expect(parseOsc133('D;127')).toEqual({ kind: 'D', exitCode: 127 })
+  })
+
+  it('parses D with exit code 1', () => {
+    expect(parseOsc133('D;1')).toEqual({ kind: 'D', exitCode: 1 })
+  })
+
+  it('returns D without exitCode for invalid exit code', () => {
+    expect(parseOsc133('D;abc')).toEqual({ kind: 'D' })
+  })
+
+  it('returns D without exitCode for negative exit code', () => {
+    expect(parseOsc133('D;-1')).toEqual({ kind: 'D' })
+  })
+
+  it('returns null for empty payload', () => {
+    expect(parseOsc133('')).toBeNull()
+  })
+
+  it('returns null for unknown marker', () => {
+    expect(parseOsc133('X')).toBeNull()
+  })
+
+  it('returns null for lowercase marker', () => {
+    expect(parseOsc133('a')).toBeNull()
   })
 })

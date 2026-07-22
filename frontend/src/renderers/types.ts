@@ -22,6 +22,19 @@ export interface CwdEvent {
 // surfaces it as an event — the backend never sniffs the byte stream.
 export type CwdCallback = (event: CwdEvent) => void
 
+// CommandMarker carries an OSC 133 command boundary marker.
+// A = prompt start, B = prompt end, C = command output start,
+// D = command finished (with optional exit code).
+export interface CommandMarker {
+  kind: 'A' | 'B' | 'C' | 'D'
+  exitCode?: number
+}
+
+// CommandMarkerCallback fires when the shell emits OSC 133.
+// The VT frontend parses OSC 133 via parser.registerOscHandler and surfaces
+// each marker as an event — the backend never sniffs the byte stream.
+export type CommandMarkerCallback = (marker: CommandMarker) => void
+
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>
   write(data: string): void
@@ -61,6 +74,13 @@ export interface TerminalRenderer {
   // tooltip. xterm.js supports this via parser.registerOscHandler(7, ...);
   // @wterm/dom does not expose an OSC handler — the callback is never fired.
   onCwd(cb: CwdCallback): void
+
+  // onCommandMarker registers a callback that fires when the shell emits
+  // OSC 133 command boundary markers (A/B/C/D). The VT frontend parses the
+  // OSC sequence and extracts the marker kind and optional exit code.
+  // xterm.js supports this via parser.registerOscHandler(133, ...);
+  // @wterm/dom does not expose an OSC handler — the callback is never fired.
+  onCommandMarker(cb: CommandMarkerCallback): void
 
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the

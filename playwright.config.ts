@@ -14,7 +14,15 @@ export default defineConfig({
     baseURL: URL,
     trace: 'retain-on-failure',
   },
-  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
+  projects: [
+    { name: 'chromium', use: { browserName: 'chromium' } },
+    {
+      name: 'webkit',
+      use: { browserName: 'webkit' },
+      // nocx-q18: the glyph corruption reproduces in WKWebView but not
+      // Chromium; WebKit is the closest Playwright can get to the real app.
+    },
+  ],
 
   // The suite starts its own app: a test that silently needs a `wails dev`
   // someone remembered to launch is red on a clean machine for a reason that

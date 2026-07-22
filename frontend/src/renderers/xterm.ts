@@ -59,9 +59,9 @@ export class XtermRenderer implements TerminalRenderer {
       pending = false
       last = Date.now()
       this.safeFit()
-      // refreshAtlas clears the texture atlas and repaints every row so that
-      // glyphs rendered before the atlas was cleared don't stay on screen
-      // referencing stale atlas positions (root cause of nocx-d1f).
+      // refreshAtlas performs a viewport-wide terminal refresh. After nocx-q18
+      // it no longer clears the texture atlas — fit() already handles atlas
+      // refresh via _refreshCharAtlas() during handleResize.
       this.refreshAtlas()
     }
     new ResizeObserver(() => {
@@ -149,8 +149,16 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   refreshAtlas(): void {
-    this.webgl?.clearTextureAtlas()
-    this.canvas?.clearTextureAtlas()
+    // nocx-q18: clearing the texture atlas and then repainting races with
+    // the atlas repopulation during _updateModel. After clearTextureAtlas(),
+    // the atlas pages are blank and the glyph cache is empty. xterm.js's
+    // default rendering path (renderRows → _updateModel → getRasterizedGlyph)
+    // draws glyphs to the atlas on demand, so clearing first buys nothing.
+    //
+    // The resize path (safeFit → fit → handleResize) already refreshes the
+    // char atlas via _refreshCharAtlas() which acquires a correctly-sized
+    // atlas. The tab-activation path needs a viewport refresh because
+    // terminal content may have changed while the tab was in the background.
     if (this.term) {
       this.term.refresh(0, this.term.rows - 1)
     }

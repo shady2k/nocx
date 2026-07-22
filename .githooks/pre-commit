@@ -81,4 +81,11 @@ if ! (cd frontend && npm test 2>&1); then
 fi
 ok "vitest"
 
+# --- 8. beads: materialise the issue snapshot into this commit ---------------
+# Last, deliberately: a gate that fails above must not leave .beads/issues.jsonl
+# rewritten and staged for a commit that never happens.
+. "$(dirname "$0")/beads-hook.sh"
+export_beads_snapshot
+ok "beads export"
+
 printf "\nAll checks passed.\n"

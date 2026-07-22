@@ -36,15 +36,25 @@ dependency.
 ```bash
 git clone <repo-url> && cd nocx
 
-# 1. Install the pre-commit hook (REQUIRED first step)
+# 1. Install the git hooks (REQUIRED first step)
 make hooks
 
-# 2. Install frontend dependencies
+# 2. Set up the issue tracker (skip if you don't use beads)
+bd bootstrap
+
+# 3. Install frontend dependencies
 cd frontend && npm ci && cd ..
 
-# 3. Run in development mode
+# 4. Run in development mode
 wails dev
 ```
+
+`bd bootstrap`, not `bd init`: the backlog lives in a Dolt database that git does
+not carry, and bootstrap is the command that knows where to get it — it clones
+from the configured remote, and falls back to the tracked `.beads/issues.jsonl`
+only if that is unavailable. A clone without this step has no issue database at
+all. `bd init --from-jsonl` exists, but it builds a history that has diverged
+from the remote, so keep it for recovery rather than setup.
 
 The pre-commit hook runs on every `git commit` and enforces:
 - `gofumpt` — format check (fails if any file needs formatting)
@@ -54,6 +64,17 @@ The pre-commit hook runs on every `git commit` and enforces:
 - `eslint` — frontend lint
 - `tsc --noEmit` — frontend type check
 - `vitest` — frontend tests
+
+It then writes `.beads/issues.jsonl` and stages it, so a commit carries the issue
+state it describes. That step runs last, so a failed gate never leaves the
+tracker export staged for a commit that does not happen.
+
+The pre-push hook pushes the issue database itself (`bd dolt push`). That is what
+a fresh clone reads — the tracked JSONL is only bootstrap's last resort — so
+skipping it leaves collaborators on a backlog that looks current and is not. If
+`bd` is missing or this clone has no database, both hooks step aside silently; a
+genuine sync failure stops the push and says so, and `git push --no-verify`
+overrides it.
 
 All four frontend gates FAIL with an actionable message if `node_modules` is absent (run `cd frontend && npm ci`).
 

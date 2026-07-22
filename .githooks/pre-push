@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# Push the issue tracker along with the code.
+#
+# `bd hooks run pre-push` pushes the Dolt data to refs/dolt/data on the same
+# remote. That ref — not the tracked .beads/issues.jsonl — is what a fresh clone
+# reads: `bd bootstrap` prefers sync.remote and only falls back to the JSONL
+# fourth. So a push that skips this step leaves collaborators reading a backlog
+# that can be days old, with nothing on screen to suggest it.
+#
+# git passes the remote name and URL as arguments, and the refs being pushed on
+# stdin; both are forwarded untouched.
+
+. "$(dirname "$0")/beads-hook.sh"
+
+run_beads_hook pre-push "$@"

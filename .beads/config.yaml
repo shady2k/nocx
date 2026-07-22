@@ -47,11 +47,17 @@
 # Optional JSONL auto-export for viewers, interchange, and issue-level migration.
 # Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
 # Use relative paths under .beads/ for JSONL import/export filenames.
-# export:
-#   auto: false
-#   path: issues.jsonl
-#   interval: 60s
-#   git-add: false
+#
+# Enabled here because .beads/issues.jsonl is tracked in git: it is what a
+# reader sees on GitHub, and the last-resort source bd bootstrap falls back to.
+# Leaving it to be exported by hand is how it drifts from the database.
+# git-add stages it so it lands in the same commit as the work it describes.
+# The export is throttled to one a minute and there is no daemon to flush the
+# tail, so .githooks/pre-commit forces a final export before each commit.
+export:
+  auto: true
+  path: issues.jsonl
+  git-add: true
 # import:
 #   path: issues.jsonl
 

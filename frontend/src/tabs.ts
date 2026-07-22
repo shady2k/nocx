@@ -47,7 +47,10 @@ class Tab {
   /** Active-tab indicator (top bar) / activity indicator (bottom bar) */
   readonly indicator = document.createElement('div')
 
-  private _title = FALLBACK_TITLE
+  // Empty, matching the label the constructor paints: a tab has no name until
+  // its session reports a directory (nocx-83a). Seeding this with FALLBACK_TITLE
+  // would make the getter claim a name the user never sees.
+  private _title = ''
   private _defaultTitle = FALLBACK_TITLE
   private _hasActivity = false
   private _agentStatus: AgentStatus | null = null
@@ -84,7 +87,9 @@ class Tab {
     this.label.className = 'tab-label'
 
     this.titleSpan.className = 'tab-title'
-    this.titleSpan.textContent = this._title
+    // Title is empty until start() resolves with the real directory name.
+    // Setting 'Terminal' here would paint a placeholder that flashes before
+    // the real name lands (nocx-83a).
 
     this.closeBtn.className = 'tab-close'
     this.closeBtn.textContent = '×'
@@ -185,6 +190,9 @@ class Tab {
       // The directory names the tab until a program sets a title. It does not
       // follow `cd` — that needs the OSC 7 events in nocx-5mn.2.
       this._defaultTitle = directoryLabel(session.cwd)
+      // First paint of the label: it stayed empty until the name existed
+      // (nocx-83a). Nothing can have set a title before this point — onTitle is
+      // subscribed below, after this await.
       this.titleSpan.textContent = this._title = this._defaultTitle
       this.button.title = session.cwd || ''
 

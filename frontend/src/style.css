@@ -73,6 +73,9 @@ body {
 
 .tab {
   --wails-draggable: no-drag;
+  /* Track the current background for the fade overlay (nocx-56w).
+     Updated by .tab:hover / .tab.active so the overlay always matches. */
+  --tab-bg: transparent;
   position: relative;
   display: flex;
   align-items: center;
@@ -96,13 +99,36 @@ body {
 }
 
 .tab:hover {
+  --tab-bg: #1f2030;
   background: #1f2030;
   color: #a9b1d6;
 }
 
 .tab.active {
+  --tab-bg: #1f2235;
   background: #1f2235;
   color: #c0caf5;
+}
+
+/* Gradient overlay that fades the title text under the close button.
+   Sits between the title (normal flow) and the close button (z-index:2).
+   Appears/disappears with the same opacity transition as the close button. */
+.tab::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 34px;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background: linear-gradient(to right, transparent, var(--tab-bg));
+}
+
+.tab:hover::after {
+  opacity: 1;
 }
 
 /* Index number — bold, rounded box. Taken out of the flow like the close
@@ -157,23 +183,19 @@ body {
   align-self: center;
 }
 
-/* Title fade under close button on hover — mask sized to the single
-   22px close button (plus a few px of gap), not Tabby's 80px cluster. */
-.tab:hover .tab-title {
-  -webkit-mask-image:
-    linear-gradient(black 0 0),
-    linear-gradient(to left, transparent 0%, transparent 40%, black 100%);
-  -webkit-mask-size:
-    calc(100% - 30px) auto,
-    30px auto;
-  -webkit-mask-repeat: no-repeat;
-  -webkit-mask-position: left, right;
-}
+/* Title fade under close button on hover (nocx-56w).
+   A gradient overlay sits above the title text but below the close button,
+   fading the rightmost 34px to the tab's current background. No -webkit-mask:
+   masks have failed twice in WKWebView (two-layer compositing ambiguity,
+   default mask-size/repeat). An absolutely-positioned gradient overlay is
+   standard CSS with no engine-dependent behaviour. */
 
 /* ── Close button ────────────────────────────────────────────────────── */
 
 .tab-close {
   --wails-draggable: no-drag;
+  /* Must paint above the gradient overlay (z-index:1) to receive clicks. */
+  z-index: 2;
   position: absolute;
   right: 4px;
   top: 50%;

@@ -15,6 +15,9 @@ import type {
   TitleCallback,
   TerminalRenderer,
 } from '../renderers/types'
+import type { ClipboardAccess } from '../clipboard'
+import type { ClipboardGate } from '../clipboard'
+import type { ClipboardBanner } from '../banner'
 import type { TabManager } from '../tabs'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -39,11 +42,17 @@ export interface RendererMock extends TerminalRenderer {
     onCwd?: CwdCallback
     onBell?: () => void
     onBufferChange?: (type: 'normal' | 'alternate') => void
+    onSelectionChange?: (text: string) => void
+    onClipboardWrite?: (text: string) => void
   }
   _fireBufferChange(type: 'normal' | 'alternate'): void
   _fireTitle(title: string): void
   _fireCwd(host: string, path: string): void
   _fireBell(): void
+  /** Fire a selection event — used by clipboard policy tests. */
+  _fireSelectionChange(text: string): void
+  /** Fire an OSC 52 write event — used by clipboard policy tests. */
+  _fireClipboardWrite(text: string): void
 }
 
 /**
@@ -75,6 +84,13 @@ export function createRendererMock(): RendererMock {
     onBufferChange: vi.fn((cb: (type: 'normal' | 'alternate') => void) => {
       cbs.onBufferChange = cb
     }),
+    onSelectionChange: vi.fn((cb: (text: string) => void) => {
+      cbs.onSelectionChange = cb
+    }),
+    onClipboardWrite: vi.fn((cb: (text: string) => void) => {
+      cbs.onClipboardWrite = cb
+    }),
+    paste: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
     cols: 80,
@@ -91,6 +107,12 @@ export function createRendererMock(): RendererMock {
     },
     _fireBell() {
       cbs.onBell?.()
+    },
+    _fireSelectionChange(text: string) {
+      cbs.onSelectionChange?.(text)
+    },
+    _fireClipboardWrite(text: string) {
+      cbs.onClipboardWrite?.(text)
     },
   }
   return mock as unknown as RendererMock
@@ -196,6 +218,48 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Clipboard fake — injectable into TabManager for policy-layer tests.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface ClipboardFake extends ClipboardAccess {
+  readText: ReturnType<typeof vi.fn>
+  writeText: ReturnType<typeof vi.fn>
+}
+
+/**
+ * Create a fake clipboard whose readText / writeText are vitest spies.
+ * Used by clipboard policy tests in tabs.test.ts.
+ */
+export function makeClipboard(overrides?: Partial<ClipboardFake>): ClipboardFake {
+  return {
+    readText: vi.fn().mockResolvedValue(''),
+    writeText: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Banner fake — injectable into TabManager for gate-layer tests.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface BannerFake extends ClipboardBanner {
+  shown: boolean
+  show: ReturnType<typeof vi.fn>
+}
+
+/**
+ * Create a fake banner whose show() returns a controllable promise.
+ * Override shown / show per-test to drive the gate policy.
+ */
+export function makeBanner(overrides?: Partial<BannerFake>): BannerFake {
+  return {
+    shown: false,
+    show: vi.fn().mockResolvedValue('dismiss' as const),
+    ...overrides,
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // DOM setup helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -213,18 +277,29 @@ export function setupTabBarDOM(): { bar: HTMLElement; panes: HTMLElement } {
  * (or a fresh makeClient() if none provided), and wait until the initial
  * session has been opened.
  */
-export async function mountTabManager(client?: ClientFake): Promise<{
+export async function mountTabManager(
+  client?: ClientFake,
+  clipboard?: ClipboardFake,
+  gate?: ClipboardGate,
+  banner?: BannerFake,
+): Promise<{
   bar: HTMLElement
   panes: HTMLElement
   manager: TabManager
   client: ClientFake
+  clipboard: ClipboardFake
+  gate: ClipboardGate
+  banner: BannerFake
 }> {
   const { bar, panes } = setupTabBarDOM()
   const c = client ?? makeClient()
+  const cb = clipboard ?? makeClipboard()
+  const g = gate ?? new (await import('../clipboard')).ClipboardGate()
+  const bn = banner ?? makeBanner()
   const { TabManager } = await import('../tabs')
-  const manager = new TabManager(bar, panes, c as unknown as import('../ipc').WSClient)
+  const manager = new TabManager(bar, panes, c as unknown as import('../ipc').WSClient, cb, g, bn)
   await vi.waitFor(() => {
     expect(c.openSession).toHaveBeenCalled()
   })
-  return { bar, panes, manager, client: c }
+  return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn }
 }

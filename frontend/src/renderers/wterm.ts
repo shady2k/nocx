@@ -83,6 +83,22 @@ export class WtermRenderer implements TerminalRenderer {
     // BEL — callers that need bell-driven activity signalling must use xterm.js.
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onSelectionChange(_cb: (text: string) => void): void {
+    // @wterm/dom has no selection event. Copy-on-select requires xterm.js.
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onClipboardWrite(_cb: (text: string) => void): void {
+    // @wterm/dom does not expose an OSC handler. OSC 52 requires xterm.js.
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  paste(_text: string): void {
+    // @wterm/dom has no paste method with bracketed-paste wrapping.
+    // Paste requires xterm.js.
+  }
+
   refreshAtlas(): void {
     // WTerm renders via DOM, not a GPU texture atlas — nothing to clear.
   }

@@ -4,9 +4,12 @@ import {
   createRendererMock,
   resetSessionCounter,
   mountTabManager,
+  makeClipboard,
+  makeBanner,
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
 } from './test-support/tabs-fixtures'
+import { ClipboardGate } from './clipboard'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -638,4 +641,284 @@ describe('TabManager', () => {
     // Second tab still has initial marker.
     expect(tabBtns[1].getAttribute('title')).toContain('(initial cwd)')
   })
+
+  // ── clipboard policy ───────────────────────────────────────────────
+  /* eslint-disable @typescript-eslint/unbound-method */
+
+  it('writes selection to the clipboard when non-empty', async () => {
+    const cb = makeClipboard()
+    await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    renderers[0]._fireSelectionChange('selected text')
+
+    expect(cb.writeText).toHaveBeenCalledWith('selected text')
+  })
+
+  it('does not write whitespace-only selection to the clipboard', async () => {
+    const cb = makeClipboard()
+    await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    renderers[0]._fireSelectionChange('   ')
+
+    expect(cb.writeText).not.toHaveBeenCalled()
+  })
+
+  it('does not write empty selection to the clipboard', async () => {
+    const cb = makeClipboard()
+    await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    renderers[0]._fireSelectionChange('')
+
+    expect(cb.writeText).not.toHaveBeenCalled()
+  })
+
+  it('writes OSC 52 decoded text to the clipboard when granted', async () => {
+    const cb = makeClipboard()
+    const gate = new ClipboardGate()
+    gate.allow()
+
+    await mountTabManager(undefined, cb, gate)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    renderers[0]._fireClipboardWrite('osc52 payload')
+
+    expect(cb.writeText).toHaveBeenCalledWith('osc52 payload')
+  })
+
+  it('pastes on right-click (contextmenu event)', async () => {
+    const cb = makeClipboard({
+      readText: vi.fn().mockResolvedValue('right-click text'),
+    })
+    const { bar } = await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    const pane = bar.parentElement!.querySelector('.pane.active')!
+    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(cb.readText).toHaveBeenCalled()
+    })
+    expect(renderers[0].paste).toHaveBeenCalledWith('right-click text')
+  })
+
+  it('pastes on middle-click', async () => {
+    const cb = makeClipboard({
+      readText: vi.fn().mockResolvedValue('middle-click text'),
+    })
+    const { bar } = await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    const pane = bar.parentElement!.querySelector('.pane.active')!
+    pane.dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(cb.readText).toHaveBeenCalled()
+    })
+    expect(renderers[0].paste).toHaveBeenCalledWith('middle-click text')
+  })
+
+  it('confirms before pasting multi-line text in the normal screen', async () => {
+    const cb = makeClipboard({
+      readText: vi.fn().mockResolvedValue('line1\nline2'),
+    })
+    const confirm = vi.fn()
+    vi.stubGlobal('confirm', confirm)
+
+    const { bar } = await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    // Default _bufferType is 'normal'.
+    confirm.mockReturnValueOnce(false)
+    const pane = bar.parentElement!.querySelector('.pane.active')!
+    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(cb.readText).toHaveBeenCalled()
+    })
+    // User declined — nothing should reach the terminal.
+    expect(renderers[0].paste).not.toHaveBeenCalled()
+
+    // Now confirm.
+    confirm.mockReturnValueOnce(true)
+    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(renderers[0].paste).toHaveBeenCalledWith('line1\nline2')
+    })
+
+    vi.unstubAllGlobals()
+  })
+
+  it('does not confirm multi-line paste in the alternate screen', async () => {
+    const cb = makeClipboard({
+      readText: vi.fn().mockResolvedValue('line1\nline2'),
+    })
+    const confirm = vi.fn()
+    vi.stubGlobal('confirm', confirm)
+
+    const { bar } = await mountTabManager(undefined, cb)
+
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    // Switch to alternate screen (TUI mode).
+    renderers[0]._fireBufferChange('alternate')
+
+    const pane = bar.parentElement!.querySelector('.pane.active')!
+    pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(cb.readText).toHaveBeenCalled()
+    })
+    // No confirmation in alternate screen — full-screen program is not a shell.
+    expect(confirm).not.toHaveBeenCalled()
+    expect(renderers[0].paste).toHaveBeenCalledWith('line1\nline2')
+
+    vi.unstubAllGlobals()
+  })
+
+  // ── OSC 52 gate ────────────────────────────────────────────────────
+
+  it('blocked write leaves the clipboard untouched and raises one banner', async () => {
+    const cb = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+
+    await mountTabManager(undefined, cb, gate, banner)
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    // Fire an OSC 52 write. Gate starts denied, banner not yet shown.
+    renderers[0]._fireClipboardWrite('osc52 text')
+
+    // The banner must have been shown exactly once.
+    expect(banner.show).toHaveBeenCalledTimes(1)
+
+    // The clipboard must be untouched — write blocked.
+    expect(cb.writeText).not.toHaveBeenCalled()
+  })
+
+  it('a second blocked write raises no second banner', async () => {
+    const cb = makeClipboard()
+    const gate = new ClipboardGate()
+    // Banner already shown — simulate the first write having raised it.
+    const banner = makeBanner({ shown: true })
+
+    await mountTabManager(undefined, cb, gate, banner)
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    // Fire a second OSC 52 write while the banner is already shown.
+    renderers[0]._fireClipboardWrite('second osc52 text')
+
+    // The banner must NOT be shown again — a program looping OSC 52
+    // must produce one banner, not a stack.
+    expect(banner.show).not.toHaveBeenCalled()
+    expect(cb.writeText).not.toHaveBeenCalled()
+  })
+
+  it('allowing lets the next write through', async () => {
+    const cb = makeClipboard()
+    const gate = new ClipboardGate()
+    // Banner that auto-chooses 'allow' when show() is called.
+    const banner = makeBanner({
+      show: vi.fn().mockImplementation(() => {
+        gate.allow()
+        return Promise.resolve('allow' as const)
+      }),
+    })
+
+    await mountTabManager(undefined, cb, gate, banner)
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    // Fire the first OSC 52 write — blocked, banner shown.
+    renderers[0]._fireClipboardWrite('first write')
+
+    expect(banner.show).toHaveBeenCalledTimes(1)
+
+    // The banner's show() synchronously called gate.allow(). The gate is
+    // now granted. Wait for the microtask that writes to clipboard.
+    await vi.waitFor(() => {
+      expect(cb.writeText).toHaveBeenCalledWith('first write')
+    })
+
+    // Fire a second write — must go through immediately, no banner.
+    renderers[0]._fireClipboardWrite('second write')
+    expect(cb.writeText).toHaveBeenCalledWith('second write')
+    // Banner still only called once.
+    expect(banner.show).toHaveBeenCalledTimes(1)
+  })
+
+  it('suppressing stops the banner without granting', async () => {
+    const cb = makeClipboard()
+    const gate = new ClipboardGate()
+    // Banner that auto-chooses 'suppress' when show() is called.
+    const banner = makeBanner({
+      show: vi.fn().mockImplementation(() => {
+        gate.suppress()
+        return Promise.resolve('suppress' as const)
+      }),
+    })
+
+    await mountTabManager(undefined, cb, gate, banner)
+    await Promise.resolve()
+    const renderers = await getRendererMocks()
+
+    // Fire the first OSC 52 write.
+    renderers[0]._fireClipboardWrite('blocked text')
+
+    expect(banner.show).toHaveBeenCalledTimes(1)
+
+    // Suppress must NOT grant — the clipboard stays untouched.
+    expect(gate.granted).toBe(false)
+
+    // Fire a second write — suppressed, no banner, no write.
+    renderers[0]._fireClipboardWrite('another blocked text')
+
+    // Still no write, and banner was not shown again.
+    expect(cb.writeText).not.toHaveBeenCalled()
+    expect(banner.show).toHaveBeenCalledTimes(1)
+  })
+
+  it('suppressed gate also silences a later OSC 52 on a second tab', async () => {
+    const cb = makeClipboard()
+    const gate = new ClipboardGate()
+    gate.suppress()
+    const banner = makeBanner()
+
+    const { manager, client } = await mountTabManager(undefined, cb, gate, banner)
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+    await Promise.resolve()
+
+    // Get both renderers.
+    const renderers = await getRendererMocks()
+    expect(renderers.length).toBeGreaterThanOrEqual(2)
+
+    // Fire on the second tab — still suppressed, gate is app-wide.
+    renderers[1]._fireClipboardWrite('tab 2 write')
+
+    expect(cb.writeText).not.toHaveBeenCalled()
+    expect(banner.show).not.toHaveBeenCalled()
+  })
+  /* eslint-enable @typescript-eslint/unbound-method */
 })

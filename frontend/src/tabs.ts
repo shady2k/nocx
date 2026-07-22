@@ -2,6 +2,8 @@ import { WSClient, type SessionHandle } from './ipc'
 import { createRenderer, resolveRendererName, type RendererName } from './renderers'
 import type { TerminalRenderer } from './renderers/types'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
+import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
+import type { ClipboardBanner } from './banner'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -80,6 +82,9 @@ class Tab {
   constructor(
     private readonly client: WSClient,
     private readonly rendererName: RendererName,
+    private readonly clipboard: ClipboardAccess,
+    private readonly gate: ClipboardGate,
+    private readonly banner: ClipboardBanner,
     id: number,
   ) {
     this.id = id
@@ -257,6 +262,85 @@ class Tab {
           this.markActivity()
         }
       })
+
+      // ── Clipboard ────────────────────────────────────────────────────
+      // The renderer reports facts and never touches the clipboard (AD-6).
+      // Policy — copy-on-select, OSC 52 notification, multi-line confirm —
+      // lives here, above the renderer boundary.
+
+      // Copy on select: write non-empty selection text to the clipboard.
+      renderer.onSelectionChange((text) => {
+        if (shouldCopy(text)) {
+          this.clipboard.writeText(text).catch((e) => {
+            console.warn('nocx: clipboard write failed (selection)', e)
+          })
+        }
+      })
+
+      // OSC 52 write: denied by default (Warp's default). The first
+      // blocked attempt raises a banner across the top of the window
+      // with the remedy built in. Once the user allows, writes are
+      // silent — the user consented.
+      renderer.onClipboardWrite((text) => {
+        // Already allowed — write directly, no notification.
+        if (this.gate.granted) {
+          this.clipboard.writeText(text).catch((e) => {
+            console.warn('nocx: clipboard write failed (OSC 52)', e)
+          })
+          return
+        }
+
+        // Suppressed — silently drop.
+        if (this.gate.suppressed) return
+
+        // Banner already shown — silently drop.
+        if (this.banner.shown) return
+
+        // First blocked write: raise the banner and wait for the user.
+        void this.banner.show().then((choice) => {
+          if (choice === 'allow') {
+            this.gate.allow()
+            this.clipboard.writeText(text).catch((e) => {
+              console.warn('nocx: clipboard write failed (OSC 52)', e)
+            })
+          } else if (choice === 'suppress') {
+            this.gate.suppress()
+          }
+          // dismiss: do nothing — neither grant nor suppress.
+        })
+      })
+
+      // Paste on right-click AND middle-click (Tabby, Warp).
+      const doPaste = () => {
+        this.clipboard
+          .readText()
+          .then((text) => {
+            if (!text) return
+            // Multi-line paste is confirmed before it reaches the terminal,
+            // except in the alternate screen — a full-screen program is not
+            // a shell prompt. This is Tabby's exact condition.
+            if (text.includes('\n') && this._bufferType === 'normal') {
+              if (!window.confirm('Paste multi-line text?')) return
+            }
+            renderer.paste(text)
+          })
+          .catch((e) => {
+            console.warn('nocx: clipboard read failed (paste)', e)
+          })
+      }
+
+      this.pane.addEventListener('contextmenu', (e: MouseEvent) => {
+        e.preventDefault()
+        doPaste()
+      })
+
+      this.pane.addEventListener('mousedown', (e: MouseEvent) => {
+        if (e.button === 1) {
+          e.preventDefault()
+          doPaste()
+        }
+      })
+
       renderer.onResize((cols: number, rows: number) => {
         if (cols === this.cols && rows === this.rows) return
         this.cols = cols
@@ -313,14 +397,27 @@ export class TabManager {
   private readonly panes: HTMLElement
   private readonly client: WSClient
   private readonly rendererName: RendererName
+  private readonly clipboard: ClipboardAccess
+  private readonly gate: ClipboardGate
+  private readonly banner: ClipboardBanner
   private readonly addBtn: HTMLButtonElement
   private readonly tabsContainer: HTMLElement
 
-  constructor(bar: HTMLElement, panes: HTMLElement, client: WSClient) {
+  constructor(
+    bar: HTMLElement,
+    panes: HTMLElement,
+    client: WSClient,
+    clipboard: ClipboardAccess,
+    gate: ClipboardGate,
+    banner: ClipboardBanner,
+  ) {
     this.bar = bar
     this.panes = panes
     this.client = client
     this.rendererName = DEFAULT_RENDERER
+    this.clipboard = clipboard
+    this.gate = gate
+    this.banner = banner
 
     bar.setAttribute('role', 'tablist')
     bar.classList.add('tabbar')
@@ -356,7 +453,14 @@ export class TabManager {
 
   /** Create a new tab, activate it. */
   newTab(): Tab {
-    const tab = new Tab(this.client, this.rendererName, this.nextTabId++)
+    const tab = new Tab(
+      this.client,
+      this.rendererName,
+      this.clipboard,
+      this.gate,
+      this.banner,
+      this.nextTabId++,
+    )
 
     this.tabs.push(tab)
     // Append to the tabs container (addBtn sits after the container).

@@ -9,6 +9,7 @@
 
 import { vi, expect } from 'vitest'
 import type {
+  CommandMarkerCallback,
   CwdCallback,
   DataCallback,
   ResizeCallback,
@@ -37,12 +38,14 @@ export interface RendererMock extends TerminalRenderer {
     onResize?: ResizeCallback
     onTitle?: TitleCallback
     onCwd?: CwdCallback
+    onCommandMarker?: CommandMarkerCallback
     onBell?: () => void
     onBufferChange?: (type: 'normal' | 'alternate') => void
   }
   _fireBufferChange(type: 'normal' | 'alternate'): void
   _fireTitle(title: string): void
   _fireCwd(host: string, path: string): void
+  _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]): void
   _fireBell(): void
 }
 
@@ -69,6 +72,9 @@ export function createRendererMock(): RendererMock {
     onCwd: vi.fn((cb: CwdCallback) => {
       cbs.onCwd = cb
     }),
+    onCommandMarker: vi.fn((cb: CommandMarkerCallback) => {
+      cbs.onCommandMarker = cb
+    }),
     onBell: vi.fn((cb: () => void) => {
       cbs.onBell = cb
     }),
@@ -88,6 +94,9 @@ export function createRendererMock(): RendererMock {
     },
     _fireCwd(host: string, path: string) {
       cbs.onCwd?.({ host, path })
+    },
+    _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]) {
+      cbs.onCommandMarker?.(marker)
     },
     _fireBell() {
       cbs.onBell?.()

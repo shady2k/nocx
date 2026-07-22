@@ -100,6 +100,9 @@ func TestRemoteStartCommand(t *testing.T) {
 	if !strings.Contains(cmd, "exec") {
 		t.Errorf("RemoteStartCommand missing exec: %q", cmd)
 	}
+	if !strings.Contains(cmd, `"${SHELL:-/bin/sh}"`) {
+		t.Errorf("RemoteStartCommand should quote SHELL expansion: %q", cmd)
+	}
 }
 
 func TestEnsureInstalled_WritesScriptsAndGates(t *testing.T) {
@@ -114,6 +117,7 @@ func TestEnsureInstalled_WritesScriptsAndGates(t *testing.T) {
 
 	// Check VERSION file.
 	vf := filepath.Join(dir, versionFile)
+	// #nosec G304 — test-only path built from t.TempDir + fixed constants.
 	data, err := os.ReadFile(vf)
 	if err != nil {
 		t.Fatalf("VERSION file not found: %v", err)
@@ -133,6 +137,7 @@ func TestEnsureInstalled_WritesScriptsAndGates(t *testing.T) {
 	// Check gate lines in rc files.
 	for rcFile, gate := range rcGate {
 		rcPath := filepath.Join(home, rcFile)
+		// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
 			t.Errorf("rc file %s not found: %v", rcFile, err)
@@ -156,6 +161,7 @@ func TestEnsureInstalled_Idempotent(t *testing.T) {
 	// Read gate line count before second install.
 	for rcFile := range rcGate {
 		rcPath := filepath.Join(home, rcFile)
+		// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
 			t.Fatalf("read rc %s: %v", rcFile, err)
@@ -163,10 +169,11 @@ func TestEnsureInstalled_Idempotent(t *testing.T) {
 		firstCount := strings.Count(string(data), "# nocx terminal shell integration")
 
 		// Second install should not duplicate.
-		if err := s.EnsureInstalled(home); err != nil {
-			t.Fatalf("second EnsureInstalled: %v", err)
+		if installErr := s.EnsureInstalled(home); installErr != nil {
+			t.Fatalf("second EnsureInstalled: %v", installErr)
 		}
 
+		// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
 		data2, err := os.ReadFile(rcPath)
 		if err != nil {
 			t.Fatalf("read rc %s after second install: %v", rcFile, err)
@@ -192,7 +199,8 @@ func TestEnsureInstalled_PreservesExistingRcContent(t *testing.T) {
 	// Write existing rc content.
 	for rcFile := range rcGate {
 		rcPath := filepath.Join(home, rcFile)
-		if err := os.WriteFile(rcPath, []byte("# existing config\n"), 0644); err != nil {
+		// #nosec G306 — test fixture file, intentionally created with restricted permissions.
+		if err := os.WriteFile(rcPath, []byte("# existing config\n"), 0o600); err != nil {
 			t.Fatalf("write rc: %v", err)
 		}
 	}
@@ -203,6 +211,7 @@ func TestEnsureInstalled_PreservesExistingRcContent(t *testing.T) {
 
 	for rcFile := range rcGate {
 		rcPath := filepath.Join(home, rcFile)
+		// #nosec G304 — test-only path built from t.TempDir + fixed rc filename constants.
 		data, err := os.ReadFile(rcPath)
 		if err != nil {
 			t.Fatalf("read rc: %v", err)

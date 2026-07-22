@@ -33,18 +33,18 @@ type SSH interface {
 type ConnectOption func(*ConnectConfig)
 
 type ConnectConfig struct {
-	User             string
-	Port             int
-	KeyFile          string
-	Password         string
-	UseAgent         bool
-	Cols             uint16
-	Rows             uint16
-	XPixel           uint16
-	YPixel           uint16
-	AuthMethods      []gossh.AuthMethod
-	KeyExchanges     []string
-	RemoteInstaller  RemoteInstaller
+	User            string
+	Port            int
+	KeyFile         string
+	Password        string
+	UseAgent        bool
+	Cols            uint16
+	Rows            uint16
+	XPixel          uint16
+	YPixel          uint16
+	AuthMethods     []gossh.AuthMethod
+	KeyExchanges    []string
+	RemoteInstaller RemoteInstaller
 }
 
 func WithUser(user string) ConnectOption {

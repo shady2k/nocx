@@ -71,8 +71,12 @@ export function parseOsc133(payload: string): CommandMarker | null {
 
   if (kind === 'D' && payload.length > 1 && payload[1] === ';') {
     const codeStr = payload.slice(2)
+    // Strict: reject trailing junk, negatives, or out-of-range exit codes.
+    if (!/^\d+$/.test(codeStr)) {
+      return { kind: 'D' }
+    }
     const code = parseInt(codeStr, 10)
-    if (isNaN(code) || code < 0) {
+    if (code < 0 || code > 255) {
       return { kind: 'D' }
     }
     return { kind: 'D', exitCode: code }

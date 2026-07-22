@@ -3,11 +3,11 @@
 # Emits OSC 133 (A/B/C/D) command markers and OSC 7 (cwd).
 
 if [[ -z "$NOCX_SHELL_INTEGRATION" ]]; then
-    return
+    return 2>/dev/null || exit 0
 fi
 
 if [[ -n "$__nocx_loaded" ]]; then
-    return
+    return 2>/dev/null || exit 0
 fi
 __nocx_loaded=1
 

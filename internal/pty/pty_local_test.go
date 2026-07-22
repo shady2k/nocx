@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -36,16 +37,24 @@ func TestLocalPty_ReadReturnsOutput(t *testing.T) {
 	}
 
 	buf := make([]byte, 4096)
-	n, err := lp.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("Read: %v", err)
+	var output strings.Builder
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		n, readErr := lp.Read(buf)
+		if readErr != nil && readErr != io.EOF {
+			t.Fatalf("Read: %v", readErr)
+		}
+		if n > 0 {
+			output.Write(buf[:n])
+			if strings.Contains(output.String(), "hello") {
+				return
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
 	}
-	if n == 0 {
-		t.Fatal("expected output, got 0 bytes")
-	}
-	if !strings.Contains(string(buf[:n]), "hello") {
-		t.Fatalf("expected output to contain 'hello', got: %q", string(buf[:n]))
-	}
+	t.Fatalf("expected output to contain 'hello', got: %q", output.String())
 }
 
 func TestLocalPty_Resize(t *testing.T) {

@@ -82,26 +82,27 @@ func (s *Impl) EnsureInstalled(home string) error {
 	vf := filepath.Join(dir, versionFile)
 
 	// Check version — skip if already installed and up to date.
+	// #nosec G304 — path is built from validated home + fixed dir/version constants.
 	if data, err := os.ReadFile(vf); err == nil && strings.TrimSpace(string(data)) == version {
 		s.log.Debug("shellintegration: already installed, version matches", "version", version)
 		return nil
 	}
 
 	// Create directory.
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("shellintegration: create dir %s: %w", dir, err)
 	}
 
 	// Write scripts.
 	for name, content := range scripts {
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("shellintegration: write script %s: %w", path, err)
 		}
 	}
 
 	// Write version.
-	if err := os.WriteFile(vf, []byte(version+"\n"), 0644); err != nil {
+	if err := os.WriteFile(vf, []byte(version+"\n"), 0o600); err != nil {
 		return fmt.Errorf("shellintegration: write version: %w", err)
 	}
 
@@ -120,14 +121,17 @@ func (s *Impl) EnsureInstalled(home string) error {
 }
 
 // appendGate appends gateLine to filePath if not already present.
+// Writes atomically via a temporary file + rename to avoid truncating the
+// rc file if the process is interrupted.
 func appendGate(filePath, gateLine string) error {
+	// #nosec G304 — path is built from validated home + fixed rc filename constants.
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
 		// File doesn't exist — create it with just the gate.
-		return os.WriteFile(filePath, []byte(gateLine+"\n"), 0644)
+		return writeFileAtomic(filePath, []byte(gateLine+"\n"))
 	}
 
 	content := string(data)
@@ -140,7 +144,34 @@ func appendGate(filePath, gateLine string) error {
 		content += "\n"
 	}
 	content += gateLine + "\n"
-	return os.WriteFile(filePath, []byte(content), 0644)
+	return writeFileAtomic(filePath, []byte(content))
+}
+
+// writeFileAtomic writes data to path by creating a temporary file in the
+// same directory and renaming it over path.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".nocx-gate-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
 }
 
 func (s *Impl) ActivationEnv() []string {
@@ -148,7 +179,9 @@ func (s *Impl) ActivationEnv() []string {
 }
 
 func (s *Impl) RemoteStartCommand() string {
-	return activationEnvVar + "=1 exec ${SHELL:-/bin/sh} -l"
+	// Quote ${SHELL:-/bin/sh} so paths with spaces are handled as a single
+	// argument to exec. The expansion still happens on the remote host.
+	return activationEnvVar + `=1 exec "${SHELL:-/bin/sh}" -l`
 }
 
 func isLocalHost(host string) bool {
@@ -161,5 +194,3 @@ func isLocalHost(host string) bool {
 	}
 	return host == hn
 }
-
-

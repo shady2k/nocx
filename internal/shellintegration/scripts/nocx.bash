@@ -12,6 +12,7 @@ fi
 __nocx_loaded=1
 
 __nocx_first_prompt=
+__nocx_in_prompt_command=0
 
 __nocx_encode_url() {
     local s="$1"
@@ -37,16 +38,36 @@ __nocx_preexec() {
     builtin printf '\e]133;C\a'
 }
 
+# bash-preexec-style wrapper: keep the original PROMPT_COMMAND and run it
+# after our precmd. The flag prevents preexec from firing for commands that
+# run as part of the prompt (e.g. an existing PROMPT_COMMAND).
+__nocx_prompt_command() {
+    __nocx_in_prompt_command=1
+    __nocx_precmd
+    if [[ -n "${__nocx_old_pc:-}" ]]; then
+        eval "$__nocx_old_pc"
+    fi
+    __nocx_in_prompt_command=0
+}
+
 if [[ -z "${PROMPT_COMMAND:-}" ]]; then
-    PROMPT_COMMAND=__nocx_precmd
+    PROMPT_COMMAND='__nocx_prompt_command'
 else
     __nocx_old_pc="$PROMPT_COMMAND"
-    PROMPT_COMMAND='__nocx_precmd; eval "$__nocx_old_pc"'
+    PROMPT_COMMAND='__nocx_prompt_command'
 fi
 
+# Save the original DEBUG trap so we can chain to it after our preexec hook.
 __nocx_old_debug="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '//;s/' DEBUG$//")"
+
 __nocx_preexec_wrapper() {
-    __nocx_preexec
+    local __nocx_current_command=${BASH_COMMAND}
+    # Skip our own internal commands and anything that runs while servicing
+    # PROMPT_COMMAND; otherwise fire the command-start marker.
+    if [[ "$__nocx_current_command" != __nocx_* ]] && [[ "${__nocx_in_prompt_command:-0}" != "1" ]]; then
+        __nocx_preexec
+    fi
+    # Chain to the previous DEBUG trap, if any.
     if [[ -n "${__nocx_old_debug:-}" ]]; then
         eval "$__nocx_old_debug"
     fi
@@ -54,6 +75,8 @@ __nocx_preexec_wrapper() {
 trap '__nocx_preexec_wrapper' DEBUG
 
 if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
-    PS1="${PS1}"$'\[\e]133;B\a\]'
+    # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
+    # literally; they tell bash that the OSC sequence is non-printing.
+    PS1="${PS1}"$'\\[\e]133;B\\a\\]'
     __nocx_prompt_wrapped=1
 fi

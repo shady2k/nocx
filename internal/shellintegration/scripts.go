@@ -32,7 +32,7 @@ const gateLineBash = `# nocx terminal shell integration
 
 // scripts maps shell rc filename → embedded script content.
 var scripts = map[string]string{
-	"shell-integration.zsh": zshScript,
+	"shell-integration.zsh":  zshScript,
 	"shell-integration.bash": bashScript,
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"strings"
 
@@ -22,7 +23,7 @@ func (s *Impl) EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Clien
 	if err != nil {
 		return fmt.Errorf("shellintegration: sftp client: %w", err)
 	}
-	defer sftpClient.Close()
+	defer func() { _ = sftpClient.Close() }()
 
 	dir := path.Join(remoteHome, dirName)
 	vf := path.Join(dir, versionFile)
@@ -71,7 +72,7 @@ func (s *Impl) GetRemoteHome(sshClient *gossh.Client) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("shellintegration: new session for home: %w", err)
 	}
-	defer sess.Close()
+	defer func() { _ = sess.Close() }()
 
 	output, err := sess.Output("echo $HOME")
 	if err != nil {
@@ -83,7 +84,7 @@ func (s *Impl) GetRemoteHome(sshClient *gossh.Client) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("shellintegration: new session for ~: %w", err)
 		}
-		defer sess2.Close()
+		defer func() { _ = sess2.Close() }()
 		output2, err := sess2.Output("cd ~ && pwd")
 		if err != nil {
 			return "", fmt.Errorf("shellintegration: get remote home via ~: %w", err)
@@ -101,7 +102,7 @@ func versionMatches(client *sftp.Client, versionPath string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(f)
 	if err != nil {
@@ -115,21 +116,28 @@ func writeFile(client *sftp.Client, remotePath, content string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	_, err = io.Copy(f, bytes.NewReader([]byte(content)))
-	return err
+	_, copyErr := io.Copy(f, bytes.NewReader([]byte(content)))
+	closeErr := f.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func appendGateRemote(client *sftp.Client, remotePath, gateLine string) error {
 	f, err := client.Open(remotePath)
 	if err != nil {
+		// File doesn't exist — create it with just the gate.
 		return writeFile(client, remotePath, gateLine+"\n")
 	}
 	data, err := io.ReadAll(f)
-	f.Close()
+	closeErr := f.Close()
 	if err != nil {
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 
 	content := string(data)
@@ -137,9 +145,21 @@ func appendGateRemote(client *sftp.Client, remotePath, gateLine string) error {
 		return nil
 	}
 
-	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-		content += "\n"
+	// Append to the existing file instead of rewriting it whole. This avoids
+	// truncating the rc file if the connection or process is interrupted.
+	needNewline := len(content) > 0 && !strings.HasSuffix(content, "\n")
+	w, err := client.OpenFile(remotePath, os.O_WRONLY|os.O_APPEND)
+	if err != nil {
+		return fmt.Errorf("open remote rc for append: %w", err)
 	}
-	content += gateLine + "\n"
-	return writeFile(client, remotePath, content)
+	defer func() { _ = w.Close() }()
+	if needNewline {
+		if _, err := w.Write([]byte("\n")); err != nil {
+			return fmt.Errorf("write newline to remote rc: %w", err)
+		}
+	}
+	if _, err := w.Write([]byte(gateLine + "\n")); err != nil {
+		return fmt.Errorf("write gate to remote rc: %w", err)
+	}
+	return nil
 }

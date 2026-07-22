@@ -98,6 +98,18 @@ describe('parseOsc133', () => {
     expect(parseOsc133('D;-1')).toEqual({ kind: 'D' })
   })
 
+  it('returns D without exitCode for trailing junk', () => {
+    expect(parseOsc133('D;1extra')).toEqual({ kind: 'D' })
+  })
+
+  it('returns D without exitCode for out-of-range exit code', () => {
+    expect(parseOsc133('D;256')).toEqual({ kind: 'D' })
+  })
+
+  it('parses D with exit code 255', () => {
+    expect(parseOsc133('D;255')).toEqual({ kind: 'D', exitCode: 255 })
+  })
+
   it('returns null for empty payload', () => {
     expect(parseOsc133('')).toBeNull()
   })

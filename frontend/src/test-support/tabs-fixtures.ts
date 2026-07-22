@@ -9,6 +9,7 @@
 
 import { vi, expect } from 'vitest'
 import type {
+  CwdCallback,
   DataCallback,
   ResizeCallback,
   TitleCallback,
@@ -35,11 +36,13 @@ export interface RendererMock extends TerminalRenderer {
     onData?: DataCallback
     onResize?: ResizeCallback
     onTitle?: TitleCallback
+    onCwd?: CwdCallback
     onBell?: () => void
     onBufferChange?: (type: 'normal' | 'alternate') => void
   }
   _fireBufferChange(type: 'normal' | 'alternate'): void
   _fireTitle(title: string): void
+  _fireCwd(host: string, path: string): void
   _fireBell(): void
 }
 
@@ -63,6 +66,9 @@ export function createRendererMock(): RendererMock {
     onTitle: vi.fn((cb: TitleCallback) => {
       cbs.onTitle = cb
     }),
+    onCwd: vi.fn((cb: CwdCallback) => {
+      cbs.onCwd = cb
+    }),
     onBell: vi.fn((cb: () => void) => {
       cbs.onBell = cb
     }),
@@ -79,6 +85,9 @@ export function createRendererMock(): RendererMock {
     },
     _fireTitle(title: string) {
       cbs.onTitle?.(title)
+    },
+    _fireCwd(host: string, path: string) {
+      cbs.onCwd?.({ host, path })
     },
     _fireBell() {
       cbs.onBell?.()

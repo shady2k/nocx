@@ -524,4 +524,118 @@ describe('TabManager', () => {
 
     style.remove()
   })
+  // ── OSC 7: cwd follows cd ───────────────────────────────────────────
+
+  it('updates tab title when OSC 7 fires (cwd follows cd)', async () => {
+    const { bar } = await mountTabManager()
+
+    await Promise.resolve()
+
+    const renderers = await getRendererMocks()
+    const titleEl = bar.querySelector('.tab-title')!
+
+    // Initial title is the fixture directory label.
+    expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
+
+    // User does `cd /tmp` → shell emits OSC 7
+    renderers[0]._fireCwd('', '/tmp')
+    expect(titleEl.textContent).toBe('tmp')
+
+    // User does `cd /var/log`
+    renderers[0]._fireCwd('', '/var/log')
+    expect(titleEl.textContent).toBe('var/log')
+
+    // User goes to /var (single segment after root)
+    renderers[0]._fireCwd('', '/var')
+    expect(titleEl.textContent).toBe('var')
+  })
+
+  it('updates tooltip when OSC 7 fires', async () => {
+    const { bar } = await mountTabManager()
+
+    await Promise.resolve()
+
+    const renderers = await getRendererMocks()
+    const tabBtn = bar.querySelector('.tab')!
+
+    // Initial tooltip includes the '(initial cwd)' marker (AD-5 surfacing).
+    expect(tabBtn.getAttribute('title')).toContain('(initial cwd)')
+
+    // OSC 7 fires → tooltip is just the path, no marker.
+    renderers[0]._fireCwd('', '/tmp')
+    expect(tabBtn.getAttribute('title')).toBe('/tmp')
+    expect(tabBtn.getAttribute('title')).not.toContain('(initial')
+  })
+
+  it('program title overrides cwd-based title, but cwd updates the fallback', async () => {
+    const { bar } = await mountTabManager()
+
+    await Promise.resolve()
+
+    const renderers = await getRendererMocks()
+    const titleEl = bar.querySelector('.tab-title')!
+
+    // Program sets a title (e.g. vim, htop).
+    renderers[0]._fireTitle('vim')
+    expect(titleEl.textContent).toBe('vim')
+
+    // cwd changes — visible title stays 'vim' because program title wins.
+    renderers[0]._fireCwd('', '/etc')
+    expect(titleEl.textContent).toBe('vim')
+
+    // Program exits, clears the title → fallback is the new cwd.
+    renderers[0]._fireTitle('')
+    expect(titleEl.textContent).toBe('etc')
+  })
+
+  it('cwd only affects its own tab', async () => {
+    const { client, manager, bar } = await mountTabManager()
+
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+
+    await Promise.resolve()
+
+    const renderers = await getRendererMocks()
+    expect(renderers.length).toBe(2)
+
+    const titles = bar.querySelectorAll('.tab-title')
+
+    // Fire cwd for first tab only.
+    renderers[0]._fireCwd('', '/tmp')
+    expect(titles[0].textContent).toBe('tmp')
+    // Second tab still has the fixture label.
+    expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
+
+    // Fire cwd for second tab only.
+    renderers[1]._fireCwd('', '/var/log')
+    expect(titles[0].textContent).toBe('tmp')
+    expect(titles[1].textContent).toBe('var/log')
+  })
+
+  it('initial tooltip marks cwd as stale before first OSC 7', async () => {
+    const { client, manager, bar } = await mountTabManager()
+
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+
+    await Promise.resolve()
+
+    const tabBtns = bar.querySelectorAll('.tab')
+    // Both tabs should have the initial marker since no OSC 7 fired.
+    expect(tabBtns[0].getAttribute('title')).toContain('(initial cwd)')
+    expect(tabBtns[1].getAttribute('title')).toContain('(initial cwd)')
+
+    // First tab gets OSC 7.
+    const renderers = await getRendererMocks()
+    renderers[0]._fireCwd('', '/tmp')
+
+    expect(tabBtns[0].getAttribute('title')).toBe('/tmp')
+    // Second tab still has initial marker.
+    expect(tabBtns[1].getAttribute('title')).toContain('(initial cwd)')
+  })
 })

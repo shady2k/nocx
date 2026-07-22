@@ -21,6 +21,10 @@ const FALLBACK_TITLE = 'Terminal'
  * the tail, which is the informative end of a path — the CSS ellipsis cuts
  * from the right, so handing it a long path would hide exactly the part worth
  * reading. '~' stays as itself: that is already the shortest true answer.
+ *
+ * The label says nothing about where the cwd came from — surfacing the
+ * session-open fallback (AD-5) is cwdTooltip's job, where there is room to
+ * say it in words.
  */
 function directoryLabel(cwd: string): string {
   const path = cwd.trim().replace(/\/+$/, '')
@@ -28,6 +32,15 @@ function directoryLabel(cwd: string): string {
   const parts = path.split('/').filter(Boolean)
   if (path === '~' || parts.length === 0) return path || FALLBACK_TITLE
   return parts.slice(-2).join('/')
+}
+
+/**
+ * Tooltip for a cwd. When the value comes from session open (no OSC 7 yet)
+ * the tooltip surfaces that fact (AD-5 fallback visibility).
+ */
+function cwdTooltip(cwd: string, fromOSC7: boolean): string {
+  if (!cwd) return ''
+  return fromOSC7 ? cwd : `${cwd} (initial cwd)`
 }
 
 const DEFAULT_RENDERER: RendererName = resolveRendererName()
@@ -52,9 +65,11 @@ class Tab {
   // would make the getter claim a name the user never sees.
   private _title = ''
   private _defaultTitle = FALLBACK_TITLE
+  private _programTitle = ''
   private _hasActivity = false
   private _agentStatus: AgentStatus | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
+  private _cwdFromOSC7 = false
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private started = false
@@ -161,9 +176,27 @@ class Tab {
     // empty title is the shell clearing it, which is not an agent state.
     this.updateAgentStatus(title)
 
-    const next = title.trim() || this._defaultTitle
+    this._programTitle = title.trim()
+    const next = this._programTitle || this._defaultTitle
     this._title = next
     this.titleSpan.textContent = next
+  }
+
+  /**
+   * Called when the VT frontend parses OSC 7 (AD-6). Updates the cwd-based
+   * tab name and the tooltip. If no program has set a title, the visible
+   * tab title follows the cwd immediately.
+   */
+  updateCwd(path: string): void {
+    this._cwdFromOSC7 = true
+    this._defaultTitle = directoryLabel(path)
+    this.button.title = cwdTooltip(path, true)
+
+    // If no program has set a title, the visible title tracks the cwd.
+    if (!this._programTitle) {
+      this._title = this._defaultTitle
+      this.titleSpan.textContent = this._defaultTitle
+    }
   }
 
   /**
@@ -187,14 +220,14 @@ class Tab {
       // the PTY is created at this size — never spawn-then-resize.
       const session = await this.client.openSession(this.cols, this.rows)
 
-      // The directory names the tab until a program sets a title. It does not
-      // follow `cd` — that needs the OSC 7 events in nocx-5mn.2.
+      // The directory names the tab until a program sets a title; from here
+      // on OSC 7 keeps it following `cd` (nocx-5mn.2).
       this._defaultTitle = directoryLabel(session.cwd)
       // First paint of the label: it stayed empty until the name existed
       // (nocx-83a). Nothing can have set a title before this point — onTitle is
       // subscribed below, after this await.
       this.titleSpan.textContent = this._title = this._defaultTitle
-      this.button.title = session.cwd || ''
+      this.button.title = cwdTooltip(session.cwd, false)
 
       session.onData((data: string) => {
         renderer.write(data)
@@ -211,6 +244,9 @@ class Tab {
       renderer.onData((data: string) => session.send(data))
       renderer.onTitle((title: string) => {
         this.updateTitle(title)
+      })
+      renderer.onCwd(({ path }) => {
+        this.updateCwd(path)
       })
       renderer.onBufferChange((type) => {
         this._bufferType = type

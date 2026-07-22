@@ -19,7 +19,7 @@ type App struct {
 	Session          *session.Reg
 	Transport        *transport.WSServer
 	Config           *config.Stub
-	ShellIntegration *shellintegration.Stub
+	ShellIntegration shellintegration.ShellIntegration
 }
 
 func New() (*App, error) {

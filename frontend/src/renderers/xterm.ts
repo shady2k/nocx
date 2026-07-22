@@ -5,7 +5,13 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
-import type { DataCallback, ResizeCallback, TitleCallback, TerminalRenderer } from './types'
+import type {
+  CwdCallback,
+  DataCallback,
+  ResizeCallback,
+  TitleCallback,
+  TerminalRenderer,
+} from './types'
 
 type BellCallback = () => void
 
@@ -15,6 +21,40 @@ type BellCallback = () => void
 
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
 const RESIZE_MIN_INTERVAL = 32
+
+// ── OSC 7 parser (AD-6: frontend parses OSC, backend never sniffs) ──────
+
+// OSC 7 format: ESC ] 7 ; file://host/path ST
+// xterm.js parser.registerOscHandler(7, handler) gives us the string
+// after the ';', i.e. 'file://host/path'. Percent-decode per RFC 3986.
+const OSC7_PREFIX = 'file://'
+
+/**
+ * Parses an OSC 7 payload into {host, path}. Returns null when the payload
+ * does not start with 'file://' or percent-decoding fails.
+ */
+export function parseOsc7(payload: string): { host: string; path: string } | null {
+  if (!payload.startsWith(OSC7_PREFIX)) return null
+  const uri = payload.slice(OSC7_PREFIX.length)
+
+  // Split at the first '/' after the authority section.
+  // file://host/path  → host, /path
+  // file:///path      → '',  /path
+  const slashIdx = uri.indexOf('/')
+  if (slashIdx === -1) return null
+
+  const rawHost = uri.slice(0, slashIdx)
+  const rawPath = uri.slice(slashIdx)
+
+  try {
+    const host = decodeURIComponent(rawHost)
+    const path = decodeURIComponent(rawPath)
+    return { host, path }
+  } catch {
+    // decodeURIComponent throws on malformed percent-encoding (e.g. '%ZZ').
+    return null
+  }
+}
 
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
@@ -142,6 +182,16 @@ export class XtermRenderer implements TerminalRenderer {
 
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
     this.term?.buffer.onBufferChange((buf) => cb(buf.type))
+  }
+
+  onCwd(cb: CwdCallback): void {
+    this.term?.parser.registerOscHandler(7, (data: string) => {
+      const parsed = parseOsc7(data)
+      if (parsed) {
+        cb({ host: parsed.host, path: parsed.path })
+      }
+      return false // let xterm.js also handle it (default render is no-op)
+    })
   }
 
   onBell(cb: BellCallback): void {

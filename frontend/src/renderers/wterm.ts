@@ -1,7 +1,13 @@
 import { WTerm } from '@wterm/dom'
 import '@wterm/dom/css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
-import type { DataCallback, ResizeCallback, TitleCallback, TerminalRenderer } from './types'
+import type {
+  CwdCallback,
+  DataCallback,
+  ResizeCallback,
+  TitleCallback,
+  TerminalRenderer,
+} from './types'
 
 // DOM-rendering candidate (vercel-labs/wterm). Text is real DOM nodes rendered
 // by the browser's native font engine, so there is no canvas/DPR blur to fight.
@@ -63,6 +69,12 @@ export class WtermRenderer implements TerminalRenderer {
     // @wterm/dom has no buffer-change event. The tab bar defaults to 'normal'
     // and the callback is never fired — alternate-buffer suppression requires
     // xterm.js.
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onCwd(_cb: CwdCallback): void {
+    // @wterm/dom does not expose an OSC handler. OSC 7 cwd tracking
+    // requires xterm.js.
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

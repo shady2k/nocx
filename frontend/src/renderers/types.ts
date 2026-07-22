@@ -10,6 +10,18 @@ export type ResizeCallback = (cols: number, rows: number) => void
 // the string.
 export type TitleCallback = (title: string) => void
 
+// CwdEvent carries the percent-decoded OSC 7 payload (AD-5).
+// host is empty for local shells; path is an absolute filesystem path.
+export interface CwdEvent {
+  host: string
+  path: string
+}
+
+// CwdCallback fires when the shell emits OSC 7 (current working directory).
+// Per AD-6, the VT frontend parses OSC 7 via parser.registerOscHandler and
+// surfaces it as an event — the backend never sniffs the byte stream.
+export type CwdCallback = (event: CwdEvent) => void
+
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>
   write(data: string): void
@@ -42,6 +54,13 @@ export interface TerminalRenderer {
   // exist (each tab has its own). onBufferChange is a first-class xterm.js
   // API that fires reliably regardless of how the getter chain resolves.
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void
+
+  // onCwd registers a callback that fires when the shell emits OSC 7
+  // (current working directory). The VT frontend parses the OSC sequence
+  // and percent-decodes host + path; the caller updates the tab title and
+  // tooltip. xterm.js supports this via parser.registerOscHandler(7, ...);
+  // @wterm/dom does not expose an OSC handler — the callback is never fired.
+  onCwd(cb: CwdCallback): void
 
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the

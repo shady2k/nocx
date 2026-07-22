@@ -11,6 +11,27 @@ OpenCode, …) contributing to the repo. Read it before writing code.
   (`AD-1`…`AD-10`), module boundaries, the WebSocket protocol. **The ADs are binding.**
 - The task backlog lives in **beads** (`bd`), not in prose. Get work with `bd ready`.
 
+## First thing in a fresh clone
+
+```bash
+make init
+```
+
+Run it before anything else. Git carries neither the issue database nor the ref
+it lives on, so until `make init` has run there is **no backlog**: `bd ready`
+answers "no beads database found", and an agent that reads `.beads/issues.jsonl`
+instead is reading a passive export that may lag the database.
+
+After that, task state syncs by itself and you should not sync it by hand:
+
+- `git commit` writes and stages `.beads/issues.jsonl`, so the snapshot travels
+  in the same commit as the work it describes.
+- `git push` runs `bd dolt push`, which is what a fresh clone actually reads.
+
+If a push stops with a beads failure, fix the sync — do not reach for
+`--no-verify`. That path leaves everyone else on a backlog that looks current
+and is not, which is precisely the failure this setup exists to prevent.
+
 ## Repository layout
 
 - `docs/` — living source-of-truth docs (`vision.md`, `architecture.md`, `decisions/` ADRs).

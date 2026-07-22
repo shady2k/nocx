@@ -36,25 +36,30 @@ dependency.
 ```bash
 git clone <repo-url> && cd nocx
 
-# 1. Install the git hooks (REQUIRED first step)
-make hooks
+# One command: git hooks, issue tracker, and both dependency trees
+make init
 
-# 2. Set up the issue tracker (skip if you don't use beads)
-bd bootstrap
-
-# 3. Install frontend dependencies
-cd frontend && npm ci && cd ..
-
-# 4. Run in development mode
+# Run in development mode
 wails dev
 ```
 
+`make init` is safe to re-run, and does four things:
+
+| Step | Why it matters |
+| --- | --- |
+| `git config core.hooksPath .githooks` | Installs the quality gate and the tracker sync. Without it nothing is enforced and issue state never leaves your machine. |
+| `bd bootstrap` | Fetches the issue database. Skipped with a note if `bd` is not installed. |
+| `npm ci` (root) | `@playwright/test`, for the e2e suite. |
+| `npm ci` (frontend) | The app's own dependencies. |
+
 `bd bootstrap`, not `bd init`: the backlog lives in a Dolt database that git does
 not carry, and bootstrap is the command that knows where to get it — it clones
-from the configured remote, and falls back to the tracked `.beads/issues.jsonl`
+from the configured remote and falls back to the tracked `.beads/issues.jsonl`
 only if that is unavailable. A clone without this step has no issue database at
-all. `bd init --from-jsonl` exists, but it builds a history that has diverged
-from the remote, so keep it for recovery rather than setup.
+all, and `bd ready` will tell you so. `bd init --from-jsonl` exists, but it
+builds a history divergent from the remote, so keep it for recovery, not setup.
+
+The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
 The pre-commit hook runs on every `git commit` and enforces:
 - `gofumpt` — format check (fails if any file needs formatting)

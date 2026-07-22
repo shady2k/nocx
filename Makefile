@@ -1,4 +1,4 @@
-.PHONY: all build dev lint format test clean hooks ci lint-ci test-ci build-ci frontend-ci
+.PHONY: all init build dev lint format test clean hooks ci lint-ci test-ci build-ci frontend-ci
 
 GO ?= go
 GOFUMPT ?= gofumpt
@@ -25,6 +25,27 @@ test:
 clean:
 	$(GO) clean -cache
 	rm -rf build/
+
+# Everything a fresh clone needs, in one command. Safe to re-run.
+#
+# The issue database is the part people miss: git carries neither the Dolt
+# database nor the ref it lives on, so without bootstrap a clone has no backlog
+# at all — `bd ready` just reports that no database was found.
+init: hooks
+	@if ! command -v bd >/dev/null 2>&1; then \
+		echo "=== issue tracker: bd not installed, skipping (see README) ==="; \
+	elif bd ready >/dev/null 2>&1; then \
+		echo "=== issue tracker: database already present ==="; \
+	else \
+		echo "=== issue tracker: bootstrapping ==="; \
+		bd bootstrap --yes; \
+	fi
+	@echo "=== e2e dependencies ==="
+	npm ci
+	@echo "=== frontend dependencies ==="
+	cd frontend && npm ci
+	@echo ""
+	@echo "Ready. Run 'wails dev' to start the app, 'bd ready' for the backlog."
 
 hooks:
 	git config core.hooksPath .githooks

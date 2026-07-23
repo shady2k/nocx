@@ -40,10 +40,16 @@ Then open nocx normally. This is required only the first time — later in-app u
 | Wails CLI | v2 | `go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
 | gofumpt | latest | `go install mvdan.cc/gofumpt@latest` |
 | golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
-| bd (beads) | 1.x | `brew install beads` |
+| bd (beads) | **≥ 1.1.0** | `brew install beads` |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
+
+> ⚠️ `bd` must be **≥ 1.1.0**. Older builds (e.g. 1.0.3, which some distros and
+> nixpkgs still ship) misread the tracker's dependency schema: `bd stats` errors,
+> and — worse — the auto-export strips every dependency edge from
+> `.beads/issues.jsonl`, which the pre-commit hook then commits. Check with
+> `bd version` before enabling hooks.
 
 **On NixOS / without Homebrew.** `brew` and `npm i -g` don't work here — the
 latter writes into the read-only Nix store. Install `go`, `nodejs_24`, `gofumpt`,
@@ -58,7 +64,8 @@ uv tool install graphifyy && graphify install
 ```
 
 `bd` is not in upstream nixpkgs, so `go install` is the clean route (or package
-it yourself). The `beads-superpowers` plugin installs via `claude` — see
+it yourself) — either way confirm `bd version` is **≥ 1.1.0**, since a system or
+nixpkgs build can lag. The `beads-superpowers` plugin installs via `claude` — see
 [Agent tooling](#agent-tooling).
 
 ## Getting started

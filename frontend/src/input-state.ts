@@ -22,6 +22,26 @@ export function initialMachine(): Machine {
   return { state: 'RAW', trusted: false }
 }
 
+export class InputStateController {
+  private machine = initialMachine()
+  private subs: Array<(m: Machine) => void> = []
+
+  get state(): InputState { return this.machine.state }
+  get trusted(): boolean { return this.machine.trusted }
+
+  dispatch(e: InputEvent): void {
+    const next = reduce(this.machine, e)
+    if (next.state === this.machine.state && next.trusted === this.machine.trusted) {
+      this.machine = next
+      return
+    }
+    this.machine = next
+    for (const cb of this.subs) cb(next)
+  }
+
+  onChange(cb: (m: Machine) => void): void { this.subs.push(cb) }
+}
+
 export function reduce(m: Machine, e: InputEvent): Machine {
   switch (e.type) {
     case 'buffer':

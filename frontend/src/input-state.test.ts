@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { initialMachine, reduce, type Machine, type InputEvent } from './input-state'
+import { initialMachine, reduce, InputStateController, type Machine, type InputEvent } from './input-state'
 
 const run = (evs: InputEvent[], m: Machine = initialMachine()) =>
   evs.reduce(reduce, m)
@@ -58,5 +58,18 @@ describe('input-state hardening / resync', () => {
   it('B without a prompt is untrusted PROMPT_READY', () => {
     const b = reduce(initialMachine(), { type: 'marker', kind: 'B' })
     expect(b).toEqual({ state: 'PROMPT_READY', trusted: false })
+  })
+})
+
+describe('InputStateController', () => {
+  it('tracks state and fires onChange only on real changes', () => {
+    const c = new InputStateController()
+    const seen: string[] = []
+    c.onChange((m) => seen.push(m.state))
+    c.dispatch({ type: 'marker', kind: 'A' }) // -> PROMPT_READY
+    c.dispatch({ type: 'marker', kind: 'B' }) // stays PROMPT_READY (no change)
+    c.dispatch({ type: 'marker', kind: 'C' }) // -> RUNNING_RAW
+    expect(c.state).toBe('RUNNING_RAW')
+    expect(seen).toEqual(['PROMPT_READY', 'RUNNING_RAW'])
   })
 })

@@ -148,6 +148,18 @@ jobs:
           #    round trip (§9) asserts is preserved through packaging.
           codesign --verify --deep --strict "$APP"
 
+      # The load-bearing packaging proof (nocx-3dk, design §9.1): the built
+      # bundle must survive `ditto -c -k --keepParent` → `ditto -x -k` with its
+      # executable bit, symlinks, both universal slices and the ad-hoc signature
+      # intact and still launch, while a naive archive/zip extraction of the same
+      # archive must NOT — that gap is the reason the updater shells out to
+      # /usr/bin/ditto (§7.4 step 9). It runs here because it needs a real built
+      # .app; a plain `go test` elsewhere skips it (NOCX_ROUNDTRIP_APP unset).
+      - name: Payload round-trip test
+        env:
+          NOCX_ROUNDTRIP_APP: ${{ github.workspace }}/build/bin/nocx.app
+        run: go test -count=1 -run '^TestPayloadRoundTrip' -v ./internal/update/
+
       - name: Package .dmg and .zip
         run: |
           set -euo pipefail

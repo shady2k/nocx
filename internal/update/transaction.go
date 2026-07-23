@@ -66,10 +66,10 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 	if err != nil {
 		return fmt.Errorf("update apply: %w", err)
 	}
-	defer lk.release()
+	defer func() { _ = lk.release() }()
 
 	// Step 2: reconcile; refuse if transaction already in flight.
-	if err := u.reconcileLocked(ctx); err != nil {
+	if err = u.reconcileLocked(ctx); err != nil {
 		return fmt.Errorf("update apply: reconcile before apply: %w", err)
 	}
 
@@ -80,7 +80,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 	}
 
 	// Step 3: preflight check through platform seam.
-	if err := u.platform.Preflight(ctx, u.installPath); err != nil {
+	if err = u.platform.Preflight(ctx, u.installPath); err != nil {
 		return fmt.Errorf("update apply: preflight refused: %w", err)
 	}
 
@@ -104,7 +104,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 		ToVersion:      info.Version,
 		ArtifactSHA256: info.SHA256,
 	}
-	if err := writeJournal(jp, rec); err != nil {
+	if err = writeJournal(jp, rec); err != nil {
 		return fmt.Errorf("update apply: write journal: %w", err)
 	}
 
@@ -113,13 +113,13 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 
 	// Step 5: create extraction directory.
 	extractDir := extractionDir(u.installPath, txID)
-	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+	if err = os.MkdirAll(extractDir, 0o750); err != nil {
 		return fmt.Errorf("update apply: create extraction dir: %w", err)
 	}
 
 	// Step 6: download the artefact.
 	archivePath := filepath.Join(extractDir, "download")
-	if err := u.downloadVerified(ctx, info.URL, info.SHA256, info.Size, archivePath); err != nil {
+	if err = u.downloadVerified(ctx, info.URL, info.SHA256, info.Size, archivePath); err != nil {
 		// Cleanup on download failure — the journal remains so
 		// reconciliation cleans up the extraction dir.
 		return fmt.Errorf("update apply: download artefact: %w", err)
@@ -132,24 +132,24 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 	// destination are the SAME path — the file is truncated to
 	// zero before io.Copy reads it. The subdir prevents that.
 	stageDir := filepath.Join(extractDir, "stage")
-	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+	if err = os.MkdirAll(stageDir, 0o750); err != nil {
 		return fmt.Errorf("update apply: create stage dir: %w", err)
 	}
-	if err := u.platform.Extract(ctx, archivePath, stageDir); err != nil {
+	if err = u.platform.Extract(ctx, archivePath, stageDir); err != nil {
 		return fmt.Errorf("update apply: extract: %w", err)
 	}
 
 	// Step 8: platform verify.
 	extractedBundle := u.extractedBundlePath(stageDir)
-	if err := u.platform.VerifyExtracted(ctx, extractedBundle); err != nil {
+	if err = u.platform.VerifyExtracted(ctx, extractedBundle); err != nil {
 		return fmt.Errorf("update apply: verify extracted: %w", err)
 	}
 
 	// Step 9: rename staged bundle to swap peer, record newBundleID.
 	swap := swapPath(u.installPath)
 	// Remove any leftover swap from a previous crashed transaction.
-	os.RemoveAll(swap)
-	if err := os.Rename(extractedBundle, swap); err != nil {
+	_ = os.RemoveAll(swap)
+	if err = os.Rename(extractedBundle, swap); err != nil {
 		return fmt.Errorf("update apply: rename staged → swap: %w", err)
 	}
 
@@ -158,7 +158,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 		return fmt.Errorf("update apply: stat swap bundle: %w", err)
 	}
 	rec.NewBundleID = newID
-	if err := writeJournal(jp, rec); err != nil {
+	if err = writeJournal(jp, rec); err != nil {
 		return fmt.Errorf("update apply: update journal with newBundleID: %w", err)
 	}
 
@@ -186,7 +186,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 	// Cleanup the extraction directory (the archive was already
 	// consumed; the bundle was moved to swap which is now the old
 	// install at swapPath).
-	os.RemoveAll(extractDir)
+	_ = os.RemoveAll(extractDir)
 
 	return nil
 }
@@ -231,7 +231,7 @@ func (u *updater) Reconcile(ctx context.Context) error {
 		u.log.Debug("reconcile: another process holds the lock, skipping this launch")
 		return nil
 	}
-	defer lk.release()
+	defer func() { _ = lk.release() }()
 
 	return u.reconcileLocked(ctx)
 }
@@ -279,9 +279,9 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 			"fromVersion", rec.FromVersion, "toVersion", rec.ToVersion)
 
 		swap := swapPath(u.installPath)
-		os.RemoveAll(swap)
+		_ = os.RemoveAll(swap)
 		extractDir := extractionDir(u.installPath, rec.TxID)
-		os.RemoveAll(extractDir)
+		_ = os.RemoveAll(extractDir)
 		if err := deleteJournal(jp); err != nil {
 			return fmt.Errorf("reconcile: clear journal: %w", err)
 		}
@@ -346,7 +346,7 @@ func (u *updater) rollback(jp string, rec *journalRecord) error {
 		return fmt.Errorf("rollback: clear journal: %w", err)
 	}
 	extractDir := extractionDir(u.installPath, rec.TxID)
-	os.RemoveAll(extractDir)
+	_ = os.RemoveAll(extractDir)
 
 	return nil
 }
@@ -361,7 +361,7 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("report healthy: lock: %w", err)
 	}
-	defer lk.release()
+	defer func() { _ = lk.release() }()
 
 	jp := journalPath(u.installPath)
 	rec, err := readJournal(jp)
@@ -388,13 +388,13 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 	backup := backupPath(u.installPath)
 	backupID, _ := statBundleID(backup)
 	if !backupID.isZero() && !backupID.equal(rec.NewBundleID) {
-		os.RemoveAll(backup)
+		_ = os.RemoveAll(backup)
 	}
 
 	// 2. Rename swap (which now holds old bundle) to backup.
 	swap := swapPath(u.installPath)
 	if u.pathExists(swap) {
-		os.RemoveAll(backup)
+		_ = os.RemoveAll(backup)
 		if err := os.Rename(swap, backup); err != nil {
 			u.log.Warn("report healthy: rename swap→backup failed", "error", err)
 		}
@@ -417,4 +417,3 @@ func (u *updater) pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
-

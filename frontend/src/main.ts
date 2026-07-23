@@ -1,5 +1,11 @@
 import './style.css'
-import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
+import {
+  GetWSPort,
+  CheckForUpdate,
+  ApplyUpdate,
+  ReportHealthy,
+  type UpdateInfo,
+} from '../wailsjs/go/main/WailsApp'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
@@ -36,7 +42,9 @@ class UpdateNotice {
     const btn = document.createElement('button')
     btn.textContent = 'Update'
     btn.className = 'update-apply-btn'
-    btn.addEventListener('click', () => this.apply())
+    btn.addEventListener('click', () => {
+      void this.apply()
+    })
     this.el.append(span, ' · ', link, ' ', btn)
   }
 
@@ -74,8 +82,9 @@ class UpdateNotice {
       await ApplyUpdate()
       // After a successful apply, show pending restart.
       this.showPendingRestart('') // version unknown here; Go can enrich later
-    } catch (err: any) {
-      this.showError(err?.message ?? String(err))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      this.showError(msg)
     }
   }
 }
@@ -120,9 +129,7 @@ async function main() {
   // Report healthy once the initial tab's renderer mounted and PTY opened.
   tm.initialTabReady.then(
     () => {
-      ReportHealthy().catch((err) =>
-        console.warn('nocx: ReportHealthy failed', err),
-      )
+      ReportHealthy().catch((err) => console.warn('nocx: ReportHealthy failed', err))
     },
     () => {
       console.warn('nocx: initial tab failed — not reporting healthy')
@@ -131,7 +138,7 @@ async function main() {
 
   // Check for updates. Failures are silent (airplane mode, DNS hiccup, etc.).
   try {
-    const info = await CheckForUpdate()
+    const info: UpdateInfo | null = await CheckForUpdate()
     if (info) {
       notice.showAvailable(info.Version, info.NotesURL)
     }
@@ -141,15 +148,17 @@ async function main() {
 
   // Re-check every 24 hours.
   const DAY_MS = 24 * 60 * 60 * 1000
-  setInterval(async () => {
-    try {
-      const info = await CheckForUpdate()
-      if (info) {
-        notice.showAvailable(info.Version, info.NotesURL)
+  setInterval(() => {
+    void (async () => {
+      try {
+        const info: UpdateInfo | null = await CheckForUpdate()
+        if (info) {
+          notice.showAvailable(info.Version, info.NotesURL)
+        }
+      } catch {
+        // Silent.
       }
-    } catch {
-      // Silent.
-    }
+    })()
   }, DAY_MS)
 }
 

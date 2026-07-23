@@ -310,11 +310,11 @@ func fatBinaryWithBothSlices() []byte {
 		cpuSubtypeAll uint32 = 0x00000003
 	)
 
-	const fatHeaderSize = 8         // magic + nfat_arch
-	const fatArchSize = 20          // one fat_arch entry
-	const sliceDataSize = 32        // minimal thin Mach-O header
-	const fatArchOffset0 = 4096     // page-aligned offset for slice 0
-	const fatArchOffset1 = 8192     // page-aligned offset for slice 1
+	const fatHeaderSize = 8     // magic + nfat_arch
+	const fatArchSize = 20      // one fat_arch entry
+	const sliceDataSize = 32    // minimal thin Mach-O header
+	const fatArchOffset0 = 4096 // page-aligned offset for slice 0
+	const fatArchOffset1 = 8192 // page-aligned offset for slice 1
 
 	out := make([]byte, fatArchOffset1+sliceDataSize)
 	cursor := 0
@@ -336,7 +336,7 @@ func fatBinaryWithBothSlices() []byte {
 	}
 
 	write32be(0xcafebabe) // fat magic
-	write32be(2)           // nfat_arch = 2
+	write32be(2)          // nfat_arch = 2
 
 	// fat_arch[0] — x86_64
 	write32be(cpuTypeX8664)

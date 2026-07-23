@@ -81,7 +81,7 @@ func makeMinimalAppImage(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	content := append(header, payload...)
-	if err := os.WriteFile(path, content, 0o755); err != nil {
+	if err := os.WriteFile(path, content, 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 }
@@ -112,10 +112,12 @@ func TestUpdater_Check_FindsUpdate(t *testing.T) {
 	arch := NewPlatform().ArtifactID()
 
 	artifacts := []Artifact{
-		{OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
+		{
+			OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
 			URL:    "https://example.com/nocx-0.2.0.AppImage",
 			SHA256: "abc123",
-			Size:   12345},
+			Size:   12345,
+		},
 	}
 	body, sig := newTestManifest("0.2.0", artifacts, priv)
 
@@ -139,10 +141,12 @@ func TestUpdater_Check_AlreadyCurrent(t *testing.T) {
 	arch := NewPlatform().ArtifactID()
 
 	artifacts := []Artifact{
-		{OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
+		{
+			OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
 			URL:    "https://example.com/nocx-0.1.0.AppImage",
 			SHA256: "abc",
-			Size:   123},
+			Size:   123,
+		},
 	}
 	body, sig := newTestManifest("0.1.0", artifacts, priv) // same version
 
@@ -163,10 +167,12 @@ func TestUpdater_Check_RemoteOlder(t *testing.T) {
 	arch := NewPlatform().ArtifactID()
 
 	artifacts := []Artifact{
-		{OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
+		{
+			OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
 			URL:    "https://example.com/nocx-0.0.9.AppImage",
 			SHA256: "abc",
-			Size:   123},
+			Size:   123,
+		},
 	}
 	body, sig := newTestManifest("0.0.9", artifacts, priv)
 
@@ -188,8 +194,10 @@ func TestUpdater_Check_BadSignature(t *testing.T) {
 	arch := NewPlatform().ArtifactID()
 
 	artifacts := []Artifact{
-		{OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
-			URL: "https://example.com/nocx.AppImage", SHA256: "abc", Size: 123},
+		{
+			OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
+			URL: "https://example.com/nocx.AppImage", SHA256: "abc", Size: 123,
+		},
 	}
 	body, sig := newTestManifest("0.2.0", artifacts, otherPriv) // signed by wrong key
 
@@ -207,8 +215,10 @@ func TestUpdater_Check_NoMatchingArtifact(t *testing.T) {
 
 	// Only darwin artifacts — no linux.
 	artifacts := []Artifact{
-		{OS: "darwin", Arch: "universal", Format: "zip",
-			URL: "https://example.com/mac.zip", SHA256: "abc", Size: 123},
+		{
+			OS: "darwin", Arch: "universal", Format: "zip",
+			URL: "https://example.com/mac.zip", SHA256: "abc", Size: 123,
+		},
 	}
 	body, sig := newTestManifest("0.2.0", artifacts, priv)
 
@@ -247,7 +257,7 @@ func TestReconcile_NoRecord_ManagedDebris(t *testing.T) {
 	makeMinimalAppImage(t, installPath)
 
 	// Create managed debris without a journal.
-	if err := os.WriteFile(swapPath(installPath), []byte("debris"), 0o644); err != nil {
+	if err := os.WriteFile(swapPath(installPath), []byte("debris"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,11 +301,11 @@ func TestReconcile_ExchangeDidNotHappen_OldIDMatches(t *testing.T) {
 
 	// Create a swap file (like the staged bundle was renamed).
 	swap := swapPath(installPath)
-	os.WriteFile(swap, []byte("staged"), 0o644)
+	_ = os.WriteFile(swap, []byte("staged"), 0o600)
 
 	// Create extraction dir debris.
 	extractDir := extractionDir(installPath, "0.2.0")
-	os.MkdirAll(extractDir, 0o755)
+	_ = os.MkdirAll(extractDir, 0o750)
 
 	u := NewUpdater(UpdaterConfig{
 		Platform:       NewPlatform(),
@@ -400,7 +410,7 @@ func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
 		ArtifactSHA256: "abc",
 		LaunchAttempts: 2, // one more launch triggers rollback
 	}
-	if err := writeJournal(jp, rec); err != nil {
+	if err = writeJournal(jp, rec); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,12 +422,13 @@ func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
 		InstallPath:    installPath,
 	})
 
-	if err := u.Reconcile(context.Background()); err != nil {
+	if err = u.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile (auto-rollback) failed: %v", err)
 	}
 
 	// Journal should be deleted.
-	if _, err := os.Stat(jp); !os.IsNotExist(err) {
+	_, statErr := os.Stat(jp)
+	if !os.IsNotExist(statErr) {
 		t.Error("journal not deleted after auto-rollback")
 	}
 
@@ -531,7 +542,7 @@ func TestFlock_TryLockBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer holder.release()
+	defer func() { _ = holder.release() }()
 
 	// Try to get it with a short timeout — must time out.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -542,7 +553,7 @@ func TestFlock_TryLockBlocks(t *testing.T) {
 		t.Fatalf("tryLock returned error: %v", err)
 	}
 	if lk != nil {
-		lk.release()
+		_ = lk.release()
 		t.Fatal("tryLock acquired lock while holder still had it")
 	}
 }
@@ -555,7 +566,7 @@ func TestFlock_TryLockSucceedsAfterRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	holder.release()
+	_ = holder.release()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -567,17 +578,7 @@ func TestFlock_TryLockSucceedsAfterRelease(t *testing.T) {
 	if lk == nil {
 		t.Fatal("tryLock failed to acquire lock after release")
 	}
-	lk.release()
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-func sha256HexBytes(data []byte) string {
-	h := sha256.New()
-	h.Write(data)
-	return hex.EncodeToString(h.Sum(nil))
+	_ = lk.release()
 }
 
 // ---------------------------------------------------------------------------
@@ -610,7 +611,7 @@ func serveAppImageFixture(t *testing.T) (url string, sha256Hex string, size int6
 
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Write(fixture)
+		_, _ = w.Write(fixture)
 	}))
 
 	return srv.URL, sha256Hex, size, srv
@@ -633,7 +634,8 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 
 	// Build a signed manifest pointing at the fixture.
 	artifacts := []Artifact{
-		{OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
+		{
+			OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
 			URL:    fixtureURL,
 			SHA256: fixtureSHA256,
 			Size:   fixtureSize,
@@ -674,7 +676,7 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 	}
 
 	// 2. Apply must succeed.
-	if err := u.Apply(ctx, info); err != nil {
+	if err = u.Apply(ctx, info); err != nil {
 		t.Fatalf("Apply failed: %v", err)
 	}
 
@@ -761,10 +763,11 @@ func TestUpdater_Apply_SHA256Mismatch(t *testing.T) {
 
 	// Manifest declares an sha256 that does NOT match the served fixture.
 	artifacts := []Artifact{
-		{OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
+		{
+			OS: arch.OS, Arch: arch.Arch, Format: arch.Format,
 			URL:    srv.URL,
 			SHA256: "0000000000000000000000000000000000000000000000000000000000000000", // deliberately wrong
-			Size:   523, // matches the fixture size (11 header + 512 payload)
+			Size:   523,                                                                // matches the fixture size (11 header + 512 payload)
 		},
 	}
 	manifestBody, manifestSig := newTestManifest("0.2.0", artifacts, priv)

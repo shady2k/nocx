@@ -21,10 +21,10 @@ func TestExchange_SwapContents(t *testing.T) {
 	a := filepath.Join(dir, "a")
 	b := filepath.Join(dir, "b")
 
-	if err := os.WriteFile(a, []byte("content-A"), 0o644); err != nil {
+	if err := os.WriteFile(a, []byte("content-A"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(b, []byte("content-B"), 0o644); err != nil {
+	if err := os.WriteFile(b, []byte("content-B"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -34,7 +34,7 @@ func TestExchange_SwapContents(t *testing.T) {
 	}
 
 	// After swap, file "a" should have B's content and vice versa.
-	gotA, err := os.ReadFile(a)
+	gotA, err := os.ReadFile(a) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestExchange_SwapContents(t *testing.T) {
 		t.Errorf("file a after swap: got %q, want %q", string(gotA), "content-B")
 	}
 
-	gotB, err := os.ReadFile(b)
+	gotB, err := os.ReadFile(b) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestExchange_MissingPath(t *testing.T) {
 	existing := filepath.Join(dir, "exists")
 	missing := filepath.Join(dir, "does-not-exist")
 
-	if err := os.WriteFile(existing, []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(existing, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -116,7 +116,7 @@ func TestPreflight_AppImageSetButReadOnlyDir(t *testing.T) {
 	t.Setenv("APPIMAGE", appImagePath)
 
 	// Make the directory read-only.
-	if err := os.Chmod(dir, 0o500); err != nil {
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // test needs read-only dir
 		t.Fatal(err)
 	}
 
@@ -193,7 +193,7 @@ func TestVerifyExtracted_NotExecutable(t *testing.T) {
 func TestVerifyExtracted_NoELDMagic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "not-an-appimage")
-	if err := os.WriteFile(path, []byte("just some text"), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte("just some text"), 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 
@@ -216,7 +216,7 @@ func TestVerifyExtracted_NoAppImageMagic(t *testing.T) {
 		0x02, 0x01, 0x01, 0x00, // padding
 		0x00, 0x00, 0x00, // not AppImage magic
 	}
-	if err := os.WriteFile(path, header, 0o755); err != nil {
+	if err := os.WriteFile(path, header, 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 
@@ -248,13 +248,13 @@ func TestVerifyExtracted_MissingFile(t *testing.T) {
 func TestExtract_CopiesWithExecBit(t *testing.T) {
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "staging")
-	if err := os.Mkdir(destDir, 0o755); err != nil {
+	if err := os.Mkdir(destDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
 	srcPath := filepath.Join(dir, "source.AppImage")
 	content := []byte("fake AppImage content for extract test")
-	if err := os.WriteFile(srcPath, content, 0o644); err != nil {
+	if err := os.WriteFile(srcPath, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -264,7 +264,7 @@ func TestExtract_CopiesWithExecBit(t *testing.T) {
 	}
 
 	staged := filepath.Join(destDir, "source.AppImage")
-	got, err := os.ReadFile(staged)
+	got, err := os.ReadFile(staged) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestExtract_CopiesWithExecBit(t *testing.T) {
 func TestExtract_SourceNotFound(t *testing.T) {
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "staging")
-	if err := os.Mkdir(destDir, 0o755); err != nil {
+	if err := os.Mkdir(destDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 

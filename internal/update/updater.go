@@ -181,7 +181,7 @@ func (f *GitHubManifestFetcher) get(ctx context.Context, url string) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
@@ -208,7 +208,7 @@ func (u *updater) downloadVerified(ctx context.Context, url, sha256Hex string, s
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: unexpected status %d", url, resp.StatusCode)
@@ -219,21 +219,21 @@ func (u *updater) downloadVerified(ctx context.Context, url, sha256Hex string, s
 	if limit < 0 {
 		limit = size
 	}
-	f, err := os.Create(destPath)
+	f, err := os.Create(destPath) //nolint:gosec // destPath is constructed in the extraction dir
 	if err != nil {
 		return fmt.Errorf("create download file %s: %w", destPath, err)
 	}
 	ok := false
 	defer func() {
 		if !ok {
-			os.Remove(destPath)
+			_ = os.Remove(destPath)
 		}
 	}()
 
 	h := sha256.New()
 	written, err := io.Copy(f, io.TeeReader(io.LimitReader(resp.Body, limit), h))
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("download write: %w", err)
 	}
 	if err := f.Close(); err != nil {

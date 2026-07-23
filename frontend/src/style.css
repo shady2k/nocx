@@ -494,7 +494,11 @@ body {
   align-items: center;
   gap: 6px;
   padding: 0 12px;
-  font: 11px/1 ui-sans-serif, -apple-system, 'SF Pro Text', system-ui;
+  font:
+    11px/1 ui-sans-serif,
+    -apple-system,
+    'SF Pro Text',
+    system-ui;
   color: #a9b1d6;
   white-space: nowrap;
   --wails-draggable: no-drag;

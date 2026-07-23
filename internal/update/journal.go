@@ -38,10 +38,10 @@ func statBundleID(path string) (bundleID, error) {
 	if !ok {
 		return zeroID, fmt.Errorf("unsupported filesystem stat for %s", path)
 	}
-	return bundleID{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil
+	return bundleID{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil //nolint:unconvert // stat.Dev is int32 on darwin, uint64 on linux
 }
 
-func (b bundleID) isZero() bool   { return b == zeroID }
+func (b bundleID) isZero() bool          { return b == zeroID }
 func (b bundleID) equal(o bundleID) bool { return b == o }
 
 // ---------------------------------------------------------------------------
@@ -56,15 +56,15 @@ func (b bundleID) equal(o bundleID) bool { return b == o }
 // The schema version is included so future format changes can be
 // recognised and a legible error produced instead of guessing.
 type journalRecord struct {
-	SchemaVersion  int       `json:"schemaVersion"`
-	TxID           string    `json:"txID"`
-	InstallPath    string    `json:"installPath"`
-	OldBundleID    bundleID  `json:"oldBundleID"`
-	NewBundleID    bundleID  `json:"newBundleID"` // zeroID until the staged swap file exists
-	FromVersion    string    `json:"fromVersion"`
-	ToVersion      string    `json:"toVersion"`
-	ArtifactSHA256 string    `json:"artifactSHA256"`
-	LaunchAttempts int       `json:"launchAttempts"`
+	SchemaVersion  int      `json:"schemaVersion"`
+	TxID           string   `json:"txID"`
+	InstallPath    string   `json:"installPath"`
+	OldBundleID    bundleID `json:"oldBundleID"`
+	NewBundleID    bundleID `json:"newBundleID"` // zeroID until the staged swap file exists
+	FromVersion    string   `json:"fromVersion"`
+	ToVersion      string   `json:"toVersion"`
+	ArtifactSHA256 string   `json:"artifactSHA256"`
+	LaunchAttempts int      `json:"launchAttempts"`
 }
 
 const journalSchemaVersion = 1
@@ -79,14 +79,14 @@ func journalPath(installPath string) string {
 // readJournal reads and parses the journal, or returns nil if the
 // journal file does not exist.
 func readJournal(path string) (*journalRecord, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path is constructed from installPath (caller-controlled)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("open journal %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var r journalRecord
 	if err := json.NewDecoder(f).Decode(&r); err != nil {
@@ -105,43 +105,43 @@ func writeJournal(path string, r *journalRecord) error {
 	r.SchemaVersion = journalSchemaVersion
 
 	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
+	f, err := os.Create(tmpPath) //nolint:gosec // path is constructed from journalPath (caller-controlled)
 	if err != nil {
 		return fmt.Errorf("create journal tmp %s: %w", tmpPath, err)
 	}
 
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(r); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+	if err = enc.Encode(r); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("encode journal: %w", err)
 	}
 
 	// fsync the data to disk.
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("fsync journal tmp: %w", err)
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmpPath)
+	if err = f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close journal tmp: %w", err)
 	}
 
 	// Atomic rename.
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+	if err = os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename journal tmp → journal: %w", err)
 	}
 
 	// fsync the directory so the rename is durable.
-	dir, err := os.Open(filepath.Dir(path))
+	dir, err := os.Open(filepath.Dir(path)) //nolint:gosec // path is constructed from journalPath
 	if err != nil {
 		return fmt.Errorf("open journal dir for fsync: %w", err)
 	}
-	dir.Sync()
-	dir.Close()
+	_ = dir.Sync()
+	_ = dir.Close()
 
 	return nil
 }

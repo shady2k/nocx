@@ -51,7 +51,7 @@ func makeAppImageFixture(t *testing.T, dir, name string) (string, []byte) {
 
 	content := append(header, payload...)
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, content, 0o755); err != nil {
+	if err := os.WriteFile(path, content, 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 	return path, content
@@ -66,7 +66,7 @@ func TestLinuxAppImageStructuralRoundTrip(t *testing.T) {
 
 	// Step 2 — Extract into a staging directory.
 	stagingDir := filepath.Join(base, "staging")
-	if err := os.Mkdir(stagingDir, 0o755); err != nil {
+	if err := os.Mkdir(stagingDir, 0o755); err != nil { //nolint:gosec // test-controlled dir
 		t.Fatal(err)
 	}
 
@@ -88,7 +88,7 @@ func TestLinuxAppImageStructuralRoundTrip(t *testing.T) {
 
 	// Step 5 — byte-level integrity: the staged file must be identical
 	// to the original.
-	stagedContent, err := os.ReadFile(stagedPath)
+	stagedContent, err := os.ReadFile(stagedPath) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,18 +117,18 @@ func TestLinuxAppImageStructuralRoundTrip(t *testing.T) {
 	// Step 7 — Exchange: swap the staged file with a "currently installed" one.
 	installPath := filepath.Join(base, "nocx-current.AppImage")
 	installContent := []byte("previous-version-content")
-	if err := os.WriteFile(installPath, installContent, 0o755); err != nil {
+	if err = os.WriteFile(installPath, installContent, 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 
-	if err := p.Exchange(ctx, installPath, stagedPath); err != nil {
+	if err = p.Exchange(ctx, installPath, stagedPath); err != nil {
 		t.Fatalf("Exchange failed: %v", err)
 	}
 
 	// Step 8 — after Exchange:
 	//   installPath must now hold the new AppImage (the staged content).
 	//   stagedPath must now hold the old content.
-	gotNew, err := os.ReadFile(installPath)
+	gotNew, err := os.ReadFile(installPath) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestLinuxAppImageStructuralRoundTrip(t *testing.T) {
 		t.Error("after Exchange, installPath does not contain the new AppImage")
 	}
 
-	gotOld, err := os.ReadFile(stagedPath)
+	gotOld, err := os.ReadFile(stagedPath) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,12 +176,12 @@ func TestLinuxAppImageRoundTrip_VariousPayloadSizes(t *testing.T) {
 
 			full := append(header, payload...)
 			srcPath := filepath.Join(base, "fixture.AppImage")
-			if err := os.WriteFile(srcPath, full, 0o755); err != nil {
+			if err := os.WriteFile(srcPath, full, 0o755); err != nil { //nolint:gosec // test fixture must be executable
 				t.Fatal(err)
 			}
 
 			stagingDir := filepath.Join(base, "staging")
-			if err := os.Mkdir(stagingDir, 0o755); err != nil {
+			if err := os.Mkdir(stagingDir, 0o755); err != nil { //nolint:gosec // test-controlled dir
 				t.Fatal(err)
 			}
 
@@ -191,7 +191,7 @@ func TestLinuxAppImageRoundTrip_VariousPayloadSizes(t *testing.T) {
 			}
 
 			stagedPath := filepath.Join(stagingDir, "fixture.AppImage")
-			staged, err := os.ReadFile(stagedPath)
+			staged, err := os.ReadFile(stagedPath) //nolint:gosec // test-controlled path
 			if err != nil {
 				t.Fatal(err)
 			}

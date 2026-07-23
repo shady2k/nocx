@@ -972,7 +972,7 @@ describe('TabManager', () => {
 
   it('Tab.ready resolves true for a genuinely started tab', async () => {
     // mountTabManager starts the initial tab — its ready must resolve true.
-    const { manager, client } = await mountTabManager()
+    const { client } = await mountTabManager()
 
     // Access the initial Tab via the (newly exported) Tab class and the tabs array.
     // The tabs array is private, but initialTabReady is derived from it — and

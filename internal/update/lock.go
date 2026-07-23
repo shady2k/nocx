@@ -19,12 +19,12 @@ type flock struct {
 // acquireLock acquires an exclusive advisory flock, blocking until
 // the lock is available.
 func acquireLock(path string) (*flock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) //nolint:gosec // path is caller-controlled, permission is read-only
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("flock LOCK_EX %s: %w", path, err)
 	}
 	return &flock{f: f, path: path}, nil
@@ -34,7 +34,7 @@ func acquireLock(path string) (*flock, error) {
 // bounded timeout. It returns nil, nil if the lock cannot be
 // acquired within the timeout (another process is mid-update).
 func tryLock(ctx context.Context, path string) (*flock, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) //nolint:gosec // path is caller-controlled, permission is read-only
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)
 	}
@@ -47,16 +47,16 @@ func tryLock(ctx context.Context, path string) (*flock, error) {
 			return &flock{f: f, path: path}, nil
 		}
 		if !isWouldBlock(err) {
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("flock LOCK_EX|LOCK_NB %s: %w", path, err)
 		}
 		if time.Now().After(deadline) {
-			f.Close()
+			_ = f.Close()
 			return nil, nil // timeout — not an error
 		}
 		select {
 		case <-ctx.Done():
-			f.Close()
+			_ = f.Close()
 			return nil, nil // context cancelled — treat as timeout
 		case <-time.After(50 * time.Millisecond):
 		}

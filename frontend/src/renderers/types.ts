@@ -76,4 +76,9 @@ export interface TerminalRenderer {
   focus(): void
   readonly cols: number
   readonly rows: number
+
+  // dispose releases renderer-held resources (timers, listeners). Called when
+  // the tab owning this renderer is closed so a periodic forced-refresh pump
+  // does not outlive the terminal it paints.
+  dispose(): void
 }

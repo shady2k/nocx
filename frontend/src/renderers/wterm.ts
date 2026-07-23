@@ -87,6 +87,10 @@ export class WtermRenderer implements TerminalRenderer {
     // WTerm renders via DOM, not a GPU texture atlas — nothing to clear.
   }
 
+  dispose(): void {
+    // WTerm renders via DOM and runs no periodic pump — nothing to release.
+  }
+
   focus(): void {
     this.term?.focus()
   }

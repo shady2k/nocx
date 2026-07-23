@@ -21,6 +21,115 @@ const MAX_BACKOFF_MS = 5000
 // the AD-9 trimming budget without needless chatter.
 const ACK_INTERVAL_MS = 100
 
+// UTF8StreamDecoder is a zero-delay replacement for TextDecoder with
+// stream:true. It decodes and emits every COMPLETE UTF-8 character
+// immediately — no timer, no buffering of trailing bytes that are already
+// a valid character. Only genuinely incomplete multi-byte sequences (a
+// leading byte without enough continuation bytes at the frame boundary)
+// are held for the next frame.
+//
+// TextDecoder in stream:true mode can hold back the final byte(s) of a
+// frame indefinitely in WebKitGTK, making the last typed character
+// invisible until more output arrives. This decoder eliminates that class
+// of bug by construction: if the bytes form a complete character, it is
+// returned now, not later.
+class UTF8StreamDecoder {
+  private tail: number[] = [] // incomplete multi-byte leftovers (0–3 bytes)
+
+  decode(input: Uint8Array): string {
+    if (input.length === 0 && this.tail.length === 0) return ''
+
+    // Merge any leftover bytes from the previous chunk with the new input
+    // into a single flat byte array so we can scan it linearly.
+    const all = new Uint8Array(this.tail.length + input.length)
+    if (this.tail.length > 0) all.set(this.tail)
+    all.set(input, this.tail.length)
+    this.tail = []
+
+    let out = ''
+    let i = 0
+    const len = all.length
+
+    while (i < len) {
+      const b0 = all[i]
+
+      if (b0 < 0x80) {
+        // ASCII — one byte, one character. Emit immediately.
+        out += String.fromCharCode(b0)
+        i++
+        continue
+      }
+
+      // Determine the expected sequence length and continuation mask.
+      let seqLen: number
+      if ((b0 & 0xe0) === 0xc0) seqLen = 2
+      else if ((b0 & 0xf0) === 0xe0) seqLen = 3
+      else if ((b0 & 0xf8) === 0xf0) seqLen = 4
+      else {
+        // Invalid leading byte — emit U+FFFD and skip.
+        out += '\uFFFD'
+        i++
+        continue
+      }
+
+      if (i + seqLen > len) {
+        // Not enough continuation bytes in this chunk — save the partial
+        // sequence for the next decode() call. This is the ONLY case
+        // where bytes are held back, and it only happens when a frame
+        // boundary splits a multi-byte character, which is rare.
+        this.tail = Array.from(all.slice(i))
+        break
+      }
+
+      // Validate continuation bytes (must be 10xxxxxx).
+      let valid = true
+      for (let j = 1; j < seqLen; j++) {
+        if ((all[i + j] & 0xc0) !== 0x80) {
+          valid = false
+          break
+        }
+      }
+      if (!valid) {
+        out += '\uFFFD'
+        i++
+        continue
+      }
+
+      // Decode the codepoint and emit.
+      let cp: number
+      if (seqLen === 2) {
+        cp = ((b0 & 0x1f) << 6) | (all[i + 1] & 0x3f)
+      } else if (seqLen === 3) {
+        cp = ((b0 & 0x0f) << 12) | ((all[i + 1] & 0x3f) << 6) | (all[i + 2] & 0x3f)
+      } else {
+        cp =
+          ((b0 & 0x07) << 18) |
+          ((all[i + 1] & 0x3f) << 12) |
+          ((all[i + 2] & 0x3f) << 6) |
+          (all[i + 3] & 0x3f)
+      }
+
+      // Surrogate pairs for codepoints > 0xFFFF.
+      if (cp > 0xffff) {
+        cp -= 0x10000
+        out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff))
+      } else {
+        out += String.fromCharCode(cp)
+      }
+      i += seqLen
+    }
+
+    return out
+  }
+
+  // reset clears any held partial bytes. Called when the stream position
+  // jumps (reattach reset) so stale leading bytes are not spliced onto a
+  // new stream position.
+  reset(): void {
+    this.tail = []
+  }
+}
+
 // The control-plane messages we receive, mirroring the JSON-RPC 2.0 contract
 // documented in internal/transport/frame.go. Every field is optional: this is
 // untrusted input off the socket, narrowed at each use.
@@ -56,14 +165,25 @@ interface AttachResult {
 }
 
 interface SessionState {
-  decoder: TextDecoder
+  decoder: UTF8StreamDecoder
 
   // Monotonic byte offset — the total count of payload bytes received for
   // this session. Counted as frame.payload.byteLength, NOT decoded string
   // length, because a multi-byte rune is several bytes and one character.
   offset: number
 
+  // dataCallback receives decoded PTY output for the caller (Tab → renderer).
+  // May be null briefly between session creation (open response) and the
+  // first onSessionData() call — binary frames arriving in that window are
+  // buffered in pendingData and flushed when the callback is attached.
   dataCallback: ((data: string) => void) | null
+
+  // pendingData holds decoded output that arrived before dataCallback was
+  // registered. The server starts ringToConn immediately after the open
+  // response, so the initial shell prompt can race the caller's
+  // session.onData() — without this buffer the prompt is silently lost.
+  pendingData: string
+
   exitCallback: ((sessionId: string) => void) | null
   resetCallback: (() => void) | null
 }
@@ -167,8 +287,17 @@ export class WSClient {
               // reconnect). Use byteLength, not decoded string length,
               // because every byte counts on the wire.
               state.offset += frame.payload.byteLength
-              const text = state.decoder.decode(frame.payload, { stream: true })
-              state.dataCallback?.(text)
+              const text = state.decoder.decode(new Uint8Array(frame.payload))
+              if (state.dataCallback) {
+                state.dataCallback(text)
+              } else {
+                // dataCallback is not registered yet — the server starts
+                // ringToConn immediately after the open response, so the
+                // initial shell prompt can arrive before the caller has
+                // a chance to call session.onData(). Buffer until the
+                // callback is attached, then flush.
+                state.pendingData += text
+              }
               this._scheduleAck(frame.sessionId, state.offset)
             }
           }
@@ -207,13 +336,13 @@ export class WSClient {
               state.offset = result.from
               // A reset means the client fell out of the ring — there
               // is a byte gap in the stream. If the last frame before
-              // the drop ended mid-rune, the per-session TextDecoder
-              // is holding the leading bytes of a multi-byte character.
-              // Reusing that decoder would splice stale leading bytes
-              // onto bytes from a different stream position, producing
-              // a wrong character or U+FFFD (bead nocx-ao7 reborn).
-              // Recreate the decoder so the stream starts clean.
-              state.decoder = new TextDecoder()
+              // the drop ended mid-rune, the decoder is holding the
+              // leading bytes of a multi-byte character. Reusing those
+              // bytes would splice stale leading bytes onto bytes from
+              // a different stream position, producing a wrong character
+              // or U+FFFD (bead nocx-ao7 reborn).
+              // Reset the decoder so the stream starts clean.
+              state.decoder.reset()
               state.resetCallback?.()
             }
           })
@@ -324,9 +453,10 @@ export class WSClient {
             return
           }
           this.sessions.set(sid, {
-            decoder: new TextDecoder(),
+            decoder: new UTF8StreamDecoder(),
             offset: 0,
             dataCallback: null,
+            pendingData: '',
             exitCallback: null,
             resetCallback: null,
           })
@@ -434,6 +564,14 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.dataCallback = cb
+      // Flush any output that arrived between session creation (open
+      // response) and this call — the initial shell prompt can race
+      // onSessionData() because the server starts ringToConn immediately.
+      if (state.pendingData) {
+        const buffered = state.pendingData
+        state.pendingData = ''
+        cb(buffered)
+      }
     }
   }
 

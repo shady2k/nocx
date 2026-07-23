@@ -46,7 +46,10 @@ export interface SpikeHarness {
 // Approach (a): Decoration at x:0 + CSS transform translateX(-100%)
 // ═══════════════════════════════════════════════════════════════════════════
 
-function approachA(term: Terminal, log: string[]): {
+function approachA(
+  term: Terminal,
+  log: string[],
+): {
   notClipped: boolean
   leftOffset: number
   decoration: HTMLElement | null
@@ -120,7 +123,9 @@ function approachA(term: Terminal, log: string[]): {
     style.visibility !== 'hidden' &&
     postRect.width > 0 &&
     postRect.height > 0
-  log.push(`[A] Visible: ${isVisible}, display: ${style.display}, size: ${postRect.width}x${postRect.height}`)
+  log.push(
+    `[A] Visible: ${isVisible}, display: ${style.display}, size: ${postRect.width}x${postRect.height}`,
+  )
 
   return { notClipped, leftOffset, decoration: decEl }
 }
@@ -201,11 +206,7 @@ function approachB(
 // Approach (c): Reserved left padding on terminal container
 // ═══════════════════════════════════════════════════════════════════════════
 
-function approachC(
-  term: Terminal,
-  container: HTMLElement,
-  log: string[],
-): { applied: boolean } {
+function approachC(term: Terminal, container: HTMLElement, log: string[]): { applied: boolean } {
   log.push('[C] Reserving left padding on terminal container')
 
   // Apply padding to the container
@@ -276,9 +277,7 @@ function estimateCellHeight(term: Terminal): number {
   const cellHeight = Math.ceil(fontSize * lineHeight)
 
   // Try to read actual dimensions from the char-measure-element if available.
-  const measureEl = term.element?.querySelector(
-    '.xterm-char-measure-element',
-  ) as HTMLElement | null
+  const measureEl = term.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
   if (measureEl) {
     const rect = measureEl.getBoundingClientRect()
     if (rect.height > 0) {
@@ -296,9 +295,7 @@ function estimateCellWidth(term: Terminal): number {
   const fontSize = term.options.fontSize ?? 15
   const letterSpacing = term.options.letterSpacing ?? 0
 
-  const measureEl = term.element?.querySelector(
-    '.xterm-char-measure-element',
-  ) as HTMLElement | null
+  const measureEl = term.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
   if (measureEl) {
     const rect = measureEl.getBoundingClientRect()
     if (rect.width > 0) {
@@ -395,7 +392,10 @@ export function mountGutterSpike(container: HTMLElement): SpikeHarness {
  * This function is the reference implementation the blocks milestone should
  * use. It demonstrates every required API call.
  */
-export function createGutter(container: HTMLElement, terminal: Terminal): {
+export function createGutter(
+  container: HTMLElement,
+  terminal: Terminal,
+): {
   gutter: HTMLElement
   addGlyph(markerLine: number): HTMLElement
   syncPositions(): void
@@ -420,8 +420,7 @@ export function createGutter(container: HTMLElement, terminal: Terminal): {
   function addGlyph(markerLine: number): HTMLElement {
     const glyph = document.createElement('div')
     glyph.style.cssText =
-      'position:absolute;left:2px;width:12px;height:12px;' +
-      'border-radius:50%;top:0;'
+      'position:absolute;left:2px;width:12px;height:12px;' + 'border-radius:50%;top:0;'
     gutter.appendChild(glyph)
     glyphs.push({ el: glyph, markerLine })
     syncPositions()
@@ -472,8 +471,7 @@ export const RECOMMENDED_API_CALLS = {
   getBufferType: 'terminal.buffer.active.type: "normal" | "alternate"',
 
   /** Cell height estimate (fontSize * lineHeight, or measure-element rect). */
-  cellHeight:
-    'Math.ceil((terminal.options.fontSize ?? 15) * (terminal.options.lineHeight ?? 1.0))',
+  cellHeight: 'Math.ceil((terminal.options.fontSize ?? 15) * (terminal.options.lineHeight ?? 1.0))',
 
   /** Cell width estimate. */
   cellWidth:
@@ -489,8 +487,7 @@ export const RECOMMENDED_API_CALLS = {
   onResize: 'terminal.onResize(listener: (size: {cols:number, rows:number}) => void): IDisposable',
 
   /** Listen for render events (viewport content updated). */
-  onRender:
-    'terminal.onRender(listener: (range: {start:number, end:number}) => void): IDisposable',
+  onRender: 'terminal.onRender(listener: (range: {start:number, end:number}) => void): IDisposable',
 
   /** Listen for buffer type changes (normal ↔ alternate). */
   onBufferChange:

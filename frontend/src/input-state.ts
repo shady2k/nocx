@@ -29,12 +29,20 @@ export class InputStateController {
   private machine = initialMachine()
   private subs: Array<(m: Machine) => void> = []
 
-  get state(): InputState { return this.machine.state }
-  get trusted(): boolean { return this.machine.trusted }
+  get state(): InputState {
+    return this.machine.state
+  }
+  get trusted(): boolean {
+    return this.machine.trusted
+  }
 
   dispatch(e: InputEvent): void {
     const next = reduce(this.machine, e)
-    if (next.state === this.machine.state && next.trusted === this.machine.trusted && next.owned === this.machine.owned) {
+    if (
+      next.state === this.machine.state &&
+      next.trusted === this.machine.trusted &&
+      next.owned === this.machine.owned
+    ) {
       this.machine = next
       return
     }
@@ -42,7 +50,9 @@ export class InputStateController {
     for (const cb of this.subs) cb(next)
   }
 
-  onChange(cb: (m: Machine) => void): void { this.subs.push(cb) }
+  onChange(cb: (m: Machine) => void): void {
+    this.subs.push(cb)
+  }
 }
 
 export function reduce(m: Machine, e: InputEvent): Machine {
@@ -67,11 +77,19 @@ export function reduce(m: Machine, e: InputEvent): Machine {
         case 'B':
           // B only means "input ready" when we are already at a prompt.
           // DOM ownership is granted ONLY when an A preceded this B.
-          return { state: 'PROMPT_READY', trusted: m.state === 'PROMPT_READY' && m.trusted, owned: m.state === 'PROMPT_READY' }
+          return {
+            state: 'PROMPT_READY',
+            trusted: m.state === 'PROMPT_READY' && m.trusted,
+            owned: m.state === 'PROMPT_READY',
+          }
         case 'C':
           // Command start. Trusted only if a clean prompt preceded it; an orphan
           // or nested C runs raw but disables downstream actions.
-          return { state: 'RUNNING_RAW', trusted: m.state === 'PROMPT_READY' && m.trusted, owned: false }
+          return {
+            state: 'RUNNING_RAW',
+            trusted: m.state === 'PROMPT_READY' && m.trusted,
+            owned: false,
+          }
         case 'D':
           // Finished — only meaningful while a command is running. Orphan D
           // (e.g. empty Enter emits D with no preceding C) is ignored.

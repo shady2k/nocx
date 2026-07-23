@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { initialMachine, reduce, InputStateController, type Machine, type InputEvent } from './input-state'
+import {
+  initialMachine,
+  reduce,
+  InputStateController,
+  type Machine,
+  type InputEvent,
+} from './input-state'
 
-const run = (evs: InputEvent[], m: Machine = initialMachine()) =>
-  evs.reduce(reduce, m)
+const run = (evs: InputEvent[], m: Machine = initialMachine()) => evs.reduce(reduce, m)
 
 describe('input-state clean cycle', () => {
   it('walks RAW → PROMPT_READY → RUNNING_RAW → RAW', () => {
@@ -19,7 +24,10 @@ describe('input-state clean cycle', () => {
   })
 
   it('alt-buffer wins from any state and normal returns to RAW', () => {
-    const alt = run([{ type: 'marker', kind: 'A' }, { type: 'buffer', buffer: 'alternate' }])
+    const alt = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'buffer', buffer: 'alternate' },
+    ])
     expect(alt.state).toBe('ALT_SCREEN')
     const back = reduce(alt, { type: 'buffer', buffer: 'normal' })
     expect(back.state).toBe('RAW')
@@ -50,7 +58,10 @@ describe('input-state hardening / resync', () => {
   })
 
   it('A interrupting a running command yields untrusted PROMPT_READY', () => {
-    const running = run([{ type: 'marker', kind: 'A' }, { type: 'marker', kind: 'C' }])
+    const running = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'C' },
+    ])
     const a = reduce(running, { type: 'marker', kind: 'A' })
     expect(a).toEqual({ state: 'PROMPT_READY', trusted: false, owned: false })
   })
@@ -73,8 +84,10 @@ describe('A→B ownership gate', () => {
     expect(reduce(initialMachine(), { type: 'marker', kind: 'B' }).owned).toBe(false)
   })
   it('C, submit, alt-buffer, reset clear ownership', () => {
-    const owned = [{ type: 'marker', kind: 'A' } as InputEvent, { type: 'marker', kind: 'B' } as InputEvent]
-      .reduce(reduce, initialMachine())
+    const owned = [
+      { type: 'marker', kind: 'A' } as InputEvent,
+      { type: 'marker', kind: 'B' } as InputEvent,
+    ].reduce(reduce, initialMachine())
     expect(owned.owned).toBe(true)
     expect(reduce(owned, { type: 'marker', kind: 'C' }).owned).toBe(false)
     expect(reduce(owned, { type: 'submit' }).owned).toBe(false)

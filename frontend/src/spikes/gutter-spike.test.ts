@@ -22,16 +22,17 @@
 if (typeof window !== 'undefined' && !window.matchMedia) {
   Object.defineProperty(window, 'matchMedia', {
     writable: true,
-    value: (query: string): MediaQueryList => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    } as MediaQueryList),
+    value: (query: string): MediaQueryList =>
+      ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList,
   })
 }
 if (typeof window !== 'undefined' && !window.innerWidth) {
@@ -41,11 +42,7 @@ if (typeof window !== 'undefined' && !window.innerWidth) {
 }
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import {
-  mountGutterSpike,
-  createGutter,
-  RECOMMENDED_API_CALLS,
-} from './gutter-spike'
+import { mountGutterSpike, createGutter, RECOMMENDED_API_CALLS } from './gutter-spike'
 import type { SpikeHarness } from './gutter-spike'
 import { Terminal } from '@xterm/xterm'
 
@@ -98,9 +95,7 @@ describe('gutter-spike harness', () => {
     const results = harness.collectResults()
 
     // API-level: registerMarker + registerDecoration succeeded.
-    expect(
-      results.log.some((l) => l.includes('[A] Registering marker')),
-    ).toBe(true)
+    expect(results.log.some((l) => l.includes('[A] Registering marker'))).toBe(true)
 
     // IMPORTANT: In jsdom, decoration.onRender never fires (no real canvas
     // rendering pipeline), so the decoration element is never created and
@@ -156,9 +151,7 @@ describe('gutter-spike harness', () => {
   it('creates a decoration container', () => {
     harness = mountGutterSpike(container)
 
-    const decoContainer = container.querySelector(
-      '.xterm-decoration-container',
-    )
+    const decoContainer = container.querySelector('.xterm-decoration-container')
     expect(decoContainer).not.toBeNull()
   })
 })
@@ -336,9 +329,7 @@ describe('DOM structure invariants (xterm.js 5.5)', () => {
     const harness = mountGutterSpike(container)
     harness.collectResults()
 
-    const decoContainer = container.querySelector(
-      '.xterm-decoration-container',
-    )
+    const decoContainer = container.querySelector('.xterm-decoration-container')
     expect(decoContainer).not.toBeNull()
 
     // jsdom limitation: individual .xterm-decoration elements are only
@@ -356,9 +347,7 @@ describe('DOM structure invariants (xterm.js 5.5)', () => {
     harness.collectResults()
 
     const screen = container.querySelector('.xterm-screen')
-    const decoContainer = container.querySelector(
-      '.xterm-decoration-container',
-    )
+    const decoContainer = container.querySelector('.xterm-decoration-container')
     expect(decoContainer?.parentElement).toBe(screen)
 
     harness.dispose()
@@ -377,9 +366,7 @@ describe('DOM structure invariants (xterm.js 5.5)', () => {
     //
     // The decoration-container IS rendered (verified in earlier test),
     // so the z-index layering applies once onRender fires in a real browser.
-    const decoContainer = container.querySelector(
-      '.xterm-decoration-container',
-    )
+    const decoContainer = container.querySelector('.xterm-decoration-container')
     expect(decoContainer).not.toBeNull()
 
     harness.dispose()

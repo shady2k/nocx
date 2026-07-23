@@ -132,6 +132,31 @@ echo NOCX_SOURCED_OK
 	}
 }
 
+// TestBashMarkerOnlyBeatsHostilePrompt spawns a bash that sources nocx.bash
+// with NOCX_PROMPT_MODE=marker-only, with a hostile PROMPT_COMMAND that sets
+// PS1='HOSTILE$ ', calls __nocx_prompt_command, and asserts HOSTILE does not
+// appear in the rendered prompt.
+func TestBashMarkerOnlyBeatsHostilePrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Set hostile PROMPT_COMMAND BEFORE sourcing so nocx captures it.
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+PROMPT_COMMAND='PS1="HOSTILE$ "'
+source "$1"
+__nocx_prompt_command
+echo "PS1=[$PS1]"
+`
+	out := runShellProg(t, bash, prog, script)
+	if strings.Contains(out, "HOSTILE") {
+		t.Errorf("bash marker-only clobbered by framework PROMPT_COMMAND:\n%s", out)
+	}
+	if !strings.Contains(out, "]133;B") {
+		t.Errorf("bash marker-only prompt missing OSC 133 B marker:\n%s", out)
+	}
+}
+
 // TestZshMarkerOnlyBeatsHostilePrompt spawns a zsh that sources nocx.zsh
 // with NOCX_PROMPT_MODE=marker-only, registers a hostile precmd that sets
 // PROMPT='HOSTILE$ ', runs the precmd hooks, and asserts HOSTILE does not

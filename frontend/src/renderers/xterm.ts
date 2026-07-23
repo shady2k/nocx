@@ -27,6 +27,25 @@ type ClipboardWriteCallback = (text: string) => void
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
 const RESIZE_MIN_INTERVAL = 32
 
+// On WebKitGTK (Linux/Wails) the compositor may not present a frame until the
+// window receives a user interaction, so xterm.js's rAF-scheduled repaint of
+// the just-written data never runs — the initial shell prompt stays invisible
+// until a click, and each typed character renders one frame behind (the last
+// one never painted). A periodic timer that re-marks every row dirty forces a
+// render attempt on each tick, keeping the buffer visible without any click.
+// ~24 fps is smooth enough for terminal output and cheap (a no-op refresh when
+// nothing changed costs little). Only active on Linux/WebKitGTK — on macOS
+// (WKWebView) and in browsers the compositor is healthy and the pump is a
+// waste of CPU.
+const FORCED_REFRESH_MS = 42
+
+function isLinuxWebKit(): boolean {
+  if (typeof navigator === 'undefined') return false
+  // Wails on Linux embeds a WebKitGTK webview. The platform is Linux and the
+  // user agent carries "WebKit". macOS uses WKWebView (platform is not Linux).
+  return /linux/i.test(navigator.platform) && /webkit/i.test(navigator.userAgent)
+}
+
 // ── OSC 7 parser (AD-6: frontend parses OSC, backend never sniffs) ──────
 
 // OSC 7 format: ESC ] 7 ; file://host/path ST
@@ -95,6 +114,8 @@ export class XtermRenderer implements TerminalRenderer {
   private canvas?: CanvasAddon
   private container: HTMLElement | null = null
   private recoveryAttempts = 0
+  // Periodic forced refresh — Linux/WebKitGTK only. See FORCED_REFRESH_MS.
+  private refreshTimer: ReturnType<typeof setInterval> | null = null
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -152,6 +173,15 @@ export class XtermRenderer implements TerminalRenderer {
       if (wait > 0) setTimeout(() => requestAnimationFrame(run), wait)
       else requestAnimationFrame(run)
     }).observe(container)
+
+    // Linux/WebKitGTK: re-mark every row dirty on a timer so a render is
+    // always pending. No-op on macOS/browsers where the compositor is healthy.
+    if (isLinuxWebKit()) {
+      this.refreshTimer = setInterval(() => {
+        const t = this.term
+        if (t) t.refresh(0, (t.rows ?? 24) - 1)
+      }, FORCED_REFRESH_MS)
+    }
   }
 
   private safeFit(): void {
@@ -290,6 +320,13 @@ export class XtermRenderer implements TerminalRenderer {
 
   focus(): void {
     this.term?.focus()
+  }
+
+  dispose(): void {
+    if (this.refreshTimer !== null) {
+      clearInterval(this.refreshTimer)
+      this.refreshTimer = null
+    }
   }
 
   get cols(): number {

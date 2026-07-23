@@ -36,13 +36,21 @@ export function reduce(m: Machine, e: InputEvent): Machine {
     case 'marker':
       switch (e.kind) {
         case 'A':
-          return { state: 'PROMPT_READY', trusted: true }
+          // Fresh prompt. Trusted only when we arrived cleanly (from RAW after a
+          // finished command or from initial). An A that interrupts RUNNING_RAW
+          // (no D, or a nested prompt) is a resync: PROMPT_READY but untrusted.
+          return { state: 'PROMPT_READY', trusted: m.state !== 'RUNNING_RAW' }
         case 'B':
-          return { state: 'PROMPT_READY', trusted: m.trusted }
+          // B only means "input ready" when we are already at a prompt.
+          return { state: 'PROMPT_READY', trusted: m.state === 'PROMPT_READY' && m.trusted }
         case 'C':
-          return { state: 'RUNNING_RAW', trusted: m.trusted }
+          // Command start. Trusted only if a clean prompt preceded it; an orphan
+          // or nested C runs raw but disables downstream actions.
+          return { state: 'RUNNING_RAW', trusted: m.state === 'PROMPT_READY' && m.trusted }
         case 'D':
-          return { state: 'RAW', trusted: m.trusted }
+          // Finished — only meaningful while a command is running. Orphan D
+          // (e.g. empty Enter emits D with no preceding C) is ignored.
+          return m.state === 'RUNNING_RAW' ? { state: 'RAW', trusted: m.trusted } : m
       }
   }
 }

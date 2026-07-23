@@ -69,6 +69,7 @@ export function createRendererMock(): RendererMock {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
     reset: vi.fn(),
+    dispose: vi.fn(),
     onData: vi.fn((cb: DataCallback) => {
       cbs.onData = cb
     }),

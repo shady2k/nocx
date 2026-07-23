@@ -384,6 +384,7 @@ class Tab {
 
   close(): void {
     this.session?.close()
+    this.renderer?.dispose()
   }
 }
 

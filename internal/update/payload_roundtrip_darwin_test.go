@@ -232,12 +232,12 @@ func naiveUnzip(t *testing.T, zipPath, dest string) {
 	for _, f := range r.File {
 		target := filepath.Join(dest, f.Name) //nolint:gosec // test-controlled archive we just created
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := os.MkdirAll(target, 0o750); err != nil {
 				t.Fatal(err)
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			t.Fatal(err)
 		}
 		rc, err := f.Open()

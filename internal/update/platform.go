@@ -1,7 +1,7 @@
 // Package update implements the cross-platform auto-update mechanism.
 //
 // The package is structured around a thin [Platform] seam (per
-// ADR-0006): one platform-agnostic core (manifest fetch, ed25519
+// ADR-0007): one platform-agnostic core (manifest fetch, ed25519
 // verification, semver comparison, artefact matching, and the
 // crash-consistency transaction) plus per-OS implementations of the
 // Platform interface.

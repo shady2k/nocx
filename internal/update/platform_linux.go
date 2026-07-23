@@ -24,7 +24,7 @@ var elfMagic = []byte{0x7f, 0x45, 0x4c, 0x46}
 
 // linuxPlatform implements [Platform] for Linux.
 //
-// The implementation follows ADR-0006: the updater ships an AppImage,
+// The implementation follows ADR-0007: the updater ships an AppImage,
 // a single self-contained executable file. Extract is a plain file
 // copy + chmod, VerifyExtracted checks the executable bit and
 // AppImage magic, and Exchange is an atomic renameat2(RENAME_EXCHANGE)
@@ -106,7 +106,7 @@ func (p *linuxPlatform) Extract(_ context.Context, archivePath, destDir string) 
 
 // VerifyExtracted implements [Platform.VerifyExtracted] for AppImage.
 //
-// AppImage carries no OS-level signature (ADR-0006 Consequences —
+// AppImage carries no OS-level signature (ADR-0007 Consequences —
 // integrity already rests on the signed manifest plus the artefact
 // sha256 verified at download). The checks here confirm the staged
 // file is a plausible AppImage: it has the executable bit and starts

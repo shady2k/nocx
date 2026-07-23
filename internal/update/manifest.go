@@ -89,7 +89,7 @@ func IsNewer(current, remote string) bool {
 // MatchArtifact selects the [Artifact] from the manifest whose
 // {OS, Arch, Format} triplet matches id.
 //
-// The matching rules follow ADR-0006:
+// The matching rules follow ADR-0007:
 //   - An exact match on all three fields wins.
 //   - For darwin targets where the runtime reports arm64 or amd64 but
 //     the manifest carries universal, the universal entry matches any

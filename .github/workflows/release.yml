@@ -2,7 +2,7 @@
 #
 # Design: docs/superpowers/specs/2026-07-22-distribution-and-updates-design.md
 # (§4 versioning, §5 pipeline, §6 manifest). macOS .app + Linux AppImage (D1
-# reversed per ADR-0006).
+# reversed per ADR-0007).
 #
 # Shape of the pipeline:
 #   - A real release comes from a stable version tag and *only* from a tag: a
@@ -175,7 +175,7 @@ jobs:
 
   # Build a self-contained Linux AppImage on a pinned glibc floor.
   # ubuntu-22.04 provides glibc 2.35, the baseline the support envelope
-  # promises (see ADR-0006 and the Linux section in README.md).
+  # promises (see ADR-0007 and the Linux section in README.md).
   build-linux:
     needs: [ci, validate]
     runs-on: ubuntu-22.04
@@ -255,7 +255,7 @@ jobs:
           # ── linuxdeploy + GTK plugin ─────────────────────────────────
           # The GTK plugin bundles libgtk-3, libwebkit2gtk-4.1 and their
           # transitive dependencies into the AppDir, so the AppImage is
-          # self-contained (the whole point vs a bare tarball — ADR-0006).
+          # self-contained (the whole point vs a bare tarball — ADR-0007).
           wget -q -O linuxdeploy.AppImage \
             https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy.AppImage

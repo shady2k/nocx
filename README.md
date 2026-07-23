@@ -40,7 +40,7 @@ chmod +x nocx-*-linux-amd64.AppImage
 ./nocx-*-linux-amd64.AppImage
 ```
 
-No package manager or root access needed — the AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0006](docs/decisions/0006-cross-platform-auto-update.md)).
+No package manager or root access needed — the AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0007](docs/decisions/0007-cross-platform-auto-update.md)).
 
 ### Support envelope
 
@@ -59,7 +59,7 @@ floor.
 > extracted the AppImage or installed via a package manager), in-app updates are
 > silently disabled — the updater only engages when the app is running as an
 > AppImage, mirroring the macOS refusals for dev and translocated builds
-> ([ADR-0006](docs/decisions/0006-cross-platform-auto-update.md) §Decision).
+> ([ADR-0007](docs/decisions/0007-cross-platform-auto-update.md) §Decision).
 
 ## Rollback procedures
 

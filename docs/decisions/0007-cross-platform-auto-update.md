@@ -1,4 +1,4 @@
-# ADR-0006 — Cross-platform auto-update via a platform abstraction
+# ADR-0007 — Cross-platform auto-update via a platform abstraction
 
 - **Status:** Accepted
 - **Date:** 2026-07-23

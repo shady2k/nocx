@@ -13,7 +13,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Linux AppImage structural round-trip — ADR-0006 / bead nocx-3dk
+// Linux AppImage structural round-trip — ADR-0007 / bead nocx-3dk
 //
 // This test proves the exec bit and exact-byte integrity survive a synthetic
 // Extract → VerifyExtracted → Exchange round-trip through the linux Platform,

@@ -13,14 +13,14 @@ five places, which is why §7 no longer has one: the filesystem is now the sourc
 the journal only records intent. Scope reductions (Linux, Developer ID signing,
 `--sequesterRsrc`, a beta channel, a durable `healthy` phase) are deliberate, not omissions.
 
-Revision (2026-07-23) — **cross-platform, per [ADR-0006](../../decisions/0006-cross-platform-auto-update.md).**
+Revision (2026-07-23) — **cross-platform, per [ADR-0007](../../decisions/0007-cross-platform-auto-update.md).**
 D1 is reversed: the updater is no longer macOS-only. It becomes one platform-agnostic core
 plus a thin `Platform` seam; §7 below is the **darwin** implementation of that seam, and Linux
 ships as an **AppImage** with its own implementation (extract + `chmod +x`,
 `renameat2(RENAME_EXCHANGE)`, an `APPIMAGE`-env refusal mirroring §7.7). We stay on **Wails v2**
-— v3's built-in updater was evaluated and rejected (bare-binary-only, alpha). ADR-0006 is the
+— v3's built-in updater was evaluated and rejected (bare-binary-only, alpha). ADR-0007 is the
 authority for this reversal; where §3 (D1), §9, §10 and §12 below still read "macOS only",
-ADR-0006 supersedes them.
+ADR-0007 supersedes them.
 
 ## 1. Problem
 
@@ -67,7 +67,7 @@ Consequences accepted:
 ## 3. Decisions
 
 **D1 — Cross-platform (macOS + Linux now, Windows later), behind a `Platform` seam.**
-*Reversed 2026-07-23 ([ADR-0006](../../decisions/0006-cross-platform-auto-update.md)); the
+*Reversed 2026-07-23 ([ADR-0007](../../decisions/0007-cross-platform-auto-update.md)); the
 round-1 deferral of Linux is undone now that the maintainer runs nocx on Linux and needs
 updates there.* The updater is one platform-agnostic core (manifest fetch + ed25519 verify,
 semver, download, and the §7 crash-consistency transaction — journal by device+inode, `flock`,
@@ -589,11 +589,11 @@ the update notice renders from state, including `pendingRestart`; bound calls ar
   key-loss consequence from §6.
 - `README.md` — install instructions, the quarantine one-liner against `/Applications/nocx.app`,
   and both rollback procedures from §7.5. Plus the Linux (AppImage) install + update notes.
-- **ADR-0006 "Cross-platform auto-update via a platform abstraction"** — the D1 reversal, the
+- **ADR-0007 "Cross-platform auto-update via a platform abstraction"** — the D1 reversal, the
   `Platform` seam, AppImage as the Linux format and its support envelope, and why Wails v3's
   built-in updater was evaluated and rejected.
 
-`docs/architecture.md:179` **is** amended for Linux (D1 reversed, ADR-0006): "MVP is macOS-only;
+`docs/architecture.md:179` **is** amended for Linux (D1 reversed, ADR-0007): "MVP is macOS-only;
 Windows/Linux are Phase 3" becomes "macOS + Linux now; Windows is Phase 3".
 
 ## 11. Work breakdown
@@ -610,7 +610,7 @@ ships and gets used by hand before anything replaces a bundle automatically.
 | 5 | new | Frontend readiness signal: `Tab` reports started/failed, `TabManager` exposes the promise. Independently useful, and a prerequisite for health. |
 | 6 | `nocx-a75.3` | `internal/update`: record, flock, preflight, exchange, reconciliation, finalisation, auto-rollback, refusals, bound methods, UI notice, README. |
 | 7 | `nocx-a75.2` | Close as out of scope per D3, with the reason recorded. |
-| 8 | `nocx-mbu` | Linux distribution — now **in scope** (D1 reversed, ADR-0006): AppImage build in CI (linuxdeploy + GTK plugin), the `linux` `Platform` impl, and the Linux entries in the manifest. Items 4 and 6 gain their Linux half behind the seam. |
+| 8 | `nocx-mbu` | Linux distribution — now **in scope** (D1 reversed, ADR-0007): AppImage build in CI (linuxdeploy + GTK plugin), the `linux` `Platform` impl, and the Linux entries in the manifest. Items 4 and 6 gain their Linux half behind the seam. |
 
 Doc and ADR changes ride inside items 3 and 6.
 
@@ -618,7 +618,7 @@ Doc and ADR changes ride inside items 3 and 6.
 
 Windows (unimplemented `Platform` seam — also needs a conpty branch in `internal/pty`);
 Developer ID signing and notarization (D3 — Wails' ad-hoc signature is preserved, not added);
-`.deb`/`.rpm` (AppImage is now **in** scope as the Linux format per D1/ADR-0006, but native
+`.deb`/`.rpm` (AppImage is now **in** scope as the Linux format per D1/ADR-0007, but native
 packages update via `apt`/`dnf`, not this updater); a styled DMG; `--sequesterRsrc`; artefact
 signatures beyond the hash in the signed manifest; signed freshness metadata against update
 freezing (D4 records the gap); a beta channel; a Wails event subsystem for download progress;

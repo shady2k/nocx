@@ -11,7 +11,16 @@ var bashScript string
 // version is the integration script version. Bump when scripts change;
 // EnsureInstalled/EnsureInstalledRemote compare this against the installed
 // VERSION file and rewrite scripts when they differ.
-const version = "2"
+const version = "3"
+
+// promptModeEnvVar is the env var that selects the prompt mode.
+const promptModeEnvVar = "NOCX_PROMPT_MODE"
+
+// promptModeMarkerOnly is the marker-only prompt mode value.
+const promptModeMarkerOnly = "marker-only"
+
+// sessionIDEnvVar is the env var for the nocx session identifier.
+const sessionIDEnvVar = "NOCX_SESSION_ID"
 
 // dirName is the directory name inside the user's home.
 const dirName = ".nocx"

@@ -2,6 +2,9 @@ import { WSClient, type SessionHandle } from './ipc'
 import { createRenderer, resolveRendererName, type RendererName } from './renderers'
 import type { TerminalRenderer } from './renderers/types'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
+import { InputStateController } from './input-state'
+import { CommandEditor } from './editor'
+import { ShellInputTarget } from './input-target'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 
@@ -13,6 +16,10 @@ import type { ClipboardBanner } from './banner'
 // locally as fast as the renderer likes, but only tell the PTY the size
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
+
+// ADR-0006: OFF by default; flip only after the native-mode escape +
+// readiness gating land.
+const ENHANCED_INPUT = false
 
 // Shown only until the session reports where it started; a tab named after a
 // generic word tells the user nothing once there are three of them.
@@ -73,8 +80,11 @@ export class Tab {
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private _cwdFromOSC7 = false
   private _lastExitCode: number | null = null
+  private inputState = new InputStateController()
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
+  private editor: CommandEditor | null = null
+  private shellTarget: ShellInputTarget | null = null
   private started = false
 
   // _readyPromise resolves true when the renderer mounts and the PTY session
@@ -267,8 +277,14 @@ export class Tab {
           this.markActivity()
         }
       })
-      session.onExit((sid: string) => console.log('nocx: session exited:', sid))
-      session.onReset(() => renderer.reset())
+      session.onExit((sid: string) => {
+        console.log('nocx: session exited:', sid)
+        this.inputState.dispatch({ type: 'exit' })
+      })
+      session.onReset(() => {
+        renderer.reset()
+        this.inputState.dispatch({ type: 'reset' })
+      })
 
       renderer.onData((data: string) => session.send(data))
       renderer.onTitle((title: string) => {
@@ -279,6 +295,7 @@ export class Tab {
       })
       renderer.onBufferChange((type) => {
         this._bufferType = type
+        this.inputState.dispatch({ type: 'buffer', buffer: type })
       })
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.
@@ -287,6 +304,7 @@ export class Tab {
         }
       })
       renderer.onCommandMarker((marker) => {
+        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
         // OSC 133 D carries the exit code of the just-finished command.
         // Stored for future consumers: command blocks, success/failure
         // colouring, activity indicator refinement.
@@ -294,6 +312,29 @@ export class Tab {
           this._lastExitCode = marker.exitCode
         }
       })
+
+      this.inputState.onChange((m) => {
+        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
+        if (!ENHANCED_INPUT) return
+        if (m.owned) this.editor!.show()
+        else {
+          this.editor!.hide()
+          renderer.focus()
+        }
+      })
+
+      // ── Command editor (DOM textarea) ────────────────────────────────
+      // Wired behind ENHANCED_INPUT (ADR-0006 §5: fail-open). When the flag
+      // is on, ownership (A→B) gives the editor focus; typing + Enter submits
+      // via ShellInputTarget's atomic handoff (hide-before-send → bracketed
+      // paste + CR). When the flag is off, keys flow unchanged to the PTY.
+      this.shellTarget = new ShellInputTarget((data: string) => session.send(data))
+      this.editor = new CommandEditor({
+        submit: (doc: string) => {
+          void this.shellTarget!.submit(doc)
+        },
+      })
+      this.editor.mount(this.pane)
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).
@@ -406,6 +447,7 @@ export class Tab {
   close(): void {
     this.session?.close()
     this.renderer?.dispose()
+    this.editor?.dispose()
   }
 }
 

@@ -540,3 +540,25 @@ body {
 .update-apply-btn:hover {
   background: #89b0ff;
 }
+
+/* ── Command editor (DOM textarea) ──────────────────────────────────── */
+
+.nocx-editor {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 4px 8px;
+  background: #1a1b26;
+}
+
+.nocx-editor-input {
+  width: 100%;
+  background: transparent;
+  color: #c0caf5;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: inherit;
+  resize: none;
+}

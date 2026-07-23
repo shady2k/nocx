@@ -2,6 +2,8 @@ package shellintegration
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,8 +39,9 @@ type ShellIntegration interface {
 	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
 
 	// ActivationEnv returns env vars to set when starting a shell so the
-	// rc gate activates the integration.
-	ActivationEnv() []string
+	// rc gate activates the integration. When enhanced is true, it also
+	// emits NOCX_PROMPT_MODE=marker-only and a unique NOCX_SESSION_ID.
+	ActivationEnv(enhanced bool) []string
 
 	// RemoteStartCommand returns the command to use for SSH session.Start()
 	// that sets the activation env var and execs the user's shell.
@@ -181,8 +184,24 @@ func writeFileAtomic(path string, data []byte) error {
 	return nil
 }
 
-func (s *Impl) ActivationEnv() []string {
-	return []string{activationEnvVar + "=1"}
+func (s *Impl) ActivationEnv(enhanced bool) []string {
+	env := []string{activationEnvVar + "=1"}
+	if enhanced {
+		env = append(
+			env,
+			promptModeEnvVar+"="+promptModeMarkerOnly,
+			sessionIDEnvVar+"="+newSessionID(),
+		)
+	}
+	return env
+}
+
+func newSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "nocx"
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func (s *Impl) RemoteStartCommand() string {

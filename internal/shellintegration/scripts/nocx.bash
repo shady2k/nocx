@@ -45,22 +45,45 @@ __nocx_preexec() {
     builtin printf '\e]133;C\a'
 }
 
-# bash-preexec-style wrapper: keep the original PROMPT_COMMAND and run it
-# after our precmd. The flag prevents preexec from firing for commands that
-# run as part of the prompt (e.g. an existing PROMPT_COMMAND).
+# In marker-only mode __nocx_prompt_command runs the user/framework
+# PROMPT_COMMAND first, then emits D/A/OSC 7, then sets PS1 to the
+# marker-only B prompt as the final action — so a hostile framework
+# PROMPT_COMMAND that rewrites PS1 cannot win. In baseline mode the
+# original order is preserved (precmd first, then old PC).
 __nocx_prompt_command() {
     # Capture the just-finished command's status FIRST — the assignment below
     # would otherwise reset $? to 0 before __nocx_precmd could read it.
     local __nocx_exit=$?
     __nocx_in_prompt_command=1
-    __nocx_precmd "$__nocx_exit"
-    if [[ -n "${__nocx_old_pc:-}" ]]; then
-        eval "$__nocx_old_pc"
+    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
+        # 1) run the user/framework prompt command FIRST.
+        if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
+            local __c
+            for __c in "${__nocx_old_pc_arr[@]}"; do eval "$__c"; done
+        elif [[ -n "${__nocx_old_pc:-}" ]]; then
+            eval "$__nocx_old_pc"
+        fi
+        # 2) emit D/A/OSC7.
+        __nocx_precmd "$__nocx_exit"
+        # 3) set the marker-only prompt as the FINAL action.
+        PS1="$__nocx_b_marker"
+    else
+        __nocx_precmd "$__nocx_exit"
+        if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
+            local __c
+            for __c in "${__nocx_old_pc_arr[@]}"; do eval "$__c"; done
+        elif [[ -n "${__nocx_old_pc:-}" ]]; then
+            eval "$__nocx_old_pc"
+        fi
     fi
     __nocx_in_prompt_command=0
 }
 
 if [[ -z "${PROMPT_COMMAND:-}" ]]; then
+    PROMPT_COMMAND='__nocx_prompt_command'
+elif [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == declare\ -a* ]]; then
+    # Array form: save and replace.
+    eval "__nocx_old_pc_arr=(\"\${PROMPT_COMMAND[@]}\")"
     PROMPT_COMMAND='__nocx_prompt_command'
 else
     __nocx_old_pc="$PROMPT_COMMAND"
@@ -89,7 +112,9 @@ __nocx_preexec_wrapper() {
 }
 trap '__nocx_preexec_wrapper' DEBUG
 
-if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
+__nocx_b_marker='\[\e]133;B\a\]'
+
+if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] && [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
     # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
     # literally; they tell bash that the OSC sequence is non-printing.
     PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'

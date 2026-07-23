@@ -6,6 +6,10 @@ Sources of truth: [`docs/vision.md`](docs/vision.md) (what & why) and
 [`docs/architecture.md`](docs/architecture.md) (the binding architecture spine).
 The task backlog lives in beads — run `bd ready`.
 
+**Fresh clone?** The [README setup](README.md#agent-tooling) lists the tooling to
+install per machine — `bd`, the `beads-superpowers` Claude Code plugin, and
+(optional) `graphify`. `make init` wires up the repo but does not install these.
+
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker

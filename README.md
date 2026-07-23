@@ -57,6 +57,10 @@ make init
 wails dev
 ```
 
+> `make init` assumes the [Prerequisites](#prerequisites) and [Agent tooling](#agent-tooling)
+> are already installed — it sets up the repo (hooks, backlog, dependencies), not
+> your machine.
+
 `make init` is safe to re-run, and does four things:
 
 | Step | Why it matters |
@@ -177,8 +181,38 @@ _bmad/, .claude/,
 
 ## Built by AI agents
 
-Development is driven by AI coding agents using the BMAD workflow. The agent
-tooling is vendored — clone and go.
+Development is driven by AI coding agents. The tooling comes in two layers that
+install differently:
+
+- **Vendored — clone and go.** The BMAD workflow lives in the repo under
+  `_bmad/`, `.claude/`, `.agents/`, `.opencode/`.
+- **Per-machine — you install it.** The issue tracker and the Claude Code agent
+  tooling below.
+
+### Agent tooling
+
+Install these once per machine — they are **not** vendored, and `make init` does
+not install them:
+
+| Tool | Needed for | Install |
+|------|------------|---------|
+| `bd` (beads) | The backlog — **required** (also in [Prerequisites](#prerequisites)) | `brew install beads` (or `npm i -g @beads/bd`) |
+| [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) plugin | Superpowers skills + the `bd` session hooks — **recommended** | `claude plugin marketplace add DollarDill/beads-superpowers` then `claude plugin install beads-superpowers@beads-superpowers-marketplace` |
+| [`graphify`](https://github.com/Graphify-Labs/graphify) | Knowledge-graph code search — **optional** | `uv tool install graphifyy` then `graphify install` |
+
+- **Install `bd` before the plugin.** The plugin's hooks call `bd` on every
+  session start, so a missing `bd` makes them fail.
+- The `beads-superpowers` plugin bundles the Superpowers skill system with the
+  Beads integration. It also targets Codex, OpenCode, Cursor and others — the
+  [marketplace README](https://github.com/DollarDill/beads-superpowers) has the
+  per-agent variant. (Inside a running session the same two steps are
+  `/plugin marketplace add …` and `/plugin install …`.)
+- `graphify` builds the code knowledge-graph under `graphify-out/`. **That map is
+  committed**, so [`graphify-out/GRAPH_REPORT.md`](graphify-out/GRAPH_REPORT.md)
+  is readable with nothing installed. Install the CLI only to rebuild it
+  (`/graphify .`) or query it live (`/graphify query "…"`). Without graphify,
+  code search falls back to plain grep/glob — it still works, just slower and
+  less precise.
 
 ### Set your BMAD identity
 

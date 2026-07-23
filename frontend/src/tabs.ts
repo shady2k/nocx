@@ -54,7 +54,7 @@ function cwdTooltip(cwd: string, fromOSC7: boolean): string {
 
 const DEFAULT_RENDERER: RendererName = resolveRendererName()
 
-class Tab {
+export class Tab {
   readonly id: number
 
   readonly pane = document.createElement('div')
@@ -86,6 +86,13 @@ class Tab {
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   private started = false
+
+  // _readyPromise resolves true when the renderer mounts and the PTY session
+  // opens; resolves false when start() throws. Never rejects. It stays pending
+  // until start() is called, so consumers can await it for the honest
+  // did-it-actually-start signal (see §7.5 of distribution-and-updates-design).
+  private readonly _readyPromise: Promise<boolean>
+  private _readyResolve!: (value: boolean) => void
   cols = 0
   rows = 0
   private resizeTimer: number | undefined
@@ -99,6 +106,9 @@ class Tab {
     id: number,
   ) {
     this.id = id
+    this._readyPromise = new Promise<boolean>((resolve) => {
+      this._readyResolve = resolve
+    })
 
     this.pane.className = 'pane'
     this.pane.id = `pane-${id}`
@@ -163,6 +173,15 @@ class Tab {
 
   get lastExitCode(): number | null {
     return this._lastExitCode
+  }
+
+  /**
+   * Resolves true when the renderer mounts and the PTY session opens;
+   * resolves false when start() throws. Never rejects. Stays pending
+   * until start() is called.
+   */
+  get ready(): Promise<boolean> {
+    return this._readyPromise
   }
 
   /**
@@ -405,12 +424,14 @@ class Tab {
 
       this.renderer = renderer
       this.session = session
+      this._readyResolve(true)
       console.log(`nocx: tab ready (renderer=${this.rendererName})`, { sid: session.sessionId })
     } catch (err) {
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Tab ${this.id} failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
       this.pane.replaceChildren(notice)
+      this._readyResolve(false)
       console.error(`nocx: tab ${this.id} failed`, err)
     }
   }
@@ -458,6 +479,7 @@ export class TabManager {
   private readonly banner: ClipboardBanner
   private readonly addBtn: HTMLButtonElement
   private readonly tabsContainer: HTMLElement
+  private readonly _initialTabReady: Promise<void>
 
   constructor(
     bar: HTMLElement,
@@ -497,7 +519,10 @@ export class TabManager {
     bar.append(spacer)
 
     // Open the initial tab — the window is never empty.
-    this.newTab()
+    const initialTab = this.newTab()
+    this._initialTabReady = initialTab.ready.then((ok) => {
+      if (!ok) throw new Error('initial tab failed to start')
+    })
 
     // Capture phase: the active terminal swallows keys once they reach it.
     window.addEventListener('keydown', this.onKeydown, true)
@@ -505,6 +530,19 @@ export class TabManager {
 
   get tabCount(): number {
     return this.tabs.length
+  }
+
+  /**
+   * Resolves when the initial tab's renderer mounts and its PTY session
+   * opens. Rejects when the initial tab's start() threw — a broken tab
+   * is not "ready" even though the UI shows a .pane-error notice.
+   *
+   * This is the signal §7.5 of distribution-and-updates-design uses to
+   * gate the updater health check: ReportHealthy() is only called after
+   * this promise resolves.
+   */
+  get initialTabReady(): Promise<void> {
+    return this._initialTabReady
   }
 
   /** Create a new tab, activate it. */

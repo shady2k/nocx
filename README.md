@@ -7,7 +7,7 @@ Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
 **Status:** MVP in progress. Local PTY over WebSocket works; SSH client, tabs,
-and cwd features are under active development. macOS-first.
+and cwd features are under active development. macOS + Linux (AppImage).
 
 ## What makes it different
 
@@ -30,6 +30,87 @@ xattr -dr com.apple.quarantine /Applications/nocx.app
 Then open nocx normally. This is required only the first time — later in-app updates fetch the build directly and do not re-quarantine it. Confirm the version any time with `nocx --version`.
 
 > No publisher signature and no notarization; the reasoning is in [ADR-0003](docs/decisions/0003-distribution-without-a-developer-id.md). Update integrity is enforced by an ed25519-signed manifest, not by Gatekeeper.
+
+## Install (Linux)
+
+Download the `.AppImage` from the [Releases page](https://github.com/shady2k/nocx/releases), make it executable, and run it:
+
+```bash
+chmod +x nocx-*-linux-amd64.AppImage
+./nocx-*-linux-amd64.AppImage
+```
+
+No package manager or root access needed — the AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0007](docs/decisions/0007-cross-platform-auto-update.md)).
+
+### Support envelope
+
+The AppImage bundles its own GTK 3 and WebKitGTK (via `linuxdeploy-plugin-gtk`),
+so it does **not** depend on the host's `libgtk-3` or `libwebkit2gtk-4.1`. It
+links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
+
+**This means it runs on distributions at or above that baseline**, including
+Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+, and Arch (rolling). It is
+**not** "runs everywhere" — older enterprise distributions (RHEL 8, Ubuntu 20.04)
+carry an earlier glibc and are not supported. If the AppImage refuses to start
+and `ldd --version` reports a glibc before 2.35, the distribution is below the
+floor.
+
+> If the `APPIMAGE` environment variable is not set at runtime (e.g. you
+> extracted the AppImage or installed via a package manager), in-app updates are
+> silently disabled — the updater only engages when the app is running as an
+> AppImage, mirroring the macOS refusals for dev and translocated builds
+> ([ADR-0007](docs/decisions/0007-cross-platform-auto-update.md) §Decision).
+
+## Rollback procedures
+
+If an update fails or you need to return to the previous version, these
+manual recovery paths cover both states an update can be in (§7.5 of the
+distribution-and-updates design).
+
+### After a successful update (to the retained known-good backup)
+
+The previous version is saved as `.nocx-backup.app` (macOS) or
+`.nocx-backup.AppImage` (Linux) next to the active bundle.
+
+**macOS:**
+```bash
+osascript -e 'quit app "nocx"'
+rm -rf /Applications/nocx.app
+mv /Applications/.nocx-backup.app /Applications/nocx.app
+```
+
+**Linux:**
+```bash
+killall nocx
+mv ~/.local/bin/.nocx-backup.AppImage ~/.local/bin/nocx.AppImage
+```
+
+### During a failed update (before health was ever confirmed)
+
+If nocx was restarted after an update and something is broken — a JS
+exception, a blank window, or the app exits before `ReportHealthy` ever
+runs — the new bundle sits at the install path and the swap file holds
+the previous working version.
+
+**macOS:**
+```bash
+osascript -e 'quit app "nocx"'
+rm -rf /Applications/nocx.app
+mv /Applications/.nocx-swap.app /Applications/nocx.app
+rm -f ~/Library/Application\ Support/nocx/.nocx-update-journal.json
+```
+
+**Linux:**
+```bash
+killall nocx
+# The swap file is the previous AppImage; exchange it back.
+mv ~/.local/bin/.nocx-swap.app ~/.local/bin/nocx.AppImage
+rm -f ~/.local/bin/.nocx-update-journal.json
+```
+
+> The updater also performs an automatic rollback after three launches that
+> reach Go without a successful `ReportHealthy` call — the feature above is
+> for cases where the new build never reaches Go at all (e.g. a dyld failure).
 
 ## Prerequisites
 

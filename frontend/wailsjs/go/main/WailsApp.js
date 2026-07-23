@@ -5,3 +5,15 @@
 export function GetWSPort() {
   return window['go']['main']['WailsApp']['GetWSPort']();
 }
+
+export function CheckForUpdate() {
+  return window['go']['main']['WailsApp']['CheckForUpdate']();
+}
+
+export function ApplyUpdate() {
+  return window['go']['main']['WailsApp']['ApplyUpdate']();
+}
+
+export function ReportHealthy() {
+  return window['go']['main']['WailsApp']['ReportHealthy']();
+}

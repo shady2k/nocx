@@ -4,8 +4,10 @@ import {
   createRendererMock,
   resetSessionCounter,
   mountTabManager,
+  makeClient,
   makeClipboard,
   makeBanner,
+  setupTabBarDOM,
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
 } from './test-support/tabs-fixtures'
@@ -921,4 +923,119 @@ describe('TabManager', () => {
     expect(banner.show).not.toHaveBeenCalled()
   })
   /* eslint-enable @typescript-eslint/unbound-method */
+
+  // ── readiness signal ───────────────────────────────────────────────
+
+  it('initialTabReady resolves when the initial tab starts successfully', async () => {
+    const { manager } = await mountTabManager()
+
+    // The initial tab was created and started by mountTabManager.
+    // initialTabReady must resolve (not hang, not reject).
+    await expect(manager.initialTabReady).resolves.toBeUndefined()
+  })
+
+  it('initialTabReady rejects when the initial tab start() throws', async () => {
+    const client = makeClient({
+      openSession: vi.fn(() => Promise.reject(new Error('session failed'))),
+    })
+
+    const { bar, panes } = setupTabBarDOM()
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+
+    const { TabManager } = await import('./tabs')
+    const manager = new TabManager(
+      bar,
+      panes,
+      client as unknown as import('./ipc').WSClient,
+      clipboard,
+      gate,
+      banner,
+    )
+
+    // initialTabReady must reject — a genuinely broken tab is not "ready".
+    // expect().rejects attaches the handler synchronously, so the rejection
+    // that fires in a microtask is already handled; no unhandled-rejection.
+    await expect(manager.initialTabReady).rejects.toThrow('initial tab failed to start')
+
+    // openSession was called (the rejection proves it — start() reached the call).
+    expect(client.openSession).toHaveBeenCalled()
+
+    // The UI still shows the error notice — swallow-and-show behaviour is intact.
+    const pane = panes.querySelector('.pane')
+    expect(pane).not.toBeNull()
+    const errorNotice = pane!.querySelector('.pane-error')
+    expect(errorNotice).not.toBeNull()
+    expect(errorNotice!.textContent).toContain('session failed')
+  })
+
+  it('Tab.ready resolves true for a genuinely started tab', async () => {
+    // mountTabManager starts the initial tab — its ready must resolve true.
+    const { client } = await mountTabManager()
+
+    // Access the initial Tab via the (newly exported) Tab class and the tabs array.
+    // The tabs array is private, but initialTabReady is derived from it — and
+    // initialTabReady resolved above, proving the Tab-level signal resolved true.
+    //
+    // For a direct Tab.ready assertion, construct a Tab and drive it manually.
+    const wsClient = client as unknown as import('./ipc').WSClient
+    const { Tab } = await import('./tabs')
+
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+    const tab = new Tab(wsClient, 'xterm', clipboard, gate, banner, 99)
+
+    // Before start(): ready must still be pending.
+    // Prove it by racing — if it were already settled the race would catch it.
+    const beforeStart = Promise.race([tab.ready.then(() => 'settled'), Promise.resolve('pending')])
+    await expect(beforeStart).resolves.toBe('pending')
+
+    // Now start it.
+    const paneParent = document.createElement('div')
+    paneParent.append(tab.pane)
+
+    // Simulate what activate() does — pane must be in the DOM for the renderer.
+    await tab.start()
+
+    // After a genuine start, ready must resolve to true.
+    await expect(tab.ready).resolves.toBe(true)
+
+    // Clean up.
+    tab.close()
+    paneParent.remove()
+  })
+
+  it('Tab.ready resolves false when start() throws', async () => {
+    const client = makeClient({
+      openSession: vi.fn(() => Promise.reject(new Error('session failed'))),
+    })
+
+    const wsClient = client as unknown as import('./ipc').WSClient
+    const { Tab } = await import('./tabs')
+
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+    const tab = new Tab(wsClient, 'xterm', clipboard, gate, banner, 99)
+
+    const paneParent = document.createElement('div')
+    paneParent.append(tab.pane)
+
+    // start() swallows the error for the UI but ready must reflect the failure.
+    await tab.start()
+
+    // No throw from start(), but ready resolves false.
+    await expect(tab.ready).resolves.toBe(false)
+
+    // Verify the error notice is rendered.
+    const errorNotice = tab.pane.querySelector('.pane-error')
+    expect(errorNotice).not.toBeNull()
+    expect(errorNotice!.textContent).toContain('session failed')
+
+    // Clean up.
+    tab.close()
+    paneParent.remove()
+  })
 })

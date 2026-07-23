@@ -47,6 +47,7 @@ import {
   RECOMMENDED_API_CALLS,
 } from './gutter-spike'
 import type { SpikeHarness } from './gutter-spike'
+import { Terminal } from '@xterm/xterm'
 
 describe('gutter-spike harness', () => {
   let container: HTMLElement
@@ -170,7 +171,6 @@ describe('createGutter (RECOMMENDED approach)', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
 
-    const { Terminal } = require('@xterm/xterm')
     terminal = new Terminal({
       cols: 80,
       rows: 24,

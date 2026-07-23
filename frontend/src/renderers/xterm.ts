@@ -14,8 +14,11 @@ import type {
   TitleCallback,
   TerminalRenderer,
 } from './types'
+import { decodeOsc52 } from '../clipboard'
 
 type BellCallback = () => void
+type SelectionCallback = (text: string) => void
+type ClipboardWriteCallback = (text: string) => void
 
 // xterm.js (VS Code's engine, stable 5.x) with the WebGL (GPU) renderer,
 // hardened the way Tabby runs it: recover from a lost GPU context and clear the
@@ -103,6 +106,15 @@ export class XtermRenderer implements TerminalRenderer {
       allowProposedApi: true,
       smoothScrollDuration: 120,
       scrollback: 10000,
+      // Holding Option (macOS) or Shift (elsewhere) forces selection in
+      // mouse-tracking programs — the engine's own escape hatch for CAP-4.
+      macOptionClickForcesSelection: true,
+      // On macOS xterm.js defaults rightClickSelectsWord to true, which
+      // word-selects, then with copy-on-select that overwrites the clipboard
+      // and pastes the word under the pointer. Neither Warp nor Tabby ships
+      // that combination; disable it so right-click pastes what the user
+      // expects.
+      rightClickSelectsWord: false,
       theme: {
         background: '#1a1b26',
         foreground: '#c0caf5',
@@ -233,6 +245,31 @@ export class XtermRenderer implements TerminalRenderer {
 
   onBell(cb: BellCallback): void {
     this.term?.onBell(cb)
+  }
+
+  onSelectionChange(cb: SelectionCallback): void {
+    this.term?.onSelectionChange(() => {
+      cb(this.term?.getSelection() ?? '')
+    })
+  }
+
+  onClipboardWrite(cb: ClipboardWriteCallback): void {
+    this.term?.parser.registerOscHandler(52, (data: string) => {
+      // decodeOsc52 is a pure parser imported from the clipboard module
+      // and does not touch the clipboard — the callback fires the decoded
+      // text upward, the policy layer writes it (AD-6).
+      const decoded = decodeOsc52(data)
+      if (decoded !== null) {
+        cb(decoded)
+      }
+      return false
+    })
+  }
+
+  paste(text: string): void {
+    // term.paste() owns bracketed-paste wrapping: when the running program
+    // has enabled mode 2004, it wraps the payload in the escape sequences.
+    this.term?.paste(text)
   }
 
   refreshAtlas(): void {

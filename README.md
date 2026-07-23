@@ -17,19 +17,56 @@ an integrated SSH manager + (later) a secrets vault + (later) shell-integration
 blocks, completions, and input-editor in nested shells — with no cloud
 dependency.
 
+## Install (macOS)
+
+Released builds are on the [Releases page](https://github.com/shady2k/nocx/releases). Download the `.dmg`, open it, and drag **nocx** into Applications.
+
+There is no Apple Developer ID, so the build is unsigned and macOS quarantines it on download. Clear that once, on first install:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/nocx.app
+```
+
+Then open nocx normally. This is required only the first time — later in-app updates fetch the build directly and do not re-quarantine it. Confirm the version any time with `nocx --version`.
+
+> No publisher signature and no notarization; the reasoning is in [ADR-0003](docs/decisions/0003-distribution-without-a-developer-id.md). Update integrity is enforced by an ed25519-signed manifest, not by Gatekeeper.
+
 ## Prerequisites
 
 | Tool | Version | Install |
 |------|---------|---------|
 | Go | 1.26 | [go.dev](https://go.dev/dl/) |
-| Node | 22 | [nodejs.org](https://nodejs.org/) |
+| Node | 24 | [nodejs.org](https://nodejs.org/) |
 | Wails CLI | v2 | `go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
 | gofumpt | latest | `go install mvdan.cc/gofumpt@latest` |
 | golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
-| bd (beads) | 1.x | `brew install beads` |
+| bd (beads) | **≥ 1.1.0** | `brew install beads` |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
+
+> ⚠️ `bd` must be **≥ 1.1.0**. Older builds (e.g. 1.0.3, which some distros and
+> nixpkgs still ship) misread the tracker's dependency schema: `bd stats` errors,
+> and — worse — the auto-export strips every dependency edge from
+> `.beads/issues.jsonl`, which the pre-commit hook then commits. Check with
+> `bd version` before enabling hooks.
+
+**On NixOS / without Homebrew.** `brew` and `npm i -g` don't work here — the
+latter writes into the read-only Nix store. Install `go`, `nodejs_24`, `gofumpt`,
+and `uv` from nixpkgs, put `~/go/bin` and `~/.local/bin` on your `PATH`, then get
+the rest through the language toolchains:
+
+```bash
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest        # server-mode bd; add gcc only for the embedded cgo build
+uv tool install graphifyy && graphify install
+```
+
+`bd` is not in upstream nixpkgs, so `go install` is the clean route (or package
+it yourself) — either way confirm `bd version` is **≥ 1.1.0**, since a system or
+nixpkgs build can lag. The `beads-superpowers` plugin installs via `claude` — see
+[Agent tooling](#agent-tooling).
 
 ## Getting started
 
@@ -42,6 +79,10 @@ make init
 # Run in development mode
 wails dev
 ```
+
+> `make init` assumes the [Prerequisites](#prerequisites) and [Agent tooling](#agent-tooling)
+> are already installed — it sets up the repo (hooks, backlog, dependencies), not
+> your machine.
 
 `make init` is safe to re-run, and does four things:
 
@@ -101,10 +142,11 @@ Every commit must pass:
 | `vitest` | ✓ | ✓ | ✓ |
 | `npm run build` | — | ✓ | ✓ |
 
-CI runs on release branches (`release/**`), version tags (`v*`), and manual
-dispatch (GitHub Actions, macos-latest for Go job, ubuntu-latest for frontend).
-Everyday gating on `main` is enforced locally by the pre-commit hook and
-`make ci` — they run the identical set of checks.
+CI (`ci.yml`) runs on release branches (`release/**`) and manual dispatch, and
+is called by `release.yml` on a version tag (`v*`) so a release gates on a green
+suite (GitHub Actions, macos-latest for the Go and e2e jobs, ubuntu-latest for
+the frontend). Everyday gating on `main` is enforced locally by the pre-commit
+hook and `make ci` — they run the identical set of checks.
 
 ## Task tracking — beads (bd)
 
@@ -162,8 +204,38 @@ _bmad/, .claude/,
 
 ## Built by AI agents
 
-Development is driven by AI coding agents using the BMAD workflow. The agent
-tooling is vendored — clone and go.
+Development is driven by AI coding agents. The tooling comes in two layers that
+install differently:
+
+- **Vendored — clone and go.** The BMAD workflow lives in the repo under
+  `_bmad/`, `.claude/`, `.agents/`, `.opencode/`.
+- **Per-machine — you install it.** The issue tracker and the Claude Code agent
+  tooling below.
+
+### Agent tooling
+
+Install these once per machine — they are **not** vendored, and `make init` does
+not install them:
+
+| Tool | Needed for | Install |
+|------|------------|---------|
+| `bd` (beads) | The backlog — **required** (also in [Prerequisites](#prerequisites)) | `brew install beads` (or `npm i -g @beads/bd`) |
+| [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) plugin | Superpowers skills + the `bd` session hooks — **recommended** | `claude plugin marketplace add DollarDill/beads-superpowers` then `claude plugin install beads-superpowers@beads-superpowers-marketplace` |
+| [`graphify`](https://github.com/Graphify-Labs/graphify) | Knowledge-graph code search — **optional** | `uv tool install graphifyy` then `graphify install` |
+
+- **Install `bd` before the plugin.** The plugin's hooks call `bd` on every
+  session start, so a missing `bd` makes them fail.
+- The `beads-superpowers` plugin bundles the Superpowers skill system with the
+  Beads integration. It also targets Codex, OpenCode, Cursor and others — the
+  [marketplace README](https://github.com/DollarDill/beads-superpowers) has the
+  per-agent variant. (Inside a running session the same two steps are
+  `/plugin marketplace add …` and `/plugin install …`.)
+- `graphify` builds the code knowledge-graph under `graphify-out/`. **That map is
+  committed**, so [`graphify-out/GRAPH_REPORT.md`](graphify-out/GRAPH_REPORT.md)
+  is readable with nothing installed. Install the CLI only to rebuild it
+  (`/graphify .`) or query it live (`/graphify query "…"`). Without graphify,
+  code search falls back to plain grep/glob — it still works, just slower and
+  less precise.
 
 ### Set your BMAD identity
 

@@ -16,6 +16,9 @@ daemon.*
 # Push state (runtime, per-machine)
 push-state.json
 
+# Plugin prime safety-net pointer (regenerated per-machine by beads-superpowers)
+PRIME.md
+
 # Lock files (various runtime locks)
 *.lock
 

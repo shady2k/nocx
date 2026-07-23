@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -12,12 +13,21 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 
 	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/version"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func main() {
+	// Checked before any backend or window exists so CI's release smoke check
+	// (distribution design §5) and a user's `nocx --version` print the linked
+	// build metadata and exit, never opening a terminal.
+	if versionRequested() {
+		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
+		return
+	}
+
 	backend, err := app.New()
 	if err != nil {
 		slog.Error("failed to initialize application", "error", err)
@@ -84,4 +94,16 @@ func (w *WailsApp) shutdown(ctx context.Context) {
 
 func (w *WailsApp) GetWSPort() int {
 	return w.backend.WSPort()
+}
+
+// versionRequested reports whether the process was invoked only to print its
+// version. Both spellings that Go's flag package accepts are honoured; the app
+// takes no other flags today, so a plain launch always returns false.
+func versionRequested() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-version" {
+			return true
+		}
+	}
+	return false
 }

@@ -89,6 +89,32 @@ export interface TerminalRenderer {
   // need it must use xterm.js.
   onBell(cb: () => void): void
 
+  // onSelectionChange fires when the user completes a selection gesture in
+  // the terminal, not per cell or per boundary movement. The callback
+  // receives the current selection text (via getSelection()). An empty
+  // string means the selection was cleared. @wterm/dom has no selection —
+  // never fired.
+  //
+  // The renderer reports facts and never touches the clipboard (AD-6).
+  // Copy-on-select policy lives above the renderer boundary.
+  onSelectionChange(cb: (text: string) => void): void
+
+  // onClipboardWrite fires when a program emits OSC 52 to place text on the
+  // clipboard. The renderer decodes the OSC 52 payload and fires the
+  // callback with the decoded text. @wterm/dom has no OSC handler — never
+  // fired.
+  //
+  // The renderer reports the decoded text and never touches the clipboard
+  // (AD-6). OSC 52 policy (notification, clipboard write) lives above the
+  // renderer boundary.
+  onClipboardWrite(cb: (text: string) => void): void
+
+  // paste inserts text at the cursor, preserving bracketed-paste semantics
+  // when the running program has enabled mode 2004. Implemented via
+  // xterm.js's term.paste() so the engine owns the wrapping — hand-rolling
+  // it would duplicate engine behaviour and drift from it.
+  paste(text: string): void
+
   // refreshAtlas is called when the renderer becomes visible after being
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.

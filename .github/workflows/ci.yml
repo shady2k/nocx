@@ -12,25 +12,36 @@
 # The pre-commit hook and the Makefile `ci` target mirror this same set of
 # checks so "green" is identical locally and in CI.
 #
-# Trigger decision: CI runs on release branches (release/**), version tags
-# (v*), and manual workflow_dispatch. Everyday protection on main comes from
-# the local pre-commit hook and make ci, which run the same checks.
+# Trigger decision: CI runs on release branches (release/**) and manual
+# workflow_dispatch, and is *called* by release.yml via workflow_call so a tag
+# release cannot exist without a green run on that exact commit. The standalone
+# `push: tags: ['v*']` trigger is deliberately gone: with release.yml calling
+# this workflow, keeping it would run the whole suite twice for every release
+# for no added protection (see distribution design §5). Everyday protection on
+# main comes from the local pre-commit hook and make ci, which run the same
+# checks.
 
 name: CI
 
 on:
   push:
     branches: ['release/**']
-    tags: ['v*']
   workflow_dispatch:
+  workflow_call:
+
+# Least privilege: the quality gates only read the repo. When release.yml calls
+# this workflow the effective token is the intersection with what the caller
+# grants, so the publish job's write scope never reaches these jobs.
+permissions:
+  contents: read
 
 jobs:
   backend:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache: true
@@ -65,11 +76,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
@@ -97,16 +108,16 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: |
             package-lock.json
@@ -129,7 +140,7 @@ jobs:
 
       - name: Upload traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-traces
           path: test-results/

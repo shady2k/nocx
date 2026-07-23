@@ -10,14 +10,27 @@ OpenCode, …) contributing to the repo. Read it before writing code.
 - [`docs/architecture.md`](docs/architecture.md) — the architecture spine: invariants
   (`AD-1`…`AD-10`), module boundaries, the WebSocket protocol. **The ADs are binding.**
 - The task backlog lives in **beads** (`bd`), not in prose. Get work with `bd ready`.
+- **New here?** The [README setup](README.md#agent-tooling) is the full install guide —
+  the toolchain *and* the per-machine agent tooling (`bd`, the `beads-superpowers`
+  plugin, and optional `graphify`). `make init` does not install any of it.
 
 ## First thing in a fresh clone
+
+Two kinds of setup, in order. **First, install the tooling on your machine** — the
+toolchain (Go, Node, Wails, `bd`) *and* the agent tooling that is not vendored:
+the [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) Claude
+Code plugin (Superpowers skills + the `bd` session hooks) and, optionally,
+`graphify` for knowledge-graph code search. The [README](README.md#agent-tooling)
+has the exact commands; `make init` installs none of it and assumes the tools
+already exist.
+
+**Then wire up the repo:**
 
 ```bash
 make init
 ```
 
-Run it before anything else. Git carries neither the issue database nor the ref
+Run it before touching code. Git carries neither the issue database nor the ref
 it lives on, so until `make init` has run there is **no backlog**: `bd ready`
 answers "no beads database found", and an agent that reads `.beads/issues.jsonl`
 instead is reading a passive export that may lag the database.

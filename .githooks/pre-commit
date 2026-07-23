@@ -4,6 +4,14 @@ set -eu
 warn() { printf "FAIL: %s\n" "$1"; }
 ok()   { printf "OK:   %s\n" "$1"; }
 
+# Tests run inside a container, never against the host filesystem.
+. "$(dirname "$0")/containerized-tests.sh"
+
+# go-installed tools (gofumpt, golangci-lint) live in $(go env GOPATH)/bin, which
+# an interactive shell has on PATH but a hook invoked by an editor or a sandboxed
+# process may not. Add it so the checks below find them wherever the hook runs.
+command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
+
 # --- check all binaries first, report all missing together ------------------
 CHECK_CMD_TRUE=true
 check_cmd() {
@@ -18,6 +26,7 @@ check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golang
 check_cmd go "install Go from https://go.dev/dl/"
 check_cmd node "install Node.js from https://nodejs.org/"
 check_cmd npm "install Node.js from https://nodejs.org/"
+check_cmd docker "start OrbStack or Docker Desktop — tests run in a container"
 
 if [ ! -d frontend/node_modules ]; then
     warn "frontend/node_modules not found — run: cd frontend && npm ci"
@@ -46,12 +55,12 @@ if ! golangci-lint run ./... 2>&1; then
 fi
 ok "golangci-lint"
 
-# --- 3. go test -------------------------------------------------------------
-if ! go test -race -count=1 ./... 2>&1; then
+# --- 3. go test (in a container) --------------------------------------------
+if ! go_test_containerized; then
     printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
     exit 1
 fi
-ok "go test -race"
+ok "go test -race (container)"
 
 # --- 4. frontend format check -----------------------------------------------
 if ! (cd frontend && npm run format:check 2>&1); then
@@ -74,12 +83,12 @@ if ! (cd frontend && npm run typecheck 2>&1); then
 fi
 ok "tsc --noEmit"
 
-# --- 7. frontend test -------------------------------------------------------
-if ! (cd frontend && npm test 2>&1); then
+# --- 7. frontend test (in a container) --------------------------------------
+if ! vitest_containerized; then
     printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
     exit 1
 fi
-ok "vitest"
+ok "vitest (container)"
 
 # --- 8. beads: materialise the issue snapshot into this commit ---------------
 # Last, deliberately: a gate that fails above must not leave .beads/issues.jsonl

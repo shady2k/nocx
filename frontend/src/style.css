@@ -316,6 +316,15 @@ body {
      edge reads as broken. The renderer measures this padded box, so the grid
      shrinks to match instead of being clipped. */
   padding: 6px 10px;
+
+  /* Defence in depth against the Wails webview context menu. The
+     contextmenu handler calls preventDefault, which is sufficient in a
+     plain browser; Wails registers its own document-level listener, and
+     under the default 'auto' the native menu may still open over an input,
+     contentEditable, or a selection — xterm parks focus in a helper
+     textarea, so the Cut/Copy/Paste menu can reproduce even in a packaged
+     build. The property inherits, exactly like --wails-draggable. */
+  --default-contextmenu: hide;
 }
 
 .pane.active {
@@ -381,4 +390,99 @@ body {
     background: #7aa2f7;
     border-color: transparent;
   }
+}
+
+/* ── Clipboard banner (OSC 52 blocked-write notification) ──────────── */
+
+/* Floats over the top of the terminal area, inside #panes (position:relative),
+   which is the only placement that satisfies both constraints. Over the whole
+   window it would cover the tab strip — the strip is the title bar, so the
+   traffic lights go with it. In the layout flow it would take vertical space,
+   and shrinking the terminal reflows the grid down to the PTY, repainting any
+   full-screen program running at the time. A notice must not resize the
+   terminal underneath it.
+
+   It also has to read as a warning at a glance, so it does not reuse the
+   terminal background (#1a1b26) — that is what made the first attempt vanish
+   into the window. Lighter surface, amber edge, the palette's warning colour. */
+.clipboard-banner {
+  --wails-draggable: no-drag;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: #24283b;
+  border-left: 3px solid #e0af68;
+  border-bottom: 1px solid #2a2b3d;
+  color: #c0caf5;
+  font:
+    13px/1.4 ui-sans-serif,
+    -apple-system,
+    'SF Pro Text',
+    system-ui,
+    sans-serif;
+}
+
+.clipboard-banner-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.clipboard-banner-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clipboard-banner-btn {
+  --wails-draggable: no-drag;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 4px;
+  font:
+    12px/1 ui-sans-serif,
+    -apple-system,
+    'SF Pro Text',
+    system-ui,
+    sans-serif;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.clipboard-banner-allow {
+  background: #7aa2f7;
+  color: #1a1b26;
+}
+
+.clipboard-banner-allow:hover {
+  background: #89b4ff;
+}
+
+.clipboard-banner-suppress {
+  background: transparent;
+  color: #787c99;
+}
+
+.clipboard-banner-suppress:hover {
+  color: #a9b1d6;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.clipboard-banner-dismiss {
+  background: transparent;
+  color: #565f89;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+
+.clipboard-banner-dismiss:hover {
+  color: #a9b1d6;
+  background: rgba(255, 255, 255, 0.06);
 }

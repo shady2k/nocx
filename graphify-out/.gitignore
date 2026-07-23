@@ -1,0 +1,15 @@
+# Machine-local graphify sidecars — never commit (absolute paths / local cache).
+# The shareable map (graph.json, graph.html, GRAPH_REPORT.md, manifest.json,
+# cost.json, .graphify_labels.json) IS committed so the team starts with a map.
+.graphify_python
+.graphify_root
+.graphify_detect*.json
+.graphify_extract.json
+.graphify_ast.json
+.graphify_semantic*.json
+.graphify_analysis.json
+.graphify_chunk_*.json
+.graphify_uncached.txt
+.graphify_cached.json
+.needs_update
+cache/

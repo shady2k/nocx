@@ -126,6 +126,26 @@ describe('parseOsc133', () => {
 
 describe('onCommandMarker fan-out', () => {
   it('fans out one enriched event per marker to every subscriber', async () => {
+    // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
+    // code uses during init. Stub them so the terminal can initialise.
+    const origMatchMedia = window.matchMedia
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia
+    const OrigResizeObserver = (globalThis as Record<string, unknown>).ResizeObserver
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+
     const r = new XtermRenderer()
     const container = document.createElement('div')
     Object.defineProperty(container, 'clientWidth', { value: 800 })
@@ -135,7 +155,7 @@ describe('onCommandMarker fan-out', () => {
     const a = vi.fn()
     let resolveDone: () => void
     const done = new Promise<void>((res) => { resolveDone = res })
-    const b = vi.fn<[CommandMarkerEvent]>(() => resolveDone())
+    const b = vi.fn((_ev: CommandMarkerEvent) => resolveDone())
     r.onCommandMarker(a)
     r.onCommandMarker(b)
 
@@ -152,5 +172,6 @@ describe('onCommandMarker fan-out', () => {
     expect(typeof ev.line).toBe('number')
     expect(typeof ev.col).toBe('number')
     r.dispose()
+    window.matchMedia = origMatchMedia
   })
 })

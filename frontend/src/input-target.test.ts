@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from 'vitest'
 import { createRegistry, type InputTarget, ShellInputTarget } from './input-target'
 
 const fake = (id: string): InputTarget => ({
-  id, label: id, submit: vi.fn(async () => {}),
+  id,
+  label: id,
+  submit: vi.fn(async () => {}),
 })
 
 describe('InputTargetRegistry', () => {

@@ -29,9 +29,7 @@ describe('CommandEditor', () => {
     ed.show()
     ta.value = 'echo hi'
     // record visibility at submit time via a spy
-    submit.mockImplementation((doc: string) =>
-      order.push(`visible@submit:${ed.isVisible}|${doc}`),
-    )
+    submit.mockImplementation((doc: string) => order.push(`visible@submit:${ed.isVisible}|${doc}`))
     enter(ta)
     expect(submit).toHaveBeenCalledWith('echo hi')
     expect(order[0]).toBe('visible@submit:false|echo hi') // hidden BEFORE submit

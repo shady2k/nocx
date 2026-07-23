@@ -19,7 +19,7 @@ export interface InputTargetRegistry {
 }
 
 const PASTE_START = '\x1b[200~'
-const PASTE_END   = '\x1b[201~'
+const PASTE_END = '\x1b[201~'
 
 // ShellInputTarget routes a submitted document to the active PTY using the
 // ADR-0004 §2 atomic handoff: the editor hides itself (caller's job), then the

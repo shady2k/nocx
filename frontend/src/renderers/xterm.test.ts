@@ -154,7 +154,9 @@ describe('onCommandMarker fan-out', () => {
 
     const a = vi.fn()
     let resolveDone: () => void
-    const done = new Promise<void>((res) => { resolveDone = res })
+    const done = new Promise<void>((res) => {
+      resolveDone = res
+    })
     const b = vi.fn((_ev: CommandMarkerEvent) => resolveDone())
     r.onCommandMarker(a)
     r.onCommandMarker(b)

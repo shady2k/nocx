@@ -187,7 +187,8 @@ func writeFileAtomic(path string, data []byte) error {
 func (s *Impl) ActivationEnv(enhanced bool) []string {
 	env := []string{activationEnvVar + "=1"}
 	if enhanced {
-		env = append(env,
+		env = append(
+			env,
 			promptModeEnvVar+"="+promptModeMarkerOnly,
 			sessionIDEnvVar+"="+newSessionID(),
 		)

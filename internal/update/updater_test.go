@@ -86,6 +86,58 @@ func makeMinimalAppImage(t *testing.T, path string) {
 	}
 }
 
+// fakePlatform is a host-independent [Platform] test double. The
+// transaction core (Check/Apply/Reconcile/ReportHealthy) is
+// platform-agnostic, so its tests must NOT depend on the host's real
+// platform: the backend CI job runs on macOS, where newFakePlatform() would
+// return the darwin impl (zip artefact, dev-build preflight refusal) and
+// diverge from Linux. Real OS behaviour (ditto/renameat2/codesign) is
+// covered by the platform_*_roundtrip tests.
+type fakePlatform struct {
+	id           ArtifactID
+	preflightErr error
+	verifyErr    error
+}
+
+// newFakePlatform returns a fake with a fixed linux/amd64/AppImage
+// identity and permissive preflight/verify, so the core's behaviour is
+// identical on every host.
+func newFakePlatform() *fakePlatform {
+	return &fakePlatform{id: ArtifactID{OS: "linux", Arch: "amd64", Format: "AppImage"}}
+}
+
+func (f *fakePlatform) ArtifactID() ArtifactID { return f.id }
+
+func (f *fakePlatform) Preflight(context.Context, string) error { return f.preflightErr }
+
+func (f *fakePlatform) VerifyExtracted(context.Context, string) error { return f.verifyErr }
+
+// Extract copies the downloaded archive into destDir under its own name
+// — the single-file behaviour the linux impl has, sufficient to exercise
+// the transaction core.
+func (f *fakePlatform) Extract(_ context.Context, archivePath, destDir string) error {
+	data, err := os.ReadFile(archivePath) //nolint:gosec // test-controlled path
+	if err != nil {
+		return err
+	}
+	staged := filepath.Join(destDir, filepath.Base(archivePath))
+	return os.WriteFile(staged, data, 0o755) //nolint:gosec // staged fixture must be executable
+}
+
+// Exchange swaps two same-filesystem paths via a 3-way rename. os.Rename
+// preserves inodes, so the core's device+inode journal behaves exactly
+// as it does with the real renameat2(RENAME_EXCHANGE)/RENAME_SWAP.
+func (f *fakePlatform) Exchange(_ context.Context, a, b string) error {
+	tmp := a + ".fakeswap"
+	if err := os.Rename(a, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(b, a); err != nil {
+		return err
+	}
+	return os.Rename(tmp, b)
+}
+
 // newTestUpdater creates an Updater wired for testing against a
 // temp directory's synthetic AppImage "install".
 func newTestUpdater(t *testing.T, installDir string, fetcherBody, fetcherSig []byte, keyring []ed25519.PublicKey) Updater {
@@ -94,7 +146,7 @@ func newTestUpdater(t *testing.T, installDir string, fetcherBody, fetcherSig []b
 	makeMinimalAppImage(t, installPath)
 
 	return NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{body: fetcherBody, sig: fetcherSig},
 		Keyring:        keyring,
 		CurrentVersion: "0.1.0",
@@ -109,7 +161,7 @@ func newTestUpdater(t *testing.T, installDir string, fetcherBody, fetcherSig []b
 func TestUpdater_Check_FindsUpdate(t *testing.T) {
 	dir := t.TempDir()
 	pubs, priv := makeTestKeyring(1)
-	arch := NewPlatform().ArtifactID()
+	arch := newFakePlatform().ArtifactID()
 
 	artifacts := []Artifact{
 		{
@@ -138,7 +190,7 @@ func TestUpdater_Check_FindsUpdate(t *testing.T) {
 func TestUpdater_Check_AlreadyCurrent(t *testing.T) {
 	dir := t.TempDir()
 	pubs, priv := makeTestKeyring(1)
-	arch := NewPlatform().ArtifactID()
+	arch := newFakePlatform().ArtifactID()
 
 	artifacts := []Artifact{
 		{
@@ -164,7 +216,7 @@ func TestUpdater_Check_AlreadyCurrent(t *testing.T) {
 func TestUpdater_Check_RemoteOlder(t *testing.T) {
 	dir := t.TempDir()
 	pubs, priv := makeTestKeyring(1)
-	arch := NewPlatform().ArtifactID()
+	arch := newFakePlatform().ArtifactID()
 
 	artifacts := []Artifact{
 		{
@@ -191,7 +243,7 @@ func TestUpdater_Check_BadSignature(t *testing.T) {
 	dir := t.TempDir()
 	pubs, _ := makeTestKeyring(1)
 	_, otherPriv := makeTestKeyring(1) // different key
-	arch := NewPlatform().ArtifactID()
+	arch := newFakePlatform().ArtifactID()
 
 	artifacts := []Artifact{
 		{
@@ -239,7 +291,7 @@ func TestReconcile_NoRecord_NothingInFlight(t *testing.T) {
 	makeMinimalAppImage(t, installPath)
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.1.0",
@@ -262,7 +314,7 @@ func TestReconcile_NoRecord_ManagedDebris(t *testing.T) {
 	}
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.1.0",
@@ -308,7 +360,7 @@ func TestReconcile_ExchangeDidNotHappen_OldIDMatches(t *testing.T) {
 	_ = os.MkdirAll(extractDir, 0o750)
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.1.0",
@@ -360,7 +412,7 @@ func TestReconcile_ExchangeHappened_PendingRestart(t *testing.T) {
 	}
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.1.0",
@@ -415,7 +467,7 @@ func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
 	}
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.1.0",
@@ -471,7 +523,7 @@ func TestReportHealthy_FinalisesUpdate(t *testing.T) {
 	makeMinimalAppImage(t, swap)
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.2.0",
@@ -503,7 +555,7 @@ func TestReportHealthy_Idempotent_NoRecord(t *testing.T) {
 	makeMinimalAppImage(t, installPath)
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.1.0",
@@ -630,7 +682,7 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 
 	// Generate signing keys.
 	pubs, priv := makeTestKeyring(1)
-	arch := NewPlatform().ArtifactID()
+	arch := newFakePlatform().ArtifactID()
 
 	// Build a signed manifest pointing at the fixture.
 	artifacts := []Artifact{
@@ -651,7 +703,7 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 	t.Setenv("APPIMAGE", installPath)
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{body: manifestBody, sig: manifestSig},
 		Keyring:        pubs,
 		CurrentVersion: "0.1.0",
@@ -759,7 +811,7 @@ func TestUpdater_Apply_SHA256Mismatch(t *testing.T) {
 	defer srv.Close()
 
 	pubs, priv := makeTestKeyring(1)
-	arch := NewPlatform().ArtifactID()
+	arch := newFakePlatform().ArtifactID()
 
 	// Manifest declares an sha256 that does NOT match the served fixture.
 	artifacts := []Artifact{
@@ -782,7 +834,7 @@ func TestUpdater_Apply_SHA256Mismatch(t *testing.T) {
 	}
 
 	u := NewUpdater(UpdaterConfig{
-		Platform:       NewPlatform(),
+		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{body: manifestBody, sig: manifestSig},
 		Keyring:        pubs,
 		CurrentVersion: "0.1.0",

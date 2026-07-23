@@ -36,7 +36,7 @@ Then open nocx normally. This is required only the first time — later in-app u
 | Tool | Version | Install |
 |------|---------|---------|
 | Go | 1.26 | [go.dev](https://go.dev/dl/) |
-| Node | 22 | [nodejs.org](https://nodejs.org/) |
+| Node | 24 | [nodejs.org](https://nodejs.org/) |
 | Wails CLI | v2 | `go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
 | gofumpt | latest | `go install mvdan.cc/gofumpt@latest` |
 | golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
@@ -44,6 +44,22 @@ Then open nocx normally. This is required only the first time — later in-app u
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
+
+**On NixOS / without Homebrew.** `brew` and `npm i -g` don't work here — the
+latter writes into the read-only Nix store. Install `go`, `nodejs_24`, `gofumpt`,
+and `uv` from nixpkgs, put `~/go/bin` and `~/.local/bin` on your `PATH`, then get
+the rest through the language toolchains:
+
+```bash
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
+CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest        # server-mode bd; add gcc only for the embedded cgo build
+uv tool install graphifyy && graphify install
+```
+
+`bd` is not in upstream nixpkgs, so `go install` is the clean route (or package
+it yourself). The `beads-superpowers` plugin installs via `claude` — see
+[Agent tooling](#agent-tooling).
 
 ## Getting started
 

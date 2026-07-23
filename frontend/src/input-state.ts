@@ -16,10 +16,13 @@ export interface Machine {
   // The current prompt→C→D cycle reached C through a clean A/B. Consumers gate
   // block actions (e.g. re-run) on this; anomalies clear it (Task 3).
   trusted: boolean
+  // DOM keyboard ownership is authorized ONLY after A→B (ADR-0006 §4).
+  // A alone leaves owned:false; C/submit/alt-buffer/reset/exit clear it.
+  owned: boolean
 }
 
 export function initialMachine(): Machine {
-  return { state: 'RAW', trusted: false }
+  return { state: 'RAW', trusted: false, owned: false }
 }
 
 export class InputStateController {
@@ -31,7 +34,7 @@ export class InputStateController {
 
   dispatch(e: InputEvent): void {
     const next = reduce(this.machine, e)
-    if (next.state === this.machine.state && next.trusted === this.machine.trusted) {
+    if (next.state === this.machine.state && next.trusted === this.machine.trusted && next.owned === this.machine.owned) {
       this.machine = next
       return
     }
@@ -46,31 +49,33 @@ export function reduce(m: Machine, e: InputEvent): Machine {
   switch (e.type) {
     case 'buffer':
       return e.buffer === 'alternate'
-        ? { state: 'ALT_SCREEN', trusted: false }
-        : { state: 'RAW', trusted: false }
+        ? { state: 'ALT_SCREEN', trusted: false, owned: false }
+        : { state: 'RAW', trusted: false, owned: false }
     case 'reset':
     case 'exit':
-      return { state: 'RAW', trusted: false }
+      return { state: 'RAW', trusted: false, owned: false }
     case 'submit':
-      return { state: 'RUNNING_RAW', trusted: m.trusted }
+      return { state: 'RUNNING_RAW', trusted: m.trusted, owned: false }
     case 'marker':
       switch (e.kind) {
         case 'A':
           // Fresh prompt. Trusted only when we arrived cleanly (from RAW after a
           // finished command or from initial). An A that interrupts RUNNING_RAW
           // (no D, or a nested prompt) is a resync: PROMPT_READY but untrusted.
-          return { state: 'PROMPT_READY', trusted: m.state !== 'RUNNING_RAW' }
+          // Ownership requires the full A→B sequence (ADR-0006 §4).
+          return { state: 'PROMPT_READY', trusted: m.state !== 'RUNNING_RAW', owned: false }
         case 'B':
           // B only means "input ready" when we are already at a prompt.
-          return { state: 'PROMPT_READY', trusted: m.state === 'PROMPT_READY' && m.trusted }
+          // DOM ownership is granted ONLY when an A preceded this B.
+          return { state: 'PROMPT_READY', trusted: m.state === 'PROMPT_READY' && m.trusted, owned: m.state === 'PROMPT_READY' }
         case 'C':
           // Command start. Trusted only if a clean prompt preceded it; an orphan
           // or nested C runs raw but disables downstream actions.
-          return { state: 'RUNNING_RAW', trusted: m.state === 'PROMPT_READY' && m.trusted }
+          return { state: 'RUNNING_RAW', trusted: m.state === 'PROMPT_READY' && m.trusted, owned: false }
         case 'D':
           // Finished — only meaningful while a command is running. Orphan D
           // (e.g. empty Enter emits D with no preceding C) is ignored.
-          return m.state === 'RUNNING_RAW' ? { state: 'RAW', trusted: m.trusted } : m
+          return m.state === 'RUNNING_RAW' ? { state: 'RAW', trusted: m.trusted, owned: false } : m
       }
   }
 }

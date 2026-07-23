@@ -132,6 +132,35 @@ echo NOCX_SOURCED_OK
 	}
 }
 
+// TestZshMarkerOnlyBeatsHostilePrompt spawns a zsh that sources nocx.zsh
+// with NOCX_PROMPT_MODE=marker-only, registers a hostile precmd that sets
+// PROMPT='HOSTILE$ ', runs the precmd hooks, and asserts HOSTILE does not
+// appear in the rendered prompt.
+func TestZshMarkerOnlyBeatsHostilePrompt(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	// Register a hostile precmd BEFORE sourcing nocx so nocx can position
+	// its suppressor after it. Then invoke precmd hooks and print PROMPT.
+	prog := `
+autoload -Uz add-zsh-hook
+__hostile() { PROMPT='HOSTILE$ '; }
+add-zsh-hook precmd __hostile
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+for f in $precmd_functions; do $f; done
+builtin printf 'PROMPT=[%s]' "$PROMPT"
+`
+	out := runShellProg(t, zsh, prog, script)
+	if strings.Contains(out, "HOSTILE") {
+		t.Errorf("marker-only prompt was clobbered by a later precmd hook:\n%s", out)
+	}
+	// The prompt must still carry the B marker.
+	if !strings.Contains(out, "]133;B") {
+		t.Errorf("marker-only prompt missing OSC 133 B marker:\n%s", out)
+	}
+}
+
 // TestEnsureInstalled_SkipsVersionWhenGateFails guards nocx-1dx: the VERSION
 // marker must not be recorded if a gate append failed, so the next launch
 // retries instead of short-circuiting on a version match.

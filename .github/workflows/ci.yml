@@ -12,18 +12,22 @@
 # The pre-commit hook and the Makefile `ci` target mirror this same set of
 # checks so "green" is identical locally and in CI.
 #
-# Trigger decision: CI runs on release branches (release/**) and manual
-# workflow_dispatch, and is *called* by release.yml via workflow_call so a tag
-# release cannot exist without a green run on that exact commit. The standalone
-# `push: tags: ['v*']` trigger is deliberately gone: with release.yml calling
-# this workflow, keeping it would run the whole suite twice for every release
-# for no added protection (see distribution design §5). Everyday protection on
-# main comes from the local pre-commit hook and make ci, which run the same
-# checks.
+# Trigger decision: CI runs on pull requests to main, on release branches
+# (release/**) and manual workflow_dispatch, and is *called* by release.yml via
+# workflow_call so a tag release cannot exist without a green run on that exact
+# commit. The `pull_request: [main]` trigger is the mechanical gate on main
+# (nocx-q36): the local pre-commit hook and `make ci` give the same checks as
+# fast feedback, but a hook is bypassable with --no-verify and `make hooks` is a
+# per-clone step a fresh checkout may skip, so CI is what actually enforces "no
+# merge without green". The standalone `push: tags: ['v*']` trigger stays gone:
+# with release.yml calling this workflow, keeping it would run the whole suite
+# twice for every release for no added protection (see distribution design §5).
 
 name: CI
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: ['release/**']
   workflow_dispatch:

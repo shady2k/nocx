@@ -58,7 +58,7 @@ func TestDarwinPayloadRoundTrip(t *testing.T) {
 	frameworkDir := filepath.Join(contentsDir, "Frameworks")
 
 	for _, d := range []string{contentsDir, macosDir, frameworkDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -68,7 +68,7 @@ func TestDarwinPayloadRoundTrip(t *testing.T) {
 	// (b) its exec bit survives ditto, (c) lipo -archs works. Use a
 	// real Mach-O header crafted by test helper so lipo succeeds.
 	fakeBinaryPath := filepath.Join(macosDir, "nocx")
-	if err := os.WriteFile(fakeBinaryPath, fatBinaryWithBothSlices(), 0o755); err != nil {
+	if err := os.WriteFile(fakeBinaryPath, fatBinaryWithBothSlices(), 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 
@@ -80,14 +80,14 @@ func TestDarwinPayloadRoundTrip(t *testing.T) {
 
 	// Pack with ditto.
 	archivePath := filepath.Join(base, "nocx.zip")
-	cmd := exec.Command("ditto", "-c", "-k", "--keepParent", appDir, archivePath)
+	cmd := exec.Command("ditto", "-c", "-k", "--keepParent", appDir, archivePath) //nolint:gosec // test-controlled args
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("ditto pack failed: %v\n%s", err, string(out))
 	}
 
 	// Unpack with ditto through the Platform seam.
 	destDir := filepath.Join(base, "extracted")
-	if err := os.Mkdir(destDir, 0o755); err != nil {
+	if err := os.Mkdir(destDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,13 +153,13 @@ func TestDarwinRoundTrip_ArchiveZipDestroysBundle(t *testing.T) {
 	macosDir := filepath.Join(appDir, "Contents", "MacOS")
 	frameworkDir := filepath.Join(appDir, "Contents", "Frameworks")
 	for _, d := range []string{macosDir, frameworkDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	binaryPath := filepath.Join(macosDir, "nocx")
-	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\necho fake\n"), 0o755); err != nil {
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\necho fake\n"), 0o755); err != nil { //nolint:gosec // test fixture must be executable
 		t.Fatal(err)
 	}
 	symlinkPath := filepath.Join(frameworkDir, "somelib.dylib")
@@ -170,59 +170,59 @@ func TestDarwinRoundTrip_ArchiveZipDestroysBundle(t *testing.T) {
 	// Pack with archive/zip. The header records the +x bit and the symlink —
 	// the point is that the naive extractor below ignores both.
 	zipPath := filepath.Join(base, "nocx-plain.zip")
-	zf, err := os.Create(zipPath)
+	zf, err := os.Create(zipPath) //nolint:gosec // test-controlled path
 	if err != nil {
 		t.Fatal(err)
 	}
 	zw := zip.NewWriter(zf)
-	if err := filepath.Walk(appDir, func(path string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	if err = filepath.Walk(appDir, func(path string, fi os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if path == appDir {
 			return nil
 		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
 		}
-		header, err := zip.FileInfoHeader(fi)
-		if err != nil {
-			return err
+		header, hErr := zip.FileInfoHeader(fi)
+		if hErr != nil {
+			return hErr
 		}
 		header.Name = rel
 		if fi.IsDir() {
 			header.Name += "/"
 		}
-		w, err := zw.CreateHeader(header)
-		if err != nil {
-			return err
+		w, cErr := zw.CreateHeader(header)
+		if cErr != nil {
+			return cErr
 		}
 		switch {
 		case fi.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
+			target, lErr := os.Readlink(path)
+			if lErr != nil {
+				return lErr
 			}
-			_, err = w.Write([]byte(target))
-			return err
+			_, wErr := w.Write([]byte(target))
+			return wErr
 		case fi.Mode().IsRegular():
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
+			data, rErr := os.ReadFile(path) //nolint:gosec // test-controlled path
+			if rErr != nil {
+				return rErr
 			}
-			_, err = w.Write(data)
-			return err
+			_, wErr := w.Write(data)
+			return wErr
 		default:
 			return nil
 		}
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := zw.Close(); err != nil {
+	if err = zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := zf.Close(); err != nil {
+	if err = zf.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -234,34 +234,34 @@ func TestDarwinRoundTrip_ArchiveZipDestroysBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	for _, f := range zr.File {
-		dest := filepath.Join(extractedDir, f.Name)
+		dest := filepath.Join(extractedDir, f.Name) //nolint:gosec // test-controlled archive, not adversarial input
 		if strings.HasSuffix(f.Name, "/") {
-			if err := os.MkdirAll(dest, 0o755); err != nil {
-				t.Fatal(err)
+			if mkErr := os.MkdirAll(dest, 0o750); mkErr != nil {
+				t.Fatal(mkErr)
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			t.Fatal(err)
+		if mkErr := os.MkdirAll(filepath.Dir(dest), 0o750); mkErr != nil {
+			t.Fatal(mkErr)
 		}
-		rc, err := f.Open()
-		if err != nil {
-			t.Fatal(err)
+		rc, openErr := f.Open()
+		if openErr != nil {
+			t.Fatal(openErr)
 		}
-		out, err := os.Create(dest) // default perms — never sets +x
-		if err != nil {
-			rc.Close()
-			t.Fatal(err)
+		out, createErr := os.Create(dest) //nolint:gosec // test-controlled path
+		if createErr != nil {
+			_ = rc.Close()
+			t.Fatal(createErr)
 		}
-		if _, err := io.Copy(out, rc); err != nil {
-			rc.Close()
-			out.Close()
-			t.Fatal(err)
+		if _, copyErr := io.Copy(out, rc); copyErr != nil { //nolint:gosec // test-controlled archive, bounded input
+			_ = rc.Close()
+			_ = out.Close()
+			t.Fatal(copyErr)
 		}
-		rc.Close()
-		out.Close()
+		_ = rc.Close()
+		_ = out.Close()
 	}
 
 	// THE KEY ASSERTION: the executable bit is gone. os.Create never sets +x,
@@ -279,12 +279,12 @@ func TestDarwinRoundTrip_ArchiveZipDestroysBundle(t *testing.T) {
 	// And the symlink is gone: it came back as a regular file whose contents
 	// are the link target, not a symlink.
 	extractedSymlink := filepath.Join(extractedDir, "nocx.app", "Contents", "Frameworks", "somelib.dylib")
-	if si, err := os.Lstat(extractedSymlink); err == nil {
+	if si, lErr := os.Lstat(extractedSymlink); lErr == nil {
 		if si.Mode()&os.ModeSymlink != 0 {
 			t.Error("archive/zip extraction restored a real symlink — it should have produced a regular file")
 		}
-	} else if !os.IsNotExist(err) {
-		t.Errorf("unexpected error checking extracted symlink: %v", err)
+	} else if !os.IsNotExist(lErr) {
+		t.Errorf("unexpected error checking extracted symlink: %v", lErr)
 	}
 
 	t.Log("archive/zip negative test: +x bit and symlink NOT restored by a naive archive/zip extract (as designed) ✓")
@@ -310,8 +310,6 @@ func fatBinaryWithBothSlices() []byte {
 		cpuSubtypeAll uint32 = 0x00000003
 	)
 
-	const fatHeaderSize = 8     // magic + nfat_arch
-	const fatArchSize = 20      // one fat_arch entry
 	const sliceDataSize = 32    // minimal thin Mach-O header
 	const fatArchOffset0 = 4096 // page-aligned offset for slice 0
 	const fatArchOffset1 = 8192 // page-aligned offset for slice 1

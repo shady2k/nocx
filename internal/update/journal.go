@@ -38,7 +38,7 @@ func statBundleID(path string) (bundleID, error) {
 	if !ok {
 		return zeroID, fmt.Errorf("unsupported filesystem stat for %s", path)
 	}
-	return bundleID{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil //nolint:unconvert // stat.Dev is int32 on darwin, uint64 on linux
+	return bundleID{Dev: uint64(stat.Dev), Ino: stat.Ino}, nil //nolint:unconvert,gosec // stat.Dev is int32 on darwin (conversion required; device id, overflow benign), uint64 on linux
 }
 
 func (b bundleID) isZero() bool          { return b == zeroID }

@@ -95,7 +95,7 @@ func (p *darwinPlatform) VerifyExtracted(ctx context.Context, bundlePath string)
 	// pack/extract round-trip.
 	{
 		binary := filepath.Join(bundlePath, "Contents", "MacOS", "nocx")
-		cmd := exec.CommandContext(ctx, "lipo", "-archs", binary)
+		cmd := exec.CommandContext(ctx, "lipo", "-archs", binary) //nolint:gosec // fixed argv; binary is the verified extracted bundle path
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("lipo -archs %s failed: %w\n%s", binary, err, string(out))

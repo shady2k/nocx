@@ -26,6 +26,7 @@ _bmad/core/config.yaml
 /build/
 /dist/
 /go/build/
+/tools/bin/
 # --- Beads / Dolt files (added by bd init) ---
 # --- BMAD resolved config: installer-generated, bakes in personal identity ---
 # --- BMAD working scratch: canonical outputs are promoted to docs/ ---

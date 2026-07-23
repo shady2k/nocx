@@ -2,6 +2,7 @@ import { WTerm } from '@wterm/dom'
 import '@wterm/dom/css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
 import type {
+  CommandMarkerCallback,
   CwdCallback,
   DataCallback,
   ResizeCallback,
@@ -75,6 +76,12 @@ export class WtermRenderer implements TerminalRenderer {
   onCwd(_cb: CwdCallback): void {
     // @wterm/dom does not expose an OSC handler. OSC 7 cwd tracking
     // requires xterm.js.
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onCommandMarker(_cb: CommandMarkerCallback): void {
+    // @wterm/dom does not expose an OSC handler. OSC 133 command markers
+    // require xterm.js.
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

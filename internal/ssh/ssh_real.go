@@ -151,7 +151,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	rc.mu.Unlock()
 
 	// 6. Open session, request PTY + shell.
-	ch, err := rc.openShell(gclient, resolved)
+	ch, err := rc.openShell(ctx, gclient, resolved, cfg)
 	if err != nil {
 		_ = gclient.Close()
 		return nil, err
@@ -425,8 +425,25 @@ func (rc *RealClient) agentMethods() []gossh.AuthMethod {
 }
 
 // openShell opens a session, requests a PTY at the requested size, and
-// starts a shell. Returns a RealChannel wrapping the underlying channel.
-func (rc *RealClient) openShell(gclient *gossh.Client, resolved *resolvedConfig) (*RealChannel, error) {
+// starts a shell. If cfg.RemoteInstaller is set, shell integration scripts
+// are installed on the remote host via SFTP and the shell is started with
+// the integration activated. Returns a RealChannel wrapping the underlying
+// channel.
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (*RealChannel, error) {
+	// Install shell integration on the remote host if a RemoteInstaller is
+	// provided. This is best-effort: errors are logged but do not prevent
+	// the session from opening.
+	if cfg.RemoteInstaller != nil {
+		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
+		if err != nil {
+			rc.log.Warn("ssh: could not determine remote home for shell integration",
+				"host", resolved.hostName, "error", err)
+		} else if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
+			rc.log.Warn("ssh: shell integration install failed",
+				"host", resolved.hostName, "error", err)
+		}
+	}
+
 	session, err := gclient.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("new session: %w", err)
@@ -465,10 +482,18 @@ func (rc *RealClient) openShell(gclient *gossh.Client, resolved *resolvedConfig)
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	// Start the shell.
-	if err := session.Shell(); err != nil {
-		_ = session.Close()
-		return nil, fmt.Errorf("shell: %w", err)
+	// Start the shell. If shell integration is installed, use Start with
+	// the integration command; otherwise fall back to Shell().
+	if cfg.RemoteInstaller != nil {
+		if err := session.Start(cfg.RemoteInstaller.RemoteStartCommand()); err != nil {
+			_ = session.Close()
+			return nil, fmt.Errorf("shell start: %w", err)
+		}
+	} else {
+		if err := session.Shell(); err != nil {
+			_ = session.Close()
+			return nil, fmt.Errorf("shell: %w", err)
+		}
 	}
 
 	ch := &RealChannel{

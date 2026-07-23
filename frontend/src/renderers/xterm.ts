@@ -6,6 +6,8 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
 import type {
+  CommandMarker,
+  CommandMarkerCallback,
   CwdCallback,
   DataCallback,
   ResizeCallback,
@@ -57,6 +59,33 @@ export function parseOsc7(payload: string): { host: string; path: string } | nul
     // decodeURIComponent throws on malformed percent-encoding (e.g. '%ZZ').
     return null
   }
+}
+
+/**
+ * Parses an OSC 133 payload into a CommandMarker. Returns null for invalid
+ * or unrecognized payloads.
+ *
+ * Format: 'A' | 'B' | 'C' | 'D' | 'D;<exitcode>'
+ */
+export function parseOsc133(payload: string): CommandMarker | null {
+  if (payload.length === 0) return null
+  const kind = payload[0] as CommandMarker['kind']
+  if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return null
+
+  if (kind === 'D' && payload.length > 1 && payload[1] === ';') {
+    const codeStr = payload.slice(2)
+    // Strict: reject trailing junk, negatives, or out-of-range exit codes.
+    if (!/^\d+$/.test(codeStr)) {
+      return { kind: 'D' }
+    }
+    const code = parseInt(codeStr, 10)
+    if (code < 0 || code > 255) {
+      return { kind: 'D' }
+    }
+    return { kind: 'D', exitCode: code }
+  }
+
+  return { kind }
 }
 
 export class XtermRenderer implements TerminalRenderer {
@@ -203,6 +232,14 @@ export class XtermRenderer implements TerminalRenderer {
         cb({ host: parsed.host, path: parsed.path })
       }
       return false // let xterm.js also handle it (default render is no-op)
+    })
+  }
+
+  onCommandMarker(cb: CommandMarkerCallback): void {
+    this.term?.parser.registerOscHandler(133, (data: string) => {
+      const marker = parseOsc133(data)
+      if (marker) cb(marker)
+      return false
     })
   }
 

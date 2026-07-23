@@ -16,6 +16,15 @@ type Channel interface {
 	Done() <-chan struct{}
 }
 
+// RemoteInstaller installs shell integration scripts on a remote host via
+// SSH/SFTP and returns the start command for the shell. Defined here (not
+// in shellintegration) to avoid a cyclic import.
+type RemoteInstaller interface {
+	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
+	GetRemoteHome(sshClient *gossh.Client) (string, error)
+	RemoteStartCommand() string
+}
+
 type SSH interface {
 	Connect(ctx context.Context, host string, opts ...ConnectOption) (Channel, error)
 	Close() error
@@ -24,17 +33,18 @@ type SSH interface {
 type ConnectOption func(*ConnectConfig)
 
 type ConnectConfig struct {
-	User         string
-	Port         int
-	KeyFile      string
-	Password     string
-	UseAgent     bool
-	Cols         uint16
-	Rows         uint16
-	XPixel       uint16
-	YPixel       uint16
-	AuthMethods  []gossh.AuthMethod
-	KeyExchanges []string
+	User            string
+	Port            int
+	KeyFile         string
+	Password        string
+	UseAgent        bool
+	Cols            uint16
+	Rows            uint16
+	XPixel          uint16
+	YPixel          uint16
+	AuthMethods     []gossh.AuthMethod
+	KeyExchanges    []string
+	RemoteInstaller RemoteInstaller
 }
 
 func WithUser(user string) ConnectOption {
@@ -76,6 +86,13 @@ func WithPTYSize(cols, rows, xpixel, ypixel uint16) ConnectOption {
 // default key-discovery logic. Used primarily in tests.
 func WithAuthMethods(auths []gossh.AuthMethod) ConnectOption {
 	return func(c *ConnectConfig) { c.AuthMethods = auths }
+}
+
+// WithRemoteInstaller injects a shell integration installer for the remote
+// session. When set, openShell installs scripts via SFTP and starts the
+// shell with the integration activated.
+func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
+	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
 }
 
 type Stub struct {

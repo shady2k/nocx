@@ -56,7 +56,23 @@ add-zsh-hook preexec __nocx_preexec
 # clobber $? before we read it. Dedupe first so re-sourcing stays idempotent.
 precmd_functions=(__nocx_capture_status ${precmd_functions:#__nocx_capture_status})
 
-if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
+# Non-printing B marker (zsh %{...%} so it takes zero prompt width).
+__nocx_b_marker=$'%{\e]133;B\a%}'
+
+if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
+    # Enhanced mode: reassert a marker-only prompt AFTER frameworks run, every
+    # prompt. Kept last in precmd_functions so a framework precmd that rewrote
+    # PS1 cannot win. Do NOT touch PS2/PS3 (continuation/secondary stay native).
+    __nocx_marker_only_prompt() {
+        PROMPT="$__nocx_b_marker"
+        PS1="$__nocx_b_marker"
+        RPROMPT=''
+        RPS1=''
+    }
+    add-zsh-hook precmd __nocx_marker_only_prompt
+    # Force it last, deduped, on every source.
+    precmd_functions=(${precmd_functions:#__nocx_marker_only_prompt} __nocx_marker_only_prompt)
+elif [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
     PS1="${PS1:-}"$'%{\e]133;B\a%}'
     __nocx_prompt_wrapped=1
 fi

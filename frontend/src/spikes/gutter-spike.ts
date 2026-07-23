@@ -288,25 +288,6 @@ function estimateCellHeight(term: Terminal): number {
   return cellHeight
 }
 
-/**
- * Estimate cell width from terminal options.
- */
-function estimateCellWidth(term: Terminal): number {
-  const fontSize = term.options.fontSize ?? 15
-  const letterSpacing = term.options.letterSpacing ?? 0
-
-  const measureEl = term.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
-  if (measureEl) {
-    const rect = measureEl.getBoundingClientRect()
-    if (rect.width > 0) {
-      return rect.width
-    }
-  }
-
-  // Typical monospace width is ~0.6 * fontSize
-  return Math.ceil(fontSize * 0.6 + letterSpacing)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Main harness
 // ═══════════════════════════════════════════════════════════════════════════

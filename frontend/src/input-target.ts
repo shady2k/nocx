@@ -31,8 +31,9 @@ export class ShellInputTarget implements InputTarget {
   readonly label = 'Shell'
   constructor(private readonly send: (data: string) => void) {}
 
-  async submit(doc: string, _ctx: SubmitContext): Promise<void> {
+  submit(doc: string): Promise<void> {
     this.send(`${PASTE_START}${doc}${PASTE_END}\r`)
+    return Promise.resolve()
   }
 }
 

@@ -1,10 +1,5 @@
 import './style.css'
-import {
-  GetWSPort,
-  CheckForUpdate,
-  ApplyUpdate,
-  ReportHealthy,
-} from '../wailsjs/go/main/WailsApp'
+import { GetWSPort, CheckForUpdate, ApplyUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
 import { createClipboardAccess, ClipboardGate } from './clipboard'

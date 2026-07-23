@@ -3,6 +3,8 @@ import { createRenderer, resolveRendererName, type RendererName } from './render
 import type { TerminalRenderer } from './renderers/types'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { InputStateController } from './input-state'
+import { CommandEditor } from './editor'
+import { ShellInputTarget } from './input-target'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 
@@ -14,6 +16,10 @@ import type { ClipboardBanner } from './banner'
 // locally as fast as the renderer likes, but only tell the PTY the size
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
+
+// ADR-0006: OFF by default; flip only after the native-mode escape +
+// readiness gating land.
+const ENHANCED_INPUT = false
 
 // Shown only until the session reports where it started; a tab named after a
 // generic word tells the user nothing once there are three of them.
@@ -77,6 +83,8 @@ class Tab {
   private inputState = new InputStateController()
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
+  private editor: CommandEditor | null = null
+  private shellTarget: ShellInputTarget | null = null
   private started = false
   cols = 0
   rows = 0
@@ -286,8 +294,28 @@ class Tab {
         }
       })
 
-      this.inputState.onChange((m) =>
-        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted))
+      this.inputState.onChange((m) => {
+        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
+        if (!ENHANCED_INPUT) return
+        if (m.owned) this.editor!.show()
+        else {
+          this.editor!.hide()
+          renderer.focus()
+        }
+      })
+
+      // ── Command editor (DOM textarea) ────────────────────────────────
+      // Wired behind ENHANCED_INPUT (ADR-0006 §5: fail-open). When the flag
+      // is on, ownership (A→B) gives the editor focus; typing + Enter submits
+      // via ShellInputTarget's atomic handoff (hide-before-send → bracketed
+      // paste + CR). When the flag is off, keys flow unchanged to the PTY.
+      this.shellTarget = new ShellInputTarget((data: string) => session.send(data))
+      this.editor = new CommandEditor({
+        submit: (doc: string) => {
+          void this.shellTarget!.submit(doc, { targetId: 'shell' })
+        },
+      })
+      this.editor.mount(this.pane)
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).
@@ -398,6 +426,7 @@ class Tab {
   close(): void {
     this.session?.close()
     this.renderer?.dispose()
+    this.editor?.dispose()
   }
 }
 

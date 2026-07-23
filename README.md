@@ -142,11 +142,14 @@ Every commit must pass:
 | `vitest` | ✓ | ✓ | ✓ |
 | `npm run build` | — | ✓ | ✓ |
 
-CI (`ci.yml`) runs on release branches (`release/**`) and manual dispatch, and
-is called by `release.yml` on a version tag (`v*`) so a release gates on a green
-suite (GitHub Actions, macos-latest for the Go and e2e jobs, ubuntu-latest for
-the frontend). Everyday gating on `main` is enforced locally by the pre-commit
-hook and `make ci` — they run the identical set of checks.
+CI (`ci.yml`) runs on every pull request to `main`, on release branches
+(`release/**`) and manual dispatch, and is called by `release.yml` on a version
+tag (`v*`) so a release gates on a green suite (GitHub Actions, macos-latest for
+the Go and e2e jobs, ubuntu-latest for the frontend). The pull-request run is
+what enforces **no merge without green** on `main`: the pre-commit hook and
+`make ci` run the identical checks as fast local feedback, but a hook is
+bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh
+checkout may skip.
 
 ## Task tracking — beads (bd)
 

@@ -4,7 +4,6 @@ import {
   CheckForUpdate,
   ApplyUpdate,
   ReportHealthy,
-  type UpdateInfo,
 } from '../wailsjs/go/main/WailsApp'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
@@ -138,7 +137,7 @@ async function main() {
 
   // Check for updates. Failures are silent (airplane mode, DNS hiccup, etc.).
   try {
-    const info: UpdateInfo | null = await CheckForUpdate()
+    const info = await CheckForUpdate()
     if (info) {
       notice.showAvailable(info.Version, info.NotesURL)
     }
@@ -151,7 +150,7 @@ async function main() {
   setInterval(() => {
     void (async () => {
       try {
-        const info: UpdateInfo | null = await CheckForUpdate()
+        const info = await CheckForUpdate()
         if (info) {
           notice.showAvailable(info.Version, info.NotesURL)
         }

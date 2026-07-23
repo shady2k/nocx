@@ -2,6 +2,7 @@ import { WSClient, type SessionHandle } from './ipc'
 import { createRenderer, resolveRendererName, type RendererName } from './renderers'
 import type { TerminalRenderer } from './renderers/types'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
+import { InputStateController } from './input-state'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 
@@ -73,6 +74,7 @@ class Tab {
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private _cwdFromOSC7 = false
   private _lastExitCode: number | null = null
+  private inputState = new InputStateController()
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private started = false
@@ -248,8 +250,14 @@ class Tab {
           this.markActivity()
         }
       })
-      session.onExit((sid: string) => console.log('nocx: session exited:', sid))
-      session.onReset(() => renderer.reset())
+      session.onExit((sid: string) => {
+        console.log('nocx: session exited:', sid)
+        this.inputState.dispatch({ type: 'exit' })
+      })
+      session.onReset(() => {
+        renderer.reset()
+        this.inputState.dispatch({ type: 'reset' })
+      })
 
       renderer.onData((data: string) => session.send(data))
       renderer.onTitle((title: string) => {
@@ -260,6 +268,7 @@ class Tab {
       })
       renderer.onBufferChange((type) => {
         this._bufferType = type
+        this.inputState.dispatch({ type: 'buffer', buffer: type })
       })
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.
@@ -268,6 +277,7 @@ class Tab {
         }
       })
       renderer.onCommandMarker((marker) => {
+        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
         // OSC 133 D carries the exit code of the just-finished command.
         // Stored for future consumers: command blocks, success/failure
         // colouring, activity indicator refinement.
@@ -275,6 +285,9 @@ class Tab {
           this._lastExitCode = marker.exitCode
         }
       })
+
+      this.inputState.onChange((m) =>
+        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted))
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).

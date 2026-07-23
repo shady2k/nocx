@@ -101,22 +101,29 @@ func (s *Impl) EnsureInstalled(home string) error {
 		}
 	}
 
-	// Write version.
-	if err := os.WriteFile(vf, []byte(version+"\n"), 0o600); err != nil {
-		return fmt.Errorf("shellintegration: write version: %w", err)
-	}
-
 	// Append gate lines to rc files.
+	gatesOK := true
 	for rcFile, gate := range rcGate {
 		rcPath := filepath.Join(home, rcFile)
 		if err := appendGate(rcPath, gate); err != nil {
 			s.log.Warn("shellintegration: failed to append gate to rc file",
 				"path", rcPath, "error", err)
 			// Non-fatal: scripts are installed, user can source manually.
+			gatesOK = false
 		}
 	}
 
-	s.log.Info("shellintegration: installed", "dir", dir, "version", version)
+	// Write the version marker LAST, and only once the gates are in place. A
+	// matching version short-circuits every future run, so recording success
+	// before a gate is appended would strand the integration forever if the
+	// append failed — the next launch must retry rather than skip.
+	if gatesOK {
+		if err := os.WriteFile(vf, []byte(version+"\n"), 0o600); err != nil {
+			return fmt.Errorf("shellintegration: write version: %w", err)
+		}
+	}
+
+	s.log.Info("shellintegration: installed", "dir", dir, "version", version, "gatesOK", gatesOK)
 	return nil
 }
 

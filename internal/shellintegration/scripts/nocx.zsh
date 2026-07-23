@@ -2,11 +2,11 @@
 # Activated when NOCX_SHELL_INTEGRATION is set.
 # Emits OSC 133 (A/B/C/D) command markers and OSC 7 (cwd).
 
-if [[ -z "$NOCX_SHELL_INTEGRATION" ]]; then
+if [[ -z "${NOCX_SHELL_INTEGRATION:-}" ]]; then
     return 2>/dev/null || exit 0
 fi
 
-if [[ -n "$__nocx_loaded" ]]; then
+if [[ -n "${__nocx_loaded:-}" ]]; then
     return 2>/dev/null || exit 0
 fi
 __nocx_loaded=1
@@ -24,8 +24,12 @@ __nocx_encode_url() {
     builtin printf '%s' "$s"
 }
 
+# Capture the just-finished command's exit status. This must run before any
+# other precmd hook can clobber $?, so it is forced to the front of
+# precmd_functions below; it re-returns the status so later hooks still see it.
 __nocx_capture_status() {
     __nocx_exit_code=$?
+    return $__nocx_exit_code
 }
 
 __nocx_precmd() {
@@ -47,7 +51,12 @@ add-zsh-hook precmd __nocx_capture_status
 add-zsh-hook precmd __nocx_precmd
 add-zsh-hook preexec __nocx_preexec
 
+# Force the status capture to the front of precmd_functions so a precmd hook the
+# user registered earlier (oh-my-zsh, plugins, sourced before our gate) cannot
+# clobber $? before we read it. Dedupe first so re-sourcing stays idempotent.
+precmd_functions=(__nocx_capture_status ${precmd_functions:#__nocx_capture_status})
+
 if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
-    PS1="${PS1}"$'%{\e]133;B\a%}'
+    PS1="${PS1:-}"$'%{\e]133;B\a%}'
     __nocx_prompt_wrapped=1
 fi

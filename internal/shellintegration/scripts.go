@@ -11,7 +11,7 @@ var bashScript string
 // version is the integration script version. Bump when scripts change;
 // EnsureInstalled/EnsureInstalledRemote compare this against the installed
 // VERSION file and rewrite scripts when they differ.
-const version = "1"
+const version = "2"
 
 // dirName is the directory name inside the user's home.
 const dirName = ".nocx"

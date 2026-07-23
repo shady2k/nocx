@@ -8,6 +8,7 @@ import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
 import type {
   CommandMarker,
   CommandMarkerCallback,
+  CommandMarkerEvent,
   CwdCallback,
   DataCallback,
   ResizeCallback,
@@ -116,6 +117,8 @@ export class XtermRenderer implements TerminalRenderer {
   private recoveryAttempts = 0
   // Periodic forced refresh — Linux/WebKitGTK only. See FORCED_REFRESH_MS.
   private refreshTimer: ReturnType<typeof setInterval> | null = null
+  private commandMarkerSubs: CommandMarkerCallback[] = []
+  private osc133Disposable?: { dispose(): void }
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -266,9 +269,20 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onCommandMarker(cb: CommandMarkerCallback): void {
-    this.term?.parser.registerOscHandler(133, (data: string) => {
+    this.commandMarkerSubs.push(cb)
+    if (this.osc133Disposable || !this.term) return
+    this.osc133Disposable = this.term.parser.registerOscHandler(133, (data: string) => {
       const marker = parseOsc133(data)
-      if (marker) cb(marker)
+      if (marker && this.term) {
+        const buf = this.term.buffer.active
+        const event: CommandMarkerEvent = {
+          ...marker,
+          line: buf.baseY + buf.cursorY,
+          col: buf.cursorX,
+          buffer: buf.type,
+        }
+        for (const sub of this.commandMarkerSubs) sub(event)
+      }
       return false
     })
   }
@@ -327,6 +341,9 @@ export class XtermRenderer implements TerminalRenderer {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
     }
+    this.osc133Disposable?.dispose()
+    this.osc133Disposable = undefined
+    this.commandMarkerSubs = []
   }
 
   get cols(): number {

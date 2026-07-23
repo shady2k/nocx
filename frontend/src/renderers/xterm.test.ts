@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
-import { parseOsc7, parseOsc133 } from './xterm'
+import { describe, expect, it, vi } from 'vitest'
+import { parseOsc7, parseOsc133, XtermRenderer } from './xterm'
+import type { CommandMarkerEvent } from './types'
 
 describe('parseOsc7', () => {
   it('parses a local file:/// path (empty host)', () => {
@@ -120,5 +121,36 @@ describe('parseOsc133', () => {
 
   it('returns null for lowercase marker', () => {
     expect(parseOsc133('a')).toBeNull()
+  })
+})
+
+describe('onCommandMarker fan-out', () => {
+  it('fans out one enriched event per marker to every subscriber', async () => {
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const a = vi.fn()
+    let resolveDone: () => void
+    const done = new Promise<void>((res) => { resolveDone = res })
+    const b = vi.fn<[CommandMarkerEvent]>(() => resolveDone())
+    r.onCommandMarker(a)
+    r.onCommandMarker(b)
+
+    // Drive an OSC 133;D;0 through the real parser; write() is async.
+    r.write('\x1b]133;D;0\x07')
+    await done
+
+    expect(a).toHaveBeenCalledTimes(1)
+    expect(b).toHaveBeenCalledTimes(1)
+    const ev = a.mock.calls[0][0] as CommandMarkerEvent
+    expect(ev.kind).toBe('D')
+    expect(ev.exitCode).toBe(0)
+    expect(ev.buffer).toBe('normal')
+    expect(typeof ev.line).toBe('number')
+    expect(typeof ev.col).toBe('number')
+    r.dispose()
   })
 })

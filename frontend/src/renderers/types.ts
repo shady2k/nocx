@@ -30,10 +30,19 @@ export interface CommandMarker {
   exitCode?: number
 }
 
+// CommandMarkerEvent enriches the OSC 133 marker with a cursor snapshot
+// (absolute line, column, active buffer) taken at parse time. xterm.js only;
+// @wterm/dom never fires.
+export interface CommandMarkerEvent extends CommandMarker {
+  line: number
+  col: number
+  buffer: 'normal' | 'alternate'
+}
+
 // CommandMarkerCallback fires when the shell emits OSC 133.
 // The VT frontend parses OSC 133 via parser.registerOscHandler and surfaces
-// each marker as an event — the backend never sniffs the byte stream.
-export type CommandMarkerCallback = (marker: CommandMarker) => void
+// each enriched marker as an event — the backend never sniffs the byte stream.
+export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>

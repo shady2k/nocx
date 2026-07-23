@@ -74,19 +74,29 @@ func TestValidateCwd_CustomHostFunc(t *testing.T) {
 
 func TestActivationEnv(t *testing.T) {
 	s := New(testLogger())
-	env := s.ActivationEnv()
+	env := s.ActivationEnv(false)
 
-	if len(env) == 0 {
-		t.Fatal("ActivationEnv returned empty")
+	if len(env) != 1 || env[0] != "NOCX_SHELL_INTEGRATION=1" {
+		t.Fatalf("ActivationEnv(false) = %v, want [NOCX_SHELL_INTEGRATION=1]", env)
 	}
-	found := false
-	for _, kv := range env {
-		if kv == "NOCX_SHELL_INTEGRATION=1" {
-			found = true
+}
+
+func TestActivationEnvEnhanced(t *testing.T) {
+	s := New(testLogger())
+	enh := s.ActivationEnv(true)
+
+	joined := strings.Join(enh, "\n")
+	if !strings.Contains(joined, "NOCX_PROMPT_MODE=marker-only") {
+		t.Errorf("enhanced env missing NOCX_PROMPT_MODE: %v", enh)
+	}
+	var sid string
+	for _, e := range enh {
+		if strings.HasPrefix(e, "NOCX_SESSION_ID=") {
+			sid = strings.TrimPrefix(e, "NOCX_SESSION_ID=")
 		}
 	}
-	if !found {
-		t.Errorf("ActivationEnv missing NOCX_SHELL_INTEGRATION=1, got %v", env)
+	if sid == "" {
+		t.Errorf("enhanced env missing non-empty NOCX_SESSION_ID: %v", enh)
 	}
 }
 

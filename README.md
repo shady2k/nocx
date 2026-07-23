@@ -7,7 +7,7 @@ Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
 **Status:** MVP in progress. Local PTY over WebSocket works; SSH client, tabs,
-and cwd features are under active development. macOS-first.
+and cwd features are under active development. macOS + Linux (AppImage).
 
 ## What makes it different
 
@@ -30,6 +30,36 @@ xattr -dr com.apple.quarantine /Applications/nocx.app
 Then open nocx normally. This is required only the first time — later in-app updates fetch the build directly and do not re-quarantine it. Confirm the version any time with `nocx --version`.
 
 > No publisher signature and no notarization; the reasoning is in [ADR-0003](docs/decisions/0003-distribution-without-a-developer-id.md). Update integrity is enforced by an ed25519-signed manifest, not by Gatekeeper.
+
+## Install (Linux)
+
+Download the `.AppImage` from the [Releases page](https://github.com/shady2k/nocx/releases), make it executable, and run it:
+
+```bash
+chmod +x nocx-*-linux-amd64.AppImage
+./nocx-*-linux-amd64.AppImage
+```
+
+No package manager or root access needed — the AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0006](docs/decisions/0006-cross-platform-auto-update.md)).
+
+### Support envelope
+
+The AppImage bundles its own GTK 3 and WebKitGTK (via `linuxdeploy-plugin-gtk`),
+so it does **not** depend on the host's `libgtk-3` or `libwebkit2gtk-4.1`. It
+links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
+
+**This means it runs on distributions at or above that baseline**, including
+Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+, and Arch (rolling). It is
+**not** "runs everywhere" — older enterprise distributions (RHEL 8, Ubuntu 20.04)
+carry an earlier glibc and are not supported. If the AppImage refuses to start
+and `ldd --version` reports a glibc before 2.35, the distribution is below the
+floor.
+
+> If the `APPIMAGE` environment variable is not set at runtime (e.g. you
+> extracted the AppImage or installed via a package manager), in-app updates are
+> silently disabled — the updater only engages when the app is running as an
+> AppImage, mirroring the macOS refusals for dev and translocated builds
+> ([ADR-0006](docs/decisions/0006-cross-platform-auto-update.md) §Decision).
 
 ## Prerequisites
 

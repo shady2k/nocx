@@ -30,13 +30,13 @@ describe('ShellInputTarget', () => {
   it('submits one bracketed paste + CR', async () => {
     const send = vi.fn()
     const t = new ShellInputTarget(send)
-    await t.submit('echo hi', { targetId: 'shell' })
+    await t.submit('echo hi')
     expect(send).toHaveBeenCalledTimes(1)
     expect(send).toHaveBeenCalledWith('\x1b[200~echo hi\x1b[201~\r')
   })
   it('preserves a multi-line document inside the paste', async () => {
     const send = vi.fn()
-    await new ShellInputTarget(send).submit('a\nb', { targetId: 'shell' })
+    await new ShellInputTarget(send).submit('a\nb')
     expect(send).toHaveBeenCalledWith('\x1b[200~a\nb\x1b[201~\r')
   })
 })

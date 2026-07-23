@@ -221,9 +221,6 @@ describe('createGutter (RECOMMENDED approach)', () => {
     const glyph1 = gutterApi.addGlyph(0)
     const glyph2 = gutterApi.addGlyph(1)
 
-    const top1Before = parseFloat(glyph1.style.top)
-    const top2Before = parseFloat(glyph2.style.top)
-
     // After syncPositions, glyphs should have different top values
     // (since they're on different lines).
     gutterApi.syncPositions()

@@ -312,7 +312,7 @@ class Tab {
       this.shellTarget = new ShellInputTarget((data: string) => session.send(data))
       this.editor = new CommandEditor({
         submit: (doc: string) => {
-          void this.shellTarget!.submit(doc, { targetId: 'shell' })
+          void this.shellTarget!.submit(doc)
         },
       })
       this.editor.mount(this.pane)

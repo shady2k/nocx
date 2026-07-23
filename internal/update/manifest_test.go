@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -168,6 +169,121 @@ func TestVerifyManifest_InvalidJSON(t *testing.T) {
 	if !strings.Contains(err.Error(), "manifest parse") {
 		t.Errorf("error should mention parse failure: %v", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Manifest verification acceptance matrix (§6 of the design, bead nocx-3dk)
+//
+// These five cases are the explicit cross-platform acceptance criteria for
+// the signed-manifest mechanism. Fixture keys are generated in the test;
+// no network is involved. The cases mirror the bead's wording exactly so
+// they are auditable against the spec.
+// ---------------------------------------------------------------------------
+
+func TestManifestVerificationAcceptanceMatrix(t *testing.T) {
+	makeManifest := func(version string) []byte {
+		m := Manifest{Version: version, Released: "2026-07-22T10:00:00Z", NotesURL: "https://example.com", Artifacts: []Artifact{}}
+		b, _ := json.Marshal(m)
+		return b
+	}
+
+	t.Run("1-valid-signature-happy-path", func(t *testing.T) {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := makeManifest("0.2.0")
+		sig := ed25519.Sign(priv, body)
+
+		got, err := VerifyManifest(body, base64.StdEncoding.EncodeToString(sig), []ed25519.PublicKey{pub})
+		if err != nil {
+			t.Fatalf("valid signature was rejected: %v", err)
+		}
+		if got.Version != "0.2.0" {
+			t.Errorf("version: got %q, want 0.2.0", got.Version)
+		}
+	})
+
+	t.Run("2-tampered-body-rejected", func(t *testing.T) {
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := makeManifest("0.2.0")
+		sig := ed25519.Sign(priv, original)
+		tampered := makeManifest("9.9.9") // different body, same signature
+
+		_, err = VerifyManifest(tampered, base64.StdEncoding.EncodeToString(sig), []ed25519.PublicKey{pub})
+		if err == nil {
+			t.Fatal("tampered body must be rejected (signature no longer matches)")
+		}
+		if !strings.Contains(err.Error(), "verification failed") {
+			t.Errorf("error should mention verification failure: %v", err)
+		}
+	})
+
+	t.Run("3-key-outside-keyring-rejected", func(t *testing.T) {
+		_, priv, err := ed25519.GenerateKey(rand.Reader) // signing key
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherPub, _, err := ed25519.GenerateKey(rand.Reader) // key in keyring — NOT the signing key
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		body := makeManifest("0.2.0")
+		sig := ed25519.Sign(priv, body)
+
+		_, err = VerifyManifest(body, base64.StdEncoding.EncodeToString(sig), []ed25519.PublicKey{otherPub})
+		if err == nil {
+			t.Fatal("signature from a key outside the keyring must be rejected")
+		}
+		if !strings.Contains(err.Error(), "verification failed") {
+			t.Errorf("error should mention verification failure: %v", err)
+		}
+	})
+
+	t.Run("4-second-key-in-keyring-accepted", func(t *testing.T) {
+		pub1, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub2, priv2, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		body := makeManifest("0.2.0")
+		sig := ed25519.Sign(priv2, body) // signed by key 2
+
+		got, err := VerifyManifest(body, base64.StdEncoding.EncodeToString(sig), []ed25519.PublicKey{pub1, pub2})
+		if err != nil {
+			t.Fatalf("valid signature from second key in multi-key keyring was rejected: %v", err)
+		}
+		if got.Version != "0.2.0" {
+			t.Errorf("version: got %q, want 0.2.0", got.Version)
+		}
+	})
+
+	t.Run("5-malformed-base64-rejected", func(t *testing.T) {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		body := makeManifest("0.2.0")
+		for _, badSig := range []string{"", "!!!not-valid-base64!!!", "aGVsbG8="} {
+			t.Run(fmt.Sprintf("sig=%q", badSig), func(t *testing.T) {
+				_, err := VerifyManifest(body, badSig, []ed25519.PublicKey{pub})
+				if err == nil {
+					t.Fatal("malformed base64 must be rejected with a legible error")
+				}
+				// All base64 errors or signature-verification errors
+				// (an empty/too-short decoded sig fails verification) are acceptable.
+			})
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

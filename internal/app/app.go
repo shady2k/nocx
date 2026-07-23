@@ -11,6 +11,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/update"
 )
 
 type App struct {
@@ -20,6 +21,7 @@ type App struct {
 	Transport        *transport.WSServer
 	Config           *config.Stub
 	ShellIntegration shellintegration.ShellIntegration
+	Updater          update.Updater
 }
 
 func New() (*App, error) {

@@ -61,6 +61,57 @@ floor.
 > AppImage, mirroring the macOS refusals for dev and translocated builds
 > ([ADR-0006](docs/decisions/0006-cross-platform-auto-update.md) §Decision).
 
+## Rollback procedures
+
+If an update fails or you need to return to the previous version, these
+manual recovery paths cover both states an update can be in (§7.5 of the
+distribution-and-updates design).
+
+### After a successful update (to the retained known-good backup)
+
+The previous version is saved as `.nocx-backup.app` (macOS) or
+`.nocx-backup.AppImage` (Linux) next to the active bundle.
+
+**macOS:**
+```bash
+osascript -e 'quit app "nocx"'
+rm -rf /Applications/nocx.app
+mv /Applications/.nocx-backup.app /Applications/nocx.app
+```
+
+**Linux:**
+```bash
+killall nocx
+mv ~/.local/bin/.nocx-backup.AppImage ~/.local/bin/nocx.AppImage
+```
+
+### During a failed update (before health was ever confirmed)
+
+If nocx was restarted after an update and something is broken — a JS
+exception, a blank window, or the app exits before `ReportHealthy` ever
+runs — the new bundle sits at the install path and the swap file holds
+the previous working version.
+
+**macOS:**
+```bash
+osascript -e 'quit app "nocx"'
+rm -rf /Applications/nocx.app
+mv /Applications/.nocx-swap.app /Applications/nocx.app
+rm -f ~/Library/Application\ Support/nocx/.nocx-update-journal.json
+```
+
+**Linux:**
+```bash
+killall nocx
+# The swap file is the previous AppImage; exchange it back.
+mv ~/.local/bin/.nocx-swap.app ~/.local/bin/nocx.AppImage
+rm -f ~/.local/bin/.nocx-update-journal.json
+```
+
+> The updater also performs an automatic rollback after three launches that
+> reach Go without a successful `ReportHealthy` call — the feature above is
+> for cases where the new build never reaches Go at all (e.g. a dyld failure).
+
 ## Prerequisites
 
 | Tool | Version | Install |

@@ -486,3 +486,53 @@ body {
   color: #a9b1d6;
   background: rgba(255, 255, 255, 0.06);
 }
+
+/* ── Update notice (auto-update UI) ──────────────────────────────────── */
+
+.update-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  font: 11px/1 ui-sans-serif, -apple-system, 'SF Pro Text', system-ui;
+  color: #a9b1d6;
+  white-space: nowrap;
+  --wails-draggable: no-drag;
+}
+
+.update-notice.pending {
+  color: #9ece6a;
+}
+
+.update-notice.error {
+  color: #f7768e;
+}
+
+.update-notice.downloading {
+  color: #e0af68;
+}
+
+.update-notes-link {
+  color: #7aa2f7;
+  text-decoration: none;
+}
+
+.update-notes-link:hover {
+  text-decoration: underline;
+}
+
+.update-apply-btn {
+  background: #7aa2f7;
+  color: #1a1b26;
+  border: none;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  --wails-draggable: no-drag;
+}
+
+.update-apply-btn:hover {
+  background: #89b0ff;
+}

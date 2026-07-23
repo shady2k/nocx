@@ -17,6 +17,20 @@ an integrated SSH manager + (later) a secrets vault + (later) shell-integration
 blocks, completions, and input-editor in nested shells — with no cloud
 dependency.
 
+## Install (macOS)
+
+Released builds are on the [Releases page](https://github.com/shady2k/nocx/releases). Download the `.dmg`, open it, and drag **nocx** into Applications.
+
+There is no Apple Developer ID, so the build is unsigned and macOS quarantines it on download. Clear that once, on first install:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/nocx.app
+```
+
+Then open nocx normally. This is required only the first time — later in-app updates fetch the build directly and do not re-quarantine it. Confirm the version any time with `nocx --version`.
+
+> No publisher signature and no notarization; the reasoning is in [ADR-0003](docs/decisions/0003-distribution-without-a-developer-id.md). Update integrity is enforced by an ed25519-signed manifest, not by Gatekeeper.
+
 ## Prerequisites
 
 | Tool | Version | Install |
@@ -101,10 +115,11 @@ Every commit must pass:
 | `vitest` | ✓ | ✓ | ✓ |
 | `npm run build` | — | ✓ | ✓ |
 
-CI runs on release branches (`release/**`), version tags (`v*`), and manual
-dispatch (GitHub Actions, macos-latest for Go job, ubuntu-latest for frontend).
-Everyday gating on `main` is enforced locally by the pre-commit hook and
-`make ci` — they run the identical set of checks.
+CI (`ci.yml`) runs on release branches (`release/**`) and manual dispatch, and
+is called by `release.yml` on a version tag (`v*`) so a release gates on a green
+suite (GitHub Actions, macos-latest for the Go and e2e jobs, ubuntu-latest for
+the frontend). Everyday gating on `main` is enforced locally by the pre-commit
+hook and `make ci` — they run the identical set of checks.
 
 ## Task tracking — beads (bd)
 

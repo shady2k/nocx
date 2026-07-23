@@ -86,7 +86,7 @@ Phases as one-liners. The detailed, executable backlog lives in **beads**, not i
 
 ## 8. Platform & distribution
 
-macOS first (the author's own machine). Windows and Linux later (Phase 3). Builds are produced via GitHub Actions CI and shared with colleagues directly — no app-store or packaged distribution, and no formal support.
+macOS first (the author's own machine). Windows and Linux later (Phase 3). Builds are produced by GitHub Actions on a version tag and published as GitHub Releases — a `.dmg` to install and a `.zip` the app updates itself from. There is no Apple Developer ID and there will not be one, so builds are unsigned: the first launch needs a one-time manual `xattr` to clear quarantine (see the README), and update integrity is ours rather than Apple's — an ed25519-signed manifest verified against a keyring compiled into the binary. No app store, and no Homebrew cask (Homebrew closed that route for unsigned casks on 2026-09-01), and no formal support. Design: `docs/superpowers/specs/2026-07-22-distribution-and-updates-design.md`; rationale: ADR-0003.
 
 ## 9. Success criteria
 

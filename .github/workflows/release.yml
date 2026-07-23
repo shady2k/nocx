@@ -1,0 +1,237 @@
+# Release — build, verify, sign and publish a macOS artefact.
+#
+# Design: docs/superpowers/specs/2026-07-22-distribution-and-updates-design.md
+# (§4 versioning, §5 pipeline, §6 manifest). macOS only; Linux is deferred (D1).
+#
+# Shape of the pipeline:
+#   - A real release comes from a stable version tag and *only* from a tag: a
+#     manual run has no tag and cannot produce the /releases/download/v<ver>/…
+#     URLs the manifest asserts, so workflow_dispatch is a dry run that builds,
+#     signs and verifies everything and publishes nothing (§5).
+#   - The whole quality suite must be green on this exact commit before anything
+#     is built: release.yml *calls* ci.yml (workflow_call) and every downstream
+#     job needs it. `needs:` alone would not do this — it does not reach across
+#     workflows — which is why ci.yml is a called workflow, not a sibling.
+#   - The signing key lives only in the publish job, which runs no build tooling.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Read-only by default. Only the publish job is granted contents: write, and it
+# only runs for a real tag release.
+permissions:
+  contents: read
+
+jobs:
+  # The gate. A release cannot exist without green backend, frontend and e2e on
+  # this commit.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  # Resolve the version and decide whether this run publishes. Git-only, so it
+  # runs on ubuntu in parallel with the macOS build gate.
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: v
+        name: Resolve and validate the version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+            # Stable vMAJOR.MINOR.PATCH only. CFBundleVersion has a narrower
+            # grammar than semver, so a prerelease tag would produce an invalid
+            # plist, and GitHub's `latest` excludes prereleases anyway (§4).
+            if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::tag '$tag' is not a stable vMAJOR.MINOR.PATCH release"
+              exit 1
+            fi
+            # The tagged commit must be reachable from main (a commit is its own
+            # ancestor, so tagging main's tip is valid).
+            git fetch --no-tags --depth=2147483647 origin main
+            tagsha="$(git rev-parse HEAD)"
+            if ! git merge-base --is-ancestor "$tagsha" FETCH_HEAD; then
+              echo "::error::tag commit $tagsha is not reachable from main"
+              exit 1
+            fi
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            # Dry run: no tag, so no release URLs. 0.0.0 is a valid
+            # CFBundleVersion and never collides with a shipped release.
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: [ci, validate]
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      # Pinned to the version in go.mod, like the e2e job: the CLI builds the
+      # app, so drift between the two is a build no developer can reproduce.
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+
+      - name: Patch wails.json product version
+        run: |
+          set -euo pipefail
+          # wails.json has no info object today, so 1.0.0 is Wails' default, not
+          # a value in the file. Wails writes info.productVersion into both
+          # CFBundleShortVersionString and CFBundleVersion, and there is no build
+          # flag for it, so the object is created here before the build (§4).
+          tmp="$(mktemp)"
+          jq --arg v "$VERSION" '.info = {productName: "nocx", productVersion: $v}' wails.json > "$tmp"
+          mv "$tmp" wails.json
+          cat wails.json
+
+      - name: Build universal bundle
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          # Wails v2.13 passes -ldflags to the Go compiler for both slices and
+          # joins them with lipo (§4).
+          wails build -platform darwin/universal -ldflags "$LDFLAGS"
+
+      - name: Smoke checks
+        run: |
+          set -euo pipefail
+          APP="build/bin/nocx.app"
+          BIN="$APP/Contents/MacOS/nocx"
+          # 1. A universal Mach-O must carry both slices. This is not proof they
+          #    both launch (§13 verifies that on hardware), only that lipo joined
+          #    two architectures.
+          archs="$(lipo -archs "$BIN")"
+          echo "archs: $archs"
+          echo "$archs" | grep -qw x86_64
+          echo "$archs" | grep -qw arm64
+          # 2. The plist version must match the linked Go version — both keys.
+          plist="$APP/Contents/Info.plist"
+          short="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+          [ "$short" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString=$short != $VERSION"; exit 1; }
+          [ "$bundle" = "$VERSION" ] || { echo "::error::CFBundleVersion=$bundle != $VERSION"; exit 1; }
+          # 3. The linked binary must report the same version.
+          reported="$("$BIN" --version)"
+          echo "reported: $reported"
+          echo "$reported" | grep -qw "$VERSION"
+          # 4. Wails' ad-hoc signature must be intact — the baseline the payload
+          #    round trip (§9) asserts is preserved through packaging.
+          codesign --verify --deep --strict "$APP"
+
+      - name: Package .dmg and .zip
+        run: |
+          set -euo pipefail
+          APP="build/bin/nocx.app"
+          base="nocx-${VERSION}-darwin-universal"
+          mkdir -p dist
+          # The .zip is the updater payload: ditto (not zip) preserves the
+          # bundle's symlinks, executable bits and ad-hoc signature; --noqtn so
+          # no quarantine attribute can ride along (§5).
+          ditto -c -k --keepParent --noqtn "$APP" "dist/${base}.zip"
+          # The .dmg is the human install path: a staging folder holding the app
+          # and an /Applications symlink, compressed with plain hdiutil (§2).
+          staging="$(mktemp -d)"
+          cp -R "$APP" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "nocx" -srcfolder "$staging" -ov -format UDZO "dist/${base}.dmg"
+          shasum -a 256 dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: dist/*
+          retention-days: 7
+
+  # Separate from build so the signing key is never present in a job that runs
+  # build tooling (§5). Publishing is git/manifest work, so it runs on ubuntu.
+  publish:
+    needs: [validate, build]
+    if: needs.validate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-universal
+          path: dist
+
+      - name: Generate manifest.json
+        run: |
+          set -euo pipefail
+          base="nocx-${VERSION}-darwin-universal"
+          zip="dist/${base}.zip"
+          sha="$(sha256sum "$zip" | awk '{print $1}')"
+          size="$(stat -c%s "$zip")"
+          url="https://github.com/shady2k/nocx/releases/download/v${VERSION}/${base}.zip"
+          released="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Only the .zip is an updater artefact; the .dmg is the human path and
+          # is attached to the release but not declared in the manifest (§6).
+          jq -n \
+            --arg v "$VERSION" \
+            --arg r "$released" \
+            --arg notes "https://github.com/shady2k/nocx/releases/tag/v${VERSION}" \
+            --arg url "$url" \
+            --arg sha "$sha" \
+            --argjson size "$size" \
+            '{version: $v, released: $r, notesUrl: $notes,
+              artifacts: [{os: "darwin", arch: "universal", format: "zip",
+                           url: $url, sha256: $sha, size: $size}]}' > dist/manifest.json
+          cat dist/manifest.json
+
+      - name: Sign manifest.json
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: go run ./cmd/manifest-sign -in dist/manifest.json -out dist/manifest.json.sig
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes "Automated release. First launch needs the manual quarantine step — see the README." \
+            "dist/nocx-${VERSION}-darwin-universal.dmg" \
+            "dist/nocx-${VERSION}-darwin-universal.zip" \
+            "dist/manifest.json" \
+            "dist/manifest.json.sig"

@@ -36,3 +36,27 @@ describe('input-state clean cycle', () => {
     expect(m).toEqual({ state: 'RAW', trusted: false })
   })
 })
+
+describe('input-state hardening / resync', () => {
+  it('orphan C (no prior A) is RUNNING_RAW but untrusted', () => {
+    const c = reduce(initialMachine(), { type: 'marker', kind: 'C' })
+    expect(c).toEqual({ state: 'RUNNING_RAW', trusted: false })
+  })
+
+  it('orphan D (empty Enter, not running) leaves state unchanged', () => {
+    const pr = reduce(initialMachine(), { type: 'marker', kind: 'A' }) // PROMPT_READY
+    const d = reduce(pr, { type: 'marker', kind: 'D' })
+    expect(d.state).toBe('PROMPT_READY')
+  })
+
+  it('A interrupting a running command yields untrusted PROMPT_READY', () => {
+    const running = run([{ type: 'marker', kind: 'A' }, { type: 'marker', kind: 'C' }])
+    const a = reduce(running, { type: 'marker', kind: 'A' })
+    expect(a).toEqual({ state: 'PROMPT_READY', trusted: false })
+  })
+
+  it('B without a prompt is untrusted PROMPT_READY', () => {
+    const b = reduce(initialMachine(), { type: 'marker', kind: 'B' })
+    expect(b).toEqual({ state: 'PROMPT_READY', trusted: false })
+  })
+})

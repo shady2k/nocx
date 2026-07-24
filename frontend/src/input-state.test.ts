@@ -6,6 +6,7 @@ import {
   type Machine,
   type InputEvent,
 } from './input-state'
+import { shouldShowEditor } from './native-mode'
 
 const run = (evs: InputEvent[], m: Machine = initialMachine()) => evs.reduce(reduce, m)
 
@@ -121,5 +122,20 @@ describe('InputStateController', () => {
     c.dispatch({ type: 'marker', kind: 'C' }) // -> RUNNING_RAW
     expect(c.state).toBe('RUNNING_RAW')
     expect(seen).toEqual(['PROMPT_READY', 'PROMPT_READY', 'RUNNING_RAW'])
+  })
+})
+
+describe('raw-routing invariant (nocx-4ff.4)', () => {
+  it('editor is hidden in every non-owned state', () => {
+    const running = [
+      { type: 'marker', kind: 'A' } as InputEvent,
+      { type: 'marker', kind: 'B' } as InputEvent,
+      { type: 'submit' } as InputEvent, // -> RUNNING_RAW, owned:false
+    ].reduce(reduce, initialMachine())
+    expect(running.owned).toBe(false)
+    expect(shouldShowEditor(running.owned, false)).toBe(false)
+    const alt = reduce(running, { type: 'buffer', buffer: 'alternate' })
+    expect(shouldShowEditor(alt.owned, false)).toBe(false)
+    expect(shouldShowEditor(initialMachine().owned, false)).toBe(false) // RAW
   })
 })

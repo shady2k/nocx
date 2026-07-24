@@ -5,6 +5,7 @@ import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
 import { ShellInputTarget } from './input-target'
+import { submitCommand } from './submit'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 
@@ -331,7 +332,11 @@ export class Tab {
       this.shellTarget = new ShellInputTarget((data: string) => session.send(data))
       this.editor = new CommandEditor({
         submit: (doc: string) => {
-          void this.shellTarget!.submit(doc)
+          submitCommand(doc, {
+            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+            focusGrid: () => renderer.focus(),
+            sendDoc: (d) => void this.shellTarget!.submit(d),
+          })
         },
       })
       this.editor.mount(this.pane)

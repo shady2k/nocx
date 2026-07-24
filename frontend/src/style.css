@@ -589,6 +589,7 @@ body {
   display: inline-flex;
   gap: 5px;
   align-items: center;
+  cursor: default;
 }
 
 .nocx-editor-submit {

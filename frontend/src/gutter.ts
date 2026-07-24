@@ -84,8 +84,16 @@ export class Gutter {
 
     const el = document.createElement('div')
     el.className = 'nocx-gutter'
+
+    // The gutter is position:absolute inside .pane. .pane has padding, so
+    // the xterm element starts below the padding-top — but an absolutely-
+    // positioned child at top:0 sits in the padding area, above the xterm.
+    // Read the computed padding and offset to match (nocx-4ff.14).
+    const cs = window.getComputedStyle(pane)
+    const topPad = parseInt(cs.paddingTop) || 0
+    const botPad = parseInt(cs.paddingBottom) || 0
     el.style.cssText =
-      'position:absolute;left:0;top:0;bottom:0;' +
+      `position:absolute;left:0;top:${topPad}px;bottom:${botPad}px;` +
       `width:${GUTTER_WIDTH_PX}px;` +
       'pointer-events:none;z-index:10;overflow:hidden;'
     // Do NOT set pane.style.position here: .pane is already `position:absolute`

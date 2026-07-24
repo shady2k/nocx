@@ -282,10 +282,7 @@ export class Tab {
       // is shown, which can only happen after markers arrive from the PTY.
       // paste() delegates bracketed-paste wrapping to the engine (correct for
       // mode 2004); sendRaw carries the CR. session is referenced lazily.
-      this.shellTarget = new ShellInputTarget(
-        (text: string) => renderer.paste(text),
-        (data: string) => this.session!.send(data),
-      )
+      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
       this.editor = new CommandEditor({
         submit: (doc: string) => {
           // Anchor the block at the COMMAND row NOW, while the terminal cursor

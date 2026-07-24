@@ -27,20 +27,16 @@ describe('InputTargetRegistry', () => {
 })
 
 describe('ShellInputTarget', () => {
-  it('pastes the doc (engine owns bracketed-paste wrapping) then sends CR', async () => {
-    const paste = vi.fn()
+  it('sends the doc as one bracketed paste followed by CR', async () => {
     const sendRaw = vi.fn()
-    const t = new ShellInputTarget(paste, sendRaw)
+    const t = new ShellInputTarget(sendRaw)
     await t.submit('echo hi')
-    expect(paste).toHaveBeenCalledTimes(1)
-    expect(paste).toHaveBeenCalledWith('echo hi')
-    expect(sendRaw).toHaveBeenCalledWith('\r')
+    expect(sendRaw).toHaveBeenCalledTimes(1)
+    expect(sendRaw).toHaveBeenCalledWith('\x1b[200~echo hi\x1b[201~\r')
   })
-  it('never hand-rolls ESC[200~ wrappers on the raw channel', async () => {
-    const paste = vi.fn()
+  it('preserves \\n so every line executes as a command separator (nocx-4ff.14)', async () => {
     const sendRaw = vi.fn()
-    await new ShellInputTarget(paste, sendRaw).submit('a\nb')
-    expect(paste).toHaveBeenCalledWith('a\nb')
-    for (const [arg] of sendRaw.mock.calls) expect(arg).not.toContain('200~')
+    await new ShellInputTarget(sendRaw).submit('a\nb')
+    expect(sendRaw).toHaveBeenCalledWith('\x1b[200~a\nb\x1b[201~\r')
   })
 })

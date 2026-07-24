@@ -54,3 +54,7 @@ vendor/
 /test-results/
 /playwright-report/
 /e2e/screenshots/
+# bd worktree
+.worktrees/nocx-3dk/
+# bd worktree
+.worktrees/nocx-q36/

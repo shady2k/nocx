@@ -75,11 +75,9 @@ export class CommandLedger {
   ): CommandRecord {
     if (!command) throw new Error('command must not be empty')
 
-    // Reuse cycle state if there's no running command (the previous cycle
-    // completed cleanly). Otherwise a pending marker set will finalize the
-    // old record when the next A/C arrives.
+    // L2: open() while a record is still running finalizes the old one.
     if (this._cycle.running) {
-      this._cycle = createCycle()
+      this._finalizeRunning()
     }
 
     const rec: CommandRecord = {
@@ -150,7 +148,9 @@ export class CommandLedger {
           if (exitCode !== undefined) {
             rec.exitCode = exitCode
           }
-          rec.status = rec.exitCode === 0 ? 'success' : 'failure'
+          // L1: D with no exit code known → 'unknown', not 'failure'.
+          rec.status =
+            rec.exitCode === 0 ? 'success' : rec.exitCode !== null ? 'failure' : 'unknown'
           this._cycle = createCycle()
         }
         break
@@ -174,6 +174,20 @@ export class CommandLedger {
   /** Look up a record by id. Returns undefined if not found. */
   resolveID(id: number): CommandRecord | undefined {
     return this._records.find((r) => r.id === id)
+  }
+
+  /** B3: finalize any still-running record (fail-open on reset/exit). */
+  finalizeOpen(): void {
+    this._finalizeRunning()
+  }
+
+  /** Internal: finalize the current running record and reset cycle state. */
+  private _finalizeRunning(): void {
+    if (this._cycle.running) {
+      this._cycle.running.status = this._cycle.running.trusted ? 'interrupted' : 'unknown'
+      this._cycle.running.endedAt = this._now()
+    }
+    this._cycle = createCycle()
   }
 
   /**

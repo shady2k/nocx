@@ -124,6 +124,7 @@ export class XtermRenderer implements TerminalRenderer {
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
+  private _cachedCellHeight: number | null = null
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -190,6 +191,11 @@ export class XtermRenderer implements TerminalRenderer {
         if (t) t.refresh(0, (t.rows ?? 24) - 1)
       }, FORCED_REFRESH_MS)
     }
+
+    // Invalidate cellHeight cache on resize (M1).
+    this.term?.onResize(() => {
+      this._cachedCellHeight = null
+    })
   }
 
   private safeFit(): void {
@@ -388,20 +394,29 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   get cellHeight(): number {
+    // M1: cache cellHeight — getBoundingClientRect is expensive per paint.
+    if (this._cachedCellHeight !== null) return this._cachedCellHeight
     const t = this.term
     if (!t) return Math.ceil(FONT_SIZE * LINE_HEIGHT)
     const measureEl = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
     if (measureEl) {
       const rect = measureEl.getBoundingClientRect()
-      if (rect.height > 0) return rect.height
+      if (rect.height > 0) {
+        this._cachedCellHeight = rect.height
+        return rect.height
+      }
     }
-    return Math.ceil(FONT_SIZE * LINE_HEIGHT)
+    const fallback = Math.ceil(FONT_SIZE * LINE_HEIGHT)
+    this._cachedCellHeight = fallback
+    return fallback
   }
 
   get viewportTopLine(): number {
     const t = this.term
     if (!t) return 0
-    return t.buffer.active.baseY + t.buffer.active.viewportY
+    // viewportY is already the absolute buffer line at the top of the viewport
+    // (xterm.d.ts). Adding baseY double-counts scrollback (B1).
+    return t.buffer.active.viewportY
   }
 
   onScroll(cb: (viewportY: number) => void): void {

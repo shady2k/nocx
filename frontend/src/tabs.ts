@@ -90,8 +90,8 @@ export class Tab {
   private started = false
   private ledger: CommandLedger | null = null
   private gutter: Gutter | null = null
-  /** Marker registered at the most recent A/B prompt row (ADR-0008). */
-  private _promptMarker: MarkerAdapter | null = null
+  /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
+  private _markers = new Map<number, MarkerAdapter>()
   private _cwd = '~'
   private _host = ''
 
@@ -287,11 +287,25 @@ export class Tab {
       )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
-          // Open a command record in the ledger BEFORE the state-machine
-          // dispatch, so the record exists when the C marker arrives.
+          // B2: register a PER-RECORD marker at the prompt row and hand
+          // its live line accessor to the ledger. The marker is never
+          // reassigned across records — every historical record keeps
+          // its own marker so glyphs stay at their original row.
           if (this.ledger) {
-            const lineOf = this._promptMarker ? () => this._promptMarker!.line() : () => undefined
-            this.ledger.open(doc, this._cwd, this._host, lineOf)
+            const m = renderer.registerMarker?.()
+            const lineOf = m ? () => m.line() : () => undefined
+            const rec = this.ledger.open(doc, this._cwd, this._host, lineOf)
+            if (m) {
+              // B2: retain per-record marker so we can dispose it later.
+              this._markers.set(rec.id, m)
+              // H1: when scrollback trims the marker, drop the record
+              // so the gutter doesn't grow unbounded.
+              m.onDispose(() => {
+                this.ledger?.dispose(rec.id)
+                this._markers.delete(rec.id)
+                if (this.ledger) this.gutter?.setRecords(this.ledger.records())
+              })
+            }
             this.gutter?.setRecords(this.ledger.records())
           }
           submitCommand(doc, {
@@ -316,13 +330,6 @@ export class Tab {
         }
         // Feed the command ledger.
         this.ledger?.onMarker(marker.kind, marker.exitCode)
-        // Register a live marker at the prompt row on A (anchor before C —
-        // ADR-0008 pitfalls). The marker's line moves with scrollback trim
-        // and is never cached as a number.
-        if (marker.kind === 'A') {
-          this._promptMarker?.dispose()
-          this._promptMarker = renderer.registerMarker?.() ?? null
-        }
         // Tell the gutter to repaint.
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
@@ -375,19 +382,19 @@ export class Tab {
       session.onExit((sid: string) => {
         console.log('nocx: session exited:', sid)
         this.inputState.dispatch({ type: 'exit' })
-        // Fail-open: finalize any running records as interrupted,
-        // dispose markers, and clear the gutter.
-        this._promptMarker?.dispose()
-        this._promptMarker = null
-        this.gutter?.setRecords([])
+        // B3: fail-open — finalize running records, dispose per-record
+        // markers, and clear the gutter.
+        this.ledger?.finalizeOpen()
+        this._disposeAllMarkers()
+        if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
       session.onReset(() => {
         renderer.reset()
         this.inputState.dispatch({ type: 'reset' })
-        // Fail-open: clear all gutter state on transport reset.
-        this._promptMarker?.dispose()
-        this._promptMarker = null
-        this.gutter?.setRecords([])
+        // B3: fail-open — same as exit.
+        this.ledger?.finalizeOpen()
+        this._disposeAllMarkers()
+        if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
 
       renderer.onData((data: string) => session.send(data))
@@ -533,11 +540,15 @@ export class Tab {
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()
-    this._promptMarker?.dispose()
-    this._promptMarker = null
+    this._disposeAllMarkers()
     this.gutter?.dispose()
     this.gutter = null
     this.ledger = null
+  }
+
+  private _disposeAllMarkers(): void {
+    for (const m of this._markers.values()) m.dispose()
+    this._markers.clear()
   }
 }
 

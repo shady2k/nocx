@@ -260,4 +260,79 @@ describe('CommandLedger', () => {
   it('resolveID returns undefined for unknown id', () => {
     expect(ledger.resolveID(999)).toBeUndefined()
   })
+
+  // ── L1: D with no exit code → unknown ────────────────────────────────
+
+  it('D with no exit code and no prior exitCode → status unknown', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D') // no exitCode at all
+    const rec = l.records()[0]
+    expect(rec.status).toBe('unknown')
+    expect(rec.exitCode).toBeNull()
+  })
+
+  // ── L2: open() while record running → finalizes old record ───────────
+
+  it('open() while a record is running finalizes the old one', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    const r1 = l.open('cmd1', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    expect(r1.status).toBe('running')
+    expect(r1.trusted).toBe(true)
+
+    // Open a second command while first is still running (no D arrived).
+    const r2 = l.open('cmd2', '/', '', fakeLineOf(10))
+    expect(r1.status).toBe('interrupted')
+    expect(r1.trusted).toBe(true)
+    expect(r2.status).toBe('unknown')
+  })
+
+  it('open() while untrusted record running finalizes as unknown', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    const r1 = l.open('cmd1', '/', '', fakeLineOf(0))
+    l.onMarker('C') // orphan → untrusted running
+    expect(r1.trusted).toBe(false)
+    l.open('cmd2', '/', '', fakeLineOf(10))
+    expect(r1.status).toBe('unknown')
+  })
+
+  // ── B3: finalizeOpen ─────────────────────────────────────────────────
+
+  it('finalizeOpen marks running trusted record as interrupted', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    const rec = l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    expect(rec.status).toBe('running')
+    l.finalizeOpen()
+    expect(rec.status).toBe('interrupted')
+    expect(rec.endedAt).toBe(500)
+  })
+
+  it('finalizeOpen marks running untrusted record as unknown', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    const rec = l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('C') // orphan → untrusted
+    l.finalizeOpen()
+    expect(rec.status).toBe('unknown')
+    expect(rec.endedAt).toBe(500)
+  })
+
+  it('finalizeOpen is no-op when nothing is running', () => {
+    const l = new CommandLedger({ now: fixtureNow(500) })
+    l.open('cmd', '/', '', fakeLineOf(0))
+    l.onMarker('A')
+    l.onMarker('B')
+    l.onMarker('C')
+    l.onMarker('D', 0)
+    // Cycle is complete, nothing running.
+    expect(() => l.finalizeOpen()).not.toThrow()
+  })
 })

@@ -111,6 +111,23 @@ export class CommandEditor {
     if (this.root.style.display !== 'none') this.ta.focus()
   }
 
+  /**
+   * Insert text at the caret, replacing any selection, then grow + focus.
+   * Used by right-click/middle-click paste while the editor owns input: at the
+   * prompt the terminal is read-only (setReadOnly), so a paste must land in the
+   * composed command, not the (disabled) grid.
+   */
+  insertText(text: string): void {
+    const start = this.ta.selectionStart
+    const end = this.ta.selectionEnd
+    const v = this.ta.value
+    this.ta.value = v.slice(0, start) + text + v.slice(end)
+    const caret = start + text.length
+    this.ta.selectionStart = this.ta.selectionEnd = caret
+    this._grow()
+    this.ta.focus()
+  }
+
   hide(): void {
     this.ta.blur()
     this.root.style.display = 'none'

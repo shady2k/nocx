@@ -142,4 +142,15 @@ describe('CommandEditor', () => {
     expect(chip).not.toBeNull()
     expect(chip!.textContent).toContain('dev/projects')
   })
+
+  it('insertText inserts at the caret, replacing any selection', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    ta.value = 'echo XX'
+    ta.selectionStart = 5
+    ta.selectionEnd = 7 // select "XX"
+    ed.insertText('hi')
+    expect(ta.value).toBe('echo hi')
+    expect(ta.selectionStart).toBe(7) // caret after the inserted text
+  })
 })

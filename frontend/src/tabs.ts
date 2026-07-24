@@ -485,9 +485,18 @@ export class Tab {
           .readText()
           .then((text) => {
             if (!text) return
-            // Multi-line paste is confirmed before it reaches the terminal,
-            // except in the alternate screen — a full-screen program is not
-            // a shell prompt. This is Tabby's exact condition.
+            // At the prompt the editor owns input and the grid is read-only
+            // (setReadOnly), so a paste must land in the composed command, not
+            // the disabled terminal. The editor is a composer — a multi-line
+            // paste is expected and needs no confirm.
+            if (this.editor?.isVisible) {
+              this.editor.insertText(text)
+              return
+            }
+            // Otherwise the terminal owns input (a running program). Multi-line
+            // paste is confirmed before it reaches the terminal, except in the
+            // alternate screen — a full-screen program is not a shell prompt.
+            // This is Tabby's exact condition.
             if (text.includes('\n') && this._bufferType === 'normal') {
               if (!window.confirm('Paste multi-line text?')) return
             }

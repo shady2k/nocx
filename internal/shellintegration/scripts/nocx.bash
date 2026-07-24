@@ -55,7 +55,7 @@ __nocx_prompt_command() {
     # would otherwise reset $? to 0 before __nocx_precmd could read it.
     local __nocx_exit=$?
     __nocx_in_prompt_command=1
-    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ -z "${__nocx_owned_session:-}" ]]; then
+    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ "${__nocx_arm_marker_only:-}" == 1 ]]; then
         # Top-level session: arm the marker-only overlay.
         # 1) run the user/framework prompt command FIRST.
         if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
@@ -124,7 +124,7 @@ trap '__nocx_preexec_wrapper' DEBUG
 
 __nocx_b_marker='\[\e]133;B\a\]'
 
-if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] || [[ -n "${__nocx_owned_session:-}" ]]; then
+if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] || [[ "${__nocx_arm_marker_only:-}" != 1 ]]; then
     # Baseline mode or nested marker-only (nocx-4ff.13): wrap PS1 with
     # the B marker so the prompt is visible. Top-level marker-only leaves
     # PS1 untouched — __nocx_prompt_command sets it at runtime.
@@ -138,9 +138,12 @@ fi
 
 # Nested-session gate (nocx-4ff.13): record the owning session at source
 # time so child shells see the guard and keep a visible prompt.
+# ALSO capture owner-ness into __nocx_arm_marker_only before the export,
+# so __nocx_prompt_command can distinguish owner from nested descendant.
 if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ -z "${__nocx_owned_session:-}" ]]; then
     __nocx_owned_session="${NOCX_SESSION_ID:-}"
     export __nocx_owned_session
+    __nocx_arm_marker_only=1
 fi
 
 # Native-mode escape (nocx-4ff.9): restore a visible prompt.

@@ -284,6 +284,57 @@ echo "AFTER=[$PS1]"
 // TestEnsureInstalled_SkipsVersionWhenGateFails guards nocx-1dx: the VERSION
 // marker must not be recorded if a gate append failed, so the next launch
 // retries instead of short-circuiting on a version match.
+// TestBashTopLevelMarkerOnlyArmsBMarker verifies that a TOP-LEVEL bash
+// session with NOCX_PROMPT_MODE=marker-only AND a non-empty NOCX_SESSION_ID
+// DOES arm the marker-only B marker — the owner correctly identifies itself
+// (nocx-4ff.13 regression fix). Without this guard the owner would see its
+// own __nocx_owned_session export and incorrectly treat itself as nested.
+func TestBashTopLevelMarkerOnlyArmsBMarker(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Simulate a TOP-LEVEL enhanced session: NOCX_SESSION_ID is set by the
+	// backend and NO parent __nocx_owned_session exists.
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=deadbeefdeadbeef
+source "$1"
+
+# Run two prompt cycles — the second must set the marker-only PS1.
+__nocx_prompt_command
+__nocx_prompt_command
+# PS1 content (includes the B marker escape) and length for assertions.
+echo "PS1_CONTENT=$PS1"
+echo "PS1_LEN=${#PS1}"
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// The B marker must be present in the output (precmd emits it).
+	if !strings.Contains(out, "]133;B") {
+		t.Errorf("top-level marker-only session missing OSC 133 B marker in output:\n%s", out)
+	}
+
+	// PS1 must be the marker-only B marker (short, no visible glyphs).
+	if !strings.Contains(out, "PS1_LEN=") {
+		t.Fatalf("PS1_LEN= line not found in output:\n%s", out)
+	}
+	idx := strings.Index(out, "PS1_LEN=")
+	rest := out[idx:]
+	end := strings.Index(rest, "\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	lenStr := strings.TrimSpace(rest[8:end])
+	var ps1Len int
+	if _, err := fmt.Sscanf(lenStr, "%d", &ps1Len); err != nil {
+		t.Fatalf("could not parse PS1_LEN: %q", lenStr)
+	}
+	// The B marker alone is ~12-14 chars. If PS1 is > 25 the B marker
+	// was wrapped onto a visible prompt (nested branch, bug).
+	if ps1Len > 25 {
+		t.Errorf("top-level marker-only PS1 too long (%d chars) — may have fallen into nested branch: %q", ps1Len, out)
+	}
+}
+
 // TestBashNestedSessionKeepsVisiblePrompt spawns a bash that inherits a
 // NOCX_SESSION_ID (simulating a nested/SSH shell). The marker-only overlay
 // must NOT arm — the prompt must stay visible (nocx-4ff.13).

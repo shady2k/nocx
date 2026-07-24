@@ -88,7 +88,11 @@ export class Gutter {
       'position:absolute;left:0;top:0;bottom:0;' +
       `width:${GUTTER_WIDTH_PX}px;` +
       'pointer-events:none;z-index:10;overflow:hidden;'
-    pane.style.position = pane.style.position || 'relative'
+    // Do NOT set pane.style.position here: .pane is already `position:absolute`
+    // (style.css), so it is already the positioning context for this absolute
+    // gutter. Forcing inline `position:relative` overrode that, dropping the
+    // pane out of its absolute-overlay layout — which broke multi-tab (two
+    // in-flow panes stacked). The pane's CSS absolute is all the anchor we need.
     pane.appendChild(el)
     this._el = el
 

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest'
-import { visibleGlyphs } from './gutter'
+import { visibleGlyphs, Gutter } from './gutter'
 import type { CommandRecord } from './command-ledger'
+import type { TerminalRenderer } from './renderers/types'
 
 function fakeRecord(
   overrides: Partial<CommandRecord> & { id: number; lineOfVal: number },
@@ -117,5 +118,28 @@ describe('visibleGlyphs', () => {
     const recs = [fakeRecord({ id: 1, lineOfVal: 0 })]
     const result = visibleGlyphs(recs, -5, 10, 0)
     expect(result).toEqual([{ record: recs[0], top: 5 }])
+  })
+})
+
+describe('Gutter.mount', () => {
+  it('does not override the pane position (regression: broke multi-tab layout)', () => {
+    // .pane is `position:absolute` via style.css, so its inline style.position
+    // is empty. The gutter must NOT force `position:relative` inline — doing so
+    // dropped the pane out of its absolute overlay and stacked panes in flow,
+    // which made all tabs vanish when a second tab opened.
+    const pane = document.createElement('div')
+    const renderer = {
+      paneElement: pane,
+      onScroll: () => {},
+      onRender: () => {},
+      cellHeight: 16,
+      viewportTopLine: 0,
+      rows: 24,
+    } as unknown as TerminalRenderer
+    const g = new Gutter()
+    g.mount(renderer)
+    expect(pane.style.position).toBe('')
+    expect(pane.querySelector('.nocx-gutter')).not.toBeNull()
+    g.dispose()
   })
 })

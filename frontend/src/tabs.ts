@@ -92,6 +92,15 @@ export class Tab {
   private gutter: Gutter | null = null
   /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
   private _markers = new Map<number, MarkerAdapter>()
+  /**
+   * Pending marker registration — set at submit time, consumed when the
+   * OSC 133 A or C marker arrives so the glyph anchors at the correct row.
+   * { recordId, setLineOf } — setLineOf patches the record's lineOf closure.
+   */
+  private _pendingMarker: {
+    recordId: number
+    setLineOf: (fn: () => number | undefined) => void
+  } | null = null
   private _cwd = '~'
   private _host = ''
 
@@ -288,24 +297,17 @@ export class Tab {
       )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
-          // B2: register a PER-RECORD marker at the prompt row and hand
-          // its live line accessor to the ledger. The marker is never
-          // reassigned across records — every historical record keeps
-          // its own marker so glyphs stay at their original row.
+          // B2: open the record immediately (so it appears in the ledger)
+          // but defer marker registration to OSC 133 A/C arrival so the
+          // glyph anchors at the correct row (item 7 — landmark geometry).
           if (this.ledger) {
-            const m = renderer.registerMarker?.()
-            const lineOf = m ? () => m.line() : () => undefined
-            const rec = this.ledger.open(doc, this._cwd, this._host, lineOf)
-            if (m) {
-              // B2: retain per-record marker so we can dispose it later.
-              this._markers.set(rec.id, m)
-              // H1: when scrollback trims the marker, drop the record
-              // so the gutter doesn't grow unbounded.
-              m.onDispose(() => {
-                this.ledger?.dispose(rec.id)
-                this._markers.delete(rec.id)
-                if (this.ledger) this.gutter?.setRecords(this.ledger.records())
-              })
+            let markerLine: () => number | undefined = () => undefined
+            const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
+            this._pendingMarker = {
+              recordId: rec.id,
+              setLineOf: (fn) => {
+                markerLine = fn
+              },
             }
             this.gutter?.setRecords(this.ledger.records())
           }
@@ -331,6 +333,25 @@ export class Tab {
         }
         // Feed the command ledger.
         this.ledger?.onMarker(marker.kind, marker.exitCode)
+
+        // Register per-record marker when the cursor is at the correct
+        // row (A=prompt or C=command-start). Deferred from submit because
+        // at submit time the cursor hasn't moved past the prompt yet.
+        if ((marker.kind === 'A' || marker.kind === 'C') && this._pendingMarker) {
+          const m = renderer.registerMarker?.()
+          if (m) {
+            const { recordId, setLineOf } = this._pendingMarker
+            setLineOf(() => m.line())
+            this._markers.set(recordId, m)
+            m.onDispose(() => {
+              this.ledger?.dispose(recordId)
+              this._markers.delete(recordId)
+              if (this.ledger) this.gutter?.setRecords(this.ledger.records())
+            })
+          }
+          this._pendingMarker = null
+        }
+
         // Tell the gutter to repaint.
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
@@ -359,12 +380,29 @@ export class Tab {
       // when the user clicks into the terminal (text selection still works
       // because disableStdin only blocks keyboard, not mouse). Bounce
       // focus back to the editor so keystrokes don't leak to the PTY.
+      //
+      // Scoped to fire only when focus lands OUTSIDE the editor root —
+      // clicks on the submit button, textarea, or cwd chip must not
+      // bounce (item 5). That restores: clickable submit button, native
+      // double-click word selection, and Ctrl+A then click to deselect.
       this.pane.addEventListener('focusin', () => {
-        if (
-          this.editor?.isVisible &&
-          document.activeElement !== this.pane.querySelector('.nocx-editor-input')
-        ) {
+        if (this.editor?.isVisible && !this.editor.rootContains(document.activeElement)) {
           this.editor.focus()
+        }
+      })
+
+      // ── Editor copy-on-select (item 6) ─────────────────────────────
+      // Same rules as the terminal: copy-on-select + shouldCopy policy.
+      this.editor.textarea.addEventListener('mouseup', () => {
+        const ta = this.editor!.textarea
+        const start = ta.selectionStart
+        const end = ta.selectionEnd
+        if (start === end) return
+        const text = ta.value.slice(start, end)
+        if (shouldCopy(text)) {
+          this.clipboard.writeText(text).catch((e) => {
+            console.warn('nocx: clipboard write failed (editor selection)', e)
+          })
         }
       })
 
@@ -407,6 +445,7 @@ export class Tab {
         // markers, and clear the gutter.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
+        this._pendingMarker = null
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
       session.onReset(() => {
@@ -415,6 +454,7 @@ export class Tab {
         // B3: fail-open — same as exit.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
+        this._pendingMarker = null
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
 

@@ -143,6 +143,40 @@ describe('CommandEditor', () => {
     expect(chip!.textContent).toContain('dev/projects')
   })
 
+  it('Escape clears the textarea and resets rows, does not cancel (no shell interrupt)', () => {
+    const { ed, ta, cancel } = setup()
+    ed.show()
+    ta.value = 'some draft'
+    ta.rows = 2
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(ta.value).toBe('')
+    expect(ta.rows).toBe(1)
+    // Escape clears the draft only — it does NOT interrupt the shell.
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('rootContains returns true for elements inside the editor root', () => {
+    const { ed, container, ta } = setup()
+    ed.show()
+    expect(ed.rootContains(ta)).toBe(true)
+    expect(ed.rootContains(container.querySelector('.nocx-editor-submit'))).toBe(true)
+    expect(ed.rootContains(container.querySelector('.nocx-editor-cwd'))).toBe(true)
+  })
+
+  it('rootContains returns false for elements outside the editor root', () => {
+    const { ed, container } = setup()
+    ed.show()
+    expect(ed.rootContains(document.body)).toBe(false)
+    expect(ed.rootContains(container)).toBe(false) // container is the mount parent, not inside root
+    expect(ed.rootContains(null)).toBe(false)
+  })
+
   it('insertText inserts at the caret, replacing any selection', () => {
     const { ed, ta } = setup()
     ed.show()

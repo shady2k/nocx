@@ -88,6 +88,13 @@ export class CommandEditor {
       this.submit()
       return
     }
+    // Escape clears the draft without interrupting the shell (Ctrl-C).
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      this.ta.value = ''
+      this.ta.rows = 1
+      return
+    }
     // Ctrl-C cancels the composed line like a shell prompt. A real selection is
     // left alone so Ctrl-C still copies; with nothing selected, interrupt.
     if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
@@ -135,6 +142,18 @@ export class CommandEditor {
 
   get isVisible(): boolean {
     return this.root.style.display !== 'none'
+  }
+
+  /** Whether the editor's root element contains `el`. Used to scope the
+   *  focus-bounce so clicks on the submit button / textarea / cwd chip
+   *  are not swallowed. */
+  rootContains(el: Node | null): boolean {
+    return this.root.contains(el)
+  }
+
+  /** The raw textarea element — exposed so the Tab can wire copy-on-select. */
+  get textarea(): HTMLTextAreaElement {
+    return this.ta
   }
 
   dispose(): void {

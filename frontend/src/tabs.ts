@@ -19,9 +19,6 @@ import type { ClipboardBanner } from './banner'
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
 
-// Enabled: readiness gating (nocx-4ff.10) + native-mode escape (nocx-4ff.9) landed.
-const ENHANCED_INPUT = true
-
 // Shown only until the session reports where it started; a tab named after a
 // generic word tells the user nothing once there are three of them.
 const FALLBACK_TITLE = 'Terminal'
@@ -294,7 +291,6 @@ export class Tab {
 
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        if (!ENHANCED_INPUT) return
         if (shouldShowEditor(m.owned, this.nativeMode)) this.editor!.show()
         else {
           this.editor!.hide()
@@ -304,7 +300,9 @@ export class Tab {
 
       // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
       // the PTY is created at this size — never spawn-then-resize.
-      const session = await this.client.openSession(this.cols, this.rows, ENHANCED_INPUT)
+      // Enhanced input (DOM editor + marker-only prompt) is always on; the shell
+      // fails open to a plain terminal when markers are absent (ADR-0004/0006).
+      const session = await this.client.openSession(this.cols, this.rows, true)
       this.session = session
 
       // The directory names the tab until a program sets a title; from here

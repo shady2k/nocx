@@ -48,13 +48,12 @@ func New() (*App, error) {
 }
 
 type localPTYFactory struct {
-	log           log.Logger
-	shint         shellintegration.ShellIntegration
-	enhancedInput bool
+	log   log.Logger
+	shint shellintegration.ShellIntegration
 }
 
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
-	env := f.shint.ActivationEnv(f.enhancedInput)
+	env := f.shint.ActivationEnv(cfg.Enhanced)
 	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
 }
 

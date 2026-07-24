@@ -19,9 +19,8 @@ import type { ClipboardBanner } from './banner'
 // the drag actually settled on.
 const RESIZE_SETTLE_MS = 80
 
-// ADR-0006: OFF by default; flip only after the native-mode escape +
-// readiness gating land.
-const ENHANCED_INPUT = false
+// Enabled: readiness gating (nocx-4ff.10) + native-mode escape (nocx-4ff.9) landed.
+const ENHANCED_INPUT = true
 
 // Shown only until the session reports where it started; a tab named after a
 // generic word tells the user nothing once there are three of them.

@@ -10,8 +10,7 @@ import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { CommandLedger } from './command-ledger'
-import { Gutter } from './gutter'
-import type { MarkerAdapter } from './renderers/types'
+import type { MarkerAdapter, DecorationHandle } from './renderers/types'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -89,9 +88,10 @@ export class Tab {
   private nativeMode = false
   private started = false
   private ledger: CommandLedger | null = null
-  private gutter: Gutter | null = null
   /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
   private _markers = new Map<number, MarkerAdapter>()
+  /** Per-record xterm decorations (ADR-0008 v2): positioned natively, no external DOM. */
+  private _decorations = new Map<number, DecorationHandle>()
   private _cwd = '~'
   private _host = ''
 
@@ -265,10 +265,6 @@ export class Tab {
       this.cols = renderer.cols
       this.rows = renderer.rows
 
-      // ── Gutter overlay (ADR-0008 first increment) ────────────────────────
-      this.gutter = new Gutter()
-      this.gutter.mount(renderer)
-
       // ── Command ledger (ADR-0008) ────────────────────────────────────────
       this.ledger = new CommandLedger({ now: () => performance.now() })
 
@@ -297,13 +293,20 @@ export class Tab {
             if (m) {
               markerLine = () => m.line()
               this._markers.set(rec.id, m)
+              // Create an xterm decoration anchored at this marker (ADR-0008 v2).
+              // xterm positions the element natively — no external DOM alignment.
+              const dec = m.createDecoration?.(
+                this._decorationColor(rec.status),
+                renderer.cellHeight ?? 15,
+              )
+              if (dec) this._decorations.set(rec.id, dec)
               m.onDispose(() => {
                 this.ledger?.dispose(rec.id)
                 this._markers.delete(rec.id)
-                if (this.ledger) this.gutter?.setRecords(this.ledger.records())
+                dec?.dispose()
+                this._decorations.delete(rec.id)
               })
             }
-            this.gutter?.setRecords(this.ledger.records())
           }
           submitCommand(doc, {
             dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
@@ -328,15 +331,18 @@ export class Tab {
         // Feed the command ledger.
         this.ledger?.onMarker(marker.kind, marker.exitCode)
 
-        // Tell the gutter to repaint.
-        if (this.ledger) this.gutter?.setRecords(this.ledger.records())
+        // Update decoration colours when status changes (running → success/failure).
+        for (const rec of this.ledger?.records() ?? []) {
+          const dec = this._decorations.get(rec.id)
+          if (dec) dec.setColor(this._decorationColor(rec.status))
+        }
       })
 
       renderer.onBufferChange((type) => {
         this._bufferType = type
         this.inputState.dispatch({ type: 'buffer', buffer: type })
-        if (type === 'alternate') this.gutter?.hide()
-        else this.gutter?.show()
+        // Decorations are tied to normal-buffer markers; xterm hides them
+        // automatically when the alternate buffer is active.
       })
 
       this.inputState.onChange((m) => {
@@ -418,10 +424,9 @@ export class Tab {
         console.log('nocx: session exited:', sid)
         this.inputState.dispatch({ type: 'exit' })
         // B3: fail-open — finalize running records, dispose per-record
-        // markers, and clear the gutter.
+        // markers and decorations.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
-        if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
       session.onReset(() => {
         renderer.reset()
@@ -429,7 +434,6 @@ export class Tab {
         // B3: fail-open — same as exit.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
-        if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
 
       renderer.onData((data: string) => session.send(data))
@@ -540,7 +544,6 @@ export class Tab {
         clearTimeout(this.resizeTimer)
         this.resizeTimer = window.setTimeout(() => {
           session.sendResize(cols, rows)
-          this.gutter?.sync()
         }, RESIZE_SETTLE_MS)
       })
 
@@ -585,14 +588,28 @@ export class Tab {
     this.renderer?.dispose()
     this.editor?.dispose()
     this._disposeAllMarkers()
-    this.gutter?.dispose()
-    this.gutter = null
     this.ledger = null
+  }
+
+  private _decorationColor(status: string): string {
+    switch (status) {
+      case 'running':
+        return '#7aa2f7'
+      case 'failure':
+        return '#f7768e'
+      case 'interrupted':
+        return '#ff9e64'
+      case 'success':
+      default:
+        return '#565f89'
+    }
   }
 
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
+    for (const d of this._decorations.values()) d.dispose()
+    this._decorations.clear()
   }
 }
 

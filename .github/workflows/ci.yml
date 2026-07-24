@@ -28,6 +28,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: ['release/**']
   workflow_dispatch:
@@ -75,6 +76,7 @@ jobs:
         run: go test -race -count=1 ./...
 
   frontend:
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -109,6 +111,7 @@ jobs:
   # clean checkout runs the suite with one command and nothing is left behind
   # (see the gracefulShutdown note there).
   e2e:
+    if: github.event.pull_request.draft == false
     runs-on: macos-latest
     timeout-minutes: 20
     steps:

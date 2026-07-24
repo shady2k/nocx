@@ -401,6 +401,27 @@ export class XtermRenderer implements TerminalRenderer {
       dispose: () => {
         m.dispose()
       },
+      createDecoration: (color: string, cellHeight: number) => {
+        const tt = this.term
+        if (!tt) return undefined
+        const dec = tt.registerDecoration({
+          marker: m,
+          layer: 'top',
+          anchor: 'left',
+          width: 3,
+          height: Math.round(cellHeight),
+          backgroundColor: color,
+        })
+        if (!dec || !dec.element) return undefined
+        return {
+          setColor(c: string) {
+            dec.element!.style.backgroundColor = c
+          },
+          dispose() {
+            dec.dispose()
+          },
+        }
+      },
     }
   }
 

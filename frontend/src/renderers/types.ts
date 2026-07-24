@@ -179,4 +179,19 @@ export interface MarkerAdapter {
   readonly onDispose: (cb: () => void) => void
   /** Dispose the marker. Idempotent. */
   dispose(): void
+
+  /**
+   * Create an xterm decoration positioned at this marker. xterm handles
+   * repositioning natively — no external DOM alignment needed. Only
+   * available on xterm (wterm returns undefined).
+   */
+  createDecoration?(color: string, cellHeight: number): DecorationHandle | undefined
+}
+
+/** Thin handle over an xterm IDecoration for status-colour updates. */
+export interface DecorationHandle {
+  /** Update the decoration's background colour (running → success, etc.). */
+  setColor(color: string): void
+  /** Dispose the decoration. Idempotent. */
+  dispose(): void
 }

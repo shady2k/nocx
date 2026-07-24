@@ -256,9 +256,55 @@ export class Tab {
       this.cols = renderer.cols
       this.rows = renderer.rows
 
+      // ── Wire input ownership BEFORE opening the session ─────────────────
+      // A marker-only (invisible) prompt can never paint before the editor
+      // exists (nocx-4ff.10). These listeners are pure state wiring — they
+      // fire only after the session opens and markers arrive.
+
+      // ShellInputTarget references this.session lazily so it can be created
+      // before openSession resolves. submit() is only called while the editor
+      // is shown, which can only happen after markers arrive from the PTY.
+      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
+      this.editor = new CommandEditor({
+        submit: (doc: string) => {
+          submitCommand(doc, {
+            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+            focusGrid: () => renderer.focus(),
+            sendDoc: (d) => void this.shellTarget!.submit(d),
+          })
+        },
+      })
+      this.editor.mount(this.pane)
+
+      renderer.onCommandMarker((marker) => {
+        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
+        // OSC 133 D carries the exit code of the just-finished command.
+        // Stored for future consumers: command blocks, success/failure
+        // colouring, activity indicator refinement.
+        if (marker.kind === 'D' && marker.exitCode !== undefined) {
+          this._lastExitCode = marker.exitCode
+        }
+      })
+
+      renderer.onBufferChange((type) => {
+        this._bufferType = type
+        this.inputState.dispatch({ type: 'buffer', buffer: type })
+      })
+
+      this.inputState.onChange((m) => {
+        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
+        if (!ENHANCED_INPUT) return
+        if (m.owned) this.editor!.show()
+        else {
+          this.editor!.hide()
+          renderer.focus()
+        }
+      })
+
       // Open the session at the renderer's actual grid size. Per AD-1/AD-7,
       // the PTY is created at this size — never spawn-then-resize.
-      const session = await this.client.openSession(this.cols, this.rows)
+      const session = await this.client.openSession(this.cols, this.rows, ENHANCED_INPUT)
+      this.session = session
 
       // The directory names the tab until a program sets a title; from here
       // on OSC 7 keeps it following `cd` (nocx-5mn.2).
@@ -294,52 +340,12 @@ export class Tab {
       renderer.onCwd(({ path }) => {
         this.updateCwd(path)
       })
-      renderer.onBufferChange((type) => {
-        this._bufferType = type
-        this.inputState.dispatch({ type: 'buffer', buffer: type })
-      })
       renderer.onBell(() => {
         // Bell is always attention-worthy, even in the alternate buffer.
         if (!this.button.classList.contains('active')) {
           this.markActivity()
         }
       })
-      renderer.onCommandMarker((marker) => {
-        this.inputState.dispatch({ type: 'marker', kind: marker.kind })
-        // OSC 133 D carries the exit code of the just-finished command.
-        // Stored for future consumers: command blocks, success/failure
-        // colouring, activity indicator refinement.
-        if (marker.kind === 'D' && marker.exitCode !== undefined) {
-          this._lastExitCode = marker.exitCode
-        }
-      })
-
-      this.inputState.onChange((m) => {
-        console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        if (!ENHANCED_INPUT) return
-        if (m.owned) this.editor!.show()
-        else {
-          this.editor!.hide()
-          renderer.focus()
-        }
-      })
-
-      // ── Command editor (DOM textarea) ────────────────────────────────
-      // Wired behind ENHANCED_INPUT (ADR-0006 §5: fail-open). When the flag
-      // is on, ownership (A→B) gives the editor focus; typing + Enter submits
-      // via ShellInputTarget's atomic handoff (hide-before-send → bracketed
-      // paste + CR). When the flag is off, keys flow unchanged to the PTY.
-      this.shellTarget = new ShellInputTarget((data: string) => session.send(data))
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          submitCommand(doc, {
-            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
-            focusGrid: () => renderer.focus(),
-            sendDoc: (d) => void this.shellTarget!.submit(d),
-          })
-        },
-      })
-      this.editor.mount(this.pane)
 
       // ── Clipboard ────────────────────────────────────────────────────
       // The renderer reports facts and never touches the clipboard (AD-6).
@@ -428,7 +434,6 @@ export class Tab {
       })
 
       this.renderer = renderer
-      this.session = session
       this._readyResolve(true)
       console.log(`nocx: tab ready (renderer=${this.rendererName})`, { sid: session.sessionId })
     } catch (err) {

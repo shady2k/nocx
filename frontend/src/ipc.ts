@@ -501,7 +501,14 @@ export class WSClient {
   // SessionHandle carrying the server-assigned sessionId. Per AD-7, the
   // server assigns the authoritative id — nothing may be sent on the data
   // plane for this session before this resolves.
-  openSession(cols: number, rows: number): Promise<SessionHandle> {
+  // openSession sends the JSON-RPC open request and resolves with a
+  // SessionHandle carrying the server-assigned sessionId. Per AD-7, the
+  // server assigns the authoritative id — nothing may be sent on the data
+  // plane for this session before this resolves.
+  // enhanced tells the backend to spawn the shell in marker-only prompt mode
+  // (ADR-0006); the frontend wires the editor BEFORE this call so no invisible
+  // prompt gap can occur (nocx-4ff.10).
+  openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle> {
     return new Promise((resolve, reject) => {
       const id = nextID()
       this.pendingOpens.set(id, {
@@ -513,7 +520,7 @@ export class WSClient {
           jsonrpc: '2.0',
           id,
           method: 'open',
-          params: { cols, rows, xpixel: 0, ypixel: 0 },
+          params: { cols, rows, xpixel: 0, ypixel: 0, enhanced },
         }),
       )
     })

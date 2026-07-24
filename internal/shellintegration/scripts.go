@@ -11,7 +11,7 @@ var bashScript string
 // version is the integration script version. Bump when scripts change;
 // EnsureInstalled/EnsureInstalledRemote compare this against the installed
 // VERSION file and rewrite scripts when they differ.
-const version = "4"
+const version = "5"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

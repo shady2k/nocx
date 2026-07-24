@@ -1,6 +1,7 @@
 package shellintegration
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,6 +284,77 @@ echo "AFTER=[$PS1]"
 // TestEnsureInstalled_SkipsVersionWhenGateFails guards nocx-1dx: the VERSION
 // marker must not be recorded if a gate append failed, so the next launch
 // retries instead of short-circuiting on a version match.
+// TestBashNestedSessionKeepsVisiblePrompt spawns a bash that inherits a
+// NOCX_SESSION_ID (simulating a nested/SSH shell). The marker-only overlay
+// must NOT arm — the prompt must stay visible (nocx-4ff.13).
+func TestBashNestedSessionKeepsVisiblePrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Simulate a nested session: NOCX_SESSION_ID is already set by a
+	// parent nocx session and __nocx_owned_session was exported by the
+	// parent. The shell must NOT install the marker-only overlay.
+	prog := `
+PS1='\w \$ '
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=parent-id-1234 __nocx_owned_session=parent-id-1234
+source "$1"
+__nocx_prompt_command
+# In marker-only mode, PS1 would be just the B marker (~18 chars).
+# In baseline/nested mode, PS1 has the original prompt + B marker appended.
+echo "PS1_LEN=${#PS1}"
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// In nested mode the prompt must NOT be stripped to just the B marker.
+	// The B marker alone is ~18 characters. A visible prompt has more.
+	if !strings.Contains(out, "PS1_LEN=") {
+		t.Fatalf("PS1_LEN= line not found in output:\n%s", out)
+	}
+	idx := strings.Index(out, "PS1_LEN=")
+	rest := out[idx:]
+	end := strings.Index(rest, "\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	lenStr := strings.TrimSpace(rest[8:end])
+	// The B marker alone is ~12 characters. A visible prompt is longer.
+	var ps1Len int
+	if _, err := fmt.Sscanf(lenStr, "%d", &ps1Len); err != nil || ps1Len <= 14 {
+		t.Errorf("nested session PS1 too short (%q chars) — marker-only may be armed: %q", lenStr, out)
+	}
+}
+
+// TestZshNestedSessionKeepsVisiblePrompt spawns a zsh that inherits a
+// NOCX_SESSION_ID (simulating a nested/SSH shell). The marker-only overlay
+// must NOT arm — the prompt must stay visible (nocx-4ff.13).
+func TestZshNestedSessionKeepsVisiblePrompt(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	prog := `
+autoload -Uz add-zsh-hook
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=parent-id-1234 __nocx_owned_session=parent-id-1234
+source "$1"
+# In a nested session, __nocx_marker_only_prompt must NOT be in precmd_functions.
+builtin printf 'MARKER_ONLY_IN_PRECMD=%s\n' "${precmd_functions[(r)__nocx_marker_only_prompt]:-NO}"
+`
+	out := runShellProg(t, zsh, prog, script)
+
+	if !strings.Contains(out, "MARKER_ONLY_IN_PRECMD=") {
+		t.Fatalf("MARKER_ONLY_IN_PRECMD= line not found in output:\n%s", out)
+	}
+	idx := strings.Index(out, "MARKER_ONLY_IN_PRECMD=")
+	rest := out[idx:]
+	end := strings.Index(rest, "\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	val := strings.TrimSpace(rest[22:end])
+	if val != "NO" {
+		t.Errorf("nested session incorrectly armed marker-only prompt; precmd_functions=%q", val)
+	}
+}
+
 func TestEnsureInstalled_SkipsVersionWhenGateFails(t *testing.T) {
 	home := t.TempDir()
 	s := New(testLogger())

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,10 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 )
+
+// randReader is the io.Reader used to generate session IDs. Swappable
+// in tests so we can verify the fail-closed path (nocx-4ff.13).
+var randReader io.Reader = rand.Reader
 
 // CwdInfo carries the validated cwd payload defined by AD-5.
 type CwdInfo struct {
@@ -187,21 +192,26 @@ func writeFileAtomic(path string, data []byte) error {
 func (s *Impl) ActivationEnv(enhanced bool) []string {
 	env := []string{activationEnvVar + "=1"}
 	if enhanced {
+		sid, ok := newSessionID()
+		if !ok {
+			s.log.Warn("shellintegration: session id unavailable; disabling enhanced prompt (fail-closed)")
+			return env
+		}
 		env = append(
 			env,
 			promptModeEnvVar+"="+promptModeMarkerOnly,
-			sessionIDEnvVar+"="+newSessionID(),
+			sessionIDEnvVar+"="+sid,
 		)
 	}
 	return env
 }
 
-func newSessionID() string {
+func newSessionID() (string, bool) {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "nocx"
+	if _, err := io.ReadFull(randReader, b[:]); err != nil {
+		return "", false
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), true
 }
 
 func (s *Impl) RemoteStartCommand() string {

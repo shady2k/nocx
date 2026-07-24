@@ -55,7 +55,8 @@ __nocx_prompt_command() {
     # would otherwise reset $? to 0 before __nocx_precmd could read it.
     local __nocx_exit=$?
     __nocx_in_prompt_command=1
-    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
+    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ -z "${__nocx_owned_session:-}" ]]; then
+        # Top-level session: arm the marker-only overlay.
         # 1) run the user/framework prompt command FIRST.
         if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
             local __c
@@ -67,6 +68,15 @@ __nocx_prompt_command() {
         __nocx_precmd "$__nocx_exit"
         # 3) set the marker-only prompt as the FINAL action.
         PS1="$__nocx_b_marker"
+    elif [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
+        # Nested session (nocx-4ff.13): keep a visible prompt via baseline path.
+        __nocx_precmd "$__nocx_exit"
+        if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
+            local __c
+            for __c in "${__nocx_old_pc_arr[@]}"; do eval "$__c"; done
+        elif [[ -n "${__nocx_old_pc:-}" ]]; then
+            eval "$__nocx_old_pc"
+        fi
     else
         __nocx_precmd "$__nocx_exit"
         if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
@@ -114,11 +124,23 @@ trap '__nocx_preexec_wrapper' DEBUG
 
 __nocx_b_marker='\[\e]133;B\a\]'
 
-if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] && [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
-    # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
-    # literally; they tell bash that the OSC sequence is non-printing.
-    PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'
-    __nocx_prompt_wrapped=1
+if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] || [[ -n "${__nocx_owned_session:-}" ]]; then
+    # Baseline mode or nested marker-only (nocx-4ff.13): wrap PS1 with
+    # the B marker so the prompt is visible. Top-level marker-only leaves
+    # PS1 untouched — __nocx_prompt_command sets it at runtime.
+    if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
+        # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
+        # literally; they tell bash that the OSC sequence is non-printing.
+        PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'
+        __nocx_prompt_wrapped=1
+    fi
+fi
+
+# Nested-session gate (nocx-4ff.13): record the owning session at source
+# time so child shells see the guard and keep a visible prompt.
+if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ -z "${__nocx_owned_session:-}" ]]; then
+    __nocx_owned_session="${NOCX_SESSION_ID:-}"
+    export __nocx_owned_session
 fi
 
 # Native-mode escape (nocx-4ff.9): restore a visible prompt.

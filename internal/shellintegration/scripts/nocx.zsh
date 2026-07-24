@@ -60,18 +60,28 @@ precmd_functions=(__nocx_capture_status ${precmd_functions:#__nocx_capture_statu
 __nocx_b_marker=$'%{\e]133;B\a%}'
 
 if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
-    # Enhanced mode: reassert a marker-only prompt AFTER frameworks run, every
-    # prompt. Kept last in precmd_functions so a framework precmd that rewrote
-    # PS1 cannot win. Do NOT touch PS2/PS3 (continuation/secondary stay native).
-    __nocx_marker_only_prompt() {
-        PROMPT="$__nocx_b_marker"
-        PS1="$__nocx_b_marker"
-        RPROMPT=''
-        RPS1=''
-    }
-    add-zsh-hook precmd __nocx_marker_only_prompt
-    # Force it last, deduped, on every source.
-    precmd_functions=(${precmd_functions:#__nocx_marker_only_prompt} __nocx_marker_only_prompt)
+    # Nested-session gate (nocx-4ff.13): a shell that inherits a
+    # NOCX_SESSION_ID it did not create (__nocx_owned_session already
+    # exported by a parent) keeps a visible prompt.
+    if [[ -n "${__nocx_owned_session:-}" ]]; then
+        # Nested shell — do NOT arm the marker-only overlay.
+        :
+    else
+        __nocx_owned_session="${NOCX_SESSION_ID:-}"
+        export __nocx_owned_session
+        # Enhanced mode: reassert a marker-only prompt AFTER frameworks run, every
+        # prompt. Kept last in precmd_functions so a framework precmd that rewrote
+        # PS1 cannot win. Do NOT touch PS2/PS3 (continuation/secondary stay native).
+        __nocx_marker_only_prompt() {
+            PROMPT="$__nocx_b_marker"
+            PS1="$__nocx_b_marker"
+            RPROMPT=''
+            RPS1=''
+        }
+        add-zsh-hook precmd __nocx_marker_only_prompt
+        # Force it last, deduped, on every source.
+        precmd_functions=(${precmd_functions:#__nocx_marker_only_prompt} __nocx_marker_only_prompt)
+    fi
 elif [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
     PS1="${PS1:-}"$'%{\e]133;B\a%}'
     __nocx_prompt_wrapped=1

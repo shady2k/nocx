@@ -6,6 +6,7 @@ import { InputStateController } from './input-state'
 import { CommandEditor } from './editor'
 import { ShellInputTarget } from './input-target'
 import { submitCommand } from './submit'
+import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 
@@ -86,6 +87,7 @@ export class Tab {
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
+  private nativeMode = false
   private started = false
 
   // _readyPromise resolves true when the renderer mounts and the PTY session
@@ -294,7 +296,7 @@ export class Tab {
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
         if (!ENHANCED_INPUT) return
-        if (m.owned) this.editor!.show()
+        if (shouldShowEditor(m.owned, this.nativeMode)) this.editor!.show()
         else {
           this.editor!.hide()
           renderer.focus()
@@ -434,6 +436,21 @@ export class Tab {
       })
 
       this.renderer = renderer
+
+      // ── Native-mode escape (Ctrl/Cmd+Shift+.) ─────────────────────────
+      // Latch this tab to raw mode forever: hide the editor, focus the grid,
+      // and ask the shell to restore a visible prompt (nocx-4ff.9).
+      this.pane.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === '.' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.nativeMode = true
+          this.editor?.hide()
+          this.renderer?.focus()
+          this.session?.send(NATIVE_RESTORE)
+        }
+      })
+
       this._readyResolve(true)
       console.log(`nocx: tab ready (renderer=${this.rendererName})`, { sid: session.sessionId })
     } catch (err) {

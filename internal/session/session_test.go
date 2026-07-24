@@ -288,6 +288,39 @@ func (f *stubPTYFactory) NewPTY(_ context.Context, _ pty.Config) (pty.Pty, error
 	return f.stub, nil
 }
 
+// capturingPTYFactory records the pty.Config passed to NewPTY so tests can
+// assert the session's Config threaded through correctly.
+type capturingPTYFactory struct {
+	stub *pty.Stub
+	got  pty.Config
+}
+
+func (f *capturingPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	f.got = cfg
+	return f.stub, nil
+}
+
+// TestOpenThreadsEnhancedIntoPTYConfig verifies that session.Config.Enhanced
+// is threaded through to pty.Config.Enhanced (nocx-4ff.10).
+func TestOpenThreadsEnhancedIntoPTYConfig(t *testing.T) {
+	stub := pty.NewStub(log.NewSlogAdapter(nil))
+	factory := &capturingPTYFactory{stub: stub}
+	reg := New(log.NewSlogAdapter(nil), factory)
+
+	_, err := reg.Open(context.Background(), Config{
+		Kind:     KindLocal,
+		Cols:     80,
+		Rows:     24,
+		Enhanced: true,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !factory.got.Enhanced {
+		t.Fatalf("pty.Config.Enhanced = false, want true")
+	}
+}
+
 // TestRegistry_OpenWithFakePTY proves a session can be opened against a stub
 // PTY — no real process is spawned, and the registry is independently testable
 // (DEFECT 10 / AD-8).

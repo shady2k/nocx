@@ -110,6 +110,11 @@ export class WtermRenderer implements TerminalRenderer {
     // WTerm renders via DOM, not a GPU texture atlas — nothing to clear.
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  setReadOnly(_readOnly: boolean): void {
+    // @wterm/dom has no disableStdin — no-op.
+  }
+
   dispose(): void {
     // WTerm renders via DOM and runs no periodic pump — nothing to release.
   }

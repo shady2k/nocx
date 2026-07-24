@@ -6,6 +6,7 @@ import {
   type Machine,
   type InputEvent,
 } from './input-state'
+import { shouldShowEditor } from './native-mode'
 
 const run = (evs: InputEvent[], m: Machine = initialMachine()) => evs.reduce(reduce, m)
 
@@ -83,6 +84,21 @@ describe('A→B ownership gate', () => {
   it('B without a prompt does not grant ownership', () => {
     expect(reduce(initialMachine(), { type: 'marker', kind: 'B' }).owned).toBe(false)
   })
+  it('B,B from RAW never latches ownership without an A (nocx-4ff.11)', () => {
+    const b1 = reduce(initialMachine(), { type: 'marker', kind: 'B' })
+    expect(b1.owned).toBe(false)
+    const b2 = reduce(b1, { type: 'marker', kind: 'B' })
+    expect(b2.owned).toBe(false) // currently FAILS: reduce grants owned on the 2nd B
+  })
+  it('an untrusted resync A→B does not grant ownership (fail-open)', () => {
+    const running = [
+      { type: 'marker', kind: 'A' } as InputEvent,
+      { type: 'marker', kind: 'C' } as InputEvent,
+    ].reduce(reduce, initialMachine())
+    const a = reduce(running, { type: 'marker', kind: 'A' }) // untrusted PROMPT_READY
+    expect(a.trusted).toBe(false)
+    expect(reduce(a, { type: 'marker', kind: 'B' }).owned).toBe(false)
+  })
   it('C, submit, alt-buffer, reset clear ownership', () => {
     const owned = [
       { type: 'marker', kind: 'A' } as InputEvent,
@@ -106,5 +122,20 @@ describe('InputStateController', () => {
     c.dispatch({ type: 'marker', kind: 'C' }) // -> RUNNING_RAW
     expect(c.state).toBe('RUNNING_RAW')
     expect(seen).toEqual(['PROMPT_READY', 'PROMPT_READY', 'RUNNING_RAW'])
+  })
+})
+
+describe('raw-routing invariant (nocx-4ff.4)', () => {
+  it('editor is hidden in every non-owned state', () => {
+    const running = [
+      { type: 'marker', kind: 'A' } as InputEvent,
+      { type: 'marker', kind: 'B' } as InputEvent,
+      { type: 'submit' } as InputEvent, // -> RUNNING_RAW, owned:false
+    ].reduce(reduce, initialMachine())
+    expect(running.owned).toBe(false)
+    expect(shouldShowEditor(running.owned, false)).toBe(false)
+    const alt = reduce(running, { type: 'buffer', buffer: 'alternate' })
+    expect(shouldShowEditor(alt.owned, false)).toBe(false)
+    expect(shouldShowEditor(initialMachine().owned, false)).toBe(false) // RAW
   })
 })

@@ -25,6 +25,8 @@ type Config struct {
 	Rows   uint16
 	XPixel uint16
 	YPixel uint16
+	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
+	Enhanced bool
 }
 
 // Option configures a Config before PTY creation.

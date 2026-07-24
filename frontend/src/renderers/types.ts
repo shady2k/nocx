@@ -128,6 +128,11 @@ export interface TerminalRenderer {
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.
   refreshAtlas(): void
+
+  /** When readOnly, the terminal ignores keyboard input but text selection
+   *  still works. Used when the DOM editor owns input at a prompt. */
+  setReadOnly(readOnly: boolean): void
+
   focus(): void
   readonly cols: number
   readonly rows: number
@@ -135,5 +140,58 @@ export interface TerminalRenderer {
   // dispose releases renderer-held resources (timers, listeners). Called when
   // the tab owning this renderer is closed so a periodic forced-refresh pump
   // does not outlive the terminal it paints.
+  dispose(): void
+
+  // ── Marker/geometry API (ADR-0008 command-ledger gutter) ────────────────
+  // These are optional — the gutter feature-detects and skips when absent.
+
+  /**
+   * Register a marker at the current cursor row. Returns an adapter that
+   * exposes the live marker line, an onDispose callback (fired when scrollback
+   * trims the line), and a dispose method. Returns undefined when the renderer
+   * does not support markers (e.g. wterm).
+   */
+  registerMarker?(): MarkerAdapter | undefined
+
+  /** Measured cell height in pixels, from the actual rendered char element.
+   *  Falls back to fontSize * lineHeight only if measurement is unavailable. */
+  readonly cellHeight?: number
+
+  /** Absolute buffer line index at the top of the visible viewport.
+   *  = buffer.active.baseY + buffer.active.viewportY in xterm terms. */
+  readonly viewportTopLine?: number
+
+  /** Subscribe to scroll events. Fires with the new viewportY (scroll offset). */
+  onScroll?(cb: (viewportY: number) => void): void
+
+  /** Subscribe to render events. Fires whenever viewport content is painted. */
+  onRender?(cb: (range: { start: number; end: number }) => void): void
+
+  /** The DOM element the renderer mounted into — the gutter overlays it. */
+  readonly paneElement?: HTMLElement
+}
+
+/** Adapter over an xterm IMarker, exposing only what the gutter needs. */
+export interface MarkerAdapter {
+  /** The marker's current absolute buffer line, or undefined if disposed. */
+  readonly line: () => number | undefined
+  /** Fires when the marker is disposed (scrollback trim). */
+  readonly onDispose: (cb: () => void) => void
+  /** Dispose the marker. Idempotent. */
+  dispose(): void
+
+  /**
+   * Create an xterm decoration positioned at this marker. xterm handles
+   * repositioning natively — no external DOM alignment needed. Only
+   * available on xterm (wterm returns undefined).
+   */
+  createDecoration?(color: string, cellHeight: number): DecorationHandle | undefined
+}
+
+/** Thin handle over an xterm IDecoration for status-colour updates. */
+export interface DecorationHandle {
+  /** Update the decoration's background colour (running → success, etc.). */
+  setColor(color: string): void
+  /** Dispose the decoration. Idempotent. */
   dispose(): void
 }

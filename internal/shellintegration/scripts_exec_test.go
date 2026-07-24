@@ -1,6 +1,7 @@
 package shellintegration
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -186,9 +187,265 @@ builtin printf 'PROMPT=[%s]' "$PROMPT"
 	}
 }
 
+// TestZshNativeModeRestoresVisiblePrompt spawns a marker-only zsh, invokes
+// __nocx_native_mode, then runs precmd hooks and asserts the prompt is
+// visible (contains % or #, not merely a B marker) — nocx-4ff.9.
+func TestZshNativeModeRestoresVisiblePrompt(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	prog := `
+autoload -Uz add-zsh-hook
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+
+# First run precmd — the marker-only overlay should be active.
+for f in $precmd_functions; do $f; done
+builtin printf 'BEFORE=[%s]\n' "$PROMPT"
+
+# Escape to native mode.
+__nocx_native_mode
+
+# Run precmd again — should now produce a visible prompt.
+for f in $precmd_functions; do $f; done
+builtin printf 'AFTER=[%s]\n' "$PROMPT"
+`
+	out := runShellProg(t, zsh, prog, script)
+
+	// Before escape: the prompt must be the B marker only.
+	if !strings.Contains(out, "]133;B") {
+		t.Errorf("marker-only BEFORE missing OSC 133 B marker:\n%s", out)
+	}
+
+	// After escape: the prompt must be visible — contains % or # (zsh prompt),
+	// and NOT only the B marker with no other content.
+	// The visible prompt is '%~ %# ' which means we should find %~ or a % followed by space.
+	// Note: the C marker may prefix the printf output, so search by substring.
+	if !strings.Contains(out, "AFTER=[") {
+		t.Fatalf("AFTER= line not found in output:\n%s", out)
+	}
+	afterIdx := strings.Index(out, "AFTER=[")
+	afterRest := out[afterIdx:]
+	endIdx := strings.Index(afterRest, "]")
+	if endIdx < 0 {
+		t.Fatalf("could not parse AFTER value from:\n%s", out)
+	}
+	afterOnly := afterRest[7:endIdx]
+	if afterOnly == "" || afterOnly == "%{\x1b]133;B\a%}" {
+		t.Errorf("native mode did not restore a visible prompt; PS1 is still marker-only: %q", afterOnly)
+	}
+	if !strings.Contains(afterOnly, "%~") && !strings.Contains(afterOnly, "%#") {
+		t.Logf("prompt after native mode (expected visible chars like %%~): %q", afterOnly)
+	}
+}
+
+// TestBashNativeModeRestoresVisiblePrompt spawns a marker-only bash, invokes
+// __nocx_native_mode, then runs __nocx_prompt_command and asserts the prompt
+// is visible (contains \w or \$, not merely a B marker) — nocx-4ff.9.
+func TestBashNativeModeRestoresVisiblePrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+
+# First run prompt command — the marker-only overlay should be active.
+__nocx_prompt_command
+echo "BEFORE=[$PS1]"
+
+# Escape to native mode.
+__nocx_native_mode
+
+# Run prompt command again — should now produce a visible prompt.
+__nocx_prompt_command
+echo "AFTER=[$PS1]"
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// After escape: the prompt must be visible — contains \w or \$.
+	// The visible prompt is '\w \$ '.
+	// Note: the C marker may prefix the echo output, so search by substring.
+	if !strings.Contains(out, "AFTER=[") {
+		t.Fatalf("AFTER= line not found in output:\n%s", out)
+	}
+	afterIdx := strings.Index(out, "AFTER=[")
+	afterRest := out[afterIdx:]
+	endIdx := strings.Index(afterRest, "]")
+	if endIdx < 0 {
+		t.Fatalf("could not parse AFTER value from:\n%s", out)
+	}
+	afterOnly := afterRest[7:endIdx]
+	if !strings.Contains(afterOnly, "\\w") && !strings.Contains(afterOnly, "\\$") {
+		t.Errorf("native mode did not restore a visible bash prompt; PS1 still marker-only: %q", afterOnly)
+	}
+}
+
 // TestEnsureInstalled_SkipsVersionWhenGateFails guards nocx-1dx: the VERSION
 // marker must not be recorded if a gate append failed, so the next launch
 // retries instead of short-circuiting on a version match.
+// TestBashTopLevelMarkerOnlyArmsBMarker verifies that a TOP-LEVEL bash
+// session with NOCX_PROMPT_MODE=marker-only AND a non-empty NOCX_SESSION_ID
+// DOES arm the marker-only B marker — the owner correctly identifies itself
+// (nocx-4ff.13 regression fix). Without this guard the owner would see its
+// own __nocx_owned_session export and incorrectly treat itself as nested.
+func TestBashTopLevelMarkerOnlyArmsBMarker(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Simulate a TOP-LEVEL enhanced session: NOCX_SESSION_ID is set by the
+	// backend and NO parent __nocx_owned_session exists.
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=deadbeefdeadbeef
+source "$1"
+
+# Run two prompt cycles — the second must set the marker-only PS1.
+__nocx_prompt_command
+__nocx_prompt_command
+# PS1 content (includes the B marker escape) and length for assertions.
+echo "PS1_CONTENT=$PS1"
+echo "PS1_LEN=${#PS1}"
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// The B marker must be present in the output (precmd emits it).
+	if !strings.Contains(out, "]133;B") {
+		t.Errorf("top-level marker-only session missing OSC 133 B marker in output:\n%s", out)
+	}
+
+	// PS1 must be the marker-only B marker (short, no visible glyphs).
+	if !strings.Contains(out, "PS1_LEN=") {
+		t.Fatalf("PS1_LEN= line not found in output:\n%s", out)
+	}
+	idx := strings.Index(out, "PS1_LEN=")
+	rest := out[idx:]
+	end := strings.Index(rest, "\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	lenStr := strings.TrimSpace(rest[8:end])
+	var ps1Len int
+	if _, err := fmt.Sscanf(lenStr, "%d", &ps1Len); err != nil {
+		t.Fatalf("could not parse PS1_LEN: %q", lenStr)
+	}
+	// The B marker alone is ~12-14 chars. If PS1 is > 25 the B marker
+	// was wrapped onto a visible prompt (nested branch, bug).
+	if ps1Len > 25 {
+		t.Errorf("top-level marker-only PS1 too long (%d chars) — may have fallen into nested branch: %q", ps1Len, out)
+	}
+}
+
+// TestBashMarkerOnlyNoSpuriousCommandStartDuringSourcing guards the first-prompt
+// ownership regression (nocx-4ff, "the editor appears only after the first
+// command"). The DEBUG trap is live from the moment `trap ... DEBUG` runs while
+// nocx.bash is still being sourced, so the ordinary `[[ ... ]]` tests further
+// down the script would fire __nocx_preexec — a spurious OSC 133 C
+// (command-start) BEFORE the first prompt's A. That drives the input-ownership
+// machine to RUNNING_RAW, so the first A→B lands untrusted and the DOM editor
+// never takes ownership until a command has run once. With __nocx_preexec_done
+// initialised DISARMED, the first OSC 133 marker at a clean start is A, and C
+// still fires for a genuine command line.
+func TestBashMarkerOnlyNoSpuriousCommandStartDuringSourcing(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=deadbeefdeadbeef
+source "$1"
+__nocx_prompt_command
+echo real-command
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// Match the actual emitted escapes (ESC ] 133 ; X), not literal PS1 text.
+	firstA := strings.Index(out, "\x1b]133;A")
+	firstC := strings.Index(out, "\x1b]133;C")
+
+	if firstA < 0 {
+		t.Fatalf("no OSC 133 A marker emitted at a clean start:\n%q", out)
+	}
+	// The fix must not disable command markers: a real command still fires C.
+	if firstC < 0 {
+		t.Fatalf("no OSC 133 C marker for a genuine command — over-suppressed:\n%q", out)
+	}
+	// A C before the first A is the spurious command-start emitted while the
+	// script was being sourced — the bug that poisons first-prompt ownership.
+	if firstC < firstA {
+		t.Errorf("spurious OSC 133 C before the first A: the editor would not own the first prompt:\n%q", out)
+	}
+}
+
+// TestBashNestedSessionKeepsVisiblePrompt spawns a bash that inherits a
+// NOCX_SESSION_ID (simulating a nested/SSH shell). The marker-only overlay
+// must NOT arm — the prompt must stay visible (nocx-4ff.13).
+func TestBashNestedSessionKeepsVisiblePrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Simulate a nested session: NOCX_SESSION_ID is already set by a
+	// parent nocx session and __nocx_owned_session was exported by the
+	// parent. The shell must NOT install the marker-only overlay.
+	prog := `
+PS1='\w \$ '
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=parent-id-1234 __nocx_owned_session=parent-id-1234
+source "$1"
+__nocx_prompt_command
+# In marker-only mode, PS1 would be just the B marker (~18 chars).
+# In baseline/nested mode, PS1 has the original prompt + B marker appended.
+echo "PS1_LEN=${#PS1}"
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// In nested mode the prompt must NOT be stripped to just the B marker.
+	// The B marker alone is ~18 characters. A visible prompt has more.
+	if !strings.Contains(out, "PS1_LEN=") {
+		t.Fatalf("PS1_LEN= line not found in output:\n%s", out)
+	}
+	idx := strings.Index(out, "PS1_LEN=")
+	rest := out[idx:]
+	end := strings.Index(rest, "\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	lenStr := strings.TrimSpace(rest[8:end])
+	// The B marker alone is ~12 characters. A visible prompt is longer.
+	var ps1Len int
+	if _, err := fmt.Sscanf(lenStr, "%d", &ps1Len); err != nil || ps1Len <= 14 {
+		t.Errorf("nested session PS1 too short (%q chars) — marker-only may be armed: %q", lenStr, out)
+	}
+}
+
+// TestZshNestedSessionKeepsVisiblePrompt spawns a zsh that inherits a
+// NOCX_SESSION_ID (simulating a nested/SSH shell). The marker-only overlay
+// must NOT arm — the prompt must stay visible (nocx-4ff.13).
+func TestZshNestedSessionKeepsVisiblePrompt(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	prog := `
+autoload -Uz add-zsh-hook
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=parent-id-1234 __nocx_owned_session=parent-id-1234
+source "$1"
+# In a nested session, __nocx_marker_only_prompt must NOT be in precmd_functions.
+builtin printf 'MARKER_ONLY_IN_PRECMD=%s\n' "${precmd_functions[(r)__nocx_marker_only_prompt]:-NO}"
+`
+	out := runShellProg(t, zsh, prog, script)
+
+	if !strings.Contains(out, "MARKER_ONLY_IN_PRECMD=") {
+		t.Fatalf("MARKER_ONLY_IN_PRECMD= line not found in output:\n%s", out)
+	}
+	idx := strings.Index(out, "MARKER_ONLY_IN_PRECMD=")
+	rest := out[idx:]
+	end := strings.Index(rest, "\n")
+	if end < 0 {
+		end = len(rest)
+	}
+	val := strings.TrimSpace(rest[22:end])
+	if val != "NO" {
+		t.Errorf("nested session incorrectly armed marker-only prompt; precmd_functions=%q", val)
+	}
+}
+
 func TestEnsureInstalled_SkipsVersionWhenGateFails(t *testing.T) {
 	home := t.TempDir()
 	s := New(testLogger())

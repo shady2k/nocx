@@ -11,6 +11,7 @@ import type {
   CommandMarkerEvent,
   CwdCallback,
   DataCallback,
+  MarkerAdapter,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -119,6 +120,11 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
+  private scrollSubs: Array<(viewportY: number) => void> = []
+  private renderSubs: Array<(range: { start: number; end: number }) => void> = []
+  private scrollDisposable?: { dispose(): void }
+  private renderDisposable?: { dispose(): void }
+  private _cachedCellHeight: number | null = null
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -130,6 +136,13 @@ export class XtermRenderer implements TerminalRenderer {
       allowProposedApi: true,
       smoothScrollDuration: 120,
       scrollback: 10000,
+      // When the DOM editor owns input at a prompt, focus is on the editor's
+      // textarea and xterm is blurred — its default 'outline' inactive cursor
+      // then paints a hollow box at the marker-only prompt, a second cursor
+      // competing with the editor's caret (item 9). 'none' hides the terminal
+      // cursor whenever xterm is not focused; a running program that takes
+      // focus back still shows its active cursor.
+      cursorInactiveStyle: 'none',
       // Holding Option (macOS) or Shift (elsewhere) forces selection in
       // mouse-tracking programs — the engine's own escape hatch for CAP-4.
       macOptionClickForcesSelection: true,
@@ -185,6 +198,11 @@ export class XtermRenderer implements TerminalRenderer {
         if (t) t.refresh(0, (t.rows ?? 24) - 1)
       }, FORCED_REFRESH_MS)
     }
+
+    // Invalidate cellHeight cache on resize (M1).
+    this.term?.onResize(() => {
+      this._cachedCellHeight = null
+    })
   }
 
   private safeFit(): void {
@@ -332,6 +350,10 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
+  setReadOnly(readOnly: boolean): void {
+    if (this.term) this.term.options.disableStdin = readOnly
+  }
+
   focus(): void {
     this.term?.focus()
   }
@@ -344,6 +366,12 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
+    this.scrollDisposable?.dispose()
+    this.scrollDisposable = undefined
+    this.scrollSubs = []
+    this.renderDisposable?.dispose()
+    this.renderDisposable = undefined
+    this.renderSubs = []
   }
 
   get cols(): number {
@@ -352,5 +380,94 @@ export class XtermRenderer implements TerminalRenderer {
 
   get rows(): number {
     return this.term?.rows ?? 24
+  }
+
+  // ── Marker/geometry API (ADR-0008 command-ledger gutter) ──────────────
+
+  registerMarker(): MarkerAdapter | undefined {
+    const t = this.term
+    if (!t) return undefined
+    const m = t.registerMarker(0)
+    if (!m) return undefined
+    return {
+      line: () => {
+        // m.line returns -1 when disposed, so map to undefined.
+        const l = m.line
+        return l >= 0 ? l : undefined
+      },
+      onDispose: (cb: () => void) => {
+        m.onDispose(cb)
+      },
+      dispose: () => {
+        m.dispose()
+      },
+      createDecoration: (color: string, cellHeight: number) => {
+        const tt = this.term
+        if (!tt) return undefined
+        const dec = tt.registerDecoration({
+          marker: m,
+          layer: 'top',
+          anchor: 'left',
+          width: 3,
+          height: Math.round(cellHeight),
+          backgroundColor: color,
+        })
+        if (!dec || !dec.element) return undefined
+        return {
+          setColor(c: string) {
+            dec.element!.style.backgroundColor = c
+          },
+          dispose() {
+            dec.dispose()
+          },
+        }
+      },
+    }
+  }
+
+  get cellHeight(): number {
+    // M1: cache cellHeight — getBoundingClientRect is expensive per paint.
+    if (this._cachedCellHeight !== null) return this._cachedCellHeight
+    const t = this.term
+    if (!t) return Math.ceil(FONT_SIZE * LINE_HEIGHT)
+    const measureEl = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
+    if (measureEl) {
+      const rect = measureEl.getBoundingClientRect()
+      if (rect.height > 0) {
+        this._cachedCellHeight = rect.height
+        return rect.height
+      }
+    }
+    const fallback = Math.ceil(FONT_SIZE * LINE_HEIGHT)
+    this._cachedCellHeight = fallback
+    return fallback
+  }
+
+  get viewportTopLine(): number {
+    const t = this.term
+    if (!t) return 0
+    // viewportY is already the absolute buffer line at the top of the viewport
+    // (xterm.d.ts). Adding baseY double-counts scrollback (B1).
+    return t.buffer.active.viewportY
+  }
+
+  onScroll(cb: (viewportY: number) => void): void {
+    this.scrollSubs.push(cb)
+    if (this.scrollDisposable || !this.term) return
+    this.scrollDisposable = this.term.onScroll((y: number) => {
+      for (const sub of this.scrollSubs) sub(y)
+    })
+  }
+
+  onRender(cb: (range: { start: number; end: number }) => void): void {
+    this.renderSubs.push(cb)
+    if (this.renderDisposable || !this.term) return
+    this.renderDisposable = this.term.onRender((r: { start: number; end: number }) => {
+      for (const sub of this.renderSubs) sub(r)
+    })
+  }
+
+  get paneElement(): HTMLElement {
+    return this.container ?? document.createElement('div')
   }
 }

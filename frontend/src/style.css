@@ -4,6 +4,13 @@
   box-sizing: border-box;
 }
 
+:root {
+  /* Keep --nocx-mono identical to FONT_FAMILY in renderers/font.ts. */
+  --nocx-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --nocx-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+}
+
 html,
 body {
   margin: 0;
@@ -15,6 +22,7 @@ body {
 }
 
 #app {
+  font-family: var(--nocx-ui);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -548,17 +556,135 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 4px 8px;
-  background: #1a1b26;
+  /* Above every xterm layer. The WebGL link-layer canvas paints at z-index:2
+     and the accessibility tree at z-index:10 (both inside .xterm, which sets
+     no z-index so they land in the pane's stacking context). Without a higher
+     z-index here the editor is painted on top but the canvas still WINS
+     hit-testing — every click, caret move, double-click word-select and the
+     submit button land on .xterm-link-layer instead of the textarea. The
+     editor owns the bottom strip; it must own the mouse there too. */
+  z-index: 20;
+  background: #16161e;
+  border-top: 1px solid #292e42;
+  border-left: 3px solid #7aa2f7;
+  padding: 10px 14px 12px;
+}
+
+.nocx-editor-chrome {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.nocx-editor-cwd {
+  color: #7aa2f7;
+  background: #292e42;
+  border-radius: 5px;
+  padding: 3px 9px;
+  font-size: 12px;
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  cursor: default;
+}
+
+.nocx-editor-submit {
+  /* Centred vertically against the whole input block on the right edge
+     (item 2). Absolute inside .nocx-editor (its positioning context). */
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #414868;
+  border-radius: 6px;
+  background: #292e42;
+  color: #7aa2f7;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+
+.nocx-editor-submit:hover {
+  background: #363b54;
 }
 
 .nocx-editor-input {
   width: 100%;
+  /* Clear the absolutely-positioned submit button on the right (item 2) so a
+     long or multi-line command never slides underneath it. */
+  padding-right: 44px;
   background: transparent;
   color: #c0caf5;
   border: none;
   outline: none;
-  font-family: inherit;
-  font-size: inherit;
+  font-family: var(--nocx-mono);
+  font-size: 14px;
+  line-height: 1.2;
   resize: none;
+}
+
+/* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
+/* Base geometry (3px vertical bar at left edge) is set inline by
+   gutter.ts. Status sets the look. Restraint is the rule: a routine
+   successful command is calm and present, not shouting — strong colour is
+   reserved for running, failure, interruption and focus. No green "success
+   confetti". */
+
+.nocx-gutter-glyph {
+  background: #565f89;
+  opacity: 0.4;
+  transition: opacity 120ms ease;
+}
+
+.nocx-gutter-success {
+  background: #565f89; /* neutral, not green */
+  opacity: 0.5; /* visible but calm */
+}
+
+.nocx-gutter-running {
+  background: #7aa2f7; /* accent blue */
+  opacity: 0.95;
+}
+
+.nocx-gutter-failure {
+  background: #f7768e; /* red — a failure earns attention */
+  opacity: 1;
+}
+
+.nocx-gutter-interrupted {
+  background: #ff9e64; /* amber */
+  opacity: 0.9;
+}
+
+.nocx-gutter-unknown {
+  background: #565f89;
+  opacity: 0.4;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nocx-gutter-running {
+    animation: nocx-gutter-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes nocx-gutter-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }

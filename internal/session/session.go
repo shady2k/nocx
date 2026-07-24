@@ -34,6 +34,8 @@ type Config struct {
 	Rows   uint16
 	XPixel uint16
 	YPixel uint16
+	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
+	Enhanced bool
 }
 
 type PTYFactory interface {
@@ -108,11 +110,12 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	}
 
 	pt, err := r.ptf.NewPTY(ctx, pty.Config{
-		Cwd:    cfg.Cwd,
-		Cols:   cfg.Cols,
-		Rows:   cfg.Rows,
-		XPixel: cfg.XPixel,
-		YPixel: cfg.YPixel,
+		Cwd:      cfg.Cwd,
+		Cols:     cfg.Cols,
+		Rows:     cfg.Rows,
+		XPixel:   cfg.XPixel,
+		YPixel:   cfg.YPixel,
+		Enhanced: cfg.Enhanced,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open session: %w", err)

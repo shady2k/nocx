@@ -266,3 +266,34 @@ func osHostname(t *testing.T) string {
 	}
 	return h
 }
+
+// errReader is an io.Reader that always returns an error.
+type errReader struct{}
+
+func (errReader) Read(_ []byte) (int, error) { return 0, os.ErrInvalid }
+
+// TestActivationEnvFailsClosedOnRandError verifies that when crypto/rand
+// fails (e.g. on a low-entropy embedded system), ActivationEnv(true) omits
+// the enhanced vars entirely instead of falling back to a predictable id
+// (nocx-4ff.13).
+func TestActivationEnvFailsClosedOnRandError(t *testing.T) {
+	orig := randReader
+	randReader = errReader{}
+	defer func() { randReader = orig }()
+
+	s := New(testLogger())
+	enh := s.ActivationEnv(true)
+	joined := strings.Join(enh, "\n")
+	if strings.Contains(joined, "NOCX_PROMPT_MODE") || strings.Contains(joined, "NOCX_SESSION_ID") {
+		t.Fatalf("enhanced env must be omitted when session id cannot be generated: %v", enh)
+	}
+	found := false
+	for _, e := range enh {
+		if strings.HasPrefix(e, "NOCX_SHELL_INTEGRATION=") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("NOCX_SHELL_INTEGRATION must be present even on rand failure: %v", enh)
+	}
+}

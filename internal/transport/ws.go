@@ -274,10 +274,11 @@ func isJSONObject(data []byte) bool {
 
 // openParams is the payload of the "open" RPC method.
 type openParams struct {
-	Cols   uint16 `json:"cols"`
-	Rows   uint16 `json:"rows"`
-	XPixel uint16 `json:"xpixel"`
-	YPixel uint16 `json:"ypixel"`
+	Cols     uint16 `json:"cols"`
+	Rows     uint16 `json:"rows"`
+	XPixel   uint16 `json:"xpixel"`
+	YPixel   uint16 `json:"ypixel"`
+	Enhanced bool   `json:"enhanced"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -423,11 +424,12 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	}
 
 	sess, err := s.registry.Open(ctx, session.Config{
-		Kind:   session.KindLocal,
-		Cols:   params.Cols,
-		Rows:   params.Rows,
-		XPixel: params.XPixel,
-		YPixel: params.YPixel,
+		Kind:     session.KindLocal,
+		Cols:     params.Cols,
+		Rows:     params.Rows,
+		XPixel:   params.XPixel,
+		YPixel:   params.YPixel,
+		Enhanced: params.Enhanced,
 	})
 	if err != nil {
 		s.log.Error("failed to open session", "error", err)

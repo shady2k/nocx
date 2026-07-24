@@ -96,6 +96,18 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	}
 }
 
+// TestOpenParamsUnmarshalsEnhanced verifies that the openParams struct
+// deserialises the `enhanced` boolean from the open RPC params (nocx-4ff.10).
+func TestOpenParamsUnmarshalsEnhanced(t *testing.T) {
+	var p openParams
+	if err := json.Unmarshal([]byte(`{"cols":80,"rows":24,"enhanced":true}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if !p.Enhanced {
+		t.Fatalf("openParams.Enhanced = false, want true")
+	}
+}
+
 func TestWSServer_StartStop(t *testing.T) {
 	sess := newRegWithStub(log.NewSlogAdapter(nil))
 	ws := NewWSServer(log.NewSlogAdapter(nil), sess)

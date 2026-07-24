@@ -27,16 +27,16 @@ describe('InputTargetRegistry', () => {
 })
 
 describe('ShellInputTarget', () => {
-  it('submits one bracketed paste + CR', async () => {
-    const send = vi.fn()
-    const t = new ShellInputTarget(send)
+  it('sends the doc as one bracketed paste followed by CR', async () => {
+    const sendRaw = vi.fn()
+    const t = new ShellInputTarget(sendRaw)
     await t.submit('echo hi')
-    expect(send).toHaveBeenCalledTimes(1)
-    expect(send).toHaveBeenCalledWith('\x1b[200~echo hi\x1b[201~\r')
+    expect(sendRaw).toHaveBeenCalledTimes(1)
+    expect(sendRaw).toHaveBeenCalledWith('\x1b[200~echo hi\x1b[201~\r')
   })
-  it('preserves a multi-line document inside the paste', async () => {
-    const send = vi.fn()
-    await new ShellInputTarget(send).submit('a\nb')
-    expect(send).toHaveBeenCalledWith('\x1b[200~a\nb\x1b[201~\r')
+  it('preserves \\n so every line executes as a command separator (nocx-4ff.14)', async () => {
+    const sendRaw = vi.fn()
+    await new ShellInputTarget(sendRaw).submit('a\nb')
+    expect(sendRaw).toHaveBeenCalledWith('\x1b[200~a\nb\x1b[201~\r')
   })
 })

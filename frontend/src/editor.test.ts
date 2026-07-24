@@ -7,11 +7,22 @@ const setup = () => {
   document.body.appendChild(container)
   const order: string[] = []
   const submit = vi.fn((doc: string) => order.push(`submit:${doc}`))
-  const ed = new CommandEditor({ submit })
+  const cancel = vi.fn(() => order.push('cancel'))
+  const ed = new CommandEditor({ submit, cancel })
   ed.mount(container)
   const ta = container.querySelector('textarea')!
-  return { ed, ta, submit, order, container }
+  return { ed, ta, submit, cancel, order, container }
 }
+
+const ctrlC = (ta: HTMLTextAreaElement) =>
+  ta.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  )
 
 const enter = (ta: HTMLTextAreaElement, shift = false) =>
   ta.dispatchEvent(
@@ -51,5 +62,129 @@ describe('CommandEditor', () => {
     expect(ed.isVisible).toBe(true)
     ed.hide()
     expect(ed.isVisible).toBe(false)
+  })
+
+  it('Ctrl-C with no selection clears and cancels (interrupt)', () => {
+    const { ed, ta, cancel, submit } = setup()
+    ed.show()
+    ta.value = 'echo partial'
+    ta.selectionStart = ta.selectionEnd = ta.value.length
+    ctrlC(ta)
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(submit).not.toHaveBeenCalled()
+    expect(ta.value).toBe('')
+  })
+
+  it('Ctrl-C with a selection is left alone so copy still works', () => {
+    const { ed, ta, cancel } = setup()
+    ed.show()
+    ta.value = 'echo hi'
+    ta.selectionStart = 0
+    ta.selectionEnd = ta.value.length
+    ctrlC(ta)
+    expect(cancel).not.toHaveBeenCalled()
+    expect(ta.value).toBe('echo hi')
+  })
+
+  it('applies the nocx-editor-input class (mono font via CSS)', () => {
+    const { ta } = setup()
+    expect(ta.className).toContain('nocx-editor-input')
+  })
+
+  it('multiline: grows rows as lines are added, resets to 1 on submit', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    // 3 lines → rows should be 3
+    ta.value = 'line1\nline2\nline3'
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(ta.rows).toBe(3)
+
+    // submit resets to 1
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        shiftKey: false,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(ta.rows).toBe(1)
+  })
+
+  it('multiline: caps rows at MAX_ROWS (10)', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    ta.value = Array(15).fill('line').join('\n') // 15 lines
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(ta.rows).toBe(10)
+  })
+
+  it('clicking the submit button submits and clears (same as Enter)', () => {
+    const { ed, container, submit } = setup()
+    ed.show()
+    const ta = container.querySelector('textarea')!
+    ta.value = 'echo hi'
+
+    const btn = container.querySelector('.nocx-editor-submit') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    btn.click()
+
+    expect(submit).toHaveBeenCalledWith('echo hi')
+    expect(ta.value).toBe('')
+    expect(ed.isVisible).toBe(false)
+  })
+
+  it('setCwd updates the cwd chip text', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.setCwd('/home/dev/projects')
+    const chip = container.querySelector('.nocx-editor-cwd')
+    expect(chip).not.toBeNull()
+    expect(chip!.textContent).toContain('dev/projects')
+  })
+
+  it('Escape clears the textarea and resets rows, does not cancel (no shell interrupt)', () => {
+    const { ed, ta, cancel } = setup()
+    ed.show()
+    ta.value = 'some draft'
+    ta.rows = 2
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(ta.value).toBe('')
+    expect(ta.rows).toBe(1)
+    // Escape clears the draft only — it does NOT interrupt the shell.
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('rootContains returns true for elements inside the editor root', () => {
+    const { ed, container, ta } = setup()
+    ed.show()
+    expect(ed.rootContains(ta)).toBe(true)
+    expect(ed.rootContains(container.querySelector('.nocx-editor-submit'))).toBe(true)
+    expect(ed.rootContains(container.querySelector('.nocx-editor-cwd'))).toBe(true)
+  })
+
+  it('rootContains returns false for elements outside the editor root', () => {
+    const { ed, container } = setup()
+    ed.show()
+    expect(ed.rootContains(document.body)).toBe(false)
+    expect(ed.rootContains(container)).toBe(false) // container is the mount parent, not inside root
+    expect(ed.rootContains(null)).toBe(false)
+  })
+
+  it('insertText inserts at the caret, replacing any selection', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    ta.value = 'echo XX'
+    ta.selectionStart = 5
+    ta.selectionEnd = 7 // select "XX"
+    ed.insertText('hi')
+    expect(ta.value).toBe('echo hi')
+    expect(ta.selectionStart).toBe(7) // caret after the inserted text
   })
 })

@@ -3,6 +3,48 @@ import { describe, expect, it, vi } from 'vitest'
 import { parseOsc7, parseOsc133, XtermRenderer } from './xterm'
 import type { CommandMarkerEvent } from './types'
 
+describe('XtermRenderer setReadOnly', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  it('toggles disableStdin on the underlying terminal', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Access the private term via a cast — the test owns both sides.
+    const term = (r as unknown as Record<string, unknown>).term as
+      { options: { disableStdin: boolean } } | undefined
+    expect(term).toBeDefined()
+
+    r.setReadOnly(true)
+    expect(term!.options.disableStdin).toBe(true)
+
+    r.setReadOnly(false)
+    expect(term!.options.disableStdin).toBe(false)
+
+    r.dispose()
+  })
+})
+
 describe('parseOsc7', () => {
   it('parses a local file:/// path (empty host)', () => {
     const result = parseOsc7('file:///Users/shady/projects')

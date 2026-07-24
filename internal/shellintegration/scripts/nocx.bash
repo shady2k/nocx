@@ -15,7 +15,17 @@ __nocx_first_prompt=
 __nocx_in_prompt_command=0
 # Latch so the command-start (C) marker fires once per entered line, not once
 # per simple command — a pipeline or list fires the DEBUG trap for each element.
-__nocx_preexec_done=0
+#
+# Initialised DISARMED (1), not armed (0): the DEBUG trap is live from the
+# moment `trap ... DEBUG` runs below, and the remaining lines of THIS sourced
+# script (and the rest of .bashrc after it) are ordinary commands — e.g. the
+# `[[ ... ]]` tests below do not match the `__nocx_*` skip. Armed, the very
+# first such test fires a spurious C, driving the input machine to RUNNING_RAW
+# before the first A→B ever arrives; the first real prompt is then untrusted
+# and the DOM editor never takes ownership until a command has run once
+# (nocx-4ff: "editor appears only after the first command"). __nocx_precmd arms
+# the latch (=0) at each prompt, so the first genuine command line still fires C.
+__nocx_preexec_done=1
 
 __nocx_encode_url() {
     local s="$1"
@@ -55,7 +65,8 @@ __nocx_prompt_command() {
     # would otherwise reset $? to 0 before __nocx_precmd could read it.
     local __nocx_exit=$?
     __nocx_in_prompt_command=1
-    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
+    if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ "${__nocx_arm_marker_only:-}" == 1 ]]; then
+        # Top-level session: arm the marker-only overlay.
         # 1) run the user/framework prompt command FIRST.
         if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
             local __c
@@ -67,6 +78,15 @@ __nocx_prompt_command() {
         __nocx_precmd "$__nocx_exit"
         # 3) set the marker-only prompt as the FINAL action.
         PS1="$__nocx_b_marker"
+    elif [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
+        # Nested session (nocx-4ff.13): keep a visible prompt via baseline path.
+        __nocx_precmd "$__nocx_exit"
+        if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
+            local __c
+            for __c in "${__nocx_old_pc_arr[@]}"; do eval "$__c"; done
+        elif [[ -n "${__nocx_old_pc:-}" ]]; then
+            eval "$__nocx_old_pc"
+        fi
     else
         __nocx_precmd "$__nocx_exit"
         if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
@@ -114,9 +134,30 @@ trap '__nocx_preexec_wrapper' DEBUG
 
 __nocx_b_marker='\[\e]133;B\a\]'
 
-if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] && [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
-    # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
-    # literally; they tell bash that the OSC sequence is non-printing.
-    PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'
-    __nocx_prompt_wrapped=1
+if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] || [[ "${__nocx_arm_marker_only:-}" != 1 ]]; then
+    # Baseline mode or nested marker-only (nocx-4ff.13): wrap PS1 with
+    # the B marker so the prompt is visible. Top-level marker-only leaves
+    # PS1 untouched — __nocx_prompt_command sets it at runtime.
+    if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
+        # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
+        # literally; they tell bash that the OSC sequence is non-printing.
+        PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'
+        __nocx_prompt_wrapped=1
+    fi
 fi
+
+# Nested-session gate (nocx-4ff.13): record the owning session at source
+# time so child shells see the guard and keep a visible prompt.
+# ALSO capture owner-ness into __nocx_arm_marker_only before the export,
+# so __nocx_prompt_command can distinguish owner from nested descendant.
+if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ -z "${__nocx_owned_session:-}" ]]; then
+    __nocx_owned_session="${NOCX_SESSION_ID:-}"
+    export __nocx_owned_session
+    __nocx_arm_marker_only=1
+fi
+
+# Native-mode escape (nocx-4ff.9): restore a visible prompt.
+__nocx_native_mode() {
+    unset NOCX_PROMPT_MODE
+    PS1='\w \$ '
+}

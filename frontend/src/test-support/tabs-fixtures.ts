@@ -98,6 +98,7 @@ export function createRendererMock(): RendererMock {
       cbs.onClipboardWrite = cb
     }),
     paste: vi.fn(),
+    setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
     cols: 80,

@@ -136,6 +136,15 @@ test.describe('paste', () => {
       { button: 'right' },
     )
 
+    // Wait for the paste to land in the editor: readText() is async, and
+    // at the prompt the terminal is read-only so text goes to the editor.
+    // Pressing Enter before the paste resolves would submit the still-empty
+    // editor (hiding it), then paste to the terminal with no CR — unexecuted.
+    await expect(page.locator('.nocx-editor-input')).toHaveValue(
+      new RegExp(pasteMarker),
+      { timeout: 3000 },
+    )
+
     // Execute the pasted command. If paste worked, the title changes.
     await page.keyboard.press('Enter')
     await expect(page.locator(TITLE).first()).toHaveText(pasteMarker, {

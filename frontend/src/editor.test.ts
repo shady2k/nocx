@@ -91,4 +91,41 @@ describe('CommandEditor', () => {
     expect(ta.style.fontFamily).toContain('monospace')
     expect(ta.style.fontSize).toBe('14px')
   })
+
+  it('multiline: grows rows as lines are added, resets to 1 on submit', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    // 3 lines → rows should be 3
+    ta.value = 'line1\nline2\nline3'
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(ta.rows).toBe(3)
+
+    // submit resets to 1
+    ta.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        shiftKey: false,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(ta.rows).toBe(1)
+  })
+
+  it('multiline: caps rows at MAX_ROWS (10)', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    ta.value = Array(15).fill('line').join('\n') // 15 lines
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(ta.rows).toBe(10)
+  })
+
+  it('setCwd updates the cwd chip text', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.setCwd('/home/dev/projects')
+    const chip = container.querySelector('.nocx-editor-cwd')
+    expect(chip).not.toBeNull()
+    expect(chip!.textContent).toContain('dev/projects')
+  })
 })

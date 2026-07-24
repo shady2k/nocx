@@ -239,6 +239,7 @@ export class Tab {
     this._cwd = path
     this._defaultTitle = directoryLabel(path)
     this.button.title = cwdTooltip(path, true)
+    this.editor?.setCwd(path)
 
     // If no program has set a title, the visible title tracks the cwd.
     if (!this._programTitle) {
@@ -360,6 +361,9 @@ export class Tab {
       // Store the initial cwd for the command ledger.
       this._cwd = session.cwd
       this._host = ''
+
+      // Seed the editor cwd chip with the initial cwd.
+      this.editor?.setCwd(session.cwd)
 
       // The directory names the tab until a program sets a title; from here
       // on OSC 7 keeps it following `cd` (nocx-5mn.2).

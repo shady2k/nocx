@@ -548,8 +548,35 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 4px 8px;
-  background: #1a1b26;
+  background: #16161e;
+  border-top: 1px solid #292e42;
+  border-left: 3px solid #7aa2f7;
+  padding: 6px 10px;
+}
+
+.nocx-editor-chrome {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 11px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.nocx-editor-cwd {
+  color: #7aa2f7;
+  background: #292e42;
+  border-radius: 4px;
+  padding: 1px 6px;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.nocx-editor-hint {
+  color: #565f89;
+  font-size: 11px;
 }
 
 .nocx-editor-input {
@@ -564,25 +591,26 @@ body {
 }
 
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
-/* Base geometry (12px circle) is set inline by gutter.ts; status sets the
-   look. Restraint is the rule: a routine successful command must almost
-   disappear — strong colour is reserved for running, failure, interruption
-   and focus. No green "success confetti". */
+/* Base geometry (3px vertical bar at left edge) is set inline by
+   gutter.ts. Status sets the look. Restraint is the rule: a routine
+   successful command is calm and present, not shouting — strong colour is
+   reserved for running, failure, interruption and focus. No green "success
+   confetti". */
 
 .nocx-gutter-glyph {
   background: #565f89;
-  opacity: 0.16;
+  opacity: 0.4;
   transition: opacity 120ms ease;
 }
 
 .nocx-gutter-success {
   background: #565f89; /* neutral, not green */
-  opacity: 0.12; /* routine success is not news */
+  opacity: 0.5; /* visible but calm */
 }
 
 .nocx-gutter-running {
   background: #7aa2f7; /* accent blue */
-  opacity: 0.9;
+  opacity: 0.95;
 }
 
 .nocx-gutter-failure {
@@ -592,12 +620,12 @@ body {
 
 .nocx-gutter-interrupted {
   background: #ff9e64; /* amber */
-  opacity: 0.85;
+  opacity: 0.9;
 }
 
 .nocx-gutter-unknown {
   background: #565f89;
-  opacity: 0.3;
+  opacity: 0.4;
 }
 
 @media (prefers-reduced-motion: no-preference) {

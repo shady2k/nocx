@@ -170,7 +170,9 @@ export class Gutter {
         glyph = document.createElement('div')
         glyph.className = `nocx-gutter-glyph ${statusClass(record.status)}`
         glyph.style.cssText =
-          'position:absolute;left:2px;' + `width:12px;height:12px;` + 'border-radius:50%;'
+          'position:absolute;left:0;' +
+          `width:3px;height:${Math.round(ch)}px;` +
+          'border-radius:1px;'
         el.appendChild(glyph)
         this._glyphs.set(record.id, glyph)
       }

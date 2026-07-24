@@ -562,3 +562,56 @@ body {
   font-size: inherit;
   resize: none;
 }
+
+/* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
+/* Base geometry (12px circle) is set inline by gutter.ts; status sets the
+   look. Restraint is the rule: a routine successful command must almost
+   disappear — strong colour is reserved for running, failure, interruption
+   and focus. No green "success confetti". */
+
+.nocx-gutter-glyph {
+  background: #565f89;
+  opacity: 0.16;
+  transition: opacity 120ms ease;
+}
+
+.nocx-gutter-success {
+  background: #565f89; /* neutral, not green */
+  opacity: 0.12; /* routine success is not news */
+}
+
+.nocx-gutter-running {
+  background: #7aa2f7; /* accent blue */
+  opacity: 0.9;
+}
+
+.nocx-gutter-failure {
+  background: #f7768e; /* red — a failure earns attention */
+  opacity: 1;
+}
+
+.nocx-gutter-interrupted {
+  background: #ff9e64; /* amber */
+  opacity: 0.85;
+}
+
+.nocx-gutter-unknown {
+  background: #565f89;
+  opacity: 0.3;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .nocx-gutter-running {
+    animation: nocx-gutter-pulse 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes nocx-gutter-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}

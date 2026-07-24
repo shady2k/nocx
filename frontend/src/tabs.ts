@@ -92,15 +92,6 @@ export class Tab {
   private gutter: Gutter | null = null
   /** Per-record markers (B2): each record owns its own marker, keyed by record id. */
   private _markers = new Map<number, MarkerAdapter>()
-  /**
-   * Pending marker registration — set at submit time, consumed when the
-   * OSC 133 A or C marker arrives so the glyph anchors at the correct row.
-   * { recordId, setLineOf } — setLineOf patches the record's lineOf closure.
-   */
-  private _pendingMarker: {
-    recordId: number
-    setLineOf: (fn: () => number | undefined) => void
-  } | null = null
   private _cwd = '~'
   private _host = ''
 
@@ -297,17 +288,23 @@ export class Tab {
       )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
-          // B2: open the record immediately (so it appears in the ledger)
-          // but defer marker registration to OSC 133 A/C arrival so the
-          // glyph anchors at the correct row (item 7 — landmark geometry).
+          // Anchor the block at the COMMAND row NOW, while the terminal cursor
+          // still sits on the (marker-only) prompt line the command is about to
+          // be echoed onto. Deferring to the next OSC 133 C anchored the glyph
+          // on the command's first OUTPUT line instead — one row too low, so
+          // every landmark drifted below its command (item 1).
           if (this.ledger) {
             let markerLine: () => number | undefined = () => undefined
             const rec = this.ledger.open(doc, this._cwd, this._host, () => markerLine())
-            this._pendingMarker = {
-              recordId: rec.id,
-              setLineOf: (fn) => {
-                markerLine = fn
-              },
+            const m = renderer.registerMarker?.()
+            if (m) {
+              markerLine = () => m.line()
+              this._markers.set(rec.id, m)
+              m.onDispose(() => {
+                this.ledger?.dispose(rec.id)
+                this._markers.delete(rec.id)
+                if (this.ledger) this.gutter?.setRecords(this.ledger.records())
+              })
             }
             this.gutter?.setRecords(this.ledger.records())
           }
@@ -333,24 +330,6 @@ export class Tab {
         }
         // Feed the command ledger.
         this.ledger?.onMarker(marker.kind, marker.exitCode)
-
-        // Register per-record marker when the cursor is at the correct
-        // row (A=prompt or C=command-start). Deferred from submit because
-        // at submit time the cursor hasn't moved past the prompt yet.
-        if ((marker.kind === 'A' || marker.kind === 'C') && this._pendingMarker) {
-          const m = renderer.registerMarker?.()
-          if (m) {
-            const { recordId, setLineOf } = this._pendingMarker
-            setLineOf(() => m.line())
-            this._markers.set(recordId, m)
-            m.onDispose(() => {
-              this.ledger?.dispose(recordId)
-              this._markers.delete(recordId)
-              if (this.ledger) this.gutter?.setRecords(this.ledger.records())
-            })
-          }
-          this._pendingMarker = null
-        }
 
         // Tell the gutter to repaint.
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
@@ -445,7 +424,6 @@ export class Tab {
         // markers, and clear the gutter.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
-        this._pendingMarker = null
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
       session.onReset(() => {
@@ -454,7 +432,6 @@ export class Tab {
         // B3: fail-open — same as exit.
         this.ledger?.finalizeOpen()
         this._disposeAllMarkers()
-        this._pendingMarker = null
         if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
 

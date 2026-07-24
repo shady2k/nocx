@@ -36,10 +36,19 @@ export class CommandEditor {
     const submitBtn = document.createElement('button')
     submitBtn.className = 'nocx-editor-submit'
     submitBtn.textContent = '→'
+    // preventDefault on mousedown so clicking the button never blurs the
+    // textarea (WebKit does not focus buttons on click, so the textarea would
+    // otherwise lose focus first); the click still fires and submits.
+    submitBtn.addEventListener('mousedown', (e) => e.preventDefault())
     submitBtn.addEventListener('click', () => this.submit())
 
-    this.chrome.append(this.cwdChip, submitBtn)
+    this.chrome.append(this.cwdChip)
     this.root.appendChild(this.chrome)
+
+    // The submit button is a direct child of the editor root (not the chrome
+    // row) so it can sit vertically centred against the whole input block on
+    // the right edge, the way Warp places its run affordance (item 2).
+    this.root.appendChild(submitBtn)
 
     // ── Textarea ────────────────────────────────────────────────────────
     this.ta = document.createElement('textarea')

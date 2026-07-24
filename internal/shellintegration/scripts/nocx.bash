@@ -15,7 +15,17 @@ __nocx_first_prompt=
 __nocx_in_prompt_command=0
 # Latch so the command-start (C) marker fires once per entered line, not once
 # per simple command — a pipeline or list fires the DEBUG trap for each element.
-__nocx_preexec_done=0
+#
+# Initialised DISARMED (1), not armed (0): the DEBUG trap is live from the
+# moment `trap ... DEBUG` runs below, and the remaining lines of THIS sourced
+# script (and the rest of .bashrc after it) are ordinary commands — e.g. the
+# `[[ ... ]]` tests below do not match the `__nocx_*` skip. Armed, the very
+# first such test fires a spurious C, driving the input machine to RUNNING_RAW
+# before the first A→B ever arrives; the first real prompt is then untrusted
+# and the DOM editor never takes ownership until a command has run once
+# (nocx-4ff: "editor appears only after the first command"). __nocx_precmd arms
+# the latch (=0) at each prompt, so the first genuine command line still fires C.
+__nocx_preexec_done=1
 
 __nocx_encode_url() {
     local s="$1"

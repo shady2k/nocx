@@ -556,6 +556,14 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
+  /* Above every xterm layer. The WebGL link-layer canvas paints at z-index:2
+     and the accessibility tree at z-index:10 (both inside .xterm, which sets
+     no z-index so they land in the pane's stacking context). Without a higher
+     z-index here the editor is painted on top but the canvas still WINS
+     hit-testing — every click, caret move, double-click word-select and the
+     submit button land on .xterm-link-layer instead of the textarea. The
+     editor owns the bottom strip; it must own the mouse there too. */
+  z-index: 20;
   background: #16161e;
   border-top: 1px solid #292e42;
   border-left: 3px solid #7aa2f7;
@@ -584,17 +592,24 @@ body {
 }
 
 .nocx-editor-submit {
+  /* Centred vertically against the whole input block on the right edge
+     (item 2). Absolute inside .nocx-editor (its positioning context). */
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border: 1px solid #414868;
   border-radius: 6px;
   background: #292e42;
   color: #7aa2f7;
   padding: 0;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
   flex: none;
@@ -606,6 +621,9 @@ body {
 
 .nocx-editor-input {
   width: 100%;
+  /* Clear the absolutely-positioned submit button on the right (item 2) so a
+     long or multi-line command never slides underneath it. */
+  padding-right: 44px;
   background: transparent;
   color: #c0caf5;
   border: none;

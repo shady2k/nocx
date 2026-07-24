@@ -335,6 +335,46 @@ echo "PS1_LEN=${#PS1}"
 	}
 }
 
+// TestBashMarkerOnlyNoSpuriousCommandStartDuringSourcing guards the first-prompt
+// ownership regression (nocx-4ff, "the editor appears only after the first
+// command"). The DEBUG trap is live from the moment `trap ... DEBUG` runs while
+// nocx.bash is still being sourced, so the ordinary `[[ ... ]]` tests further
+// down the script would fire __nocx_preexec — a spurious OSC 133 C
+// (command-start) BEFORE the first prompt's A. That drives the input-ownership
+// machine to RUNNING_RAW, so the first A→B lands untrusted and the DOM editor
+// never takes ownership until a command has run once. With __nocx_preexec_done
+// initialised DISARMED, the first OSC 133 marker at a clean start is A, and C
+// still fires for a genuine command line.
+func TestBashMarkerOnlyNoSpuriousCommandStartDuringSourcing(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=deadbeefdeadbeef
+source "$1"
+__nocx_prompt_command
+echo real-command
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// Match the actual emitted escapes (ESC ] 133 ; X), not literal PS1 text.
+	firstA := strings.Index(out, "\x1b]133;A")
+	firstC := strings.Index(out, "\x1b]133;C")
+
+	if firstA < 0 {
+		t.Fatalf("no OSC 133 A marker emitted at a clean start:\n%q", out)
+	}
+	// The fix must not disable command markers: a real command still fires C.
+	if firstC < 0 {
+		t.Fatalf("no OSC 133 C marker for a genuine command — over-suppressed:\n%q", out)
+	}
+	// A C before the first A is the spurious command-start emitted while the
+	// script was being sourced — the bug that poisons first-prompt ownership.
+	if firstC < firstA {
+		t.Errorf("spurious OSC 133 C before the first A: the editor would not own the first prompt:\n%q", out)
+	}
+}
+
 // TestBashNestedSessionKeepsVisiblePrompt spawns a bash that inherits a
 // NOCX_SESSION_ID (simulating a nested/SSH shell). The marker-only overlay
 // must NOT arm — the prompt must stay visible (nocx-4ff.13).

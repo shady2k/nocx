@@ -136,6 +136,13 @@ export class XtermRenderer implements TerminalRenderer {
       allowProposedApi: true,
       smoothScrollDuration: 120,
       scrollback: 10000,
+      // When the DOM editor owns input at a prompt, focus is on the editor's
+      // textarea and xterm is blurred — its default 'outline' inactive cursor
+      // then paints a hollow box at the marker-only prompt, a second cursor
+      // competing with the editor's caret (item 9). 'none' hides the terminal
+      // cursor whenever xterm is not focused; a running program that takes
+      // focus back still shows its active cursor.
+      cursorInactiveStyle: 'none',
       // Holding Option (macOS) or Shift (elsewhere) forces selection in
       // mouse-tracking programs — the engine's own escape hatch for CAP-4.
       macOptionClickForcesSelection: true,

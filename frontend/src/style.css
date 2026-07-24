@@ -4,6 +4,13 @@
   box-sizing: border-box;
 }
 
+:root {
+  /* Keep --nocx-mono identical to FONT_FAMILY in renderers/font.ts. */
+  --nocx-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  --nocx-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
+}
+
 html,
 body {
   margin: 0;
@@ -15,6 +22,7 @@ body {
 }
 
 #app {
+  font-family: var(--nocx-ui);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -574,9 +582,18 @@ body {
   align-items: center;
 }
 
-.nocx-editor-hint {
-  color: #565f89;
-  font-size: 11px;
+.nocx-editor-submit {
+  border: 1px solid #414868;
+  border-radius: 4px;
+  background: #292e42;
+  color: #7aa2f7;
+  padding: 1px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.nocx-editor-submit:hover {
+  background: #363b54;
 }
 
 .nocx-editor-input {
@@ -585,8 +602,9 @@ body {
   color: #c0caf5;
   border: none;
   outline: none;
-  font-family: inherit;
-  font-size: inherit;
+  font-family: var(--nocx-mono);
+  font-size: 14px;
+  line-height: 1.2;
   resize: none;
 }
 

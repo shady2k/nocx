@@ -344,10 +344,27 @@ export class Tab {
 
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
-        if (shouldShowEditor(m.owned, this.nativeMode)) this.editor!.show()
-        else {
+        if (shouldShowEditor(m.owned, this.nativeMode)) {
+          this.editor!.show()
+          renderer.setReadOnly(true)
+        } else {
           this.editor!.hide()
+          renderer.setReadOnly(false)
           renderer.focus()
+        }
+      })
+
+      // ── Focus bounce ───────────────────────────────────────────────
+      // When the editor owns input, typing must stay in the textarea even
+      // when the user clicks into the terminal (text selection still works
+      // because disableStdin only blocks keyboard, not mouse). Bounce
+      // focus back to the editor so keystrokes don't leak to the PTY.
+      this.pane.addEventListener('focusin', () => {
+        if (
+          this.editor?.isVisible &&
+          document.activeElement !== this.pane.querySelector('.nocx-editor-input')
+        ) {
+          this.editor.focus()
         }
       })
 

@@ -86,10 +86,9 @@ describe('CommandEditor', () => {
     expect(ta.value).toBe('echo hi')
   })
 
-  it('uses the terminal monospace font, not the page font', () => {
+  it('applies the nocx-editor-input class (mono font via CSS)', () => {
     const { ta } = setup()
-    expect(ta.style.fontFamily).toContain('monospace')
-    expect(ta.style.fontSize).toBe('14px')
+    expect(ta.className).toContain('nocx-editor-input')
   })
 
   it('multiline: grows rows as lines are added, resets to 1 on submit', () => {
@@ -118,6 +117,21 @@ describe('CommandEditor', () => {
     ta.value = Array(15).fill('line').join('\n') // 15 lines
     ta.dispatchEvent(new Event('input', { bubbles: true }))
     expect(ta.rows).toBe(10)
+  })
+
+  it('clicking the submit button submits and clears (same as Enter)', () => {
+    const { ed, container, submit } = setup()
+    ed.show()
+    const ta = container.querySelector('textarea')!
+    ta.value = 'echo hi'
+
+    const btn = container.querySelector('.nocx-editor-submit') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    btn.click()
+
+    expect(submit).toHaveBeenCalledWith('echo hi')
+    expect(ta.value).toBe('')
+    expect(ed.isVisible).toBe(false)
   })
 
   it('setCwd updates the cwd chip text', () => {

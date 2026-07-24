@@ -343,6 +343,10 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
+  setReadOnly(readOnly: boolean): void {
+    if (this.term) this.term.options.disableStdin = readOnly
+  }
+
   focus(): void {
     this.term?.focus()
   }

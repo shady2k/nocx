@@ -128,6 +128,11 @@ export interface TerminalRenderer {
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.
   refreshAtlas(): void
+
+  /** When readOnly, the terminal ignores keyboard input but text selection
+   *  still works. Used when the DOM editor owns input at a prompt. */
+  setReadOnly(readOnly: boolean): void
+
   focus(): void
   readonly cols: number
   readonly rows: number

@@ -2,7 +2,6 @@
 // registered action decides where a submit goes. Keyboard routing to/from the
 // PTY is by FOCUS: while shown the textarea captures keys; while hidden the
 // xterm has focus and keys flow to the PTY as usual.
-import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './renderers/font'
 
 const MAX_ROWS = 10
 
@@ -34,11 +33,12 @@ export class CommandEditor {
     this.cwdChip.className = 'nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
-    const hint = document.createElement('span')
-    hint.className = 'nocx-editor-hint'
-    hint.textContent = '\u23ce'
+    const submitBtn = document.createElement('button')
+    submitBtn.className = 'nocx-editor-submit'
+    submitBtn.textContent = '→'
+    submitBtn.addEventListener('click', () => this.submit())
 
-    this.chrome.append(this.cwdChip, hint)
+    this.chrome.append(this.cwdChip, submitBtn)
     this.root.appendChild(this.chrome)
 
     // ── Textarea ────────────────────────────────────────────────────────
@@ -47,12 +47,6 @@ export class CommandEditor {
     this.ta.rows = 1
     this.ta.spellcheck = false
     this.ta.autocapitalize = 'off'
-    // Match the terminal's font exactly (single source of truth with the
-    // renderer) so the composed command reads as a continuation of the grid
-    // above it, not as an alien UI-font input box.
-    this.ta.style.fontFamily = FONT_FAMILY
-    this.ta.style.fontSize = `${FONT_SIZE}px`
-    this.ta.style.lineHeight = String(LINE_HEIGHT)
     this.ta.addEventListener('keydown', this.onKeydown)
     // Auto-grow: resize rows to fit content (1..MAX_ROWS).
     this.ta.addEventListener('input', this.onInput)
@@ -77,16 +71,21 @@ export class CommandEditor {
     this._grow()
   }
 
+  /** Submit the current textarea value, then hide and clear (ADR-0004 §2). */
+  private submit(): void {
+    const doc = this.ta.value
+    // Atomic handoff (ADR-0004 §2): hide + clear BEFORE sending, so the
+    // committed command is painted once by the shell, not echoed twice.
+    this.ta.value = ''
+    this.ta.rows = 1
+    this.hide()
+    this.actions.submit(doc)
+  }
+
   private onKeydown = (e: KeyboardEvent): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      const doc = this.ta.value
-      // Atomic handoff (ADR-0004 §2): hide + clear BEFORE sending, so the
-      // committed command is painted once by the shell, not echoed twice.
-      this.ta.value = ''
-      this.ta.rows = 1
-      this.hide()
-      this.actions.submit(doc)
+      this.submit()
       return
     }
     // Ctrl-C cancels the composed line like a shell prompt. A real selection is
@@ -105,6 +104,11 @@ export class CommandEditor {
   show(): void {
     this.root.style.display = ''
     this.ta.focus()
+  }
+
+  /** Focus the textarea if the editor is visible. Safe to call when hidden. */
+  focus(): void {
+    if (this.root.style.display !== 'none') this.ta.focus()
   }
 
   hide(): void {

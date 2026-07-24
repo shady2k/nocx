@@ -7,11 +7,22 @@ const setup = () => {
   document.body.appendChild(container)
   const order: string[] = []
   const submit = vi.fn((doc: string) => order.push(`submit:${doc}`))
-  const ed = new CommandEditor({ submit })
+  const cancel = vi.fn(() => order.push('cancel'))
+  const ed = new CommandEditor({ submit, cancel })
   ed.mount(container)
   const ta = container.querySelector('textarea')!
-  return { ed, ta, submit, order, container }
+  return { ed, ta, submit, cancel, order, container }
 }
+
+const ctrlC = (ta: HTMLTextAreaElement) =>
+  ta.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  )
 
 const enter = (ta: HTMLTextAreaElement, shift = false) =>
   ta.dispatchEvent(
@@ -51,5 +62,33 @@ describe('CommandEditor', () => {
     expect(ed.isVisible).toBe(true)
     ed.hide()
     expect(ed.isVisible).toBe(false)
+  })
+
+  it('Ctrl-C with no selection clears and cancels (interrupt)', () => {
+    const { ed, ta, cancel, submit } = setup()
+    ed.show()
+    ta.value = 'echo partial'
+    ta.selectionStart = ta.selectionEnd = ta.value.length
+    ctrlC(ta)
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(submit).not.toHaveBeenCalled()
+    expect(ta.value).toBe('')
+  })
+
+  it('Ctrl-C with a selection is left alone so copy still works', () => {
+    const { ed, ta, cancel } = setup()
+    ed.show()
+    ta.value = 'echo hi'
+    ta.selectionStart = 0
+    ta.selectionEnd = ta.value.length
+    ctrlC(ta)
+    expect(cancel).not.toHaveBeenCalled()
+    expect(ta.value).toBe('echo hi')
+  })
+
+  it('uses the terminal monospace font, not the page font', () => {
+    const { ta } = setup()
+    expect(ta.style.fontFamily).toContain('monospace')
+    expect(ta.style.fontSize).toBe('14px')
   })
 })

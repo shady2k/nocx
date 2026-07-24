@@ -18,21 +18,27 @@ export interface InputTargetRegistry {
   active(): InputTarget
 }
 
-const PASTE_START = '\x1b[200~'
-const PASTE_END = '\x1b[201~'
-
 // ShellInputTarget routes a submitted document to the active PTY using the
 // ADR-0004 §2 atomic handoff: the editor hides itself (caller's job), then the
-// whole command is sent as ONE bracketed paste followed by CR. zle/readline
-// paints the accepted command once as the committed transcript — no per-key
-// echo, no stty, no readline mirroring.
+// command is pasted and a CR runs it. zle/readline paints the accepted command
+// once as the committed transcript — no per-key echo, no stty, no mirroring.
+//
+// Bracketed-paste wrapping is DELEGATED to the terminal engine's paste(): it
+// wraps in ESC[200~..ESC[201~ only when the shell has enabled mode 2004.
+// Hand-rolling the wrappers here leaked them into the command whenever mode
+// 2004 was not (yet) enabled — e.g. a fast second submit racing the prompt —
+// producing corruption like `...00~` / `...01~` in the committed line.
 export class ShellInputTarget implements InputTarget {
   readonly id = 'shell'
   readonly label = 'Shell'
-  constructor(private readonly send: (data: string) => void) {}
+  constructor(
+    private readonly paste: (text: string) => void,
+    private readonly sendRaw: (data: string) => void,
+  ) {}
 
   submit(doc: string): Promise<void> {
-    this.send(`${PASTE_START}${doc}${PASTE_END}\r`)
+    this.paste(doc)
+    this.sendRaw('\r')
     return Promise.resolve()
   }
 }

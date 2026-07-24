@@ -4,7 +4,6 @@ import { test, expect } from '@playwright/test'
 // submit — the editor must stay hidden while a program runs, and typed keys
 // must reach the PTY rather than the editor.
 
-const PANE = '.pane.active'
 const TITLE = '.tab-title'
 
 test.describe('enhanced input raw routing', () => {
@@ -17,20 +16,20 @@ test.describe('enhanced input raw routing', () => {
       timeout: 10000,
     })
 
-    // Type a read command at the prompt and submit it.
-    // read reads a line from stdin into variable x, then echo prints it.
-    await page.keyboard.type('read x; echo "got:$x"\n')
+    // read a line into x, then set the terminal TITLE to got-<x>. Assert on the
+    // title, not the pane: xterm renders text to a WebGL canvas, so terminal
+    // output is never in the DOM — toContainText on the pane always sees "".
+    await page.keyboard.type('read x; printf "\\033]0;got-$x\\007"\n')
 
-    // The `read` builtin is waiting for stdin. Type the answer.
+    // The `read` builtin is now waiting for stdin. Typing must reach the running
+    // program (RUNNING_RAW → editor hidden), not the editor.
     await page.keyboard.type('hello')
-
-    // Submit the answer — it should reach read, not the editor.
     await page.keyboard.press('Enter')
 
-    // The shell should now echo "got:hello" — proof the input reached
-    // the running program, not the editor.
-    const pane = page.locator(PANE)
-    await expect(pane).toContainText('got:hello', { timeout: 5000 })
+    // Title becomes got-hello ⇒ the input reached `read`, not the editor.
+    await expect(page.locator(TITLE).first()).toHaveText('got-hello', {
+      timeout: 5000,
+    })
   })
 
   test('Ctrl-C at a prompt does not trap input', async ({ page }) => {
@@ -63,19 +62,17 @@ test.describe('enhanced input raw routing', () => {
       timeout: 10000,
     })
 
-    const marker = `MS-${Date.now().toString(36)}`
-
-    // Run several commands in rapid succession — each submit must leave
-    // the state machine in RUNNING_RAW (owned:false) so the next command
-    // prompt returns via markers, not stale editor state.
+    // Run several commands back-to-back — each submit must leave the state
+    // machine in RUNNING_RAW (owned:false) so the next prompt returns via
+    // markers, and each paste must NOT leak bracketed-paste wrappers into the
+    // command. Each command sets the title to its own marker; the final title
+    // proves the last of three rapid submits committed cleanly.
     for (let i = 0; i < 3; i++) {
-      await page.keyboard.type(`echo ${marker}-${i}\n`)
+      await page.keyboard.type(`printf "\\033]0;MS-${i}\\007"\n`)
     }
 
-    // All three echoes should appear in the terminal output.
-    const pane = page.locator(PANE)
-    await expect(pane).toContainText(`${marker}-0`, { timeout: 5000 })
-    await expect(pane).toContainText(`${marker}-1`, { timeout: 1000 })
-    await expect(pane).toContainText(`${marker}-2`, { timeout: 1000 })
+    await expect(page.locator(TITLE).first()).toHaveText('MS-2', {
+      timeout: 5000,
+    })
   })
 })

@@ -262,7 +262,12 @@ export class Tab {
       // ShellInputTarget references this.session lazily so it can be created
       // before openSession resolves. submit() is only called while the editor
       // is shown, which can only happen after markers arrive from the PTY.
-      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
+      // paste() delegates bracketed-paste wrapping to the engine (correct for
+      // mode 2004); sendRaw carries the CR. session is referenced lazily.
+      this.shellTarget = new ShellInputTarget(
+        (text: string) => renderer.paste(text),
+        (data: string) => this.session!.send(data),
+      )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
           submitCommand(doc, {
@@ -271,6 +276,9 @@ export class Tab {
             sendDoc: (d) => void this.shellTarget!.submit(d),
           })
         },
+        // Ctrl-C at the editor prompt: interrupt the shell so a fresh prompt
+        // returns (the editor already cleared its composed line).
+        cancel: () => this.session?.send('\x03'),
       })
       this.editor.mount(this.pane)
 

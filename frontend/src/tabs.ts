@@ -9,6 +9,9 @@ import { submitCommand } from './submit'
 import { shouldShowEditor, NATIVE_RESTORE } from './native-mode'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
+import { CommandLedger } from './command-ledger'
+import { Gutter } from './gutter'
+import type { MarkerAdapter } from './renderers/types'
 
 // How long the grid must hold still before the PTY is told about it.
 // Dragging a window edge walks the grid through every intermediate size,
@@ -85,6 +88,12 @@ export class Tab {
   private shellTarget: ShellInputTarget | null = null
   private nativeMode = false
   private started = false
+  private ledger: CommandLedger | null = null
+  private gutter: Gutter | null = null
+  /** Marker registered at the most recent A/B prompt row (ADR-0008). */
+  private _promptMarker: MarkerAdapter | null = null
+  private _cwd = '~'
+  private _host = ''
 
   // _readyPromise resolves true when the renderer mounts and the PTY session
   // opens; resolves false when start() throws. Never rejects. It stays pending
@@ -227,6 +236,7 @@ export class Tab {
    */
   updateCwd(path: string): void {
     this._cwdFromOSC7 = true
+    this._cwd = path
     this._defaultTitle = directoryLabel(path)
     this.button.title = cwdTooltip(path, true)
 
@@ -254,6 +264,13 @@ export class Tab {
       this.cols = renderer.cols
       this.rows = renderer.rows
 
+      // ── Gutter overlay (ADR-0008 first increment) ────────────────────────
+      this.gutter = new Gutter()
+      this.gutter.mount(renderer)
+
+      // ── Command ledger (ADR-0008) ────────────────────────────────────────
+      this.ledger = new CommandLedger({ now: () => performance.now() })
+
       // ── Wire input ownership BEFORE opening the session ─────────────────
       // A marker-only (invisible) prompt can never paint before the editor
       // exists (nocx-4ff.10). These listeners are pure state wiring — they
@@ -270,6 +287,13 @@ export class Tab {
       )
       this.editor = new CommandEditor({
         submit: (doc: string) => {
+          // Open a command record in the ledger BEFORE the state-machine
+          // dispatch, so the record exists when the C marker arrives.
+          if (this.ledger) {
+            const lineOf = this._promptMarker ? () => this._promptMarker!.line() : () => undefined
+            this.ledger.open(doc, this._cwd, this._host, lineOf)
+            this.gutter?.setRecords(this.ledger.records())
+          }
           submitCommand(doc, {
             dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
             focusGrid: () => renderer.focus(),
@@ -290,11 +314,24 @@ export class Tab {
         if (marker.kind === 'D' && marker.exitCode !== undefined) {
           this._lastExitCode = marker.exitCode
         }
+        // Feed the command ledger.
+        this.ledger?.onMarker(marker.kind, marker.exitCode)
+        // Register a live marker at the prompt row on A (anchor before C —
+        // ADR-0008 pitfalls). The marker's line moves with scrollback trim
+        // and is never cached as a number.
+        if (marker.kind === 'A') {
+          this._promptMarker?.dispose()
+          this._promptMarker = renderer.registerMarker?.() ?? null
+        }
+        // Tell the gutter to repaint.
+        if (this.ledger) this.gutter?.setRecords(this.ledger.records())
       })
 
       renderer.onBufferChange((type) => {
         this._bufferType = type
         this.inputState.dispatch({ type: 'buffer', buffer: type })
+        if (type === 'alternate') this.gutter?.hide()
+        else this.gutter?.show()
       })
 
       this.inputState.onChange((m) => {
@@ -312,6 +349,10 @@ export class Tab {
       // fails open to a plain terminal when markers are absent (ADR-0004/0006).
       const session = await this.client.openSession(this.cols, this.rows, true)
       this.session = session
+
+      // Store the initial cwd for the command ledger.
+      this._cwd = session.cwd
+      this._host = ''
 
       // The directory names the tab until a program sets a title; from here
       // on OSC 7 keeps it following `cd` (nocx-5mn.2).
@@ -334,10 +375,19 @@ export class Tab {
       session.onExit((sid: string) => {
         console.log('nocx: session exited:', sid)
         this.inputState.dispatch({ type: 'exit' })
+        // Fail-open: finalize any running records as interrupted,
+        // dispose markers, and clear the gutter.
+        this._promptMarker?.dispose()
+        this._promptMarker = null
+        this.gutter?.setRecords([])
       })
       session.onReset(() => {
         renderer.reset()
         this.inputState.dispatch({ type: 'reset' })
+        // Fail-open: clear all gutter state on transport reset.
+        this._promptMarker?.dispose()
+        this._promptMarker = null
+        this.gutter?.setRecords([])
       })
 
       renderer.onData((data: string) => session.send(data))
@@ -437,7 +487,10 @@ export class Tab {
         this.cols = cols
         this.rows = rows
         clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => session.sendResize(cols, rows), RESIZE_SETTLE_MS)
+        this.resizeTimer = window.setTimeout(() => {
+          session.sendResize(cols, rows)
+          this.gutter?.sync()
+        }, RESIZE_SETTLE_MS)
       })
 
       this.renderer = renderer
@@ -480,6 +533,11 @@ export class Tab {
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()
+    this._promptMarker?.dispose()
+    this._promptMarker = null
+    this.gutter?.dispose()
+    this.gutter = null
+    this.ledger = null
   }
 }
 

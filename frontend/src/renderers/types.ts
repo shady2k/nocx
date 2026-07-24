@@ -136,4 +136,42 @@ export interface TerminalRenderer {
   // the tab owning this renderer is closed so a periodic forced-refresh pump
   // does not outlive the terminal it paints.
   dispose(): void
+
+  // ── Marker/geometry API (ADR-0008 command-ledger gutter) ────────────────
+  // These are optional — the gutter feature-detects and skips when absent.
+
+  /**
+   * Register a marker at the current cursor row. Returns an adapter that
+   * exposes the live marker line, an onDispose callback (fired when scrollback
+   * trims the line), and a dispose method. Returns undefined when the renderer
+   * does not support markers (e.g. wterm).
+   */
+  registerMarker?(): MarkerAdapter | undefined
+
+  /** Measured cell height in pixels, from the actual rendered char element.
+   *  Falls back to fontSize * lineHeight only if measurement is unavailable. */
+  readonly cellHeight?: number
+
+  /** Absolute buffer line index at the top of the visible viewport.
+   *  = buffer.active.baseY + buffer.active.viewportY in xterm terms. */
+  readonly viewportTopLine?: number
+
+  /** Subscribe to scroll events. Fires with the new viewportY (scroll offset). */
+  onScroll?(cb: (viewportY: number) => void): void
+
+  /** Subscribe to render events. Fires whenever viewport content is painted. */
+  onRender?(cb: (range: { start: number; end: number }) => void): void
+
+  /** The DOM element the renderer mounted into — the gutter overlays it. */
+  readonly paneElement?: HTMLElement
+}
+
+/** Adapter over an xterm IMarker, exposing only what the gutter needs. */
+export interface MarkerAdapter {
+  /** The marker's current absolute buffer line, or undefined if disposed. */
+  readonly line: () => number | undefined
+  /** Fires when the marker is disposed (scrollback trim). */
+  readonly onDispose: (cb: () => void) => void
+  /** Dispose the marker. Idempotent. */
+  dispose(): void
 }

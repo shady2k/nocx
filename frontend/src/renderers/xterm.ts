@@ -11,6 +11,7 @@ import type {
   CommandMarkerEvent,
   CwdCallback,
   DataCallback,
+  MarkerAdapter,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -119,6 +120,10 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
+  private scrollSubs: Array<(viewportY: number) => void> = []
+  private renderSubs: Array<(range: { start: number; end: number }) => void> = []
+  private scrollDisposable?: { dispose(): void }
+  private renderDisposable?: { dispose(): void }
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -344,6 +349,12 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
+    this.scrollDisposable?.dispose()
+    this.scrollDisposable = undefined
+    this.scrollSubs = []
+    this.renderDisposable?.dispose()
+    this.renderDisposable = undefined
+    this.renderSubs = []
   }
 
   get cols(): number {
@@ -352,5 +363,64 @@ export class XtermRenderer implements TerminalRenderer {
 
   get rows(): number {
     return this.term?.rows ?? 24
+  }
+
+  // ── Marker/geometry API (ADR-0008 command-ledger gutter) ──────────────
+
+  registerMarker(): MarkerAdapter | undefined {
+    const t = this.term
+    if (!t) return undefined
+    const m = t.registerMarker(0)
+    if (!m) return undefined
+    return {
+      line: () => {
+        // m.line returns -1 when disposed, so map to undefined.
+        const l = m.line
+        return l >= 0 ? l : undefined
+      },
+      onDispose: (cb: () => void) => {
+        m.onDispose(cb)
+      },
+      dispose: () => {
+        m.dispose()
+      },
+    }
+  }
+
+  get cellHeight(): number {
+    const t = this.term
+    if (!t) return Math.ceil(FONT_SIZE * LINE_HEIGHT)
+    const measureEl = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
+    if (measureEl) {
+      const rect = measureEl.getBoundingClientRect()
+      if (rect.height > 0) return rect.height
+    }
+    return Math.ceil(FONT_SIZE * LINE_HEIGHT)
+  }
+
+  get viewportTopLine(): number {
+    const t = this.term
+    if (!t) return 0
+    return t.buffer.active.baseY + t.buffer.active.viewportY
+  }
+
+  onScroll(cb: (viewportY: number) => void): void {
+    this.scrollSubs.push(cb)
+    if (this.scrollDisposable || !this.term) return
+    this.scrollDisposable = this.term.onScroll((y: number) => {
+      for (const sub of this.scrollSubs) sub(y)
+    })
+  }
+
+  onRender(cb: (range: { start: number; end: number }) => void): void {
+    this.renderSubs.push(cb)
+    if (this.renderDisposable || !this.term) return
+    this.renderDisposable = this.term.onRender((r: { start: number; end: number }) => {
+      for (const sub of this.renderSubs) sub(r)
+    })
+  }
+
+  get paneElement(): HTMLElement {
+    return this.container ?? document.createElement('div')
   }
 }

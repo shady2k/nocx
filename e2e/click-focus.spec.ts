@@ -48,6 +48,7 @@ test("a click into the pane leaves the terminal taking keystrokes", async ({
   // once WebGL paints to a canvas, the screen text is not in the DOM at all.
   // An OSC 0 sequence is shell-agnostic, so this holds on a runner's bash just
   // as it does on the developer's zsh.
-  await page.keyboard.type("printf '\\033]0;NOCX-D1F-CLICK\\007'\n");
+  await page.keyboard.type("printf '\\033]0;NOCX-D1F-CLICK\\007'");
+  await page.keyboard.press("Enter");
   await expect(page.locator(TITLE).first()).toHaveText("NOCX-D1F-CLICK");
 });

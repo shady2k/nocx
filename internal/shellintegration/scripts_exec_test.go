@@ -186,6 +186,100 @@ builtin printf 'PROMPT=[%s]' "$PROMPT"
 	}
 }
 
+// TestZshNativeModeRestoresVisiblePrompt spawns a marker-only zsh, invokes
+// __nocx_native_mode, then runs precmd hooks and asserts the prompt is
+// visible (contains % or #, not merely a B marker) — nocx-4ff.9.
+func TestZshNativeModeRestoresVisiblePrompt(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	prog := `
+autoload -Uz add-zsh-hook
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+
+# First run precmd — the marker-only overlay should be active.
+for f in $precmd_functions; do $f; done
+builtin printf 'BEFORE=[%s]\n' "$PROMPT"
+
+# Escape to native mode.
+__nocx_native_mode
+
+# Run precmd again — should now produce a visible prompt.
+for f in $precmd_functions; do $f; done
+builtin printf 'AFTER=[%s]\n' "$PROMPT"
+`
+	out := runShellProg(t, zsh, prog, script)
+
+	// Before escape: the prompt must be the B marker only.
+	if !strings.Contains(out, "]133;B") {
+		t.Errorf("marker-only BEFORE missing OSC 133 B marker:\n%s", out)
+	}
+
+	// After escape: the prompt must be visible — contains % or # (zsh prompt),
+	// and NOT only the B marker with no other content.
+	// The visible prompt is '%~ %# ' which means we should find %~ or a % followed by space.
+	// Note: the C marker may prefix the printf output, so search by substring.
+	if !strings.Contains(out, "AFTER=[") {
+		t.Fatalf("AFTER= line not found in output:\n%s", out)
+	}
+	afterIdx := strings.Index(out, "AFTER=[")
+	afterRest := out[afterIdx:]
+	endIdx := strings.Index(afterRest, "]")
+	if endIdx < 0 {
+		t.Fatalf("could not parse AFTER value from:\n%s", out)
+	}
+	afterOnly := afterRest[7:endIdx]
+	if afterOnly == "" || afterOnly == "%{\x1b]133;B\a%}" {
+		t.Errorf("native mode did not restore a visible prompt; PS1 is still marker-only: %q", afterOnly)
+	}
+	if !strings.Contains(afterOnly, "%~") && !strings.Contains(afterOnly, "%#") {
+		t.Logf("prompt after native mode (expected visible chars like %%~): %q", afterOnly)
+	}
+}
+
+// TestBashNativeModeRestoresVisiblePrompt spawns a marker-only bash, invokes
+// __nocx_native_mode, then runs __nocx_prompt_command and asserts the prompt
+// is visible (contains \w or \$, not merely a B marker) — nocx-4ff.9.
+func TestBashNativeModeRestoresVisiblePrompt(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+
+# First run prompt command — the marker-only overlay should be active.
+__nocx_prompt_command
+echo "BEFORE=[$PS1]"
+
+# Escape to native mode.
+__nocx_native_mode
+
+# Run prompt command again — should now produce a visible prompt.
+__nocx_prompt_command
+echo "AFTER=[$PS1]"
+`
+	out := runShellProg(t, bash, prog, script)
+
+	// After escape: the prompt must be visible — contains \w or \$.
+	// The visible prompt is '\w \$ '.
+	// Note: the C marker may prefix the echo output, so search by substring.
+	if !strings.Contains(out, "AFTER=[") {
+		t.Fatalf("AFTER= line not found in output:\n%s", out)
+	}
+	afterIdx := strings.Index(out, "AFTER=[")
+	afterRest := out[afterIdx:]
+	endIdx := strings.Index(afterRest, "]")
+	if endIdx < 0 {
+		t.Fatalf("could not parse AFTER value from:\n%s", out)
+	}
+	afterOnly := afterRest[7:endIdx]
+	if !strings.Contains(afterOnly, "\\w") && !strings.Contains(afterOnly, "\\$") {
+		t.Errorf("native mode did not restore a visible bash prompt; PS1 still marker-only: %q", afterOnly)
+	}
+}
+
 // TestEnsureInstalled_SkipsVersionWhenGateFails guards nocx-1dx: the VERSION
 // marker must not be recorded if a gate append failed, so the next launch
 // retries instead of short-circuiting on a version match.

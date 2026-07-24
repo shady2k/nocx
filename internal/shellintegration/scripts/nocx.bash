@@ -120,3 +120,9 @@ if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] && [[ -z "${__nocx_prompt_wrap
     PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'
     __nocx_prompt_wrapped=1
 fi
+
+# Native-mode escape (nocx-4ff.9): restore a visible prompt.
+__nocx_native_mode() {
+    unset NOCX_PROMPT_MODE
+    PS1='\w \$ '
+}

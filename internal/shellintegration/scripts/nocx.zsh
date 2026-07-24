@@ -76,3 +76,12 @@ elif [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
     PS1="${PS1:-}"$'%{\e]133;B\a%}'
     __nocx_prompt_wrapped=1
 fi
+
+# Native-mode escape (nocx-4ff.9): drop the marker-only overlay and restore a
+# visible prompt on the next precmd. Called by nocx when the user hits escape.
+__nocx_native_mode() {
+    add-zsh-hook -d precmd __nocx_marker_only_prompt 2>/dev/null
+    unset NOCX_PROMPT_MODE
+    PROMPT='%~ %# '
+    PS1='%~ %# '
+}

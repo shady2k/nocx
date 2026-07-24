@@ -75,12 +75,13 @@ export function reduce(m: Machine, e: InputEvent): Machine {
           // Ownership requires the full A→B sequence (ADR-0006 §4).
           return { state: 'PROMPT_READY', trusted: m.state !== 'RUNNING_RAW', owned: false }
         case 'B':
-          // B only means "input ready" when we are already at a prompt.
-          // DOM ownership is granted ONLY when an A preceded this B.
+          // B grants DOM ownership ONLY when a clean A already put us at a trusted
+          // prompt (ADR-0006 §4). Gating on `trusted` closes the B,B latch: a B that
+          // merely re-enters PROMPT_READY without a preceding A stays owned:false.
           return {
             state: 'PROMPT_READY',
             trusted: m.state === 'PROMPT_READY' && m.trusted,
-            owned: m.state === 'PROMPT_READY',
+            owned: m.state === 'PROMPT_READY' && m.trusted,
           }
         case 'C':
           // Command start. Trusted only if a clean prompt preceded it; an orphan

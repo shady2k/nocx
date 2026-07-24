@@ -83,6 +83,21 @@ describe('A→B ownership gate', () => {
   it('B without a prompt does not grant ownership', () => {
     expect(reduce(initialMachine(), { type: 'marker', kind: 'B' }).owned).toBe(false)
   })
+  it('B,B from RAW never latches ownership without an A (nocx-4ff.11)', () => {
+    const b1 = reduce(initialMachine(), { type: 'marker', kind: 'B' })
+    expect(b1.owned).toBe(false)
+    const b2 = reduce(b1, { type: 'marker', kind: 'B' })
+    expect(b2.owned).toBe(false) // currently FAILS: reduce grants owned on the 2nd B
+  })
+  it('an untrusted resync A→B does not grant ownership (fail-open)', () => {
+    const running = [
+      { type: 'marker', kind: 'A' } as InputEvent,
+      { type: 'marker', kind: 'C' } as InputEvent,
+    ].reduce(reduce, initialMachine())
+    const a = reduce(running, { type: 'marker', kind: 'A' }) // untrusted PROMPT_READY
+    expect(a.trusted).toBe(false)
+    expect(reduce(a, { type: 'marker', kind: 'B' }).owned).toBe(false)
+  })
   it('C, submit, alt-buffer, reset clear ownership', () => {
     const owned = [
       { type: 'marker', kind: 'A' } as InputEvent,

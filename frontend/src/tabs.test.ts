@@ -13,6 +13,8 @@ import {
   type RendererMock,
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
+import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
+import { TabManager } from './tabs'
 import type { TerminalContent } from './terminal-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
@@ -1373,5 +1375,68 @@ describe('TabManager', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method
       expect(renderers[renderers.length - 1].fitViewport).not.toHaveBeenCalled()
     })
+  })
+  // ── replaceStrip class hygiene (nocx-98z6) ────────────────────────────
+
+  it('replaceStrip H→V removes .tabbar and adds .tabstrip-vertical', async () => {
+    const { bar, manager } = await mountTabManager()
+
+    // Cold start: container has .tabbar from HorizontalTabStrip.mount().
+    expect(bar.classList.contains('tabbar')).toBe(true)
+    expect(bar.classList.contains('tabstrip-vertical')).toBe(false)
+
+    const initialTabs = bar.querySelectorAll('.tab').length
+    expect(initialTabs).toBeGreaterThanOrEqual(1)
+
+    manager.replaceStrip(new VerticalTabStrip())
+
+    // After swap: .tabbar must be gone, .tabstrip-vertical must be present.
+    expect(bar.classList.contains('tabbar')).toBe(false)
+    expect(bar.classList.contains('tabstrip-vertical')).toBe(true)
+
+    // Tab count must be preserved.
+    expect(bar.querySelectorAll('.tab').length).toBe(initialTabs)
+  })
+
+  it('replaceStrip V→H removes .tabstrip-vertical and adds .tabbar', async () => {
+    const { bar, panes } = setupTabBarDOM()
+    const client = makeClient()
+    const clipboard = makeClipboard()
+    const gate = new ClipboardGate()
+    const banner = makeBanner()
+    const pc = {
+      listProfiles: vi.fn().mockResolvedValue([]),
+      listGroups: vi.fn().mockResolvedValue([]),
+    }
+
+    const manager = new TabManager(
+      bar,
+      panes,
+      client as unknown as import('./ipc').WSClient,
+      clipboard,
+      gate,
+      banner,
+      pc as unknown as import('./profiles').ProfileClient,
+      new VerticalTabStrip(),
+    )
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalled()
+    })
+
+    // Cold start: container has .tabstrip-vertical from VerticalTabStrip.mount().
+    expect(bar.classList.contains('tabbar')).toBe(false)
+    expect(bar.classList.contains('tabstrip-vertical')).toBe(true)
+
+    const initialTabs = bar.querySelectorAll('.tab').length
+    expect(initialTabs).toBeGreaterThanOrEqual(1)
+
+    manager.replaceStrip(new HorizontalTabStrip())
+
+    // After swap: .tabstrip-vertical must be gone, .tabbar must be present.
+    expect(bar.classList.contains('tabbar')).toBe(true)
+    expect(bar.classList.contains('tabstrip-vertical')).toBe(false)
+
+    // Tab count must be preserved.
+    expect(bar.querySelectorAll('.tab').length).toBe(initialTabs)
   })
 })

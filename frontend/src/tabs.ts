@@ -412,8 +412,17 @@ export class TabManager {
     old.onNewTab = null
     old.onReorder = null
 
-    // Clear the bar and mount the new strip.
+    // Reset container to a clean slate: both strips set classes and aria
+    // attributes on mount, but neither removes the other's.  A live swap
+    // (H→V or V→H) would carry the old strip's class, causing CSS conflicts
+    // — .tabbar height:38px + overflow:hidden clips vertical tabs to
+    // invisible, and .tabstrip-vertical narrows the horizontal strip to
+    // 240 px (nocx-98z6, nocx-nb8v).
     this.bar.innerHTML = ''
+    this.bar.className = ''
+    this.bar.removeAttribute('role')
+    this.bar.removeAttribute('aria-label')
+    this.bar.removeAttribute('aria-orientation')
     newStrip.mount(this.bar)
 
     // Transfer every existing tab into the new strip.

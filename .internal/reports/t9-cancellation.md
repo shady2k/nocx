@@ -44,16 +44,16 @@ Commit 9d411ec (the connection pool) already wrapped `RealChannel.Close`'s body 
 
 Each fix was temporarily disabled and the affected tests were run. Failures recorded below.
 
-| Fix | Test(s) | Without fix |
-|-----|---------|-------------|
-| `dialDirect` watchdog | `TestDialCancel_DirectNewClientConn`, `TestDialCancel_DirectHandshake` | Hangs (>10s timeout); the blocking listener accepts TCP but never sends an SSH banner, so `NewClientConn` blocks forever without the watchdog closing the socket on ctx.Done() |
-| `dialViaJumpHost` watchdog + `DialContext` | `TestDialCancel_JumpHandshake` | Hangs (>10s timeout) |
-| Pool waiter `ctx` select | `TestPoolAcquire_WaiterCancellation` | Hangs (>2s timeout); the waiter blocks on `&lt;-dialing.done` without ctx awareness |
-| Pool waiter `ctx` select (concurrent) | `TestPoolAcquire_WaiterCancellationConcurrent` | Hangs (>10s timeout) |
-| `closeOnce` guard in `RealChannel.Close` | `TestChannelClose_Repeated` | `panic: close of closed channel` |
-| `closeOnce` guard in `RealChannel.Close` | `TestChannelClose_Concurrent` | `panic: close of closed channel` (data race) |
-| Resize disconnect detection (both `<-c.done` checks) | `TestResize_AfterDisconnect` | Returns `"EOF"`, not `*ErrDisconnected` |
-| Resize `ctx` check | `TestResize_CancelledContext` | Returns `"EOF"`, not `context.Canceled` |
+| Fix                                                  | Test(s)                                                                | Without fix                                                                                                                                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `dialDirect` watchdog                                | `TestDialCancel_DirectNewClientConn`, `TestDialCancel_DirectHandshake` | Hangs (>10s timeout); the blocking listener accepts TCP but never sends an SSH banner, so `NewClientConn` blocks forever without the watchdog closing the socket on ctx.Done() |
+| `dialViaJumpHost` watchdog + `DialContext`           | `TestDialCancel_JumpHandshake`                                         | Hangs (>10s timeout)                                                                                                                                                           |
+| Pool waiter `ctx` select                             | `TestPoolAcquire_WaiterCancellation`                                   | Hangs (>2s timeout); the waiter blocks on `&lt;-dialing.done` without ctx awareness                                                                                            |
+| Pool waiter `ctx` select (concurrent)                | `TestPoolAcquire_WaiterCancellationConcurrent`                         | Hangs (>10s timeout)                                                                                                                                                           |
+| `closeOnce` guard in `RealChannel.Close`             | `TestChannelClose_Repeated`                                            | `panic: close of closed channel`                                                                                                                                               |
+| `closeOnce` guard in `RealChannel.Close`             | `TestChannelClose_Concurrent`                                          | `panic: close of closed channel` (data race)                                                                                                                                   |
+| Resize disconnect detection (both `<-c.done` checks) | `TestResize_AfterDisconnect`                                           | Returns `"EOF"`, not `*ErrDisconnected`                                                                                                                                        |
+| Resize `ctx` check                                   | `TestResize_CancelledContext`                                          | Returns `"EOF"`, not `context.Canceled`                                                                                                                                        |
 
 All 9 tests fail (hang/panic/wrong error) with their corresponding fix disabled. All pass with `-race` with fixes enabled.
 

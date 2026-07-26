@@ -34,7 +34,7 @@ composition root in `internal/app/app.go`.
 requests therefore load the same snapshot, mutate different records, and the later rename
 silently discards the earlier mutation. Read-modify-write must be atomic as a whole.
 
-Write the failing test **first**: concurrent `SaveProfile` calls for two *different* profile
+Write the failing test **first**: concurrent `SaveProfile` calls for two _different_ profile
 IDs, run under `go test -race`, asserting both survive. Watch it fail before you fix it — the
 report must quote that failure.
 

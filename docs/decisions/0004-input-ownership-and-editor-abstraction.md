@@ -91,8 +91,8 @@ added by registering a target, never by editing the editor:
 
 ```ts
 interface InputTarget {
-  readonly id: string            // 'shell' | 'agent' | …
-  readonly label: string         // UI chip
+  readonly id: string // 'shell' | 'agent' | …
+  readonly label: string // UI chip
   submit(doc: string, ctx: SubmitContext): Promise<void>
   complete?(doc: string, pos: number, ctx: CompleteContext): Promise<Completion[]>
   history?(dir: 'back' | 'forward'): string | undefined

@@ -8,11 +8,11 @@ Generated: 2026-07-25 from CI logs (`main` run 30162745654, `pr-11-boundary` run
 > a third run (`30163136292`, also on `pr-11-boundary`) plus a direct diff of the three
 > failure lists gives this ground truth:
 >
-> | Bucket | This report | Verified |
-> |---|---|---|
-> | Fail on every run, both refs (pre-existing) | 11 | **13** |
-> | Fail reproducibly on the branch only (blockers) | 2 | **5** |
-> | Genuinely unstable | 7 | **2** |
+> | Bucket                                          | This report | Verified |
+> | ----------------------------------------------- | ----------- | -------- |
+> | Fail on every run, both refs (pre-existing)     | 11          | **13**   |
+> | Fail reproducibly on the branch only (blockers) | 2           | **5**    |
+> | Genuinely unstable                              | 7           | **2**    |
 >
 > Two specific errors:
 >
@@ -31,100 +31,109 @@ Generated: 2026-07-25 from CI logs (`main` run 30162745654, `pr-11-boundary` run
 
 ## Summary
 
-| Bucket | Count |
-|---|---|
-| **PRE-EXISTING** (fail on both refs, same assertion) | 11 |
-| **BRANCH-REGRESSION** (pass on main, fail on branch, assertion-backed) | 2 |
-| **FLAKY-SUSPECT** (bare timeout, differing errors between runs, or cannot classify) | 7 |
-| **SKIPPED** (WebKit clipboard — explicit skip) | 2 |
-| Always-passing | 10 |
-| **Total** | 32 |
+| Bucket                                                                              | Count |
+| ----------------------------------------------------------------------------------- | ----- |
+| **PRE-EXISTING** (fail on both refs, same assertion)                                | 11    |
+| **BRANCH-REGRESSION** (pass on main, fail on branch, assertion-backed)              | 2     |
+| **FLAKY-SUSPECT** (bare timeout, differing errors between runs, or cannot classify) | 7     |
+| **SKIPPED** (WebKit clipboard — explicit skip)                                      | 2     |
+| Always-passing                                                                      | 10    |
+| **Total**                                                                           | 32    |
 
 ### Per-file breakdown
 
-| Spec file | Pre-existing | Branch-regression | Flaky-suspect | Always-pass | Skipped |
-|---|---|---|---|---|---|
-| `activity.spec.ts` | — | — | chromium, webkit | — | — |
-| `activity-bell.spec.ts` | chromium | — | webkit | — | — |
-| `click-focus.spec.ts` | — | — | chromium, webkit | — | — |
-| `clipboard.spec.ts` | chromium (copy-on-select), chromium (paste) | — | — | — | webkit (2) |
-| `command-editor.spec.ts` | chromium (submit, gutter), webkit (submit, gutter) | — | — | chromium (visible, hit-test, dblclick), webkit (visible, hit-test, dblclick) | — |
-| `enhanced-input.spec.ts` | chromium (Ctrl-C), webkit (read, Ctrl-C, multi-submit) | **chromium** (read, multi-submit) | — | — | — |
-| `tab-title.spec.ts` | — | — | — | chromium, webkit | — |
-| `tabs.spec.ts` | — | — | **chromium**, **webkit** | — | — |
-| `seed.spec.ts` | — | — | — | chromium, webkit | — |
+| Spec file                | Pre-existing                                           | Branch-regression                 | Flaky-suspect            | Always-pass                                                                  | Skipped    |
+| ------------------------ | ------------------------------------------------------ | --------------------------------- | ------------------------ | ---------------------------------------------------------------------------- | ---------- |
+| `activity.spec.ts`       | —                                                      | —                                 | chromium, webkit         | —                                                                            | —          |
+| `activity-bell.spec.ts`  | chromium                                               | —                                 | webkit                   | —                                                                            | —          |
+| `click-focus.spec.ts`    | —                                                      | —                                 | chromium, webkit         | —                                                                            | —          |
+| `clipboard.spec.ts`      | chromium (copy-on-select), chromium (paste)            | —                                 | —                        | —                                                                            | webkit (2) |
+| `command-editor.spec.ts` | chromium (submit, gutter), webkit (submit, gutter)     | —                                 | —                        | chromium (visible, hit-test, dblclick), webkit (visible, hit-test, dblclick) | —          |
+| `enhanced-input.spec.ts` | chromium (Ctrl-C), webkit (read, Ctrl-C, multi-submit) | **chromium** (read, multi-submit) | —                        | —                                                                            | —          |
+| `tab-title.spec.ts`      | —                                                      | —                                 | —                        | chromium, webkit                                                             | —          |
+| `tabs.spec.ts`           | —                                                      | —                                 | **chromium**, **webkit** | —                                                                            | —          |
+| `seed.spec.ts`           | —                                                      | —                                 | —                        | chromium, webkit                                                             | —          |
 
 ---
 
 ## Full Test Inventory
 
 ### `e2e/activity.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 1 | chromium | a background tab lights the activity indicator on normal-buffer output | PASS | **FAIL** | **FLAKY-SUSPECT** | `locator.click: Test timeout 60000ms` on `.tab-add`. Resolved to `<button class="tab-add">+</button>` but "element is not visible". Bare timeout — no assertion reached. Cannot tell from logs alone whether this is a regression or a flake. |
-| 2 | webkit | a background tab lights the activity indicator on normal-buffer output | FAIL | FAIL | **FLAKY-SUSPECT** | **Different errors:** main = `expect(locator).toBeAttached()` — expected `tab-activity` indicator, not found. pr = `locator.click` timeout on `.tab-add` — "element is not visible". Same ref but different failure paths — cannot classify as same bug from logs alone. |
+
+| #   | Project  | Test                                                                   | main | pr       | Bucket            | Evidence                                                                                                                                                                                                                                                                 |
+| --- | -------- | ---------------------------------------------------------------------- | ---- | -------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | chromium | a background tab lights the activity indicator on normal-buffer output | PASS | **FAIL** | **FLAKY-SUSPECT** | `locator.click: Test timeout 60000ms` on `.tab-add`. Resolved to `<button class="tab-add">+</button>` but "element is not visible". Bare timeout — no assertion reached. Cannot tell from logs alone whether this is a regression or a flake.                            |
+| 2   | webkit   | a background tab lights the activity indicator on normal-buffer output | FAIL | FAIL     | **FLAKY-SUSPECT** | **Different errors:** main = `expect(locator).toBeAttached()` — expected `tab-activity` indicator, not found. pr = `locator.click` timeout on `.tab-add` — "element is not visible". Same ref but different failure paths — cannot classify as same bug from logs alone. |
 
 ### `e2e/activity-bell.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 3 | chromium | a bell lights the indicator from inside the alternate buffer | FAIL | FAIL | PRE-EXISTING | `locator.click: Test timeout 60000ms` on `.tab-add`. "element is not visible". Same on both refs. |
-| 4 | webkit | a bell lights the indicator from inside the alternate buffer | PASS | **FAIL** | **FLAKY-SUSPECT** | `locator.click: Test timeout 60000ms` on `.tab-add`. "element is not visible". Bare timeout — no assertion reached. |
+
+| #   | Project  | Test                                                         | main | pr       | Bucket            | Evidence                                                                                                            |
+| --- | -------- | ------------------------------------------------------------ | ---- | -------- | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 3   | chromium | a bell lights the indicator from inside the alternate buffer | FAIL | FAIL     | PRE-EXISTING      | `locator.click: Test timeout 60000ms` on `.tab-add`. "element is not visible". Same on both refs.                   |
+| 4   | webkit   | a bell lights the indicator from inside the alternate buffer | PASS | **FAIL** | **FLAKY-SUSPECT** | `locator.click: Test timeout 60000ms` on `.tab-add`. "element is not visible". Bare timeout — no assertion reached. |
 
 ### `e2e/click-focus.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 5 | chromium | a click into the pane leaves the terminal taking keystrokes | FAIL | FAIL | **FLAKY-SUSPECT** | **Different errors:** main = `expect.toContain("nocx-editor-input")` Received `""`. pr = `locator.click` timeout on `.tabbar-spacer` "element is not visible". Failure text differs run to run — cannot prove same root cause. |
-| 6 | webkit | a click into the pane leaves the terminal taking keystrokes | FAIL | FAIL | **FLAKY-SUSPECT** | Same pattern: main = `expect.toContain` assertion; pr = tabbar-spacer click timeout. Different failure text between runs. |
+
+| #   | Project  | Test                                                        | main | pr   | Bucket            | Evidence                                                                                                                                                                                                                       |
+| --- | -------- | ----------------------------------------------------------- | ---- | ---- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 5   | chromium | a click into the pane leaves the terminal taking keystrokes | FAIL | FAIL | **FLAKY-SUSPECT** | **Different errors:** main = `expect.toContain("nocx-editor-input")` Received `""`. pr = `locator.click` timeout on `.tabbar-spacer` "element is not visible". Failure text differs run to run — cannot prove same root cause. |
+| 6   | webkit   | a click into the pane leaves the terminal taking keystrokes | FAIL | FAIL | **FLAKY-SUSPECT** | Same pattern: main = `expect.toContain` assertion; pr = tabbar-spacer click timeout. Different failure text between runs.                                                                                                      |
 
 ### `e2e/clipboard.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 7 | chromium | copy-on-select: selecting terminal text copies it to the clipboard | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText` — Expected `"CT-ms0i..."`, Received `"Users/runner"`. Same on both refs. |
-| 8 | chromium | paste: right-click pastes clipboard text at the cursor | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText` — Expected `"PT-ms0i..."`, Received `"Users/runner"`. Same on both refs. |
-| 9 | webkit | copy-on-select | — | — | SKIPPED | `test.skip(browserName !== "chromium")` |
-| 10 | webkit | paste | — | — | SKIPPED | `test.skip(browserName !== "chromium")` |
+
+| #   | Project  | Test                                                               | main | pr   | Bucket       | Evidence                                                                                     |
+| --- | -------- | ------------------------------------------------------------------ | ---- | ---- | ------------ | -------------------------------------------------------------------------------------------- |
+| 7   | chromium | copy-on-select: selecting terminal text copies it to the clipboard | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText` — Expected `"CT-ms0i..."`, Received `"Users/runner"`. Same on both refs. |
+| 8   | chromium | paste: right-click pastes clipboard text at the cursor             | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText` — Expected `"PT-ms0i..."`, Received `"Users/runner"`. Same on both refs. |
+| 9   | webkit   | copy-on-select                                                     | —    | —    | SKIPPED      | `test.skip(browserName !== "chromium")`                                                      |
+| 10  | webkit   | paste                                                              | —    | —    | SKIPPED      | `test.skip(browserName !== "chromium")`                                                      |
 
 ### `e2e/command-editor.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 11 | chromium | editor is visible at the first prompt | PASS | PASS | — | Passing on both refs. |
-| 12 | chromium | mouse hit-tests the textarea, not the terminal canvas | PASS | PASS | — | Passing on both refs. |
-| 13 | chromium | double-click selects a word in the editor | PASS | PASS | — | Passing on both refs. |
-| 14 | chromium | the submit button is clickable and submits | FAIL | FAIL | PRE-EXISTING | `locator.click: Test timeout 60000ms` on `.nocx-editor-submit`. **Known dead selector — `.nocx-editor-submit` deleted in commit `7204aff`**. No longer in the DOM. |
-| 15 | chromium | a multi-line command is one gutter landmark, not three | FAIL | FAIL | PRE-EXISTING | `expect.poll.toBe(1)` — Received `0`. No `.nocx-gutter-glyph` elements found after submit. Same on both refs. |
-| 16 | webkit | editor is visible at the first prompt | PASS | PASS | — | Passing on both refs. |
-| 17 | webkit | mouse hit-tests the textarea, not the terminal canvas | PASS | PASS | — | Passing on both refs. |
-| 18 | webkit | double-click selects a word in the editor | PASS | PASS | — | Passing on both refs. |
-| 19 | webkit | the submit button is clickable and submits | FAIL | FAIL | PRE-EXISTING | Same dead `.nocx-editor-submit` selector. |
-| 20 | webkit | a multi-line command is one gutter landmark, not three | FAIL | FAIL | PRE-EXISTING | Same gutter glyph count assertion. |
+
+| #   | Project  | Test                                                   | main | pr   | Bucket       | Evidence                                                                                                                                                           |
+| --- | -------- | ------------------------------------------------------ | ---- | ---- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 11  | chromium | editor is visible at the first prompt                  | PASS | PASS | —            | Passing on both refs.                                                                                                                                              |
+| 12  | chromium | mouse hit-tests the textarea, not the terminal canvas  | PASS | PASS | —            | Passing on both refs.                                                                                                                                              |
+| 13  | chromium | double-click selects a word in the editor              | PASS | PASS | —            | Passing on both refs.                                                                                                                                              |
+| 14  | chromium | the submit button is clickable and submits             | FAIL | FAIL | PRE-EXISTING | `locator.click: Test timeout 60000ms` on `.nocx-editor-submit`. **Known dead selector — `.nocx-editor-submit` deleted in commit `7204aff`**. No longer in the DOM. |
+| 15  | chromium | a multi-line command is one gutter landmark, not three | FAIL | FAIL | PRE-EXISTING | `expect.poll.toBe(1)` — Received `0`. No `.nocx-gutter-glyph` elements found after submit. Same on both refs.                                                      |
+| 16  | webkit   | editor is visible at the first prompt                  | PASS | PASS | —            | Passing on both refs.                                                                                                                                              |
+| 17  | webkit   | mouse hit-tests the textarea, not the terminal canvas  | PASS | PASS | —            | Passing on both refs.                                                                                                                                              |
+| 18  | webkit   | double-click selects a word in the editor              | PASS | PASS | —            | Passing on both refs.                                                                                                                                              |
+| 19  | webkit   | the submit button is clickable and submits             | FAIL | FAIL | PRE-EXISTING | Same dead `.nocx-editor-submit` selector.                                                                                                                          |
+| 20  | webkit   | a multi-line command is one gutter landmark, not three | FAIL | FAIL | PRE-EXISTING | Same gutter glyph count assertion.                                                                                                                                 |
 
 ### `e2e/enhanced-input.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 21 | chromium | read command receives input after enhanced submit | PASS | **FAIL** | **BRANCH-REGRESSION** | `expect.toHaveText("got-hello")` — Received `"Users/runner"` after 5000ms timeout. Title never updated — either the command never executed or the title-set path is broken. Assertion-backed. |
-| 22 | chromium | Ctrl-C at a prompt does not trap input | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText(marker)` — Received `"Users/runner"`. Same on both refs. |
-| 23 | chromium | multiple submits in succession all route raw | PASS | **FAIL** | **BRANCH-REGRESSION** | `expect.toHaveText("MS-2")` — Received `"MS-1~00701~"`. The `~00701~` is the escape character `\007` leaked as literal text — the second OSC 0 sequence was partially parsed but the `\007` terminator was not stripped. Assertion-backed. |
-| 24 | webkit | read command receives input after enhanced submit | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText("got-hello")` — Received `"got-"`. `read` builtin ran but received empty string — keystrokes didn't reach the PTY. Same on both refs. |
-| 25 | webkit | Ctrl-C at a prompt does not trap input | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText(marker)` — Received `"Users/runner"`. Same on both refs. |
-| 26 | webkit | multiple submits in succession all route raw | FAIL | FAIL | PRE-EXISTING | `expect.toHaveText("MS-2")` — Received `"Users/runner"`. Same on both refs. |
+
+| #   | Project  | Test                                              | main | pr       | Bucket                | Evidence                                                                                                                                                                                                                                   |
+| --- | -------- | ------------------------------------------------- | ---- | -------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 21  | chromium | read command receives input after enhanced submit | PASS | **FAIL** | **BRANCH-REGRESSION** | `expect.toHaveText("got-hello")` — Received `"Users/runner"` after 5000ms timeout. Title never updated — either the command never executed or the title-set path is broken. Assertion-backed.                                              |
+| 22  | chromium | Ctrl-C at a prompt does not trap input            | FAIL | FAIL     | PRE-EXISTING          | `expect.toHaveText(marker)` — Received `"Users/runner"`. Same on both refs.                                                                                                                                                                |
+| 23  | chromium | multiple submits in succession all route raw      | PASS | **FAIL** | **BRANCH-REGRESSION** | `expect.toHaveText("MS-2")` — Received `"MS-1~00701~"`. The `~00701~` is the escape character `\007` leaked as literal text — the second OSC 0 sequence was partially parsed but the `\007` terminator was not stripped. Assertion-backed. |
+| 24  | webkit   | read command receives input after enhanced submit | FAIL | FAIL     | PRE-EXISTING          | `expect.toHaveText("got-hello")` — Received `"got-"`. `read` builtin ran but received empty string — keystrokes didn't reach the PTY. Same on both refs.                                                                                   |
+| 25  | webkit   | Ctrl-C at a prompt does not trap input            | FAIL | FAIL     | PRE-EXISTING          | `expect.toHaveText(marker)` — Received `"Users/runner"`. Same on both refs.                                                                                                                                                                |
+| 26  | webkit   | multiple submits in succession all route raw      | FAIL | FAIL     | PRE-EXISTING          | `expect.toHaveText("MS-2")` — Received `"Users/runner"`. Same on both refs.                                                                                                                                                                |
 
 ### `e2e/tab-title.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 27 | chromium | a new tab never displays "Terminal" in its title | PASS | PASS | — | Passing on both refs. |
-| 28 | webkit | a new tab never displays "Terminal" in its title | PASS | PASS | — | Passing on both refs. |
+
+| #   | Project  | Test                                             | main | pr   | Bucket | Evidence              |
+| --- | -------- | ------------------------------------------------ | ---- | ---- | ------ | --------------------- |
+| 27  | chromium | a new tab never displays "Terminal" in its title | PASS | PASS | —      | Passing on both refs. |
+| 28  | webkit   | a new tab never displays "Terminal" in its title | PASS | PASS | —      | Passing on both refs. |
 
 ### `e2e/tabs.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 29 | chromium | adding a second tab preserves layout with both tabs visible | PASS | **FAIL** | **FLAKY-SUSPECT** | `locator.click: Test timeout 60000ms` on `.tab-add`. Resolved but "element is not visible". Bare timeout — no assertion reached. |
-| 30 | webkit | adding a second tab preserves layout with both tabs visible | PASS | **FAIL** | **FLAKY-SUSPECT** | Same `.tab-add` invisible pattern. Bare timeout. |
+
+| #   | Project  | Test                                                        | main | pr       | Bucket            | Evidence                                                                                                                         |
+| --- | -------- | ----------------------------------------------------------- | ---- | -------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 29  | chromium | adding a second tab preserves layout with both tabs visible | PASS | **FAIL** | **FLAKY-SUSPECT** | `locator.click: Test timeout 60000ms` on `.tab-add`. Resolved but "element is not visible". Bare timeout — no assertion reached. |
+| 30  | webkit   | adding a second tab preserves layout with both tabs visible | PASS | **FAIL** | **FLAKY-SUSPECT** | Same `.tab-add` invisible pattern. Bare timeout.                                                                                 |
 
 ### `e2e/seed.spec.ts`
-| # | Project | Test | main | pr | Bucket | Evidence |
-|---|---|---|---|---|---|---|
-| 31 | chromium | seed | PASS | PASS | — | Stub — no assertions. |
-| 32 | webkit | seed | PASS | PASS | — | Stub — no assertions. |
+
+| #   | Project  | Test | main | pr   | Bucket | Evidence              |
+| --- | -------- | ---- | ---- | ---- | ------ | --------------------- |
+| 31  | chromium | seed | PASS | PASS | —      | Stub — no assertions. |
+| 32  | webkit   | seed | PASS | PASS | —      | Stub — no assertions. |
 
 ---
 
@@ -161,6 +170,7 @@ Both regressions point to the same class of problem: keystrokes not reaching the
 ### Dead selector note
 
 The `.nocx-editor-submit` element was deleted from `frontend/src/editor.ts` in commit `7204aff`. This causes:
+
 - `[chromium] command-editor.spec.ts:61` — `locator.click` timeout (pre-existing)
 - `[webkit] command-editor.spec.ts:61` — same (pre-existing)
 

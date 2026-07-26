@@ -23,7 +23,7 @@ that shape the contract around a renderer nobody uses.
 - **`frontend/src/renderers/types.ts`** — two comments concede the contract to wterm
   (`@wterm/dom never fires`, `has no equivalent event — the callback is never …`). Removing those
   concessions is what **actually** retires `nocx-au6`: the interface should stop describing a
-  renderer that no longer exists, and any member that was optional *only* because wterm could not
+  renderer that no longer exists, and any member that was optional _only_ because wterm could not
   honour it should become non-optional. Read each one and decide deliberately — do not blanket
   delete comments and leave the shape unchanged.
 - **`frontend/package.json`** — drop the `@wterm/dom` dependency. Do not run a broad
@@ -39,14 +39,14 @@ that shape the contract around a renderer nobody uses.
 `docs/decisions/0001-xterm-js-as-vt-frontend.md`.
 
 **ADR-0001 is the sensitive one.** It records that wterm stays switchable behind
-`TerminalRenderer` for re-testing. Removing wterm *changes that decision*, so amend the ADR
+`TerminalRenderer` for re-testing. Removing wterm _changes that decision_, so amend the ADR
 **deliberately** — add a superseding/amendment note stating that the second implementation was
 removed, when, and why — rather than quietly editing the sentence so it reads as if the decision
 was always this. `AGENTS.md` is explicit: a decision that turns out wrong gets changed on
 purpose, never routed around.
 
 ADR-0005 (Linux/WebKitGTK forced-refresh pump) mentions wterm as context. Check whether the
-*mechanism* it documents is xterm-specific or renderer-agnostic before touching it — if the pump
+_mechanism_ it documents is xterm-specific or renderer-agnostic before touching it — if the pump
 exists for reasons unrelated to wterm, leave the mechanism alone and only correct the reference.
 
 For the historical plan document under `docs/superpowers/plans/`, prefer leaving history intact:

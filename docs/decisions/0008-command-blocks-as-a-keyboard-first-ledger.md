@@ -13,7 +13,7 @@
 The product goal is a Warp-style command experience. Warp models a session as a
 stack of **blocks**: each command+output is a discrete card with a header (cwd,
 duration), exit-code color, hover actions (copy/rerun/share), collapse, and
-click-to-select. We use Warp as a reference for *what problems to solve*, not a
+click-to-select. We use Warp as a reference for _what problems to solve_, not a
 spec to copy — the explicit goal is to be **better** than Warp for a local-first,
 SSH-heavy, agent-TUI-heavy daily driver.
 
@@ -21,7 +21,7 @@ Two facts constrain the design:
 
 - **Architecture (ADR-0004 §4, AD-6):** output lives in **one continuous xterm.js
   instance rendered to a WebGL canvas**. Terminal text is in the canvas, not the
-  DOM. Block visuals are lightweight decorations drawn *over* the grid (a spike,
+  DOM. Block visuals are lightweight decorations drawn _over_ the grid (a spike,
   `nocx-4ff.8`, recommends a sibling "gutter" div anchored to OSC-133 marker
   rows). Freezing output rows into DOM cards forks the render model and fights the
   single-owner rule — it stays deferred.
@@ -40,7 +40,7 @@ agents) of our users.
 
 Model command blocks as a **keyboard-first structural ledger of trusted command
 landmarks over a real terminal** — not as cards. The transcript stays a live
-xterm; blocks are an *index and control surface* on top of it.
+xterm; blocks are an _index and control surface_ on top of it.
 
 For each trusted OSC-133 command cycle we retain a compact record:
 
@@ -62,7 +62,7 @@ The five pillars, in priority order:
    Jumping scrolls xterm to the marker; it never selects or rearranges the
    transcript. A "return to live output" control after jumping back.
 2. **Safe contextual rerun** — "Edit and run again" is the primary action: load
-   the *app-owned* command into the editor, show its original `host:cwd`, warn
+   the _app-owned_ command into the editor, show its original `host:cwd`, warn
    when the current host/cwd differs. Never rerun scraped terminal text. Execution
    actions are disabled for untrusted/malformed marker cycles. A secondary
    explicit "run immediately" may exist for experts but is not the prominent

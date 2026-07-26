@@ -52,7 +52,7 @@ from the same source: Orca's tabs slice is 1987 lines — an unbounded tab model
 limit, so ours stays small and does not speculatively grow splits or groups.
 
 Orca needs `entityId` because its state lives in a serializable store. We are not adopting a
-store, so holding a content object directly is fine — only the *restore descriptor* must be
+store, so holding a content object directly is fine — only the _restore descriptor_ must be
 serializable.
 
 ## Binding constraints
@@ -96,8 +96,8 @@ notification; save pending/error/race handling; responsive layout; search rankin
 keyboard semantics; the deep-link router; snapshot revision tracking; "open settings file";
 export/import.
 
-The declaration says what a setting *is*. The snapshot says its current *state*. The
-transport says *when state changed*. The UI shell says *how users navigate it*.
+The declaration says what a setting _is_. The snapshot says its current _state_. The
+transport says _when state changed_. The UI shell says _how users navigate it_.
 
 ## Part A — Authoritative settings state and propagation
 
@@ -107,9 +107,9 @@ transport says *when state changed*. The UI shell says *how users navigate it*.
 
 ```ts
 interface SettingsSnapshot {
-  values: Record<string, unknown>   // effective, non-secret
-  overridden: string[]              // non-secret keys with a stored override
-  revision: number                  // monotonic, per backend instance
+  values: Record<string, unknown> // effective, non-secret
+  overridden: string[] // non-secret keys with a stored override
+  revision: number // monotonic, per backend instance
 }
 ```
 
@@ -166,8 +166,11 @@ Backend-originated, over the existing JSON-RPC control plane. The precedent exis
 `exit` notification is already handled as a method without an `id` (`frontend/src/ipc.ts:443`).
 
 ```json
-{ "jsonrpc": "2.0", "method": "settings.changed",
-  "params": { "revision": 42, "keys": ["terminal.fontSize"] } }
+{
+  "jsonrpc": "2.0",
+  "method": "settings.changed",
+  "params": { "revision": 42, "keys": ["terminal.fontSize"] }
+}
 ```
 
 Rules:
@@ -323,7 +326,7 @@ Two branded string types, centrally registered at the composition root — regis
 dynamically generated. These are protocol-like constants and must stay stable across releases.
 
 ```ts
-type SurfaceType  = string & { readonly __brand: 'SurfaceType' }
+type SurfaceType = string & { readonly __brand: 'SurfaceType' }
 type SingletonKey = string & { readonly __brand: 'SingletonKey' }
 ```
 
@@ -347,12 +350,12 @@ Four existing sites assume every tab is a terminal. Each needs an explicit polic
 model — restore descriptor or `null`, attention capability, badge/decoration state, singleton
 key, fixed initial title — rather than a `kind` test:
 
-| Site | Current assumption |
-|---|---|
-| `tabs.ts:861-863` | `getTabs()` substitutes `'Terminal'` for an empty title |
-| `tabs.ts:1077-1079` | closing the last tab opens a fresh **terminal** |
-| `tabs.ts:1172-1177` | Cmd/Ctrl+1..9 addresses all visual tabs |
-| `tabs.ts:847-851` | `_initialTabReady` from `newTab().ready` gates updater health via `main.ts:168` |
+| Site                | Current assumption                                                              |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `tabs.ts:861-863`   | `getTabs()` substitutes `'Terminal'` for an empty title                         |
+| `tabs.ts:1077-1079` | closing the last tab opens a fresh **terminal**                                 |
+| `tabs.ts:1172-1177` | Cmd/Ctrl+1..9 addresses all visual tabs                                         |
+| `tabs.ts:847-851`   | `_initialTabReady` from `newTab().ready` gates updater health via `main.ts:168` |
 
 The last one is the trap: after content extraction, "the first tab mounted" must **not** be
 redefined as application health. The criterion is specifically "the initial terminal renderer

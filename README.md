@@ -12,7 +12,7 @@ and cwd features are under active development. macOS + Linux (AppImage).
 ## What makes it different
 
 Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stakes;
-the wedge is the *combination*, all local in one app: Ghostty-grade rendering +
+the wedge is the _combination_, all local in one app: Ghostty-grade rendering +
 an integrated SSH manager + (later) a secrets vault + (later) shell-integration
 blocks, completions, and input-editor in nested shells — with no cloud
 dependency.
@@ -73,6 +73,7 @@ The previous version is saved as `.nocx-backup.app` (macOS) or
 `.nocx-backup.AppImage` (Linux) next to the active bundle.
 
 **macOS:**
+
 ```bash
 osascript -e 'quit app "nocx"'
 rm -rf /Applications/nocx.app
@@ -80,6 +81,7 @@ mv /Applications/.nocx-backup.app /Applications/nocx.app
 ```
 
 **Linux:**
+
 ```bash
 killall nocx
 mv ~/.local/bin/.nocx-backup.AppImage ~/.local/bin/nocx.AppImage
@@ -93,6 +95,7 @@ runs — the new bundle sits at the install path and the swap file holds
 the previous working version.
 
 **macOS:**
+
 ```bash
 osascript -e 'quit app "nocx"'
 rm -rf /Applications/nocx.app
@@ -101,6 +104,7 @@ rm -f ~/Library/Application\ Support/nocx/.nocx-update-journal.json
 ```
 
 **Linux:**
+
 ```bash
 killall nocx
 # The swap file is the previous AppImage; exchange it back.
@@ -114,14 +118,14 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 
 ## Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Go | 1.26 | [go.dev](https://go.dev/dl/) |
-| Node | 24 | [nodejs.org](https://nodejs.org/) |
-| Wails CLI | v2 | `go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
-| gofumpt | latest | `go install mvdan.cc/gofumpt@latest` |
+| Tool          | Version     | Install                                                                  |
+| ------------- | ----------- | ------------------------------------------------------------------------ |
+| Go            | 1.26        | [go.dev](https://go.dev/dl/)                                             |
+| Node          | 24          | [nodejs.org](https://nodejs.org/)                                        |
+| Wails CLI     | v2          | `go install github.com/wailsapp/wails/v2/cmd/wails@latest`               |
+| gofumpt       | latest      | `go install mvdan.cc/gofumpt@latest`                                     |
 | golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
-| bd (beads) | **≥ 1.1.0** | `brew install beads` |
+| bd (beads)    | **≥ 1.1.0** | `brew install beads`                                                     |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
@@ -167,12 +171,12 @@ wails dev
 
 `make init` is safe to re-run, and does four things:
 
-| Step | Why it matters |
-| --- | --- |
+| Step                                  | Why it matters                                                                                                            |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `git config core.hooksPath .githooks` | Installs the quality gate and the tracker sync. Without it nothing is enforced and issue state never leaves your machine. |
-| `bd bootstrap` | Fetches the issue database. Skipped with a note if `bd` is not installed. |
-| `npm ci` (root) | `@playwright/test`, for the e2e suite. |
-| `npm ci` (frontend) | The app's own dependencies. |
+| `bd bootstrap`                        | Fetches the issue database. Skipped with a note if `bd` is not installed.                                                 |
+| `npm ci` (root)                       | `@playwright/test`, for the e2e suite.                                                                                    |
+| `npm ci` (frontend)                   | The app's own dependencies.                                                                                               |
 
 `bd bootstrap`, not `bd init`: the backlog lives in a Dolt database that git does
 not carry, and bootstrap is the command that knows where to get it — it clones
@@ -184,6 +188,7 @@ builds a history divergent from the remote, so keep it for recovery, not setup.
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
 The pre-commit hook runs on every `git commit` and enforces:
+
 - `gofumpt` — format check (fails if any file needs formatting)
 - `golangci-lint` — lint
 - `go test -race -count=1 ./...` — tests with race detector
@@ -225,17 +230,17 @@ Run locally without committing: `make ci` (close mirror of CI — runs the same 
 
 Every commit must pass:
 
-| Gate | Pre-commit | `make ci` | CI (GitHub Actions) |
-|------|-----------|-----------|---------------------|
-| gofumpt (format) | ✓ | ✓ | ✓ |
-| golangci-lint | v1.64.8 | v1.64.8 | v1.64.8 |
-| `go test -race` | ✓ | ✓ | ✓ |
-| `go build ./...` | — | ✓ | ✓ (macos-latest) |
-| `prettier --check` | ✓ | ✓ | ✓ |
-| `eslint` | ✓ | ✓ | ✓ |
-| `tsc --noEmit` | ✓ | ✓ | ✓ |
-| `vitest` | ✓ | ✓ | ✓ |
-| `npm run build` | — | ✓ | ✓ |
+| Gate               | Pre-commit | `make ci` | CI (GitHub Actions) |
+| ------------------ | ---------- | --------- | ------------------- |
+| gofumpt (format)   | ✓          | ✓         | ✓                   |
+| golangci-lint      | v1.64.8    | v1.64.8   | v1.64.8             |
+| `go test -race`    | ✓          | ✓         | ✓                   |
+| `go build ./...`   | —          | ✓         | ✓ (macos-latest)    |
+| `prettier --check` | ✓          | ✓         | ✓                   |
+| `eslint`           | ✓          | ✓         | ✓                   |
+| `tsc --noEmit`     | ✓          | ✓         | ✓                   |
+| `vitest`           | ✓          | ✓         | ✓                   |
+| `npm run build`    | —          | ✓         | ✓                   |
 
 CI (`ci.yml`) runs on every pull request to `main`, on release branches
 (`release/**`) and manual dispatch, and is called by `release.yml` on a version
@@ -261,12 +266,12 @@ See `AGENTS.md` for the full workflow.
 
 ## Sources of truth
 
-| File | What it contains |
-|------|------------------|
-| `AGENTS.md` | Binding engineering rules for all contributors (human and AI) |
-| `docs/architecture.md` | Architecture spine with AD-1..AD-10 invariants |
-| `docs/vision.md` | Product vision, MVP scope, roadmap |
-| `docs/decisions/` | Architecture Decision Records (append-only) |
+| File                   | What it contains                                              |
+| ---------------------- | ------------------------------------------------------------- |
+| `AGENTS.md`            | Binding engineering rules for all contributors (human and AI) |
+| `docs/architecture.md` | Architecture spine with AD-1..AD-10 invariants                |
+| `docs/vision.md`       | Product vision, MVP scope, roadmap                            |
+| `docs/decisions/`      | Architecture Decision Records (append-only)                   |
 
 ## Repository layout
 
@@ -316,11 +321,11 @@ install differently:
 Install these once per machine — they are **not** vendored, and `make init` does
 not install them:
 
-| Tool | Needed for | Install |
-|------|------------|---------|
-| `bd` (beads) | The backlog — **required** (also in [Prerequisites](#prerequisites)) | `brew install beads` (or `npm i -g @beads/bd`) |
-| [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) plugin | Superpowers skills + the `bd` session hooks — **recommended** | `claude plugin marketplace add DollarDill/beads-superpowers` then `claude plugin install beads-superpowers@beads-superpowers-marketplace` |
-| [`graphify`](https://github.com/Graphify-Labs/graphify) | Knowledge-graph code search — **optional** | `uv tool install graphifyy` then `graphify install` |
+| Tool                                                                          | Needed for                                                           | Install                                                                                                                                   |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `bd` (beads)                                                                  | The backlog — **required** (also in [Prerequisites](#prerequisites)) | `brew install beads` (or `npm i -g @beads/bd`)                                                                                            |
+| [`beads-superpowers`](https://github.com/DollarDill/beads-superpowers) plugin | Superpowers skills + the `bd` session hooks — **recommended**        | `claude plugin marketplace add DollarDill/beads-superpowers` then `claude plugin install beads-superpowers@beads-superpowers-marketplace` |
+| [`graphify`](https://github.com/Graphify-Labs/graphify)                       | Knowledge-graph code search — **optional**                           | `uv tool install graphifyy` then `graphify install`                                                                                       |
 
 - **Install `bd` before the plugin.** The plugin's hooks call `bd` on every
   session start, so a missing `bd` makes them fail.

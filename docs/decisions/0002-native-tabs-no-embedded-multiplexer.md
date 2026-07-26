@@ -45,7 +45,7 @@ only — no code, and no place in the process tree.
   None of it gets outsourced.
 - **Reconnect stays a bounded per-session byte-offset output ring** (`nocx-2ho.3`),
   not zellij's "server holds the grid and repaints on attach". That alternative
-  is *closed* to us by AD-6, not merely unchosen — worth recording so it is not
+  is _closed_ to us by AD-6, not merely unchosen — worth recording so it is not
   re-proposed as a shortcut.
 - Zellij's session-serialization model — per-pane cwd plus the running command,
   written out and replayed to rebuild the workspace — is a **reference design**

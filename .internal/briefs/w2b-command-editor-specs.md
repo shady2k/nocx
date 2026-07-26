@@ -13,9 +13,9 @@ PRs to `main`.
 
 Four of those 13 live in `e2e/command-editor.spec.ts`, two per browser project:
 
-| Test | Failure |
-|---|---|
-| `command-editor.spec.ts:61` — "the submit button is clickable and submits" | `locator.click` times out on `.nocx-editor-submit` |
+| Test                                                                                   | Failure                                                                 |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `command-editor.spec.ts:61` — "the submit button is clickable and submits"             | `locator.click` times out on `.nocx-editor-submit`                      |
 | `command-editor.spec.ts:73` — "a multi-line command is one gutter landmark, not three" | `expect.poll(...).toBe(1)` receives `0` — no `.nocx-gutter-glyph` found |
 
 Bead `nocx-m7x` already records the first one: `.nocx-editor-submit` was deleted from
@@ -49,7 +49,7 @@ real defect and must survive.
 
 1. Read `e2e/command-editor.spec.ts` in full — all five tests, not just the two failing
    ones. Three currently pass (`editor is visible at the first prompt`, `mouse hit-tests
-   the textarea, not the terminal canvas`, `double-click selects a word in the editor`).
+the textarea, not the terminal canvas`, `double-click selects a word in the editor`).
    Do not break them.
 
 2. For every selector the file asserts on (`.nocx-editor-submit`, `.nocx-gutter-glyph`, and
@@ -85,7 +85,7 @@ say why — do not start a server.
 - No commits, no pushes, no branches. No `git stash`.
 - **The only file you may modify is `e2e/command-editor.spec.ts`.** Another worker owns
   `frontend/index.html`. Do not touch `frontend/src/**`, `playwright.config.ts`,
-  `package.json` or `package-lock.json`. If your conclusion is that a *product* file needs
+  `package.json` or `package-lock.json`. If your conclusion is that a _product_ file needs
   changing, report that — do not change it.
 - Do not run repo-wide gates (`npm test`, `tsc --noEmit`, `prettier`, `golangci-lint`).
   They compile the whole project and would observe the other worker's half-written files,

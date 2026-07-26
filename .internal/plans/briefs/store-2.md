@@ -38,7 +38,7 @@ the two defects the bead records, both of which are real:
   (same class as bead `nocx-ab4`). Refuse to write when the target is a symlink.
 
 Also implement the **per-module schema version** protocol: each module declares its own
-monotonic version and its own migrations; you share the *protocol*, never a single app-wide
+monotonic version and its own migrations; you share the _protocol_, never a single app-wide
 version number. ADR-0011 §6 says why: one app-wide version couples unrelated releases of
 settings, profiles, conversations and history, and JSON migrations have different transactional
 properties from SQLite ones.

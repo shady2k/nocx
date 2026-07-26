@@ -37,8 +37,8 @@ it into a JSON-RPC frame, and `frontend/src/tabs.ts:560` logs the whole object �
 `Log('nocx: opening session, sshOpts: ' + JSON.stringify(this.sshOpts))`. The secret was
 an ordinary string in an ordinary struct, so nothing stopped it. Supporting evidence
 that the boundary was never expressed in types: `internal/credential/credential.go:59-64`
-defines `VaultSecret{ Value string \`json:"value"\` }` — a secret **designed** to
-serialize — and `internal/transport/ws.go:998-1010` deletes credential metadata without
+defines `VaultSecret{ Value string \`json:"value"\` }`— a secret **designed** to
+serialize — and`internal/transport/ws.go:998-1010` deletes credential metadata without
 deleting the corresponding keychain entry, orphaning it permanently.
 
 Three different kinds of data are being conflated:
@@ -67,7 +67,7 @@ history. Append-heavy, unbounded, wanting search and ranking.
 ```
 
 - **DocumentStore** — bounded, human-recoverable configuration as atomic JSON documents.
-  Settings, profiles, groups, credential *metadata*, tab restore. A user can open these
+  Settings, profiles, groups, credential _metadata_, tab restore. A user can open these
   in an editor and repair them; that is a feature, not an accident.
 - **SecretStore** — authenticators only, in the OS keychain. Never a file we write.
 - **ContentDB** — one SQLite database for unbounded, query-oriented private content.
@@ -92,7 +92,7 @@ This is a **type boundary, not a redaction convention.** Redaction — struct ta
 `json:"-"`, a `String()` that prints `[REDACTED]` — protects one encoder at a time and
 would not have prevented the PR #11 leak, because by the time the password reached
 `tabs.ts` it was already an ordinary JavaScript string. Defense in depth (a `Secret`
-wrapper that refuses to marshal and redacts in `slog`) is worth having *inside* the
+wrapper that refuses to marshal and redacts in `slog`) is worth having _inside_ the
 credential package, but it is not the boundary. The boundary is that the renderer has
 no API that returns a secret.
 
@@ -106,7 +106,7 @@ A small vocabulary — public config, private metadata, private content, secret
 authenticator — drives the generated settings UI, export eligibility, log handling,
 retention and backup warnings. It does **not** dynamically decide where each struct
 field is written. Routing by reflection over arbitrary entities would turn persistence
-into a framework, and one entity's fields are split by *ownership* (profile metadata vs.
+into a framework, and one entity's fields are split by _ownership_ (profile metadata vs.
 credential secret) far more cleanly than by a per-field router.
 
 Note that the classification is not binary. Command lines, hostnames and conversation
@@ -151,7 +151,7 @@ we implement checkpointing and vacuum behaviour deliberately.
 
 ### 6. What is shared is small, and schema versions are not
 
-Shared: path resolution, the migration *protocol*, the classification vocabulary, and
+Shared: path resolution, the migration _protocol_, the classification vocabulary, and
 export/backup policy. Paths distinguish OS roles — configuration documents in the config
 dir, `content.db` in the application-data dir, disposable indexes in the cache dir,
 secrets in the keychain. On macOS these may resolve under the same Application Support
@@ -187,7 +187,7 @@ The alternative shapes were considered and rejected:
   declared knobs; the model does not fit and the fit would get worse with grouping and
   credential links.
 - **One shared persistence primitive.** An atomic-file-write primitive serves neither a
-  keychain nor a database. Sharing the *mechanism* only works when the mechanism is the
+  keychain nor a database. Sharing the _mechanism_ only works when the mechanism is the
   same, and here it is three different mechanisms with three different failure modes.
 - **A per-field sensitivity router.** The intent is right; the implementation would be a
   reflection engine that every serializer, logger and DTO must honour. Separate types

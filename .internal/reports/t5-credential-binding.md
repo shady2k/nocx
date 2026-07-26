@@ -7,7 +7,7 @@ Worker: nocx-mon wave. Branch `pr-11-boundary`. No commits, per the ground rules
 `Credential.Host` was optional and empty meant "works for any host". An
 authenticated renderer can both create profiles and call `open`, so it could
 point a victim credential at a host it controls and have the backend submit
-the password there. T4 stopped the password being *returned*; this is the
+the password there. T4 stopped the password being _returned_; this is the
 other direction. Strict `known_hosts` is host authentication, not credential
 authorization — it does not stop a credential being aimed where it was never
 meant to go.
@@ -24,7 +24,7 @@ facts alone):
 - **`internal/ssh` (where the effective target is known):** `checkBinding`
   runs **after `resolveConfig`**, before any dial, comparing the credential's
   bound host (case-insensitive, `strings.EqualFold`) and effective port
-  against the *resolved* hostname and effective port — never the alias.
+  against the _resolved_ hostname and effective port — never the alias.
 
 Enforcement points: `RealClient.Connect` (target) and `dialer.connectToJumpHost`
 (jump), each gated on `Credentials != nil` so inline auth is exempt (no stored
@@ -33,14 +33,14 @@ secret to redirect).
 ## Decisions (recorded in the code)
 
 - **"Belongs to" = host + port, not user.** Identity for binding is the
-  network endpoint the password is submitted *to*. User is an auth parameter,
+  network endpoint the password is submitted _to_. User is an auth parameter,
   not part of the target. Binding on user would let an attacker rename the
   target account and redirect; binding on host+port pins the actual
-  destination. (`credential.Identity` for *lookup* still includes user; that
-  is a distinct concern from *binding*.)
-- **Empty `Credential.Host` = refused.** The hole *is* empty-host-means-any.
+  destination. (`credential.Identity` for _lookup_ still includes user; that
+  is a distinct concern from _binding_.)
+- **Empty `Credential.Host` = refused.** The hole _is_ empty-host-means-any.
   Existing unbound credentials are refused on next connect with a distinct
-  `ErrCredentialNotBound` naming the credential, so the user sees *why* their
+  `ErrCredentialNotBound` naming the credential, so the user sees _why_ their
   old credential no longer works and can re-bind it. No auto-migration: the
   approval-record alternative was rejected (it would live in the renderer —
   the actor this task constrains).
@@ -71,7 +71,7 @@ SSH server:
   unreachable target is the proof the check fires **before any dial**: a
   mismatch returns a binding error, not a connection-refused/timeout.
 - `TestBinding_AliasResolutionNotAlias` — alias `victim` → `HostName
-  127.0.0.1`. Bound to the alias string `victim` → **refused** (resolved host
+127.0.0.1`. Bound to the alias string `victim` → **refused** (resolved host
   is `127.0.0.1`, ≠ `victim`). Bound to the resolved `127.0.0.1` →
   **connects**. This is the load-bearing proof: matching uses the resolved
   value, not the alias, and the check is not "deny everything".

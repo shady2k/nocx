@@ -71,13 +71,13 @@ tell whether the passphrase was wrong or the ciphertext was tampered.
 
 ## Tests added (5 new, all pass)
 
-| Test | What it proves |
-|---|---|
-| `TestVaultTamperedCiphertextRejected` | Flipping a byte in the ciphertext (past the nonce) causes decryption failure |
-| `TestVaultTamperedTagRejected` | Flipping a byte in the GCM tag (last 16 bytes) causes decryption failure |
-| `TestVaultTamperedVersionRejected` | Changing the version field to 999 causes explicit refusal |
-| `TestVaultOldFormatRefused` | A version=1 `StoredVault` is refused with a message mentioning version/format |
-| `TestVaultWrongPasswordIndistinguishableFromTamper` | Wrong-password and tampered-data errors are identical strings |
+| Test                                                | What it proves                                                                |
+| --------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `TestVaultTamperedCiphertextRejected`               | Flipping a byte in the ciphertext (past the nonce) causes decryption failure  |
+| `TestVaultTamperedTagRejected`                      | Flipping a byte in the GCM tag (last 16 bytes) causes decryption failure      |
+| `TestVaultTamperedVersionRejected`                  | Changing the version field to 999 causes explicit refusal                     |
+| `TestVaultOldFormatRefused`                         | A version=1 `StoredVault` is refused with a message mentioning version/format |
+| `TestVaultWrongPasswordIndistinguishableFromTamper` | Wrong-password and tampered-data errors are identical strings                 |
 
 Existing 7 vault tests + 9 keychain tests continue to pass. Total: 21 passing, 0 skipped, 0 failures.
 

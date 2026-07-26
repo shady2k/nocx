@@ -8,7 +8,7 @@ Bead: `nocx-l7o` (PR11-T7). Branch work in `/home/dev/orca/workspaces/nocx/pr-11
 
 - **Refuses serialization.** `MarshalJSON` and `MarshalText` return
   `errSecretNotSerializable` (`"credential.Secret is not serializable; use
-  Secret.Use to access plaintext"`), naming the type so a caller that tries
+Secret.Use to access plaintext"`), naming the type so a caller that tries
   to serialize one finds out at the call site. Verified by
   `TestSecretMarshalJSONErrors` (direct + struct-containing-Secret) and
   `TestSecretMarshalTextErrors`.
@@ -28,10 +28,9 @@ Bead: `nocx-l7o` (PR11-T7). Branch work in `/home/dev/orca/workspaces/nocx/pr-11
 ## Migration
 
 `VaultSecret.Value` is now `Secret` (was `string \`json:"value"\``). The
-`json:"value"` tag is kept (not `json:"-"`) so `json.Marshal(VaultSecret{})`
-calls `Secret.MarshalJSON` and **errors loudly** — a silent `json:"-"` would
+`json:"value"`tag is kept (not`json:"-"`) so `json.Marshal(VaultSecret{})`calls`Secret.MarshalJSON`and **errors loudly** — a silent`json:"-"`would
 let marshaling succeed while dropping the secret, which is a data-loss hole,
-not a boundary. `TestVaultSecretRefusesMarshal` locks this in.
+not a boundary.`TestVaultSecretRefusesMarshal` locks this in.
 
 **Vault persistence** (`internal/credential/vault.go`): the in-memory
 `vaultData` holds `[]VaultSecret` (with `Secret` values). At the encryption
@@ -47,6 +46,7 @@ tamper tests) still passes.
 `LookupPassword` and `LookupKeyPassphrase` now return `Secret` instead of
 `string`. `SavePassword`/`SaveKeyPassphrase` still take `string` (the
 boundary is on output, not input). Both backends updated:
+
 - `vaultCredentialAdapter` wraps/unwraps via `NewSecret`/`s.Value`.
 - `Keychain` (`keychain.go`) wraps the keyring string in `NewSecret`.
 
@@ -119,6 +119,7 @@ ok  github.com/shady2k/nocx/internal/transport    0.005s
 ```
 
 Acceptance criteria from the brief, all verified by tests:
+
 - `json.Marshal` of a struct containing a `Secret` returns an error naming
   the type → `TestSecretMarshalJSONErrors`, `TestVaultSecretRefusesMarshal`.
 - `fmt.Sprintf("%s"/"%v"/"%#v")` and an `slog` record all render
@@ -137,9 +138,11 @@ crypto helpers (`encryptGCM`, `decryptGCM`, `buildAAD`, `pbkdf2`,
 
 gofmt + gofumpt clean on all touched files (`gofumpt -l .` reports nothing).
 `internal/profile/profile.go` (the other worker's file) was not touched.
+
 ## Out of scope (per the brief)
 
 Not touched, as specified:
+
 - vault KDF (`nocx-dcd`) — PBKDF2 hand-roll unchanged.
 - AEAD (`nocx-1vr`) — GCM construction unchanged.
 - credential-to-host binding (`nocx-mon`) and delete-cascade (`nocx-7l4`).

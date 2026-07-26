@@ -2,9 +2,9 @@
 
 > **Research / de-risking task.** The deliverable is a findings doc + recommendation + a minimal throwaway harness — NOT production feature code. Time-box it.
 
-**Goal:** Settle *how* nocx will draw a per-command status glyph in a left "gutter" over the xterm.js grid, so the blocks milestone (`nocx-4ff.5`) can be planned with a proven approach instead of an open question.
+**Goal:** Settle _how_ nocx will draw a per-command status glyph in a left "gutter" over the xterm.js grid, so the blocks milestone (`nocx-4ff.5`) can be planned with a proven approach instead of an open question.
 
-**Why:** The blocks spec flags this as unproven (Codex review). `registerDecoration({x:0,width:1})` reserves a cell *inside* the grid; naively translating that element left may land it in a clipped layer and drift on fit/DPI/font/renderer-fallback. VS Code's terminal solves the same problem — learn from it.
+**Why:** The blocks spec flags this as unproven (Codex review). `registerDecoration({x:0,width:1})` reserves a cell _inside_ the grid; naively translating that element left may land it in a clipped layer and drift on fit/DPI/font/renderer-fallback. VS Code's terminal solves the same problem — learn from it.
 
 ## Global Constraints
 

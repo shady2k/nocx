@@ -29,8 +29,11 @@ already there: the `exit` notification is handled as a method with no `id`
 (`frontend/src/ipc.ts` — find the current site, the file was refactored by `608ad61`).
 
 ```json
-{ "jsonrpc": "2.0", "method": "settings.changed",
-  "params": { "revision": 42, "keys": ["clipboard.osc52Suppressed"] } }
+{
+  "jsonrpc": "2.0",
+  "method": "settings.changed",
+  "params": { "revision": 42, "keys": ["clipboard.osc52Suppressed"] }
+}
 ```
 
 Requirements:

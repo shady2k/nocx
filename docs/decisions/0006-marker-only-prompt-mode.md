@@ -14,8 +14,8 @@ command line, the shell renders a **visually empty, marker-only prompt** —
 otherwise the user sees a double prompt (nocx's editor chrome + the shell's
 native `PS1`). ADR-0004 §2 decided this should happen "in enhanced mode, with
 the user's original prompt saved and restored." Making that safe and robust
-requires resolving *how* the shell is told to suppress its prompt, and *how the
-empty prompt survives* real-world shells.
+requires resolving _how_ the shell is told to suppress its prompt, and _how the
+empty prompt survives_ real-world shells.
 
 The shipped scripts (`nocx.{zsh,bash}`) today only **append** the `B` marker to
 the existing visible `PS1` — they do not empty it, and that is correct while no
@@ -23,7 +23,7 @@ editor exists. Turning on suppression naively (a one-time `PS1=''` at load, plus
 save/restore of a captured `PS1` string) is fragile:
 
 - Prompt frameworks (oh-my-zsh, powerlevel10k, starship) **rewrite `PS1` every
-  precmd**, clobbering both the emptying *and* the `B` marker.
+  precmd**, clobbering both the emptying _and_ the `B` marker.
 - A captured `PS1` scalar is stale the moment it is captured — real prompts are
   regenerated per cycle from cwd/git/exit-status/async state.
 - A spawn-time flag cannot detect a later frontend failure, so "empty shell
@@ -55,7 +55,7 @@ after prompt frameworks have run:
 - **zsh:** the suppressor `precmd` is kept **last** in `precmd_functions`
   (reasserted idempotently), replaces `PROMPT`/`PS1` with only the non-printing
   `OSC 133 B`, and clears `RPROMPT`/`RPS1`. (Contrast: status capture is forced
-  *first*.) Powerlevel10k **instant prompt** is handled explicitly — disabled
+  _first_.) Powerlevel10k **instant prompt** is handled explicitly — disabled
   under marker-only mode, or a first-prompt artifact is accepted — and covered
   by a test.
 - **bash:** reorder `__nocx_prompt_command` to (1) capture `$?`, (2) run the

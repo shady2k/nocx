@@ -26,14 +26,17 @@
 ### Task 1: Fix input-state `B,B` ownership latch (`nocx-4ff.11`)
 
 **Files:**
+
 - Modify: `frontend/src/input-state.ts:77-84` (the `case 'B'` branch of `reduce`)
 - Test: `frontend/src/input-state.test.ts`
 
 **Interfaces:**
+
 - Consumes: nothing new.
-- Produces: unchanged `reduce(m: Machine, e: InputEvent): Machine` signature. Tightened semantics: `owned` becomes `true` on `B` **only** when the machine is already at a *trusted* `PROMPT_READY` (i.e. a clean `A` preceded this `B`). This also means an untrusted resync-`A`→`B` grants **no** ownership (fail-open to raw), which is the safe behavior.
+- Produces: unchanged `reduce(m: Machine, e: InputEvent): Machine` signature. Tightened semantics: `owned` becomes `true` on `B` **only** when the machine is already at a _trusted_ `PROMPT_READY` (i.e. a clean `A` preceded this `B`). This also means an untrusted resync-`A`→`B` grants **no** ownership (fail-open to raw), which is the safe behavior.
 
 **Acceptance Criteria:**
+
 - `B,B` from `RAW` never sets `owned:true` (no `A` ever seen).
 - A clean `A`→`B` still sets `owned:true`; a single `B` from `RAW` stays `owned:false`.
 - `owned` is `false` in every non-`PROMPT_READY` state.
@@ -97,17 +100,20 @@ git commit -m "fix(input): B,B no longer latches ownership without an A (nocx-4f
 **Problem:** `editor.ts` Enter calls `actions.submit(doc)` but nothing dispatches `{type:'submit'}` to the state machine, so `owned` stays stuck and PS2-continuation keys go nowhere. Extract the submit orchestration into a tiny tested helper and wire it in `tabs.ts`.
 
 **Files:**
+
 - Create: `frontend/src/submit.ts`
 - Create: `frontend/src/submit.test.ts`
 - Modify: `frontend/src/tabs.ts:332-336` (the `CommandEditor` `submit` callback)
 
 **Interfaces:**
+
 - Produces: `submitCommand(doc: string, deps: SubmitDeps): void` where
   `interface SubmitDeps { dispatchSubmit(): void; focusGrid(): void; sendDoc(doc: string): void }`.
   Ordering contract: `dispatchSubmit()` → `focusGrid()` → `sendDoc()`.
 - Consumes in `tabs.ts`: `this.inputState.dispatch`, `renderer.focus`, `this.shellTarget!.submit`.
 
 **Acceptance Criteria:**
+
 - After submit: the machine received `{type:'submit'}` (leaves `owned:false`), the grid was refocused, and the doc was sent — in that order.
 - The atomic-handoff order is preserved (editor already hid itself in `editor.ts` before the callback runs).
 
@@ -158,15 +164,15 @@ export function submitCommand(doc: string, deps: SubmitDeps): void {
 Then wire it in `frontend/src/tabs.ts` — replace the `submit` callback at lines 332-336:
 
 ```ts
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          submitCommand(doc, {
-            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
-            focusGrid: () => renderer.focus(),
-            sendDoc: (d) => void this.shellTarget!.submit(d),
-          })
-        },
-      })
+this.editor = new CommandEditor({
+  submit: (doc: string) => {
+    submitCommand(doc, {
+      dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+      focusGrid: () => renderer.focus(),
+      sendDoc: (d) => void this.shellTarget!.submit(d),
+    })
+  },
+})
 ```
 
 Add the import at the top of `tabs.ts` (next to the other `./` imports):
@@ -194,6 +200,7 @@ git commit -m "fix(input): dispatch {submit} + refocus grid before send (nocx-4f
 **Problem:** `enhanced` is a process-global (`localPTYFactory.enhancedInput`, hardcoded `false`). Make it per-session, carried on `pty.Config`, requested by the frontend — and set up the tab's input-owning machinery **before** `openSession` so the shell never paints an invisible marker-only prompt before the editor exists.
 
 **Files:**
+
 - Modify: `internal/pty/pty.go:16` (add `Enhanced bool` to `Config`)
 - Modify: `internal/session/session.go:27` (add `Enhanced bool` to `Config`) and `:110` (pass it into `pty.Config`)
 - Modify: `internal/transport/ws.go:276` (add `Enhanced bool` to `openParams`) and `:425` (pass into `session.Config`)
@@ -203,11 +210,13 @@ git commit -m "fix(input): dispatch {submit} + refocus grid before send (nocx-4f
 - Test: `internal/session/session_test.go`, `internal/transport/ws_test.go`, `frontend/src/ipc.test.ts` (create if absent)
 
 **Interfaces:**
+
 - Produces (Go): `pty.Config.Enhanced bool`; `session.Config.Enhanced bool`; `app` factory calls `f.shint.ActivationEnv(cfg.Enhanced)`.
 - Produces (TS): `WSClient.openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle>` sending `params: { cols, rows, xpixel: 0, ypixel: 0, enhanced }`.
 - Consumes: `ShellIntegration.ActivationEnv(enhanced bool) []string` (already exists, `shellintegration.go:187`).
 
 **Acceptance Criteria:**
+
 - `Reg.Open` with `Config.Enhanced=true` constructs a `pty.Config` whose `Enhanced` is `true`.
 - The app factory calls `ActivationEnv(cfg.Enhanced)` (per-session), not the removed global.
 - `openParams` unmarshals `enhanced`.
@@ -244,27 +253,38 @@ Expected: FAIL — `session.Config` and `pty.Config` have no `Enhanced` field (c
 - [ ] **Step 3: Implement the Go plumbing**
 
 `internal/pty/pty.go` — add to `Config`:
+
 ```go
 	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
 	Enhanced bool
 ```
+
 `internal/session/session.go` — add to `Config`:
+
 ```go
 	Enhanced bool
 ```
+
 and in `Reg.Open` (the `pty.Config{...}` literal at ~L110) add:
+
 ```go
 		Enhanced: cfg.Enhanced,
 ```
+
 `internal/transport/ws.go` — add to `openParams`:
+
 ```go
 	Enhanced bool `json:"enhanced"`
 ```
+
 and in `handleOpen`'s `session.Config{...}` literal (~L425):
+
 ```go
 		Enhanced: params.Enhanced,
 ```
+
 `internal/app/app.go` — make the factory per-session; replace lines 50-59:
+
 ```go
 type localPTYFactory struct {
 	log   log.Logger
@@ -276,6 +296,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
 }
 ```
+
 and drop the `enhancedInput` field from the `&localPTYFactory{...}` literal at `app.go:33`.
 
 - [ ] **Step 4: Run to verify pass**
@@ -296,6 +317,7 @@ func TestOpenParamsUnmarshalsEnhanced(t *testing.T) {
 	}
 }
 ```
+
 Run: `go test ./internal/transport/ -run TestOpenParamsUnmarshalsEnhanced` → PASS.
 
 - [ ] **Step 6: Frontend — thread `enhanced` through `openSession`** — `frontend/src/ipc.ts:504`:
@@ -303,10 +325,13 @@ Run: `go test ./internal/transport/ -run TestOpenParamsUnmarshalsEnhanced` → P
 ```ts
   openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle> {
 ```
+
 and the request params (L516):
+
 ```ts
         params: { cols, rows, xpixel: 0, ypixel: 0, enhanced },
 ```
+
 Add `frontend/src/ipc.test.ts` (or extend the existing one) asserting the sent frame carries `enhanced` — mirror the file's existing WS-send test pattern; assert the serialized JSON contains `"enhanced":true` when `openSession(80, 24, true)` is called.
 
 Run: `cd frontend && npx vitest run src/ipc.test.ts` → PASS.
@@ -314,22 +339,22 @@ Run: `cd frontend && npx vitest run src/ipc.test.ts` → PASS.
 - [ ] **Step 7: Frontend — reorder `start()` for readiness (no invisible-prompt gap)** — in `frontend/src/tabs.ts` `start()`, move the editor creation + `inputState`/`onCommandMarker`/`onChange` wiring to run **before** `await this.client.openSession(...)`, and pass the flag:
 
 ```ts
-      // Wire input ownership BEFORE opening the session, so a marker-only
-      // (invisible) prompt can never paint before the editor exists (nocx-4ff.10).
-      this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
-      this.editor = new CommandEditor({
-        submit: (doc: string) => {
-          submitCommand(doc, {
-            dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
-            focusGrid: () => renderer.focus(),
-            sendDoc: (d) => void this.shellTarget!.submit(d),
-          })
-        },
-      })
-      this.editor.mount(this.pane)
-      // ...attach inputState.onChange + renderer.onCommandMarker/onBufferChange here...
+// Wire input ownership BEFORE opening the session, so a marker-only
+// (invisible) prompt can never paint before the editor exists (nocx-4ff.10).
+this.shellTarget = new ShellInputTarget((data: string) => this.session!.send(data))
+this.editor = new CommandEditor({
+  submit: (doc: string) => {
+    submitCommand(doc, {
+      dispatchSubmit: () => this.inputState.dispatch({ type: 'submit' }),
+      focusGrid: () => renderer.focus(),
+      sendDoc: (d) => void this.shellTarget!.submit(d),
+    })
+  },
+})
+this.editor.mount(this.pane)
+// ...attach inputState.onChange + renderer.onCommandMarker/onBufferChange here...
 
-      const session = await this.client.openSession(this.cols, this.rows, ENHANCED_INPUT)
+const session = await this.client.openSession(this.cols, this.rows, ENHANCED_INPUT)
 ```
 
 Note: `ShellInputTarget`'s `send` must reference the session lazily (`this.session!.send`) since it is now created before `session` is assigned; assign `this.session = session` right after open.
@@ -353,16 +378,19 @@ git commit -m "feat(input): per-session enhanced flag + readiness-gated marker-o
 **Problem:** If markers break while a marker-only prompt is active, the user faces an invisible prompt with no editor. Provide a state-independent escape: a keybinding that latches the tab to raw + hides the editor, and asks the shell to restore a visible prompt for future prompts.
 
 **Files:**
+
 - Create: `frontend/src/native-mode.ts` (+ `frontend/src/native-mode.test.ts`)
 - Modify: `frontend/src/tabs.ts` (add `private nativeMode = false`; gate `onChange`; add keybinding)
 - Modify: `internal/shellintegration/scripts/nocx.zsh`, `internal/shellintegration/scripts/nocx.bash` (add `__nocx_native_mode` restore function); bump `version` in `scripts.go`
 - Test: `frontend/src/native-mode.test.ts`, `internal/shellintegration/scripts_exec_test.go`
 
 **Interfaces:**
+
 - Produces (TS): `shouldShowEditor(owned: boolean, nativeMode: boolean): boolean` = `owned && !nativeMode`.
 - Produces (shell): `__nocx_native_mode` — removes the marker-only suppressor and sets a minimal visible fallback prompt (`PS1='%~ %# '` zsh / `PS1='\w \$ '` bash), unsets `NOCX_PROMPT_MODE`.
 
 **Acceptance Criteria:**
+
 - `shouldShowEditor` returns `false` whenever `nativeMode` is true, regardless of `owned`.
 - Invoking the escape hides the editor, focuses the grid, and writes the restore invocation to the PTY.
 - After `__nocx_native_mode` runs in a marker-only shell, the next prompt is **visible** (a hostile-clobber-style exec test asserts a non-empty visible prompt returns).
@@ -452,10 +480,12 @@ git commit -m "feat(input): native-mode escape restores a visible prompt from an
 **Note:** With Task 2 dispatching `{submit}`, `RUNNING_RAW` → `owned:false` → `onChange` hides the editor and focuses the grid, so keys already flow `renderer.onData → session.send → PTY`. This task **proves** it across interactive programs and locks it with tests; it adds fixes only if a case fails.
 
 **Files:**
+
 - Modify: `frontend/src/tabs.ts` (only if a case reveals the editor stealing input)
 - Test: `frontend/src/input-state.test.ts` (editor-visibility invariant), `e2e/enhanced-input.spec.ts` (create)
 
 **Acceptance Criteria:**
+
 - The editor is hidden in every non-owned state (`RUNNING_RAW`, `ALT_SCREEN`, `RAW`).
 - Manual matrix passes: `read`, python3 REPL, node REPL, `less`, `vim`, `htop`, a `sudo`/password prompt, `Ctrl-C`, `Ctrl-D` — typed input reaches the program; the editor never appears mid-program.
 
@@ -498,12 +528,14 @@ git commit -m "test(input): raw-routing invariant + read e2e after submit (nocx-
 **Gate:** Tasks 3 (readiness) and 4 (escape) MUST be merged first — they are the ADR-required safety controls before the flag goes on.
 
 **Files:**
+
 - Modify: `frontend/src/tabs.ts:22` (`ENHANCED_INPUT = true`)
 - Modify: `internal/shellintegration/shellintegration.go:199` (`newSessionID` fail-closed)
 - Modify: `internal/shellintegration/scripts/nocx.zsh`, `nocx.bash` (nested-session gate); bump `version`
 - Test: `internal/shellintegration/shellintegration_test.go`, `internal/shellintegration/scripts_exec_test.go`
 
 **Acceptance Criteria:**
+
 - `newSessionID` fails **closed**: on `crypto/rand` error it returns `("", false)` and `ActivationEnv(true)` then omits `NOCX_PROMPT_MODE`/`NOCX_SESSION_ID` (enhanced disabled, not a predictable id).
 - A nested integrated shell (env already carries `NOCX_SESSION_ID`) does **not** re-install the marker-only overlay — it stays visible; only the top-level session owns input.
 - Default-on: a clean local zsh/bash prompt shows the editable block; unintegrated/nested shells fail open.

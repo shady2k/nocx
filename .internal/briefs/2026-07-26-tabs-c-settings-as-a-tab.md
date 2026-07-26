@@ -66,16 +66,16 @@ Wide viewport                              Narrow viewport
 └───────────────┴──────────────────────┘   └────────────────────────┘
 ```
 
-   - Rail width `clamp(240px, 28vw, 360px)`. The breakpoint is chosen by whether **both columns
-     remain usable**, not by copying a reference screenshot's dimensions.
-   - The content column scrolls **independently** of the rail.
-   - The rail is **structurally permanent**. Only one section (`Clipboard`) is declared today, so
-     it will render exactly one item and look sparse. **That is accepted and intended.** It is not
-     dead code: it carries search, section navigation, the modified-only filter and its count, and
-     it exercises the same layout, selection, focus and scroll-synchronisation code that stays in
-     production. Four more declarations are already filed and unblocked (`nocx-8yg.5`, `.6`, `.7`,
-     copy-on-select). Do **not** make the rail appear or disappear based on how many sections
-     exist.
+- Rail width `clamp(240px, 28vw, 360px)`. The breakpoint is chosen by whether **both columns
+  remain usable**, not by copying a reference screenshot's dimensions.
+- The content column scrolls **independently** of the rail.
+- The rail is **structurally permanent**. Only one section (`Clipboard`) is declared today, so
+  it will render exactly one item and look sparse. **That is accepted and intended.** It is not
+  dead code: it carries search, section navigation, the modified-only filter and its count, and
+  it exercises the same layout, selection, focus and scroll-synchronisation code that stays in
+  production. Four more declarations are already filed and unblocked (`nocx-8yg.5`, `.6`, `.7`,
+  copy-on-select). Do **not** make the rail appear or disappear based on how many sections
+  exist.
 
 4. **Deep link.** A route resolving to the Settings surface plus a setting key must: open or focus
    the tab, clear a filter that would hide the target row, scroll it into view, focus its control,

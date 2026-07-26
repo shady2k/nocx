@@ -13,7 +13,7 @@ tracker. Work in `/home/dev/orca/workspaces/nocx/pr-11-boundary`.
 The same authenticated renderer that can call `open` can also create profiles. So it can
 create a profile pointing at a host **it controls**, attach a victim credential to it, and
 have the backend dutifully submit that password to the attacker's server. T4 (landed,
-`fe6e614`) stopped the password being *returned* to the renderer — this is the other
+`fe6e614`) stopped the password being _returned_ to the renderer — this is the other
 direction, and T4 did not address it. If anything T4 makes it sharper: the renderer now
 names a credential by ID and the backend resolves it, so the renderer never needs to know
 the secret in order to spend it.

@@ -19,6 +19,7 @@ still costs one new implementation behind it.
 The original decision text below is preserved for context. The parts it
 describes as future possibilities (keeping ghostty-web and wterm switchable)
 are no longer accurate — read the amendment above as the current state.
+
 ## Context
 
 The architecture named **ghostty-web** as the VT frontend before anything was

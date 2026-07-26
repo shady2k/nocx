@@ -19,12 +19,12 @@ Consequence: `.tab-add` exists in the DOM but sits inside a hidden element, so P
 resolves it and waits for visibility until it times out. That is why exactly four e2e tests
 fail on this branch and pass on `main`:
 
-| Project | Test |
-|---|---|
-| chromium | `e2e/activity.spec.ts:10` |
-| chromium | `e2e/tabs.spec.ts:8` |
-| webkit | `e2e/tabs.spec.ts:8` |
-| webkit | `e2e/activity-bell.spec.ts:12` |
+| Project  | Test                           |
+| -------- | ------------------------------ |
+| chromium | `e2e/activity.spec.ts:10`      |
+| chromium | `e2e/tabs.spec.ts:8`           |
+| webkit   | `e2e/tabs.spec.ts:8`           |
+| webkit   | `e2e/activity-bell.spec.ts:12` |
 
 The owner has decided the redesign is worth doing, but as a **setting** — horizontal stays
 the default, vertical Warp-style becomes an option — and it belongs in its own epic

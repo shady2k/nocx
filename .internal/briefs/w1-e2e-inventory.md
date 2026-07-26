@@ -15,9 +15,9 @@ The `e2e` job runs Playwright on macOS against a real `wails dev` app.
 Two CI runs were just triggered manually (`workflow_dispatch`) so we have a clean
 comparison of the same suite on both branches:
 
-| run id | ref | e2e result |
-|---|---|---|
-| `30162745654` | `main` | 14 failed, 16 passed, 2 skipped |
+| run id        | ref              | e2e result                      |
+| ------------- | ---------------- | ------------------------------- |
+| `30162745654` | `main`           | 14 failed, 16 passed, 2 skipped |
 | `30162351263` | `pr-11-boundary` | 19 failed, 11 passed, 2 skipped |
 
 So **14 failures pre-date this branch** and **the branch appears to break ~5 more**.

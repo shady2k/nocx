@@ -75,15 +75,15 @@ ok  github.com/shady2k/nocx/internal/app         1.800s
 
 Specific auth tests and their pass/fail:
 
-| Test | Status |
-|---|---|
-| `TestUpgradeRejectedWithoutToken` | PASS |
-| `TestUpgradeRejectedWithWrongToken` | PASS |
-| `TestUpgradeSucceedsWithCorrectToken` | PASS |
-| `TestTokenIsFreshPerLaunch` | PASS |
-| `TestStartFailsClosedOnEntropyFailure` | PASS |
-| `TestUpgradeRejectedForHostileOrigin` | PASS |
-| `TestUpgradeRejectedForWrongHost` | PASS |
+| Test                                   | Status |
+| -------------------------------------- | ------ |
+| `TestUpgradeRejectedWithoutToken`      | PASS   |
+| `TestUpgradeRejectedWithWrongToken`    | PASS   |
+| `TestUpgradeSucceedsWithCorrectToken`  | PASS   |
+| `TestTokenIsFreshPerLaunch`            | PASS   |
+| `TestStartFailsClosedOnEntropyFailure` | PASS   |
+| `TestUpgradeRejectedForHostileOrigin`  | PASS   |
+| `TestUpgradeRejectedForWrongHost`      | PASS   |
 
 ## How the Host test was fixed
 

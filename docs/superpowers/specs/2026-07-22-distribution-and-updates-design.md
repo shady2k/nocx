@@ -5,7 +5,7 @@ Epic: `nocx-a75`
 Status: revised after three adversarial review rounds; approved for planning
 
 Revision note: this spec has been through three adversarial reviews. Round 1 found seven
-defects that would have shipped broken code. Round 2 found that several of the *fixes* were
+defects that would have shipped broken code. Round 2 found that several of the _fixes_ were
 themselves wrong — most importantly that the rollback protocol inferred transaction state
 from a filename, and that the health signal it depended on is not observable in this
 codebase. Round 3 attacked §7 as a crash-consistency protocol and broke the phase machine in
@@ -37,9 +37,9 @@ This is not a preference to route around; it removes options that are usually as
 
 - Notarization requires a Developer ID, which requires enrolment in the Apple Developer
   Program. An unenrolled team is refused with `Team is not enrolled in the Apple Developer
-  Program`.
+Program`.
 - No third-party service can sign in its own name. SignPath — free for open source, used by
-  Tabby for Windows — *stores and applies your* certificate; it does not issue one.
+  Tabby for Windows — _stores and applies your_ certificate; it does not issue one.
 - Homebrew has closed the workaround. `--no-quarantine` has been removed from `brew`
   (Homebrew/brew#20755, shipped in #20973), and from **1 September 2026** every cask must
   pass Gatekeeper checks. The official tap already forbids casks that "require System
@@ -67,9 +67,9 @@ Consequences accepted:
 ## 3. Decisions
 
 **D1 — Cross-platform (macOS + Linux now, Windows later), behind a `Platform` seam.**
-*Reversed 2026-07-23 ([ADR-0007](../../decisions/0007-cross-platform-auto-update.md)); the
+_Reversed 2026-07-23 ([ADR-0007](../../decisions/0007-cross-platform-auto-update.md)); the
 round-1 deferral of Linux is undone now that the maintainer runs nocx on Linux and needs
-updates there.* The updater is one platform-agnostic core (manifest fetch + ed25519 verify,
+updates there._ The updater is one platform-agnostic core (manifest fetch + ed25519 verify,
 semver, download, and the §7 crash-consistency transaction — journal by device+inode, `flock`,
 reconcile, health, auto-rollback) plus a thin `Platform` seam with per-OS implementations:
 **darwin** exactly as specified throughout §7 (`.app`, `ditto`, `codesign`, `lipo`,
@@ -88,8 +88,8 @@ Windows/Linux are Phase 3") **is** amended for Linux (Windows stays Phase 3) —
 The `.zip` is the updater payload. The `.dmg` is the human install path: it lands the app at a
 stable `/Applications/nocx.app` and is the familiar gesture.
 
-*Revised after round 1: the first draft justified the DMG by App Translocation and overstated
-it.* Accurate version: a quarantined app that was not moved by Finder runs from a randomised
+_Revised after round 1: the first draft justified the DMG by App Translocation and overstated
+it._ Accurate version: a quarantined app that was not moved by Finder runs from a randomised
 read-only path and cannot replace itself. But since this app is unsigned, the user must run
 `xattr -dr com.apple.quarantine` before it will launch at all, and that removes both the
 Gatekeeper refusal and translocation. So the DMG is the clearer path, not a technical
@@ -100,11 +100,11 @@ Built with plain `hdiutil` over a staging folder containing the `.app` and an `/
 symlink. No `create-dmg`, no background artwork.
 
 **D3 — Developer ID signing and notarization are out of scope.**
-*Revised after round 1: the first draft kept a dormant "sign if secrets exist" branch,
-modelled on Tabby's workflow.* That was speculative work the governing principle forbids, and
+_Revised after round 1: the first draft kept a dormant "sign if secrets exist" branch,
+modelled on Tabby's workflow._ That was speculative work the governing principle forbids, and
 a half-truth besides: real Developer ID distribution needs bundle signing order, hardened
-runtime, entitlements, notarytool submission and stapling — not a secrets toggle. *Sharpened
-after round 2:* what is out of scope is **distribution signing**, not all signing. Wails'
+runtime, entitlements, notarytool submission and stapling — not a secrets toggle. _Sharpened
+after round 2:_ what is out of scope is **distribution signing**, not all signing. Wails'
 ad-hoc signature (§2) is existing packaging behaviour that this work preserves and verifies.
 
 **D4 — Update integrity is ours, not Apple's.**
@@ -132,8 +132,8 @@ in `main.go` → `frontend/src/main.ts`). No Wails event channel is introduced. 
 decides when to ask — on start and every 24 h, because a window that lives for weeks makes "on
 start only" mean "never".
 
-*Revised after round 1: the first draft had `ApplyUpdate` take the `Release` returned by
-`CheckForUpdate`*, which would have round-tripped security-critical data (URL, digest, version)
+_Revised after round 1: the first draft had `ApplyUpdate` take the `Release` returned by
+`CheckForUpdate`_, which would have round-tripped security-critical data (URL, digest, version)
 through JavaScript for the backend to trust on the way back. The verified release now lives in
 backend state; `ApplyUpdate()` takes no arguments.
 
@@ -152,11 +152,11 @@ Defaults are `dev` / `none` / `unknown`. `Version` holds the bare number (`0.2.0
 manifest's `version` field so the two never need translating.
 
 **The bundle plist is a second version and must not be forgotten.** Wails writes
-`info.productVersion` from `wails.json` into *both* `CFBundleShortVersionString` and
+`info.productVersion` from `wails.json` into _both_ `CFBundleShortVersionString` and
 `CFBundleVersion`. There is no build flag for it, so patching the file before the build is the
 available mechanism.
 
-*Corrected after round 2:* `wails.json` currently has **no `info` object at all** — `1.0.0` is
+_Corrected after round 2:_ `wails.json` currently has **no `info` object at all** — `1.0.0` is
 Wails' default, not a value sitting in the file. The patch step must therefore create the
 object, not edit a key:
 
@@ -177,12 +177,12 @@ hand-rolled version parsing. It requires a `v` prefix, so one helper normalises 
 
 ## 5. Release pipeline
 
-*Revised after round 1: the first draft had `release.yml` depend on `ci.yml` via `needs`, which
+_Revised after round 1: the first draft had `release.yml` depend on `ci.yml` via `needs`, which
 only addresses jobs within one workflow — the two would have run independently and a release
-could publish while the quality gates were failing.*
+could publish while the quality gates were failing._
 
 `ci.yml` gains a `workflow_call` trigger and **loses its `push: tags: ['v*']` trigger**.
-*Added after round 2:* keeping both would run the whole suite twice for every release — once
+_Added after round 2:_ keeping both would run the whole suite twice for every release — once
 standalone, once through the caller — for no added protection. Release branches and
 `workflow_dispatch` keep their existing triggers.
 
@@ -198,10 +198,11 @@ version must match what lands in `wails.json` and in the manifest.
 **`workflow_dispatch` is dry-run only.** A manual run has no tag, so it cannot produce the
 `/releases/download/v<version>/…` URLs the manifest asserts. It performs every build, sign and
 verify step, uploads the results as workflow artefacts, and creates no release. Real releases
-come from tags, and only from tags. *The first draft proposed a draft release for this, which
-also does not work — drafts are excluded from `releases/latest`.*
+come from tags, and only from tags. _The first draft proposed a draft release for this, which
+also does not work — drafts are excluded from `releases/latest`._
 
 **Build (`macos-15` — an explicit image, not the moving `macos-latest` alias)**
+
 1. patch `wails.json` per §4
 2. `wails build -platform darwin/universal -ldflags "<version flags>"` — verified to work in
    v2.13.0, which builds both slices and joins them with `lipo`
@@ -213,7 +214,7 @@ also does not work — drafts are excluded from `releases/latest`.*
 5. `.dmg` via staging folder + `hdiutil create -format UDZO`
 6. `.zip` via `ditto -c -k --keepParent --noqtn` — `ditto`, not `zip`, because it preserves
    bundle symlinks and metadata; `--noqtn` so no quarantine attribute can ride along.
-   *`--sequesterRsrc` was dropped after round 2:* it is valid and round-trips correctly, but
+   _`--sequesterRsrc` was dropped after round 2:_ it is valid and round-trips correctly, but
    nothing in this bundle is shown to need it.
 
 **Publish (separate job)**
@@ -250,7 +251,7 @@ updater needs no API call and hits no rate limit.
 }
 ```
 
-**Artefact matching.** *Revised after round 1: this was a real bug.* The runtime reports
+**Artefact matching.** _Revised after round 1: this was a real bug._ The runtime reports
 `darwin/arm64` or `darwin/amd64`; the manifest declares `darwin/universal`. Exact matching would
 never find an artefact. Matching is therefore explicit: for `os == "darwin"`, an artefact with
 `arch == "universal"` matches any architecture; an exact architecture match wins if both are
@@ -263,8 +264,8 @@ Verification happens before the JSON is parsed.
 verifies against any of them, so a client that has upgraded past a key-introducing release keeps
 working across a rotation.
 
-*Round 2 correctly showed this does not make rotation lossless, and the limit is stated rather
-than engineered around:* a binary that only ever knew key A cannot authenticate a manifest
+_Round 2 correctly showed this does not make rotation lossless, and the limit is stated rather
+than engineered around:_ a binary that only ever knew key A cannot authenticate a manifest
 signed solely by key B, and with a `latest`-only endpoint it can never be handed an intermediate
 release. Retiring a key therefore means **clients older than the release that introduced its
 successor must reinstall by hand**. That is acceptable here and belongs in ADR-0003. Losing the
@@ -300,7 +301,7 @@ assumes "admin" is sufficient and never attempts privilege escalation.
 
 ### 7.1 The filesystem is the truth; the journal records intent
 
-*This is the round-3 redesign and the most important thing in §7.* The previous revision had a
+_This is the round-3 redesign and the most important thing in §7._ The previous revision had a
 `prepared` / `swapped` / `healthy` phase machine, and round 3 broke it in five places — every
 one of them the same bug: a crash between a filesystem mutation and the journal write that was
 supposed to describe it left the record lying. Ordering the two more carefully only moves the
@@ -309,21 +310,21 @@ window; it cannot close it.
 So the record no longer claims what happened. It records **what this transaction intends and
 which objects it involves**, identified by device+inode rather than by name or version:
 
-| Field | Purpose |
-|---|---|
-| `txID` | opaque, names the extraction directory |
-| `installPath` | where the canonical bundle lives |
+| Field                        | Purpose                                              |
+| ---------------------------- | ---------------------------------------------------- |
+| `txID`                       | opaque, names the extraction directory               |
+| `installPath`                | where the canonical bundle lives                     |
 | `oldBundleID`, `newBundleID` | device+inode of the previous and replacement bundles |
-| `fromVersion`, `toVersion` | reporting and UI only — never used to decide state |
-| `artifactSHA256` | what was verified |
-| `launchAttempts` | see §7.5 |
+| `fromVersion`, `toVersion`   | reporting and UI only — never used to decide state   |
+| `artifactSHA256`             | what was verified                                    |
+| `launchAttempts`             | see §7.5                                             |
 
 Reconciliation **observes** which identity currently sits at which path and derives the state
 from that. Versions cannot do this job: an equal-version re-release, a reinstall, and a
 downgrade all produce identical version strings for different bundles.
 
-Recorded identities also replace string path comparison everywhere. *Round 3 was right that
-comparing paths as strings is unsound*: symlinks and the `/Applications` versus
+Recorded identities also replace string path comparison everywhere. _Round 3 was right that
+comparing paths as strings is unsound_: symlinks and the `/Applications` versus
 `/System/Volumes/Data/Applications` alias give different strings for the same directory, while a
 copy the user made gives the same version at a different inode.
 
@@ -331,15 +332,15 @@ copy the user made gives the same version at a different inode.
 
 All inside the install directory, so every rename is same-volume:
 
-| Path | Role |
-|---|---|
-| `<install-dir>/.nocx-update-<txID>/` | download + extraction directory |
-| `<install-dir>/.nocx-update-<txID>/nocx.app` | staged bundle as `--keepParent` produces it |
-| `<install-dir>/.nocx-swap.app` | peer of the atomic exchange; holds the *previous* bundle after it |
-| `<install-dir>/.nocx-backup.app` | retained known-good bundle |
+| Path                                         | Role                                                              |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| `<install-dir>/.nocx-update-<txID>/`         | download + extraction directory                                   |
+| `<install-dir>/.nocx-update-<txID>/nocx.app` | staged bundle as `--keepParent` produces it                       |
+| `<install-dir>/.nocx-swap.app`               | peer of the atomic exchange; holds the _previous_ bundle after it |
+| `<install-dir>/.nocx-backup.app`             | retained known-good bundle                                        |
 
-*Round 3 found version-derived names collide across a reinstall, a downgrade, or a same-version
-rebuild.* Fixed names plus recorded identities avoid that: there is at most one transaction at a
+_Round 3 found version-derived names collide across a reinstall, a downgrade, or a same-version
+rebuild._ Fixed names plus recorded identities avoid that: there is at most one transaction at a
 time (§7.6), and nothing is deleted or reused without checking its identity against the record.
 
 ### 7.3 Reconciliation
@@ -349,9 +350,9 @@ identities at `installPath`, `.nocx-swap.app` and `.nocx-backup.app`, and acts:
 
 - **No record, no managed debris** — nothing in flight.
 - **No record, but managed debris exists** — refuse with an actionable message naming what was
-  found. *Round 3: deleting the config directory after an exchange produces exactly this, and
+  found. _Round 3: deleting the config directory after an exchange produces exactly this, and
   `.nocx-swap.app` may then hold the only rollback copy. Automatic interpretation would be
-  guessing.*
+  guessing._
 - **Record present, `installPath` holds `oldBundleID`** — the exchange did not happen, whether or
   not `newBundleID` was ever filled in. Everything else this transaction created is therefore
   debris: remove `.nocx-swap.app` and the extraction directory if present, clear the record. Both
@@ -375,45 +376,45 @@ Reconciliation is idempotent: running it twice changes nothing the first run did
 4. write the record, including `oldBundleID` observed from the currently installed bundle —
    before anything touches the disk, so every file this transaction creates is explained by it
    and the "did the exchange happen?" question is answerable from the very first moment.
-   `newBundleID` is the only field that cannot be known yet; it is filled in at step 11. *An earlier draft wrote it after extraction, which meant a crash during
+   `newBundleID` is the only field that cannot be known yet; it is filled in at step 11. _An earlier draft wrote it after extraction, which meant a crash during
    the download left an extraction directory no reconciliation could classify, blocking every
-   future update as unexplained debris.* `fsync` the record and then its containing directory:
+   future update as unexplained debris._ `fsync` the record and then its containing directory:
    a rename is not durable until the parent directory is synced.
 5. create the extraction directory
 6. download the artefact into it, with bounded timeouts and response-size limits
 7. verify SHA-256 and the declared size **before** extracting
 8. **preflight the archive before invoking `ditto`**: read the zip central directory with
    `archive/zip` and reject absolute paths, `..` traversal, link entries pointing outside the
-   tree, more than one `.app` root, or an implausible expanded size. *Round 2 was right that
+   tree, more than one `.app` root, or an implausible expanded size. _Round 2 was right that
    "extract, then assert containment" is useless — writes performed during extraction cannot be
-   un-performed.* `archive/zip` cannot *restore* a bundle, but inspecting names and types is
+   un-performed._ `archive/zip` cannot _restore_ a bundle, but inspecting names and types is
    exactly what it is good at.
-9. extract with `/usr/bin/ditto -x -k --noqtn`. *The first draft said `archive/zip`, which
+9. extract with `/usr/bin/ditto -x -k --noqtn`. _The first draft said `archive/zip`, which
    recreates nothing on its own and would have produced regular non-executable files with no
-   symlinks.*
+   symlinks._
 10. verify the extracted tree: exactly one `.app` root, inside the extraction directory, and
     `codesign --verify --deep --strict` passes
 11. rename the staged bundle to `.nocx-swap.app`; record `newBundleID` from it, and sync
 12. **re-verify identity immediately before the exchange** — the installed bundle is still
-    `oldBundleID`. *Round 2 caught that step 3 sits before a download that may take minutes, so
+    `oldBundleID`. _Round 2 caught that step 3 sits before a download that may take minutes, so
     calling it "immediately before" was internally false. The lock covers other nocx processes;
-    this covers everything that does not honour it.*
+    this covers everything that does not honour it._
 13. exchange atomically with `unix.RenameatxNp(…, unix.RENAME_SWAP)` (`golang.org/x/sys`, already
     an indirect dependency; this promotes it to direct). Verified: both paths must exist, APFS
     supports atomic exchange of non-empty directories so an `.app` is valid, and the running
-    process keeps its mapped image and open descriptors. *The first draft moved the old bundle
+    process keeps its mapped image and open descriptors. _The first draft moved the old bundle
     aside and then moved the new one in, leaving a window with nothing at the install path — a
-    crash there left the user with no application and no code able to recover.*
+    crash there left the user with no application and no code able to recover._
 14. report success. The frontend offers a restart (D5).
 
 No journal write follows the exchange, and none is needed: after step 13 the identities on disk
-say unambiguously that it happened. *That is precisely the gap round 3 identified in the previous
+say unambiguously that it happened. _That is precisely the gap round 3 identified in the previous
 revision, where the record still said `prepared` until a subsequent write that a crash could
-lose.*
+lose._
 
 ### 7.5 Health check and finalisation
 
-*Round 3 confirmed by reading the code that the previous signal does not work.* `TabManager`'s
+_Round 3 confirmed by reading the code that the previous signal does not work._ `TabManager`'s
 constructor calls `newTab()` without awaiting it (`frontend/src/tabs.ts:443`), and `Tab.start()`
 catches its own failure and renders a `.pane-error` notice into the pane
 (`frontend/src/tabs.ts:356`). A constructed `TabManager` is therefore fully compatible with a
@@ -437,16 +438,16 @@ Finalisation requires **all** of:
 Then, idempotently: delete `.nocx-backup.app` if it exists and is not `newBundleID`, rename
 `.nocx-swap.app` to `.nocx-backup.app`, and delete the record. Each step checks whether it has
 already been done, so a crash anywhere in this sequence is resolved by simply running it again.
-*Round 3 found the previous version could crash between the rename and a `healthy` write and
+_Round 3 found the previous version could crash between the rename and a `healthy` write and
 then retry the rename forever; there is no `healthy` phase now, and the record's absence is what
-marks completion.*
+marks completion._
 
 `ReportHealthy` takes the lock, is idempotent, and is harmless when no record exists.
 
-**Escape from an unconfirmed update.** *Round 3's most user-visible finding: a persistent JS
+**Escape from an unconfirmed update.** _Round 3's most user-visible finding: a persistent JS
 exception, a broken asset bundle, or a user who quits immediately would leave the app in
 `pendingRestart` forever, with checks suppressed and the documented rollback naming a file that
-does not exist yet.* `Reconcile` increments `launchAttempts` early in startup, before anything
+does not exist yet._ `Reconcile` increments `launchAttempts` early in startup, before anything
 else can fail. On the third launch that reaches Go and never confirms health, the updater rolls
 back automatically: exchange `.nocx-swap.app` back, delete the record, and log loudly. The user
 gets their working version back without touching a terminal.
@@ -454,8 +455,8 @@ gets their working version back without touching a terminal.
 This cannot help if the new build fails before Go runs at all — a dyld failure leaves nothing to
 count. That case needs the manual route, so it is documented rather than pretended away.
 
-**Manual rollback.** *Round 3 was right that the previous instructions named
-`.nocx-<fromVersion>.app`, which does not exist until finalisation succeeds* — exactly the state
+**Manual rollback.** _Round 3 was right that the previous instructions named
+`.nocx-<fromVersion>.app`, which does not exist until finalisation succeeds_ — exactly the state
 a user recovering from a bad update is not in. The README documents both:
 
 ```
@@ -473,17 +474,17 @@ rm -f ~/Library/Application\ Support/nocx/update-state.json
 
 ### 7.6 Locking
 
-*Round 3 rejected the previous "a lock file", correctly: an `O_EXCL` sentinel survives SIGKILL
+_Round 3 rejected the previous "a lock file", correctly: an `O_EXCL` sentinel survives SIGKILL
 and blocks updates forever, while deleting a held sentinel lets a second process take a lock on
-a new inode.*
+a new inode._
 
 The lock is an advisory `flock` held on an open descriptor for the lifetime of the operation, so
 the kernel releases it when the process dies however it dies. There is no state to clean up and
 no file for the user to find.
 
 `Reconcile`, `Apply` and `ReportHealthy` are public wrappers that acquire the lock around a
-private `reconcileLocked` and friends — *round 3 caught that a public `Reconcile()` taking the
-lock would deadlock against `Apply()` calling it while already holding it.*
+private `reconcileLocked` and friends — _round 3 caught that a public `Reconcile()` taking the
+lock would deadlock against `Apply()` calling it while already holding it._
 
 Startup uses a **bounded try-lock**: if another process is mid-download, startup skips
 reconciliation for this launch rather than blocking the terminal behind somebody else's network
@@ -499,7 +500,7 @@ transfer. `Apply` reports a legible "an update is already in progress" instead o
   path → name what was found and what to do (§7.3).
 
 **Replacing a running bundle.** The process holds its own mapped image, so the exchange does not
-disturb live PTYs. This is asserted as a tested property of *this* app, not a general macOS
+disturb live PTYs. This is asserted as a tested property of _this_ app, not a general macOS
 guarantee: nothing prevents Wails from lazily reading a bundle resource by path after the swap,
 so §9 tests continued terminal use across an exchange. If that ever fails, the fallback is a
 post-exit helper.
@@ -514,9 +515,9 @@ time persisted so a restart does not re-check immediately, and calls `ReportHeal
 initial tab's renderer has mounted and its PTY session has opened (§7.5) — not merely once
 `TabManager` exists.
 
-**Automatic-check failures are silent and logged.** *The first draft surfaced any error in the
+**Automatic-check failures are silent and logged.** _The first draft surfaced any error in the
 UI, which turns airplane mode, a DNS hiccup or a GitHub outage into a visible error on every
-start.* Errors are shown only for a check or an apply the user initiated.
+start._ Errors are shown only for a check or an apply the user initiated.
 
 When a release is found, a small notice appears in the tab-bar row: version, a link to the notes,
 and an action. Choosing it calls `ApplyUpdate()` and shows a **busy state** — not progress: a
@@ -535,17 +536,18 @@ TDD, as the repo requires. No unit test touches the network.
 `internal/version` — link-time defaults.
 
 `internal/update`, against `httptest` and `t.TempDir()`:
+
 - semver comparison; artefact matching (`universal` from both runtimes; no-match)
 - manifest verification: valid; tampered body; key outside the keyring; valid signature from a
-  *second* key in the keyring; malformed base64. Fixture keys generated in the test.
+  _second_ key in the keyring; malformed base64. Fixture keys generated in the test.
 - checksum and size mismatch abort before anything is touched
 - oversized manifest and oversized artefact are refused
 - archive preflight rejects absolute paths, `..`, escaping links, two `.app` roots
 - `dev` version short-circuits `Check`; translocated path detection
 
 **Crash consistency is the load-bearing test surface**, so it is tested by fault injection rather
-than by asserting on phases: *round 3 broke the previous protocol precisely where "test each
-phase" would not have looked.* A fault is injected after **every** numbered step of §7.4, and
+than by asserting on phases: _round 3 broke the previous protocol precisely where "test each
+phase" would not have looked._ A fault is injected after **every** numbered step of §7.4, and
 reconciliation must reach a correct, idempotent outcome from each — with the identity-based
 assertions being the point:
 
@@ -566,9 +568,9 @@ assertions being the point:
 1. **Payload round trip** — a genuinely built `.app` through `ditto -c -k` → `ditto -x -k`,
    asserting the executable bit, symlink targets, `lipo -archs` still showing both slices,
    `codesign --verify --deep --strict` still passing, and that the extracted bundle launches.
-2. **Exchange under load** — copy a built `.app` into a fresh temporary parent, launch *that
-   copy*, open a PTY, perform the `RENAME_SWAP`, and verify the session keeps working. *Round 2
-   was right that this cannot run through the existing Playwright harness*:
+2. **Exchange under load** — copy a built `.app` into a fresh temporary parent, launch _that
+   copy_, open a PTY, perform the `RENAME_SWAP`, and verify the session keeps working. _Round 2
+   was right that this cannot run through the existing Playwright harness_:
    `playwright.config.ts` starts `wails dev`, so swapping that bundle would be destructive to the
    checkout and would not exercise a release artefact anyway.
 
@@ -585,7 +587,7 @@ the update notice renders from state, including `pendingRestart`; bound calls ar
   `workflow_call` while losing its tag trigger.
 - **ADR-0003 "Distribution without a Developer ID"**, following `docs/decisions/0001` and `0002`:
   why there is no publisher signature, that Homebrew closed this route on 1 September 2026, the
-  D4 threat model *including update freezing and CI compromise*, and the key-rotation limit and
+  D4 threat model _including update freezing and CI compromise_, and the key-rotation limit and
   key-loss consequence from §6.
 - `README.md` — install instructions, the quarantine one-liner against `/Applications/nocx.app`,
   and both rollback procedures from §7.5. Plus the Linux (AppImage) install + update notes.
@@ -601,16 +603,16 @@ Windows/Linux are Phase 3" becomes "macOS + Linux now; Windows is Phase 3".
 Staged deliberately. An updater defect can remove the application itself, so the artefact path
 ships and gets used by hand before anything replaces a bundle automatically.
 
-| # | Bead | Work |
-|---|------|------|
-| 1 | `nocx-vu9` | Bump actions to Node 24 majors. Formally blocks a75.1; ten minutes. |
-| 2 | `nocx-hj1` | Resolve the half-tracked `frontend/dist` before it churns in release builds. |
-| 3 | `nocx-a75.1` | `internal/version` incl. the plist version, `ci.yml` → `workflow_call`, `release.yml`, dmg + zip, signed manifest, dry run. Ends with a downloadable build installed by hand on another Mac. |
-| 4 | new | Payload round trip (§9.1) and manifest verification against the keyring — the two load-bearing mechanisms, landed before anything swaps a bundle. |
-| 5 | new | Frontend readiness signal: `Tab` reports started/failed, `TabManager` exposes the promise. Independently useful, and a prerequisite for health. |
-| 6 | `nocx-a75.3` | `internal/update`: record, flock, preflight, exchange, reconciliation, finalisation, auto-rollback, refusals, bound methods, UI notice, README. |
-| 7 | `nocx-a75.2` | Close as out of scope per D3, with the reason recorded. |
-| 8 | `nocx-mbu` | Linux distribution — now **in scope** (D1 reversed, ADR-0007): AppImage build in CI (linuxdeploy + GTK plugin), the `linux` `Platform` impl, and the Linux entries in the manifest. Items 4 and 6 gain their Linux half behind the seam. |
+| #   | Bead         | Work                                                                                                                                                                                                                                     |
+| --- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `nocx-vu9`   | Bump actions to Node 24 majors. Formally blocks a75.1; ten minutes.                                                                                                                                                                      |
+| 2   | `nocx-hj1`   | Resolve the half-tracked `frontend/dist` before it churns in release builds.                                                                                                                                                             |
+| 3   | `nocx-a75.1` | `internal/version` incl. the plist version, `ci.yml` → `workflow_call`, `release.yml`, dmg + zip, signed manifest, dry run. Ends with a downloadable build installed by hand on another Mac.                                             |
+| 4   | new          | Payload round trip (§9.1) and manifest verification against the keyring — the two load-bearing mechanisms, landed before anything swaps a bundle.                                                                                        |
+| 5   | new          | Frontend readiness signal: `Tab` reports started/failed, `TabManager` exposes the promise. Independently useful, and a prerequisite for health.                                                                                          |
+| 6   | `nocx-a75.3` | `internal/update`: record, flock, preflight, exchange, reconciliation, finalisation, auto-rollback, refusals, bound methods, UI notice, README.                                                                                          |
+| 7   | `nocx-a75.2` | Close as out of scope per D3, with the reason recorded.                                                                                                                                                                                  |
+| 8   | `nocx-mbu`   | Linux distribution — now **in scope** (D1 reversed, ADR-0007): AppImage build in CI (linuxdeploy + GTK plugin), the `linux` `Platform` impl, and the Linux entries in the manifest. Items 4 and 6 gain their Linux half behind the seam. |
 
 Doc and ADR changes ride inside items 3 and 6.
 

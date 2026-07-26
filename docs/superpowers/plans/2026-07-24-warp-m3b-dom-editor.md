@@ -21,14 +21,17 @@
 ### Task 1: `A → B` ownership gate in the state machine
 
 **Files:**
+
 - Modify: `frontend/src/input-state.ts`
 - Test: `frontend/src/input-state.test.ts`
 
 **Interfaces:**
+
 - Produces: `Machine` gains `owned: boolean`. `owned` is true ONLY after `A` then `B` (in that order) — `A` alone leaves `owned:false`. `C`/`D`/`submit`/`buffer`/`reset`/`exit` clear `owned`. `owned` is the sole authorization for DOM keyboard capture (ADR-0006 §4).
 - `initialMachine()` → `{state:'RAW', trusted:false, owned:false}`.
 
 **Acceptance Criteria:**
+
 - `A` → `owned:false` (state `PROMPT_READY`). `A` then `B` → `owned:true`.
 - `B` without a preceding `A` (from non-`PROMPT_READY`) → `owned:false`.
 - `C`/`submit`/`buffer:'alternate'`/`reset`/`exit` all set `owned:false`.
@@ -49,8 +52,10 @@ describe('A→B ownership gate', () => {
     expect(reduce(initialMachine(), { type: 'marker', kind: 'B' }).owned).toBe(false)
   })
   it('C, submit, alt-buffer, reset clear ownership', () => {
-    const owned = [{ type:'marker', kind:'A' }, { type:'marker', kind:'B' }]
-      .reduce(reduce, initialMachine())
+    const owned = [
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'B' },
+    ].reduce(reduce, initialMachine())
     expect(owned.owned).toBe(true)
     expect(reduce(owned, { type: 'marker', kind: 'C' }).owned).toBe(false)
     expect(reduce(owned, { type: 'submit' }).owned).toBe(false)
@@ -69,7 +74,7 @@ describe('A→B ownership gate', () => {
   - marker `B`: owned only when arriving from a real prompt-start: `owned: m.state === 'PROMPT_READY'` (i.e. an `A` preceded it); keep `trusted` logic; state `PROMPT_READY`.
   - marker `C`: `owned:false` (command started).
   - marker `D`: `owned:false` (add to the returned object; the orphan-`D` branch returns `m` unchanged, which already has `owned:false` in practice — keep it `m`).
-  Update every returned object in `reduce` to include `owned` (TypeScript strict will flag any missing).
+    Update every returned object in `reduce` to include `owned` (TypeScript strict will flag any missing).
 
 - [ ] **Step 4: Run to verify pass** — `npm run test -- input-state.test.ts` PASS (all prior cases too — update earlier `toEqual({state,trusted})` assertions to include `owned` where they now fail).
 
@@ -85,19 +90,23 @@ git commit -m "feat(input): A→B ownership gate for DOM keyboard capture (nocx-
 ### Task 2: `CommandEditor` DOM surface + atomic-handoff submit
 
 **Files:**
+
 - Create: `frontend/src/editor.ts`
 - Test: `frontend/src/editor.test.ts`
 - Modify: `frontend/src/style.css` (editor chrome)
 
 **Interfaces:**
+
 - Produces:
   ```ts
-  export interface EditorActions { submit: (doc: string) => void }
+  export interface EditorActions {
+    submit: (doc: string) => void
+  }
   export class CommandEditor {
     constructor(actions: EditorActions)
     mount(container: HTMLElement): void
-    show(): void          // display + focus the textarea
-    hide(): void          // clear focus + display:none
+    show(): void // display + focus the textarea
+    hide(): void // clear focus + display:none
     get isVisible(): boolean
     dispose(): void
   }
@@ -105,6 +114,7 @@ git commit -m "feat(input): A→B ownership gate for DOM keyboard capture (nocx-
   Behaviour: Enter (no Shift) → capture the value, **clear + hide the editor FIRST** (atomic handoff, ADR-0004 §2), then call `actions.submit(doc)`. Shift+Enter inserts a newline (native textarea). The editor holds only text — no PTY/session/clipboard knowledge.
 
 **Acceptance Criteria:**
+
 - Pressing Enter with `echo hi` calls `actions.submit('echo hi')` exactly once, and the editor is hidden and cleared **before** submit is called (assert order).
 - Shift+Enter does NOT submit (inserts newline).
 - `hide()`/`show()` toggle `isVisible`; a fresh editor is not visible.
@@ -127,12 +137,20 @@ const setup = () => {
   return { ed, ta, submit, order }
 }
 const enter = (ta: HTMLTextAreaElement, shift = false) =>
-  ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: shift, bubbles: true, cancelable: true }))
+  ta.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'Enter',
+      shiftKey: shift,
+      bubbles: true,
+      cancelable: true,
+    }),
+  )
 
 describe('CommandEditor', () => {
   it('Enter hides+clears before submit (atomic handoff)', () => {
     const { ed, ta, submit, order } = setup()
-    ed.show(); ta.value = 'echo hi'
+    ed.show()
+    ta.value = 'echo hi'
     // record hide via a spy on visibility at submit time
     submit.mockImplementation((doc: string) => order.push(`visible@submit:${ed.isVisible}|${doc}`))
     enter(ta)
@@ -142,15 +160,18 @@ describe('CommandEditor', () => {
   })
   it('Shift+Enter does not submit', () => {
     const { ed, ta, submit } = setup()
-    ed.show(); ta.value = 'x'
+    ed.show()
+    ta.value = 'x'
     enter(ta, true)
     expect(submit).not.toHaveBeenCalled()
   })
   it('starts hidden; show/hide toggle isVisible', () => {
     const { ed } = setup()
     expect(ed.isVisible).toBe(false)
-    ed.show(); expect(ed.isVisible).toBe(true)
-    ed.hide(); expect(ed.isVisible).toBe(false)
+    ed.show()
+    expect(ed.isVisible).toBe(true)
+    ed.hide()
+    expect(ed.isVisible).toBe(false)
   })
 })
 ```
@@ -186,7 +207,9 @@ export class CommandEditor {
     this.root.appendChild(this.ta)
   }
 
-  mount(container: HTMLElement): void { container.appendChild(this.root) }
+  mount(container: HTMLElement): void {
+    container.appendChild(this.root)
+  }
 
   private onKeydown = (e: KeyboardEvent): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -200,19 +223,45 @@ export class CommandEditor {
     }
   }
 
-  show(): void { this.root.style.display = ''; this.ta.focus() }
-  hide(): void { this.ta.blur(); this.root.style.display = 'none' }
-  get isVisible(): boolean { return this.root.style.display !== 'none' }
-  dispose(): void { this.ta.removeEventListener('keydown', this.onKeydown); this.root.remove() }
+  show(): void {
+    this.root.style.display = ''
+    this.ta.focus()
+  }
+  hide(): void {
+    this.ta.blur()
+    this.root.style.display = 'none'
+  }
+  get isVisible(): boolean {
+    return this.root.style.display !== 'none'
+  }
+  dispose(): void {
+    this.ta.removeEventListener('keydown', this.onKeydown)
+    this.root.remove()
+  }
 }
 ```
 
 Add minimal styles to `style.css` (`.nocx-editor` / `.nocx-editor-input` — a single-line bar; precise prompt-line positioning is follow-on):
 
 ```css
-.nocx-editor { position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 8px; background: #1a1b26; }
-.nocx-editor-input { width: 100%; background: transparent; color: #c0caf5; border: none; outline: none;
-  font-family: inherit; font-size: inherit; resize: none; }
+.nocx-editor {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 4px 8px;
+  background: #1a1b26;
+}
+.nocx-editor-input {
+  width: 100%;
+  background: transparent;
+  color: #c0caf5;
+  border: none;
+  outline: none;
+  font-family: inherit;
+  font-size: inherit;
+  resize: none;
+}
 ```
 
 - [ ] **Step 4: Run to verify pass** — `npm run test -- editor.test.ts` PASS.
@@ -229,13 +278,16 @@ git commit -m "feat(input): CommandEditor DOM surface + atomic-handoff submit (n
 ### Task 3: Wire editor into tabs behind an OFF-by-default flag
 
 **Files:**
+
 - Modify: `frontend/src/tabs.ts`
 - Test: manual/app (no unit test — DOM+session wiring; verified by coordinator at the end)
 
 **Interfaces:**
+
 - Consumes: `InputStateController` (M1), `CommandEditor` (Task 2), `ShellInputTarget` (M2a), `session.send`, `renderer.focus()`.
 
 **Acceptance Criteria:**
+
 - With `ENHANCED_INPUT` false (default), no editor ever appears; typing is unchanged (fail-open).
 - With it true: when `inputState.owned` becomes true, the editor shows+focuses; on any non-owned state it hides and the renderer regains focus. Enter submits via `ShellInputTarget` (bracketed paste + CR). No double echo (editor hides before send).
 
@@ -244,12 +296,14 @@ git commit -m "feat(input): CommandEditor DOM surface + atomic-handoff submit (n
 ```ts
 // tabs.ts — module const near the top (read from import.meta.env later)
 const ENHANCED_INPUT = false // ADR-0006: OFF by default; flip only after the
-                             // native-mode escape + readiness gating land.
+// native-mode escape + readiness gating land.
 
 // in the tab wiring block, after the renderer is mounted and session exists:
 const shellTarget = new ShellInputTarget((data: string) => session.send(data))
 const editor = new CommandEditor({
-  submit: (doc: string) => { void shellTarget.submit(doc, { targetId: 'shell' }) },
+  submit: (doc: string) => {
+    void shellTarget.submit(doc, { targetId: 'shell' })
+  },
 })
 editor.mount(this.pane)
 
@@ -257,7 +311,10 @@ this.inputState.onChange((m) => {
   console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
   if (!ENHANCED_INPUT) return
   if (m.owned) editor.show()
-  else { editor.hide(); renderer.focus() }
+  else {
+    editor.hide()
+    renderer.focus()
+  }
 })
 ```
 
@@ -277,6 +334,7 @@ git commit -m "feat(input): wire CommandEditor behind OFF-by-default ENHANCED_IN
 ## REQUIRED before the `ENHANCED_INPUT` flag may be enabled (tracked, NOT cut — ADR-0006 §5)
 
 These are safety-critical and must land before the flag defaults on. File as follow-up beads; do NOT enable the flag without them:
+
 1. **State-independent native-mode escape** that RESTORES a visible shell prompt (a one-shot control op telling the shell to leave marker-only mode) — not merely routing keys raw to an empty prompt.
 2. **Frontend-readiness gating** — request an enhanced (`NOCX_PROMPT_MODE=marker-only`) PTY only after editor + marker handler + input router + transport are initialized; else spawn baseline.
 3. **Precise prompt-line positioning** of the editor (MVP uses a bottom bar) and multi-line growth.

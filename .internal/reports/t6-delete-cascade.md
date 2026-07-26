@@ -51,9 +51,9 @@ and the passphrase is unreachable forever. The cascade therefore:
 
 ### Order: metadata-first, then best-effort secrets (ADR-0011 §4)
 
-ADR-0011 §4 is decisive: *"Deletion goes metadata-first with a retriable
+ADR-0011 §4 is decisive: _"Deletion goes metadata-first with a retriable
 secret deletion after: a brief unreachable orphan is safer than metadata
-pointing at a secret that is gone."* So metadata deletion stands; secret
+pointing at a secret that is gone."_ So metadata deletion stands; secret
 deletion is attempted after and its failure is **returned to the caller**
 (`errors.Join`) so the cascade is not silently incomplete, but the metadata
 is **not rolled back** — the credential is gone either way. The orphan is
@@ -66,6 +66,7 @@ in a way the user cannot diagnose. That is the worse failure.
 ### Missing secret is not an error
 
 Both backends already treat "already absent" as success:
+
 - `Keychain.DeletePassword` / `DeleteKeyPassphrase` return `nil` on
   `keyring.ErrNotFound`;
 - `Vault.DeleteSecret` returns `nil` when no entry matches.
@@ -117,6 +118,7 @@ under `HashKey(contents)`, deletes the credential, and queries the store
 directly (not through the RPC under test) to assert the entry is gone.
 
 All four cascade tests:
+
 - `TestDeleteCascade_RemovesPassword` — password entry gone after delete.
 - `TestDeleteCascade_RemovesKeyPassphrase` — passphrase entry gone; fails on
   naive impl.

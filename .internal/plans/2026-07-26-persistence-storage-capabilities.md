@@ -58,19 +58,19 @@ registry, the ContentDB seam, and export/backup modes.
 assigned to exactly one worker per wave; every other worker in that wave is forbidden to
 touch it and must escalate instead.
 
-| Path | Owner |
-|---|---|
-| `internal/storage/**` | Task 1, then Task 2 |
-| `internal/app/app.go` | Task 1 (wave 1), Task 2 (wave 2), coordinator (waves 3–4) |
-| `internal/credential/**` | Task 3 |
-| `internal/connection/resolver.go` | Task 3 (wave 1), Task 4 (wave 3) |
-| `internal/transport/ws.go` | Task 3 (wave 1), Task 5 (wave 3) |
-| `internal/ssh/**` | Task 3 |
-| `internal/content/**` | Task 6 |
-| `internal/profile/**` | Task 3 (metadata fields only), Task 4 (structure) |
-| `internal/config/**` → `internal/settings/**` | Task 5 |
-| `frontend/src/settings*` | Task 5 |
-| `internal/export/**` | Task 7 |
+| Path                                          | Owner                                                     |
+| --------------------------------------------- | --------------------------------------------------------- |
+| `internal/storage/**`                         | Task 1, then Task 2                                       |
+| `internal/app/app.go`                         | Task 1 (wave 1), Task 2 (wave 2), coordinator (waves 3–4) |
+| `internal/credential/**`                      | Task 3                                                    |
+| `internal/connection/resolver.go`             | Task 3 (wave 1), Task 4 (wave 3)                          |
+| `internal/transport/ws.go`                    | Task 3 (wave 1), Task 5 (wave 3)                          |
+| `internal/ssh/**`                             | Task 3                                                    |
+| `internal/content/**`                         | Task 6                                                    |
+| `internal/profile/**`                         | Task 3 (metadata fields only), Task 4 (structure)         |
+| `internal/config/**` → `internal/settings/**` | Task 5                                                    |
+| `frontend/src/settings*`                      | Task 5                                                    |
+| `internal/export/**`                          | Task 7                                                    |
 
 ## Wave map
 
@@ -87,6 +87,7 @@ Gate:                         coordinator runs the full gate ONCE, here.
 ### Task 1 — Shared storage path resolution (`nocx-2j3`)
 
 **Files:**
+
 - Create: `internal/storage/paths.go`, `internal/storage/paths_test.go`
 - Modify: `internal/app/app.go:76-85` (the `os.UserConfigDir()` block and the `os.TempDir()`
   fallback), `internal/app/app_test.go` if it asserts on `New()` behaviour
@@ -115,6 +116,7 @@ func NewOSPaths(appName string) (Paths, error)
 ```
 
 **Platform rules:**
+
 - Linux: honour `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME`; defaults
   `~/.config`, `~/.local/share`, `~/.cache`, each with `/<appName>` appended. `os.UserConfigDir`
   and `os.UserCacheDir` cover config and cache; there is no `os.UserDataDir`, so resolve
@@ -125,6 +127,7 @@ func NewOSPaths(appName string) (Paths, error)
   naming the role that failed.
 
 **Acceptance Criteria:**
+
 - A single injected component returns the locations per platform. No store computes its own path.
 - The `/tmp` fallback is gone; failure to resolve a location is an explicit error, not a
   silent fallback. `app.New()` returns that error rather than warning and continuing with an
@@ -132,6 +135,7 @@ func NewOSPaths(appName string) (Paths, error)
 - `profile.NewJSONStore` receives `filepath.Join(paths.ConfigDir(), "profiles.json")`.
 
 **Steps:**
+
 - [ ] Write `paths_test.go`: table-driven, `t.Setenv` the XDG vars, assert all three roles on
       Linux; assert `NewOSPaths` errors when `HOME` and every XDG var are unset.
 - [ ] Run `go test ./internal/storage/...` — expect FAIL (package does not exist).
@@ -149,6 +153,7 @@ func NewOSPaths(appName string) (Paths, error)
 Security-critical, and it subsumes the rewrite that closes `nocx-7l4`.
 
 **Files:**
+
 - Create: `internal/credential/secretstore.go`, `internal/credential/secretstore_test.go`
 - Modify: `internal/credential/credential.go`, `internal/credential/keychain.go`,
   `internal/credential/vault.go`, `internal/profile/profile.go` (metadata fields only),
@@ -179,11 +184,12 @@ type SecretStore interface {
 ```
 
 **Design rules:**
+
 - Keychain backend: one service name for all nocx secrets, account = `string(id)`. Stable IDs
   mean nothing is ever re-derived from a file path or a key's contents.
 - `profile.Credential` carries `SecretID` (password) and `PassphraseSecretID` (key
   passphrase). Both are opaque strings in JSON. `KeyPath` stays — it is not a secret.
-- `HashKey` / `KeyHash` content-addressing goes away as the *secret* key. It exists today only
+- `HashKey` / `KeyHash` content-addressing goes away as the _secret_ key. It exists today only
   because there was no stable reference; a `SecretID` replaces it. Delete the dead code.
 - **The wire API does not change shape.** `credentials.savePassword` etc. keep taking
   `credentialId`; the backend mints/looks up the `SecretID`. The renderer must never see a
@@ -195,6 +201,7 @@ type SecretStore interface {
 - Never call the keychain while holding a document lock (ADR-0011 §4).
 
 **Acceptance Criteria:**
+
 - Secrets are addressed by stable `SecretID`. No API outside `internal/credential` and
   `internal/ssh` can obtain plaintext. A secret cannot be marshalled or logged.
 - Deleting a credential deletes both of its secrets, derived from stored IDs, with no
@@ -202,6 +209,7 @@ type SecretStore interface {
 - The existing `ws_logging_test.go` password-redaction test and `ws_cascade_test.go` still pass.
 
 **Steps:**
+
 - [ ] Write `secretstore_test.go` covering set → exists → get → delete → exists-false, and
       absent-`Get` returning an empty `Secret` with a nil error. Use the existing keychain test
       helpers (`internal/credential/vault_testhelpers.go`, `keychain_test.go`) as the pattern.
@@ -220,6 +228,7 @@ type SecretStore interface {
 ### Task 6 — ContentDB seam + stub (`nocx-208`)
 
 **Files:**
+
 - Create: `internal/content/content.go`, `internal/content/stub.go`, `internal/content/stub_test.go`
 
 **Interfaces — Produces:** a `ContentDB` capability plus `ConversationRepository` and
@@ -227,6 +236,7 @@ type SecretStore interface {
 returns a sentinel error, exactly as `config.Stub` does today.
 
 **Design rules:**
+
 - **No SQLite implementation and no `go.mod` change.** Verify with `git diff --stat go.mod go.sum`
   showing no output.
 - No generic `Repository[T]` (ADR-0011 §1 rejects it explicitly).
@@ -238,11 +248,13 @@ returns a sentinel error, exactly as `config.Stub` does today.
   tables, so the UI says "removed from nocx", not "securely erased".
 
 **Acceptance Criteria:**
+
 - Repository interfaces exist and compile against a stub. `go.mod` gains no database
   dependency. The conditions for the real implementation are recorded where the implementer
   will find them.
 
 **Steps:**
+
 - [ ] Write `stub_test.go` asserting each repository method returns the sentinel
       not-implemented error and that the stub satisfies the interfaces at compile time.
 - [ ] Run `go test ./internal/content/...` — expect FAIL.
@@ -254,6 +266,7 @@ returns a sentinel error, exactly as `config.Stub` does today.
 ### Task 2 — DocumentStore capability (`nocx-kx4`) — wave 2
 
 **Files:**
+
 - Create: `internal/storage/document.go`, `internal/storage/document_test.go`
 - Modify: `internal/profile/store.go` (use the capability instead of its private
   temp-plus-rename), `internal/app/app.go` (wiring)
@@ -273,17 +286,19 @@ type DocumentStore interface {
 ```
 
 **Design rules:**
+
 - Extract the mechanism currently private inside `profile.JSONStore.save`
   (`internal/profile/store.go:67-98`): `0700` directory, `0600` file, temp file + rename.
 - Fix what that mechanism does **not** do today, both flagged on the bead:
   - **Directory fsync after rename** — without it "atomic" is not crash-durable. Add it.
   - **Symlink target check** — rename-over-path replaces a symlinked target with a regular
     file (same class as `nocx-ab4`). Refuse to write when the target is a symlink.
-- **Per-module schema version.** Share the migration *protocol*, not the version: each module
+- **Per-module schema version.** Share the migration _protocol_, not the version: each module
   declares its own monotonic version and its own migrations. A single app-wide version would
   couple unrelated releases of settings, profiles, conversations and history.
 
 **Acceptance Criteria:**
+
 - Documents are written atomically with correct permissions. Each module declares and migrates
   its own schema version through a shared protocol. `profile.JSONStore` uses the capability
   rather than its own implementation.
@@ -296,6 +311,7 @@ type DocumentStore interface {
 `internal/connection/resolver.go`, `internal/app/app.go` (coordinator wires)
 
 **Design rules:**
+
 - `ProfileStore`'s nine methods over three aggregates become `ProfileRepository`,
   `GroupRepository`, `CredentialMetadataRepository`. No generic `Repository[T]`.
 - **Fix the lost-update race:** CRUD loads outside the mutex (`store.go:108-120`) while only
@@ -304,6 +320,7 @@ type DocumentStore interface {
 - Cover it with a race test (`go test -race`) that fails on today's code.
 
 **Acceptance Criteria:**
+
 - Three focused repositories behind their own interfaces. Concurrent updates to different
   records cannot lose one another; covered by a race test.
 
@@ -314,6 +331,7 @@ type DocumentStore interface {
 **Files:** create `internal/settings/**`; delete `internal/config/**`; frontend settings screen.
 
 **Design rules:**
+
 - Replace `config.Config`'s `Get(key string) (any, error)` / `Set(key string, value any) error`
   — it cannot enumerate what settings exist, their types, defaults or validation, and so
   cannot drive a generated screen.
@@ -326,6 +344,7 @@ type DocumentStore interface {
   what it says (`nocx-3cc`).
 
 **Acceptance Criteria:**
+
 - The settings screen is rendered from declarations, not hand-maintained. A user decision
   survives restart. Adding a setting requires touching one declaration site. No secret-class
   setting exposes a read operation.
@@ -344,6 +363,7 @@ the user maps existing credentials or supplies missing secrets). Private content
 silently included in a portable export.
 
 **Acceptance Criteria:**
+
 - Each mode exists separately and states what it does and does not carry. No mode silently
   exports private content or resolved secrets.
 

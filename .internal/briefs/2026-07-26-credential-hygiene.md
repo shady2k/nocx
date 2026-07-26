@@ -12,7 +12,7 @@ then `nocx-6ek.2`.
 ## Bead 1 — `nocx-dcd`: replace the hand-rolled PBKDF2
 
 `internal/credential/vault.go` inlines its own PBKDF2 (RFC 2898, HMAC-SHA512) with the comment
-*"We avoid the x/crypto/pbkdf2 dependency by inlining the core loop."*
+_"We avoid the x/crypto/pbkdf2 dependency by inlining the core loop."_
 
 **The justification is false:** `golang.org/x/crypto` v0.54.0 is already a direct dependency in
 `go.mod` — `internal/ssh` imports `golang.org/x/crypto/ssh`. Nothing is avoided.
@@ -61,6 +61,7 @@ part of this change — a passphrase that escapes `Secret.Use` into an ordinary 
 opaque-reference design in ADR-0011.
 
 **Acceptance criteria, from the bead:**
+
 - a key protected by a stored passphrase connects successfully;
 - `lookupKeyPassphrase` has a non-test caller;
 - the passphrase is read **only** inside `Secret.Use` and is never returned as a string.
@@ -119,6 +120,6 @@ per-commit gate. Do not run it, do not chase it, do not claim anything about it.
 - Report the file list from actual `git status --porcelain` output, pasted, not from memory.
 - Report numbers, not adjectives.
 - **Never log, print or return a secret value.** If you need to prove a passphrase was used, assert
-  on the *outcome* (the key parsed, the connection authenticated), never on the plaintext.
+  on the _outcome_ (the key parsed, the connection authenticated), never on the plaintext.
 - **State explicitly anything you could not verify** — in particular, say plainly whether you could
   exercise a real passphrase-protected key end to end or only through a unit-level fake.

@@ -29,7 +29,7 @@ findTab          declared in tabs.ts   callers elsewhere: NONE
 onTabsChanged    4 references in tabs.ts   subscribers elsewhere: NONE
 ```
 
-`onTabsChanged` is the interesting one: it is *fired* from inside `tabs.ts` (on close, on reorder,
+`onTabsChanged` is the interesting one: it is _fired_ from inside `tabs.ts` (on close, on reorder,
 on create) but nothing subscribes, so those call sites are dead weight too — deleting the hook means
 deleting its invocations, not just its declaration.
 

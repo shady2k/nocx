@@ -19,13 +19,13 @@ diffed against each other to separate real breakage from noise:
 
 The 5 blockers:
 
-| # | Project | Test |
-|---|---|---|
-| 1 | chromium | `e2e/activity.spec.ts:10` — a background tab lights the activity indicator on normal-buffer output |
-| 2 | chromium | `e2e/enhanced-input.spec.ts:61` — multiple submits in succession all route raw |
-| 3 | chromium | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible |
-| 4 | webkit | `e2e/activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer |
-| 5 | webkit | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible |
+| #   | Project  | Test                                                                                               |
+| --- | -------- | -------------------------------------------------------------------------------------------------- |
+| 1   | chromium | `e2e/activity.spec.ts:10` — a background tab lights the activity indicator on normal-buffer output |
+| 2   | chromium | `e2e/enhanced-input.spec.ts:61` — multiple submits in succession all route raw                     |
+| 3   | chromium | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible                 |
+| 4   | webkit   | `e2e/activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer      |
+| 5   | webkit   | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible                 |
 
 Symptoms in CI, for orientation:
 
@@ -79,7 +79,7 @@ Setup facts that still hold:
   `reuseExistingServer` off `!process.env.CI`, so you must prefix your test command with
   `CI=` or Playwright will ignore your server and try to start its own.
 - Under Xvfb, `eglinfo` and the app print `libEGL warning: DRI3 error: Could not get DRI3
-  device`. **This is benign** — the X11 path probes for hardware DRI3 and falls back to
+device`. **This is benign** — the X11 path probes for hardware DRI3 and falls back to
   software. Do not chase it.
 
 `playwright.config.ts` hardcodes `command: 'wails dev'` with no build tag, so letting

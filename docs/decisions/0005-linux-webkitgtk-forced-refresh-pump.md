@@ -74,14 +74,14 @@ Measured on the user's Linux box (X11, Intel i915, WebKitGTK 2.52.3), using
 `import -window <id>` screenshots and a bright-pixel fraction over the
 terminal region (bg `#1a1b26` dark, prompt text `#c0caf5` light):
 
-| State | bright fraction |
-|---|---|
-| No pump, no click | 0.0002 (blank) |
-| No pump, after click | 0.0020 (prompt appears) |
-| No pump, after typing `abc` | 0.0020 (last char missing) |
-| **Pump, no click** | **0.0052 (prompt visible)** |
-| Pump, after typing `abc` | 0.0021 |
-| Pump, after typing `Z` | 0.0021 (last char painted) |
+| State                       | bright fraction             |
+| --------------------------- | --------------------------- |
+| No pump, no click           | 0.0002 (blank)              |
+| No pump, after click        | 0.0020 (prompt appears)     |
+| No pump, after typing `abc` | 0.0020 (last char missing)  |
+| **Pump, no click**          | **0.0052 (prompt visible)** |
+| Pump, after typing `abc`    | 0.0021                      |
+| Pump, after typing `Z`      | 0.0021 (last char painted)  |
 
 The blank-to-visible transition happens without any user interaction, and
 every typed character is painted immediately.

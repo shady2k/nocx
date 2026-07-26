@@ -10,23 +10,23 @@
 
 ### Deleted: "the submit button is clickable and submits" (was line 61)
 
-| Evidence | Detail |
-|---|---|
-| Selector | `.nocx-editor-submit` |
-| Source check | Zero matches in `frontend/src/` |
+| Evidence       | Detail                                                                                       |
+| -------------- | -------------------------------------------------------------------------------------------- |
+| Selector       | `.nocx-editor-submit`                                                                        |
+| Source check   | Zero matches in `frontend/src/`                                                              |
 | Removal commit | `7204aff` — "fix: alt-screen overlap, remove submit btn, font sizes 14px, submit transition" |
-| Verdict | Feature deliberately removed. Test was stale. Deleted. |
+| Verdict        | Feature deliberately removed. Test was stale. Deleted.                                       |
 
 No other test or helper referenced `.nocx-editor-submit`. No dead imports or constants left behind.
 
 ### Kept (probable bug): "a multi-line command is one gutter landmark, not three" (line 64)
 
-| Evidence | Detail |
-|---|---|
-| Selector | `.nocx-gutter-glyph` |
-| Source check | **Rendered** in `frontend/src/gutter.ts` lines 183, 193; styled in `frontend/src/style.css` line 1236 |
-| History | Introduced in `ec0ab8e` ("feat(blocks): command-ledger model + gutter glyphs"), refined in `155262d` ("style(blocks): gutter glyph CSS") |
-| Verdict | Feature still exists. The test's `expect.poll(...).toBe(1)` failure receiving `0` indicates a real product bug — gutter glyphs either aren't created on submit, or are created but then immediately removed, or the commit-landmark wiring has a regression. **Do not delete this test.** |
+| Evidence     | Detail                                                                                                                                                                                                                                                                                    |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Selector     | `.nocx-gutter-glyph`                                                                                                                                                                                                                                                                      |
+| Source check | **Rendered** in `frontend/src/gutter.ts` lines 183, 193; styled in `frontend/src/style.css` line 1236                                                                                                                                                                                     |
+| History      | Introduced in `ec0ab8e` ("feat(blocks): command-ledger model + gutter glyphs"), refined in `155262d` ("style(blocks): gutter glyph CSS")                                                                                                                                                  |
+| Verdict      | Feature still exists. The test's `expect.poll(...).toBe(1)` failure receiving `0` indicates a real product bug — gutter glyphs either aren't created on submit, or are created but then immediately removed, or the commit-landmark wiring has a regression. **Do not delete this test.** |
 
 ## Files modified
 

@@ -30,7 +30,7 @@ The shape ADR-0011 and bead `nocx-9m5` require:
   descriptor interface for enumeration** alongside **typed keys for get/set**. That split is
   stated in the bead; do not collapse it back into `any`.
 - **Adding a setting must require touching exactly one declaration site.** If adding one means
-  editing a declaration *and* a switch *and* a serializer, the design has not met its bar.
+  editing a declaration _and_ a switch _and_ a serializer, the design has not met its bar.
 - A **secret-class** setting exposes `set`, `delete`, `exists` — and **no read operation at
   all**, not even an internal one that returns plaintext to the caller. ADR-0011 §2.
 - Validation failures are typed errors the transport layer can turn into JSON-RPC errors.

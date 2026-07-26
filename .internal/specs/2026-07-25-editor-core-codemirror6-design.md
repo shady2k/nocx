@@ -13,17 +13,17 @@
 `frontend/src/editor.ts` is a passive `<textarea>` chosen deliberately in ADR-0004 §3:
 it already handles mouse caret placement, selection, multiline, IME, clipboard and
 native undo, and the ADR recorded the exit condition in the same sentence —
-*"CodeMirror is introduced only when syntax-aware editing or inline widgets justify
-it. Avoid `contenteditable`."*
+_"CodeMirror is introduced only when syntax-aware editing or inline widgets justify
+it. Avoid `contenteditable`."_
 
 That condition has now been met three times over. The editor is the foundation of
 three separate epics, and each wants something a `<textarea>` structurally cannot give:
 
-| Consumer | Needs |
-| --- | --- |
-| `nocx-w7h` — semantic command line | token colours, async decorations, a popup anchored under the caret |
-| `nocx-dw3` — agent mode | prose editing plus inline mentions of blocks and files |
-| `nocx-4ff.6` — history + completion | a completion popup positioned at a character offset |
+| Consumer                            | Needs                                                              |
+| ----------------------------------- | ------------------------------------------------------------------ |
+| `nocx-w7h` — semantic command line  | token colours, async decorations, a popup anchored under the caret |
+| `nocx-dw3` — agent mode             | prose editing plus inline mentions of blocks and files             |
+| `nocx-4ff.6` — history + completion | a completion popup positioned at a character offset                |
 
 A `<textarea>` renders one uniform colour and exposes no character coordinates. Both
 gaps have the same root cause and the same fix: the input surface and the render
@@ -47,15 +47,15 @@ in `frontend/package.json`; the numbers above are a floor, not a contract** — 
 whatever the real integration adds.
 
 **Blast radius is small, but larger than the runtime import graph suggests.**
-`CommandEditor` has one production importer (`tabs.ts`), but the *observable* contract
+`CommandEditor` has one production importer (`tabs.ts`), but the _observable_ contract
 has four consumers, and three of them couple to the widget being a textarea:
 
-| Consumer | Couples to |
-| --- | --- |
-| `frontend/src/tabs.ts` | the public API, plus `.textarea` at `:480-491` |
-| `frontend/src/editor.test.ts` | `querySelector('textarea')`, `.value`, `.rows`, `.selectionStart/End` |
+| Consumer                                                                 | Couples to                                                                                                            |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `frontend/src/tabs.ts`                                                   | the public API, plus `.textarea` at `:480-491`                                                                        |
+| `frontend/src/editor.test.ts`                                            | `querySelector('textarea')`, `.value`, `.rows`, `.selectionStart/End`                                                 |
 | `e2e/command-editor.spec.ts`, `clipboard.spec.ts`, `click-focus.spec.ts` | `.nocx-editor-input` supporting `fill()`, `toHaveValue()`, selection offsets; `elementFromPoint` returning `TEXTAREA` |
-| `frontend/src/style.css:658-731` | textarea-specific properties (`resize`, wrapping) on `.nocx-editor-input` |
+| `frontend/src/style.css:658-731`                                         | textarea-specific properties (`resize`, wrapping) on `.nocx-editor-input`                                             |
 
 So "remove the `textarea` getter and consumers are decoupled" is false: the unit test
 and the e2e suite are rewritten as part of this work, not after it. That is scoped
@@ -85,7 +85,7 @@ three named exceptions:
 
 - **Tests are rewritten, not merely kept green.** `editor.test.ts` and the e2e specs
   assert against textarea internals; they are re-expressed against the public API and
-  user-visible behaviour. Per the repo's TDD rule they are rewritten *first*, so each
+  user-visible behaviour. Per the repo's TDD rule they are rewritten _first_, so each
   work item goes red before it goes green.
 - **`e2e/command-editor.spec.ts:61-68` is already failing** — it clicks
   `.nocx-editor-submit`, an element commit `7204aff` removed. It is dead independent of
@@ -108,11 +108,11 @@ buy nothing.
 
 ### 2. The public API is the contract
 
-| Member | Fate |
-| --- | --- |
-| `root`, `mount`, `setCwd`, `setTime`, `show`, `hide`, `focus`, `isVisible`, `rootContains`, `dispose` | unchanged signature and semantics |
-| `insertText(text)` | unchanged signature; implemented as a CM6 transaction |
-| `textarea` getter | **removed** — replaced by `onSelectionEnd(cb)` |
+| Member                                                                                                | Fate                                                  |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `root`, `mount`, `setCwd`, `setTime`, `show`, `hide`, `focus`, `isVisible`, `rootContains`, `dispose` | unchanged signature and semantics                     |
+| `insertText(text)`                                                                                    | unchanged signature; implemented as a CM6 transaction |
+| `textarea` getter                                                                                     | **removed** — replaced by `onSelectionEnd(cb)`        |
 
 `rootContains()` keeps working unmodified because CM6's `contentDOM` lives inside
 `root`, which is what the focus-bounce in `tabs.ts:407-417` tests against.
@@ -121,7 +121,7 @@ buy nothing.
 
 `_grow()` counts `\n` and sets `rows` (1..`MAX_ROWS` = 10). CM6 grows with its content,
 so the policy becomes CSS: `max-height` equal to ten lines, `overflow-y: auto` past it.
-This is a behaviour *match*, not a behaviour change — but it is the one place where
+This is a behaviour _match_, not a behaviour change — but it is the one place where
 wrapped long lines will now grow the box where previously they did not, so it is
 called out rather than discovered.
 
@@ -134,7 +134,7 @@ new mode edits the editor — exactly what ADR-0004 §3 forbids ("New capabiliti
 added by registering a target, never by editing the editor").
 
 **Correction (2026-07-25 review).** An earlier draft of this spec claimed `InputTarget`
-"already declares `complete?()` and `history?()`". It does not. ADR-0004 §3 *describes*
+"already declares `complete?()` and `history?()`". It does not. ADR-0004 §3 _describes_
 that richer interface, but `frontend/src/input-target.ts:9-13` implements only:
 
 ```ts
@@ -206,7 +206,7 @@ reminders.
 
 ## Work items
 
-### W0 — *(removed)*
+### W0 — _(removed)_
 
 The de-risk spike is gone. Its deliverable was a findings note rather than working
 software, and it meant doing the integration twice — while deciding nothing that is not
@@ -214,7 +214,7 @@ already decided, since CM6 is settled and W7 records it. **W1 behind a flag is t
 experiment with the code kept**, and the seams the spike would have poked by hand are
 better expressed as things a test asserts.
 
-Its six checks became acceptance criteria on W1, verified *first*, before the rest of the
+Its six checks became acceptance criteria on W1, verified _first_, before the rest of the
 swap is polished: focus interplay with xterm and both `rootContains` call sites; keymap
 precedence; IME composition; hit-testing over the editor card; geometry under
 `visibility:hidden`; and reproduction on WKWebView rather than only Chromium.
@@ -270,7 +270,7 @@ code already in hand.
   comments that it "lets the key event propagate normally".
 - **Diagnose before fixing — the failure mode is not yet established.** Focusing an
   element inside a bubbling `keydown` handler does not retarget the event that is
-  already in flight, so the drift path plausibly *loses* the first character rather
+  already in flight, so the drift path plausibly _loses_ the first character rather
   than doubling it; the earlier draft of this spec asserted double-insertion without
   evidence. Which one actually happens is browser- and engine-dependent, so W4 starts
   by writing the test and observing, on both the textarea (before W1) and CM6 (after).
@@ -292,7 +292,7 @@ code already in hand.
   sequence produces the composed text once; `nocx-foz` is closed with a decision either
   way, recorded with its reasoning.
 
-### W6 — *(removed)*
+### W6 — _(removed)_
 
 The per-target extension seam moved to `nocx-w7h`. Rationale in the Decision section:
 the premise that `InputTarget` already carried optional members was wrong, `tabs.ts`
@@ -300,7 +300,7 @@ does not use the registry, the registry has no change notification, and an uncon
 CM6 `Extension` can override the W2 key invariants. What remains here is the part with
 no interface cost — W1's constructor-parameter extension list.
 
-### W7 — ADR-0010 *(runs FIRST, before W1)*
+### W7 — ADR-0010 _(runs FIRST, before W1)_
 
 - **Change:** Write `docs/decisions/0010-*.md`: editor core is CodeMirror 6; it revises
   ADR-0004 §3. Record that the `contenteditable` ban targeted the **hand-rolled**
@@ -308,7 +308,7 @@ no interface cost — W1's constructor-parameter extension list.
   and selection problems that motivated the ban. Record the measured bundle cost, the
   two admitted behaviour changes (wrapped-line growth, undo semantics), and that
   per-target decoration ownership is deferred to `nocx-w7h`.
-- **Why first:** ADR-0004 §3 is *accepted* and says avoid `contenteditable`. Writing
+- **Why first:** ADR-0004 §3 is _accepted_ and says avoid `contenteditable`. Writing
   W1–W5 against it and documenting afterwards means every intermediate commit
   contradicts an adopted decision with nothing authorizing the change. The ADR is the
   authorization, so it precedes the code (AGENTS.md: "if an AD is wrong, change it
@@ -320,8 +320,8 @@ no interface cost — W1's constructor-parameter extension list.
 
 - **Unit (vitest):** keymap decisions including the Ctrl-C selection branch; the
   `insertText` transaction; the auto-grow policy; draft and selection surviving a
-  hide→show cycle. *(An earlier draft also listed "target reconfiguration" here — a
-  leftover from the removed W6. There is one target in this epic; nothing reconfigures.)*
+  hide→show cycle. _(An earlier draft also listed "target reconfiguration" here — a
+  leftover from the removed W6. There is one target in this epic; nothing reconfigures.)_
 - **e2e (Playwright):** click-to-place-caret, mid-line edit, multiline, submit paints
   the command exactly once, copy-on-select, hit-testing over the editor card, and IME
   composition.
@@ -331,18 +331,18 @@ no interface cost — W1's constructor-parameter extension list.
 
 ## Risks
 
-| Risk | Mitigation |
-| --- | --- |
-| Focus interplay between CM6 and xterm; the ownership machine is focus-based | first acceptance criterion on W1, verified before the rest of the swap is polished |
-| CM6's `defaultKeymap` shadows Enter / Escape / Ctrl-C | W2, `Prec.highest`, covered by unit tests |
-| IME composition broken by the document-level keydown redirect | W5 adds the first IME coverage this repo has had |
-| jsdom cannot test CM6 view behaviour | W5 forces the `nocx-foz` decision instead of leaving it implicit |
-| `insertText` double-inserts via the two redirect paths | W4 |
-| Scope creep turns a refactor into a feature epic and blocks three others | behaviour-preserving is an acceptance criterion, not an intention |
-| Undo semantics shift from native to CM6's history | accepted and documented in ADR-0010; visible but minor |
+| Risk                                                                                                                                                                                                                                    | Mitigation                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Focus interplay between CM6 and xterm; the ownership machine is focus-based                                                                                                                                                             | first acceptance criterion on W1, verified before the rest of the swap is polished                                                                                                                                    |
+| CM6's `defaultKeymap` shadows Enter / Escape / Ctrl-C                                                                                                                                                                                   | W2, `Prec.highest`, covered by unit tests                                                                                                                                                                             |
+| IME composition broken by the document-level keydown redirect                                                                                                                                                                           | W5 adds the first IME coverage this repo has had                                                                                                                                                                      |
+| jsdom cannot test CM6 view behaviour                                                                                                                                                                                                    | W5 forces the `nocx-foz` decision instead of leaving it implicit                                                                                                                                                      |
+| `insertText` double-inserts via the two redirect paths                                                                                                                                                                                  | W4                                                                                                                                                                                                                    |
+| Scope creep turns a refactor into a feature epic and blocks three others                                                                                                                                                                | behaviour-preserving is an acceptance criterion, not an intention                                                                                                                                                     |
+| Undo semantics shift from native to CM6's history                                                                                                                                                                                       | accepted and documented in ADR-0010; visible but minor                                                                                                                                                                |
 | wterm renderer has **no** read-only: `renderers/wterm.ts:114` is a documented no-op ("@wterm/dom has no disableStdin"), so under wterm the prompt relies on focus alone while `tabs.ts:380-394` assumes `setReadOnly(true)` took effect | pre-existing asymmetry, not caused by this epic, but W1 must establish what stops wterm forwarding keystrokes while the editor owns input — otherwise "parity" is unverifiable and the claim is dropped from the epic |
-| CM6 measures its own layout; the editor spends most of its life under `visibility:hidden` (`_shownOnce`) | explicit W1 acceptance criterion on size and focusability across a hide→show cycle |
-| Enter / Escape / Ctrl-C firing during IME composition | W2 handlers must ignore composing events; W5 asserts it |
+| CM6 measures its own layout; the editor spends most of its life under `visibility:hidden` (`_shownOnce`)                                                                                                                                | explicit W1 acceptance criterion on size and focusability across a hide→show cycle                                                                                                                                    |
+| Enter / Escape / Ctrl-C firing during IME composition                                                                                                                                                                                   | W2 handlers must ignore composing events; W5 asserts it                                                                                                                                                               |
 
 ## Build order and bead mapping
 
@@ -359,7 +359,7 @@ IME coverage this repo has never had.
 W6 was removed; the seam moves to `nocx-w7h`.
 
 **Resolve before W1 starts:** `nocx-hi2` (the contested submit path). Not necessarily
-*fixed* first — but the epic must know which of the three contradicting sources is
+_fixed_ first — but the epic must know which of the three contradicting sources is
 correct, because "the submit path is unchanged by W1" is meaningless until we know what
 it currently is.
 

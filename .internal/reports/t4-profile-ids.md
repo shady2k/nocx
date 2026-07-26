@@ -34,20 +34,23 @@ Quick-connect (double-click / "SSH" button in the connection manager) now passes
 ## Files changed
 
 ### New
+
 - `internal/connection/resolver.go` — ProfileID-to-ConnectConfig resolver with credential wiring and jump host recursion
 - `internal/connection/resolver_test.go` — Tests for credential mode, inline mode, jump host, unknown profile, and cycle detection
 
 ### Modified (Go)
+
 - `internal/ssh/ssh.go` — Removed `Password`, `JumpPassword` from `ConnectConfig`; removed `WithPassword`; changed `WithJumpHost` signature; added `JumpCredentials`/`JumpCredIdentity` + `WithJumpCredentials`
 - `internal/ssh/ssh_auth.go` — `addPasswordMethods` and `addKeyboardInteractiveMethods` now only use credential store (no plaintext cfg.Password path)
 - `internal/ssh/ssh_dial.go` — `connectToJumpHost` forwards `JumpCredentials`/`JumpCredIdentity`
 - `internal/ssh/auth_chain_test.go` — Tests updated to use credential store instead of Password field
 - `internal/session/session.go` — `sshOptionsFromConfig` forwards `JumpCredentials`; removed Password forwarding; updated JumpHost call
 - `internal/transport/ws.go` — `openParams` replaced with `ProfileID`; `handleOpen` uses resolver; removed `lookupPassword`/`lookupKeyPassphrase` dispatch and cases; added `ProfileResolver` interface and `WithProfileResolver` option
-- `internal/transport/ws_profiles_test.go` — Deleted `TestCredentialsRPC_SaveLookup`; added `TestNoPlaintextSecretsOnWire` (canary test proving no secret travels on the wire, covering profiles.*, credentials.*, and open paths including jump-host resolution with distinct target/jump canaries)
+- `internal/transport/ws_profiles_test.go` — Deleted `TestCredentialsRPC_SaveLookup`; added `TestNoPlaintextSecretsOnWire` (canary test proving no secret travels on the wire, covering profiles._, credentials._, and open paths including jump-host resolution with distinct target/jump canaries)
 - `internal/app/app.go` — Wires `connection.NewResolver(profileStore, credStore)` via `WithProfileResolver`
 
 ### Modified (Frontend)
+
 - `frontend/src/ipc.ts` — `openSSHSession` takes `profileId` instead of individual SSH fields
 - `frontend/src/tabs.ts` — Removed `SSHProfileConnectOpts`; Tab sshOpts simplified to `{profileId, host, user}`; `newSSHTab`/`createTab`/`onConnect` updated
 - `frontend/src/profiles.ts` — Removed `lookupPassword` method

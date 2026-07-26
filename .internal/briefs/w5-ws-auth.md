@@ -25,7 +25,7 @@ below is already decided; do not redesign it, but do push back if you find it wr
 
 **Token in `Sec-WebSocket-Protocol`.** The browser WebSocket API cannot set an
 `Authorization` header; a query parameter leaks into URLs, proxy logs and devtools; a
-first-frame handshake authenticates *after* the upgrade, which is too late because the
+first-frame handshake authenticates _after_ the upgrade, which is too late because the
 socket already exists. 32 bytes from `crypto/rand`, unpadded base64url (`=`, `+` and `/`
 are not valid in a subprotocol name), constant-time compare, and the selected subprotocol
 echoed on upgrade — RFC 6455 requires the echo and a browser aborts without it.

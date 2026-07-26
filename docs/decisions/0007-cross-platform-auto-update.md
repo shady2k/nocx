@@ -15,8 +15,8 @@ The auto-update feature (§7–§8 of the design) was scoped **macOS-only** in D
 Wails Linux build is dynamically linked against GTK/WebKitGTK/libsoup/glibc, so an
 artefact built on one distribution runs only where those happen to match, and
 shipping it means choosing a support envelope for a platform with **no identified
-user**. `nocx-mbu` recorded the deferral and its reopening condition: *both* a
-person who will actually run it *and* a decision about which distributions are
+user**. `nocx-mbu` recorded the deferral and its reopening condition: _both_ a
+person who will actually run it _and_ a decision about which distributions are
 supported.
 
 One of those conditions is now met. The maintainer runs nocx on Linux and needs
@@ -31,8 +31,8 @@ not a new pattern for this codebase; it is the `AGENTS.md` engineering rule
 **How a comparable app does it.** Tabby (an Electron terminal, already cited in
 ADR-0003 for its Windows signing) self-updates through `electron-updater`. On
 Linux that path updates **AppImage only** — not `.deb`/`.rpm`, which are left to
-the system package manager. The mechanism replaces the *running AppImage file in
-place* and relaunches, and it only engages when the app is actually running as an
+the system package manager. The mechanism replaces the _running AppImage file in
+place_ and relaunches, and it only engages when the app is actually running as an
 AppImage (the runtime sets the `APPIMAGE` environment variable; without it the
 self-update is a no-op). That is the same shape as our macOS refusals for `dev`
 and translocated builds (§7.7).
@@ -41,7 +41,7 @@ and translocated builds (§7.7).
 `v3.0.0-alpha` as of 2026-07) ships a native updater that checks GitHub Releases
 and swaps-and-relaunches, which looked like it would remove most of this work. It
 does not fit. The updater replaces the **running binary file in place**, so it
-ships a *bare binary* on every platform: on macOS a bare binary rather than a
+ships a _bare binary_ on every platform: on macOS a bare binary rather than a
 `.app`, abandoning the bundle model ADR-0003 and §7 rest on; on Linux a bare
 binary that still needs the host `libgtk-3`/`libwebkit2gtk-4.1` and therefore does
 **not** solve the dependency-envelope problem AppImage exists to solve. Adopting
@@ -67,7 +67,7 @@ an unimplemented seam.**
 - **Seam (`Platform` interface):** `Preflight`, `Extract`, `VerifyExtracted`,
   `Exchange`, `ArtifactID` — the only OS-specific surface.
   - **darwin:** `.app` directory, `ditto` pack/extract, `codesign --verify --deep
-    --strict`, `lipo` slice check, atomic exchange via `RENAME_SWAP`
+--strict`, `lipo` slice check, atomic exchange via `RENAME_SWAP`
     (`RenameatxNp`). Exactly the design as written.
   - **linux:** a single AppImage file. `Extract` is a fetch + `chmod +x`;
     `VerifyExtracted` checks the executable bit and the ed25519-signed manifest
@@ -103,7 +103,7 @@ an unimplemented seam.**
   amended; Windows stays Phase 3. The design's D1, §7, §9 and §12 are revised to
   describe the `Platform` seam rather than a macOS-only mechanism.
 
-- **ADR-0003's integrity model carries over cleanly — and is now the *whole*
+- **ADR-0003's integrity model carries over cleanly — and is now the _whole_
   story on Linux.** D4 already made the ed25519-signed manifest the real integrity
   gate ("integrity is ours, not Apple's"). macOS additionally carries Wails'
   ad-hoc signature; **AppImage has no equivalent OS-level signature**, so on Linux

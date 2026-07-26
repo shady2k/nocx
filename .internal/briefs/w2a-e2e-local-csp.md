@@ -16,13 +16,13 @@ summary):
 
 The 5 blockers:
 
-| # | Project | Test |
-|---|---|---|
-| 1 | chromium | `e2e/activity.spec.ts:10` — a background tab lights the activity indicator on normal-buffer output |
-| 2 | chromium | `e2e/enhanced-input.spec.ts:61` — multiple submits in succession all route raw |
-| 3 | chromium | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible |
-| 4 | webkit | `e2e/activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer |
-| 5 | webkit | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible |
+| #   | Project  | Test                                                                                               |
+| --- | -------- | -------------------------------------------------------------------------------------------------- |
+| 1   | chromium | `e2e/activity.spec.ts:10` — a background tab lights the activity indicator on normal-buffer output |
+| 2   | chromium | `e2e/enhanced-input.spec.ts:61` — multiple submits in succession all route raw                     |
+| 3   | chromium | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible                 |
+| 4   | webkit   | `e2e/activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer      |
+| 5   | webkit   | `e2e/tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible                 |
 
 **You are chasing the three chromium ones only.** See "webkit" below.
 
@@ -127,7 +127,7 @@ Then state which of these you observed:
 - Some pass → **mixed**; say exactly which, because the rest have another cause.
 - None change → **CSP is exonerated**; the cause is elsewhere and you have narrowed it.
 
-If CSP is implicated, go one step further and find out *which directive* does it, by
+If CSP is implicated, go one step further and find out _which directive_ does it, by
 re-adding directives one at a time. `default-src 'self'` is worth suspecting specifically:
 there is no `worker-src` in the policy, so workers fall back to `default-src` and any
 `blob:`-created worker is blocked. Also check the browser console for CSP violation

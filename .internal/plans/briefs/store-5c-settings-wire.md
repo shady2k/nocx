@@ -13,8 +13,8 @@ is live**, in `internal/export/**` only. Read before writing code:
 
 - `internal/settings` — the typed registry, landed and tested. `Registry` exposes
   `Declarations()`, `GetAll()`, typed `GetBool/SetBool/GetString/SetString/GetNumber/SetNumber/
-  GetSelect/SetSelect`, `Reset(Descriptor)`, and for secrets only `SecretSet/SecretDelete/
-  SecretExists`. There is deliberately **no** `GetSecret`; do not add one, and do not route
+GetSelect/SetSelect`, `Reset(Descriptor)`, and for secrets only `SecretSet/SecretDelete/
+SecretExists`. There is deliberately **no** `GetSecret`; do not add one, and do not route
   around its absence.
 - `frontend/src/settings.ts` + the 7 client methods in `frontend/src/profiles.ts` — the screen
   is built and unit-tested against the contract with mocks. **Do not modify the frontend.** If

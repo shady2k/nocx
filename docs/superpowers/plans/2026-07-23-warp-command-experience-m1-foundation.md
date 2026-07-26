@@ -22,18 +22,20 @@
 ### Task 1: Single OSC 133 handler with cursor snapshot + fan-out
 
 **Files:**
+
 - Modify: `frontend/src/renderers/types.ts` (enrich the marker event + callback type)
 - Modify: `frontend/src/renderers/xterm.ts:268-274` (`onCommandMarker`), plus mount/dispose
 - Test: `frontend/src/renderers/xterm.test.ts`
 
 **Interfaces:**
+
 - Consumes: existing `parseOsc133(payload): CommandMarker | null` (`xterm.ts:89`), `CommandMarker { kind:'A'|'B'|'C'|'D'; exitCode?: number }` (`types.ts`).
 - Produces:
   ```ts
   // types.ts
   export interface CommandMarkerEvent extends CommandMarker {
-    line: number              // absolute buffer line: baseY + cursorY
-    col: number               // cursorX
+    line: number // absolute buffer line: baseY + cursorY
+    col: number // cursorX
     buffer: 'normal' | 'alternate'
   }
   export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
@@ -41,6 +43,7 @@
   `onCommandMarker(cb: CommandMarkerCallback): void` — registers ONE parser handler lazily on first subscribe, appends `cb` to a subscriber list, fans out to all. Registration disposed in `dispose()`.
 
 **Acceptance Criteria:**
+
 - Exactly one OSC 133 parser handler is registered regardless of how many `onCommandMarker` subscribers there are.
 - Each subscriber receives `{kind, exitCode?, line, col, buffer}` with the cursor snapshot taken at parse time.
 - Disposing the renderer disposes the OSC 133 registration.
@@ -64,7 +67,9 @@ describe('onCommandMarker fan-out', () => {
 
     const a = vi.fn()
     let resolveDone: () => void
-    const done = new Promise<void>((res) => { resolveDone = res })
+    const done = new Promise<void>((res) => {
+      resolveDone = res
+    })
     const b = vi.fn<[CommandMarkerEvent]>(() => resolveDone())
     r.onCommandMarker(a)
     r.onCommandMarker(b)
@@ -153,10 +158,12 @@ git commit -m "feat(render): single OSC 133 handler with cursor snapshot + fan-o
 ### Task 2: Pure state-machine reducer — the clean cycle
 
 **Files:**
+
 - Create: `frontend/src/input-state.ts`
 - Test: `frontend/src/input-state.test.ts`
 
 **Interfaces:**
+
 - Consumes: nothing (pure module).
 - Produces:
   ```ts
@@ -167,13 +174,17 @@ git commit -m "feat(render): single OSC 133 handler with cursor snapshot + fan-o
     | { type: 'submit' }
     | { type: 'reset' }
     | { type: 'exit' }
-  export interface Machine { state: InputState; trusted: boolean }
+  export interface Machine {
+    state: InputState
+    trusted: boolean
+  }
   export function initialMachine(): Machine
   export function reduce(m: Machine, e: InputEvent): Machine
   ```
   `trusted` = the current prompt→C→D cycle arrived through a clean `A → (B) → C` path; consumers (blocks/re-run) gate on it later. `PROMPT_READY` is the ONLY state in which nocx may own keyboard input; all others route raw to the PTY.
 
 **Acceptance Criteria:**
+
 - Clean cycle: from `RAW`, `A` → `PROMPT_READY` (trusted), `C` → `RUNNING_RAW`, `D` → `RAW`, next `A` → `PROMPT_READY`.
 - `B` in `PROMPT_READY` is idempotent (stays `PROMPT_READY`, trusted).
 - `buffer:'alternate'` → `ALT_SCREEN` from any state; `buffer:'normal'` → `RAW`.
@@ -187,8 +198,7 @@ git commit -m "feat(render): single OSC 133 handler with cursor snapshot + fan-o
 import { describe, it, expect } from 'vitest'
 import { initialMachine, reduce, type Machine, type InputEvent } from './input-state'
 
-const run = (evs: InputEvent[], m: Machine = initialMachine()) =>
-  evs.reduce(reduce, m)
+const run = (evs: InputEvent[], m: Machine = initialMachine()) => evs.reduce(reduce, m)
 
 describe('input-state clean cycle', () => {
   it('walks RAW → PROMPT_READY → RUNNING_RAW → RAW', () => {
@@ -205,7 +215,10 @@ describe('input-state clean cycle', () => {
   })
 
   it('alt-buffer wins from any state and normal returns to RAW', () => {
-    const alt = run([{ type: 'marker', kind: 'A' }, { type: 'buffer', buffer: 'alternate' }])
+    const alt = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'buffer', buffer: 'alternate' },
+    ])
     expect(alt.state).toBe('ALT_SCREEN')
     const back = reduce(alt, { type: 'buffer', buffer: 'normal' })
     expect(back.state).toBe('RAW')
@@ -300,13 +313,16 @@ git commit -m "feat(input): pure input-ownership reducer, clean cycle (nocx-4ff.
 ### Task 3: Reducer hardening — validation, resync, nesting, malformed
 
 **Files:**
+
 - Modify: `frontend/src/input-state.ts` (validation branches in `reduce`)
 - Test: `frontend/src/input-state.test.ts` (add cases)
 
 **Interfaces:**
+
 - Consumes / Produces: same signatures as Task 2. Behaviour is refined; `trusted` now clears on anomalies.
 
 **Acceptance Criteria:**
+
 - `C` without a preceding clean `A` (orphan or nested) → `RUNNING_RAW` but `trusted:false`.
 - `D` while not `RUNNING_RAW` (orphan, e.g. empty Enter) → state unchanged, no throw.
 - `A` while `RUNNING_RAW` (previous command interrupted / nested prompt) → `PROMPT_READY` but `trusted:false`.
@@ -330,7 +346,10 @@ describe('input-state hardening / resync', () => {
   })
 
   it('A interrupting a running command yields untrusted PROMPT_READY', () => {
-    const running = run([{ type: 'marker', kind: 'A' }, { type: 'marker', kind: 'C' }])
+    const running = run([
+      { type: 'marker', kind: 'A' },
+      { type: 'marker', kind: 'C' },
+    ])
     const a = reduce(running, { type: 'marker', kind: 'A' })
     expect(a).toEqual({ state: 'PROMPT_READY', trusted: false })
   })
@@ -389,23 +408,26 @@ git commit -m "feat(input): validate/resync markers — orphan, nested, malforme
 ### Task 4: Per-tab controller wired into tabs (observe-only)
 
 **Files:**
+
 - Modify: `frontend/src/input-state.ts` (add `InputStateController`)
 - Modify: `frontend/src/tabs.ts` (construct per tab; feed marker/buffer/reset/exit; log transitions)
 - Test: `frontend/src/input-state.test.ts` (controller against a fake feed)
 
 **Interfaces:**
+
 - Consumes: `reduce`, `initialMachine`, `Machine`, `InputEvent` (Tasks 2-3); `renderer.onCommandMarker`, `renderer.onBufferChange` (`types.ts`); `session.onReset`, `session.onExit` (existing in `tabs.ts`).
 - Produces:
   ```ts
   export class InputStateController {
     get state(): InputState
     get trusted(): boolean
-    dispatch(e: InputEvent): void         // returns nothing; updates internal Machine
+    dispatch(e: InputEvent): void // returns nothing; updates internal Machine
     onChange(cb: (m: Machine) => void): void
   }
   ```
 
 **Acceptance Criteria:**
+
 - Feeding a marker/buffer/reset/exit sequence drives `controller.state` exactly as `reduce` would.
 - `onChange` fires only when the state or trusted flag actually changes.
 - Each `Tab` owns one controller; a `133 D` marker still updates `_lastExitCode` (unchanged behaviour) AND the controller.
@@ -444,8 +466,12 @@ export class InputStateController {
   private machine = initialMachine()
   private subs: Array<(m: Machine) => void> = []
 
-  get state(): InputState { return this.machine.state }
-  get trusted(): boolean { return this.machine.trusted }
+  get state(): InputState {
+    return this.machine.state
+  }
+  get trusted(): boolean {
+    return this.machine.trusted
+  }
 
   dispatch(e: InputEvent): void {
     const next = reduce(this.machine, e)
@@ -457,7 +483,9 @@ export class InputStateController {
     for (const cb of this.subs) cb(next)
   }
 
-  onChange(cb: (m: Machine) => void): void { this.subs.push(cb) }
+  onChange(cb: (m: Machine) => void): void {
+    this.subs.push(cb)
+  }
 }
 ```
 

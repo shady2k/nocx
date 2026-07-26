@@ -60,7 +60,7 @@ path** — outcome #3, a missing feature, not dead UI. None were deleted.
 4. **Ignored by the SSH layer.** `internal/ssh/ssh_dial.go:37` hardcodes
    `Timeout: 30 * time.Second` — the profile's `ReadyTimeout` is never used.
    A repo-wide grep for `KeepAlive|Keepalive|RequestAgentForward|AgentForward|
-   SetKeepAlive|time.NewTicker|ReadyTimeout` across `internal/ssh/` returns
+SetKeepAlive|time.NewTicker|ReadyTimeout` across `internal/ssh/` returns
    **zero matches** (verified on `ssh.go`, `ssh_dial.go`, `ssh_config.go`,
    `ssh_real.go`, `ssh_channel.go`, `pool.go`, `auth_chain_test.go`). There is
    no keepalive ticker and no agent-forwarding request anywhere in the SSH
@@ -68,12 +68,12 @@ path** — outcome #3, a missing feature, not dead UI. None were deleted.
 
 ### Per-field verdict
 
-| Field | UI line | Stored? | Sent? | Backend acts? | Verdict |
-|---|---|---|---|---|---|
-| `keepaliveInterval` | 441 | yes (`profile.go:60`) | yes (CRUD) | **no** — no `ConnectConfig` field, no ticker in `internal/ssh/` | missing feature — retain, report |
-| `keepaliveCountMax` | 446 | yes (`profile.go:61`) | yes | **no** | missing feature — retain, report |
-| `readyTimeout` | 451 | yes (`profile.go:62`) | yes | **no** — `ssh_dial.go:37` hardcodes `30s` | missing feature — retain, report |
-| `agentForward` | 496 | yes (`profile.go:64`) | yes | **no** — no `RequestAgentForward` call anywhere | missing feature — retain, report |
+| Field               | UI line | Stored?               | Sent?      | Backend acts?                                                   | Verdict                          |
+| ------------------- | ------- | --------------------- | ---------- | --------------------------------------------------------------- | -------------------------------- |
+| `keepaliveInterval` | 441     | yes (`profile.go:60`) | yes (CRUD) | **no** — no `ConnectConfig` field, no ticker in `internal/ssh/` | missing feature — retain, report |
+| `keepaliveCountMax` | 446     | yes (`profile.go:61`) | yes        | **no**                                                          | missing feature — retain, report |
+| `readyTimeout`      | 451     | yes (`profile.go:62`) | yes        | **no** — `ssh_dial.go:37` hardcodes `30s`                       | missing feature — retain, report |
+| `agentForward`      | 496     | yes (`profile.go:64`) | yes        | **no** — no `RequestAgentForward` call anywhere                 | missing feature — retain, report |
 
 ### Why this is outcome #3 and not #2
 
@@ -94,7 +94,7 @@ reported so it can be filed. No controls were removed.
 - In `ssh_dial.go`: use `ReadyTimeout` (falling back to 30s) for
   `gossh.ClientConfig.Timeout`; start a keepalive ticker using
   `KeepaliveInterval`/`KeepaliveCountMax` via `gossh.ClientConn.SendRequest(
-  "keepalive@openssh.com", true, nil)`.
+"keepalive@openssh.com", true, nil)`.
 - In the channel/shell path: call `gossh.Session.RequestAgentForwarding` when
   `AgentForward` is set.
 
@@ -119,7 +119,7 @@ worker's scope. Not attempted here.
 - `go test ./...` was **not** run, per the brief: `internal/credential`,
   `internal/ssh`, `internal/connection`, `internal/transport` contain another
   worker's half-written packages and would surface phantom failures. `go build
-  ./internal/profile/...` is the build check for my owned package and it passes.
+./internal/profile/...` is the build check for my owned package and it passes.
 - The `internal/credential/secret.go` parse error is the other worker's
   in-flight edit; I did not inspect or touch it beyond confirming it is outside
   my scope.

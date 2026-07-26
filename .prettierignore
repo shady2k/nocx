@@ -1,0 +1,14 @@
+node_modules/
+graphify-out/
+.beads/
+dist/
+build/
+frontend/dist/
+frontend/wailsjs/
+frontend/node_modules/
+package-lock.json
+spike/
+_bmad/
+.agents/
+.claude/
+.opencode/

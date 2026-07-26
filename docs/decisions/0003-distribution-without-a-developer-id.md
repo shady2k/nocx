@@ -16,7 +16,7 @@ constraint removes the options a macOS distribution story normally assumes:
 - **Notarization requires a Developer ID**, which requires enrolment in the
   Apple Developer Program. An unenrolled team is refused outright.
 - **No third-party service signs in its own name.** SignPath (free for open
-  source, used by Tabby on Windows) *stores and applies your* certificate; it
+  source, used by Tabby on Windows) _stores and applies your_ certificate; it
   does not issue one.
 - **Homebrew has closed the workaround.** `--no-quarantine` has been removed from
   `brew`, and from **2026-09-01** every cask must pass Gatekeeper. The official
@@ -38,7 +38,7 @@ and the packaging pipeline preserves and verifies it (`ditto`, not `zip`).
 ourselves.**
 
 - Developer ID signing and notarization are **out of scope** (D3). What is out of
-  scope is *distribution* signing; Wails' ad-hoc signature is existing behaviour
+  scope is _distribution_ signing; Wails' ad-hoc signature is existing behaviour
   that the build preserves, not something added.
 - The **first install requires a manual `xattr -dr com.apple.quarantine`**. There
   is no way to avoid this without a certificate; the README documents it against
@@ -78,7 +78,7 @@ ourselves.**
 - **Key loss is terminal for in-place updates.** Losing the private key with no
   successor already shipped in a keyring means existing installs can never be
   updated in place again. The private key therefore lives in a **backup outside
-  GitHub**, and a new key is introduced into the keyring *before* it is ever
+  GitHub**, and a new key is introduced into the keyring _before_ it is ever
   needed to sign.
 - **`vision.md` is amended, `architecture.md:179` is not.** "No app-store or
   packaged distribution" becomes GitHub Releases + unsigned builds + a

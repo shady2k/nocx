@@ -20,7 +20,7 @@ it does and does not carry. A single "Export" button would be a lie.
 A new package `internal/export` implementing the four modes as distinct operations:
 
 1. **Configuration export** — profiles, groups, credential metadata, settings. Secret
-   *references* are present but **unresolved**: a `SecretID` travels, the material never does.
+   _references_ are present but **unresolved**: a `SecretID` travels, the material never does.
 2. **Portable encrypted export** — explicit, user-authenticated, encrypted under a **new
    passphrase** supplied for this export. Not part of normal persistence. Choose a standard,
    well-reviewed construction from the Go standard library or `golang.org/x/crypto` (already an

@@ -15,9 +15,9 @@ Replace `settings.getAll` with `settings.getSnapshot`, returning:
 
 ```ts
 interface SettingsSnapshot {
-  values: Record<string, unknown>   // effective, non-secret (as today)
-  overridden: string[]              // non-secret keys that have a STORED override
-  revision: number                  // monotonic per backend instance
+  values: Record<string, unknown> // effective, non-secret (as today)
+  overridden: string[] // non-secret keys that have a STORED override
+  revision: number // monotonic per backend instance
 }
 ```
 
@@ -26,7 +26,7 @@ Why each field:
 - `overridden` is the fact the wire currently drops. Export/import is already filed
   (`nocx-6ek.3`) and needs it — otherwise an exported profile silently pins every default and
   freezes the user against future default changes.
-- `revision` is an **in-memory instance epoch**, bumped only after a *successful*
+- `revision` is an **in-memory instance epoch**, bumped only after a _successful_
   `set` / `reset` / `secretSet` / `secretDelete`. It is **not persisted**. Clients always
   fetch a full snapshot on connect, so a counter that resets on restart is harmless. Do not
   persist it and do not invent an `instanceId` unless you find a concrete need — if you do,

@@ -18,8 +18,8 @@ line editable only at the cursor. This is the bottom "input block" in Warp, not 
 per-command output blocks.
 
 The architecture is already accepted (ADR-0004/0006) and **most of it is built but
-disabled** behind `ENHANCED_INPUT = false`. This design defines the *minimum
-remaining work* to enable it safely for local zsh/bash, per the user-selected
+disabled** behind `ENHANCED_INPUT = false`. This design defines the _minimum
+remaining work_ to enable it safely for local zsh/bash, per the user-selected
 "Approach A".
 
 ## Current state (already built)
@@ -52,6 +52,7 @@ trapped in an invisible prompt.
 **In:** W1–W6 below — the safe-enable of the existing editor for local zsh/bash.
 
 **Out (deferred, tracked, not cut):**
+
 - Editor chrome: cwd/git/status presentation, the directory chip, the submit-arrow
   button, the `⌘↵ new /agent conversation` hint (polish).
 - Output blocks / OSC-133 decorations (`nocx-4ff.5`).
@@ -63,6 +64,7 @@ trapped in an invisible prompt.
 ## Work items (build order = Approach A)
 
 ### W1 — Fix input-state latch bug (`nocx-4ff.11`)
+
 - **Change:** In `input-state.ts` `reduce()`, `owned` may become `true` **only** when
   this prompt cycle passed a real `A` **then** `B`. Today `B` grants `owned` whenever
   `state === PROMPT_READY`, so `B,B` from RAW latches `owned` with no `A`, and an
@@ -74,6 +76,7 @@ trapped in an invisible prompt.
   `B,B` and orphan `D` never latch `owned`.
 
 ### W2 — Fix submit dispatch + refocus (`nocx-4ff.12`)
+
 - **Change:** On Enter, dispatch `{type:'submit'}` to the state machine and refocus
   the xterm **before/at** send. Today `editor.ts` hides + submits but never tells the
   machine, so `owned` stays stuck and `PS2`-continuation keystrokes go nowhere.
@@ -82,6 +85,7 @@ trapped in an invisible prompt.
   typing during a `PS2` continuation reaches the PTY.
 
 ### W3 — Readiness gating + enhanced spawn (`nocx-4ff.10`)
+
 - **Change:** In `app.go` add `enhancedInput bool` to the local PTY factory and call
   `ActivationEnv(enhanced)`. Spawn marker-only **only** when the frontend is ready to
   own input (editor mounted + marker listeners attached for the tab); otherwise spawn
@@ -91,6 +95,7 @@ trapped in an invisible prompt.
   asserted; when not ready it falls back to a visible prompt — no invisible-prompt gap.
 
 ### W4 — Native-mode escape (`nocx-4ff.9`)
+
 - **Change:** A **state-independent**, always-available action (keybinding + automatic
   trigger on marker anomaly) that restores a **visible** shell prompt and raw keyboard
   routing for the session, regardless of the current machine state — so the user is
@@ -99,12 +104,14 @@ trapped in an invisible prompt.
   routing; verified against a shell that stops emitting markers mid-session.
 
 ### W5 — Raw-input routing after submit until next prompt (`nocx-4ff.4`)
+
 - **Change:** In `RUNNING_RAW` all keys go straight to the PTY/xterm until the next
   clean prompt marker; the editor never steals input from a running program.
 - **Acceptance:** the matrix works normally after submit — `read`, python, node,
   `less`, `vim`, `htop`, a password prompt, `Ctrl-C`, `Ctrl-D`.
 
 ### W6 — Enable + hardening (`nocx-4ff.13`, flip `ENHANCED_INPUT`)
+
 - **Change:** Flip `ENHANCED_INPUT` default to on (gated by W3 readiness + W4 escape).
   Hardening: `NOCX_SESSION_ID` nested-shell gate (only the top-level session owns
   input), `crypto/rand` fail-closed for the session id, bash array / powerlevel10k

@@ -27,16 +27,16 @@ must contain no hand-maintained list of settings.
 
 ```ts
 interface Declaration {
-  key: string            // stable dotted id, e.g. "terminal.fontSize"
-  section: string        // group heading in the UI
+  key: string // stable dotted id, e.g. "terminal.fontSize"
+  section: string // group heading in the UI
   label: string
   description: string
   control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
   dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
-  default: unknown       // absent for control:'secret'
-  options?: { value: string; label: string }[]   // control:'select' only
-  min?: number           // control:'number' only
-  max?: number           // control:'number' only
+  default: unknown // absent for control:'secret'
+  options?: { value: string; label: string }[] // control:'select' only
+  min?: number // control:'number' only
+  max?: number // control:'number' only
 }
 ```
 

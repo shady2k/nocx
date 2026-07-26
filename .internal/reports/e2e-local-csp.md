@@ -15,11 +15,11 @@ making every subsequent test fail with `net::ERR_CONNECTION_REFUSED`. The CSP ex
 
 **None of the three chromium blockers reproduced in a comparable way.**
 
-| # | Test | CI failure | Local result | Match? |
-|---|---|---|---|---|
-| 1 | `activity.spec.ts:10` | `.tab-add` click timeouts (element not visible) | `ERR_CONNECTION_REFUSED` (server dead) | ✗ |
-| 2 | `enhanced-input.spec.ts:61` | Expect `"MS-2"` got `"MS-1~00701~"` | `ERR_CONNECTION_REFUSED` | ✗ |
-| 3 | `tabs.spec.ts:8` | `.tab-add` click timeouts | `ERR_CONNECTION_REFUSED` | ✗ |
+| #   | Test                        | CI failure                                      | Local result                           | Match? |
+| --- | --------------------------- | ----------------------------------------------- | -------------------------------------- | ------ |
+| 1   | `activity.spec.ts:10`       | `.tab-add` click timeouts (element not visible) | `ERR_CONNECTION_REFUSED` (server dead) | ✗      |
+| 2   | `enhanced-input.spec.ts:61` | Expect `"MS-2"` got `"MS-1~00701~"`             | `ERR_CONNECTION_REFUSED`               | ✗      |
+| 3   | `tabs.spec.ts:8`            | `.tab-add` click timeouts                       | `ERR_CONNECTION_REFUSED`               | ✗      |
 
 The only test that survived `page.goto` in either run was `activity-bell.spec.ts:12`
 (first test in sort order, 3-worker run), which found `.tab` count = 0 instead of the
@@ -85,6 +85,7 @@ CI= npx playwright test --project=chromium --reporter=list
 ```
 
 15 tests, 1 passed (`seed.spec.ts`), 14 failed.
+
 - Tests 1-3 (`activity-bell`, `activity`, `click-focus`) connected, found no `.tab`
   elements, timed out.
 - Tests 4-15 all `ERR_CONNECTION_REFUSED`.
@@ -98,6 +99,7 @@ CI= npx playwright test --project=chromium --reporter=list --workers=1
 ```
 
 15 tests, 1 passed (`seed.spec.ts`), 14 failed.
+
 - Test 1 (`activity-bell`): connected, found `.tab` = 0.
 - Tests 2-15: all `ERR_CONNECTION_REFUSED`.
 - Server died after the first test. PID 37010 exited.

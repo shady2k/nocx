@@ -53,51 +53,51 @@ Server was confirmed alive before and after the run (HTTP 200, `nocx-dev-linux-a
 
 ### Chromium (15 tests)
 
-| Status | Test |
-|--------|------|
-| ✘ FAIL (1m timeout) | `activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer |
+| Status              | Test                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| ✘ FAIL (1m timeout) | `activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer      |
 | ✘ FAIL (1m timeout) | `activity.spec.ts:10` — a background tab lights the activity indicator on normal-buffer output |
-| ✘ FAIL (1m timeout) | `click-focus.spec.ts:26` — a click into the pane leaves the terminal taking keystrokes |
-| ✘ FAIL (3.5s)      | `clipboard.spec.ts:46` — selecting terminal text copies it to the clipboard |
-| ✘ FAIL (3.4s)      | `clipboard.spec.ts:115` — right-click pastes clipboard text at the cursor |
-| ✘ FAIL (8.5s)      | `command-editor.spec.ts:18` — editor is visible at the first prompt |
-| ✘ FAIL (8.3s)      | `command-editor.spec.ts:26` — mouse hit-tests the textarea, not the terminal canvas |
-| ✘ FAIL (8.4s)      | `command-editor.spec.ts:44` — double-click selects a word in the editor |
-| ✘ FAIL (8.3s)      | `command-editor.spec.ts:62` — a multi-line command is one gutter landmark, not three |
-| ✓ PASS (359ms)     | `enhanced-input.spec.ts:61` — multiple submits in succession all route raw |
-| ✓ PASS (466ms)     | `enhanced-input.spec.ts:10` — read command receives input after enhanced submit |
-| ✓ PASS (409ms)     | `enhanced-input.spec.ts:38` — Ctrl-C at a prompt does not trap input |
-| ✓ PASS (29ms)      | `seed.spec.ts:4` — seed |
-| ✓ PASS (355ms)     | `tab-title.spec.ts:17` — a new tab never displays "Terminal" in its title |
-| ✘ FAIL (1m timeout) | `tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible |
+| ✘ FAIL (1m timeout) | `click-focus.spec.ts:26` — a click into the pane leaves the terminal taking keystrokes         |
+| ✘ FAIL (3.5s)       | `clipboard.spec.ts:46` — selecting terminal text copies it to the clipboard                    |
+| ✘ FAIL (3.4s)       | `clipboard.spec.ts:115` — right-click pastes clipboard text at the cursor                      |
+| ✘ FAIL (8.5s)       | `command-editor.spec.ts:18` — editor is visible at the first prompt                            |
+| ✘ FAIL (8.3s)       | `command-editor.spec.ts:26` — mouse hit-tests the textarea, not the terminal canvas            |
+| ✘ FAIL (8.4s)       | `command-editor.spec.ts:44` — double-click selects a word in the editor                        |
+| ✘ FAIL (8.3s)       | `command-editor.spec.ts:62` — a multi-line command is one gutter landmark, not three           |
+| ✓ PASS (359ms)      | `enhanced-input.spec.ts:61` — multiple submits in succession all route raw                     |
+| ✓ PASS (466ms)      | `enhanced-input.spec.ts:10` — read command receives input after enhanced submit                |
+| ✓ PASS (409ms)      | `enhanced-input.spec.ts:38` — Ctrl-C at a prompt does not trap input                           |
+| ✓ PASS (29ms)       | `seed.spec.ts:4` — seed                                                                        |
+| ✓ PASS (355ms)      | `tab-title.spec.ts:17` — a new tab never displays "Terminal" in its title                      |
+| ✘ FAIL (1m timeout) | `tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible                 |
 
 ### Webkit (15 tests)
 
-| Status | Test |
-|--------|------|
-| ✘ FAIL (1m timeout) | `activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer |
+| Status              | Test                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| ✘ FAIL (1m timeout) | `activity-bell.spec.ts:12` — a bell lights the indicator from inside the alternate buffer      |
 | ✘ FAIL (1m timeout) | `activity.spec.ts:10` — a background tab lights the activity indicator on normal-buffer output |
-| ✓ PASS (660ms)     | `enhanced-input.spec.ts:10` — read command receives input after enhanced submit |
-| ✓ PASS (618ms)     | `enhanced-input.spec.ts:38` — Ctrl-C at a prompt does not trap input |
-| ✓ PASS (837ms)     | `enhanced-input.spec.ts:61` — multiple submits in succession all route raw |
-| ✓ PASS (267ms)     | `seed.spec.ts:4` — seed |
-| ✓ PASS (740ms)     | `tab-title.spec.ts:17` — a new tab never displays "Terminal" in its title |
-| ✘ FAIL (1m timeout) | `tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible |
-| – SKIPPED           | `clipboard.spec.ts:46` — selecting terminal text copies it to the clipboard |
-| – SKIPPED           | `clipboard.spec.ts:115` — right-click pastes clipboard text at the cursor |
-| ✘ FAIL (8.6s)      | `command-editor.spec.ts:18` — editor is visible at the first prompt |
-| ✘ FAIL (8.6s)      | `command-editor.spec.ts:26` — mouse hit-tests the textarea, not the terminal canvas |
-| ✘ FAIL (8.7s)      | `command-editor.spec.ts:44` — double-click selects a word in the editor |
+| ✓ PASS (660ms)      | `enhanced-input.spec.ts:10` — read command receives input after enhanced submit                |
+| ✓ PASS (618ms)      | `enhanced-input.spec.ts:38` — Ctrl-C at a prompt does not trap input                           |
+| ✓ PASS (837ms)      | `enhanced-input.spec.ts:61` — multiple submits in succession all route raw                     |
+| ✓ PASS (267ms)      | `seed.spec.ts:4` — seed                                                                        |
+| ✓ PASS (740ms)      | `tab-title.spec.ts:17` — a new tab never displays "Terminal" in its title                      |
+| ✘ FAIL (1m timeout) | `tabs.spec.ts:8` — adding a second tab preserves layout with both tabs visible                 |
+| – SKIPPED           | `clipboard.spec.ts:46` — selecting terminal text copies it to the clipboard                    |
+| – SKIPPED           | `clipboard.spec.ts:115` — right-click pastes clipboard text at the cursor                      |
+| ✘ FAIL (8.6s)       | `command-editor.spec.ts:18` — editor is visible at the first prompt                            |
+| ✘ FAIL (8.6s)       | `command-editor.spec.ts:26` — mouse hit-tests the textarea, not the terminal canvas            |
+| ✘ FAIL (8.7s)       | `command-editor.spec.ts:44` — double-click selects a word in the editor                        |
 
 ### Blocker #1–#5 reproduction status
 
-| # | Project | Test | Local result | Same as CI? |
-|---|---------|------|-------------|-------------|
-| 1 | chromium | `activity.spec.ts:10` | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom |
-| 2 | chromium | `enhanced-input.spec.ts:61` | ✓ PASS (359ms) | ❌ **Does not reproduce** |
-| 3 | chromium | `tabs.spec.ts:8` | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom |
-| 4 | webkit | `activity-bell.spec.ts:12` | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom |
-| 5 | webkit | `tabs.spec.ts:8` | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom |
+| #   | Project  | Test                        | Local result                                    | Same as CI?               |
+| --- | -------- | --------------------------- | ----------------------------------------------- | ------------------------- |
+| 1   | chromium | `activity.spec.ts:10`       | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom           |
+| 2   | chromium | `enhanced-input.spec.ts:61` | ✓ PASS (359ms)                                  | ❌ **Does not reproduce** |
+| 3   | chromium | `tabs.spec.ts:8`            | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom           |
+| 4   | webkit   | `activity-bell.spec.ts:12`  | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom           |
+| 5   | webkit   | `tabs.spec.ts:8`            | ✘ timeout — `.tab-add` "element is not visible" | ✅ Same symptom           |
 
 All four `.tab-add` failures share the identical CI error signature:
 

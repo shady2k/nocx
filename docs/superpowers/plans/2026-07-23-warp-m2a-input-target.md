@@ -21,13 +21,17 @@
 ### Task 1: InputTarget types + registry
 
 **Files:**
+
 - Create: `frontend/src/input-target.ts`
 - Test: `frontend/src/input-target.test.ts`
 
 **Interfaces:**
+
 - Produces:
   ```ts
-  export interface SubmitContext { readonly targetId: string }
+  export interface SubmitContext {
+    readonly targetId: string
+  }
   export interface InputTarget {
     readonly id: string
     readonly label: string
@@ -43,6 +47,7 @@
   Semantics: first `register` becomes active by default; `setActive('unknown')` throws; `active()` before any register throws.
 
 **Acceptance Criteria:**
+
 - `register` then `active()` returns that target; the first registered target is active by default.
 - `setActive` switches the active target; `setActive` with an unknown id throws.
 - `active()` with no registered targets throws a clear error.
@@ -55,7 +60,9 @@ import { describe, it, expect, vi } from 'vitest'
 import { createRegistry, type InputTarget } from './input-target'
 
 const fake = (id: string): InputTarget => ({
-  id, label: id, submit: vi.fn(async () => {}),
+  id,
+  label: id,
+  submit: vi.fn(async () => {}),
 })
 
 describe('InputTargetRegistry', () => {
@@ -144,10 +151,12 @@ git commit -m "feat(input): InputTarget registry (nocx-4ff.2)"
 ### Task 2: ShellInputTarget — atomic-handoff submit
 
 **Files:**
+
 - Modify: `frontend/src/input-target.ts` (add `ShellInputTarget`)
 - Test: `frontend/src/input-target.test.ts` (add)
 
 **Interfaces:**
+
 - Consumes: `InputTarget`, `SubmitContext` (Task 1).
 - Produces:
   ```ts
@@ -161,6 +170,7 @@ git commit -m "feat(input): InputTarget registry (nocx-4ff.2)"
   `submit` transmits the document as ONE bracketed paste followed by CR — the ADR-0004 §2 atomic-handoff transport — via the injected `send`. No `stty`, no per-key echo.
 
 **Acceptance Criteria:**
+
 - `submit('echo hi')` calls `send` exactly once with `"\x1b[200~echo hi\x1b[201~\r"`.
 - A multi-line document is transmitted verbatim inside the one bracketed paste (newlines preserved), still followed by a single CR.
 
@@ -229,6 +239,7 @@ git commit -m "feat(input): ShellInputTarget atomic-handoff submit (nocx-4ff.2)"
 ---
 
 ## Not in this milestone (tracked, not cut)
+
 - Wiring the registry/target into `tabs.ts` and the editor — Milestone (`nocx-4ff.3`).
 - `complete?()` / `history?()` optional members — deferred (YAGNI) until the editor needs them (`nocx-4ff.6`).
 - Gating submit on `PROMPT_READY` — enforced at the call site in the editor milestone, using the M1 state machine.

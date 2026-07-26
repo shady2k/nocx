@@ -13,7 +13,7 @@ review: Codex adversarial design review (2026-07-23) — findings folded in belo
 ## 0. Decision framing
 
 "Blocks like Warp" is **one coherent feature**, not a shippable half. Warp's
-blocks carry the command *you typed into Warp* — which is trustworthy precisely
+blocks carry the command _you typed into Warp_ — which is trustworthy precisely
 because Warp owns the input surface. The same is true here: the block's command
 text and its "re-run" action are safe only when they come from nocx's **own DOM
 editor** (app-owned, trusted submission), never from scraping xterm cells.
@@ -29,6 +29,7 @@ the hardening required by the Codex review, and the ordered build plan.
 ## 1. Current state (verified)
 
 Shipped on `main`:
+
 - **OSC 133 emission** — `nocx.{zsh,bash}` emit `A`/`B`/`C`/`D;<code>` + OSC 7,
   injected live (`NOCX_SHELL_INTEGRATION=1` on PTY spawn; scripts auto-installed).
 - **OSC 133 reception** — `xterm.ts` registers `registerOscHandler(133)`,
@@ -40,15 +41,16 @@ machine, no `InputTarget`, no DOM editor, no atomic handoff, no block model /
 decorations. Keystrokes go raw to the PTY (`renderer.onData → session.send`).
 
 **Correction to ADR-0004 §2 vs shipped scripts:** the "visually empty,
-marker-only prompt" is **not** implemented. The scripts *append* `B` to the
+marker-only prompt" is **not** implemented. The scripts _append_ `B` to the
 existing visible `PS1` (`nocx.zsh:59`, `nocx.bash:92`); they do not empty it.
-That is correct *today* (no editor exists, so emptying the prompt would leave no
+That is correct _today_ (no editor exists, so emptying the prompt would leave no
 prompt at all), but the enhanced-mode empty prompt is real, deferred work that
 must land **with** the editor. Tracked against `nocx-5mn.4` remainder.
 
 ## 2. Scope
 
 **In — the coherent MVP (ADR build order steps 1–6):**
+
 1. Input-ownership state machine `RAW / PROMPT_READY / ALT_SCREEN` (`nocx-4ff.1`).
 2. Enhanced-mode marker-only prompt: empty `PS1`/`PROMPT` + save/restore, gated
    on integration + enhanced state (`nocx-5mn.4` remainder).
@@ -71,22 +73,25 @@ partial input/UI to real users before the whole flow works.
 These are requirements on the ADR-0004 build, organised by component.
 
 ### 3.1 Prompt / shell (step 2)
+
 - Implement the enhanced-mode **empty prompt** (`PS1`/`PROMPT` reduced to the OSC
   markers), saving and restoring the user's prompt when integration is off,
   nocx exits, or the shell is not at PROMPT_READY. Raw fallback stays mandatory.
 
 ### 3.2 OSC 133 plumbing (foundation)
+
 - **One** OSC 133 handler, owned by `XtermRenderer`. It synchronously snapshots
   terminal facts at parse time (buffer line **and cursor column**, active buffer)
   and fans out typed events to all subscribers (state machine, blocks, tab
   exit-code). Store the parser `IDisposable`; dispose it in `XtermRenderer.dispose()`.
   Do not let multiple consumers each call `registerOscHandler(133)`.
 - **Marker placement:** the command-row anchor comes from **`A`/`B`** (prompt
-  row), *not* `C`. `C` fires in `preexec`/DEBUG after Enter, when the cursor is
+  row), _not_ `C`. `C` fires in `preexec`/DEBUG after Enter, when the cursor is
   already on the output row — a marker made there marks output, not the command.
   `C`/`D` drive state; the gutter glyph anchors to the prompt/command row.
 
 ### 3.3 Input-ownership state machine (step 1)
+
 - Explicit, **validating** transitions: only `A/B → PROMPT_READY`, submit →
   `RUNNING_RAW`, alt-buffer → `ALT_SCREEN`; enhanced states reachable **only**
   from markers/alt-buffer, never inferred from bytes/termios.
@@ -108,6 +113,7 @@ These are requirements on the ADR-0004 build, organised by component.
   explicit `unknown` state (or ignore + resync); do not silently render "success".
 
 ### 3.4 Editor + submission (steps 3–5)
+
 - `<textarea>` passive surface; behaviour via a registered `InputTarget`
   `{id,label,submit,complete?,history?}`; `ShellInputTarget` routes submit to the
   active PTY through the **atomic handoff** (hide editor → bracketed paste → CR).
@@ -116,6 +122,7 @@ These are requirements on the ADR-0004 build, organised by component.
   correct and safe — no buffer scraping (the approach ADR-0004 §Context rejects).
 
 ### 3.5 Blocks (step 6)
+
 - Gutter status decoration: running / ok (`exit 0`) / error (`exit ≠ 0`), colour
   from `D`. Command header/hover uses the stored submitted text (`textContent`,
   never `innerHTML`, CSS truncation).
@@ -167,6 +174,7 @@ These are requirements on the ADR-0004 build, organised by component.
   clean transcript (no double echo). Follow-ups: `nocx-9x1`, `nocx-bq7`.
 
 ## 6. Open decisions for planning
+
 1. Gutter approach — decided by the §5 spike (sibling gutter vs reserved padding).
 2. Enhanced-prompt coupling — how the state machine signals the shell to swap to
    the empty prompt (env/DSR/dedicated marker) vs always-empty-when-integrated.

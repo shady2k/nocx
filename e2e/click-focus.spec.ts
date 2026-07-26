@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "./harness";
+import { test, expect } from './harness'
 
 // Regression guard for the shared half of nocx-d1f: with one tab, clicking the
 // window left the terminal unable to take input.
@@ -20,27 +20,25 @@ import { test, expect, type Page } from "./harness";
 // target is therefore .nocx-editor-input (the CommandEditor textarea), not
 // .xterm-helper-textarea (the raw terminal grid). The path itself is identical.
 
-const PANE = ".pane.active";
-const TITLE = ".tab-title";
+const PANE = '.pane.active'
+const TITLE = '.tab-title'
 
-test("a click into the pane leaves the terminal taking keystrokes", async ({
-  page,
-}) => {
-  await page.goto("/");
-  await expect(page.locator(".tab")).toHaveCount(1);
+test('a click into the pane leaves the terminal taking keystrokes', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator('.tab')).toHaveCount(1)
   // Wait for the shell session to be ready.
-  await expect(page.locator(TITLE).first()).not.toHaveText("", {
+  await expect(page.locator(TITLE).first()).not.toHaveText('', {
     timeout: 10_000,
-  });
+  })
 
   // Move focus off the editor first. Without this the assertion is vacuous:
   // the tab is focused on load, so a click that changed nothing would pass.
   // Use blur() instead of clicking .tabbar-spacer — the spacer is hidden
   // when #app.alt-screen is active (CSS display:none), making the click hang.
-  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
+  await page.evaluate(() => (document.activeElement as HTMLElement)?.blur())
   await expect
-    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))
-    .not.toContain("nocx-editor-input");
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ''))
+    .not.toContain('nocx-editor-input')
 
   // Click near the bottom of the pane where the editor lives.  The centre
   // of the pane lands on the xterm area and its hidden textarea steals focus;
@@ -50,18 +48,18 @@ test("a click into the pane leaves the terminal taking keystrokes", async ({
   // the subject of a separate fix: the bounce handler needs a mousedown
   // listener that focuses the editor when visible regardless of where focus
   // lands inside the pane.
-  const box = await page.locator(PANE).boundingBox();
-  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30);
+  const box = await page.locator(PANE).boundingBox()
+  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30)
 
   await expect
-    .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))
-    .toContain("nocx-editor-input");
+    .poll(() => page.evaluate(() => document.activeElement?.className ?? ''))
+    .toContain('nocx-editor-input')
 
   // The tab title is the only DOM-observable end of the keystroke round trip:
   // once WebGL paints to a canvas, the screen text is not in the DOM at all.
   // An OSC 0 sequence is shell-agnostic, so this holds on a runner's bash just
   // as it does on the developer's zsh.
-  await page.keyboard.type("printf '\\033]0;NOCX-D1F-CLICK\\007'");
-  await page.keyboard.press("Enter");
-  await expect(page.locator(TITLE).first()).toHaveText("NOCX-D1F-CLICK");
-});
+  await page.keyboard.type("printf '\\033]0;NOCX-D1F-CLICK\\007'")
+  await page.keyboard.press('Enter')
+  await expect(page.locator(TITLE).first()).toHaveText('NOCX-D1F-CLICK')
+})

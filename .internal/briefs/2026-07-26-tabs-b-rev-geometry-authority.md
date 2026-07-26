@@ -9,14 +9,14 @@ good: branded identities, `AbortSignal` lifecycle, idempotent dispose, inert hos
 **One part of it is a façade, and that is your entire task.**
 
 `viewportChanged()` at `frontend/src/terminal-content.ts:534` is a no-op — it stores the value
-and returns. Its own comment admits it: *"The renderer observes its own container for resize"*.
+and returns. Its own comment admits it: _"The renderer observes its own container for resize"_.
 Its only non-test call site anywhere is `terminal-content.ts:517`, which is `TerminalContent`
 replaying to itself. **Nothing calls it from outside.** `ResizeObserver` and
 `getBoundingClientRect` appear only in `terminal-content.ts`; `tab-strip.ts` and `tabs.ts`
 contain neither.
 
 So content still measures its own container. Design section B.5 forbids exactly that:
-*"Content MUST NOT interpret container geometry itself."* The placement layer does not hold the
+_"Content MUST NOT interpret container geometry itself."_ The placement layer does not hold the
 authority the whole extraction exists to give it — and the configurable-placement epic
 (`nocx-d3q`, vertical tabs) depends on that authority. Shipping as-is means reopening this seam
 later, which the design was explicitly ordered to prevent.

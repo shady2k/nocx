@@ -354,7 +354,7 @@ to the next.
 
 Run the full local gate before pushing, not only the part you touched: `gofumpt -l .`,
 `golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
-`npx tsc --noEmit`, `npx vitest run` for frontend changes.
+`cd frontend && npm run typecheck`, `cd frontend && npm test` for frontend changes.
 
 **Take the merge slot before integrating into `main`.** When several worktrees land in
 sequence, hold `nocx-merge-slot` for the whole merge-and-resolve, and release it whether

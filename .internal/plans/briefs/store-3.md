@@ -16,7 +16,7 @@ security-critical task of the wave. Read these before writing code:
 - `credential.Secret` (`internal/credential/secret.go`) is finished and thorough: unexported
   `value`, `Use(fn)` as the only accessor, `MarshalJSON`/`MarshalText` **return an error**,
   and `String`/`GoString`/`Format`/`LogValue` all render `[REDACTED]`. **Leave this type alone.**
-  Your task builds the *capability* around it; it does not re-litigate the type.
+  Your task builds the _capability_ around it; it does not re-litigate the type.
 - `VaultSecret.Value` is already a `Secret`, not a serializable string.
 - `credentials.lookupPassword` is already gone from the wire. The surviving credential RPCs are
   already exactly `set`/`delete`/`exists`.

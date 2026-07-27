@@ -276,6 +276,13 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
 	}
+	// ADR-0013: Pass BoundHost/BoundPort for grant enforcement
+	if cfg.BoundHost != "" {
+		opts = append(opts, ssh.WithBinding(cfg.BoundHost, cfg.BoundPort))
+	}
+	if cfg.JumpBoundHost != "" {
+		opts = append(opts, ssh.WithJumpBinding(cfg.JumpBoundHost, cfg.JumpBoundPort))
+	}
 	return opts
 }
 

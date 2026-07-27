@@ -1179,8 +1179,8 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
 	case "credentials.create":
-		// ADR-0013: use CredentialCreateDTO without backend-owned fields
-		// First check for presence of backend-owned keys in raw JSON
+		// ADR-0013: reject backend-owned fields (defense-in-depth)
+		// Frontend should send identity-only payload, but reject if backend fields present
 		var rawCheck map[string]json.RawMessage
 		if err := json.Unmarshal(req.Params, &rawCheck); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
@@ -1216,7 +1216,8 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
 
 	case "credentials.update":
-		// ADR-0013: use CredentialUpdateDTO without backend-owned fields
+		// ADR-0013: reject backend-owned fields (defense-in-depth)
+		// Frontend should send identity-only payload, but reject if backend fields present
 		var rawCheck map[string]json.RawMessage
 		if err := json.Unmarshal(req.Params, &rawCheck); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))

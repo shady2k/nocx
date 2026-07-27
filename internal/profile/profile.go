@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"fmt"
 	"strings"
 )
 
@@ -394,3 +395,16 @@ func newUUID() string {
 
 // Suppress unused import safety — uuid helper.
 var _ = hex.EncodeToString
+
+// CheckGrant verifies that a credential has a grant for the given profile and endpoint.
+// ADR-0013: credentials are authorized for a finite set of exact endpoints.
+// Returns nil if grant exists, error otherwise.
+func CheckGrant(cred Credential, profileID string, endpoint CredentialTrustedEndpoint) error {
+	for _, grant := range cred.TrustedEndpoints {
+		if grant.ProfileID == profileID && grant.Host == endpoint.Host && grant.Port == endpoint.Port {
+			return nil
+		}
+	}
+	return fmt.Errorf("credential %s has no grant for profile %s at %s:%d",
+		cred.ID, profileID, endpoint.Host, endpoint.Port)
+}

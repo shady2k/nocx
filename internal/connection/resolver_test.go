@@ -330,13 +330,20 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 		Host:     "bound.example.com",
 		Port:     2222,
 		SecretID: string(pwID),
+		TrustedEndpoints: []profile.CredentialTrustedEndpoint{
+			{ProfileID: "profile:bound", Host: "bound.example.com", Port: 2222},
+		},
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:bound", Name: "bound"},
-		Options: profile.SSHProfileOptions{Host: "bound.example.com", CredentialID: "cred:bound:aaa"},
+		Options: profile.SSHProfileOptions{Host: "bound.example.com", Port: 2222, CredentialID: "cred:bound:aaa"},
 	})
 
-	r := NewResolver(ps, ps, ss, nil)
+	// ADR-0013: endpointResolver required for grant check
+	resolver := func(p profile.SSHProfile) (string, uint16, error) {
+		return p.Options.Host, uint16(p.Options.Port), nil
+	}
+	r := NewResolver(ps, ps, ss, resolver)
 	_, cfg, err := r.Resolve("profile:bound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -401,10 +408,13 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 		Host:     "jump-bound.example.com",
 		Port:     2222,
 		SecretID: string(jumpPWID),
+		TrustedEndpoints: []profile.CredentialTrustedEndpoint{
+			{ProfileID: "profile:jumpb", Host: "jump-bound.example.com", Port: 2222},
+		},
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:jumpb", Name: "jumpb"},
-		Options: profile.SSHProfileOptions{Host: "jump-bound.example.com", CredentialID: "cred:jumpbound:ccc"},
+		Options: profile.SSHProfileOptions{Host: "jump-bound.example.com", Port: 2222, CredentialID: "cred:jumpbound:ccc"},
 	})
 
 	// Target
@@ -418,13 +428,17 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 		Host:     "tgt-bound.example.com",
 		Port:     3333,
 		SecretID: string(tgtPWID),
+		TrustedEndpoints: []profile.CredentialTrustedEndpoint{
+			{ProfileID: "profile:tgtb", Host: "tgt-bound.example.com", Port: 22},
+		},
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:tgtb", Name: "tgtb"},
-		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
+		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", Port: 22, CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
 	})
 
-	r := NewResolver(ps, ps, ss, nil)
+	resolver := func(p profile.SSHProfile) (string, uint16, error) { return p.Options.Host, uint16(p.Options.Port), nil }
+	r := NewResolver(ps, ps, ss, resolver)
 	_, cfg, err := r.Resolve("profile:tgtb")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -433,13 +447,63 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 	if cfg.BoundHost != "tgt-bound.example.com" {
 		t.Errorf("BoundHost = %q, want tgt-bound.example.com", cfg.BoundHost)
 	}
-	if cfg.BoundPort != 3333 {
-		t.Errorf("BoundPort = %d, want 3333", cfg.BoundPort)
+	if cfg.BoundPort != 22 {
+		t.Errorf("BoundPort = %d, want 22 (canonical endpoint port)", cfg.BoundPort)
 	}
 	if cfg.JumpBoundHost != "jump-bound.example.com" {
 		t.Errorf("JumpBoundHost = %q, want jump-bound.example.com", cfg.JumpBoundHost)
 	}
 	if cfg.JumpBoundPort != 2222 {
 		t.Errorf("JumpBoundPort = %d, want 2222", cfg.JumpBoundPort)
+	}
+}
+
+// TestBuildConfig_GrantCheckCalled verifies that buildConfig calls endpointResolver
+// and sets BoundHost/BoundPort from canonical endpoint.
+func TestBuildConfig_GrantCheckCalled(t *testing.T) {
+	ps := newStubProfileStore()
+	ss := newStubSecretStore()
+
+	pwID := credential.NewSecretID()
+	_ = ss.Set(pwID, credential.NewSecret("pw"))
+	_ = ps.SaveCredential(profile.Credential{
+		ID:       "cred:test",
+		Name:     "test",
+		Username: "u",
+		Auth:     "password",
+		SecretID: string(pwID),
+		TrustedEndpoints: []profile.CredentialTrustedEndpoint{
+			{ProfileID: "profile:test", Host: "resolved.example.com", Port: 2222},
+		},
+	})
+	_ = ps.SaveProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "profile:test", Name: "test"},
+		Options: profile.SSHProfileOptions{Host: "alias.example.com", Port: 2222, CredentialID: "cred:test"},
+	})
+
+	resolverCalled := false
+	resolver := func(p profile.SSHProfile) (string, uint16, error) {
+		resolverCalled = true
+		t.Logf("resolver called: host=%s port=%d", p.Options.Host, p.Options.Port)
+		return "resolved.example.com", 2222, nil
+	}
+
+	r := NewResolver(ps, ps, ss, resolver)
+	_, cfg, err := r.Resolve("profile:test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if !resolverCalled {
+		t.Fatal("endpointResolver was not called")
+	}
+
+	t.Logf("cfg.BoundHost=%q cfg.BoundPort=%d", cfg.BoundHost, cfg.BoundPort)
+
+	if cfg.BoundHost != "resolved.example.com" {
+		t.Errorf("BoundHost = %q, want resolved.example.com", cfg.BoundHost)
+	}
+	if cfg.BoundPort != 2222 {
+		t.Errorf("BoundPort = %d, want 2222", cfg.BoundPort)
 	}
 }

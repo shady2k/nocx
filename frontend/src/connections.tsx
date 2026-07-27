@@ -492,9 +492,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
       setFormError('')
       try {
-        await props.client.createCredential(credential)
+        // ADR-0013: Send only identity payload, exclude backend-owned fields
+        const identityPayload = {
+          id: credential.id,
+          name: credential.name,
+          username: credential.username,
+          auth: credential.auth,
+          keyPath: credential.keyPath,
+        }
+        
+        // Use updateCredential for existing, createCredential for new
+        const saved = isNew
+          ? await props.client.createCredential(identityPayload as Credential)
+          : await props.client.updateCredential(identityPayload as Credential)
+        
+        // Use returned ID for password save (server may have assigned different ID)
+        const savedId = saved.id || credential.id
         if (credential.auth === 'password' && passwordInputRef?.value) {
-          await props.client.savePassword(credential.id, passwordInputRef.value)
+          await props.client.savePassword(savedId, passwordInputRef.value)
         }
         setEditingCredential(null)
         await loadAll()

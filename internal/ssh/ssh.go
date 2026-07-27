@@ -242,3 +242,20 @@ func (c *StubChannel) Done() <-chan struct{} {
 func (c *StubChannel) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
 	return nil
 }
+
+// WithBinding sets the credential binding for ADR-0013 grant enforcement.
+// This is set by the resolver after grant check and passed to SSH layer.
+func WithBinding(host string, port int) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.BoundHost = host
+		c.BoundPort = port
+	}
+}
+
+// WithJumpBinding sets the jump credential binding for ADR-0013 grant enforcement.
+func WithJumpBinding(host string, port int) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.JumpBoundHost = host
+		c.JumpBoundPort = port
+	}
+}

@@ -94,6 +94,8 @@ func New(opts ...Option) (*App, error) {
 		return ep.Host, ep.Port, nil
 	})
 	
+
+	
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithProfileAtomicMutator(profileStore),  // ADR-0013: atomic profile+grant operations

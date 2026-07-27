@@ -85,9 +85,6 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		cfg.AuthMode = string(cred.Auth)
 		cfg.KeyFile = cred.KeyPath
 
-		cfg.BoundHost = cred.Host
-		cfg.BoundPort = cred.Port
-
 		// Wire SecretStore for late-bound password/passphrase resolution
 		// via opaque SecretID references (ADR-0011 §2).
 		cfg.Secrets = r.secrets
@@ -96,6 +93,29 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		}
 		if cred.PassphraseSecretID != "" {
 			cfg.PassphraseSecretID = credential.SecretID(cred.PassphraseSecretID)
+		}
+
+		// ADR-0013: Check grant and set BoundHost/BoundPort from canonical endpoint
+		if r.endpointResolver != nil {
+			canonicalHost, canonicalPort, err := r.endpointResolver(*prof)
+			if err != nil {
+				return nil, fmt.Errorf("resolve endpoint for grant check: %w", err)
+			}
+			if err := profile.CheckGrant(cred, prof.ID, profile.CredentialTrustedEndpoint{
+				ProfileID: prof.ID,
+				Host:      canonicalHost,
+				Port:      canonicalPort,
+			}); err != nil {
+				return nil, fmt.Errorf("%w: credential %s has no grant for %s:%d",
+					ErrCredentialNotAuthorized, cred.ID, canonicalHost, canonicalPort)
+			}
+			// ADR-0013: Set authorization revision for pool invalidation.
+			cfg.AuthorizationRevision = fmt.Sprintf("v1:%s:%d:%s",
+				cred.ID, len(cred.TrustedEndpoints), cred.SecretID)
+			
+			// Set BoundHost/BoundPort for legacy checkBinding compatibility.
+			cfg.BoundHost = canonicalHost
+			cfg.BoundPort = int(canonicalPort)
 		}
 	} else {
 		cfg.User = prof.Options.User

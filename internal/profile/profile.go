@@ -401,7 +401,9 @@ var _ = hex.EncodeToString
 // Returns nil if grant exists, error otherwise.
 func CheckGrant(cred Credential, profileID string, endpoint CredentialTrustedEndpoint) error {
 	for _, grant := range cred.TrustedEndpoints {
-		if grant.ProfileID == profileID && grant.Host == endpoint.Host && grant.Port == endpoint.Port {
+		if grant.ProfileID == profileID &&
+			strings.EqualFold(grant.Host, endpoint.Host) &&
+			grant.Port == endpoint.Port {
 			return nil
 		}
 	}

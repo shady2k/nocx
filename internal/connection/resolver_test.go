@@ -1,6 +1,7 @@
 package connection
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -364,31 +365,35 @@ func TestResolver_UnboundCredentialSurfacesEmpty(t *testing.T) {
 
 	pwID := credential.NewSecretID()
 	_ = ss.Set(pwID, credential.NewSecret("pw"))
+	// ADR-0013: credential with empty TrustedEndpoints is "unbound"
+	// — no remote endpoint authorized. Grant check must fail closed.
 	_ = ps.SaveCredential(profile.Credential{
 		ID:       "cred:unbound:bbb",
 		Name:     "unbound",
 		Username: "u",
 		Auth:     "password",
-		Host:     "", // unbound
-		Port:     0,
 		SecretID: string(pwID),
+		// TrustedEndpoints intentionally empty — no grants
 	})
 	_ = ps.SaveProfile(profile.SSHProfile{
 		Base:    profile.Base{ID: "profile:unbound", Name: "unbound"},
-		Options: profile.SSHProfileOptions{Host: "any.example.com", CredentialID: "cred:unbound:bbb"},
+		Options: profile.SSHProfileOptions{Host: "any.example.com", Port: 22, CredentialID: "cred:unbound:bbb"},
 	})
 
-	r := NewResolver(ps, ps, ss, nil)
-	_, cfg, err := r.Resolve("profile:unbound")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	// ADR-0013: endpointResolver is required — nil resolver skips grant check,
+	// which is wrong. A real resolver must be passed.
+	resolver := func(p profile.SSHProfile) (string, uint16, error) {
+		return p.Options.Host, uint16(p.Options.Port), nil
 	}
+	r := NewResolver(ps, ps, ss, resolver)
+	_, _, err := r.Resolve("profile:unbound")
 
-	if cfg.BoundHost != "" {
-		t.Errorf("BoundHost = %q, want empty (unbound)", cfg.BoundHost)
+	// ADR-0013: unbound credential (empty TrustedEndpoints) must fail closed
+	if err == nil {
+		t.Fatal("Resolve should fail for unbound credential (empty TrustedEndpoints)")
 	}
-	if cfg.BoundPort != 0 {
-		t.Errorf("BoundPort = %d, want 0", cfg.BoundPort)
+	if !errors.Is(err, ErrCredentialNotAuthorized) {
+		t.Errorf("Resolve error = %v, want ErrCredentialNotAuthorized", err)
 	}
 }
 

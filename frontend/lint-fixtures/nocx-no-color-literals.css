@@ -1,0 +1,45 @@
+/* Negative fixture for nocx/no-color-literals — CSS declarations.
+   Tests the colour grammar on CSS file parsing.
+   This file MUST produce violations caught by check-css-colors.mjs. */
+
+.foo {
+  color: color-mix(in srgb, var(--accent), red 20%);
+}
+.bar {
+  color: white;
+}
+.baz {
+  color: black;
+}
+.quux {
+  color: #ff0000;
+}
+.plugh {
+  color: red;
+}
+.fred {
+  color: var(--x, #fff);
+}
+.thud {
+  border: 1px solid var(--x, #000);
+}
+
+/* Allowed — should NOT produce violations */
+.ok-var {
+  color: var(--color-text);
+}
+.ok-current {
+  color: currentColor;
+}
+.ok-transparent {
+  background: transparent;
+}
+.ok-inherit {
+  color: inherit;
+}
+.ok-color-mix-white {
+  background: color-mix(in srgb, white, transparent 96%);
+}
+.ok-color-mix-black {
+  color: color-mix(in srgb, var(--accent), black 50%);
+}

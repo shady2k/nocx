@@ -212,21 +212,39 @@ recorded as a tiebreak between near-peers, **not** as a technical argument.
 
 ## As shipped (2026-07-27, epic `nocx-njrx`)
 
-The migration is complete. What follows is what the code actually does, not what was
-planned; where the two differ, the difference is stated.
+The migration is complete for the surfaces it targeted. What follows states what the code
+actually does, not what was planned; where the two differ, the difference is named.
 
-**Every application surface renders from Solid.** In order of landing: the clipboard
-banner (the pilot), the sidebar, the export section, the connections manager, the settings
-screen, and the tab strip. Each was rewritten, not wrapped, and each imperative predecessor
-was deleted in the same commit as its replacement — `banner.ts`, `sidebar.ts`,
-`export-section.ts`, `connections.ts`, `settings.ts` and `tab-strip.ts` are gone, together
-with roughly 3,700 lines of structural tests that asserted the shape of the DOM those files
-happened to build.
+**Solid renders parts of the application shell and owns the component kit.** It does not
+own every surface. Measured on the shipped build:
 
-**One Solid root owns the shell.** `App.tsx` renders the skeleton — `#tabbar`,
-`#activitybar`, `#sidebar`, `#panes` — as **empty hosts** with no reactive state;
-`index.html` carries only `<div id="app">`; `main.tsx` is the composition root and nothing
-else. The six separate roots the migration passed through on its way here are gone.
+- `App.tsx` renders the skeleton — `#tabbar`, `#activitybar`, `#sidebar`, `#panes` — as
+  **empty hosts** with no reactive state. `index.html` carries only `<div id="app">`;
+  `main.tsx` is the composition root.
+- The activity bar (`SidebarSolid`) renders via Solid (`<For>`, `createEffect`,
+  `createMemo`).
+- The tab strip renders its static wrapper (`<div class="tabs-container">`, add button,
+  spacer) in Solid, but every tab button is built imperatively: `createElement` per tab,
+  `paintButton` for display updates, `innerHTML = ''` for reordering. There is no `<For>`.
+  (`nocx-82l9.5` — this is pending work, not the design.)
+- The clipboard banner (`ClipboardBannerImpl`) is a Solid component.
+- The export section, connections manager and settings screen each render from a Solid root
+  mounted into a pane by the `TabContent` seam.
+- The `UpdateNotice` (application surface in the tab bar) is a vanilla DOM class using
+  `createElement` and `innerHTML` resets. (`nocx-82l9.4` — pending.)
+- The sidebar panel (title element, per-view content containers, `style.display` toggling)
+  is built imperatively inside a `createEffect`. (`nocx-82l9.6` — pending.)
+
+**There is not one Solid root.** `App.tsx` owns the shell layout. Per-tab surfaces
+(settings, connections, export) each open their own Solid root inside their pane. The
+banner, sidebar and tab strip also open independent roots. The six intermediate roots the
+migration passed through on its way here are gone — `main.tsx` creates one shell root, and
+every surface-specific root is opened inside a host element the shell provides.
+
+The imperative predecessors deleted per-surface, preserved here for the historical record:
+`banner.ts`, `sidebar.ts`, `export-section.ts`, `connections.ts`, `settings.ts` and
+`tab-strip.ts` are gone, together with roughly 3,700 lines of structural tests that
+asserted the shape of the DOM those files happened to build.
 
 **What is deliberately still imperative**, and is not "not yet migrated":
 
@@ -243,12 +261,23 @@ else. The six separate roots the migration passed through on its way here are go
   `surface-registry.ts` — framework-neutral logic and clients, which is where §2 wants
   authority to live.
 
-**Three defects were fixed inside the migrations that caused them**, as acceptance criteria
-rather than separate patches, because fixing them first would have been throwaway work and
-"preserve current behaviour" taken literally would have reproduced them: `nocx-x6w9` (the
-settings surface now has exactly one search box and one modified filter, pinned by tests),
-`nocx-ucxl` (selecting a rail section always changes the content pane), `nocx-rp2j`
-(panel-views and tab-actions are separate concepts, so no empty panel opens at cold start).
+**The three defects fixed inside the migration were real.** As acceptance criteria rather
+than separate patches: `nocx-x6w9` (the settings surface now has exactly one search box
+and one modified filter, pinned by tests), `nocx-ucxl` (selecting a rail section always
+changes the content pane), `nocx-rp2j` (panel-views and tab-actions are separate concepts,
+so no empty panel opens at cold start).
+
+**Three defects shipped**, all from surfaces that are partially imperative or entirely
+vanilla. These are structural — the next epic (`nocx-82l9`) owns fixing them:
+
+- **Settings does not scroll** (`nocx-82l9.2`). `.pane` is `position:absolute; inset:0;
+overflow:hidden` and `SettingsContent.mount` appends an unclassed `<div>`, so the
+  `flex:1; overflow-y:auto` scroll chain is broken. Reproducible in WebKit only.
+- **Vertical tab placement is broken** (`nocx-82l9.3`). There is no `#vertical-tabstrip`
+  container alongside `#body`. `App.tsx` renders `#tabbar` then `#body`, and both
+  orientations mount into the same `#tabbar` element.
+- **UpdateNotice keeps a stale class** (`nocx-82l9.1`). `showAvailable()` does not reset
+  `className`, so a previous error class persists across states.
 
 **Bundle, measured on the shipped build:** 623,145 bytes raw / 162,827 gzip, against the
 pre-adoption baseline of 600 KB raw / 152 KB gzip recorded below — about **+7 KB gzip net**,
@@ -270,6 +299,12 @@ the first geometry delivery, a hidden pane measures ~0 width in WebKit but not i
 and the settings surface silently rendered its narrow layout with no content column. 544
 unit tests and all 20 Chromium specs were green. That is the evidence for keeping the
 `webkit` project in `playwright.config.ts`, alongside `nocx-q18`.
+
+**The next iteration is designed.** The design spec at
+`.internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md` (epic `nocx-82l9`) describes
+the shell layout, component kit, token layer, and the fix for each shipped defect. The
+surfaces named `nocx-82l9.4` through `nocx-82l9.6` above are the pending migration targets
+from that design's §7.
 
 ## Consequences
 

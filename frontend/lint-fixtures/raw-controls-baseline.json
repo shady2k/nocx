@@ -1,0 +1,12 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:update`.",
+    "",
+    "This baseline enumerates every current raw-control violation in application",
+    "surfaces. It may only shrink. A new violation in any file is an error even if",
+    "the file already has baselined violations. CI asserts this.",
+    "",
+    "This file must be empty before epic nocx-vxqj closes."
+  ],
+  "violations": []
+}

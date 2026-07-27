@@ -1,0 +1,98 @@
+/* ── Quick-connect picker ──────────────────────────────────────────────
+   Owned by nocx-imkb.7. */
+
+/* ── Caret beside the + button ────────────────────────────────────────── */
+
+.tab-caret {
+  --wails-draggable: no-drag;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: 10px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.tab-caret:hover {
+  color: var(--color-text-muted);
+}
+
+.tab-caret:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ── Dialog layout ────────────────────────────────────────────────────── */
+
+.quick-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 280px;
+  max-width: 420px;
+}
+
+.quick-connect__search {
+  padding-bottom: 8px;
+}
+
+.quick-connect__search input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ── Item list ────────────────────────────────────────────────────────── */
+
+.quick-connect__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.quick-connect__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.quick-connect__item:hover,
+.quick-connect__item--selected {
+  background: var(--color-surface-hover);
+}
+
+.quick-connect__item-label {
+  font-size: 14px;
+  color: var(--color-text);
+  flex: 0 0 auto;
+}
+
+.quick-connect__item-detail {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Empty state ──────────────────────────────────────────────────────── */
+
+.quick-connect__empty {
+  padding: 12px 8px;
+  font-size: 13px;
+  color: var(--color-text-dim);
+  text-align: center;
+}

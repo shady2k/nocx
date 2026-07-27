@@ -27,6 +27,14 @@ describe('Button', () => {
     expect(onClick).toHaveBeenCalledTimes(1)
   })
 
+  it('is natively keyboard-activatable (Enter/Space handled by browser)', () => {
+    subject()
+    const btn = screen.getByText('Click me')
+    // Native <button> handles Enter/Space activation — test that it's a real button
+    expect(btn.tagName).toBe('BUTTON')
+    expect(btn.getAttribute('type')).toBe('button')
+  })
+
   it('sets the class attribute', () => {
     subject({ class: 'my-btn' })
     const btn = screen.getByText('Click me')
@@ -45,10 +53,18 @@ describe('Button', () => {
     expect(btn.getAttribute('type')).toBe('submit')
   })
 
-  it('sets disabled', () => {
+  it('sets disabled attribute', () => {
     subject({ disabled: true })
     const btn = screen.getByText('Click me')
     expect(btn.getAttribute('disabled')).not.toBeNull()
+  })
+
+  it('does not call onClick when disabled', () => {
+    const onClick = vi.fn()
+    subject({ disabled: true, onClick })
+    const btn = screen.getByText('Click me')
+    btn.click()
+    expect(onClick).not.toHaveBeenCalled()
   })
 
   it('sets title', () => {
@@ -60,5 +76,48 @@ describe('Button', () => {
   it('sets aria-label', () => {
     subject({ ariaLabel: 'Dismiss', children: '✕' })
     expect(screen.getByLabelText('Dismiss')).toBeTruthy()
+  })
+
+  it('renders default variant with no extra class', () => {
+    subject()
+    const btn = screen.getByText('Click me')
+    expect(btn.classList.contains('ui-btn-primary')).toBe(false)
+    expect(btn.classList.contains('ui-btn-danger')).toBe(false)
+  })
+
+  it('applies primary variant class', () => {
+    subject({ variant: 'primary' })
+    const btn = screen.getByText('Click me')
+    expect(btn.classList.contains('ui-btn-primary')).toBe(true)
+  })
+
+  it('applies danger variant class', () => {
+    subject({ variant: 'danger' })
+    const btn = screen.getByText('Click me')
+    expect(btn.classList.contains('ui-btn-danger')).toBe(true)
+  })
+
+  it('applies close variant class', () => {
+    subject({ variant: 'close' })
+    const btn = screen.getByText('Click me')
+    expect(btn.classList.contains('ui-btn-close')).toBe(true)
+  })
+
+  it('combines variant and custom class', () => {
+    subject({ variant: 'primary', class: 'my-btn' })
+    const btn = screen.getByText('Click me')
+    expect(btn.classList.contains('ui-btn-primary')).toBe(true)
+    expect(btn.classList.contains('my-btn')).toBe(true)
+  })
+
+  it('has role button for accessibility', () => {
+    subject()
+    expect(screen.getByRole('button')).toBeTruthy()
+  })
+
+  it('is focusable via tab', () => {
+    subject()
+    const btn = screen.getByText('Click me')
+    expect(btn.getAttribute('tabindex')).toBeNull() // natively focusable
   })
 })

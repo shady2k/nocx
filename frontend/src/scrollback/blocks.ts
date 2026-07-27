@@ -3,7 +3,8 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import { serializeRange } from './serializer'
+import { serializeRange, fromITheme } from './serializer'
+import { getCurrentTheme } from '../renderers/theme-adapter'
 import type { IBufferLine } from '@xterm/xterm'
 
 // ── Clipboard helper ────────────────────────────────────────────────────────
@@ -565,7 +566,8 @@ export class BlockManager {
     const durationMs = this._cmdStartTime !== null ? this._now() - this._cmdStartTime : null
     this._cmdStartTime = null
 
-    const outputHtml = serializeRange(getLine, rec.startLine, endLine)
+    const snapshot = fromITheme(getCurrentTheme())
+    const outputHtml = serializeRange(snapshot, getLine, rec.startLine, endLine)
 
     const newEl = freezeBlock(
       rec.el,

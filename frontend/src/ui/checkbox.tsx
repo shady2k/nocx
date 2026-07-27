@@ -6,7 +6,6 @@
  * - connections.ts: checkboxField() helper — div.cm-field > label + input[type=checkbox]
  * - export-section.ts: show/hide password checkbox
  */
-
 import { Show } from 'solid-js'
 
 export interface CheckboxProps {
@@ -15,6 +14,7 @@ export interface CheckboxProps {
   onChange: (checked: boolean) => void
   label?: string
   ariaLabel?: string
+  disabled?: boolean
 }
 
 export function Checkbox(props: CheckboxProps) {
@@ -29,6 +29,7 @@ export function Checkbox(props: CheckboxProps) {
         type="checkbox"
         checked={props.checked}
         aria-label={props.ariaLabel ?? undefined}
+        disabled={props.disabled === true}
         onChange={onChange}
       />
       <Show when={props.label !== undefined}>

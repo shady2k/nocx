@@ -480,6 +480,22 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// UITheme controls which colour theme the UI and terminals use.
+// The frontend resolves it to a theme file matching the id; adding a new theme
+// requires a new theme CSS file and an option here.
+var UITheme = MustRegisterSelect(SelectSpec{
+	Key:         "ui.theme",
+	Section:     "Interface",
+	Label:       "Theme",
+	Description: "The colour theme applied to the UI and terminal panes. Changing the theme repaints all open terminals in place without restarting them.",
+	DataClass:   PublicConfig,
+	Default:     "tokyo-night",
+	Options: []SelectOption{
+		{Value: "tokyo-night", Label: "Tokyo Night"},
+		{Value: "light", Label: "Light"},
+	},
+})
+
 // ── Document shape ─────────────────────────────────────────────────────
 
 const settingsDocName = "settings.json"

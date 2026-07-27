@@ -1,102 +1,12 @@
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-:root {
-  /* Keep --nocx-mono identical to FONT_FAMILY in renderers/font.ts. */
-  --nocx-ui: ui-sans-serif, -apple-system, 'SF Pro Text', system-ui, sans-serif;
-  --nocx-mono:
-    ui-monospace, 'SF Mono', Menlo, Monaco, 'Apple Color Emoji', 'Apple Symbols', monospace;
-}
-
-html,
-body {
-  margin: 0;
-  padding: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: #1a1b26;
-}
-
-#app {
-  font-family: var(--nocx-mono);
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-}
-
-/* ── Connections view ─────────────────────────────────────────────────── */
-
-.cm-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 24px;
-  border-bottom: 1px solid #2a2b3d;
-  flex-shrink: 0;
-  position: relative;
-  z-index: 10;
-  pointer-events: auto;
-  --wails-draggable: no-drag;
-}
-
-.cm-header h1 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: #c0caf5;
-  flex: 1;
-}
-
-.cm-header button {
-  padding: 8px 16px;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 6px;
-  color: #c0caf5;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 500;
-  transition: all 0.15s ease;
-  position: relative;
-  z-index: 11;
-  pointer-events: auto;
-  --wails-draggable: no-drag;
-}
-
-.cm-header button:hover {
-  background: #2a2b3d;
-  border-color: #7aa2f7;
-  color: #7aa2f7;
-}
-
-.cm-header button.cm-primary {
-  background: #7aa2f7;
-  border-color: #7aa2f7;
-  color: #1a1b26;
-}
-
-.cm-header button.cm-primary:hover {
-  background: #89b4fa;
-  border-color: #89b4fa;
-}
-
-.cm-header button.cm-close {
-  background: none;
-  border: none;
-  color: #565f89;
-  font-size: 20px;
-  padding: 4px 8px;
-}
-
-.cm-header button.cm-close:hover {
-  color: #f7768e;
-  background: none;
-}
+@import './styles/tokens.css';
+@import './styles/themes/tokyo-night.css';
+@import './styles/base.css';
+@import './styles/components/kit.css';
+@import './styles/components/sidebar.css';
+@import './styles/surfaces/update-notice.css';
+@import './styles/surfaces/settings.css';
+@import './styles/components/quick-connect.css';
+@import './styles/surfaces/connections.css';
 
 .cm-body {
   flex: 1;
@@ -107,14 +17,14 @@ body {
 
 .cm-list {
   width: 320px;
-  border-right: 1px solid #2a2b3d;
+  border-right: 1px solid var(--color-border);
   overflow-y: auto;
   padding: 8px 0;
 }
 
 .cm-list-empty {
   padding: 32px 16px;
-  color: #565f89;
+  color: var(--color-text-dim);
   font-size: 13px;
   text-align: center;
 }
@@ -129,20 +39,20 @@ body {
 }
 
 .cm-item:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: color-mix(in srgb, white, transparent 97%);
 }
 
 .cm-item.cm-selected {
-  background: rgba(122, 162, 247, 0.1);
-  border-left-color: #7aa2f7;
+  background: color-mix(in srgb, var(--color-accent), transparent 90%);
+  border-left-color: var(--color-accent);
 }
 
 .cm-quick-connect {
   padding: 4px 8px;
-  background: #7aa2f7;
+  background: var(--color-accent);
   border: none;
   border-radius: 4px;
-  color: #1a1b26;
+  color: var(--color-canvas);
   cursor: pointer;
   font-size: 11px;
   font-weight: 600;
@@ -154,9 +64,8 @@ body {
 .cm-item:hover .cm-quick-connect {
   opacity: 1;
 }
-
 .cm-quick-connect:hover {
-  background: #89b4fa;
+  background: var(--color-accent-hover);
 }
 
 .cm-item-info {
@@ -167,7 +76,7 @@ body {
 .cm-item-name {
   font-size: 13px;
   font-weight: 500;
-  color: #c0caf5;
+  color: var(--color-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -175,7 +84,7 @@ body {
 
 .cm-item-meta {
   font-size: 11px;
-  color: #565f89;
+  color: var(--color-text-dim);
   margin-top: 2px;
 }
 
@@ -183,7 +92,7 @@ body {
   padding: 10px 16px 4px;
   font-size: 11px;
   font-weight: 600;
-  color: #9d7cd8;
+  color: var(--color-accent-secondary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   user-select: none;
@@ -206,12 +115,12 @@ body {
 .cm-form-section h2 {
   font-size: 13px;
   font-weight: 600;
-  color: #9d7cd8;
+  color: var(--color-accent-secondary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 0 0 16px;
   padding-bottom: 8px;
-  border-bottom: 1px solid #2a2b3d;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .cm-field {
@@ -223,7 +132,7 @@ body {
 .cm-field label {
   width: 160px;
   font-size: 13px;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   flex-shrink: 0;
 }
 
@@ -232,22 +141,21 @@ body {
 .cm-field input[type='password'] {
   flex: 1;
   padding: 8px 12px;
-  background: #16171e;
-  border: 1px solid #2a2b3d;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  color: #c0caf5;
+  color: var(--color-text);
   font-size: 13px;
 }
 
 .cm-field input:focus {
   outline: none;
-  border-color: #7aa2f7;
+  border-color: var(--color-accent);
 }
-
 .cm-field input[type='checkbox'] {
   width: 16px;
   height: 16px;
-  accent-color: #7aa2f7;
+  accent-color: var(--color-accent);
 }
 
 .cm-radio-group {
@@ -264,41 +172,18 @@ body {
   cursor: pointer;
 }
 
-.cm-keys-list {
-  flex: 1;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.cm-keys-list li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-}
-
-.cm-keys-list li button {
-  background: none;
-  border: none;
-  color: #f7768e;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 4px;
-}
-
 .cm-form-actions {
   display: flex;
   gap: 12px;
   margin-top: 24px;
   padding-top: 16px;
-  border-top: 1px solid #2a2b3d;
+  border-top: 1px solid var(--color-border);
 }
 
 /* Validation and save failures, shown on the form rather than only logged. */
 .cm-form-error {
   margin-top: 12px;
-  color: #ff6b6b;
+  color: var(--color-error);
   font-size: 13px;
   line-height: 1.4;
 }
@@ -313,67 +198,47 @@ body {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  border: 1px solid #2a2b3d;
-  background: #1f2335;
-  color: #c0caf5;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
   transition: all 0.15s ease;
 }
 
 .cm-form-actions button:hover {
-  background: #2a2b3d;
+  background: var(--color-border);
 }
 
 .cm-form-actions button.cm-save {
-  background: #7aa2f7;
-  border-color: #7aa2f7;
-  color: #1a1b26;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-canvas);
 }
 
 .cm-form-actions button.cm-save:hover {
-  background: #89b4fa;
+  background: var(--color-accent-hover);
 }
 
 .cm-form-actions button.cm-connect {
-  background: #9ece6a;
-  border-color: #9ece6a;
-  color: #1a1b26;
+  background: var(--color-success);
+  border-color: var(--color-success);
+  color: var(--color-canvas);
 }
 
 .cm-form-actions button.cm-connect:hover {
-  background: #b9d870;
+  background: var(--color-success-hover);
 }
 
 .cm-form-actions button.cm-danger {
-  border-color: #f7768e;
-  color: #f7768e;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 .cm-form-actions button.cm-danger:hover {
-  background: rgba(247, 118, 142, 0.1);
+  background: color-mix(in srgb, var(--color-danger), transparent 90%);
 }
 
 /* ── Tab bar (Tabby-inspired) ─────────────────────────────────────────── */
 
-.tab-connections {
-  color: #a9b1d6;
-  font-size: 16px;
-}
-
-.tab-connections:hover {
-  color: #7aa2f7;
-}
-
-/* The strip doubles as the window's title bar (mac.TitleBarHiddenInset in
-   main.go), so it starts clear of the inset traffic lights. In a plain
-   browser at :34115 there are none, and the padding is simply empty space.
-
-   Dragging the window is --wails-draggable, NOT -webkit-app-region: that is
-   an Electron/Chromium feature and Wails renders in WKWebView on macOS, where
-   it does nothing. Wails hooks mousedown and reads this custom property off
-   the element under the cursor. Custom properties inherit, so every
-   interactive child below must set it back to no-drag or it stops taking
-   clicks — with the title bar gone, this rule is the only way to move the
-   window. */
 .tabbar {
   --wails-draggable: drag;
   flex: 0 0 auto;
@@ -381,9 +246,9 @@ body {
   align-items: stretch;
   height: 38px;
   padding: 0 0 0 78px;
-  background: #16161e;
-  border-bottom: 1px solid #2a2b3d;
-  font-family: var(--nocx-mono);
+  background: var(--color-chrome);
+  border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-family-mono);
   font-size: 11px;
   line-height: 1;
   -webkit-user-select: none;
@@ -404,8 +269,6 @@ body {
   display: none;
 }
 
-/* ── Tabs container ── non-growing, holds tab buttons ────────────────── */
-
 .tabs-container {
   flex: 0 1 auto;
   min-width: 0;
@@ -423,19 +286,11 @@ body {
 
 .tab {
   --wails-draggable: no-drag;
-  /* Track the current background for the fade overlay (nocx-56w).
-     Updated by .tab:hover / .tab.active so the overlay always matches. */
   --tab-bg: transparent;
   position: relative;
   display: flex;
   align-items: center;
   flex: 0 1 200px;
-  /* The explicit width is load-bearing, not redundant with the flex-basis.
-     .tabs-container is flex-basis:auto, so it sizes to its content — and a
-     shrinkable child does not defend its basis during that measurement, so
-     the strip collapsed to the label width (~107px) instead of 200px.
-     Tabby carries the same width alongside the same basis, for the same
-     reason. */
   width: 200px;
   min-width: 0;
   padding: 0 10px;
@@ -443,26 +298,24 @@ body {
   background: transparent;
   border: 0;
   border-right: 1px solid transparent;
-  color: #565f89;
+  color: var(--color-text-dim);
   overflow: hidden;
   border-radius: 6px 6px 0 0;
 }
 
 .tab:hover {
-  --tab-bg: #1f2030;
-  background: #1f2030;
-  color: #a9b1d6;
+  --tab-bg: var(--color-surface-hover);
+  background: var(--color-surface-hover);
+  color: var(--color-text-muted);
 }
 
 .tab.active {
-  --tab-bg: #1f2235;
-  background: #1f2235;
-  color: #c0caf5;
+  --tab-bg: var(--color-surface);
+  background: var(--color-tab-active);
+  color: var(--color-text);
 }
 
-/* Gradient overlay that fades the title text under the close button.
-   Sits between the title (normal flow) and the close button (z-index:2).
-   Appears/disappears with the same opacity transition as the close button. */
+/* Gradient overlay */
 .tab::after {
   content: '';
   position: absolute;
@@ -481,10 +334,6 @@ body {
   opacity: 1;
 }
 
-/* Index number — bold, rounded box. Taken out of the flow like the close
-   button: while it occupied layout space the label was centred in what was
-   left over, which reads as off-centre. Now the label spans the whole tab and
-   its symmetric margins keep the text clear of both. */
 .tab-index {
   position: absolute;
   left: 10px;
@@ -498,30 +347,25 @@ body {
   line-height: 22px;
   border-radius: 10px;
   text-align: center;
-  color: #565f89;
+  color: var(--color-text-dim);
   align-self: center;
 }
 
 .tab.active .tab-index {
-  color: #7aa2f7;
-  background: rgba(122, 162, 247, 0.1);
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent), transparent 90%);
 }
 
 .tab:hover .tab-index {
-  color: #a9b1d6;
+  color: var(--color-text-muted);
 }
 
-/* Status icon and title travel together as one centred unit, as Warp does:
-   the index badge sits left and the close button only appears on hover, so a
-   left-aligned label would drift away from the tab's visual middle. */
 .tab-label {
   flex: auto;
   display: flex;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  /* Symmetric, and wide enough to clear the 22px badge and the 22px close
-     button — symmetry is what makes the centre the tab's centre. */
   margin: 0 26px;
 }
 
@@ -534,18 +378,10 @@ body {
   font-size: 13px;
 }
 
-/* Title fade under close button on hover (nocx-56w).
-   A gradient overlay sits above the title text but below the close button,
-   fading the rightmost 34px to the tab's current background. No -webkit-mask:
-   masks have failed twice in WKWebView (two-layer compositing ambiguity,
-   default mask-size/repeat). An absolutely-positioned gradient overlay is
-   standard CSS with no engine-dependent behaviour. */
-
 /* ── Close button ────────────────────────────────────────────────────── */
 
 .tab-close {
   --wails-draggable: no-drag;
-  /* Must paint above the gradient overlay (z-index:1) to receive clicks. */
   z-index: 2;
   position: absolute;
   right: 4px;
@@ -561,7 +397,7 @@ body {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #565f89;
+  color: var(--color-text-dim);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
@@ -574,8 +410,8 @@ body {
 }
 
 .tab-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #a9b1d6;
+  background: color-mix(in srgb, white, transparent 90%);
+  color: var(--color-text-muted);
 }
 
 /* ── Indicators (active top bar / activity bottom bar) ───────────────── */
@@ -587,21 +423,19 @@ body {
   pointer-events: none;
 }
 
-/* Active tab: top bar */
 .tab.active .tab-indicator {
   display: block;
   top: 0;
   height: 2px;
-  background: #7aa2f7;
+  background: var(--color-accent);
 }
 
-/* Background tab activity indicator: bottom dot */
 .tab-indicator.tab-activity {
   display: block;
   bottom: 4px;
   top: auto;
   height: 2px;
-  background: #7aa2f7;
+  background: var(--color-accent);
   border-radius: 1px;
   left: 10px;
   right: 10px;
@@ -612,7 +446,6 @@ body {
   display: none;
 }
 
-/* Active indicator never shows activity state */
 .tab.active .tab-indicator:not(.tab-activity) {
   display: block;
 }
@@ -631,37 +464,27 @@ body {
   margin: 0;
   border: 0;
   background: transparent;
-  color: #565f89;
+  color: var(--color-text-dim);
   font-size: 18px;
   font-weight: 300;
   cursor: pointer;
 }
 
 .tab-add:hover {
-  color: #a9b1d6;
-  background: #1f2030;
+  color: var(--color-text-muted);
+  background: var(--color-surface-hover);
 }
 
-/* ── Vertical tab strip (nocx-d3q.3) ────────────────────────────────────
+/* ── Vertical tab strip ──────────────────────────────────────────────── */
 
-   The vertical strip is a side panel, NOT the title bar. The horizontal
-   strip doubles as the macOS title bar (.tabbar has --wails-draggable: drag
-   and 78px left padding for the traffic lights), but a vertical strip on the
-   left cannot serve that role — the traffic lights are horizontal and macOS
-   positions them at the top. In vertical placement the #tabbar element stays
-   at the top as a minimal drag bar (nocx-d3q.2 wiring); this strip lives in
-   its own container alongside #body.
-
-   Tab buttons reuse the same .tab / .tab-close / .tab-indicator classes as
-   the horizontal strip. Only layout and the active indicator axis differ. */
 .tabstrip-vertical {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   width: 240px;
-  background: #16161e;
-  border-right: 1px solid #2a2b3d;
-  font-family: var(--nocx-mono);
+  background: var(--color-chrome);
+  border-right: 1px solid var(--color-border);
+  font-family: var(--font-family-mono);
   font-size: 11px;
   line-height: 1;
   -webkit-user-select: none;
@@ -677,7 +500,6 @@ body {
   min-height: 0;
 }
 
-/* Individual tab — full-width, row-layout chrome removed. */
 .tabstrip-vertical .tab {
   flex: 0 0 auto;
   width: 100%;
@@ -687,16 +509,10 @@ body {
   border-radius: 0;
 }
 
-.tabstrip-vertical .tab:hover {
-  --tab-bg: #1f2030;
-  background: #1f2030;
-  color: #a9b1d6;
-}
-
 .tabstrip-vertical .tab.active {
-  --tab-bg: #1f2235;
-  background: #1f2235;
-  color: #c0caf5;
+  --tab-bg: var(--color-surface);
+  background: var(--color-tab-active);
+  color: var(--color-text);
 }
 
 /* Indicator — left-edge bar instead of top bar. */
@@ -711,7 +527,7 @@ body {
 
 .tabstrip-vertical .tab.active .tab-indicator {
   display: block;
-  background: #7aa2f7;
+  background: var(--color-accent);
 }
 
 .tabstrip-vertical .tab-indicator.tab-activity {
@@ -722,7 +538,7 @@ body {
   right: auto;
   width: auto;
   height: 2px;
-  background: #7aa2f7;
+  background: var(--color-accent);
   border-radius: 1px;
 }
 
@@ -734,14 +550,14 @@ body {
 .tabstrip-vertical .tab-add {
   flex: 0 0 auto;
   width: 100%;
-  border-top: 1px solid #2a2b3d;
+  border-top: 1px solid var(--color-border);
   border-right: none;
   border-radius: 0;
 }
 
 .tabstrip-vertical .tab-add:hover {
-  color: #a9b1d6;
-  background: #1f2030;
+  color: var(--color-text-muted);
+  background: var(--color-surface-hover);
 }
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
@@ -752,18 +568,14 @@ body {
   min-height: 0;
 }
 
-/* ── Activity bar (VS Code-style icon strip) ─────────────────────────── */
+/* ── Activity bar ────────────────────────────────────────────────────── */
 
-/* Chrome, not content: same surface as the tab strip. Never collapses —
-   collapsing the sidebar only hides the panel next to it. */
 #activitybar {
-  /* The terminal is never a drag handle, and neither is the icon strip —
-     only the tab strip moves the window (see --wails-draggable on .tabbar). */
   --wails-draggable: no-drag;
   flex: 0 0 auto;
   width: 48px;
-  background: #16161e;
-  border-right: 1px solid #2a2b3d;
+  background: var(--color-canvas);
+  border-right: 1px solid var(--color-border);
   -webkit-user-select: none;
   user-select: none;
 }
@@ -778,7 +590,7 @@ body {
   padding: 0;
   border: 0;
   background: transparent;
-  color: #565f89;
+  color: var(--color-text-dim);
   cursor: pointer;
 }
 
@@ -788,14 +600,11 @@ body {
 }
 
 .activity-bar-btn:hover {
-  color: #a9b1d6;
+  color: var(--color-text-muted);
 }
 
-/* Active view: brighter icon plus the VS Code left edge indicator. The
-   highlight is dropped while the panel is collapsed — the icon then reads
-   as "click to open", matching VS Code. */
 .activity-bar-btn.active {
-  color: #c0caf5;
+  color: var(--color-text);
 }
 
 .activity-bar-btn.active::before {
@@ -805,24 +614,20 @@ body {
   top: 0;
   bottom: 0;
   width: 2px;
-  background: #7aa2f7;
+  background: var(--color-accent);
 }
 
 /* ── Sidebar panel ───────────────────────────────────────────────────── */
 
-/* Surface, one step lighter than the terminal so the region reads as a
-   panel and not as more terminal (same colour the active tab uses). */
 #sidebar {
   --wails-draggable: no-drag;
   flex: 0 0 auto;
   width: 240px;
-  background: #1f2235;
-  border-right: 1px solid #2a2b3d;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
   overflow: hidden;
 }
 
-/* display:none, not visibility: an explicit user toggle is allowed to
-   resize the terminal grid (unlike the clipboard banner, which overlays). */
 #sidebar.collapsed {
   display: none;
 }
@@ -837,102 +642,13 @@ body {
     sans-serif;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #787c99;
+  color: var(--color-text-dim);
   -webkit-user-select: none;
   user-select: none;
 }
 
-/* ── Terminal panes ──────────────────────────────────────────────────── */
-
-#panes {
-  /* The terminal is never a drag handle — selecting text must not move the
-     window (see the --wails-draggable note on .tabbar). */
-  --wails-draggable: no-drag;
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-/* Tab dragging */
-.tab.dragging {
-  opacity: 0.5;
-}
-
-.tab[draggable='true'] {
-  cursor: grab;
-}
-
-.tab[draggable='true']:active {
-  cursor: grabbing;
-}
-
-/* Inactive panes stay laid out (visibility, not display) so their renderers
-   keep measuring a real size — a zero-size container makes every fit addon
-   compute a bogus grid and reflow the shell on the way back. */
-.pane {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  background: #1a1b26;
-  visibility: hidden;
-  pointer-events: none;
-  /* Flex column: the scrollback layout takes all remaining space and the
-     command editor sits in flow at the bottom (no absolute overlay, so the
-     scrollbar ends above the editor and blocks never slide underneath). */
-  display: flex;
-  flex-direction: column;
-  /* Breathing room, as every other terminal has: text hard against the window
-     edge reads as broken. Only horizontal padding; the scrollback layout
-     handles vertical spacing internally (P1-7). */
-  padding: 0 10px;
-
-  /* Defence in depth against the Wails webview context menu. The
-     contextmenu handler calls preventDefault, which is sufficient in a
-     plain browser; Wails registers its own document-level listener, and
-     under the default 'auto' the native menu may still open over an input,
-     contentEditable, or a selection — xterm parks focus in a helper
-     textarea, so the Cut/Copy/Paste menu can reproduce even in a packaged
-     build. The property inherits, exactly like --wails-draggable. */
-  --default-contextmenu: hide;
-}
-
-.pane.active {
-  visibility: visible;
-  pointer-events: auto;
-}
-
-/* Manager panes host the connection UI, not a terminal — no padding,
-    no absolute positioning offsets, let the content fill the space. */
-.pane-manager {
-  padding: 0;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  --wails-draggable: no-drag;
-}
-
-/* Ensure manager panes receive clicks even if the .pane default
-   (pointer-events:none) somehow wins specificity. */
-.pane-manager.active {
-  pointer-events: auto !important;
-  visibility: visible !important;
-}
-
-.pane-error {
-  margin: 0;
-  padding: 16px;
-  color: #f7768e;
-  font-family: var(--nocx-mono);
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
 /* ── Agent status (derived from the terminal title) ──────────────────── */
 
-/* A coding agent runs as one long shell command, so OSC 133 cannot see
-   inside it — but it publishes its state in the title, which we already
-   receive. Working spins; waiting sits still and coloured. */
 .tab-status {
   flex: none;
   width: 0;
@@ -943,9 +659,6 @@ body {
   transition: width 0.15s;
 }
 
-/* The gap lives on the icon rather than on .tab-label, because a flex `gap`
-   would still reserve space when the icon is collapsed to zero width and the
-   title would sit off-centre on every ordinary tab. */
 .tab.working .tab-status,
 .tab.waiting .tab-status {
   width: 10px;
@@ -953,12 +666,12 @@ body {
 }
 
 .tab.waiting .tab-status {
-  background: #9ece6a;
+  background: var(--color-success);
 }
 
 .tab.working .tab-status {
-  border: 2px solid rgba(122, 162, 247, 0.25);
-  border-top-color: #7aa2f7;
+  border: 2px solid color-mix(in srgb, var(--color-accent), transparent 75%);
+  border-top-color: var(--color-accent);
   animation: tab-spin 0.7s linear infinite;
 }
 
@@ -971,24 +684,13 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .tab.working .tab-status {
     animation: none;
-    background: #7aa2f7;
+    background: var(--color-accent);
     border-color: transparent;
   }
 }
 
 /* ── Clipboard banner (OSC 52 blocked-write notification) ──────────── */
 
-/* Floats over the top of the terminal area, inside #panes (position:relative),
-   which is the only placement that satisfies both constraints. Over the whole
-   window it would cover the tab strip — the strip is the title bar, so the
-   traffic lights go with it. In the layout flow it would take vertical space,
-   and shrinking the terminal reflows the grid down to the PTY, repainting any
-   full-screen program running at the time. A notice must not resize the
-   terminal underneath it.
-
-   It also has to read as a warning at a glance, so it does not reuse the
-   terminal background (#1a1b26) — that is what made the first attempt vanish
-   into the window. Lighter surface, amber edge, the palette's warning colour. */
 .clipboard-banner {
   --wails-draggable: no-drag;
   position: absolute;
@@ -1000,11 +702,11 @@ body {
   align-items: center;
   gap: 16px;
   padding: 10px 16px;
-  background: #24283b;
-  border-left: 3px solid #e0af68;
-  border-bottom: 1px solid #2a2b3d;
-  color: #c0caf5;
-  font-family: var(--nocx-mono);
+  background: var(--color-surface-sunken);
+  border-left: 3px solid var(--color-warning);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-family: var(--font-family-mono);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -1026,7 +728,7 @@ body {
   padding: 4px 10px;
   border: 0;
   border-radius: 4px;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
@@ -1034,103 +736,45 @@ body {
 }
 
 .clipboard-banner-allow {
-  background: #7aa2f7;
-  color: #1a1b26;
+  background: var(--color-accent);
+  color: var(--color-canvas);
 }
 
 .clipboard-banner-allow:hover {
-  background: #89b4ff;
+  background: var(--color-accent-hover);
 }
 
 .clipboard-banner-suppress {
   background: transparent;
-  color: #787c99;
+  color: var(--color-text-dim);
 }
 
 .clipboard-banner-suppress:hover {
-  color: #a9b1d6;
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, white, transparent 94%);
 }
 
 .clipboard-banner-dismiss {
   background: transparent;
-  color: #565f89;
+  color: var(--color-text-dim);
   font-size: 16px;
   line-height: 1;
   padding: 4px 8px;
 }
 
 .clipboard-banner-dismiss:hover {
-  color: #a9b1d6;
-  background: rgba(255, 255, 255, 0.06);
-}
-
-/* ── Update notice (auto-update UI) ──────────────────────────────────── */
-
-.update-notice {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  font-family: var(--nocx-mono);
-  font-size: 10px;
-  line-height: 1;
-  color: #a9b1d6;
-  white-space: nowrap;
-  --wails-draggable: no-drag;
-}
-
-.update-notice.pending {
-  color: #9ece6a;
-}
-
-.update-notice.error {
-  color: #f7768e;
-}
-
-.update-notice.downloading {
-  color: #e0af68;
-}
-
-.update-notes-link {
-  color: #7aa2f7;
-  text-decoration: none;
-}
-
-.update-notes-link:hover {
-  text-decoration: underline;
-}
-
-.update-apply-btn {
-  background: #7aa2f7;
-  color: #1a1b26;
-  border: none;
-  border-radius: 3px;
-  padding: 2px 8px;
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-  --wails-draggable: no-drag;
-}
-
-.update-apply-btn:hover {
-  background: #89b0ff;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, white, transparent 94%);
 }
 
 /* ── Command editor (DOM textarea) ──────────────────────────────────── */
 
 .nocx-editor {
-  /* In-flow flex child at the bottom of the pane (the pane is a flex
-     column). No absolute overlay: the scrollback area ends above the
-     editor by construction, the pane scrollbar stops at its top edge,
-     and multi-line growth pushes the scrollback up naturally.
-     position:relative re-establishes the containing block for the
-     absolutely-positioned submit button inside. */
   position: relative;
   flex: none;
-  background: #16161e;
-  border-top: 1px solid #292e42;
-  border-left: 3px solid #7aa2f7;
+  background: var(--color-canvas);
+  border-top: 1px solid var(--color-surface-raised);
+  border-left: 3px solid var(--color-accent);
   padding: 10px 14px 12px;
 }
 
@@ -1139,27 +783,25 @@ body {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 11px;
   -webkit-user-select: none;
   user-select: none;
 }
 
-/* ── Chip — the standard metadata component (owner directive). ─────────
-   One component for every chip in the app: the editor's cwd pill and the
-   block-header metadata (cwd, duration, exit status). Variants only
-   change the text color. */
+/* ── Chip ────────────────────────────────────────────────────────────── */
+
 .nocx-chip {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  background: #292e42;
+  background: var(--color-surface-raised);
   border-radius: 5px;
   padding: 3px 9px;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 12px;
-  color: #7aa2f7;
+  color: var(--color-accent);
   cursor: default;
   -webkit-user-select: none;
   user-select: none;
@@ -1167,24 +809,24 @@ body {
 }
 
 .nocx-chip-muted {
-  color: #a9b1d6;
+  color: var(--color-text-muted);
 }
 
 .nocx-chip-ok {
-  color: #9ece6a;
+  color: var(--color-success);
 }
 
 .nocx-chip-fail {
-  color: #f7768e;
+  color: var(--color-danger);
 }
 
 .nocx-editor-input {
   width: 100%;
   background: transparent;
-  color: #c0caf5;
+  color: var(--color-text);
   border: none;
   outline: none;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 14px;
   line-height: 1.2;
   resize: none;
@@ -1195,40 +837,35 @@ body {
 }
 
 /* ── Command-ledger gutter glyphs (ADR-0008) ────────────────────────── */
-/* Base geometry (3px vertical bar at left edge) is set inline by
-   gutter.ts. Status sets the look. Restraint is the rule: a routine
-   successful command is calm and present, not shouting — strong colour is
-   reserved for running, failure, interruption and focus. No green "success
-   confetti". */
 
 .nocx-gutter-glyph {
-  background: #565f89;
+  background: var(--color-text-dim);
   opacity: 0.4;
   transition: opacity 120ms ease;
 }
 
 .nocx-gutter-success {
-  background: #565f89; /* neutral, not green */
-  opacity: 0.5; /* visible but calm */
+  background: var(--color-text-dim); /* neutral, not green */
+  opacity: 0.5;
 }
 
 .nocx-gutter-running {
-  background: #7aa2f7; /* accent blue */
+  background: var(--color-accent); /* accent blue */
   opacity: 0.95;
 }
 
 .nocx-gutter-failure {
-  background: #f7768e; /* red — a failure earns attention */
+  background: var(--color-danger); /* red */
   opacity: 1;
 }
 
 .nocx-gutter-interrupted {
-  background: #ff9e64; /* amber */
+  background: var(--color-warning); /* amber — was #ff9e64, collapsed to --color-warning */
   opacity: 0.9;
 }
 
 .nocx-gutter-unknown {
-  background: #565f89;
+  background: var(--color-text-dim);
   opacity: 0.4;
 }
 
@@ -1250,9 +887,6 @@ body {
 
 /* ── DOM scrollback layout ──────────────────────────────────────────── */
 
-/* Flex column: scrollback area fills available space, live region sits
-   at the bottom. The pane's absolute-positioned editor overlays the
-   bottom strip. */
 .scrollback-layout {
   display: flex;
   flex-direction: column;
@@ -1260,73 +894,46 @@ body {
   min-height: 0;
 }
 
-/* Scrollback area: scrollable container for frozen DOM blocks. Takes all
-   remaining vertical space. flex-end bottom-anchors content so new blocks
-   appear just above the live region (P1-6). */
 .scrollback-area {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  /* Reserve the scrollbar lane so the scrollbar never overlaps blocks. */
   scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
-  /* NO justify-content:flex-end here — content overflowing at the top of a
-     flex-end container is unreachable by scrolling (classic flexbox
-     quirk). Bottom-anchoring is done via margin-top:auto on the inner
-     wrapper instead, which keeps the scroll origin correct. */
 }
 
-/* The inner wrapper holds blocks + the live-region container in flow. */
 .scrollback-inner {
   display: flex;
   flex-direction: column;
-  /* Bottom-anchor the content when it's shorter than the scroll area
-     (empty space at top, newest block above the live region/editor).
-     margin-top:auto keeps the scroll origin correct, unlike
-     justify-content:flex-end on the scroller. */
   margin-top: auto;
 }
 
-/* Divider between last frozen block and the live region — subtle
-   low-contrast horizontal rule. Only shown when blocks exist AND we
-   are not in fullscreen. */
 .scrollback-separator {
   flex: none;
   height: 1px;
-  background: #242538;
+  background: var(--color-surface-hover);
   margin: 0;
   border-radius: 0;
 }
 
 /* ── Live region (two-layer: clip container + stable inner) ─────────── */
 
-/* Outer clip container: mode-dependent height clips the xterm view.
-   overflow:hidden allows the inner wrapper to keep a stable size while
-   only the visible slice changes — the xterm grid never collapses to
-   1 row (P0-1 fix). */
 .xterm-live-container {
   flex: none;
   overflow: hidden;
   transition: height 120ms ease;
 }
 
-/* --- Idle: fully hidden. The marker-only prompt line carries no visual
-   information (the DOM editor owns input), so the live region collapses
-   to zero height instead of showing a redundant strip (owner directive).
-   The inner wrapper keeps its stable min-height, so the xterm grid is
-   unaffected. */
 .xterm-live-container.live-idle {
   height: 0;
 }
 
-/* --- Running: show several rows of live command output. */
 .xterm-live-container.live-running {
   height: 140px;
 }
 
-/* --- Alt-screen: xterm fills the full viewport, scrollback hidden (P0-2). */
 .xterm-live-container.live-fullscreen {
   position: fixed;
   top: 0;
@@ -1334,7 +941,6 @@ body {
   right: 0;
   bottom: 0;
   z-index: 100;
-  height: auto;
 }
 
 /* Inner wrapper: always has a stable min-height so xterm.fit() produces
@@ -1364,49 +970,35 @@ body {
 
 /* ── Command blocks ─────────────────────────────────────────────────── */
 
-/* Flat warp-style blocks (P0-1 design pivot). No card background, no
-   border, no border-radius, no shadow. Blocks are separated by a subtle
-   horizontal divider line. Hover/selected use a subtle background tint. */
 .cmd-block {
   margin: 0;
   border: 0;
-  border-top: 1px solid #242538;
+  border-top: 1px solid var(--color-surface-hover);
   border-radius: 0;
   background: transparent;
-  /* content-visibility:auto lets the browser skip painting off-screen
-     blocks, keeping scroll smooth even with thousands of lines. */
   content-visibility: auto;
   contain-intrinsic-size: auto 48px;
-  /* overflow must be visible so the overflow menu is not clipped (P1-6). */
   overflow: visible;
   cursor: pointer;
-  /* position: relative anchors the overflow menu within the block. */
   position: relative;
 }
 
-/* First block: no top divider (it would double with the area edge). */
 .cmd-block:first-child {
   border-top: 0;
 }
 
-/* Hover: subtle background tint across the full block width (warp-like). */
 .cmd-block:hover {
-  background: rgba(192, 202, 245, 0.03);
+  background: color-mix(in srgb, var(--color-text), transparent 97%);
 }
 
-/* Selected block: brighter background tint (P1-8: single-select). */
 .cmd-block.cmd-block-selected {
-  background: rgba(122, 162, 247, 0.06);
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
 }
 
 .cmd-block.cmd-block-selected:hover {
-  background: rgba(122, 162, 247, 0.09);
+  background: color-mix(in srgb, var(--color-accent), transparent 91%);
 }
 
-/* Running block: no special styling beyond the header spinner. */
-
-/* Command block header row — compact, plain muted text (warp-like).
-   No background, no bottom border, no pill/chip styling. */
 .cmd-header {
   display: flex;
   flex-direction: column;
@@ -1414,14 +1006,12 @@ body {
   padding: 3px 0;
   background: transparent;
   border: 0;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 12px;
   pointer-events: auto;
-  /* Metadata (chips, ⋮) is not selectable; the command text re-enables
-     selection below (owner directive: mouse + double-click word select). */
   -webkit-user-select: none;
   user-select: none;
-  color: #565f89;
+  color: var(--color-text-dim);
 }
 
 .cmd-header-chips {
@@ -1430,6 +1020,7 @@ body {
   align-items: center;
   gap: 8px;
 }
+
 .cmd-header-right {
   display: flex;
   align-items: center;
@@ -1437,40 +1028,31 @@ body {
   flex: none;
 }
 
-/* Command text in the header — prominent mono. Multi-line commands render
-   one line per row (warp behavior), same font size as the block output
-   (owner directives). */
 .cmd-header-text {
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 14px;
-  color: #c0caf5;
+  color: var(--color-text);
   white-space: pre-wrap;
   overflow-wrap: break-word;
-  /* Command text is mouse-selectable (double-click selects a word). */
   -webkit-user-select: text;
   user-select: text;
 }
 
-/* CWD chip in the block header — layout only; visuals come from the
-   standard .nocx-chip component. */
 .cmd-header-cwd {
   flex: none;
 }
 
-/* Duration chip — fixed width + tabular figures so the column never
-   shifts between blocks (owner directive). Text centered via .nocx-chip. */
 .cmd-header-duration {
   font-variant-numeric: tabular-nums;
   min-width: 52px;
 }
 
-/* Spinner while running — a pulse dot. */
 .cmd-header-spinner {
   display: inline-block;
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #7aa2f7;
+  background: var(--color-accent);
   opacity: 0.6;
 }
 
@@ -1490,22 +1072,16 @@ body {
   }
 }
 
-/* Exit status chip — fixed width so the column aligns across blocks
-   (owner directive); colors come from .nocx-chip-ok / .nocx-chip-fail.
-   Text centered via .nocx-chip. */
 .cmd-header-exit {
   min-width: 44px;
 }
 
-/* Output area inside a block. Selectable text for copy-on-select. */
 .cmd-output {
   padding: 2px 0 6px 0;
-  font-family: var(--nocx-mono);
+  font-family: var(--font-family-mono);
   font-size: 14px;
   line-height: 1.2;
-  color: #c0caf5;
-  /* pre-wrap: long lines wrap at the viewport edge (warp behavior) instead
-     of being clipped. */
+  color: var(--color-text);
   white-space: pre-wrap;
   overflow-wrap: break-word;
   overflow-x: auto;
@@ -1513,7 +1089,6 @@ body {
   -webkit-user-select: text;
 }
 
-/* Each terminal line in the output. */
 .term-line {
   display: block;
   font-size: 14px;
@@ -1531,8 +1106,8 @@ body {
   border: 0;
   border-radius: 3px;
   background: transparent;
-  color: #565f89;
-  font-family: var(--nocx-mono);
+  color: var(--color-text-dim);
+  font-family: var(--font-family-mono);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
@@ -1542,21 +1117,18 @@ body {
 }
 
 .cmd-overflow-btn:hover {
-  background: #292e42;
-  color: #a9b1d6;
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
 }
 
-/* Overflow menu — rendered at body level with position:fixed so it floats
-   above all blocks and scroll containers (P1-6 fix). z-index must be higher
-   than the editor (z-index:20) and the fullscreen xterm (z-index:100). */
 .cmd-overflow-menu {
   z-index: 200;
-  background: #1a1b26;
-  border: 1px solid #292e42;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
   border-radius: 6px;
   padding: 4px 0;
   min-width: 160px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 16px color-mix(in srgb, black, transparent 50%);
 }
 
 .cmd-overflow-menu-item {
@@ -1565,8 +1137,8 @@ body {
   padding: 6px 12px;
   border: 0;
   background: transparent;
-  color: #c0caf5;
-  font-family: var(--nocx-mono);
+  color: var(--color-text);
+  font-family: var(--font-family-mono);
   font-size: 12px;
   text-align: left;
   cursor: pointer;
@@ -1575,453 +1147,7 @@ body {
 }
 
 .cmd-overflow-menu-item:hover {
-  background: #292e42;
-}
-
-/* ── Settings container — two-pane (rail + content) layout (Part C) ─── */
-
-/* Container fills the tab pane. Flex row in wide view; column in narrow. */
-.st-container {
-  display: flex;
-  height: 100%;
-  color: #c0caf5;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* ── Rail ────────────────────────────────────────────────────────────── */
-
-.st-rail {
-  flex: 0 0 clamp(240px, 28vw, 360px);
-  min-width: 0;
-  padding: 20px 16px;
-  border-right: 1px solid #2a2b3d;
-  overflow-y: auto;
-  background: #161720;
-}
-
-/* Search lives in the rail. `.st-search` is the WRAPPER the markup builds
-   (bar.className = 'st-search'); the field itself is `.st-search-input`, styled
-   further down. Both merge sides used the name `.st-search` — one for the
-   wrapper, one for the input — so input chrome (border, background, padding,
-   :focus, ::placeholder) belongs on `.st-search-input` alone. Putting it here
-   too would double the border and target focus on a div that never takes it. */
-.st-search {
-  width: 100%;
-}
-
-/* Section navigation list. */
-.st-section-nav {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.st-section-nav-item {
-  margin-bottom: 2px;
-}
-
-.st-section-nav-link {
-  display: block;
-  width: 100%;
-  padding: 6px 10px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: #a9b1d6;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.st-section-nav-link:hover {
-  background: rgba(255, 255, 255, 0.04);
-  color: #c0caf5;
-}
-
-.st-section-nav-active .st-section-nav-link {
-  background: rgba(122, 162, 247, 0.12);
-  color: #7aa2f7;
-}
-
-/* Modified-only count badge in the section nav. */
-.st-section-nav-badge {
-  float: right;
-  background: rgba(224, 175, 104, 0.12);
-  color: #e0af68;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  line-height: 1.4;
-}
-
-/* ── Modified-only toggle in the rail ──────────────────────────────── */
-
-.st-modified-rail {
-  margin-bottom: 14px;
-}
-
-.st-modified-rail-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: #a9b1d6;
-  cursor: pointer;
-}
-
-.st-modified-rail-label input[type='checkbox'] {
-  margin: 0;
-  accent-color: #7aa2f7;
-}
-
-.st-modified-rail-count {
-  color: #e0af68;
-  font-weight: 500;
-}
-
-/* ── Content column ──────────────────────────────────────────────────── */
-
-.st-content {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 20px 28px;
-}
-
-/* ── Narrow viewport — rail stacks above content ─────────────────────── */
-
-.st-container.st-narrow {
-  flex-direction: column;
-}
-
-.st-container.st-narrow .st-rail {
-  flex: 0 0 auto;
-  width: 100%;
-  border-right: none;
-  border-bottom: 1px solid #2a2b3d;
-  padding: 14px 16px;
-  max-height: 40vh;
-}
-
-.st-container.st-narrow .st-section-nav {
-  display: none;
-}
-
-.st-container.st-narrow .st-content {
-  padding: 16px 20px;
-}
-
-/* ── Settings view (generated from settings.describe) ─────────────────── */
-
-.st-view {
-  /* No sidebar-panel padding — the .st-content wrapper owns spacing. */
-}
-
-.st-empty {
-  padding: 24px;
-  color: #565f89;
-  font-style: italic;
-}
-
-.st-section {
-  margin-bottom: 28px;
-}
-
-.st-section-heading {
-  font-size: 13px;
-  font-weight: 600;
-  color: #7aa2f7;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #2a2b3d;
-  margin: 0 0 16px 0;
-  scroll-margin-top: 16px;
-}
-
-.st-row {
-  display: flex;
-  align-items: flex-start;
-  padding: 8px 0;
-  border-bottom: 1px solid rgba(42, 43, 61, 0.4);
-}
-
-.st-row:last-child {
-  border-bottom: none;
-}
-
-/* Deep-link highlight pulse. */
-@keyframes st-highlight-pulse {
-  0% {
-    background: rgba(122, 162, 247, 0.18);
-  }
-  100% {
-    background: transparent;
-  }
-}
-
-.st-row-highlight {
-  animation: st-highlight-pulse 1.2s ease-out;
-}
-
-.st-label-col {
-  flex: 0 1 200px;
-  padding-right: 16px;
-  min-width: 0;
-}
-
-.st-label-col label {
-  display: block;
-  font-size: 13px;
-  font-weight: 500;
-  color: #c0caf5;
-}
-
-.st-description {
-  display: block;
-  font-size: 11px;
-  color: #565f89;
-  margin-top: 2px;
-}
-
-.st-control-col {
-  flex: 1;
-  min-width: 0;
-}
-
-.st-control-col input[type='text'],
-.st-control-col input[type='number'] {
-  width: 100%;
-  max-width: 320px;
-  padding: 6px 10px;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #c0caf5;
-  font-size: 13px;
-}
-
-.st-control-col input:focus {
-  border-color: #7aa2f7;
-  outline: none;
-}
-
-.st-control-col input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-  accent-color: #7aa2f7;
-}
-
-.st-control-col select {
-  width: 100%;
-  max-width: 320px;
-  padding: 6px 10px;
-  background: #1f2335;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #c0caf5;
-  font-size: 13px;
-}
-
-.st-control-col select:focus {
-  border-color: #7aa2f7;
-  outline: none;
-}
-
-/* Secret control — status + actions, never an input. */
-
-.st-secret {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.st-secret-status {
-  font-size: 13px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  background: rgba(122, 162, 247, 0.1);
-  color: #7aa2f7;
-}
-
-.st-secret button {
-  font-size: 12px;
-  padding: 4px 12px;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  background: #1f2335;
-  color: #c0caf5;
-  cursor: pointer;
-}
-
-.st-secret button:hover {
-  background: #2a2b3d;
-}
-
-.st-secret .st-secret-clear {
-  border-color: rgba(247, 118, 142, 0.3);
-  color: #f7768e;
-}
-
-.st-secret .st-secret-clear:hover {
-  background: rgba(247, 118, 142, 0.1);
-}
-
-/* Error message on validation failure — inline on the control. */
-
-.st-error {
-  font-size: 11px;
-  color: #f7768e;
-  margin-top: 4px;
-}
-
-/* ── Load / status states ──────────────────────────────────────────── */
-
-.st-status {
-  padding: 24px;
-  text-align: center;
-  color: #a9b1d6;
-  font-size: 13px;
-}
-
-.st-loading {
-  color: #565f89;
-  font-style: italic;
-}
-
-.st-failed {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  color: #f7768e;
-}
-
-.st-nomatch {
-  color: #565f89;
-  font-style: italic;
-}
-
-.st-retry-btn {
-  font-size: 12px;
-  padding: 4px 16px;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  background: transparent;
-  color: #c0caf5;
-  cursor: pointer;
-}
-
-.st-retry-btn:hover {
-  background: #2a2b3d;
-}
-
-/* ── Search bar ─────────────────────────────────────────────────────── */
-
-.st-search {
-  margin-bottom: 12px;
-}
-
-.st-search-input {
-  width: 100%;
-  padding: 6px 10px;
-  font-size: 13px;
-  background: #1a1b26;
-  border: 1px solid #2a2b3d;
-  border-radius: 4px;
-  color: #c0caf5;
-  outline: none;
-}
-
-.st-search-input:focus {
-  border-color: #7aa2f7;
-}
-
-.st-search-input::placeholder {
-  color: #565f89;
-}
-
-/* ── Modified-only filter bar ───────────────────────────────────────── */
-
-.st-filter-bar {
-  margin-bottom: 16px;
-}
-
-.st-filter-label {
-  font-size: 12px;
-  color: #a9b1d6;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.st-filter-label input[type='checkbox'] {
-  width: 14px;
-  height: 14px;
-  margin: 0;
-}
-
-/* ── Provenance badge (Customized / Default) ────────────────────────── */
-
-.st-provenance {
-  display: inline-block;
-  font-size: 11px;
-  margin-top: 4px;
-}
-
-.st-customized {
-  color: #e0af68;
-}
-
-.st-default {
-  color: #565f89;
-}
-
-.st-reset-btn {
-  font-size: 11px;
-  padding: 1px 8px;
-  margin-left: 6px;
-  border: 1px solid rgba(224, 175, 104, 0.3);
-  border-radius: 3px;
-  background: transparent;
-  color: #e0af68;
-  cursor: pointer;
-}
-
-.st-reset-btn:hover {
-  background: rgba(224, 175, 104, 0.1);
-}
-
-/* ── Data-class privacy / storage indicator ─────────────────────────── */
-
-.st-data-class {
-  display: block;
-  font-size: 10px;
-  color: #565f89;
-  margin-top: 2px;
-}
-
-/* ── Declared bound display for numbers ─────────────────────────────── */
-
-.st-bounds {
-  display: block;
-  font-size: 11px;
-  color: #565f89;
-  margin-bottom: 2px;
-}
-
-/* ── Search-result breadcrumb ───────────────────────────────────────── */
-
-.st-breadcrumb {
-  display: block;
-  font-size: 10px;
-  color: #7aa2f7;
-  margin-bottom: 1px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  background: var(--color-surface-raised);
 }
 
 /* ── Export / backup / import section (ADR-0011 §7) ──────────────────── */
@@ -2029,11 +1155,11 @@ body {
 .st-export {
   margin-top: 32px;
   padding-top: 24px;
-  border-top: 1px solid #292e42;
+  border-top: 1px solid var(--color-surface-raised);
 }
 
 .st-export-desc {
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   font-size: 12px;
   margin: 0 0 16px;
   line-height: 1.5;
@@ -2050,7 +1176,7 @@ body {
 /* ── Mode card ───────────────────────────────────────────────────────── */
 
 .st-export-card {
-  border: 1px solid #292e42;
+  border: 1px solid var(--color-surface-raised);
   border-radius: 6px;
   overflow: hidden;
 }
@@ -2066,29 +1192,29 @@ body {
 .st-export-card-label {
   font-size: 13px;
   font-weight: 600;
-  color: #c0caf5;
+  color: var(--color-text);
   white-space: nowrap;
 }
 
 .st-export-card-summary {
   font-size: 12px;
-  color: #787c99;
+  color: var(--color-text-dim);
   flex: 1;
 }
 
 .st-export-card-toggle {
   flex: none;
   background: none;
-  border: 1px solid #3b4261;
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  color: #7aa2f7;
+  color: var(--color-accent);
   font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
 }
 
 .st-export-card-toggle:hover {
-  background: #292e42;
+  background: var(--color-surface-raised);
 }
 
 /* ── Card body (expanded) ────────────────────────────────────────────── */
@@ -2113,23 +1239,23 @@ body {
 .st-export-manifest li {
   font-size: 12px;
   padding: 2px 0;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
 }
 
 .st-export-check {
-  color: #9ece6a;
+  color: var(--color-success);
   font-weight: 700;
   margin-right: 4px;
 }
 
 .st-export-cross {
-  color: #f7768e;
+  color: var(--color-danger);
   font-weight: 700;
   margin-right: 4px;
 }
 
 .st-export-note {
-  color: #e0af68 !important;
+  color: var(--color-warning) !important;
   font-style: italic;
   padding-left: 14px !important;
 }
@@ -2141,17 +1267,17 @@ body {
 }
 
 .st-export-btn {
-  background: #292e42;
-  border: 1px solid #3b4261;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  color: #c0caf5;
+  color: var(--color-text);
   font-size: 12px;
   padding: 5px 14px;
   cursor: pointer;
 }
 
 .st-export-btn:hover {
-  background: #3b4261;
+  background: var(--color-surface-raised);
 }
 
 .st-export-btn:disabled {
@@ -2160,13 +1286,13 @@ body {
 }
 
 .st-export-btn-primary {
-  background: #7aa2f7;
-  color: #1a1b26;
-  border-color: #7aa2f7;
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  border-color: var(--color-accent);
 }
 
 .st-export-btn-primary:hover {
-  background: #89b4fa;
+  background: var(--color-accent-hover);
 }
 
 .st-export-btn-row {
@@ -2180,7 +1306,7 @@ body {
 
 .st-export-status {
   font-size: 12px;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   margin-top: 6px;
   min-height: 18px;
 }
@@ -2189,13 +1315,13 @@ body {
 
 .st-export-loading {
   font-size: 12px;
-  color: #565f89;
+  color: var(--color-text-dim);
   padding: 8px 0;
 }
 
 .st-export-error {
   font-size: 12px;
-  color: #f7768e;
+  color: var(--color-danger);
   padding: 8px 0;
 }
 
@@ -2210,15 +1336,15 @@ body {
 
 .st-export-passphrase-label {
   font-size: 12px;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   margin-top: 4px;
 }
 
 .st-export-passphrase-input {
-  background: #1a1b26;
-  border: 1px solid #3b4261;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  color: #c0caf5;
+  color: var(--color-text);
   font-size: 13px;
   padding: 6px 10px;
   width: 100%;
@@ -2226,22 +1352,20 @@ body {
 }
 
 .st-export-passphrase-input:focus {
-  border-color: #7aa2f7;
+  border-color: var(--color-accent);
   outline: none;
 }
 
 .st-export-passphrase-input::placeholder {
-  color: #565f89;
+  color: var(--color-text-dim);
 }
 
 .st-export-show-toggle,
 .st-export-private-toggle {
   font-size: 11px;
-  color: #787c99;
+  color: var(--color-text-dim);
   display: flex;
   align-items: center;
-  gap: 4px;
-  cursor: pointer;
 }
 
 .st-export-show-toggle input[type='checkbox'],
@@ -2252,12 +1376,12 @@ body {
 /* ── Backup details ──────────────────────────────────────────────────── */
 
 .st-export-backup-details {
-  background: #1a1b26;
-  border: 1px solid #292e42;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
   border-radius: 4px;
   padding: 10px 12px;
   font-size: 11px;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   white-space: pre-wrap;
   margin-top: 8px;
   max-height: 200px;
@@ -2273,13 +1397,13 @@ body {
 .st-export-import-label {
   display: block;
   font-size: 12px;
-  color: #a9b1d6;
+  color: var(--color-text-muted);
   margin-bottom: 4px;
 }
 
 .st-export-file-input {
   display: block;
   font-size: 12px;
-  color: #787c99;
+  color: var(--color-text-dim);
   margin-bottom: 8px;
 }

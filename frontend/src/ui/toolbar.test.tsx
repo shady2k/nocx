@@ -21,9 +21,20 @@ describe('Toolbar', () => {
 
   it('sets class on the wrapper', () => {
     subject({ class: 'cm-header' })
-    // The returned element IS the wrapper div
-    const el = screen.getByText('Toolbar content')
+    // The wrapper is a div with role="toolbar"
+    const el = screen.getByRole('toolbar')
     expect(el.getAttribute('class')).toBe('cm-header')
+  })
+
+  it('renders with toolbar role', () => {
+    subject()
+    expect(screen.getByRole('toolbar')).toBeTruthy()
+  })
+
+  it('sets aria-label when provided', () => {
+    subject({ ariaLabel: 'Profile actions' })
+    const toolbar = screen.getByRole('toolbar')
+    expect(toolbar.getAttribute('aria-label')).toBe('Profile actions')
   })
 
   it('renders complex children', () => {

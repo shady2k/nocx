@@ -55,7 +55,15 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
     await expect(page.locator(TITLE).nth(1)).toHaveText(tab2InitialTitle!, { timeout: 2000 })
 
     // And tab 1's title is definitely different from initial.
-    expect(page.locator(TITLE).first()).not.toHaveText(tab1InitialTitle!)
+    //
+    // This was missing its await, which is why nocx-ifgp looked load-dependent:
+    // an unawaited web-first assertion returns a promise nobody holds, so it
+    // never runs at the point it is written and its eventual rejection surfaces
+    // somewhere else — or not at all. It asserted nothing on a good day and
+    // failed the run on a bad one.
+    await expect(page.locator(TITLE).first()).not.toHaveText(tab1InitialTitle!, {
+      timeout: 5000,
+    })
   })
 
   test('second tab accepts input while it is active', async ({ page }) => {

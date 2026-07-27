@@ -1,0 +1,203 @@
+/* ── Base layer: reset, typography, shell layout, height chain ────────
+   Combines what was style.css (reset + shell-level), shell-layout.css,
+   and surface.css (the Page height contract + .pane rules). */
+
+/* ── Reset ──────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-canvas);
+}
+
+#app {
+  font-family: var(--font-family-mono);
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Shell geometry (§2.5) — #workspace, #vertical-tabstrip ────────── */
+
+#workspace {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#vertical-tabstrip {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Surface host and Page composition — the height and scroll chain (§6.1)
+   ══════════════════════════════════════════════════════════════════════
+
+   Every node in the flex chain gets explicit min-height: 0 and overflow
+   constraints.  WebKit is specifically sensitive to implicit flex minimum
+   sizes — a single missing min-height: 0 in the chain causes the scroll
+   container to never receive a bounded block size.
+
+   The surface-host class is applied by SolidTabContent to the mount root
+   element.  The .ui-page chain is the contract for the Page component
+   (nocx-imkb.1); the selectors below land the CSS before the component
+   exists. */
+
+#panes {
+  position: relative;
+  min-height: 0;
+}
+
+.surface-host {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ui-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ui-page__header {
+  flex: 0 0 auto;
+}
+
+.ui-page__body {
+  display: flex;
+  flex-direction: row;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ui-page__rail {
+  width: 200px;
+  flex: 0 0 auto;
+  overflow-y: auto;
+}
+
+.ui-page__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ── Narrow breakpoint (640px) — rail stacks above content ──────────── */
+
+@media (max-width: 640px) {
+  .ui-page__body {
+    flex-direction: column;
+  }
+  .ui-page__rail {
+    width: auto;
+    overflow-y: visible;
+  }
+}
+
+/* ── SidebarView (§6.3) — panel view layout, not a Page ────────────── */
+
+.ui-sidebar-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.ui-sidebar-view__header {
+  flex: 0 0 auto;
+  padding: 12px 16px;
+  font-weight: 600;
+  font-size: var(--font-size-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ui-sidebar-view__filter {
+  flex: 0 0 auto;
+}
+
+.ui-sidebar-view__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ── Settings-specific fix: .st-container needs min-height: 0 ──────── */
+
+.st-container {
+  min-height: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Terminal panes — .pane, .pane-manager, .pane-error
+   ══════════════════════════════════════════════════════════════════════
+
+   Inactive panes stay laid out (visibility, not display) so their
+   renderers keep measuring a real size — a zero-size container makes
+   every fit addon compute a bogus grid and reflow the shell on the way
+   back. */
+
+#panes {
+  --wails-draggable: no-drag;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.pane {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--color-canvas);
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  padding: 0 10px;
+  --default-contextmenu: hide;
+}
+
+.pane.active {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* Manager panes host the connection UI, not a terminal — no padding,
+   no absolute positioning offsets, let the content fill the space. */
+.pane-manager {
+  padding: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  --wails-draggable: no-drag;
+}
+
+.pane-manager.active {
+  pointer-events: auto !important;
+  visibility: visible !important;
+}
+
+.pane-error {
+  margin: 0;
+  padding: 16px;
+  color: var(--color-danger);
+  font-family: var(--font-family-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}

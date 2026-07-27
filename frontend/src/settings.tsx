@@ -8,12 +8,15 @@
  * Two defects fixed (not preserved):
  *   - nocx-x6w9: exactly ONE search box and ONE modified filter (both in rail)
  *   - nocx-ucxl: clicking a rail section always changes the content pane
+ *
+ * Uses the Page layout primitives (nocx-imkb.1) and the UI kit (nocx-vxqj.4).
  */
 
+import type { JSX } from 'solid-js'
 import { For, Show, createSignal, createMemo, onMount, onCleanup } from 'solid-js'
 import { createStore } from 'solid-js/store'
-
-import type { ProfileClient } from './profiles'
+import { ConnectionsView } from './connections'
+import type { ProfileClient, SSHProfile } from './profiles'
 import { SettingsObserver } from './settings-observer'
 import {
   AcceptedSnapshot,
@@ -29,6 +32,28 @@ import {
 } from './settings-domain'
 import { ExportSection } from './export-section'
 import { log } from './log'
+import {
+  Page,
+  PageSection,
+  type PageScrollerHandle,
+  SearchField,
+  Checkbox,
+  Select,
+  TextField,
+  Button,
+  Badge,
+  Field,
+} from './ui'
+
+// ── Settings page registry type (Deliverable 2) ────────────────────────
+
+export type SettingsPage =
+  | { kind: 'generated'; id: string; title: string }
+  // A component page renders itself. It is a thunk rather than a bare
+  // Component because such a page needs context the registry does not have —
+  // Connections needs the ProfileClient and the connect callback — and binding
+  // that at registration is what keeps the registry from having to know it.
+  | { kind: 'component'; id: string; title: string; render: () => JSX.Element }
 
 // ── Stable DOM id ──────────────────────────────────────────────────────
 
@@ -57,7 +82,6 @@ type LoadState = 'loading' | 'ready' | 'failed' | 'empty'
 export interface SettingsComponentHandle {
   focus(): void
   scrollToKey(key: string): void
-  setNarrow(narrow: boolean): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -65,14 +89,7 @@ export interface SettingsComponentHandle {
 export interface SettingsComponentProps {
   profileClient: ProfileClient
   observer?: SettingsObserver
-  ref?: { current: SettingsComponentHandle | null }
-}
-
-// ── Component props ────────────────────────────────────────────────────
-
-export interface SettingsComponentProps {
-  profileClient: ProfileClient
-  observer?: SettingsObserver
+  onConnect?: (profile: SSHProfile) => void
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -90,18 +107,17 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const [loadState, setLoadState] = createSignal<LoadState>('loading')
   const [searchQuery, setSearchQuery] = createSignal('')
   const [modifiedOnly, setModifiedOnly] = createSignal(false)
+  const [activeComponentPage, setActiveComponentPage] = createSignal<string | null>(null)
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
-  const [narrow, setNarrow] = createSignal(false)
-
-  // Element refs for keyboard shortcuts and deep link.
-  let searchInputRef: HTMLInputElement | undefined
-  let contentRef: HTMLDivElement | undefined
 
   // Promise that resolves when the initial data load finishes.
   let resolveReady: () => void
   const readyPromise = new Promise<void>((resolve) => {
     resolveReady = resolve
   })
+
+  // PageScroller handle (received via Page's scrollerRef).
+  let scrollerHandle: PageScrollerHandle = { scrollToElement: () => {} }
 
   // ── Observer ───────────────────────────────────────────────────────
   let cleanupObserver: (() => void) | null = null
@@ -119,6 +135,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // eslint-disable-next-line solid/reactivity
     cleanupObserver = () => props.observer!.stop()
   }
+
   // ── Data loading ───────────────────────────────────────────────────
 
   async function refresh(accept: RevisionPolicy = monotonicRevisionPolicy): Promise<void> {
@@ -237,7 +254,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   const isSearching = createMemo(() => searchQuery().length > 0)
 
-  // ── Derived: sections ──────────────────────────────────────────────
+  // ── Derived: sections (registry pages) ─────────────────────────────
+
   const sections: () => string[] = createMemo(() => {
     const seen = new Set<string>()
     const result: string[] = []
@@ -248,6 +266,22 @@ export function SettingsComponent(props: SettingsComponentProps) {
       }
     }
     return result
+  })
+
+  /** The typed page registry — generated sections + component pages. */
+  const settingsPages = createMemo<SettingsPage[]>(() => {
+    const generated: SettingsPage[] = sections().map((s) => ({
+      kind: 'generated' as const,
+      id: s,
+      title: s,
+    }))
+    const connectionPage: SettingsPage = {
+      kind: 'component',
+      id: 'connections',
+      title: 'Connections',
+      render: () => <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />,
+    }
+    return [...generated, connectionPage]
   })
 
   const modifiedCount = createMemo(() => {
@@ -332,12 +366,16 @@ export function SettingsComponent(props: SettingsComponentProps) {
     setSearchQuery(value)
   }
 
-  function handleSectionClick(section: string): void {
-    // Toggle section filter (nocx-ucxl): always produces a visible change.
-    setSectionFilter((prev) => (prev === section ? null : section))
-    // Clear search so the user sees all rows in the section.
-    setSearchQuery('')
-    if (searchInputRef) searchInputRef.value = ''
+  function handleNavClick(page: SettingsPage): void {
+    if (page.kind === 'component') {
+      setActiveComponentPage(page.id)
+      setSectionFilter(null)
+      setSearchQuery('')
+    } else {
+      setActiveComponentPage(null)
+      setSectionFilter((prev) => (prev === page.title ? null : page.title))
+      setSearchQuery('')
+    }
   }
 
   // ── Keyboard handler ───────────────────────────────────────────────
@@ -352,11 +390,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
       )
     ) {
       e.preventDefault()
-      searchInputRef?.focus()
+      document.querySelector<HTMLInputElement>('[aria-label="Search settings"]')?.focus()
     }
     if (e.key === 'Escape' && searchQuery()) {
       setSearchQuery('')
-      if (searchInputRef) searchInputRef.value = ''
     }
   }
 
@@ -364,28 +401,26 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   const handle: SettingsComponentHandle = {
     focus(): void {
-      searchInputRef?.focus()
+      document.querySelector<HTMLInputElement>('[aria-label="Search settings"]')?.focus()
     },
     scrollToKey(key: string): void {
       // Clear search and section filter so the target row is visible.
       setSearchQuery('')
       setSectionFilter(null)
-      if (searchInputRef) searchInputRef.value = ''
 
       const row = document.getElementById(keyToDomId(key))
       if (!row) return
 
-      row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      scrollerHandle.scrollToElement(row)
       const control = row.querySelector<HTMLElement>('input, select, button')
       control?.focus()
 
-      row.classList.add('st-row-highlight')
-      row.addEventListener('animationend', () => row.classList.remove('st-row-highlight'), {
-        once: true,
-      })
-    },
-    setNarrow(n: boolean): void {
-      setNarrow(n)
+      row.classList.add('ui-settings-row-highlight')
+      row.addEventListener(
+        'animationend',
+        () => row.classList.remove('ui-settings-row-highlight'),
+        { once: true },
+      )
     },
     ready(): Promise<void> {
       return readyPromise
@@ -468,7 +503,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return ''
   }
 
-  // ── Render ─────────────────────────────────────────────────────────
+  // ── Render helpers ─────────────────────────────────────────────────
 
   function renderDataClassIndicator(dataClass: Declaration['dataClass']): string {
     switch (dataClass) {
@@ -492,22 +527,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
     return (
       <Show when={decl.default !== undefined}>
-        <span
-          classList={{
-            'st-provenance': true,
-            'st-customized': customized(),
-            'st-default': !customized(),
-          }}
-        >
-          {customized() ? 'Customized' : 'Default'}
+        <span class="ui-settings-provenance">
+          <Badge variant={customized() ? 'warning' : 'default'}>
+            {customized() ? 'Customized' : 'Default'}
+          </Badge>
           <Show when={decision().canReset}>
-            <button
-              class="st-reset-btn"
-              title="Reset to default"
-              onClick={() => void resetSetting(decl.key)}
-            >
+            <Button class="ui-settings-reset-btn" onClick={() => void resetSetting(decl.key)}>
               Reset
-            </button>
+            </Button>
           </Show>
         </span>
       </Show>
@@ -523,28 +550,28 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
     return (
       <div
-        class="st-row"
+        class="ui-settings-row"
         id={keyToDomId(decl.key)}
         data-key={decl.key}
-        style={props.visible ? {} : { display: 'none' }}
+        classList={{ 'st-vis-hidden': !props.visible }}
       >
-        <div class="st-label-col">
+        <Field
+          for={keyToDomId(decl.key)}
+          label={decl.label}
+          description={decl.description || undefined}
+          orientation="horizontal"
+        >
           <Show when={showBreadcrumb()}>
-            <span class="st-breadcrumb">{decl.section}</span>
+            <span class="ui-settings-breadcrumb">{decl.section}</span>
           </Show>
-          <label title={decl.description}>{decl.label}</label>
-          <Show when={decl.description}>
-            <span class="st-description">{decl.description}</span>
-          </Show>
-          <span class="st-data-class" title={'Storage class: ' + decl.dataClass}>
+          <span class="ui-settings-data-class" title={'Storage class: ' + decl.dataClass}>
             {renderDataClassIndicator(decl.dataClass)}
           </span>
-        </div>
-        <div class="st-control-col">
+
           <Show when={decl.control === 'number'}>
-            <span class="st-bounds">
+            <span class="ui-settings-bounds">
               <Show when={decl.min !== undefined && decl.max !== undefined}>
-                {String(decl.min)} – {String(decl.max)}
+                {String(decl.min) + ' – ' + String(decl.max)}
               </Show>
               <Show when={decl.min !== undefined && decl.max === undefined}>
                 {'≥ ' + String(decl.min)}
@@ -556,76 +583,67 @@ export function SettingsComponent(props: SettingsComponentProps) {
           </Show>
 
           <Show when={decl.control === 'toggle'}>
-            <input
-              type="checkbox"
-              checked={!!eff()}
-              onChange={() => void saveSetting(decl.key, !eff())}
-            />
+            <Checkbox checked={!!eff()} onChange={(c) => void saveSetting(decl.key, c)} />
           </Show>
 
           <Show when={decl.control === 'text'}>
-            <input
-              type="text"
+            <TextField
               value={displayValue(eff(), decl)}
-              onChange={(e) => void saveSetting(decl.key, e.currentTarget.value)}
+              onInput={(v) => void saveSetting(decl.key, v)}
             />
           </Show>
 
           <Show when={decl.control === 'number'}>
-            <input
+            <TextField
               type="number"
               value={displayValue(eff(), decl)}
-              min={decl.min !== undefined ? String(decl.min) : undefined}
-              max={decl.max !== undefined ? String(decl.max) : undefined}
-              onChange={(e) => {
-                const n = Number(e.currentTarget.value)
+              min={decl.min}
+              max={decl.max}
+              onInput={(v) => {
+                const n = Number(v)
                 void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
               }}
             />
           </Show>
 
           <Show when={decl.control === 'select'}>
-            <select
+            <Select
               value={displayValue(eff(), decl)}
-              onChange={(e) => void saveSetting(decl.key, e.currentTarget.value)}
-            >
-              <For each={decl.options ?? []}>
-                {(opt) => (
-                  <option value={opt.value} selected={opt.value === displayValue(eff(), decl)}>
-                    {opt.label}
-                  </option>
-                )}
-              </For>
-            </select>
+              onChange={(v) => void saveSetting(decl.key, v)}
+              options={decl.options ?? []}
+            />
           </Show>
 
           <Show when={decl.control === 'secret'}>
-            <div class="st-secret">
-              <span class="st-secret-status">
+            <div class="ui-settings-secret">
+              <span class="ui-settings-secret-status">
                 {secretStates[decl.key] ? 'Configured' : 'Not configured'}
               </span>
-              <button
-                class="st-secret-replace"
+              <Button
                 onClick={() => {
-                  const value = prompt(`Enter new value for "${decl.label}":`)
+                  const value = prompt('Enter new value for "' + decl.label + '":')
                   if (value === null) return
                   void saveSecret(decl.key, value)
                 }}
               >
                 Replace
-              </button>
-              <button class="st-secret-clear" onClick={() => void deleteSecret(decl.key)}>
+              </Button>
+              <Button
+                class="ui-settings-secret-clear"
+                variant="danger"
+                onClick={() => void deleteSecret(decl.key)}
+              >
                 Clear
-              </button>
+              </Button>
             </div>
           </Show>
 
           <ProvenanceBadge decl={decl} />
 
           <Show when={err()}>
-            <div class="st-error">{err()}</div>
+            <div class="ui-settings-error">{err()}</div>
           </Show>
-        </div>
+        </Field>
       </div>
     )
   }
@@ -633,109 +651,131 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // ── Main render ────────────────────────────────────────────────────
 
   return (
-    <div classList={{ 'st-container': true, 'st-narrow': narrow() }} onKeyDown={handleKeydown}>
-      {/* ── Rail ──────────────────────────────────────────────────── */}
-      <nav class="st-rail" aria-label="Settings navigation">
-        {/* ONE search box (nocx-x6w9) — only in the rail. */}
-        <input
-          ref={searchInputRef}
-          type="search"
-          class="st-search"
-          placeholder="Search settings…"
-          aria-label="Search settings"
-          value={searchQuery()}
-          onInput={(e) => handleSearchInput(e.currentTarget.value)}
-        />
+    <div class="ui-settings" onKeyDown={handleKeydown}>
+      <Page
+        title="Settings"
+        leading={
+          <div class="kit-scope">
+            {/* ONE search box (nocx-x6w9) — only in the rail. */}
+            <div class="ui-settings-search">
+              <SearchField
+                value={searchQuery()}
+                onInput={handleSearchInput}
+                placeholder="Search settings…"
+                ariaLabel="Search settings"
+              />
+            </div>
 
-        {/* ONE modified-only filter (nocx-x6w9) — only in the rail. */}
-        <div class="st-modified-rail">
-          <label class="st-modified-rail-label">
-            <input
-              type="checkbox"
-              checked={modifiedOnly()}
-              onChange={(e) => setModifiedOnly(e.currentTarget.checked)}
-            />
-            {' Modified'}
-            <Show when={modifiedCount() > 0}>
-              <span class="st-modified-rail-count">{' (' + modifiedCount() + ')'}</span>
-            </Show>
-          </label>
-        </div>
+            {/* ONE modified-only filter (nocx-x6w9) — only in the rail. */}
+            <div class="ui-settings-filter">
+              <Checkbox
+                checked={modifiedOnly()}
+                onChange={(c) => setModifiedOnly(c)}
+                label={' Modified'}
+              />
+              <Show when={modifiedCount() > 0}>
+                <Badge variant="warning">{'(' + modifiedCount() + ')'}</Badge>
+              </Show>
+            </div>
 
-        {/* Section nav */}
-        <ul class="st-section-nav">
-          <For each={sections()}>
-            {(section) => {
-              const count = () => modifiedBySection().get(section)
-              const active = () => sectionFilter() === section
-              return (
-                <li
-                  classList={{ 'st-section-nav-item': true, 'st-section-nav-active': active() }}
-                  data-section={section}
-                >
-                  <button class="st-section-nav-link" onClick={() => handleSectionClick(section)}>
-                    {section}
-                    <Show when={count() !== undefined && count()! > 0}>
-                      <span class="st-section-nav-badge">{String(count())}</span>
-                    </Show>
-                  </button>
-                </li>
-              )
-            }}
-          </For>
-        </ul>
-      </nav>
-
-      {/* ── Content ────────────────────────────────────────────────── */}
-      <div ref={contentRef} class="st-content">
-        <Show when={loadState() === 'loading'}>
-          <div class="st-status st-loading">Loading settings…</div>
-        </Show>
-
-        <Show when={loadState() === 'failed'}>
-          <div class="st-status st-failed">
-            <span>Failed to load settings.</span>
-            <button class="st-retry-btn" onClick={() => void refresh()}>
-              Retry
-            </button>
+            <nav aria-label="Settings sections">
+              <ul class="ui-settings-section-nav">
+                <For each={settingsPages()}>
+                  {(page) => {
+                    const active = () =>
+                      page.kind === 'component'
+                        ? activeComponentPage() === page.id
+                        : activeComponentPage() === null && sectionFilter() === page.title
+                    const count = () =>
+                      page.kind === 'generated' ? modifiedBySection().get(page.id) : undefined
+                    return (
+                      <li
+                        classList={{
+                          'ui-settings-section-nav-item': true,
+                          'ui-settings-section-nav-active': active(),
+                        }}
+                        data-section={page.title}
+                      >
+                        <Button
+                          class="ui-settings-section-nav-link"
+                          onClick={() => handleNavClick(page)}
+                        >
+                          {page.title}
+                          <Show when={count() !== undefined && count()! > 0}>
+                            <Badge variant="warning">{String(count())}</Badge>
+                          </Show>
+                        </Button>
+                      </li>
+                    )
+                  }}
+                </For>
+              </ul>
+            </nav>
           </div>
-        </Show>
+        }
+        scrollerRef={(h) => {
+          scrollerHandle = h
+        }}
+      >
+        <div class="kit-scope">
+          {/* Component page takes over the body when active. */}
+          <Show when={activeComponentPage() === 'connections'}>
+            <ConnectionsView client={props.profileClient} onConnect={props.onConnect} />
+          </Show>
 
-        <Show
-          when={
-            loadState() === 'ready' &&
-            filteredDeclarations().length === 0 &&
-            declarations().length > 0
-          }
-        >
-          <div class="st-status st-nomatch">No settings match your search.</div>
-        </Show>
+          {/* Generated settings sections — hidden when a component page is active. */}
+          <Show when={activeComponentPage() === null}>
+            <Show when={loadState() === 'loading'}>
+              <div class="ui-settings-status ui-settings-loading">Loading settings…</div>
+            </Show>
 
-        {/* Render all sections; hide non-matching rows via inline style (keeps DOM elements for tests). */}
-        <Show when={loadState() === 'ready'}>
-          <For each={sections()}>
-            {(section) => {
-              const sectionDecls = () => declarations().filter((d) => d.section === section)
-              const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
-              return (
-                <div class="st-section" style={sectionVisible() ? {} : { display: 'none' }}>
-                  <h2 class="st-section-heading" id={'st-section-' + encodeURIComponent(section)}>
-                    {section}
-                  </h2>
-                  <For each={sectionDecls()}>
-                    {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
-                  </For>
-                </div>
-              )
-            }}
-          </For>
-        </Show>
+            <Show when={loadState() === 'failed'}>
+              <div class="ui-settings-status ui-settings-failed">
+                <span>Failed to load settings.</span>
+                <Button onClick={() => void refresh()}>Retry</Button>
+              </div>
+            </Show>
 
-        {/* ExportSection as a child component (no mountExportSection). */}
-        <Show when={loadState() === 'ready'}>
-          <ExportSection profileClient={props.profileClient} />
-        </Show>
-      </div>
+            <Show
+              when={
+                loadState() === 'ready' &&
+                filteredDeclarations().length === 0 &&
+                declarations().length > 0
+              }
+            >
+              <div class="ui-settings-status ui-settings-nomatch">
+                No settings match your search.
+              </div>
+            </Show>
+
+            {/* Render all sections; hide non-matching rows via inline style. */}
+            <Show when={loadState() === 'ready'}>
+              <For each={sections()}>
+                {(section) => {
+                  const sectionDecls = () => declarations().filter((d) => d.section === section)
+                  const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
+                  return (
+                    <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
+                      <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
+                        <For each={sectionDecls()}>
+                          {(decl) => (
+                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          )}
+                        </For>
+                      </PageSection>
+                    </div>
+                  )
+                }}
+              </For>
+            </Show>
+
+            {/* ExportSection as a child component (no mountExportSection). */}
+            <Show when={loadState() === 'ready'}>
+              <ExportSection profileClient={props.profileClient} />
+            </Show>
+          </Show>
+        </div>
+      </Page>
     </div>
   )
 }

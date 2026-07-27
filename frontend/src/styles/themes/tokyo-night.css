@@ -1,0 +1,90 @@
+/* ── Tokyo Night theme — the current palette, extracted from 27 hex values
+   ADR-0013 §2. All colour literals live here and only here. */
+
+:root,
+[data-theme='tokyo-night'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #1a1b26;
+
+  /* Chrome sits *behind* content and is deliberately darker than the canvas —
+     the tab bar, the vertical strip and the settings rail. The token migration
+     first collapsed these into --color-canvas; a computed-colour diff caught it
+     and they were restored, because flattening chrome into content is a design
+     change, not a refactor. (--color-chrome-rail differs from --color-chrome by
+     2/255 in one channel, which is almost certainly accidental and would be a
+     safe convergence to make deliberately later.) */
+  --color-chrome: #16161e;
+  --color-chrome-rail: #161720;
+  --color-surface-sunken: #24283b;
+  --color-tab-active: #1f2235;
+  --color-surface: #1f2335;
+  --color-surface-hover: #1f2030;
+  --color-surface-raised: #292e42;
+  --color-text: #c0caf5;
+  --color-text-muted: #a9b1d6;
+  --color-text-dim: #565f89;
+  --color-border: #2a2b3d;
+  --color-accent: #7aa2f7;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #9ece6a;
+  --color-warning: #e0af68;
+  --color-danger: #f7768e;
+  --color-accent-secondary: #9d7cd8;
+  --color-error: #ff6b6b;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ── */
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3 proposed deriving these centrally with color-mix(). The
+     palette does not cooperate: measured during nocx-xrrl.2, not one of the
+     six matches its derivation. surface-hover is DARKER than surface, so no
+     percentage of white reaches it; success-hover is off by 17 in red; and
+     danger-hover and warning-hover are translucent overlays, not solid
+     colours, which is a different rendering model rather than a different
+     shade. See ADR-0013 §3.1. */
+  --color-accent-hover: #89b4fa;
+  --color-accent-active: #89b4fa;
+  --color-accent-disabled: rgba(122, 162, 247, 0.6);
+  --color-surface-hover: #1f2030;
+  --color-surface-active: #2a2b3d;
+  --color-surface-disabled: rgba(31, 35, 53, 0.7);
+  --color-success-hover: #b9d870;
+  --color-danger-hover: rgba(247, 118, 142, 0.1);
+  --color-warning-hover: rgba(224, 175, 104, 0.1);
+  --color-focus-ring: rgba(122, 162, 247, 0.6);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(122, 162, 247, 0.3);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     Lifted verbatim from the literal object that lived in
+     renderers/xterm.ts, which was the only definition of these colours
+     until now. The adapter in nocx-xrrl.5 reads them from here, so this
+     file is the single source of terminal colour as well as UI colour —
+     which is the point of the token layer.
+
+     ANSI 0-15 are theme colours. Indices 16-255 and truecolor stay
+     algorithmic in the terminal itself: those are content, not theme. */
+  --terminal-background: #1a1b26;
+  --terminal-foreground: #c0caf5;
+  --terminal-cursor: #c0caf5;
+  --terminal-cursor-accent: #1a1b26;
+  --terminal-selection: #364a82;
+
+  --terminal-ansi-0: #1a1b26;
+  --terminal-ansi-1: #f7768e;
+  --terminal-ansi-2: #9ece6a;
+  --terminal-ansi-3: #e0af68;
+  --terminal-ansi-4: #7aa2f7;
+  --terminal-ansi-5: #bb9af7;
+  --terminal-ansi-6: #7dcfff;
+  --terminal-ansi-7: #a9b1d6;
+  --terminal-ansi-8: #414868;
+  --terminal-ansi-9: #f7768e;
+  --terminal-ansi-10: #9ece6a;
+  --terminal-ansi-11: #e0af68;
+  --terminal-ansi-12: #7aa2f7;
+  --terminal-ansi-13: #bb9af7;
+  --terminal-ansi-14: #7dcfff;
+  --terminal-ansi-15: #c0caf5;
+}

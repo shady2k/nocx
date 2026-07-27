@@ -17,9 +17,6 @@ export type SingletonKey = string & { readonly __brand: 'SingletonKey' }
 // ── Registered surface constants ──────────────────────────────────────────
 
 export const SURFACE_TERMINAL: SurfaceType = 'nocx.terminal' as SurfaceType
-export const SURFACE_CONNECTIONS: SurfaceType = 'nocx.connections' as SurfaceType
-
-export const SINGLETON_CONNECTIONS: SingletonKey = 'nocx.connections' as SingletonKey
 
 // ── Geometry (B.5) ────────────────────────────────────────────────────────
 
@@ -95,6 +92,17 @@ export abstract class BaseTabContent implements TabContent {
   protected _target: HTMLElement | null = null
 
   /**
+   * Whether this content is the active tab's, as the chrome told us.
+   *
+   * The authoritative answer, and the reason it exists: setVisible toggles an
+   * 'active' CSS class for presentation, and code that needs to know whether it
+   * is active was reading that class back out of the DOM (nocx-fttm). A class is
+   * a rendering detail — anything may add or remove it — so asking the DOM what
+   * the application state is inverts the direction the information travels.
+   */
+  protected _active = false
+
+  /**
    * Pre-set the mount target so setVisible is meaningful before mount.
    * Called by Tab constructor. Idempotent — subsequent calls after the
    * first are no-ops. Implementations override this only when they need
@@ -111,6 +119,7 @@ export abstract class BaseTabContent implements TabContent {
   abstract dispose(): void
 
   setVisible(visible: boolean): void {
+    this._active = visible
     if (this._target) {
       this._target.classList.toggle('active', visible)
     }

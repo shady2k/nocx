@@ -34,7 +34,7 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
 // ── Vertical tab placement (nocx-d3q.4) ────────────────────────────────
 
-const PLACEMENT_ROW = '.st-row[data-key="tab.placement"]'
+const PLACEMENT_ROW = '.ui-settings-row[data-key="tab.placement"]'
 const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 const TAB = '.tab'
 const ACTIVITY = '.tab-indicator.tab-activity'
@@ -71,11 +71,16 @@ test.describe('vertical tab placement', () => {
     })
     await page.selectOption(PLACEMENT_SELECT, value)
     await page.keyboard.press('Meta+w')
-    // The #tabbar element carries both .tabbar and .tabstrip-vertical
-    // classes after a swap — checking for absence of the opposite class
-    // is a false negative.  Just verify the expected class is present.
-    const wantClass = value === 'vertical' ? 'tabstrip-vertical' : 'tabbar'
-    await expect(page.locator('#tabbar')).toHaveClass(new RegExp(wantClass), { timeout: 5000 })
+    // Each orientation mounts into its own host:
+    //   horizontal → #tabbar gets .tabbar
+    //   vertical   → #vertical-tabstrip gets .tabstrip-vertical
+    if (value === 'vertical') {
+      await expect(page.locator('#vertical-tabstrip')).toHaveClass(/tabstrip-vertical/, {
+        timeout: 5000,
+      })
+    } else {
+      await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, { timeout: 5000 })
+    }
   }
 
   test('tabs render and activate in vertical placement', async ({ page }) => {
@@ -113,7 +118,6 @@ test.describe('vertical tab placement', () => {
     await page.keyboard.press('Meta+t')
     await expect(page.locator(TAB)).toHaveCount(2)
     await expect(page.locator(TAB).first()).not.toHaveClass(/active/)
-
     await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 15000 })
   })
 
@@ -121,8 +125,18 @@ test.describe('vertical tab placement', () => {
     // beforeEach already reset to horizontal.
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)
 
+    const paneHandle = await page.evaluateHandle(() => document.querySelector('.pane.active'))
+
     await switchPlacement(page, 'vertical')
     await expect(page.locator(TAB)).toHaveCount(1)
+
+    // Verify the terminal host is the same DOM node.
+    // ADR-0012 §1: must not remount the terminal host element.
+    const same = await page.evaluate((handle) => {
+      const active = document.querySelector('.pane.active')
+      return active === handle
+    }, paneHandle)
+    expect(same).toBe(true)
 
     await switchPlacement(page, 'horizontal')
     await expect(page.locator(TAB)).toHaveCount(1)

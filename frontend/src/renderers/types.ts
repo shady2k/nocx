@@ -1,3 +1,5 @@
+import type { ITheme } from '@xterm/xterm'
+
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
 // write PTY output in, emit user input out, and report its grid size.
@@ -125,6 +127,16 @@ export interface TerminalRenderer {
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.
   refreshAtlas(): void
+
+  /**
+   * Apply a new palette to the terminal controller. Sets term.options.theme
+   * and performs whatever refresh / atlas invalidation is needed for the new
+   * palette to actually appear — on WebKitGTK this is a full viewport refresh
+   * on top of the 42ms pump (ADR-0005).
+   *
+   * Belongs to the imperative terminal controller, not to a Solid effect.
+   */
+  applyTheme(theme: ITheme): void
 
   /** When readOnly, the terminal ignores keyboard input but text selection
    *  still works. Used when the DOM editor owns input at a prompt. */

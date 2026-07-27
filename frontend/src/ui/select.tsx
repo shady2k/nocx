@@ -4,6 +4,9 @@
  * Justified by callers:
  * - settings.ts: <select> with options, onChange fires on user selection
  * - connections.ts: credential selector and jump-host selector with inline styles
+ *
+ * Per ADR-0014: native <select> with appearance: none on the closed control.
+ * The open popup is platform-owned and unstylable — accepted tradeoff.
  */
 
 import { For, Show } from 'solid-js'
@@ -21,6 +24,7 @@ export interface SelectProps {
   /** Optional first option that reads as "— None —" or similar. */
   placeholder?: string
   placeholderValue?: string
+  disabled?: boolean
 }
 
 export function Select(props: SelectProps) {
@@ -30,17 +34,16 @@ export function Select(props: SelectProps) {
   }
 
   return (
-    <select class={props.class ?? ''} onChange={onChange}>
+    <select
+      class={props.class ?? ''}
+      value={props.value}
+      disabled={props.disabled === true}
+      onChange={onChange}
+    >
       <Show when={props.placeholder !== undefined}>
         <option value={props.placeholderValue ?? ''}>{props.placeholder}</option>
       </Show>
-      <For each={props.options}>
-        {(opt) => (
-          <option value={opt.value} selected={opt.value === props.value}>
-            {opt.label}
-          </option>
-        )}
-      </For>
+      <For each={props.options}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
     </select>
   )
 }

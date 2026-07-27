@@ -8,13 +8,15 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --max-warnings 0",
+    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
     "lint:fixture-check": "sh ./lint-fixtures/gate.sh",
-    "test:watch": "vitest"
+    "baseline:update": "node lint-fixtures/update-raw-controls-baseline.mjs",
+    "baseline:color-update": "node lint-fixtures/update-color-literals-baseline.mjs",
+    "baseline:inline-update": "node lint-fixtures/update-inline-markup-baseline.mjs"
   },
   "dependencies": {
     "@xterm/addon-canvas": "^0.7.0",
@@ -26,6 +28,7 @@
   },
   "devDependencies": {
     "@solidjs/testing-library": "^0.8.10",
+    "css-tree": "^3.2.1",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^9.1.2",
     "eslint-plugin-solid": "^0.14.5",

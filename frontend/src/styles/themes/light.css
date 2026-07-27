@@ -1,0 +1,83 @@
+/* ── Light theme — a clean light palette to prove the token layer works.
+   ADR-0013 §2. All colour literals live here and only here. */
+
+:root,
+[data-theme='light'] {
+  /* ── UI colour tokens (§2.1) ─────────────────────────────────────── */
+  --color-canvas: #f5f5f5;
+
+  --color-chrome: #e8e8e8;
+  --color-chrome-rail: #e0e0e0;
+  --color-surface-sunken: #ececec;
+  --color-tab-active: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f0f0f0;
+  --color-surface-raised: #ffffff;
+  --color-text: #1a1a1a;
+  --color-text-muted: #555555;
+  --color-text-dim: #999999;
+  --color-border: #d4d4d4;
+  --color-accent: #2563eb;
+
+  /* ── Additional semantic colours (§2.2) ──────────────────────────── */
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+  --color-accent-secondary: #7c3aed;
+  --color-error: #ef4444;
+
+  /* ── Font families (§2.4) — ADR §2.4 mandates these per theme file ── */
+
+  /* ── Interaction states — assigned, not derived ──────────────────────
+     ADR-0013 §3 proposed deriving these centrally with color-mix(). The
+     palette does not cooperate: measured during nocx-xrrl.2, not one of the
+     six matches its derivation. surface-hover is DARKER than surface, so no
+     percentage of white reaches it; success-hover is off by 17 in red; and
+     danger-hover and warning-hover are translucent overlays, not solid
+     colours, which is a different rendering model rather than a different
+     shade. See ADR-0013 §3.1. */
+  --color-accent-hover: #3b82f6;
+  --color-accent-active: #60a5fa;
+  --color-accent-disabled: rgba(37, 99, 235, 0.4);
+  --color-surface-hover: #f0f0f0;
+  --color-surface-active: #e8e8e8;
+  --color-surface-disabled: rgba(255, 255, 255, 0.7);
+  --color-success-hover: #22c55e;
+  --color-danger-hover: rgba(220, 38, 38, 0.1);
+  --color-warning-hover: rgba(217, 119, 6, 0.1);
+  --color-focus-ring: rgba(37, 99, 235, 0.4);
+  --color-scrim: rgba(0, 0, 0, 0.5);
+  --color-selection: rgba(37, 99, 235, 0.2);
+
+  /* ── Terminal palette (§2.3) ─────────────────────────────────────────
+     Lifted verbatim from the literal object that lived in
+     renderers/xterm.ts, which was the only definition of these colours
+     until now. The adapter in nocx-xrrl.5 reads them from here, so this
+     file is the single source of terminal colour as well as UI colour —
+     which is the point of the token layer.
+
+     ANSI 0-15 are theme colours. Indices 16-255 and truecolor stay
+     algorithmic in the terminal itself: those are content, not theme. */
+  --terminal-background: #ffffff;
+  --terminal-foreground: #1a1a1a;
+  --terminal-cursor: #1a1a1a;
+  --terminal-cursor-accent: #ffffff;
+  --terminal-selection: #a0c4ff;
+
+  --terminal-ansi-0: #1a1a1a;
+  --terminal-ansi-1: #dc2626;
+  --terminal-ansi-2: #16a34a;
+  --terminal-ansi-3: #d97706;
+  --terminal-ansi-4: #2563eb;
+  --terminal-ansi-5: #7c3aed;
+  --terminal-ansi-6: #0891b2;
+  --terminal-ansi-7: #d4d4d4;
+  --terminal-ansi-8: #666666;
+  --terminal-ansi-9: #ef4444;
+  --terminal-ansi-10: #22c55e;
+  --terminal-ansi-11: #f59e0b;
+  --terminal-ansi-12: #3b82f6;
+  --terminal-ansi-13: #a855f7;
+  --terminal-ansi-14: #06b6d4;
+  --terminal-ansi-15: #ffffff;
+}

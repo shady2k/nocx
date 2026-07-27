@@ -87,6 +87,15 @@ if (!('scrollIntoView' in HTMLElement.prototype)) {
   })
 }
 
+// PageScroller.scrollToElement calls scrollEl.scrollTo — mock it.
+if (!('scrollTo' in HTMLElement.prototype)) {
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+    value: vi.fn(),
+    writable: true,
+    configurable: true,
+  })
+}
+
 /** Shorthand for mocking client RPCs. */
 function mockReady(
   client: ProfileClient,
@@ -130,8 +139,8 @@ describe('SettingsContent', () => {
   let signal: AbortSignal
 
   function visibleRows(): HTMLElement[] {
-    return Array.from(target.querySelectorAll<HTMLElement>('.st-row')).filter(
-      (r) => r.style.display !== 'none',
+    return Array.from(target.querySelectorAll<HTMLElement>('.ui-settings-row')).filter(
+      (r) => r.style.display !== 'none' && !r.classList.contains('st-vis-hidden'),
     )
   }
 
@@ -154,21 +163,23 @@ describe('SettingsContent', () => {
 
   // ── Mount ──────────────────────────────────────────────────────────
 
-  it('mounts the two-pane layout with rail and content', async () => {
+  it('mounts the Page layout with rail and content', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const container = target.querySelector('.st-container')
-    expect(container).toBeTruthy()
-    expect(container!.querySelector('.st-rail')).toBeTruthy()
-    expect(container!.querySelector('.st-content')).toBeTruthy()
+    // Page renders .ui-page as root; .ui-page__rail and .ui-page__scroll
+    // are the rail and scroll containers.
+    const page = target.querySelector('.ui-page')
+    expect(page).toBeTruthy()
+    expect(page!.querySelector('.ui-page__rail')).toBeTruthy()
+    expect(page!.querySelector('.ui-page__scroll')).toBeTruthy()
   })
 
   it('rail has exactly one search input', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const rail = target.querySelector('.st-rail')!
+    const rail = target.querySelector('.ui-page__rail')!
     const searchInputs = rail.querySelectorAll<HTMLInputElement>('input[type="search"]')
     expect(searchInputs.length).toBe(1)
     expect(searchInputs[0].placeholder).toBe('Search settings…')
@@ -181,16 +192,16 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    const rail = target.querySelector('.st-rail')!
+    const rail = target.querySelector('.ui-page__rail')!
     const toggles = rail.querySelectorAll<HTMLInputElement>(
-      '.st-modified-rail input[type="checkbox"]',
+      '.ui-settings-filter input[type="checkbox"]',
     )
     expect(toggles.length).toBe(1)
     expect(toggles[0].checked).toBe(false)
 
-    const countSpan = rail.querySelector('.st-modified-rail-count')
+    const countSpan = rail.querySelector('.ui-badge-warning')
     expect(countSpan).toBeTruthy()
-    expect(countSpan!.textContent).toBe(' (2)')
+    expect(countSpan!.textContent).toBe('(2)')
   })
 
   it('modified-only count excludes secrets', async () => {
@@ -199,18 +210,23 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    const countSpan = target.querySelector('.st-modified-rail-count')
+    const countSpan = target.querySelector('.ui-badge-warning')
     // Only terminal.fontSize — ai.apiKey is a secret and is excluded.
-    expect(countSpan!.textContent).toBe(' (1)')
+    expect(countSpan!.textContent).toBe('(1)')
   })
 
-  it('section nav lists every section in declaration order', async () => {
+  it('section nav lists every generated section in declaration order, then component pages', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.st-section-nav-link')
+    const links = target.querySelectorAll('.ui-settings-section-nav-link')
     const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
-    expect(labels).toEqual(['Terminal', 'Application', 'AI'])
+
+    // Generated sections keep Go's declaration order and stay first — that is
+    // the invariant the generated screen depends on. Component pages
+    // (nocx-imkb.3 put Connections here) follow them, so asserting the whole
+    // list rather than a prefix keeps a stray insertion visible.
+    expect(labels).toEqual(['Terminal', 'Application', 'AI', 'Connections'])
   })
 
   it('section nav shows per-section modified counts', async () => {
@@ -219,14 +235,15 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.st-section-nav-link')
+    const links = target.querySelectorAll('.ui-settings-section-nav-link')
     const terminalLink = Array.from(links).find((l) => l.textContent.includes('Terminal'))
     const appLink = Array.from(links).find((l) => l.textContent.includes('Application'))
     const aiLink = Array.from(links).find((l) => l.textContent.includes('AI'))
 
-    expect(terminalLink!.querySelector('.st-section-nav-badge')!.textContent).toBe('1')
-    expect(appLink!.querySelector('.st-section-nav-badge')!.textContent).toBe('1')
-    expect(aiLink!.querySelector('.st-section-nav-badge')).toBeFalsy()
+    // Badge is rendered by the Badge kit component as .ui-badge-warning
+    expect(terminalLink!.querySelector('.ui-badge-warning')!.textContent).toBe('1')
+    expect(appLink!.querySelector('.ui-badge-warning')!.textContent).toBe('1')
+    expect(aiLink!.querySelector('.ui-badge-warning')).toBeFalsy()
   })
 
   // ── Modified-only filter ───────────────────────────────────────────
@@ -242,7 +259,7 @@ describe('SettingsContent', () => {
     expect(visibleRows().length).toBe(5)
 
     const checkbox = target.querySelector<HTMLInputElement>(
-      '.st-modified-rail input[type="checkbox"]',
+      '.ui-settings-filter input[type="checkbox"]',
     )!
     checkbox.checked = true
     checkbox.dispatchEvent(new Event('change', { bubbles: true }))
@@ -261,43 +278,36 @@ describe('SettingsContent', () => {
 
     // Find the section nav link for Application
     const appLink = Array.from(
-      target.querySelectorAll<HTMLButtonElement>('.st-section-nav-link'),
+      target.querySelectorAll<HTMLButtonElement>('.ui-settings-section-nav-link'),
     ).find((l) => l.textContent.includes('Application'))
     expect(appLink).toBeTruthy()
 
     // Click Application — content should scroll to that section.
-    // The heading 'Application' should become visible or highlighted.
-    // We assert that at least the class toggles on the nav item.
     appLink!.click()
 
     await vi.waitFor(() => {
-      const appItem = appLink!.closest('.st-section-nav-item')
-      expect(appItem!.classList.contains('st-section-nav-active')).toBe(true)
+      const appItem = appLink!.closest('.ui-settings-section-nav-item')
+      expect(appItem!.classList.contains('ui-settings-section-nav-active')).toBe(true)
     })
 
     // The previously-active nav highlight should have moved.
     const terminalItem = appLink!
-      .closest('.st-rail')!
-      .querySelector('.st-section-nav-item[data-section="Terminal"]')
-    expect(terminalItem!.classList.contains('st-section-nav-active')).toBe(false)
+      .closest('[aria-label="Settings sections"]')!
+      .querySelector('.ui-settings-section-nav-item[data-section="Terminal"]')
+    expect(terminalItem!.classList.contains('ui-settings-section-nav-active')).toBe(false)
   })
 
   // ── Narrow viewport ────────────────────────────────────────────────
 
-  it('adds st-narrow class when viewport width is below 640 px', async () => {
+  it('Page owns the narrow breakpoint — viewportChanged is a no-op', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const container = target.querySelector('.st-container')!
-
-    content.viewportChanged({ width: 800, height: 600, devicePixelRatio: 1 })
-    expect(container.classList.contains('st-narrow')).toBe(false)
-
+    // Page owns the breakpoint via base.css @media (max-width: 640px).
+    // There is no Settings-specific narrow state to test.
+    // Verify the method exists and does not throw.
     content.viewportChanged({ width: 500, height: 600, devicePixelRatio: 1 })
-    expect(container.classList.contains('st-narrow')).toBe(true)
-
     content.viewportChanged({ width: 800, height: 600, devicePixelRatio: 1 })
-    expect(container.classList.contains('st-narrow')).toBe(false)
   })
 
   // ── Search ─────────────────────────────────────────────────────────
@@ -348,13 +358,13 @@ describe('SettingsContent', () => {
 
   // ── Dispose ────────────────────────────────────────────────────────
 
-  it('dispose removes container from DOM', async () => {
+  it('dispose removes content from DOM', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    expect(target.querySelector('.st-container')).toBeTruthy()
+    expect(target.querySelector('.ui-page')).toBeTruthy()
     content.dispose()
-    expect(target.querySelector('.st-container')).toBeFalsy()
+    expect(target.querySelector('.ui-page')).toBeFalsy()
   })
 
   // ── Single instance of search/filter (nocx-x6w9) ────────────────────
@@ -378,7 +388,7 @@ describe('SettingsContent', () => {
     await content.mount(target, host, signal)
 
     const modifiedCheckboxes = target.querySelectorAll<HTMLInputElement>(
-      '.st-modified-rail input[type="checkbox"]',
+      '.ui-settings-filter input[type="checkbox"]',
     )
     expect(modifiedCheckboxes.length).toBe(1)
   })
@@ -396,7 +406,7 @@ describe('SettingsContent', () => {
 
     // Activate modified-only filter — only fontSize visible.
     const railCheckbox = target.querySelector<HTMLInputElement>(
-      '.st-modified-rail input[type="checkbox"]',
+      '.ui-settings-filter input[type="checkbox"]',
     )!
     railCheckbox.checked = true
     railCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
@@ -418,7 +428,8 @@ describe('SettingsContent', () => {
     expect(fontFamilyRow).toBeTruthy()
     const fontInput = fontFamilyRow!.querySelector<HTMLInputElement>('input[type="text"]')!
     fontInput.value = 'Fira Code'
-    fontInput.dispatchEvent(new Event('change', { bubbles: true }))
+    // TextField uses onInput — dispatch input event instead of change.
+    fontInput.dispatchEvent(new Event('input', { bubbles: true }))
 
     await vi.waitFor(() => {
       const rerendered = document.getElementById('st-setting-terminal.fontFamily')
@@ -433,5 +444,33 @@ describe('SettingsContent', () => {
       // fontSize + fontFamily both overridden → 2 rows
       expect(visibleRows().length).toBe(2)
     })
+  })
+
+  // ── Registry: generated-screen invariant (Deliverable 2) ───────────
+
+  it('generated-screen invariant: adding a declaration section auto-creates a nav entry', async () => {
+    // A new declaration in a new section appears automatically in the
+    // section nav — no frontend code change needed for a Go-declared section.
+    const extraDecl: Declaration = {
+      key: 'editor.tabSize',
+      section: 'Editor',
+      label: 'Tab Size',
+      description: 'Editor tab width',
+      control: 'number',
+      dataClass: 'publicConfig',
+      default: 4,
+      min: 1,
+      max: 8,
+    }
+    mockReady(client, { declarations: [...TEST_DECLARATIONS, extraDecl] })
+    await content.mount(target, host, signal)
+
+    const links = target.querySelectorAll('.ui-settings-section-nav-link')
+    const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
+    expect(labels).toContain('Editor')
+    // Original sections still present.
+    expect(labels).toContain('Terminal')
+    expect(labels).toContain('Application')
+    expect(labels).toContain('AI')
   })
 })

@@ -12,6 +12,8 @@ import {
   deselectAllBlocks,
   getSelectedBlock,
 } from './blocks'
+import { BufferLine } from './test-helpers'
+import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 
 /** Helper: returns a container supplier that references the given element. */
 function makeContainer(el: HTMLElement): () => HTMLElement {
@@ -393,6 +395,7 @@ describe('BlockManager', () => {
   let fixedNow: number
 
   beforeEach(() => {
+    _resetThemeState()
     inner = document.createElement('div')
     xtermContainer = document.createElement('div')
     inner.appendChild(xtermContainer)
@@ -474,6 +477,77 @@ describe('BlockManager', () => {
     manager.deselectAll()
     expect(manager.selectedBlockId).toBeNull()
     expect(rec.el.classList.contains('cmd-block-selected')).toBe(false)
+  })
+
+  it('freezeBlock captures theme snapshot at freeze time', () => {
+    const themeA = {
+      foreground: '#111111',
+      background: '#000000',
+      black: '#000000',
+      red: '#aa0000',
+      green: '#00aa00',
+      yellow: '#aaaa00',
+      blue: '#0000aa',
+      magenta: '#aa00aa',
+      cyan: '#00aaaa',
+      white: '#aaaaaa',
+      brightBlack: '#555555',
+      brightRed: '#ff5555',
+      brightGreen: '#55ff55',
+      brightYellow: '#ffff55',
+      brightBlue: '#5555ff',
+      brightMagenta: '#ff55ff',
+      brightCyan: '#55ffff',
+      brightWhite: '#ffffff',
+      cursor: '#ffffff',
+      cursorAccent: '#000000',
+      selectionBackground: '#335577',
+    }
+    const themeB = {
+      foreground: '#cccccc',
+      background: '#222222',
+      black: '#222222',
+      red: '#cc0000',
+      green: '#00cc00',
+      yellow: '#cccc00',
+      blue: '#0000cc',
+      magenta: '#cc00cc',
+      cyan: '#00cccc',
+      white: '#cccccc',
+      brightBlack: '#666666',
+      brightRed: '#ff6666',
+      brightGreen: '#66ff66',
+      brightYellow: '#ffff66',
+      brightBlue: '#6666ff',
+      brightMagenta: '#ff66ff',
+      brightCyan: '#66ffff',
+      brightWhite: '#eeeeee',
+      cursor: '#eeeeee',
+      cursorAccent: '#222222',
+      selectionBackground: '#446688',
+    }
+
+    // First block with theme A
+    setCurrentTheme(themeA)
+    manager.startBlock('cmd1', '~', 0)
+    const linesA = [new BufferLine('hello', false)]
+    const recA = manager.freezeBlock((y) => linesA[y] ?? undefined, 0, 0)
+    expect(recA).not.toBeNull()
+    const outputA = recA!.el.querySelector('.cmd-output')
+    expect(outputA?.innerHTML).toContain('#111111')
+
+    // Second block with theme B
+    setCurrentTheme(themeB)
+    manager.startBlock('cmd2', '~', 0)
+    const linesB = [new BufferLine('world', false)]
+    const recB = manager.freezeBlock((y) => linesB[y] ?? undefined, 0, 0)
+    expect(recB).not.toBeNull()
+    const outputB = recB!.el.querySelector('.cmd-output')
+    expect(outputB?.innerHTML).toContain('#cccccc')
+    expect(outputB?.innerHTML).not.toContain('#111111')
+
+    // First block still has snapshot A's colours
+    expect(outputA?.innerHTML).toContain('#111111')
   })
 })
 

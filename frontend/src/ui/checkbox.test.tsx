@@ -49,4 +49,25 @@ describe('Checkbox', () => {
     subject({ ariaLabel: 'Show passwords' })
     expect(screen.getByLabelText('Show passwords')).toBeTruthy()
   })
+
+  it('sets disabled attribute', () => {
+    subject({ disabled: true })
+    const cb = screen.getByRole('checkbox')
+    expect(cb).toHaveProperty('disabled', true)
+  })
+
+  it('does not toggle onChange when disabled', () => {
+    const onChange = vi.fn()
+    subject({ disabled: true, onChange, checked: false })
+    const cb = screen.getByRole('checkbox')
+    cb.click()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('is a native checkbox with keyboard support (Space handled by browser)', () => {
+    subject()
+    const cb = screen.getByRole('checkbox')
+    expect(cb.tagName).toBe('INPUT')
+    expect(cb.getAttribute('type')).toBe('checkbox')
+  })
 })

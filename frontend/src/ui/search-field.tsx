@@ -16,6 +16,7 @@ export interface SearchFieldProps {
   onInput: (value: string) => void
   placeholder?: string
   ariaLabel?: string
+  disabled?: boolean
 }
 
 export function SearchField(props: SearchFieldProps) {
@@ -31,6 +32,7 @@ export function SearchField(props: SearchFieldProps) {
       value={props.value}
       placeholder={props.placeholder ?? ''}
       aria-label={props.ariaLabel ?? undefined}
+      disabled={props.disabled === true}
       onInput={onInput}
     />
   )

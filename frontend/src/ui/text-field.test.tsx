@@ -69,4 +69,54 @@ describe('TextField', () => {
     const wrapper = screen.getByText('Port').parentElement
     expect(wrapper?.getAttribute('class')).toBe('cm-field')
   })
+
+  it('sets disabled attribute', () => {
+    subject({ disabled: true })
+    const input = screen.getByRole('textbox')
+    expect(input).toHaveProperty('disabled', true)
+  })
+
+  it('renders description text', () => {
+    subject({ description: 'Port number between 1 and 65535' })
+    expect(screen.getByText('Port number between 1 and 65535')).toBeTruthy()
+  })
+
+  it('renders error text and sets aria-invalid', () => {
+    subject({ error: 'Invalid port' })
+    expect(screen.getByText('Invalid port')).toBeTruthy()
+    const input = screen.getByRole('textbox')
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+  })
+
+  it('wires aria-describedby from description', () => {
+    subject({ id: 'port', description: 'Range 1-65535' })
+    const input = screen.getByRole('textbox')
+    const descId = input.getAttribute('aria-describedby')
+    expect(descId).toMatch(/port__desc/)
+  })
+
+  it('wires aria-describedby from error', () => {
+    subject({ id: 'port', error: 'Required' })
+    const input = screen.getByRole('textbox')
+    const descId = input.getAttribute('aria-describedby')
+    expect(descId).toMatch(/port__error/)
+  })
+
+  it('wires label for attribute to input id', () => {
+    subject({ id: 'host', label: 'Host' })
+    const label = screen.getByText('Host')
+    expect(label.getAttribute('for')).toBe('host')
+  })
+
+  it('is focusable via tab', () => {
+    subject()
+    const input = screen.getByRole('textbox')
+    expect(input.getAttribute('tabindex')).toBeNull() // natively focusable
+  })
+
+  it('sets required attribute', () => {
+    subject({ required: true })
+    const input = screen.getByRole('textbox')
+    expect(input).toHaveProperty('required', true)
+  })
 })

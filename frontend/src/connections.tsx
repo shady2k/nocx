@@ -17,13 +17,16 @@
  * - onConnect callback
  */
 import { For, Show, createSignal, createMemo, onMount } from 'solid-js'
-import { render } from 'solid-js/web'
 import { Button } from './ui/button'
 import { TextField } from './ui/text-field'
 import { Checkbox } from './ui/checkbox'
 import { Select, type SelectOption } from './ui/select'
 import { Toolbar } from './ui/toolbar'
+import { showConfirm } from './ui/dialog'
 import { Section } from './ui/section'
+import { Radio } from './ui/radio'
+import { EmptyState } from './ui/empty-state'
+import { Field } from './ui/field'
 import type { SSHProfile, ProfileGroup, Credential, AuthMode, TreeNode } from './profiles'
 import { ProfileClient, buildGroupTree, newProfileID } from './profiles'
 import { log } from './log'
@@ -67,9 +70,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [selectedID, setSelectedID] = createSignal('')
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
   const [editingCredential, setEditingCredential] = createSignal<Credential | null>(null)
-
-  // ── Password input ref for credential form ──────────────────────────────
-  let passwordInputRef: HTMLInputElement | undefined
 
   // ── Data loading ────────────────────────────────────────────────────────
   async function loadAll() {
@@ -164,7 +164,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   async function deleteProfile(profile: SSHProfile) {
-    if (!confirm(`Delete "${profile.name}"?`)) return
+    if (!(await showConfirm(`Delete "${profile.name}"?`))) return
     try {
       await props.client.deleteProfile(profile.id)
       setSelectedID('')
@@ -176,7 +176,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   async function deleteCredential(credential: Credential) {
-    if (!confirm(`Delete credential "${credential.name}"?`)) return
+    if (!(await showConfirm(`Delete credential "${credential.name}"?`))) return
     try {
       await props.client.deleteCredential(credential.id)
       setEditingCredential(null)
@@ -255,25 +255,25 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             {p.options.user || '?'}@{p.options.host}:{p.options.port || 22}
           </div>
         </div>
-        <button
-          class="cm-quick-connect"
-          title="Quick connect"
-          onClick={(e) => {
-            e.stopPropagation()
-            handleQuickConnect(p)
-          }}
-        >
-          SSH
-        </button>
+        <div onClick={(e) => e.stopPropagation()}>
+          <Button
+            class="cm-quick-connect"
+            title="Quick connect"
+            onClick={() => handleQuickConnect(p)}
+          >
+            SSH
+          </Button>
+        </div>
       </div>
     )
   }
 
   function renderEmpty() {
     return (
-      <div style={{ color: '#565f89', 'font-size': '13px', padding: '32px' }}>
-        Select a connection to edit, or click &quot;+ New connection&quot; to create one.
-      </div>
+      <EmptyState
+        title="Select a connection to edit"
+        description={'Click "+ New connection" to create one.'}
+      />
     )
   }
 
@@ -326,15 +326,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }}
           />
 
-          <div class="cm-field">
-            <label>Credential ({'\u0423\u0417'})</label>
+          <Field
+            for="credential-select"
+            label={'Credential (\u0423\u0417)'}
+            orientation="horizontal"
+          >
             <Select
               value={profile.options.credentialId ?? ''}
               onChange={(v) => setOption('credentialId', v || undefined)}
               options={credOptions()}
               placeholder="— None (specify below) —"
             />
-          </div>
+          </Field>
 
           <Show when={!profile.options.credentialId}>
             <TextField
@@ -348,41 +351,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         <Show when={!profile.options.credentialId}>
           <div class="cm-form-section">
             <h2>Authentication (override)</h2>
-            <div style={{ color: '#565f89', 'font-size': '12px', 'margin-bottom': '12px' }}>
+            <div class="cm-tip">
               Tip: Create a Credential above to reuse auth settings across connections.
             </div>
-            <div class="cm-field">
-              <label>Method</label>
+            <Field for="auth-method" label="Method" orientation="horizontal">
               <div class="cm-radio-group">
                 <For each={AUTH_MODES}>
                   {(mode) => (
-                    <label>
-                      <input
-                        type="radio"
-                        name="auth-mode"
-                        value={mode}
-                        checked={(profile.options.auth ?? '') === mode}
-                        onChange={() => setOption('auth', mode)}
-                      />
-                      {authModeLabel(mode)}
-                    </label>
+                    <Radio
+                      value={mode}
+                      checked={(profile.options.auth ?? '') === mode}
+                      onChange={(v) => setOption('auth', v)}
+                      name="auth-mode"
+                      label={authModeLabel(mode)}
+                    />
                   )}
                 </For>
               </div>
-            </div>
+            </Field>
           </div>
         </Show>
 
         <Show when={!!profile.options.credentialId}>
           <div class="cm-form-section">
-            <div
-              style={{
-                padding: '12px',
-                background: 'rgba(122, 162, 247, 0.1)',
-                'border-radius': '6px',
-                color: '#c0caf5',
-              }}
-            >
+            <div class="cm-credential-card">
               <strong>Using Credential: </strong>
               <span>
                 {(() => {
@@ -433,15 +425,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }}
           />
 
-          <div class="cm-field">
-            <label>Jump server</label>
+          <Field for="jump-host" label="Jump server" orientation="horizontal">
             <Select
               value={profile.options.jumpHost ?? ''}
               onChange={(v) => setOption('jumpHost', v || undefined)}
               options={jumpOptions()}
               placeholder="— None —"
             />
-          </div>
+          </Field>
 
           <Checkbox
             label="Agent forward"
@@ -456,16 +447,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         </div>
 
         <div class="cm-form-actions">
-          <button class="cm-connect" onClick={() => props.onConnect?.(profile)}>
+          <Button class="cm-connect" variant="primary" onClick={() => props.onConnect?.(profile)}>
             Connect
-          </button>
-          <button class="cm-save" onClick={() => void saveProfile(profile)}>
+          </Button>
+          <Button class="cm-save" variant="primary" onClick={() => void saveProfile(profile)}>
             {isNew ? 'Create' : 'Save'}
-          </button>
+          </Button>
           <Show when={!isNew}>
-            <button class="cm-danger" onClick={() => void deleteProfile(profile)}>
+            <Button class="cm-danger" variant="danger" onClick={() => void deleteProfile(profile)}>
               Delete
-            </button>
+            </Button>
           </Show>
         </div>
       </div>
@@ -484,6 +475,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     }
 
     const [formError, setFormError] = createSignal('')
+    const [passwordValue, setPasswordValue] = createSignal('')
 
     async function saveCred() {
       if (!credential.name || !credential.username) {
@@ -508,8 +500,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         
         // Use returned ID for password save (server may have assigned different ID)
         const savedId = saved.id || credential.id
-        if (credential.auth === 'password' && passwordInputRef?.value) {
-          await props.client.savePassword(savedId, passwordInputRef.value)
+        if (credential.auth === 'password' && passwordValue()) {
+          await props.client.savePassword(savedId, passwordValue())
         }
         setEditingCredential(null)
         await loadAll()
@@ -519,7 +511,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setFormError(message)
       }
     }
-
     return (
       <div class="cm-form">
         <Section title={isNew ? 'New Credential (\u0423\u0417)' : 'Edit Credential'}>
@@ -530,35 +521,35 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onInput={(v) => updateField('username', v)}
           />
 
-          <div class="cm-field">
-            <label>Authentication Method</label>
+          <Field for="cred-auth-method" label="Authentication Method" orientation="horizontal">
             <div class="cm-radio-group">
               <For each={CRED_AUTH_MODES}>
                 {(mode) => (
-                  <label>
-                    <input
-                      type="radio"
-                      name="cred-auth-mode"
-                      value={mode}
-                      checked={credential.auth === mode}
-                      onChange={() => updateField('auth', mode)}
-                    />
-                    {authModeLabel(mode)}
-                  </label>
+                  <Radio
+                    value={mode}
+                    checked={credential.auth === mode}
+                    onChange={(v) => updateField('auth', v)}
+                    name="cred-auth-mode"
+                    label={authModeLabel(mode)}
+                  />
                 )}
               </For>
             </div>
-          </div>
+          </Field>
 
           <Show when={credential.auth === 'password'}>
-            <div class="cm-field">
-              <label>Password (stored in OS keychain)</label>
-              <input
-                ref={passwordInputRef}
+            <Field
+              for="cred-password"
+              label="Password (stored in OS keychain)"
+              orientation="horizontal"
+            >
+              <TextField
                 type="password"
+                value={passwordValue()}
+                onInput={(v) => setPasswordValue(v)}
                 placeholder={credential.id ? 'Leave empty to keep current' : 'Enter password'}
               />
-            </div>
+            </Field>
           </Show>
 
           <Show when={credential.auth === 'publicKey'}>
@@ -577,15 +568,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         </Show>
 
         <div class="cm-form-actions">
-          <button class="cm-save" onClick={() => void saveCred()}>
+          <Button class="cm-save" variant="primary" onClick={() => void saveCred()}>
             {isNew ? 'Create Credential' : 'Save Credential'}
-          </button>
+          </Button>
           <Show when={!isNew}>
-            <button class="cm-danger" onClick={() => void deleteCredential(credential)}>
+            <Button
+              class="cm-danger"
+              variant="danger"
+              onClick={() => void deleteCredential(credential)}
+            >
               Delete Credential
-            </button>
+            </Button>
           </Show>
-          <button onClick={cancelCredential}>Cancel</button>
+          <Button onClick={cancelCredential}>Cancel</Button>
         </div>
       </div>
     )
@@ -641,11 +636,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <Show
             when={profiles().length > 0 || credentials().length > 0}
             fallback={
-              <div class="cm-list-empty">
-                No connections yet.
-                {'\n'}
-                Click &quot;+ New connection&quot; to add one.
-              </div>
+              <EmptyState
+                title="No connections yet"
+                description={'Click "+ New connection" to add one.'}
+              />
             }
           >
             <For each={tree()}>{(node) => renderGroupSection(node)}</For>
@@ -659,19 +653,4 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       </div>
     </>
   )
-}
-
-// ── Mounting helper for ConnectionsContent ──────────────────────────────────
-
-/**
- * Render the ConnectionsView Solid component into a target element.
- * Called by ConnectionsContent.mount() to bridge the TabContent seam.
- * Returns a dispose function for cleanup.
- */
-export function mountConnectionsView(
-  target: HTMLElement,
-  client: ProfileClient,
-  onConnect?: (profile: SSHProfile) => void,
-): () => void {
-  return render(() => <ConnectionsView client={client} onConnect={onConnect} />, target)
 }

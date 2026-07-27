@@ -1,0 +1,292 @@
+/* ── Export surface — replaces style.css .st-export-* rules ──────────────
+   All colours are tokens from tokyo-night.css via tokens.css. */
+
+/* ── Section description ────────────────────────────────────────────── */
+
+.ui-export-desc {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+/* ── Mode card grid ──────────────────────────────────────────────────── */
+
+.ui-export-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Mode card (disclosure) ─────────────────────────────────────────── */
+
+.st-export-card {
+  border: 1px solid var(--color-surface-raised);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.st-export-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: default;
+}
+
+.st-export-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.st-export-card-summary {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  flex: 1;
+}
+
+.st-export-card-toggle {
+  flex: none;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-accent);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.st-export-card-toggle:hover {
+  background: var(--color-surface-raised);
+}
+
+/* ── Card body (expanded) ────────────────────────────────────────────── */
+
+.st-export-card-body {
+  display: none;
+  padding: 0 14px 14px;
+}
+
+.st-export-card-expanded .st-export-card-body {
+  display: block;
+}
+
+/* ── Manifest list ───────────────────────────────────────────────────── */
+
+.st-export-manifest {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 14px;
+}
+
+.st-export-manifest li {
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--color-text-muted);
+}
+
+.st-export-check {
+  color: var(--color-success);
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.st-export-cross {
+  color: var(--color-danger);
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.st-export-note {
+  color: var(--color-warning) !important;
+  font-style: italic;
+  padding-left: 14px !important;
+}
+
+/* ── Actions ─────────────────────────────────────────────────────────── */
+
+.st-export-actions {
+  margin-top: 8px;
+}
+
+/* ── Button row (button + status inline) ─────────────────────────────── */
+
+.st-export-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* ── Status ──────────────────────────────────────────────────────────── */
+
+.st-export-status {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 6px;
+  min-height: 18px;
+}
+
+/* ── Loading / error ─────────────────────────────────────────────────── */
+
+.st-export-loading {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  padding: 8px 0;
+}
+
+.st-export-error {
+  font-size: 12px;
+  color: var(--color-danger);
+  padding: 8px 0;
+}
+
+/* ── Passphrase form ─────────────────────────────────────────────────── */
+
+.st-export-passphrase-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.st-export-passphrase-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+
+/* ── Backup details ──────────────────────────────────────────────────── */
+
+.st-export-backup-details {
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+  margin-top: 8px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+/* ── Import section ──────────────────────────────────────────────────── */
+
+.st-export-import-section {
+  margin-bottom: 16px;
+}
+
+.st-export-import-label {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+
+.st-export-file-input {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-dim);
+  margin-bottom: 8px;
+}
+
+/* ── Kit-component surface styling ─────────────────────────────────────
+   The kit components (Button, TextField, Checkbox) have no default visual
+   appearance in kit.css — only variant overrides and focus-visible. Each
+   surface scopes its own component styling. */
+
+/* ── Export buttons ────────────────────────────────────────────────── */
+
+.ui-export-btn {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 12px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.ui-export-btn:hover {
+  background: var(--color-surface-raised);
+}
+
+.ui-export-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Primary export button (matches kit .ui-btn-primary look) ────── */
+
+.ui-export-btn-primary {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  border-color: var(--color-accent);
+}
+
+.ui-export-btn-primary:hover {
+  background: var(--color-accent-hover);
+}
+
+/* ── Text inputs inside passphrase form ────────────────────────────── */
+
+.st-export-passphrase-form input[type='text'],
+.st-export-passphrase-form input[type='password'] {
+  background: var(--color-canvas);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 6px 10px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.st-export-passphrase-form input[type='text']:focus,
+.st-export-passphrase-form input[type='password']:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.st-export-passphrase-form input[type='text']::placeholder,
+.st-export-passphrase-form input[type='password']::placeholder {
+  color: var(--color-text-dim);
+}
+
+.st-export-passphrase-form label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+
+/* ── Checkboxes inside passphrase form ─────────────────────────────── */
+
+.st-export-passphrase-form input[type='checkbox'] {
+  margin: 0;
+}
+
+/* ── Import section password input ────────────────────────────────── */
+
+.st-export-import-section input[type='password'] {
+  background: var(--color-canvas);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 6px 10px;
+  width: 100%;
+  max-width: 320px;
+  margin-bottom: 8px;
+}
+
+.st-export-import-section input[type='password']:focus {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.st-export-import-section input[type='password']::placeholder {
+  color: var(--color-text-dim);
+}

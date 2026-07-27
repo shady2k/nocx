@@ -51,4 +51,16 @@ describe('SearchField', () => {
     const input = screen.getByRole('searchbox')
     expect(input.getAttribute('class')).toBe('st-search-input')
   })
+
+  it('sets disabled attribute', () => {
+    subject({ disabled: true })
+    const input = screen.getByRole('searchbox')
+    expect(input).toHaveProperty('disabled', true)
+  })
+
+  it('is focusable via tab', () => {
+    subject()
+    const input = screen.getByRole('searchbox')
+    expect(input.getAttribute('tabindex')).toBeNull() // natively focusable
+  })
 })

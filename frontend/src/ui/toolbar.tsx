@@ -11,8 +11,13 @@ import type { JSX } from 'solid-js'
 export interface ToolbarProps {
   class?: string
   children: JSX.Element
+  ariaLabel?: string
 }
 
 export function Toolbar(props: ToolbarProps) {
-  return <div class={props.class ?? ''}>{props.children}</div>
+  return (
+    <div role="toolbar" class={props.class ?? ''} aria-label={props.ariaLabel ?? undefined}>
+      {props.children}
+    </div>
+  )
 }

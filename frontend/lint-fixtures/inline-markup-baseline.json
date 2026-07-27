@@ -1,0 +1,13 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:inline-update`.",
+    "",
+    "This baseline enumerates every current inline-markup violation (bypassed",
+    "component classes and inline style props) in application surfaces below",
+    "the project root. It may only shrink. A new violation in any file is an",
+    "error even if the file already has baselined violations. CI asserts this.",
+    "",
+    "This file must be empty before epic nocx-vxqj closes."
+  ],
+  "violations": []
+}

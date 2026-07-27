@@ -3,40 +3,117 @@
 // styles, and merges adjacent cells with identical attributes into a single
 // run. Output is an HTML fragment string — assigned via innerHTML on the
 // frozen block output element.
+//
+// THEME SNAPSHOT: all colour decisions flow through a TerminalSnapshot that
+// is captured once at block-freeze time. This ensures frozen output is never
+// recoloured by a later theme change. The snapshot carries the 16-entry ANSI
+// palette and the default foreground/background used for mode-0 (inherit)
+// cells — critical for correct inverse-video fallback.
 
-import type { IBufferLine } from '@xterm/xterm'
+import type { IBufferLine, ITheme } from '@xterm/xterm'
+
+// ── Theme snapshot types ──────────────────────────────────────────────────
+
+/** 16-element ANSI palette tuple (indices 0–15). MUST match ITheme keys:
+ *  black, red, green, yellow, blue, magenta, cyan, white,
+ *  brightBlack, brightRed, brightGreen, brightYellow, brightBlue,
+ *  brightMagenta, brightCyan, brightWhite. */
+export type AnsiPalette = readonly [
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+]
+
+/** Frozen theme snapshot: ANSI palette + default foreground/background.
+ *  Captured once at block-freeze time so frozen output is immune to later
+ *  theme changes. */
+export interface TerminalSnapshot {
+  palette: AnsiPalette
+  defaultFg: string
+  defaultBg: string
+}
+
+// ── Built-in default snapshot (Tokyo Night) ──────────────────────────────
+// This is the fallback when no live theme snapshot was captured at freeze
+// time.  It MUST stay byte-for-byte consistent with fromITheme applied to
+// the DEFAULT_TERMINAL_THEME in renderers/theme-adapter.ts — if that object
+// changes, this one must change too.  The test suite cross-checks both.
+
+export const DEFAULT_SNAPSHOT: TerminalSnapshot = {
+  palette: [
+    '#1a1b26', // 0  Black
+    '#f7768e', // 1  Red
+    '#9ece6a', // 2  Green
+    '#e0af68', // 3  Yellow
+    '#7aa2f7', // 4  Blue
+    '#bb9af7', // 5  Magenta
+    '#7dcfff', // 6  Cyan
+    '#a9b1d6', // 7  White
+    '#414868', // 8  Bright Black
+    '#f7768e', // 9  Bright Red
+    '#9ece6a', // 10 Bright Green
+    '#e0af68', // 11 Bright Yellow
+    '#7aa2f7', // 12 Bright Blue
+    '#bb9af7', // 13 Bright Magenta
+    '#7dcfff', // 14 Bright Cyan
+    '#c0caf5', // 15 Bright White
+  ],
+  defaultFg: '#c0caf5',
+  defaultBg: '#1a1b26',
+}
+
+/** Convert xterm ITheme to a TerminalSnapshot.
+ *  Every field in the palette maps to the corresponding ITheme key. */
+export function fromITheme(theme: ITheme): TerminalSnapshot {
+  const p = DEFAULT_SNAPSHOT.palette
+  return {
+    palette: [
+      theme.black ?? p[0],
+      theme.red ?? p[1],
+      theme.green ?? p[2],
+      theme.yellow ?? p[3],
+      theme.blue ?? p[4],
+      theme.magenta ?? p[5],
+      theme.cyan ?? p[6],
+      theme.white ?? p[7],
+      theme.brightBlack ?? p[8],
+      theme.brightRed ?? p[9],
+      theme.brightGreen ?? p[10],
+      theme.brightYellow ?? p[11],
+      theme.brightBlue ?? p[12],
+      theme.brightMagenta ?? p[13],
+      theme.brightCyan ?? p[14],
+      theme.brightWhite ?? p[15],
+    ],
+    defaultFg: theme.foreground ?? DEFAULT_SNAPSHOT.defaultFg,
+    defaultBg: theme.background ?? DEFAULT_SNAPSHOT.defaultBg,
+  }
+}
 
 // ── 256-color palette ─────────────────────────────────────────────────────
 
-// ANSI 0-15 mapped to Tokyo Night theme (matching xterm theme in xterm.ts).
-const ANSI_COLORS: readonly string[] = [
-  '#1a1b26', // 0  Black
-  '#f7768e', // 1  Red
-  '#9ece6a', // 2  Green
-  '#e0af68', // 3  Yellow
-  '#7aa2f7', // 4  Blue
-  '#bb9af7', // 5  Magenta
-  '#7dcfff', // 6  Cyan
-  '#c0caf5', // 7  White
-  '#565f89', // 8  Bright Black
-  '#f7768e', // 9  Bright Red
-  '#9ece6a', // 10 Bright Green
-  '#e0af68', // 11 Bright Yellow
-  '#7aa2f7', // 12 Bright Blue
-  '#bb9af7', // 13 Bright Magenta
-  '#7dcfff', // 14 Bright Cyan
-  '#c0caf5', // 15 Bright White
-]
-
 /**
  * Maps a 256-color palette index to a CSS color string.
- * - 0-15: ANSI colors (Tokyo Night theme)
- * - 16-231: 6×6×6 color cube
- * - 232-255: grayscale ramp
+ * - 0-15: ANSI colors from the snapshot palette
+ * - 16-231: 6×6×6 color cube (algorithmic — theme-independent)
+ * - 232-255: grayscale ramp (algorithmic — theme-independent)
  */
-export function paletteToRGB(idx: number): string {
-  if (idx < 0 || idx > 255) return '#c0caf5' // fallback to default foreground
-  if (idx < 16) return ANSI_COLORS[idx]
+export function paletteToRGB(snapshot: TerminalSnapshot, idx: number): string {
+  if (idx < 0 || idx > 255) return snapshot.defaultFg
+  if (idx < 16) return snapshot.palette[idx]
   if (idx < 232) {
     const i = idx - 16
     const r = Math.floor(i / 36)
@@ -51,11 +128,11 @@ export function paletteToRGB(idx: number): string {
 
 /**
  * Maps an xterm color (mode + color) to a CSS color string, or null for default.
- * - mode 0: default terminal color (inherit via CSS)
+ * - mode 0: default terminal color (inherit via CSS / snapshot default)
  * - mode 1: 256-color palette index
  * - mode 2: 24-bit RGB (bits 0-7=R, 8-15=G, 16-23=B)
  */
-export function colorToCSS(color: number, mode: number): string | null {
+export function colorToCSS(snapshot: TerminalSnapshot, color: number, mode: number): string | null {
   if (mode === 0) return null
   if (mode === 2) {
     const r = color & 0xff
@@ -63,7 +140,7 @@ export function colorToCSS(color: number, mode: number): string | null {
     const b = (color >> 16) & 0xff
     return `rgb(${r},${g},${b})`
   }
-  if (mode === 1) return paletteToRGB(color)
+  if (mode === 1) return paletteToRGB(snapshot, color)
   return null
 }
 
@@ -113,7 +190,11 @@ export function attrsEqual(a: CellAttrs, b: CellAttrs): boolean {
  * Extract cell attributes from an xterm buffer cell.
  * Works with xterm.js 5.x IBufferLine / ICell interfaces.
  */
-export function cellAttrs(line: IBufferLine, cellIdx: number): CellAttrs {
+export function cellAttrs(
+  snapshot: TerminalSnapshot,
+  line: IBufferLine,
+  cellIdx: number,
+): CellAttrs {
   const cell = line.getCell(cellIdx)
   if (!cell) return emptyAttrs()
 
@@ -123,8 +204,8 @@ export function cellAttrs(line: IBufferLine, cellIdx: number): CellAttrs {
   const bgMode = cell.getBgColorMode()
 
   return {
-    fg: colorToCSS(fgColor, fgMode),
-    bg: colorToCSS(bgColor, bgMode),
+    fg: colorToCSS(snapshot, fgColor, fgMode),
+    bg: colorToCSS(snapshot, bgColor, bgMode),
     bold: cell.isBold() !== 0,
     italic: cell.isItalic() !== 0,
     underline: cell.isUnderline() !== 0,
@@ -137,18 +218,17 @@ export function cellAttrs(line: IBufferLine, cellIdx: number): CellAttrs {
 
 /**
  * Build a CSS style string from a CellAttrs record.
+ * Default-colour cells (null fg/bg) resolve to the snapshot's defaults so
+ * frozen output carries its own colours regardless of CSS theme changes.
  * Inverse mode swaps foreground and background colors.
  */
-export function attrsToStyle(a: CellAttrs): string {
+export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
   const parts: string[] = []
-  let effectiveFg = a.fg
-  let effectiveBg = a.bg
+  let effectiveFg = a.fg ?? snapshot.defaultFg
+  let effectiveBg = a.bg ?? snapshot.defaultBg
 
   if (a.inverse) {
-    // Swap: original fg → bg, original bg → fg.
-    // When a side is null (default), use the terminal's default color.
-    effectiveFg = a.bg ?? '#1a1b26'
-    effectiveBg = a.fg ?? '#c0caf5'
+    ;[effectiveFg, effectiveBg] = [effectiveBg, effectiveFg]
   }
 
   if (effectiveFg) parts.push(`color:${effectiveFg}`)
@@ -160,7 +240,6 @@ export function attrsToStyle(a: CellAttrs): string {
   if (a.underline && a.strikethrough) parts.push('text-decoration:underline line-through')
   if (a.overline) {
     if (parts.some((s) => s.startsWith('text-decoration:'))) {
-      // Append to existing text-decoration
       const idx = parts.findIndex((s) => s.startsWith('text-decoration:'))
       if (idx >= 0) parts[idx] += ' overline'
       else parts.push('text-decoration:overline')
@@ -186,7 +265,11 @@ interface Run {
  * it wrapped), so its trailing chars are real content, not xterm padding —
  * the caller passes true for every physical line that has a continuation.
  */
-function collectRuns(line: IBufferLine, keepTrailingSpace = false): Run[] {
+function collectRuns(
+  snapshot: TerminalSnapshot,
+  line: IBufferLine,
+  keepTrailingSpace = false,
+): Run[] {
   const len = line.length
   if (len === 0) return []
 
@@ -204,8 +287,7 @@ function collectRuns(line: IBufferLine, keepTrailingSpace = false): Run[] {
     const chars = cell.getChars()
 
     if (chars.length === 0) {
-      // Empty cell → space
-      const attrs = cellAttrs(line, i)
+      const attrs = cellAttrs(snapshot, line, i)
       if (runs.length > 0 && attrsEqual(runs[runs.length - 1].attrs, attrs)) {
         runs[runs.length - 1].chars += ' '
       } else {
@@ -215,10 +297,9 @@ function collectRuns(line: IBufferLine, keepTrailingSpace = false): Run[] {
       continue
     }
 
-    // Escape HTML entities in the cell characters
     const escaped = chars.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-    const attrs = cellAttrs(line, i)
+    const attrs = cellAttrs(snapshot, line, i)
 
     if (runs.length > 0 && attrsEqual(runs[runs.length - 1].attrs, attrs)) {
       runs[runs.length - 1].chars += escaped
@@ -228,8 +309,6 @@ function collectRuns(line: IBufferLine, keepTrailingSpace = false): Run[] {
     i += Math.max(1, width)
   }
 
-  // Strip trailing spaces from the last run only (xterm pads lines).
-  // We keep interior spaces — they're from the actual command output.
   if (!keepTrailingSpace && runs.length > 0) {
     const last = runs[runs.length - 1]
     last.chars = last.chars.replace(/ +$/, '')
@@ -244,16 +323,15 @@ function collectRuns(line: IBufferLine, keepTrailingSpace = false): Run[] {
  * Serialize a single buffer line to an HTML string (a <span class="term-line">
  * containing run-merged <span> elements).
  */
-export function serializeLine(line: IBufferLine | undefined): string {
+export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | undefined): string {
   if (!line) return '<span class="term-line"></span>'
 
-  const runs = collectRuns(line)
+  const runs = collectRuns(snapshot, line)
 
   if (runs.length === 0) {
     return '<span class="term-line"></span>'
   }
 
-  // Check if there's any non-empty content after trailing space trim
   const hasContent = runs.some((r) => r.chars.length > 0)
   if (!hasContent) {
     return '<span class="term-line"></span>'
@@ -262,7 +340,7 @@ export function serializeLine(line: IBufferLine | undefined): string {
   let html = '<span class="term-line">'
   for (const run of runs) {
     if (run.chars.length === 0) continue
-    const style = attrsToStyle(run.attrs)
+    const style = attrsToStyle(snapshot, run.attrs)
     if (style) {
       html += `<span style="${style}">${run.chars}</span>`
     } else {
@@ -291,12 +369,11 @@ export function serializeLine(line: IBufferLine | undefined): string {
  * lines are preserved — they are real output spacing.
  */
 export function serializeRange(
+  snapshot: TerminalSnapshot,
   getLine: (y: number) => IBufferLine | undefined,
   startLine: number,
   endLine: number,
 ): string {
-  // Group physical lines into logical lines by the isWrapped continuation
-  // flag, then serialize each group into one term-line span.
   const groups: string[] = []
   for (let y = startLine; y <= endLine; y++) {
     const line = getLine(y)
@@ -305,11 +382,11 @@ export function serializeRange(
       groups.push('')
       continue
     }
-    const runs = collectRuns(line, continuation || (getLine(y + 1)?.isWrapped ?? false))
+    const runs = collectRuns(snapshot, line, continuation || (getLine(y + 1)?.isWrapped ?? false))
     let content = ''
     for (const run of runs) {
       if (run.chars.length === 0) continue
-      const style = attrsToStyle(run.attrs)
+      const style = attrsToStyle(snapshot, run.attrs)
       content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
     }
     if (continuation) {

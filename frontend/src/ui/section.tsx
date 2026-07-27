@@ -8,18 +8,18 @@
  */
 
 import type { JSX } from 'solid-js'
-
 export interface SectionProps {
   class?: string
+  id?: string
   title: string
   children: JSX.Element
 }
 
 export function Section(props: SectionProps) {
   return (
-    <div class={props.class ?? ''}>
+    <section id={props.id} class={props.class ?? ''}>
       <h2>{props.title}</h2>
       {props.children}
-    </div>
+    </section>
   )
 }

@@ -1,0 +1,235 @@
+/* ── Settings surface — replaces .st-* rules from style.css ─────────────
+   All colours are tokens from tokyo-night.css via tokens.css. */
+
+/* ── Rail overrides ─────────────────────────────────────────────────── */
+
+.ui-settings .ui-page__rail {
+  flex: 0 0 clamp(240px, 28vw, 360px);
+  background: var(--color-chrome-rail);
+  padding: 20px 16px;
+}
+
+/* ── Search field in rail ──────────────────────────────────────────── */
+
+.ui-settings-search {
+  margin-bottom: 14px;
+}
+
+/* ── Modified-only filter in rail ──────────────────────────────────── */
+
+.ui-settings-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.ui-settings-filter-count {
+  color: var(--color-warning);
+  font-weight: 500;
+}
+
+/* ── Section navigation in rail ────────────────────────────────────── */
+
+.ui-settings-section-nav {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ui-settings-section-nav-item {
+  margin-bottom: 2px;
+}
+
+.ui-settings-section-nav-link {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ui-settings-section-nav-link:hover {
+  background: color-mix(in srgb, white, transparent 96%);
+  color: var(--color-text);
+}
+
+.ui-settings-section-nav-active .ui-settings-section-nav-link {
+  background: color-mix(in srgb, var(--color-accent), transparent 88%);
+  color: var(--color-accent);
+}
+
+/* ── Content area ──────────────────────────────────────────────────── */
+
+.ui-settings .ui-page__scroll {
+  padding: 20px 28px;
+}
+
+/* ── Section heading within PageSection ────────────────────────────── */
+
+.ui-settings section > h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+  margin: 0 0 16px 0;
+  scroll-margin-top: 16px;
+}
+
+.ui-settings section {
+  margin-bottom: 28px;
+}
+
+/* ── Setting row (two-column layout) ──────────────────────────────── */
+
+.ui-settings-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border), transparent 60%);
+}
+
+.ui-settings-row:last-child {
+  border-bottom: none;
+}
+
+.ui-settings-label-col {
+  flex: 0 1 200px;
+  padding-right: 16px;
+  min-width: 0;
+}
+
+.ui-settings-label-col label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.ui-settings-description {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-dim);
+  margin-top: 2px;
+}
+
+.ui-settings-data-class {
+  display: block;
+  font-size: 10px;
+  color: var(--color-text-dim);
+  margin-top: 4px;
+}
+
+.ui-settings-breadcrumb {
+  display: block;
+  font-size: 10px;
+  color: var(--color-accent);
+  margin-bottom: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ui-settings-control-col {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Bounds indicator for number fields ────────────────────────────── */
+
+.ui-settings-bounds {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-dim);
+  margin-bottom: 4px;
+}
+
+/* ── Secret field ─────────────────────────────────────────────────── */
+
+.ui-settings-secret {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ui-settings-secret-status {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-accent), transparent 90%);
+  color: var(--color-accent);
+}
+
+.ui-settings-secret-clear {
+  border-color: color-mix(in srgb, var(--color-danger), transparent 70%);
+  color: var(--color-danger);
+}
+
+/* ── Error message ────────────────────────────────────────────────── */
+
+.ui-settings-error {
+  font-size: 11px;
+  color: var(--color-danger);
+  margin-top: 4px;
+}
+
+/* ── Status states (loading, failed, empty, no-match) ──────────────── */
+
+.ui-settings-status {
+  padding: 24px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.ui-settings-loading {
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+
+.ui-settings-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--color-danger);
+}
+
+.ui-settings-nomatch {
+  color: var(--color-text-dim);
+  font-style: italic;
+}
+
+/* ── Row highlight animation for scrollToKey ────────────────────────── */
+
+@keyframes ui-settings-highlight-pulse {
+  0% {
+    background: color-mix(in srgb, var(--color-accent), transparent 82%);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.ui-settings-row-highlight {
+  animation: ui-settings-highlight-pulse 1.2s ease-out;
+}
+
+/* ── Provenance badge within control column ─────────────────────────── */
+
+.ui-settings-provenance {
+  display: inline-block;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.st-vis-hidden {
+  display: none;
+}

@@ -19,6 +19,7 @@
  * into #panes, cleans up with the returned dispose function.
  */
 import { render } from 'solid-js/web'
+import { Button } from './ui/button'
 
 /** The three banner outcomes the caller acts on. */
 export type BannerChoice = 'allow' | 'suppress' | 'dismiss'
@@ -53,25 +54,27 @@ function ClipboardBannerComponent(props: { onChoice: (choice: BannerChoice) => v
         security reasons, to protect against malicious software.
       </span>
       <div class="clipboard-banner-actions">
-        <button
+        <Button
           class="clipboard-banner-btn clipboard-banner-allow"
+          variant="primary"
           onClick={() => props.onChoice('allow')}
         >
           Allow clipboard writes
-        </button>
-        <button
+        </Button>
+        <Button
           class="clipboard-banner-btn clipboard-banner-suppress"
           onClick={() => props.onChoice('suppress')}
         >
           Don't show again
-        </button>
-        <button
+        </Button>
+        <Button
           class="clipboard-banner-btn clipboard-banner-dismiss"
-          aria-label="Dismiss"
+          variant="close"
+          ariaLabel="Dismiss"
           onClick={() => props.onChoice('dismiss')}
         >
           ✕
-        </button>
+        </Button>
       </div>
     </div>
   )

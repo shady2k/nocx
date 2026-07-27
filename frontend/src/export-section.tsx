@@ -3,13 +3,21 @@
  * content pane.  Replaces the imperative DOM-building predecessor (519 → 0).
  * Four modes (ADR-0011 §7), each stating what it carries and omits.
  * The portable encrypted export prompts for a new passphrase with
- * confirmation via inline inputs (not a Modal primitive, not prompt()).
+ * confirmation via inline TextFields (not a Modal primitive, not prompt()).
+ *
+ * State: local createStores per sub-component. Nothing here is shared state —
+ * these are per-operation busy flags and form drafts (nocx-imkb.5).
  */
 
-import { For, Show, createSignal } from 'solid-js'
+import { For, Show } from 'solid-js'
+import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { ProfileClient, ExportManifest, ConfigExport } from './profiles'
 import { downloadJSON, downloadBinary } from './export-utils'
+import { PageSection } from './ui/page-section'
+import { Button } from './ui/button'
+import { TextField } from './ui/text-field'
+import { Checkbox } from './ui/checkbox'
 
 // ── Mode definitions ────────────────────────────────────────────────────
 
@@ -79,34 +87,33 @@ function StatusLine(props: { message: string }) {
 // ── Config export actions ───────────────────────────────────────────────
 
 function ConfigExportActions(props: { profileClient: ProfileClient }) {
-  const [status, setStatus] = createSignal('')
-  const [busy, setBusy] = createSignal(false)
+  const [state, setState] = createStore({ status: '', busy: false })
 
   const handleClick = () => {
-    setBusy(true)
-    setStatus('Exporting…')
+    setState('busy', true)
+    setState('status', 'Exporting…')
     props.profileClient
       .configExport()
       .then(
         (result) => {
           downloadJSON('nocx-config-export.json', result)
-          setStatus('Exported — file downloaded.')
+          setState('status', 'Exported — file downloaded.')
         },
         (e) => {
-          setStatus(`Export failed: ${String(e)}`)
+          setState('status', `Export failed: ${String(e)}`)
         },
       )
       .finally(() => {
-        setBusy(false)
+        setState('busy', false)
       })
   }
 
   return (
     <>
-      <button class="st-export-btn" disabled={busy()} onClick={handleClick}>
+      <Button class="ui-export-btn" disabled={state.busy} onClick={handleClick}>
         Export Configuration
-      </button>
-      <StatusLine message={status()} />
+      </Button>
+      <StatusLine message={state.status} />
     </>
   )
 }
@@ -114,93 +121,86 @@ function ConfigExportActions(props: { profileClient: ProfileClient }) {
 // ── Portable encrypted export actions ─────────────────────────────────
 
 function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
-  const [passphrase, setPassphrase] = createSignal('')
-  const [confirm, setConfirm] = createSignal('')
-  const [showPasswords, setShowPasswords] = createSignal(false)
-  const [includePrivate, setIncludePrivate] = createSignal(false)
-  const [status, setStatus] = createSignal('')
-  const [busy, setBusy] = createSignal(false)
+  const [state, setState] = createStore({
+    passphrase: '',
+    confirm: '',
+    showPasswords: false,
+    includePrivate: false,
+    status: '',
+    busy: false,
+  })
 
   const handleEncrypt = () => {
-    const pass = passphrase()
-    const conf = confirm()
+    const pass = state.passphrase
+    const conf = state.confirm
     if (!pass) {
-      setStatus('Passphrase is required.')
+      setState('status', 'Passphrase is required.')
       return
     }
     if (pass !== conf) {
-      setStatus('Passphrases do not match.')
+      setState('status', 'Passphrases do not match.')
       return
     }
-    setBusy(true)
-    setStatus('Encrypting…')
+    setState('busy', true)
+    setState('status', 'Encrypting…')
     props.profileClient
-      .portableEncryptedExport(pass, includePrivate())
+      .portableEncryptedExport(pass, state.includePrivate)
       .then(
         (result) => {
           downloadBinary('nocx-portable-export.enc', result.payload)
-          setStatus('Exported — file downloaded. Keep the passphrase safe.')
-          setPassphrase('')
-          setConfirm('')
+          setState('status', 'Exported — file downloaded. Keep the passphrase safe.')
+          setState('passphrase', '')
+          setState('confirm', '')
         },
         (e) => {
-          setStatus(`Export failed: ${String(e)}`)
+          setState('status', `Export failed: ${String(e)}`)
         },
       )
       .finally(() => {
-        setBusy(false)
+        setState('busy', false)
       })
   }
 
-  const inputType = () => (showPasswords() ? 'text' : 'password')
+  const inputType = () => (state.showPasswords ? 'text' : 'password')
 
   return (
     <>
       <div class="st-export-passphrase-form">
-        <label class="st-export-passphrase-label">New passphrase</label>
-        <input
+        <TextField
+          label="New passphrase"
           type={inputType()}
-          class="st-export-passphrase-input"
           placeholder="Choose a strong passphrase"
-          autocomplete="new-password"
-          value={passphrase()}
-          onInput={(e) => setPassphrase(e.currentTarget.value)}
+          value={state.passphrase}
+          onInput={(v) => setState('passphrase', v)}
         />
-        <label class="st-export-passphrase-label">Confirm passphrase</label>
-        <input
+        <TextField
+          label="Confirm passphrase"
           type={inputType()}
-          class="st-export-passphrase-input"
           placeholder="Re-enter the passphrase"
-          autocomplete="new-password"
-          value={confirm()}
-          onInput={(e) => setConfirm(e.currentTarget.value)}
+          value={state.confirm}
+          onInput={(v) => setState('confirm', v)}
         />
-        <label class="st-export-show-toggle">
-          <input
-            type="checkbox"
-            checked={showPasswords()}
-            onChange={(e) => setShowPasswords(e.currentTarget.checked)}
-          />{' '}
-          Show passphrase
-        </label>
-        <label class="st-export-private-toggle">
-          <input
-            type="checkbox"
-            checked={includePrivate()}
-            onChange={(e) => setIncludePrivate(e.currentTarget.checked)}
-          />{' '}
-          Include private content (conversations, command history)
-        </label>
+        <Checkbox
+          checked={state.showPasswords}
+          onChange={(v) => setState('showPasswords', v)}
+          label="Show passphrase"
+        />
+        <Checkbox
+          checked={state.includePrivate}
+          onChange={(v) => setState('includePrivate', v)}
+          label="Include private content (conversations, command history)"
+        />
       </div>
       <div class="st-export-btn-row">
-        <button
-          class="st-export-btn st-export-btn-primary"
-          disabled={busy()}
+        <Button
+          class="ui-export-btn ui-export-btn-primary"
+          variant="primary"
+          disabled={state.busy}
           onClick={handleEncrypt}
         >
           Encrypt and Export
-        </button>
-        <StatusLine message={status()} />
+        </Button>
+        <StatusLine message={state.status} />
       </div>
     </>
   )
@@ -209,40 +209,42 @@ function PortableEncryptedActions(props: { profileClient: ProfileClient }) {
 // ── Backup actions ──────────────────────────────────────────────────────
 
 function BackupActions(props: { profileClient: ProfileClient }) {
-  const [status, setStatus] = createSignal('')
-  const [busy, setBusy] = createSignal(false)
-  const [paths, setPaths] = createSignal('')
-  const [pathsVisible, setPathsVisible] = createSignal(false)
+  const [state, setState] = createStore({
+    status: '',
+    busy: false,
+    paths: '',
+    pathsVisible: false,
+  })
 
   const handleShow = () => {
-    setBusy(true)
-    setStatus('Checking…')
+    setState('busy', true)
+    setState('status', 'Checking…')
     props.profileClient
       .backup()
       .then(
         (result) => {
-          setPaths(JSON.stringify(result, null, 2))
-          setPathsVisible(true)
-          setStatus('')
+          setState('paths', JSON.stringify(result, null, 2))
+          setState('pathsVisible', true)
+          setState('status', '')
         },
         (e) => {
-          setStatus(`Backup check failed: ${String(e)}`)
-          setPathsVisible(false)
+          setState('status', `Backup check failed: ${String(e)}`)
+          setState('pathsVisible', false)
         },
       )
       .finally(() => {
-        setBusy(false)
+        setState('busy', false)
       })
   }
 
   return (
     <>
-      <button class="st-export-btn" disabled={busy()} onClick={handleShow}>
+      <Button class="ui-export-btn" disabled={state.busy} onClick={handleShow}>
         Show Backup Paths
-      </button>
-      <StatusLine message={status()} />
-      <Show when={pathsVisible()}>
-        <pre class="st-export-backup-details">{paths()}</pre>
+      </Button>
+      <StatusLine message={state.status} />
+      <Show when={state.pathsVisible}>
+        <pre class="st-export-backup-details">{state.paths}</pre>
       </Show>
     </>
   )
@@ -251,20 +253,22 @@ function BackupActions(props: { profileClient: ProfileClient }) {
 // ── Import actions ──────────────────────────────────────────────────────
 
 function ImportActions(props: { profileClient: ProfileClient }) {
-  const [configFile, setConfigFile] = createSignal<File | null>(null)
-  const [configStatus, setConfigStatus] = createSignal('')
-  const [configBusy, setConfigBusy] = createSignal(false)
-  const [encFile, setEncFile] = createSignal<File | null>(null)
-  const [portablePass, setPortablePass] = createSignal('')
-  const [portableStatus, setPortableStatus] = createSignal('')
-  const [portableBusy, setPortableBusy] = createSignal(false)
+  const [state, setState] = createStore({
+    configFile: null as File | null,
+    configStatus: '',
+    configBusy: false,
+    encFile: null as File | null,
+    portablePass: '',
+    portableStatus: '',
+    portableBusy: false,
+  })
 
   const handleConfigImport = () => {
-    const file = configFile()
+    const file = state.configFile
     if (!file) return
     const pc = props.profileClient
-    setConfigBusy(true)
-    setConfigStatus('Importing…')
+    setState('configBusy', true)
+    setState('configStatus', 'Importing…')
     file
       .text()
       .then((text) => {
@@ -280,23 +284,23 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         if (result.unresolvedCredentials?.length) {
           parts.push(` ${result.unresolvedCredentials.length} credentials need secret mapping.`)
         }
-        setConfigStatus(parts.join(' '))
+        setState('configStatus', parts.join(' '))
       })
       .catch((e) => {
-        setConfigStatus(`Import failed: ${String(e)}`)
+        setState('configStatus', `Import failed: ${String(e)}`)
       })
       .finally(() => {
-        setConfigBusy(false)
+        setState('configBusy', false)
       })
   }
 
   const handlePortableImport = () => {
-    const file = encFile()
+    const file = state.encFile
     if (!file) return
-    const pass = portablePass()
+    const pass = state.portablePass
     const pc = props.profileClient
-    setPortableBusy(true)
-    setPortableStatus('Decrypting and importing…')
+    setState('portableBusy', true)
+    setState('portableStatus', 'Decrypting and importing…')
     file
       .arrayBuffer()
       .then((buf) => {
@@ -312,15 +316,15 @@ function ImportActions(props: { profileClient: ProfileClient }) {
         if (result.unresolvedCredentials?.length) {
           parts.push(` ${result.unresolvedCredentials.length} credentials need secret mapping.`)
         }
-        setPortableStatus(parts.join(' '))
-        setEncFile(null)
-        setPortablePass('')
+        setState('portableStatus', parts.join(' '))
+        setState('encFile', null)
+        setState('portablePass', '')
       })
       .catch((e) => {
-        setPortableStatus(`Import failed: ${String(e)}`)
+        setState('portableStatus', `Import failed: ${String(e)}`)
       })
       .finally(() => {
-        setPortableBusy(false)
+        setState('portableBusy', false)
       })
   }
 
@@ -332,16 +336,16 @@ function ImportActions(props: { profileClient: ProfileClient }) {
           type="file"
           accept=".json"
           class="st-export-file-input"
-          onChange={(e) => setConfigFile(e.currentTarget.files?.[0] ?? null)}
+          onChange={(e) => setState('configFile', e.currentTarget.files?.[0] ?? null)}
         />
-        <button
-          class="st-export-btn"
-          disabled={configBusy() || !configFile()}
+        <Button
+          class="ui-export-btn"
+          disabled={state.configBusy || !state.configFile}
           onClick={handleConfigImport}
         >
           Import
-        </button>
-        <StatusLine message={configStatus()} />
+        </Button>
+        <StatusLine message={state.configStatus} />
       </div>
       <div class="st-export-import-section">
         <label class="st-export-import-label">Import from portable encrypted export (.enc)</label>
@@ -349,24 +353,22 @@ function ImportActions(props: { profileClient: ProfileClient }) {
           type="file"
           accept=".enc"
           class="st-export-file-input"
-          onChange={(e) => setEncFile(e.currentTarget.files?.[0] ?? null)}
+          onChange={(e) => setState('encFile', e.currentTarget.files?.[0] ?? null)}
         />
-        <input
+        <TextField
           type="password"
-          class="st-export-passphrase-input"
           placeholder="Passphrase used during export"
-          autocomplete="off"
-          value={portablePass()}
-          onInput={(e) => setPortablePass(e.currentTarget.value)}
+          value={state.portablePass}
+          onInput={(v) => setState('portablePass', v)}
         />
-        <button
-          class="st-export-btn"
-          disabled={portableBusy() || !encFile() || !portablePass()}
+        <Button
+          class="ui-export-btn"
+          disabled={state.portableBusy || !state.encFile || !state.portablePass}
           onClick={handlePortableImport}
         >
           Decrypt and Import
-        </button>
-        <StatusLine message={portableStatus()} />
+        </Button>
+        <StatusLine message={state.portableStatus} />
       </div>
     </>
   )
@@ -375,56 +377,58 @@ function ImportActions(props: { profileClient: ProfileClient }) {
 // ── Mode card ────────────────────────────────────────────────────────────
 
 function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
-  const [expanded, setExpanded] = createSignal(false)
-  const [loaded, setLoaded] = createSignal(false)
-  const [loading, setLoading] = createSignal(false)
-  const [manifest, setManifest] = createSignal<ExportManifest | null>(null)
-  const [error, setError] = createSignal<string | null>(null)
+  const [state, setState] = createStore({
+    expanded: false,
+    loaded: false,
+    loading: false,
+    manifest: null as ExportManifest | null,
+    error: null as string | null,
+  })
 
   const loadManifest = () => {
-    setLoading(true)
+    setState('loading', true)
     props.profileClient
       .exportManifest(props.def.mode)
       .then(
         (m) => {
-          setManifest(m)
-          setLoaded(true)
+          setState('manifest', m)
+          setState('loaded', true)
         },
         (e) => {
-          setError(`Failed to load: ${String(e)}`)
+          setState('error', `Failed to load: ${String(e)}`)
         },
       )
       .finally(() => {
-        setLoading(false)
+        setState('loading', false)
       })
   }
 
   const handleToggle = () => {
-    const now = expanded()
-    setExpanded(!now)
-    if (!now && !loaded() && !loading()) {
+    const now = state.expanded
+    setState('expanded', !now)
+    if (!now && !state.loaded && !state.loading) {
       loadManifest()
     }
   }
 
   return (
-    <div class="st-export-card" classList={{ 'st-export-card-expanded': expanded() }}>
+    <div class="st-export-card" classList={{ 'st-export-card-expanded': state.expanded }}>
       <div class="st-export-card-header">
         <span class="st-export-card-label">{props.def.label}</span>
         <span class="st-export-card-summary">{props.def.summary}</span>
-        <button class="st-export-card-toggle" onClick={handleToggle}>
-          {expanded() ? 'Hide details' : 'Show details'}
-        </button>
+        <Button class="st-export-card-toggle" onClick={handleToggle}>
+          {state.expanded ? 'Hide details' : 'Show details'}
+        </Button>
       </div>
       <div class="st-export-card-body">
-        <Show when={loading()}>
+        <Show when={state.loading}>
           <div class="st-export-loading">Loading mode details…</div>
         </Show>
-        <Show when={error() !== null && !loading()}>
-          <div class="st-export-error">{error()}</div>
+        <Show when={state.error !== null && !state.loading}>
+          <div class="st-export-error">{state.error}</div>
         </Show>
-        <Show when={manifest() !== null && !loading()}>
-          <ManifestDisplay manifest={manifest()!} />
+        <Show when={state.manifest !== null && !state.loading}>
+          <ManifestDisplay manifest={state.manifest!} />
           <div class="st-export-actions">
             <Show when={props.def.mode === 'config-export'}>
               <ConfigExportActions profileClient={props.profileClient} />
@@ -449,18 +453,17 @@ function ModeCard(props: { def: ModeDef; profileClient: ProfileClient }) {
 
 export function ExportSection(props: { profileClient: ProfileClient }) {
   return (
-    <div class="st-export">
-      <h2 class="st-section-heading">Export / Backup / Import</h2>
-      <p class="st-export-desc">
+    <PageSection title="Export / Backup / Import" class="ui-export">
+      <p class="ui-export-desc">
         Each mode states what it carries and what it omits. Private content and secrets are never
         included without an explicit choice.
       </p>
-      <div class="st-export-grid">
+      <div class="ui-export-grid">
         <For each={MODES}>
           {(def) => <ModeCard def={def} profileClient={props.profileClient} />}
         </For>
       </div>
-    </div>
+    </PageSection>
   )
 }
 

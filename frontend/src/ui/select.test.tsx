@@ -29,8 +29,8 @@ describe('Select', () => {
 
   it('marks the matching option as selected', () => {
     subject({ value: 'bob' })
-    const sel = screen.getByRole('combobox')
-    expect(sel).toHaveProperty('value', 'bob')
+    const sel = screen.getByRole<HTMLSelectElement>('combobox')
+    expect(sel.value).toBe('bob')
   })
 
   it('calls onChange when selection changes', () => {
@@ -50,5 +50,17 @@ describe('Select', () => {
     subject({ class: 'cm-field' })
     const sel = screen.getByRole('combobox')
     expect(sel.getAttribute('class')).toBe('cm-field')
+  })
+
+  it('sets disabled attribute', () => {
+    subject({ disabled: true })
+    const sel = screen.getByRole('combobox')
+    expect(sel).toHaveProperty('disabled', true)
+  })
+
+  it('is natively keyboard-operable (Arrow keys, typeahead)', () => {
+    subject()
+    const sel = screen.getByRole('combobox')
+    expect(sel.tagName).toBe('SELECT')
   })
 })

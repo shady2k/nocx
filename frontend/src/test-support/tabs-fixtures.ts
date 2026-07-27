@@ -325,6 +325,7 @@ export async function mountTabManager(
   const tabStrip = new HorizontalTabStrip()
   const manager = new TabManager(
     bar,
+    bar,
     panes,
     c as unknown as import('../ipc').WSClient,
     cb,

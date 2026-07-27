@@ -1,4 +1,7 @@
-import { Show } from 'solid-js'
+import { For, Show, createSignal } from 'solid-js'
+import { Button } from './ui/button'
+import type { Setter } from 'solid-js'
+import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { AgentStatus } from './agent-status'
 
@@ -17,48 +20,68 @@ export interface TabView {
   onDisplayChange: (() => void) | null
 }
 
+/**
+ * Reactive display-state record for a single tab, keyed by tab id.
+ * Stored in a local Solid store so JSX expressions (each compiled into
+ * their own reactive computation) are fine-grained reactive.
+ * Mirrors TabView getters — not Tab.displayTitle (which falls back to
+ * 'Terminal' and would break e2e/tab-title.spec.ts).
+ */
+interface TabDisplayRecord {
+  title: string
+  tooltip: string
+  hasActivity: boolean
+  agentStatus: AgentStatus | null
+}
+
 /** Presentation port for tab chrome. */
 export interface TabStrip {
+  readonly orientation: Orientation
   mount(container: HTMLElement): void
   addTab(tab: TabView): void
   removeTab(tabId: number): void
   setActive(tabId: number): void
   reorder(tabs: readonly TabView[]): void
-
   onActivate: ((tabId: number) => void) | null
   onClose: ((tabId: number) => void) | null
   onNewTab: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
+  onQuickConnect: (() => void) | null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Internal types
 // ═══════════════════════════════════════════════════════════════════════════
 
-type Orientation = 'horizontal' | 'vertical'
+export type Orientation = 'horizontal' | 'vertical'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Adapter base — Solid renders the static wrapping structure; tab buttons
-// are created, updated, and destroyed imperatively for full backward
-// compatibility with existing DOM-level tests and e2e MutationObservers.
+// TabStripBase — Solid renders every tab button via <For>, keyed by tab
+// object identity. Display-state reactivity comes from a local store
+// (createStore) that mirrors onDisplayChange-driven updates; the JSX reads
+// store values inline (never hoisted into local variables), so Solid
+// compiles each JSX expression into its own reactive computation.
+// No createEffect or DOM patching is needed.
 // ═══════════════════════════════════════════════════════════════════════════
 
 abstract class TabStripBase implements TabStrip {
   protected dispose: (() => void) | null = null
   protected container: HTMLElement | null = null
   private mounted = false
-  /** Tab buttons by id, for imperative display updates. */
-  private readonly buttons = new Map<number, HTMLElement>()
-  /** Stored so onDisplayChange can be cleared on remove. */
-  private readonly views = new Map<number, TabView>()
 
-  protected abstract orientation: Orientation
+  // Solid stores/signals — set during mount(), used by imperative API
+  private _setTabViews!: Setter<TabView[]>
+  private _getTabViews!: () => TabView[]
+  private _setDisplay!: (...args: unknown[]) => void
+
+  public abstract readonly orientation: Orientation
 
   // Intent callbacks
   onActivate: ((tabId: number) => void) | null = null
   onClose: ((tabId: number) => void) | null = null
   onNewTab: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
+  onQuickConnect: (() => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -71,191 +94,172 @@ abstract class TabStripBase implements TabStrip {
     this.setupContainer(container)
     container.addEventListener('keydown', this.onTablistKeydown)
 
-    // Solid renders the static structure (tabs-container, add button, spacer).
-    // The tabs-container is initially empty — tab buttons are added imperatively.
-    // Arrow function in render() captures `this` from the enclosing mount method.
-    this.dispose = render(
-      () => (
+    this.dispose = render(() => {
+      const [tabViews, setTabViews] = createSignal<TabView[]>([])
+      const [display, setDisplay] = createStore<{
+        records: Record<number, TabDisplayRecord>
+        activeId: number
+      }>({ records: {}, activeId: -1 })
+
+      this._getTabViews = tabViews
+      this._setTabViews = setTabViews
+      this._setDisplay = setDisplay
+
+      return (
         <>
-          <div class="tabs-container" />
-          <button class="tab-add" aria-label="New tab" onClick={() => this.onNewTab?.()}>
+          <div class="tabs-container">
+            <For each={tabViews()}>
+              {(tab, index) => (
+                <div
+                  id={`tab-btn-${tab.id}`}
+                  classList={{
+                    tab: true,
+                    active: display.activeId === tab.id,
+                    working: display.records[tab.id]?.agentStatus === 'working',
+                    waiting: display.records[tab.id]?.agentStatus === 'idle',
+                  }}
+                  role="tab"
+                  aria-controls={tab.paneId}
+                  aria-selected={display.activeId === tab.id}
+                  data-tab-id={String(tab.id)}
+                  title={display.records[tab.id]?.tooltip ?? ''}
+                  draggable={true}
+                  tabIndex={display.activeId === tab.id ? 0 : -1}
+                  onClick={() => this.onActivate?.(tab.id)}
+                  onMouseDown={(e: MouseEvent) => {
+                    if (e.button === 1) {
+                      e.preventDefault()
+                      this.onClose?.(tab.id)
+                    }
+                  }}
+                  onDragStart={(e: DragEvent) => {
+                    e.dataTransfer?.setData('text/plain', String(tab.id))
+                    if (e.currentTarget instanceof HTMLElement) {
+                      e.currentTarget.classList.add('dragging')
+                    }
+                  }}
+                  onDragEnd={(e: DragEvent) => {
+                    if (e.currentTarget instanceof HTMLElement) {
+                      e.currentTarget.classList.remove('dragging')
+                    }
+                  }}
+                  onDragOver={(e: DragEvent) => {
+                    e.preventDefault()
+                  }}
+                  onDrop={(e: DragEvent) => {
+                    e.preventDefault()
+                    const draggedId = Number(e.dataTransfer?.getData('text/plain'))
+                    if (!Number.isNaN(draggedId) && draggedId !== tab.id) {
+                      this.onReorder?.(draggedId, tab.id)
+                    }
+                  }}
+                >
+                  <span class="tab-index">{index() + 1}</span>
+                  <span class="tab-label">
+                    <span class="tab-status" />
+                    <span class="tab-title">{display.records[tab.id]?.title ?? ''}</span>
+                  </span>
+                  <Button
+                    class="tab-close"
+                    ariaLabel="Close tab"
+                    onClick={(e: MouseEvent) => {
+                      e.stopPropagation()
+                      this.onClose?.(tab.id)
+                    }}
+                  >
+                    {'\u00d7'}
+                  </Button>
+                  <div
+                    class="tab-indicator"
+                    classList={{
+                      'tab-activity':
+                        display.records[tab.id]?.hasActivity === true &&
+                        display.activeId !== tab.id,
+                    }}
+                  />
+                </div>
+              )}
+            </For>
+          </div>
+          <Button class="tab-add" ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
             +
-          </button>
+          </Button>
+          <Button
+            class="tab-caret"
+            ariaLabel="Quick connect"
+            onClick={() => this.onQuickConnect?.()}
+            tabIndex={-1}
+          >
+            ▾
+          </Button>
           <Show when={this.orientation === 'horizontal'}>
             <div class="tabbar-spacer" />
           </Show>
         </>
-      ),
-      container,
-    )
+      )
+    }, container)
   }
 
   addTab(tab: TabView): void {
-    if (!this.container) return
+    if (!this.mounted) return
 
-    const button = document.createElement('div')
-    button.id = `tab-btn-${tab.id}`
-    button.className = 'tab'
-    button.setAttribute('role', 'tab')
-    button.setAttribute('aria-controls', tab.paneId)
-    button.setAttribute('data-tab-id', String(tab.id))
-    button.draggable = true
-    // Roving tabindex: only the active tab gets tabindex=0.
-    button.tabIndex = -1
+    // Wire display-change notification to write changed fields into the store.
+    tab.onDisplayChange = () => {
+      this._setDisplay('records', tab.id, {
+        title: tab.title,
+        tooltip: tab.tooltip,
+        hasActivity: tab.hasActivity,
+        agentStatus: tab.agentStatus,
+      })
+    }
 
-    // Index badge
-    const indexLabel = document.createElement('span')
-    indexLabel.className = 'tab-index'
-    button.append(indexLabel)
+    this._setTabViews((prev) => [...prev, tab])
 
-    // Status icon + title
-    const label = document.createElement('span')
-    label.className = 'tab-label'
-    const statusIcon = document.createElement('span')
-    statusIcon.className = 'tab-status'
-    const titleSpan = document.createElement('span')
-    titleSpan.className = 'tab-title'
-    label.append(statusIcon, titleSpan)
-    button.append(label)
-
-    // Close button
-    const closeBtn = document.createElement('button')
-    closeBtn.className = 'tab-close'
-    closeBtn.textContent = '\u00d7'
-    closeBtn.setAttribute('aria-label', 'Close tab')
-    button.append(closeBtn)
-
-    // Indicator bar
-    const indicator = document.createElement('div')
-    indicator.className = 'tab-indicator'
-    button.append(indicator)
-
-    // Paint initial state
-    this.paintButton(button, tab)
-
-    // Event wiring
-    button.addEventListener('click', () => this.onActivate?.(tab.id))
-    closeBtn.addEventListener('click', (e: MouseEvent) => {
-      e.stopPropagation()
-      this.onClose?.(tab.id)
+    // Initialize store entry with current display state.
+    this._setDisplay('records', tab.id, {
+      title: tab.title,
+      tooltip: tab.tooltip,
+      hasActivity: tab.hasActivity,
+      agentStatus: tab.agentStatus,
     })
-    button.addEventListener('mousedown', (e: MouseEvent) => {
-      if (e.button === 1) {
-        e.preventDefault()
-        this.onClose?.(tab.id)
-      }
-    })
-
-    // Drag-and-drop reorder
-    button.addEventListener('dragstart', (e: DragEvent) => {
-      e.dataTransfer?.setData('text/plain', String(tab.id))
-      button.classList.add('dragging')
-    })
-    button.addEventListener('dragend', () => {
-      button.classList.remove('dragging')
-    })
-    button.addEventListener('dragover', (e: DragEvent) => {
-      e.preventDefault()
-    })
-    button.addEventListener('drop', (e: DragEvent) => {
-      e.preventDefault()
-      const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-      if (!Number.isNaN(draggedId) && draggedId !== tab.id) {
-        this.onReorder?.(draggedId, tab.id)
-      }
-    })
-
-    // Subscribe to state changes
-    tab.onDisplayChange = () => this.paintButton(button, tab)
-
-    // Insert into DOM
-    const tabsContainer = this.container.querySelector('.tabs-container')
-    tabsContainer?.append(button)
-    this.buttons.set(tab.id, button)
-    this.views.set(tab.id, tab)
 
     // Link pane to button (aria-labelledby)
     const pane = document.getElementById(tab.paneId)
-    if (pane) pane.setAttribute('aria-labelledby', button.id)
-
-    this.refreshIndices()
+    if (pane) pane.setAttribute('aria-labelledby', `tab-btn-${tab.id}`)
   }
 
   removeTab(tabId: number): void {
-    const button = this.buttons.get(tabId)
-    if (button) {
-      button.remove()
-      this.buttons.delete(tabId)
-      const view = this.views.get(tabId)
-      if (view) view.onDisplayChange = null
-      this.views.delete(tabId)
-      this.refreshIndices()
-    }
-  }
-
-  setActive(tabId: number): void {
-    // Update roving tabindex: active gets 0, all others get -1.
-    for (const [id, button] of this.buttons) {
-      const active = id === tabId
-      button.classList.toggle('active', active)
-      button.setAttribute('aria-selected', String(active))
-      button.tabIndex = active ? 0 : -1
-    }
-    // Re-paint for activity indicators: paintButton gates on !.active, which
-    // was still set during the setActive(false)-triggered repaint earlier in
-    // activate(). Without this repaint, a newly-inactive tab's pending activity
-    // indicator stays hidden.
-    for (const [id, tab] of this.views) {
-      const btn = this.buttons.get(id)
-      if (btn) this.paintButton(btn, tab)
-    }
-  }
-
-  reorder(tabs: readonly TabView[]): void {
-    const tabsContainer = this.container?.querySelector('.tabs-container')
-    if (!tabsContainer) return
-    tabsContainer.innerHTML = ''
-    for (const tab of tabs) {
-      const button = this.buttons.get(tab.id)
-      if (button) tabsContainer.append(button)
-    }
-    this.refreshIndices()
-  }
-
-  // ── Private helpers ─────────────────────────────────────────────────
-
-  private paintButton(button: HTMLElement, tab: TabView): void {
-    const titleSpan = button.querySelector('.tab-title')
-    if (titleSpan) titleSpan.textContent = tab.title
-
-    button.title = tab.tooltip
-
-    button.classList.toggle('working', tab.agentStatus === 'working')
-    button.classList.toggle('waiting', tab.agentStatus === 'idle')
-
-    const indicator = button.querySelector('.tab-indicator')
-    if (indicator) {
-      indicator.classList.toggle(
-        'tab-activity',
-        tab.hasActivity && !button.classList.contains('active'),
-      )
-    }
-  }
-
-  /** Update index badges from DOM order. */
-  private refreshIndices(): void {
-    const ordered = this.orderedButtons()
-    ordered.forEach((btn, i) => {
-      const label = btn.querySelector('.tab-index')
-      if (label) label.textContent = String(i + 1)
+    if (!this.mounted) return
+    this._setTabViews((prev) => {
+      const removed = prev.find((t) => t.id === tabId)
+      if (removed) removed.onDisplayChange = null
+      return prev.filter((t) => t.id !== tabId)
+    })
+    // Delete store entry — functional update avoids referencing current state.
+    this._setDisplay('records', (prev: Record<number, TabDisplayRecord>) => {
+      const next = { ...prev }
+      delete next[tabId]
+      return next
     })
   }
 
-  /** Return tab buttons in DOM order. */
-  private orderedButtons(): HTMLElement[] {
-    const tabsContainer = this.container?.querySelector('.tabs-container')
-    if (!tabsContainer) return []
-    return Array.from(tabsContainer.querySelectorAll('[role="tab"]'))
+  setActive(tabId: number): void {
+    if (!this.mounted) return
+    this._setDisplay('activeId', tabId)
+  }
+
+  reorder(tabs: readonly TabView[]): void {
+    if (!this.mounted) return
+    // Solid's <For> reconciliation clears focus when it moves a node with
+    // insertBefore, even though the node itself survives — keyed identity is
+    // necessary here and not sufficient (nocx-82l9.8). Signal setters run their
+    // dependent effects synchronously outside a batch, so the DOM is settled by
+    // the time _setTabViews returns and restoring focus here is enough.
+    const active = document.activeElement
+    this._setTabViews([...tabs])
+    if (active instanceof HTMLElement && this.container?.contains(active)) {
+      active.focus({ preventScroll: true })
+    }
   }
 
   // ── Keyboard (roving tabindex) ───────────────────────────────────────
@@ -273,12 +277,15 @@ abstract class TabStripBase implements TabStrip {
     e.preventDefault()
     e.stopPropagation()
 
-    const ordered = this.orderedButtons()
-    const idx = ordered.indexOf(button as HTMLElement)
+    const tabId = Number(button.getAttribute('data-tab-id'))
+    if (Number.isNaN(tabId)) return
+
+    const tabs = this._getTabViews()
+    const idx = tabs.findIndex((t) => t.id === tabId)
     if (idx === -1) return
 
+    const len = tabs.length
     let nextIdx: number
-    const len = ordered.length
     switch (e.key) {
       case 'ArrowUp':
       case 'ArrowLeft':
@@ -297,7 +304,12 @@ abstract class TabStripBase implements TabStrip {
       default:
         return
     }
-    ordered[nextIdx]?.focus()
+
+    const nextTab = tabs[nextIdx]
+    if (nextTab) {
+      const nextBtn = document.getElementById(`tab-btn-${nextTab.id}`)
+      nextBtn?.focus()
+    }
   }
 }
 
@@ -306,12 +318,12 @@ abstract class TabStripBase implements TabStrip {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class HorizontalTabStrip extends TabStripBase {
-  protected readonly orientation: Orientation = 'horizontal'
+  public readonly orientation: Orientation = 'horizontal'
 
   protected setupContainer(container: HTMLElement): void {
-    container.setAttribute('role', 'tablist')
-    container.setAttribute('aria-label', 'Tabs')
     container.classList.add('tabbar')
+    container.setAttribute('role', 'tablist')
+    container.setAttribute('aria-label', 'Terminal tabs')
   }
 }
 
@@ -320,12 +332,11 @@ export class HorizontalTabStrip extends TabStripBase {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export class VerticalTabStrip extends TabStripBase {
-  protected readonly orientation: Orientation = 'vertical'
+  public readonly orientation: Orientation = 'vertical'
 
   protected setupContainer(container: HTMLElement): void {
-    container.setAttribute('role', 'tablist')
-    container.setAttribute('aria-label', 'Tabs')
-    container.setAttribute('aria-orientation', 'vertical')
     container.classList.add('tabstrip-vertical')
+    container.setAttribute('role', 'tablist')
+    container.setAttribute('aria-label', 'Terminal tabs')
   }
 }

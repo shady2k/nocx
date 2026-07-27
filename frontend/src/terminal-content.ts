@@ -16,6 +16,7 @@ import { CommandLedger } from './command-ledger'
 import { ScrollbackController } from './scrollback/controller'
 import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
+import { showConfirm } from './ui/dialog'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
 
 // How long the grid must hold still before the PTY is told about it.
@@ -276,7 +277,8 @@ export class TerminalContent extends BaseTabContent {
       })
 
       this._globalKeydown = (e: KeyboardEvent) => {
-        if (!target.isConnected || !target.classList.contains('active')) return
+        // Read the flag the chrome set, not the class it rendered (nocx-fttm).
+        if (!target.isConnected || !this._active) return
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
           if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault()
@@ -447,34 +449,33 @@ export class TerminalContent extends BaseTabContent {
       })
 
       // Paste on right-click AND middle-click.
-      const doPaste = () => {
-        this.clipboard
-          .readText()
-          .then((text) => {
-            if (!text) return
-            if (this.editor?.isVisible) {
-              this.editor.insertText(text)
-              return
-            }
-            if (text.includes('\n') && this._bufferType === 'normal') {
-              if (!window.confirm('Paste multi-line text?')) return
-            }
-            renderer.paste(text)
-          })
-          .catch((e) => {
-            console.warn('nocx: clipboard read failed (paste)', e)
-          })
+      const doPaste = async () => {
+        try {
+          const text = await this.clipboard.readText()
+          if (!text) return
+          if (this.editor?.isVisible) {
+            this.editor.insertText(text)
+            return
+          }
+          if (text.includes('\n') && this._bufferType === 'normal') {
+            const confirmed = await showConfirm('Paste multi-line text?', 'Paste', 'Cancel')
+            if (!confirmed) return
+          }
+          renderer.paste(text)
+        } catch (e) {
+          console.warn('nocx: clipboard read failed (paste)', e)
+        }
       }
 
       target.addEventListener('contextmenu', (e: MouseEvent) => {
         e.preventDefault()
-        doPaste()
+        void doPaste()
       })
 
       target.addEventListener('mousedown', (e: MouseEvent) => {
         if (e.button === 1) {
           e.preventDefault()
-          doPaste()
+          void doPaste()
         }
       })
 

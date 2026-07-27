@@ -1,4 +1,4 @@
-import { Terminal } from '@xterm/xterm'
+import { Terminal, type ITheme } from '@xterm/xterm'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
@@ -15,6 +15,7 @@ import type {
   TitleCallback,
   TerminalRenderer,
 } from './types'
+import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { decodeOsc52 } from '../clipboard'
 
 type BellCallback = () => void
@@ -122,6 +123,8 @@ export class XtermRenderer implements TerminalRenderer {
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
+  /** Unsubscribe from the module-level theme watcher. */
+  private _themeUnsub: (() => void) | null = null
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -149,31 +152,7 @@ export class XtermRenderer implements TerminalRenderer {
       // that combination; disable it so right-click pastes what the user
       // expects.
       rightClickSelectsWord: false,
-      theme: {
-        background: '#1a1b26',
-        foreground: '#c0caf5',
-        cursor: '#c0caf5',
-        cursorAccent: '#1a1b26',
-        selectionBackground: '#364A82',
-        // Explicit ANSI colors ensure full color in alt-screen mode
-        // regardless of COLORTERM detection by apps (P0-3).
-        black: '#1a1b26',
-        red: '#f7768e',
-        green: '#9ece6a',
-        yellow: '#e0af68',
-        blue: '#7aa2f7',
-        magenta: '#bb9af7',
-        cyan: '#7dcfff',
-        white: '#a9b1d6',
-        brightBlack: '#414868',
-        brightRed: '#f7768e',
-        brightGreen: '#9ece6a',
-        brightYellow: '#e0af68',
-        brightBlue: '#7aa2f7',
-        brightMagenta: '#bb9af7',
-        brightCyan: '#7dcfff',
-        brightWhite: '#c0caf5',
-      },
+      theme: getCurrentTheme(),
     })
     this.term = term
 
@@ -198,6 +177,13 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.onResize(() => {
       this._cachedCellHeight = null
     })
+
+    // Subscribe to theme changes BEFORE construction completes. Re-apply the
+    // current theme immediately to close any fetch/subscribe race (a notification
+    // published between the resolve above and this registration would otherwise
+    // be missed). ADR-0013 §8, design spec §5.4.
+    this._themeUnsub = subscribeThemeChanges((t: ITheme) => this.applyTheme(t))
+    this.applyTheme(getCurrentTheme())
   }
 
   /**
@@ -375,6 +361,17 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
+  applyTheme(theme: ITheme): void {
+    // Deliverable 3: setting the option alone may leave a stale render,
+    // especially on the WebKitGTK compositor (ADR-0005). The full viewport
+    // refresh forces a repaint in the new palette. The 42 ms pump (when
+    // active) continues alongside; this is the one-shot push, not a second
+    // loop.
+    if (!this.term) return
+    this.term.options.theme = theme
+    this.term.refresh(0, this.term.rows - 1)
+  }
+
   setReadOnly(readOnly: boolean): void {
     if (this.term) this.term.options.disableStdin = readOnly
   }
@@ -397,6 +394,10 @@ export class XtermRenderer implements TerminalRenderer {
     this.renderDisposable?.dispose()
     this.renderDisposable = undefined
     this.renderSubs = []
+    if (this._themeUnsub !== null) {
+      this._themeUnsub()
+      this._themeUnsub = null
+    }
   }
 
   get cols(): number {

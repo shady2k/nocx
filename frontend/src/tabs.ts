@@ -274,11 +274,13 @@ export class TabManager {
   private _initialTabReady: Promise<void> | undefined
   private tabStrip: TabStrip
   private readonly bar: HTMLElement
+  private readonly verticalHost: HTMLElement
   /** MRU stack: most-recently-activated tab ids. */
   private readonly recentTabIds: number[] = []
 
   constructor(
     bar: HTMLElement,
+    verticalHost: HTMLElement,
     panes: HTMLElement,
     client: WSClient,
     clipboard: ClipboardAccess,
@@ -295,11 +297,17 @@ export class TabManager {
     this.profileClient = profileClient
     this.tabStrip = tabStrip
     this.bar = bar
+    this.verticalHost = verticalHost
 
     // Wire TabStrip intents.
     this.wireStrip(tabStrip)
 
     window.addEventListener('keydown', this.onKeydown, true)
+  }
+
+  /** Return the mount host for the given strip based on orientation. */
+  private hostFor(strip: TabStrip): HTMLElement {
+    return strip.orientation === 'vertical' ? this.verticalHost : this.bar
   }
 
   get tabCount(): number {
@@ -327,7 +335,7 @@ export class TabManager {
     if (this._initialTabReady) {
       throw new Error('openInitialTab called twice; the composition root calls it exactly once')
     }
-    this.tabStrip.mount(this.bar)
+    this.tabStrip.mount(this.hostFor(this.tabStrip))
     const initialTab = this.newTab()
     const initialContent = initialTab.content as TerminalContent
     this._initialTabReady = initialContent.ready.then((ok) => {
@@ -429,9 +437,25 @@ export class TabManager {
     old.onNewTab = null
     old.onReorder = null
 
-    // Clear the bar and mount the new strip.
-    this.bar.innerHTML = ''
-    newStrip.mount(this.bar)
+    // Determine the old and new mount hosts based on orientation.
+    // This handles both horizontal→vertical and vertical→horizontal transitions.
+    const oldHost = this.hostFor(old)
+    const newHost = this.hostFor(newStrip)
+
+    // Clear the old host and strip everything setupContainer put on it.
+    // The class matters for layout: when switching vertical→horizontal,
+    // #vertical-tabstrip must not keep .tabstrip-vertical or it leaves a 240px
+    // empty column. The ARIA attributes matter for the accessibility tree:
+    // an emptied host that keeps role="tablist" is a second, empty tablist
+    // sitting beside the real one, which is worse than no tablist at all.
+    oldHost.innerHTML = ''
+    oldHost.classList.remove('tabstrip-vertical')
+    oldHost.removeAttribute('role')
+    oldHost.removeAttribute('aria-label')
+    oldHost.removeAttribute('aria-orientation')
+
+    // Mount the new strip on the correct host.
+    newStrip.mount(newHost)
 
     // Transfer every existing tab into the new strip.
     for (const tab of this.tabs) {

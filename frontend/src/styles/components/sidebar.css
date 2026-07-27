@@ -1,0 +1,29 @@
+/* Activity bar and sidebar panel — the multi-view shell.
+   Owned by nocx-82l9.6; see .internal/specs/2026-07-27-ui-shell-kit-and-theming-design.md §2. */
+
+/* ── Activity bar inner layout ────────────────────────────────────────── */
+
+.activity-bar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.activity-bar-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.activity-bar-spacer {
+  flex: 1 1 auto;
+}
+
+.activity-bar-spacer::before {
+  content: '';
+  display: block;
+  width: 24px;
+  height: 1px;
+  background: var(--color-border);
+  margin: 4px auto;
+}

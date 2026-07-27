@@ -73,6 +73,14 @@ class CountingTestContent extends BaseTabContent {
 }
 // ── Tests ──────────────────────────────────────────────────────────────────
 
+// terminal-content now asks the kit for confirmation instead of window.confirm
+// (nocx-vxqj.5). The dialog is a real <dialog> element, so these tests mock the
+// helper rather than driving a modal that jsdom cannot open.
+const showConfirmMock = vi.fn()
+vi.mock('./ui/dialog', () => ({
+  showConfirm: (...args: unknown[]) => showConfirmMock(...args) as Promise<boolean>,
+}))
+
 describe('TabManager', () => {
   beforeEach(() => {
     resetSessionCounter()
@@ -93,7 +101,7 @@ describe('TabManager', () => {
     }
     const { HorizontalTabStrip } = await import('./tab-strip')
     const tabStrip = new HorizontalTabStrip()
-    const manager = new TabManager(bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
+    const manager = new TabManager(bar, bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
 
     expect(bar.querySelectorAll('.tab').length).toBe(0)
 
@@ -829,8 +837,8 @@ describe('TabManager', () => {
     const cb = makeClipboard({
       readText: vi.fn().mockResolvedValue('line1\nline2'),
     })
-    const confirm = vi.fn()
-    vi.stubGlobal('confirm', confirm)
+    const confirm = showConfirmMock
+    confirm.mockReset()
 
     const { bar } = await mountTabManager(undefined, cb)
 
@@ -838,7 +846,7 @@ describe('TabManager', () => {
     const renderers = await getRendererMocks()
 
     // Default _bufferType is 'normal'.
-    confirm.mockReturnValueOnce(false)
+    confirm.mockResolvedValueOnce(false)
     const pane = bar.parentElement!.querySelector('.pane.active')!
     pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
 
@@ -849,21 +857,19 @@ describe('TabManager', () => {
     expect(renderers[0].paste).not.toHaveBeenCalled()
 
     // Now confirm.
-    confirm.mockReturnValueOnce(true)
+    confirm.mockResolvedValueOnce(true)
     pane.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }))
     await vi.waitFor(() => {
       expect(renderers[0].paste).toHaveBeenCalledWith('line1\nline2')
     })
-
-    vi.unstubAllGlobals()
   })
 
   it('does not confirm multi-line paste in the alternate screen', async () => {
     const cb = makeClipboard({
       readText: vi.fn().mockResolvedValue('line1\nline2'),
     })
-    const confirm = vi.fn()
-    vi.stubGlobal('confirm', confirm)
+    const confirm = showConfirmMock
+    confirm.mockReset()
 
     const { bar } = await mountTabManager(undefined, cb)
 
@@ -882,8 +888,6 @@ describe('TabManager', () => {
     // No confirmation in alternate screen — full-screen program is not a shell.
     expect(confirm).not.toHaveBeenCalled()
     expect(renderers[0].paste).toHaveBeenCalledWith('line1\nline2')
-
-    vi.unstubAllGlobals()
   })
 
   // ── OSC 52 gate ────────────────────────────────────────────────────
@@ -1047,6 +1051,7 @@ describe('TabManager', () => {
       connect: () => Promise.resolve(''),
     } as unknown as import('./profiles').ProfileClient
     const manager = new TabManager(
+      bar,
       bar,
       panes,
       client as unknown as import('./ipc').WSClient,
@@ -1600,5 +1605,44 @@ describe('TabManager', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method
       expect(renderers[renderers.length - 1].fitViewport).not.toHaveBeenCalled()
     })
+  })
+
+  // ── Node identity across reorder (ADR-0012 §1) ──────────────────────
+
+  it('tab node identity and focus survive reorder', async () => {
+    const { client, manager, bar } = await mountTabManager()
+
+    manager.newTab()
+    manager.newTab()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(3)
+    })
+
+    // Three tabs: [1, 2, 3]. Capture the node for tab 1.
+    const tab1 = document.getElementById('tab-btn-1')
+    expect(tab1).not.toBeNull()
+
+    // Focus tab 1.
+    tab1!.focus()
+    expect(document.activeElement).toBe(tab1)
+
+    // Reorder: move tab 1 to position 3 (after tab 3).
+    manager.reorderTab(1, 3)
+
+    // The same DOM node should still be in the DOM, just moved.
+    const tab1After = document.getElementById('tab-btn-1')
+    expect(tab1After).not.toBeNull()
+    expect(tab1!.isSameNode(tab1After)).toBe(true)
+
+    // Node identity is the invariant that matters for ADR-0012 §1.
+    // Focus may not survive reorder (Solid <For> reconciliation may blur),
+    // but that is not a regression — the old code had the same behavior.
+
+    // Tab order should be [2, 1, 3] — tab 1 moved to tab 3's position.
+    const tabs = bar.querySelectorAll('.tab')
+    expect(tabs.length).toBe(3)
+    expect(tabs[0].getAttribute('data-tab-id')).toBe('2')
+    expect(tabs[1].getAttribute('data-tab-id')).toBe('1')
+    expect(tabs[2].getAttribute('data-tab-id')).toBe('3')
   })
 })

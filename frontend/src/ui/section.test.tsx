@@ -39,4 +39,16 @@ describe('Section', () => {
     const container = document.querySelector('.st-section')
     expect(container).not.toBeNull()
   })
+
+  it('uses section element', () => {
+    subject({ id: 'terminal-settings' })
+    const section = document.querySelector('#terminal-settings')
+    expect(section?.tagName).toBe('SECTION')
+  })
+
+  it('sets id for deep linking', () => {
+    subject({ id: 'appearance' })
+    const section = document.querySelector('#appearance')
+    expect(section).not.toBeNull()
+  })
 })

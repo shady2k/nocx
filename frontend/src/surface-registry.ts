@@ -17,7 +17,6 @@ import type { TabContent, ContentDescriptor, SurfaceType, SingletonKey } from '.
 // build() where it cannot.
 
 export const SURFACE_ID_SETTINGS = 'settings'
-export const SURFACE_ID_CONNECTIONS = 'connections'
 
 // ── Registration ──────────────────────────────────────────────────────────
 

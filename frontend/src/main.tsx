@@ -1,11 +1,5 @@
 import './style.css'
-import {
-  GetWSPort,
-  GetWSToken,
-  CheckForUpdate,
-  ApplyUpdate,
-  ReportHealthy,
-} from '../wailsjs/go/main/WailsApp'
+import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { render } from 'solid-js/web'
 import App from './App'
 import { log } from './log'
@@ -18,84 +12,17 @@ import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
-import { ConnectionsContent } from './connections-content'
-import { SURFACE_CONNECTIONS, SINGLETON_CONNECTIONS } from './tab-content'
-import { SurfaceRegistry, SURFACE_ID_SETTINGS, SURFACE_ID_CONNECTIONS } from './surface-registry'
+import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
+import { mountUpdateNotice } from './update-notice'
+import { SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
-
-/**
- * Renders the auto-update notice in the tab bar. The notice is a small,
- * non-modal element that shows update availability, download progress,
- * and pending-restart state. It renders from state — bound Go calls are
- * idempotent.
- */
-class UpdateNotice {
-  private readonly el: HTMLDivElement
-
-  constructor(private bar: HTMLElement) {
-    this.el = document.createElement('div')
-    this.el.className = 'update-notice'
-    this.el.style.display = 'none'
-    this.bar.append(this.el)
-  }
-
-  /** Show an update is available with a link to release notes. */
-  showAvailable(version: string, notesUrl: string): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    const span = document.createElement('span')
-    span.textContent = `nocx ${version} available`
-    const link = document.createElement('a')
-    link.href = notesUrl
-    link.target = '_blank'
-    link.rel = 'noopener'
-    link.textContent = 'release notes'
-    link.className = 'update-notes-link'
-    const btn = document.createElement('button')
-    btn.textContent = 'Update'
-    btn.className = 'update-apply-btn'
-    btn.addEventListener('click', () => {
-      void this.apply()
-    })
-    this.el.append(span, ' · ', link, ' ', btn)
-  }
-
-  /** Show the busy/downloading state. */
-  showDownloading(): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    this.el.textContent = 'Downloading update…'
-    this.el.className = 'update-notice downloading'
-  }
-
-  /** Show pending restart state after a successful apply. */
-  showPendingRestart(version: string): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    this.el.textContent = `nocx ${version} installed — restart to apply`
-    this.el.className = 'update-notice pending'
-  }
-
-  /** Show an error message. */
-  showError(msg: string): void {
-    this.el.style.display = 'flex'
-    this.el.innerHTML = ''
-    this.el.textContent = `Update failed: ${msg}`
-    this.el.className = 'update-notice error'
-  }
-
-  private async apply(): Promise<void> {
-    this.showDownloading()
-    try {
-      await ApplyUpdate()
-      // After a successful apply, show pending restart.
-      this.showPendingRestart('') // version unknown here; Go can enrich later
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      this.showError(msg)
-    }
-  }
-}
+import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
+import {
+  QuickConnectController,
+  LocalShellQuickConnectProvider,
+  SSHQuickConnectProvider,
+  type QuickConnectProvider,
+} from './quick-connect'
 
 async function main() {
   log.info('nocx: main() called')
@@ -104,14 +31,20 @@ async function main() {
   // hosts (#tabbar, #activitybar, #sidebar, #panes) that imperative code
   // mounts into. Everything below is the composition root — no more DOM
   // construction, no hand-wired layout.
+  // Bootstrap the theme before any render. Applies data-theme, validates
+  // terminal tokens, and sets the module-level current theme so every
+  // XtermRenderer mount() reads the correct palette from the first frame.
+  // ADR-0013 §8, §8.1; design spec §5.4.
+  const appliedThemeId = bootstrapTheme()
   render(() => <App />, document.getElementById('app')!)
   const bar = document.getElementById('tabbar')!
+  const verticalStripHost = document.getElementById('vertical-tabstrip')!
   const panes = document.getElementById('panes')!
   const activityBar = document.getElementById('activitybar')!
   const sidebarPanel = document.getElementById('sidebar')!
 
   // Update notice — renders inline in the tab bar, right-aligned.
-  const notice = new UpdateNotice(bar)
+  const notice = mountUpdateNotice(bar)
 
   const clipboard = createClipboardAccess()
   const gate = new ClipboardGate()
@@ -150,17 +83,32 @@ async function main() {
   // add exactly such a select to Interface, at which point tab placement would
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
+  const THEME_KEY = 'ui.theme'
 
   let placement: unknown = 'horizontal'
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+    // Reconcile the Go theme setting against the bootstrap cache. Go is
+    // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
+    // frame, but the persisted Go value wins on snapshot arrival.
+    reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
-
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
-  const tm = new TabManager(bar, panes, client, clipboard, gate, banner, profileClient, tabStrip)
+
+  const tm = new TabManager(
+    bar,
+    verticalStripHost,
+    panes,
+    client,
+    clipboard,
+    gate,
+    banner,
+    profileClient,
+    tabStrip,
+  )
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -168,20 +116,15 @@ async function main() {
   registry.register(SURFACE_ID_SETTINGS, {
     surfaceType: SURFACE_SETTINGS,
     singletonKey: SINGLETON_SETTINGS,
-    factory: () => new SettingsContent(profileClient),
-    descriptor: {
-      restoreDescriptor: null,
-      supportsAttention: false,
-      defaultTitle: 'Settings',
-    },
-  })
-  registry.register(SURFACE_ID_CONNECTIONS, {
-    surfaceType: SURFACE_CONNECTIONS,
-    singletonKey: SINGLETON_CONNECTIONS,
+    // Settings hosts the Connections page (nocx-imkb.3), so it needs the same
+    // connect callback the standalone surface has. Assigned inside the factory,
+    // before mount: the factory builds a fresh SettingsContent each time it is
+    // opened, and a setter applied afterwards would leave the first connect
+    // click of a freshly opened tab with nothing to call.
     factory: () => {
-      const content = new ConnectionsContent(profileClient)
+      const content = new SettingsContent(profileClient)
       content.onConnect = (profile) => {
-        log.info('nocx: onConnect called', { profileId: profile.id, profile: profile.name })
+        log.info('nocx: connect from Settings', { profileId: profile.id })
         tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
       }
       return content
@@ -189,12 +132,12 @@ async function main() {
     descriptor: {
       restoreDescriptor: null,
       supportsAttention: false,
-      defaultTitle: 'Connections',
+      defaultTitle: 'Settings',
     },
   })
 
-  // Live application through SettingsObserver: when the placement setting
-  // changes, refetch the snapshot and swap the strip in place.
+  // Live application through SettingsObserver: when any setting
+  // changes, refetch the snapshot and act on relevant keys.
   const observer = new SettingsObserver(dispatcher)
   observer.setRevision(0)
   observer.start(() => {
@@ -205,47 +148,36 @@ async function main() {
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
         if (next !== placement) {
           placement = next
-          tm.replaceStrip(next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip())
+          const newStrip = next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
+          wireQuickConnect(newStrip)
+          tm.replaceStrip(newStrip)
         }
+        // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
+        reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
     })()
   })
-  // App-shell sidebar (nocx-8yg.9) — VS Code-style activity bar plus a
-  // collapsible panel. Panel views and tab actions are separate arguments,
-  // not two kinds of row in one list: mixing them is what opened an empty
-  // panel at cold start (nocx-rp2j).
+  // App-shell sidebar (nocx-82l9.6) — VS Code-style activity bar plus a
+  // collapsible panel.  Views and actions are two separate zones:
   //
-  // - Connections and Settings are TAB ACTIONS: they open a full-screen tab.
-  // - Sessions is a PANEL VIEW, and deliberately empty: the tab list lives in
-  //   the tab bar. Making the sidebar a second home for tabs is the subject of
-  //   epic nocx-d3q (configurable placement), not of this branch.
+  // - Top zone: views from the registry (currently empty; Explorer, Git,
+  //   and Servers are future beads).
+  // - Bottom zone: global actions (currently only the Settings gear).
+  //
+  // Connections has been removed from the activity bar — it is not a view
+  // and not an action (see .internal/specs §2.4).  It is now a Settings
+  // sub-page reachable from the Settings rail.
   mountSidebar(
     activityBar,
     sidebarPanel,
-    [
-      {
-        id: 'sessions',
-        title: 'Sessions',
-        icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/><path d="M13 15h4"/></svg>',
-      },
-    ],
-    [
-      {
-        id: 'connections',
-        title: 'Connections',
-        icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>',
-        onActivate: () => {
-          log.info('nocx: opening Connections tab')
-          const { content, descriptor } = registry.build(SURFACE_ID_CONNECTIONS)
-          tm.openTab(content, descriptor)
-        },
-      },
+    /* views — empty until nocx-708q */ [],
+    /* actions */ [
       {
         id: 'settings',
         title: 'Settings',
-        icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
+        icon: SettingsIcon,
         onActivate: () => {
           log.info('nocx: opening Settings tab')
           const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
@@ -261,6 +193,40 @@ async function main() {
       e.preventDefault()
       const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
       tm.openTab(content, descriptor)
+    }
+  })
+
+  // ── Quick-connect picker (nocx-imkb.7) ──────────────────────────────
+  // Both the initial tab strip AND replacement strips (via replaceStrip)
+  // need onQuickConnect wired — the helper ensures no strip is missed.
+
+  const qcContainer = document.createElement('div')
+  document.body.append(qcContainer)
+
+  const sshProvider = new SSHQuickConnectProvider(profileClient, (id, host, user) =>
+    tm.newSSHTab(id, host, user),
+  )
+  const qcProviders: QuickConnectProvider[] = [
+    new LocalShellQuickConnectProvider(() => tm.newTab()),
+    sshProvider,
+  ]
+
+  const qc = new QuickConnectController()
+  qc.mount(qcContainer, qcProviders)
+
+  function wireQuickConnect(strip: typeof tabStrip) {
+    strip.onQuickConnect = () => qc.show()
+  }
+  wireQuickConnect(tabStrip)
+
+  // Cmd/Ctrl+Shift+P opens the quick-connect picker.
+  // Chosen to match VS Code's command-palette convention. Does not collide
+  // with TabManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
+  // CodeMirror (which does not register this binding in its keymap).
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
+      e.preventDefault()
+      qc.show()
     }
   })
 

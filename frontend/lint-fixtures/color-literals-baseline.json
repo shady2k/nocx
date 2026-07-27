@@ -1,0 +1,12 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:color-update`.",
+    "",
+    "This baseline enumerates every current colour-literal violation outside",
+    "frontend/src/styles/themes/. It may only shrink. A new violation in any",
+    "file is an error even if the file already has baselined violations.",
+    "",
+    "This file must be empty before the colour grammar epic (nocx-xrrl) closes."
+  ],
+  "violations": []
+}

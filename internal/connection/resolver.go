@@ -18,14 +18,16 @@ import (
 
 // Resolver maps profile IDs to ssh.ConnectConfig with credential wiring.
 type Resolver struct {
-	profiles profile.ProfileRepository
-	credMeta profile.CredentialMetadataRepository
-	secrets  credential.SecretStore
+	profiles         profile.ProfileRepository
+	credMeta         profile.CredentialMetadataRepository
+	secrets          credential.SecretStore
+	endpointResolver profile.EndpointResolver // ADR-0013: for canonical endpoint resolution and grant check
 }
 
 // NewResolver creates a Resolver backed by the given stores.
-func NewResolver(pr profile.ProfileRepository, cmr profile.CredentialMetadataRepository, ss credential.SecretStore) *Resolver {
-	return &Resolver{profiles: pr, credMeta: cmr, secrets: ss}
+// ADR-0013: endpointResolver is optional; if nil, grant checks are skipped (migration-only mode).
+func NewResolver(pr profile.ProfileRepository, cmr profile.CredentialMetadataRepository, ss credential.SecretStore, er profile.EndpointResolver) *Resolver {
+	return &Resolver{profiles: pr, credMeta: cmr, secrets: ss, endpointResolver: er}
 }
 
 // Resolve maps a profile ID to a Resolved ready for SSH connection.
@@ -36,6 +38,7 @@ func NewResolver(pr profile.ProfileRepository, cmr profile.CredentialMetadataRep
 //   - SecretStore + SecretID wired for late-bound password resolution
 //     (only when a credential is linked)
 //   - Jump host fields resolved recursively (with cycle detection)
+//   - AuthorizationRevision set after grant check (ADR-0013)
 //
 // Passwords are never set as plaintext on the returned config.
 func (r *Resolver) Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error) {
@@ -150,3 +153,6 @@ func (r *Resolver) findCredential(id string) (profile.Credential, error) {
 
 // ErrProfileNotFound is returned when a profile or credential ID is not found.
 var ErrProfileNotFound = errors.New("not found")
+
+// ErrCredentialNotAuthorized is returned when a credential has no grant for the target endpoint (ADR-0013).
+var ErrCredentialNotAuthorized = errors.New("credential not authorized for this endpoint")

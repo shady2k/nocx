@@ -64,6 +64,10 @@ type SSHProfileOptions struct {
 	JumpHost          string   `json:"jumpHost,omitempty"` // Profile name or ID of the jump server
 	AgentForward      bool     `json:"agentForward,omitempty"`
 	CanBeJumpServer   bool     `json:"canBeJumpServer,omitempty"` // Whether this profile can be used as a jump server
+	// RequiresReview is set by ADR-0013 migration when legacy credential binding
+	// (Host/Port) cannot be automatically converted to a TrustedEndpoint grant.
+	// The user must save the connection again to authorize the endpoint.
+	RequiresReview bool `json:"requiresReview,omitempty"`
 }
 
 // SSHProfile is a connection profile for an SSH host. It holds only
@@ -93,6 +97,16 @@ type ProfileGroup struct {
 	Editable      bool           `json:"editable,omitempty"`
 }
 
+// CredentialTrustedEndpoint represents a grant allowing this credential
+// to be used for a specific saved connection profile at a resolved endpoint.
+// ADR-0013: replaces the old single Host/Port binding with a set of
+// profile-scoped grants.
+type CredentialTrustedEndpoint struct {
+	ProfileID string `json:"profileId"` // Provenance: the saved connection that granted access
+	Host      string `json:"host"`      // Canonical host after SSH config resolution
+	Port      uint16 `json:"port"`      // Effective port; always explicit (1-65535)
+}
+
 // Credential is a reusable authentication identity (УЗ).
 // Stored separately from connections so multiple connections can share it.
 // Secrets (passwords, key passphrases) are stored in the OS keychain / vault,
@@ -107,21 +121,46 @@ type Credential struct {
 	Username string   `json:"username"`          // SSH username
 	Auth     AuthMode `json:"auth"`              // Auth method: password, publicKey, agent, keyboardInteractive
 	KeyPath  string   `json:"keyPath,omitempty"` // Private key path (only for publicKey auth)
-	// Host binds this credential to a single target host. A stored password
-	// is only ever submitted to its bound target; the binding is enforced in
-	// internal/ssh after ~/.ssh/config resolution, against the resolved
-	// hostname (never the profile alias). "Any host" was the
-	// credential-redirection hole (nocx-mon/PR11-T5), so Host is REQUIRED:
-	// Validate refuses an empty one and SaveCredential will not store it.
-	// Port pins the port when set; 0 means "this host, any port".
-	Host string `json:"host,omitempty"`
-	Port int    `json:"port,omitempty"`
+	// TrustedEndpoints is the set of (profile, host, port) grants allowing
+	// this credential to be used. ADR-0013: replaces Host/Port binding.
+	// Empty set means "no remote endpoint authorized".
+	// Backend-owned: renderer cannot submit or overwrite these.
+	TrustedEndpoints []CredentialTrustedEndpoint `json:"trustedEndpoints,omitempty"`
 	// SecretID is the opaque reference to the stored password in the
 	// SecretStore. Never transmitted to the renderer (ADR-0011 §2).
 	SecretID string `json:"secretId,omitempty"`
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore. Never transmitted to the renderer.
 	PassphraseSecretID string `json:"passphraseSecretId,omitempty"`
+	// Legacy fields (deprecated, removed after migration):
+	// Host binds this credential to a single target host. ADR-0013: replaced
+	// by TrustedEndpoints. Retained for migration only.
+	Host string `json:"host,omitempty"`
+	// Port pins the port when set; 0 means "this host, any port".
+	// ADR-0013: replaced by TrustedEndpoints. Retained for migration only.
+	Port int `json:"port,omitempty"`
+}
+
+// CredentialUpdateDTO is the renderer-submitted credential update payload.
+// ADR-0013: excludes backend-owned fields (TrustedEndpoints, SecretID, PassphraseSecretID).
+// The presence of these fields in the JSON payload is rejected to prevent accidental or
+// malicious attempts to modify backend-owned state.
+type CredentialUpdateDTO struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`              // Display name (e.g. "work-github")
+	Username string   `json:"username"`          // SSH username
+	Auth     AuthMode `json:"auth"`              // Auth method: password, publicKey, agent, keyboardInteractive
+	KeyPath  string   `json:"keyPath,omitempty"` // Private key path (only for publicKey auth)
+}
+
+// CredentialCreateDTO is the renderer-submitted credential creation payload.
+// ADR-0013: excludes backend-owned fields (TrustedEndpoints, SecretID, PassphraseSecretID).
+// The presence of these fields in the JSON payload is rejected.
+type CredentialCreateDTO struct {
+	Name     string   `json:"name"`              // Display name (e.g. "work-github")
+	Username string   `json:"username"`          // SSH username
+	Auth     AuthMode `json:"auth"`              // Auth method: password, publicKey, agent, keyboardInteractive
+	KeyPath  string   `json:"keyPath,omitempty"` // Private key path (only for publicKey auth)
 }
 
 // NewCredentialID generates a credential id: "cred:name:uuid".
@@ -129,25 +168,15 @@ func NewCredentialID(name string) string {
 	return "cred:" + slugify(name) + ":" + newUUID()
 }
 
-// ErrCredentialHostRequired is returned when a credential carries no host.
-//
-// The policy is nocx-mon's and it is unchanged: a stored secret may only be
-// spent on the target it is bound to. What changes here is WHEN that is
-// enforced. Refusing only at connect time (checkBinding, internal/ssh) let the
-// user store a secret and meet the refusal later as a broken connection rather
-// than as a rejected form — the rule was real but arrived too late to act on.
-//
-// Note what this does NOT claim. A renderer that can create credentials can
-// also edit the binding, so this stops a mistake, not an attacker; a binding
-// that the constrained actor can rewrite is not an authorization boundary.
-// Making it one needs an approval path outside the renderer, which does not
-// exist yet (nocx-wd2m).
-var ErrCredentialHostRequired = errors.New("credential must be bound to a host")
-
-// Validate reports whether the credential may be stored.
+// Validate reports whether the credential identity fields are valid.
+// ADR-0013: TrustedEndpoints are backend-owned and validated separately.
+// An empty grant set is valid — it means "no remote endpoint authorized".
 func (c Credential) Validate() error {
-	if strings.TrimSpace(c.Host) == "" {
-		return ErrCredentialHostRequired
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("credential name is required")
+	}
+	if strings.TrimSpace(c.Username) == "" {
+		return errors.New("credential username is required")
 	}
 	return nil
 }

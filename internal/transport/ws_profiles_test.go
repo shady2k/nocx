@@ -14,11 +14,24 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
+
+// fakeEndpointResolver returns explicit profile values for tests without credential
+type fakeEndpointResolver struct{}
+
+func (r *fakeEndpointResolver) ResolveEndpoint(p profile.SSHProfile) (string, uint16, error) {
+	host := p.Options.Host
+	port := p.Options.Port
+	if port == 0 {
+		port = 22
+	}
+	return host, uint16(port), nil
+}
+
 func TestProfilesRPC_ListEmpty(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -44,7 +57,8 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithProfileAtomicMutator(ps), WithEndpointResolver(&fakeEndpointResolver{}),
+		WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -94,7 +108,8 @@ func TestProfilesRPC_Delete(t *testing.T) {
 	_ = ps.SaveProfile(p)
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithProfileAtomicMutator(ps), WithEndpointResolver(&fakeEndpointResolver{}),
+		WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -120,7 +135,7 @@ func TestGroupsRPC_Create(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -225,10 +240,10 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 		},
 	})
 
-	resolver := connection.NewResolver(ps, ps, cs)
+	resolver := connection.NewResolver(ps, ps, cs, nil)
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps),
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps),
 		WithCredentialStore(cs),
 		WithProfileResolver(resolver),
 	)
@@ -274,4 +289,115 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 		"kind":      "ssh",
 		"profileId": "profile:canary-jump",
 	})
+}
+
+// TestProfilesRPC_CreateWithCredentialCreatesGrant verifies that creating a profile
+// with credential creates a TrustedEndpoint grant.
+func TestProfilesRPC_CreateWithCredentialCreatesGrant(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	
+	// Create credential first
+	cred := profile.Credential{
+		ID:       "cred:test:key",
+		Name:     "test-key",
+		Username: "testuser",
+		Auth:     "publicKey",
+	}
+	if err := ps.SaveCredential(cred); err != nil {
+		t.Fatalf("SaveCredential: %v", err)
+	}
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithProfileAtomicMutator(ps), WithEndpointResolver(&fakeEndpointResolver{}),
+		WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	p := profile.SSHProfile{
+		Base: profile.Base{
+			ID:   profile.NewProfileID("ssh", "test-host"),
+			Type: "ssh",
+			Name: "test-host",
+		},
+		Options: profile.SSHProfileOptions{
+			Host:         "example.com",
+			Port:         22,
+			User:         "testuser",
+			CredentialID: "cred:test:key",
+		},
+	}
+
+	_ = jsonrpcCall(t, conn, "profiles.create", p)
+
+	// Verify grant was created
+	creds, err := ps.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("want 1 credential, got %d", len(creds))
+	}
+	if len(creds[0].TrustedEndpoints) != 1 {
+		t.Fatalf("want 1 grant, got %d", len(creds[0].TrustedEndpoints))
+	}
+	grant := creds[0].TrustedEndpoints[0]
+	if grant.ProfileID != p.ID {
+		t.Errorf("grant profileId = %q, want %q", grant.ProfileID, p.ID)
+	}
+	if grant.Host != "example.com" {
+		t.Errorf("grant host = %q, want example.com", grant.Host)
+	}
+	if grant.Port != 22 {
+		t.Errorf("grant port = %d, want 22", grant.Port)
+	}
+}
+
+// TestProfilesRPC_DeleteRemovesGrant verifies that deleting a profile removes its grant.
+func TestProfilesRPC_DeleteRemovesGrant(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	
+	// Create credential with grant
+	cred := profile.Credential{
+		ID:       "cred:test:key",
+		Name:     "test-key",
+		Username: "testuser",
+		Auth:     "publicKey",
+		TrustedEndpoints: []profile.CredentialTrustedEndpoint{
+			{ProfileID: "ssh:custom:test:001", Host: "example.com", Port: 22},
+		},
+	}
+	if err := ps.SaveCredential(cred); err != nil {
+		t.Fatalf("SaveCredential: %v", err)
+	}
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithProfileAtomicMutator(ps), WithEndpointResolver(&fakeEndpointResolver{}),
+		WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	_ = jsonrpcCall(t, conn, "profiles.delete", map[string]any{"id": "ssh:custom:test:001"})
+
+	// Verify grant was removed
+	creds, err := ps.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if len(creds[0].TrustedEndpoints) != 0 {
+		t.Errorf("want 0 grants after delete, got %d", len(creds[0].TrustedEndpoints))
+	}
 }

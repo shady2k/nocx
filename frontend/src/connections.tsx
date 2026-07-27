@@ -490,12 +490,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         setFormError('Name and username are required.')
         return
       }
-      if (!credential.host || !credential.host.trim()) {
-        setFormError(
-          'Bind to Host is required — a credential must name the host it may be used for.',
-        )
-        return
-      }
       setFormError('')
       try {
         await props.client.createCredential(credential)
@@ -557,23 +551,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               label="Private Key Path"
               value={credential.keyPath || ''}
               onInput={(v) => updateField('keyPath', v)}
-            />
-          </Show>
-
-          <TextField
-            label="Bind to Host (required)"
-            value={credential.host || ''}
-            onInput={(v) => updateField('host', v)}
-          />
-          <Show when={!!credential.host}>
-            <TextField
-              label="Port"
-              value={credential.port || 22}
-              type="number"
-              onInput={(v) => {
-                const n = parseInt(v, 10)
-                updateField('port', isNaN(n) ? '' : String(n))
-              }}
             />
           </Show>
         </Section>

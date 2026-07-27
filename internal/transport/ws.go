@@ -66,10 +66,13 @@ type WSServer struct {
 	// Optional profile/group/credential stores for the connection-manager
 	// control plane (profiles.*, groups.*, credentials.*). When nil, those
 	// methods return a JSON-RPC error.
-	profiles    profile.ProfileRepository
-	groups      profile.GroupRepository
-	credMeta    profile.CredentialMetadataRepository
-	credentials credential.CredentialStore
+	profiles         profile.ProfileRepository
+	profileMutator   profile.ProfileAtomicMutator      // For atomic profile+grant operations (ADR-0013)
+	groups           profile.GroupRepository
+	credMeta         profile.CredentialMetadataRepository  // For read/list/delete (resolver, export, import)
+	credMutator      profile.CredentialMetadataMutator     // For atomic patch operations (transport handlers)
+	credentials      credential.CredentialStore
+	endpointResolver EndpointResolver  // For canonical endpoint resolution (ADR-0013)
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -105,6 +108,28 @@ type ProfileResolver interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
 }
 
+// EndpointResolver resolves an unsaved SSHProfile to its canonical endpoint
+// after SSH config resolution. Used by profile save handlers to determine
+// the canonical host:port for TrustedEndpoint grants (ADR-0013).
+type EndpointResolver interface {
+	ResolveEndpoint(profile.SSHProfile) (host string, port uint16, err error)
+}
+
+// SSHConfigEndpointResolver resolves SSHProfile to canonical endpoint using SSH config.
+// ADR-0013: canonical endpoint is calculated after SSH configuration is applied.
+// Delegates to ssh.EndpointResolver for actual resolution.
+type SSHConfigEndpointResolver struct {
+	Resolver *ssh.EndpointResolver
+}
+
+func (r *SSHConfigEndpointResolver) ResolveEndpoint(p profile.SSHProfile) (string, uint16, error) {
+	endpoint, err := r.Resolver.ResolveEndpoint(p)
+	if err != nil {
+		return "", 0, err
+	}
+	return endpoint.Host, endpoint.Port, nil
+}
+
 // WithProfileResolver attaches a profile resolver for SSH connection setup.
 func WithProfileResolver(r ProfileResolver) WSServerOption {
 	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
@@ -114,9 +139,22 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 type WSServerOption func(*WSServer)
 
 // WithProfileRepository attaches a profile repository to the server, enabling
-// the profiles.* JSON-RPC methods.
+// the profiles.list JSON-RPC method (read-only path).
 func WithProfileRepository(pr profile.ProfileRepository) WSServerOption {
 	return func(s *WSServer) { s.profiles = pr }
+}
+
+// WithProfileAtomicMutator attaches a profile atomic mutator to the server,
+// enabling atomic profile save/delete operations that manage credential grants.
+// ADR-0013: saving a connection is the only automatic grant operation.
+func WithProfileAtomicMutator(pam profile.ProfileAtomicMutator) WSServerOption {
+	return func(s *WSServer) { s.profileMutator = pam }
+}
+
+// WithEndpointResolver attaches an endpoint resolver to the server, enabling
+// canonical endpoint resolution for unsaved profiles (ADR-0013).
+func WithEndpointResolver(er EndpointResolver) WSServerOption {
+	return func(s *WSServer) { s.endpointResolver = er }
 }
 
 // WithGroupRepository attaches a group repository to the server, enabling the
@@ -126,10 +164,18 @@ func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
 }
 
 // WithCredentialMetadataRepository attaches a credential metadata repository
-// to the server, enabling the credentials.create/update/delete/list JSON-RPC
-// methods.
+// to the server, enabling the credentials.list and credentials.delete JSON-RPC
+// methods (read-only or full-replacement paths).
 func WithCredentialMetadataRepository(cmr profile.CredentialMetadataRepository) WSServerOption {
 	return func(s *WSServer) { s.credMeta = cmr }
+}
+
+// WithCredentialMetadataMutator attaches a credential metadata mutator
+// to the server, enabling atomic patch operations for credentials.create/update
+// and secret-ref management. ADR-0013: renderer cannot submit or overwrite
+// backend-owned fields (TrustedEndpoints, SecretID, PassphraseSecretID).
+func WithCredentialMetadataMutator(cmm profile.CredentialMetadataMutator) WSServerOption {
+	return func(s *WSServer) { s.credMutator = cmm }
 }
 
 // WithCredentialStore attaches a credential store, enabling the
@@ -1007,30 +1053,58 @@ func (s *WSServer) closeSession(sid session.ID) {
 // not wired (WithProfileRepository/WithGroupRepository/WithCredentialMetadataRepository not called).
 
 func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
-	if s.profiles == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
-		return
-	}
 	switch req.Method {
 	case "profiles.list":
+		if s.profiles == nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+			return
+		}
 		profs, err := s.profiles.LoadProfiles()
 		if err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(profs)))
+	
 	case "profiles.create", "profiles.update":
+		if s.profileMutator == nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profile mutator not available"))
+			return
+		}
 		var p profile.SSHProfile
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.profiles.SaveProfile(p); err != nil {
+		
+		// Resolve canonical endpoint for grant creation
+		var canonicalHost string
+		var canonicalPort uint16
+		if p.Options.CredentialID != "" {
+			if s.endpointResolver == nil {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "endpoint resolver not available"))
+				return
+			}
+			// Resolve canonical endpoint through SSH config
+			var err error
+			canonicalHost, canonicalPort, err = s.endpointResolver.ResolveEndpoint(p)
+			if err != nil {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "resolve endpoint: "+err.Error()))
+				return
+			}
+		}
+		
+		if err := s.profileMutator.SaveProfileWithGrant(p, canonicalHost, canonicalPort); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(p)))
+	
 	case "profiles.delete":
+		if s.profileMutator == nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profile mutator not available"))
+			return
+		}
 		var params struct {
 			ID string `json:"id"`
 		}
@@ -1038,7 +1112,7 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if err := s.profiles.DeleteProfile(params.ID); err != nil {
+		if err := s.profileMutator.DeleteProfileWithGrants(params.ID); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
@@ -1104,34 +1178,75 @@ func (s *WSServer) handleCredentialCRUDMethod(wconn *wsConn, req jsonrpcRequest)
 			creds[i].PassphraseSecretID = ""
 		}
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(creds)))
-	case "credentials.create", "credentials.update":
-		var c profile.Credential
-		if err := json.Unmarshal(req.Params, &c); err != nil {
+	case "credentials.create":
+		// ADR-0013: use CredentialCreateDTO without backend-owned fields
+		// First check for presence of backend-owned keys in raw JSON
+		var rawCheck map[string]json.RawMessage
+		if err := json.Unmarshal(req.Params, &rawCheck); err != nil {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		// Reject renderer-supplied SecretIDs — the backend owns them exclusively.
-		if c.SecretID != "" || c.PassphraseSecretID != "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "secretId/passphraseSecretId are backend-owned"))
+		for _, key := range []string{"secretId", "passphraseSecretId", "trustedEndpoints", "host", "port"} {
+			if _, exists := rawCheck[key]; exists {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, key+" is backend-owned"))
+				return
+			}
+		}
+		var dto profile.CredentialCreateDTO
+		if err := json.Unmarshal(req.Params, &dto); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
 			return
 		}
-		if c.ID == "" {
-			c.ID = profile.NewCredentialID(c.Name)
+		c := profile.Credential{
+			ID:                 profile.NewCredentialID(dto.Name),
+			Name:               dto.Name,
+			Username:           dto.Username,
+			Auth:               dto.Auth,
+			KeyPath:            dto.KeyPath,
+			TrustedEndpoints:   []profile.CredentialTrustedEndpoint{}, // empty, backend-owned
+			SecretID:           "", // backend-owned
+			PassphraseSecretID: "", // backend-owned
 		}
 		if err := s.credMeta.SaveCredential(c); err != nil {
-			// A missing host binding is the caller's mistake, not ours, and the
-			// renderer has to tell the user which field to fix — so it travels
-			// as Invalid params rather than Internal error (nocx-wd2m).
-			code := -32603
-			if errors.Is(err, profile.ErrCredentialHostRequired) {
-				code = -32602
-			}
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, code, err.Error()))
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 			return
 		}
 		c.SecretID = ""
 		c.PassphraseSecretID = ""
 		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(c)))
+
+	case "credentials.update":
+		// ADR-0013: use CredentialUpdateDTO without backend-owned fields
+		var rawCheck map[string]json.RawMessage
+		if err := json.Unmarshal(req.Params, &rawCheck); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		for _, key := range []string{"secretId", "passphraseSecretId", "trustedEndpoints", "host", "port"} {
+			if _, exists := rawCheck[key]; exists {
+				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, key+" is backend-owned"))
+				return
+			}
+		}
+		var dto profile.CredentialUpdateDTO
+		if err := json.Unmarshal(req.Params, &dto); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			return
+		}
+		// Atomically update identity fields, preserving backend-owned fields
+		if err := s.credMutator.UpdateCredentialIdentity(dto); err != nil {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			return
+		}
+		// Load updated credential to return
+		updated, found, err := s.findCredentialByID(dto.ID)
+		if err != nil || !found {
+			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "credential not found after update"))
+			return
+		}
+		updated.SecretID = ""
+		updated.PassphraseSecretID = ""
+		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(updated)))
 	case "credentials.delete":
 		var params struct {
 			ID string `json:"id"`
@@ -1234,29 +1349,24 @@ func (s *WSServer) savePasswordForCredential(credID, password string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
 
 	newID := credential.NewSecretID()
 	if err := s.credentials.Set(newID, credential.NewSecret(password)); err != nil {
 		return fmt.Errorf("store secret: %w", err)
 	}
 
-	oldID := credential.SecretID(cred.SecretID)
-	cred.SecretID = string(newID)
-	if err := s.credMeta.SaveCredential(cred); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
+	// Atomically update SecretID and get old value for safe deletion
+	oldID, err := s.credMutator.SetCredentialSecretID(credID, string(newID))
+	if err != nil {
+		// CRITICAL: metadata patch failed — clean up the orphaned new secret
+		_ = s.credentials.Delete(newID)
+		return fmt.Errorf("update credential secret ID: %w", err)
 	}
 
 	// Best-effort delete of the old secret. The new one is already stored
 	// and metadata points at it, so this is purely garbage collection.
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(credential.SecretID(oldID))
 	}
 	return nil
 }
@@ -1268,22 +1378,15 @@ func (s *WSServer) deletePasswordForCredential(credID string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
 
-	oldID := credential.SecretID(cred.SecretID)
-	cred.SecretID = ""
-	if err := s.credMeta.SaveCredential(cred); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
+	// Atomically clear SecretID and get old value for safe deletion
+	oldID, err := s.credMutator.ClearCredentialSecretID(credID)
+	if err != nil {
+		return fmt.Errorf("clear credential secret ID: %w", err)
 	}
 
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(credential.SecretID(oldID))
 	}
 	return nil
 }
@@ -1311,27 +1414,22 @@ func (s *WSServer) savePassphraseForCredential(credID, passphrase string) error 
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
 
 	newID := credential.NewSecretID()
 	if err := s.credentials.Set(newID, credential.NewSecret(passphrase)); err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
 	}
 
-	oldID := credential.SecretID(cred.PassphraseSecretID)
-	cred.PassphraseSecretID = string(newID)
-	if err := s.credMeta.SaveCredential(cred); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
+	// Atomically update PassphraseSecretID and get old value for safe deletion
+	oldID, err := s.credMutator.SetCredentialPassphraseSecretID(credID, string(newID))
+	if err != nil {
+		// CRITICAL: metadata patch failed — clean up the orphaned new secret
+		_ = s.credentials.Delete(newID)
+		return fmt.Errorf("update credential passphrase secret ID: %w", err)
 	}
 
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(credential.SecretID(oldID))
 	}
 	return nil
 }
@@ -1342,22 +1440,15 @@ func (s *WSServer) deletePassphraseForCredential(credID string) error {
 	if s.credMeta == nil {
 		return errors.New("profiles not available")
 	}
-	cred, ok, err := s.findCredentialByID(credID)
-	if err != nil {
-		return fmt.Errorf("load credential %s: %w", credID, err)
-	}
-	if !ok {
-		return fmt.Errorf("credential %s not found", credID)
-	}
 
-	oldID := credential.SecretID(cred.PassphraseSecretID)
-	cred.PassphraseSecretID = ""
-	if err := s.credMeta.SaveCredential(cred); err != nil {
-		return fmt.Errorf("save credential metadata: %w", err)
+	// Atomically clear PassphraseSecretID and get old value for safe deletion
+	oldID, err := s.credMutator.ClearCredentialPassphraseSecretID(credID)
+	if err != nil {
+		return fmt.Errorf("clear credential passphrase secret ID: %w", err)
 	}
 
 	if oldID != "" {
-		_ = s.credentials.Delete(oldID)
+		_ = s.credentials.Delete(credential.SecretID(oldID))
 	}
 	return nil
 }

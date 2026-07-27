@@ -40,9 +40,9 @@ func (c *pooledSSHConn) Close() error {
 
 // poolKey identifies a shared SSH connection. Two Connect calls whose keys
 // compare equal are the SAME principal reaching the SAME endpoint through
-// the SAME route, so they may share one authenticated connection. Every
-// component is load-bearing — omitting any of them is an authorization
-// bug, not a resource bug:
+// the SAME route with the SAME authorization, so they may share one
+// authenticated connection. Every component is load-bearing — omitting any
+// of them is an authorization bug, not a resource bug:
 //
 //   - host/port/user: the network endpoint and the account on it. Two
 //     different users on one host are different principals; sharing a
@@ -60,6 +60,11 @@ func (c *pooledSSHConn) Close() error {
 //     dialed through. The same target reached via two different bastions
 //     is a different route; pooling them together would let one bastion's
 //     transport carry the other's traffic. Empty for direct connections.
+//   - authorizationRevision: ADR-0013 credential grant revision. When a
+//     grant is added/removed or a secret is rotated, the revision changes
+//     and pooled connections are automatically invalidated. Two Connect
+//     calls with different revisions MUST NOT share a connection, or a
+//     revoked credential's pooled connection would continue to be reused.
 //
 // Widen this key only by adding a component that distinguishes two
 // principals — narrowing it (dropping a component) is the authorization

@@ -100,6 +100,10 @@ type ConnectConfig struct {
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID
+	
+	// AuthorizationRevision is set by connection.Resolver after grant check (ADR-0013).
+	// Used by poolKey to invalidate pooled connections when grants change or secrets rotate.
+	AuthorizationRevision string
 }
 
 func WithUser(user string) ConnectOption {

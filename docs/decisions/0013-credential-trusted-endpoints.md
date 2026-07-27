@@ -267,3 +267,47 @@ Implementation is incomplete until tests cover:
 - Fleet policy needs host groups, patterns, or centrally managed authorization. Wildcard
   matching must be a new decision; it is not an extension of this exact-endpoint model.
 - A supported protocol identifies servers differently from SSH host+port.
+
+## Implementation Status
+
+**Implemented (2026-07-27):**
+
+### Phase 1: Migration
+- `internal/profile/migration.go`: Versioned migration with `storage.Module` protocol
+- `internal/profile/store.go`: Schema versioning, atomic migration write, `requiresReview` marker on SSHProfileOptions
+- Raw document decode for legacy Host/Port fields
+- Endpoint resolver callback for canonical endpoint resolution during migration
+
+### Phase 2: Atomic Grant Workflow  
+- `SaveProfileWithGrant`: Atomic profile+grant save with idempotent check (JSON snapshot)
+- `DeleteProfileWithGrants`: Atomic profile delete with stale grant cleanup
+- `ProfileAtomicMutator` interface in `internal/profile/store.go`
+- `EndpointResolver` interface for canonical endpoint resolution
+
+### Phase 3: Open Enforcement
+- `internal/connection/resolver.go`: Grant check via `CheckGrant` before dial
+- `ErrCredentialNotAuthorized` error for fail-closed behavior
+- `AuthorizationRevision` in `ConnectConfig` and `poolKey` for pool invalidation
+- Pool security identity includes canonical endpoint, credential ID, and authorization revision
+- Grant check on pool channel open (via pool key mismatch on grant change)
+
+### Required Verification Tests
+All ADR-0013 required verification tests are implemented:
+- `TestSaveProfileWithGrant_*`: Adds grant, missing credential fails, empty endpoint fails, idempotent, no credential
+- `TestDeleteProfileWithGrants_*`: Removes grants, stale grant cleanup, idempotent
+- `TestMigration_*`: Match creates grant, alias resolution, mismatch marks review, unresolvable marks review, Port==0 matches any, nil resolver marks all review
+- `TestProfilesRPC_CreateWithCredentialCreatesGrant`: End-to-end grant creation via RPC
+- `TestProfilesRPC_DeleteRemovesGrant`: End-to-end grant removal via RPC
+
+### Migration Path
+1. On first load, `loadLocked()` detects schema version 0 and applies migration
+2. Migration resolves canonical endpoints for each profile with legacy Host/Port
+3. Matching grants are created; non-matching profiles are marked `requiresReview`
+4. Migrated document is atomically written with schema version 1
+5. Subsequent loads skip migration (schema version 1 == current)
+
+### Security Boundary
+- Renderer cannot submit/overwrite `TrustedEndpoints`, `SecretID`, or `PassphraseSecretID` via RPC
+- `open{profileId}` checks grant before dial (target and jump hosts independently)
+- Pool invalidates on grant change via `authorizationRevision` in pool key
+- Fail-closed: missing grant returns `ErrCredentialNotAuthorized`

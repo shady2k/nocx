@@ -120,7 +120,7 @@ func TestResolver_CredentialMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	host, cfg, err := r.Resolve("profile:1")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -165,7 +165,7 @@ func TestResolver_InlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	host, cfg, err := r.Resolve("profile:inline")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -193,7 +193,7 @@ func TestResolver_UnknownProfile(t *testing.T) {
 	ps := newStubProfileStore()
 	ss := newStubSecretStore()
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	_, _, err := r.Resolve("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for unknown profile")
@@ -238,7 +238,7 @@ func TestResolver_JumpHost(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	host, cfg, err := r.Resolve("profile:tgt")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -298,7 +298,7 @@ func TestResolver_JumpHostInlineMode(t *testing.T) {
 		},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	host, cfg, err := r.Resolve("profile:tgt2")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -336,7 +336,7 @@ func TestResolver_CarriesTargetBinding(t *testing.T) {
 		Options: profile.SSHProfileOptions{Host: "bound.example.com", CredentialID: "cred:bound:aaa"},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	_, cfg, err := r.Resolve("profile:bound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -371,7 +371,7 @@ func TestResolver_UnboundCredentialSurfacesEmpty(t *testing.T) {
 		Options: profile.SSHProfileOptions{Host: "any.example.com", CredentialID: "cred:unbound:bbb"},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	_, cfg, err := r.Resolve("profile:unbound")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -424,7 +424,7 @@ func TestResolver_CarriesJumpBinding(t *testing.T) {
 		Options: profile.SSHProfileOptions{Host: "tgt-bound.example.com", CredentialID: "cred:tgtbound:ddd", JumpHost: "profile:jumpb"},
 	})
 
-	r := NewResolver(ps, ps, ss)
+	r := NewResolver(ps, ps, ss, nil)
 	_, cfg, err := r.Resolve("profile:tgtb")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)

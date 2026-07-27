@@ -81,12 +81,28 @@ func New(opts ...Option) (*App, error) {
 	credStore := credential.NewKeychain()
 	settingsRegistry := settings.New(docStore, credStore)
 
+	// Create SSH endpoint resolver for ADR-0013 canonical endpoint resolution
+	sshEndpointResolver := ssh.NewEndpointResolver(sshClient)
+	
+	// Install resolver in profileStore BEFORE any Load (migration needs it)
+	// ADR-0013 §Migration: resolver creates grants on match with canonical endpoint
+	profileStore.SetEndpointResolver(func(p profile.SSHProfile) (string, uint16, error) {
+		ep, err := sshEndpointResolver.ResolveEndpoint(p)
+		if err != nil {
+			return "", 0, err
+		}
+		return ep.Host, ep.Port, nil
+	})
+	
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
+		transport.WithProfileAtomicMutator(profileStore),  // ADR-0013: atomic profile+grant operations
+		transport.WithEndpointResolver(&transport.SSHConfigEndpointResolver{Resolver: sshEndpointResolver}),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialMetadataRepository(profileStore),
+		transport.WithCredentialMetadataMutator(profileStore),
 		transport.WithCredentialStore(credStore),
-		transport.WithProfileResolver(connection.NewResolver(profileStore, profileStore, credStore)),
+		transport.WithProfileResolver(connection.NewResolver(profileStore, profileStore, credStore, profileStore.EndpointResolver())),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithExportPaths(paths),
 		transport.WithExportContentDB(content.NewStub(logger)),

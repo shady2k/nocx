@@ -1,7 +1,6 @@
 package profile
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -245,65 +244,45 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 	}
 }
 
-// nocx-wd2m. Host binding is mandatory (nocx-mon), and the rule has to bite at
-// save time. Enforcing it only at connect time — which is where checkBinding
-// lives — means the user stores a secret, walks away, and meets the refusal
-// later as a broken connection instead of a rejected form.
-//
-// The store is the enforcement point on purpose: it is the one path every
-// writer goes through, so a future caller cannot route around the rule the way
-// it could around a check sitting in the transport handler.
-func TestSaveCredentialRejectsMissingHost(t *testing.T) {
+func TestSaveCredentialAcceptsEmptyTrustedEndpoints(t *testing.T) {
 	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
 
-	unbound := Credential{
-		ID:       NewCredentialID("unbound"),
-		Name:     "unbound",
-		Username: "bob",
-		Auth:     AuthPassword,
+	// ADR-0013: empty TrustedEndpoints is valid - means "no remote endpoint authorized"
+	c := Credential{
+		ID:               NewCredentialID("empty-grants"),
+		Name:             "empty-grants",
+		Username:         "bob",
+		Auth:             AuthPassword,
+		TrustedEndpoints: []CredentialTrustedEndpoint{},
 	}
-	if err := store.SaveCredential(unbound); err == nil {
-		t.Fatal("SaveCredential accepted a credential with no host; an unbound credential must not be storable")
-	} else if !errors.Is(err, ErrCredentialHostRequired) {
-		t.Fatalf("want ErrCredentialHostRequired, got %T: %v", err, err)
+	if err := store.SaveCredential(c); err != nil {
+		t.Fatalf("SaveCredential with empty TrustedEndpoints: %v", err)
 	}
-
 	creds, err := store.LoadCredentials()
 	if err != nil {
 		t.Fatalf("LoadCredentials: %v", err)
 	}
-	if len(creds) != 0 {
-		t.Fatalf("a rejected credential must not be persisted; store holds %d", len(creds))
+	if len(creds) != 1 {
+		t.Fatalf("want 1 credential, got %d", len(creds))
+	}
+	if len(creds[0].TrustedEndpoints) != 0 {
+		t.Fatalf("want empty TrustedEndpoints after reload, got %v", creds[0].TrustedEndpoints)
 	}
 }
 
-func TestSaveCredentialRejectsWhitespaceOnlyHost(t *testing.T) {
+func TestSaveCredentialAcceptsTrustedEndpoints(t *testing.T) {
 	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
 
-	// " " is not a host. Accepting it would satisfy the letter of the rule and
-	// none of its purpose — checkBinding compares against a resolved hostname
-	// and would never match, so the credential would be storable and useless.
+	// ADR-0013: TrustedEndpoints replace legacy Host/Port binding
 	c := Credential{
-		ID:       NewCredentialID("spacey"),
-		Name:     "spacey",
+		ID:       NewCredentialID("with-grants"),
+		Name:     "with-grants",
 		Username: "bob",
 		Auth:     AuthPassword,
-		Host:     "   ",
-	}
-	if err := store.SaveCredential(c); !errors.Is(err, ErrCredentialHostRequired) {
-		t.Fatalf("want ErrCredentialHostRequired for a whitespace host, got %v", err)
-	}
-}
-
-func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
-
-	c := Credential{
-		ID:       NewCredentialID("bound"),
-		Name:     "bound",
-		Username: "bob",
-		Auth:     AuthPassword,
-		Host:     "prod.example.com",
+		TrustedEndpoints: []CredentialTrustedEndpoint{
+			{ProfileID: "profile:prod", Host: "prod.example.com", Port: 22},
+			{ProfileID: "profile:staging", Host: "staging.example.com", Port: 22},
+		},
 	}
 	if err := store.SaveCredential(c); err != nil {
 		t.Fatalf("SaveCredential: %v", err)
@@ -312,7 +291,16 @@ func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCredentials: %v", err)
 	}
-	if len(creds) != 1 || creds[0].Host != "prod.example.com" {
-		t.Fatalf("want the bound credential stored, got %+v", creds)
+	if len(creds) != 1 {
+		t.Fatalf("want 1 credential, got %d", len(creds))
+	}
+	if len(creds[0].TrustedEndpoints) != 2 {
+		t.Fatalf("want 2 TrustedEndpoints, got %d", len(creds[0].TrustedEndpoints))
+	}
+	if creds[0].TrustedEndpoints[0].Host != "prod.example.com" {
+		t.Fatalf("want first endpoint host prod.example.com, got %s", creds[0].TrustedEndpoints[0].Host)
+	}
+	if creds[0].TrustedEndpoints[1].Host != "staging.example.com" {
+		t.Fatalf("want second endpoint host staging.example.com, got %s", creds[0].TrustedEndpoints[1].Host)
 	}
 }

@@ -109,8 +109,6 @@ function makeCredential(overrides?: Partial<Credential>): Credential {
     name: overrides?.name ?? 'Admin Key',
     username: overrides?.username ?? 'admin',
     auth: overrides?.auth ?? 'publicKey',
-    host: overrides?.host,
-    port: overrides?.port,
     keyPath: overrides?.keyPath,
   }
 }
@@ -303,16 +301,14 @@ describe('Connections surface — observable behaviour', () => {
   })
 })
 
-// ── Credential form: host binding is required (nocx-wd2m, nocx-mon) ────────
+// ── ADR-0013 regression: credential form has no Bind to Host/Port ───────────
 
-describe('credential form: host binding is required', () => {
+describe('ADR-0013: credential form security boundary', () => {
   let container: HTMLElement
   let client: ProfileClient
   let content: ConnectionsContent
 
   function fillField(label: string, value: string): void {
-    // Find a <label> whose text contains the label string, then get the input
-    // from inside the same field container.
     const labels = container.querySelectorAll('label')
     for (const lbl of labels) {
       if (lbl.textContent?.includes(label)) {
@@ -368,48 +364,40 @@ describe('credential form: host binding is required', () => {
     await mount(content, container)
   })
 
-  it('refuses to submit without a host and shows an error on screen', async () => {
-    const create = vi.spyOn(client, 'createCredential')
-
+  it('form does not show Bind to Host field', async () => {
     openCredentials()
-    fillField('Name', 'unbound')
-    fillField('Username', 'bob')
-    clickSave()
 
-    await Promise.resolve() // flush microtasks
-
-    expect(create).not.toHaveBeenCalled()
-    expect(textVisible(container, 'Bind to Host is required')).toBe(true)
+    // ADR-0013: Bind to Host is backend-owned, not exposed in credential form
+    expect(textVisible(container, 'Bind to Host')).toBe(false)
   })
 
-  it('refuses a whitespace-only host', async () => {
-    const create = vi.spyOn(client, 'createCredential')
-
+  it('form does not show Port field for credentials', async () => {
     openCredentials()
-    fillField('Name', 'spacey')
-    fillField('Username', 'bob')
-    fillField('Bind to Host', '   ')
-    clickSave()
 
-    await Promise.resolve()
-
-    expect(create).not.toHaveBeenCalled()
+    // ADR-0013: Port binding is backend-owned, not exposed in credential form
+    // (Port field exists in profile form, but not in credential form)
+    const portFields = [...container.querySelectorAll('label')].filter(
+      (lbl) => lbl.textContent?.includes('Port') && lbl.closest('.cm-form'),
+    )
+    expect(portFields.length).toBe(0)
   })
 
-  it('submits once a host is given', async () => {
+  it('submit without host succeeds and payload has no host/port/trustedEndpoints', async () => {
     const create = vi
       .spyOn(client, 'createCredential')
-      .mockResolvedValue({ id: 'c1', name: 'bound', username: 'bob', auth: '' } as never)
+      .mockResolvedValue({ id: 'c1', name: 'no-host', username: 'bob', auth: 'password' } as never)
 
     openCredentials()
-    fillField('Name', 'bound')
+    fillField('Name', 'no-host')
     fillField('Username', 'bob')
-    fillField('Bind to Host', 'prod.example.com')
     clickSave()
 
     await Promise.resolve()
 
     expect(create).toHaveBeenCalledTimes(1)
-    expect(create.mock.calls[0][0]).toMatchObject({ host: 'prod.example.com' })
+    const payload = create.mock.calls[0][0]
+    expect((payload as any).host).toBeUndefined()
+    expect((payload as any).port).toBeUndefined()
+    expect((payload as any).trustedEndpoints).toBeUndefined()
   })
 })

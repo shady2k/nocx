@@ -36,7 +36,7 @@ func newCascadeHarness(t *testing.T) *cascadeHarness {
 	ps := profile.NewJSONStore(dir + "/p.json")
 	cs := credential.NewKeychain()
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialStore(cs))
+		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps), WithCredentialMetadataMutator(ps), WithCredentialStore(cs))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -141,7 +141,7 @@ func TestDeleteCascade_RemovesPassword(t *testing.T) {
 	// Host is required for a credential to be storable at all (nocx-wd2m); it
 	// is incidental to what this test proves, which is secret cleanup.
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-pw", Username: "alice", Auth: "password", Host: "cascade.example.com",
+		Name: "cascade-pw", Username: "alice", Auth: "password",
 	})
 
 	pwID := h.savePasswordViaRPC(id, "cascade-password-secret")
@@ -170,7 +170,7 @@ func TestDeleteCascade_RemovesKeyPassphrase(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-pp", Username: "bob", Auth: "publicKey", Host: "cascade.example.com",
+		Name: "cascade-pp", Username: "bob", Auth: "publicKey",
 	})
 
 	ppID := h.savePassphraseViaRPC(id, "cascade-passphrase-secret")
@@ -197,7 +197,7 @@ func TestDeleteCascade_NoSecretsSucceeds(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-empty", Username: "carol", Auth: "password", Host: "cascade.example.com",
+		Name: "cascade-empty", Username: "carol", Auth: "password",
 	})
 
 	h.deleteCredentialViaRPC(id)
@@ -218,7 +218,7 @@ func TestDeleteCascade_Idempotent(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-idem", Username: "dan", Auth: "password", Host: "cascade.example.com",
+		Name: "cascade-idem", Username: "dan", Auth: "password",
 	})
 	pwID := h.savePasswordViaRPC(id, "p")
 
@@ -240,7 +240,7 @@ func TestDeleteCascade_KeyFileDeleted(t *testing.T) {
 	h := newCascadeHarness(t)
 
 	id := h.createCredentialViaRPC(profile.Credential{
-		Name: "cascade-key-gone", Username: "bob", Auth: "publicKey", Host: "cascade.example.com",
+		Name: "cascade-key-gone", Username: "bob", Auth: "publicKey",
 		KeyPath: "/nonexistent/key/file",
 	})
 

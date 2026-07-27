@@ -66,6 +66,8 @@ export interface ProfileGroup {
 
 // Credential is a reusable authentication identity (nocx-УЗ).
 // Stored separately from connections so multiple connections can share it.
+// ADR-0013: host/port binding removed — TrustedEndpoints are backend-owned,
+// created automatically when a profile references a credential.
 export interface Credential {
   id: string
   name: string // Display name (e.g. "work-github", "prod-server")
@@ -76,14 +78,8 @@ export interface Credential {
   // - publicKey: path to private key or vault:// URL
   // - agent/keyboardInteractive: not needed
   keyPath?: string // Only for publicKey auth
-  // The host this credential may be submitted to. Required: an empty host is
-  // refused at connect time, because "any host" is what lets this renderer
-  // aim a credential at a host it controls (nocx-mon). Matching happens on the
-  // backend against the RESOLVED hostname, never this alias.
-  host?: string
-  // Unset means "this host, any port" — a stated exception, not an oversight:
-  // host is the load-bearing half of the identity.
-  port?: number
+  // ADR-0013: TrustedEndpoints are backend-owned, not exposed to renderer
+  // TrustedEndpoints?: CredentialTrustedEndpoint[] // Backend only
 }
 
 // TreeNode is a ProfileGroup with its children resolved — the output of

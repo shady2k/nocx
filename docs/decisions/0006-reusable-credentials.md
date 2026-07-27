@@ -1,11 +1,11 @@
 # ADR-0006 — Reusable Credentials (УЗ) for SSH Connections
 
 - **Status:** Superseded in part by
-  [ADR-0012 — Credential-Scoped Trusted Endpoints](0012-credential-trusted-endpoints.md)
+  [ADR-0013 — Credential-Scoped Trusted Endpoints](0013-credential-trusted-endpoints.md)
 - **Date:** 2026-07-24
 - **Related:** Connection Manager UI, SSH authentication
 
-> ADR-0012 replaces this ADR's optional single-host `Host`/`Port` binding, the
+> ADR-0013 replaces this ADR's optional single-host `Host`/`Port` binding, the
 > empty-host wildcard, and the **Bind to Host** credential UI. The reusable credential
 > abstraction and secret-storage separation remain accepted.
 

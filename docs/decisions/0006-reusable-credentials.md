@@ -1,8 +1,13 @@
 # ADR-0006 — Reusable Credentials (УЗ) for SSH Connections
 
-- **Status:** Accepted
+- **Status:** Superseded in part by
+  [ADR-0012 — Credential-Scoped Trusted Endpoints](0012-credential-trusted-endpoints.md)
 - **Date:** 2026-07-24
 - **Related:** Connection Manager UI, SSH authentication
+
+> ADR-0012 replaces this ADR's optional single-host `Host`/`Port` binding, the
+> empty-host wildcard, and the **Bind to Host** credential UI. The reusable credential
+> abstraction and secret-storage separation remain accepted.
 
 ## Context
 
@@ -35,7 +40,6 @@ type Credential struct {
 Credentials are stored in the profile store (JSON file) alongside SSH profiles. The actual secrets (passwords, key passphrases) remain in the OS keychain / encrypted vault, keyed by `Credential.ID` (not by Identity).
 
 When connecting, the SSH module resolves the credential:
-
 1. Load `Credential` by ID from the profile store
 2. Load secret from keychain by `Credential.ID`
 3. If `Credential` is host-bound, verify the connection matches
@@ -43,13 +47,11 @@ When connecting, the SSH module resolves the credential:
 ### UI Changes
 
 **Saved Credentials (УЗ) button:**
-
 - Opens a form to create/edit a Credential: name, username, auth method, secret (password or key path)
 - Shows a list of saved credentials with edit/delete actions
 - Secrets are stored in OS keychain, never in the profile store
 
 **New Connection form:**
-
 - Dropdown to select a Credential from the list
 - If a credential is selected, username/auth are pre-filled from the credential
 - User can override username/auth per-connection if needed
@@ -57,7 +59,6 @@ When connecting, the SSH module resolves the credential:
 ### Backend API
 
 New JSON-RPC methods:
-
 - `credentials.list` → `[]Credential`
 - `credentials.create` → `Credential`
 - `credentials.update` → `Credential`

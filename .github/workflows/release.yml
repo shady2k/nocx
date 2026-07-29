@@ -119,6 +119,7 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Keyring=${RELEASE_KEYRING}"
           # Wails v2.13 passes -ldflags to the Go compiler for both slices and
           # joins them with lipo (§4).
           wails build -platform darwin/universal -ldflags "$LDFLAGS"
@@ -148,6 +149,8 @@ jobs:
           # 4. Wails' ad-hoc signature must be intact — the baseline the payload
           #    round trip (§9) asserts is preserved through packaging.
           codesign --verify --deep --strict "$APP"
+          # 5. The compiled-in keyring must be non-empty and parseable on release builds.
+          "$BIN" -test.run=TestReleaseKeyringParsable -test.v 2>&1 | grep -q "PASS" || { echo "::error::compiled-in keyring missing or invalid"; exit 1; }
 
       - name: Package .dmg and .zip
         run: |
@@ -210,6 +213,7 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Keyring=${RELEASE_KEYRING}"
           wails build -platform linux/amd64 -ldflags "$LDFLAGS"
 
       - name: Smoke checks (binary)
@@ -221,6 +225,8 @@ jobs:
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
+          # 3. The compiled-in keyring must be non-empty and parseable on release builds.
+          "$BIN" -test.run=TestReleaseKeyringParsable -test.v 2>&1 | grep -q "PASS" || { echo "::error::compiled-in keyring missing or invalid"; exit 1; }
 
       - name: Package AppImage
         run: |

@@ -80,6 +80,18 @@ ourselves.**
   updated in place again. The private key therefore lives in a **backup outside
   GitHub**, and a new key is introduced into the keyring _before_ it is ever
   needed to sign.
+- **Keyring format.** The compiled-in keyring is a comma-separated list of
+  base64-encoded ed25519 public keys, injected at link time via
+  `-ldflags -X github.com/shady2k/nocx/internal/version.Keyring=...`.
+  The `cmd/manifest-sign` tool prints public keys in exactly this format.
+  An empty keyring is valid at compile time but causes `VerifyManifest` to
+  fail closed, so dev builds (where `Version == "dev"`) skip update checks
+  entirely.
+- **Rotation procedure.** Add the new public key to `version.Keyring` in release
+  N; sign manifests with the new private key starting from release N+1. Clients
+  on release N can verify N+1. Clients older than N cannot verify N+1 and must
+  reinstall by hand. The old key may be removed from the keyring once all
+  supported releases contain the successor.
 - **`vision.md` is amended, `architecture.md:179` is not.** "No app-store or
   packaged distribution" becomes GitHub Releases + unsigned builds + a
   self-hosted update chain + the manual quarantine step. With Linux deferred

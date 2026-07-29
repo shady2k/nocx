@@ -19,8 +19,12 @@ package version
 //	github.com/shady2k/nocx/internal/version.Version
 //	github.com/shady2k/nocx/internal/version.Commit
 //	github.com/shady2k/nocx/internal/version.Date
+//	github.com/shady2k/nocx/internal/version.Keyring
 var (
 	Version = "dev"
 	Commit  = "none"
 	Date    = "unknown"
+	// Keyring holds base64-encoded ed25519 public keys, comma-separated.
+	// Injected at link time by the release pipeline. Empty in dev builds.
+	Keyring = ""
 )

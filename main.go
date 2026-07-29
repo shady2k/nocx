@@ -103,11 +103,17 @@ func (w *WailsApp) startup(ctx context.Context) {
 	}
 	installPath := upgradeInstallPath(execPath)
 
+	// Parse the compiled-in keyring (empty in dev builds).
+	keyring, err := update.ParseKeyring(version.Keyring)
+	if err != nil {
+		w.backend.Logger.Error("invalid compiled-in keyring", "error", err)
+	}
+
 	// Wire the updater with the real install path and platform.
 	w.backend.Updater = update.NewUpdater(update.UpdaterConfig{
 		Platform:       update.NewPlatform(),
 		Fetcher:        update.NewGitHubManifestFetcher(nil),
-		Keyring:        nil, // populated by release pipeline via ldflags
+		Keyring:        keyring,
 		CurrentVersion: version.Version,
 		InstallPath:    installPath,
 		Logger:         w.backend.Logger,

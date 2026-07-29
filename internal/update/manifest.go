@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"golang.org/x/mod/semver"
 )
@@ -42,6 +43,32 @@ type Artifact struct {
 // have produced the signature.
 //
 // Errors are safe to log and surface — they never include key material.
+// ParseKeyring decodes a comma-separated list of base64-encoded ed25519
+// public keys into a slice suitable for VerifyManifest.
+// Empty input returns an empty slice (which VerifyManifest rejects).
+func ParseKeyring(s string) ([]ed25519.PublicKey, error) {
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	keys := make([]ed25519.PublicKey, 0, len(parts))
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		b, err := base64.StdEncoding.DecodeString(p)
+		if err != nil {
+			return nil, fmt.Errorf("keyring entry %d: invalid base64: %w", i, err)
+		}
+		if len(b) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("keyring entry %d: decoded %d bytes, want %d", i, len(b), ed25519.PublicKeySize)
+		}
+		keys = append(keys, ed25519.PublicKey(b))
+	}
+	return keys, nil
+}
+
 func VerifyManifest(body []byte, sigBase64 string, keyring []ed25519.PublicKey) (*Manifest, error) {
 	sig, err := base64.StdEncoding.DecodeString(sigBase64)
 	if err != nil {

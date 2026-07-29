@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/version"
 )
 
 func TestVerifyManifest_HappyPath(t *testing.T) {
@@ -445,4 +447,121 @@ func TestMatchArtifact_DarwinUniversalFallback(t *testing.T) {
 			t.Errorf("URL: got %q, want mac.zip", got.URL)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// ParseKeyring
+// ---------------------------------------------------------------------------
+
+func TestParseKeyring_Empty(t *testing.T) {
+	keys, err := ParseKeyring("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if keys != nil {
+		t.Errorf("expected nil, got %v", keys)
+	}
+}
+
+func TestParseKeyring_Single(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(pub)
+
+	keys, err := ParseKeyring(b64)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	if string(keys[0]) != string(pub) {
+		t.Error("decoded key does not match original")
+	}
+}
+
+func TestParseKeyring_TwoKeys(t *testing.T) {
+	pub1, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub2, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(pub1) + ", " + base64.StdEncoding.EncodeToString(pub2)
+
+	keys, err := ParseKeyring(b64)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(keys))
+	}
+	if string(keys[0]) != string(pub1) {
+		t.Error("first decoded key does not match original")
+	}
+	if string(keys[1]) != string(pub2) {
+		t.Error("second decoded key does not match original")
+	}
+}
+
+func TestParseKeyring_InvalidBase64(t *testing.T) {
+	_, err := ParseKeyring("!!!not-valid-base64!!!")
+	if err == nil {
+		t.Fatal("expected error for invalid base64, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid base64") {
+		t.Errorf("error should mention base64: %v", err)
+	}
+}
+
+func TestParseKeyring_WrongLength(t *testing.T) {
+	// 31 bytes — one short of ed25519.PublicKeySize.
+	short := base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize-1))
+	_, err := ParseKeyring(short)
+	if err == nil {
+		t.Fatal("expected error for wrong key length, got nil")
+	}
+	if !strings.Contains(err.Error(), "bytes, want") {
+		t.Errorf("error should mention byte count mismatch: %v", err)
+	}
+}
+
+func TestParseKeyring_ExtraWhitespaceIgnored(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	// Leading/trailing spaces and empty parts between commas.
+	keys, err := ParseKeyring("  " + b64 + "  , , ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	if string(keys[0]) != string(pub) {
+		t.Error("decoded key does not match original")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Release keyring smoke test
+// ---------------------------------------------------------------------------
+
+func TestReleaseKeyringParsable(t *testing.T) {
+	if version.Version == "dev" {
+		t.Skip("dev build — keyring is expected to be empty")
+	}
+	keys, err := ParseKeyring(version.Keyring)
+	if err != nil {
+		t.Fatalf("compiled-in keyring is invalid: %v", err)
+	}
+	if len(keys) == 0 {
+		t.Fatal("compiled-in keyring is empty on a release build")
+	}
 }

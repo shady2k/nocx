@@ -114,7 +114,6 @@ func mustRestore(t *testing.T, svc *backup.Service, contents string, strategy ba
 	return r
 }
 
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 func TestCreate_RoundTrip(t *testing.T) {

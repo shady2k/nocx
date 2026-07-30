@@ -63,7 +63,7 @@ async function lastSectionReachable(page: Page): Promise<boolean> {
 }
 
 test.describe('settings scroll — normal', () => {
-  test.use({ viewport: { width: 1024, height: 380 } })
+  test.use({ viewport: { width: 1024, height: 300 } })
 
   test('scrolls the last section into view in a short window (nocx-82l9.2)', async ({
     page,

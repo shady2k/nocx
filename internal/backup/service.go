@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -213,14 +214,15 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		return nil, fmt.Errorf("journal prepared: %w", jerr)
 	}
 
-	if err := s.connections.ReplaceConnectionSnapshot(targetSnap); err != nil {
+	if cerr := s.connections.ReplaceConnectionSnapshot(targetSnap); cerr != nil {
 		if recErr := s.Recover(); recErr != nil {
-			return nil, fmt.Errorf("replace connections: %w; recovery failed: %w", err, recErr)
+			return nil, fmt.Errorf("replace connections: %w; recovery failed: %w", cerr, recErr)
 		}
-		return nil, fmt.Errorf("replace connections: %w", err)
+		return nil, fmt.Errorf("replace connections: %w", cerr)
 	}
 
-	pn, err := s.settings.ReplaceNonSecretOverrides(targetOverrides)
+	var pn settings.PendingNotification
+	pn, err = s.settings.ReplaceNonSecretOverrides(targetOverrides)
 	if err != nil {
 		if recErr := s.Recover(); recErr != nil {
 			return nil, fmt.Errorf("replace settings: %w; recovery failed: %w", err, recErr)
@@ -228,11 +230,11 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		return nil, fmt.Errorf("replace settings: %w", err)
 	}
 
-	if err := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides); err != nil {
+	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides); werr != nil {
 		if recErr := s.Recover(); recErr != nil {
-			return nil, fmt.Errorf("journal committed: %w; recovery failed: %w", err, recErr)
+			return nil, fmt.Errorf("journal committed: %w; recovery failed: %w", werr, recErr)
 		}
-		return nil, fmt.Errorf("journal committed: %w", err)
+		return nil, fmt.Errorf("journal committed: %w", werr)
 	}
 
 	cleanupJournal(s.doc)

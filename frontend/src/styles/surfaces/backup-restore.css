@@ -18,10 +18,10 @@
 
 .backup-restore__warning {
   padding: var(--space-3);
-  border: 1px solid var(--color-warning-border, #856404);
+  border: 1px solid var(--color-warning);
   border-radius: var(--radius-md);
-  background-color: var(--color-warning-bg, #fff3cd);
-  color: var(--color-warning-text, #856404);
+  background-color: color-mix(in srgb, var(--color-warning) 15%, transparent);
+  color: var(--color-warning);
   font-size: var(--font-size-sm);
 }
 
@@ -32,10 +32,10 @@
 
 .backup-restore__error {
   padding: var(--space-3);
-  border: 1px solid var(--color-danger-border, #721c24);
+  border: 1px solid var(--color-danger);
   border-radius: var(--radius-md);
-  background-color: var(--color-danger-bg, #f8d7da);
-  color: var(--color-danger-text, #721c24);
+  background-color: color-mix(in srgb, var(--color-danger) 15%, transparent);
+  color: var(--color-danger);
 }
 
 .backup-restore__status {

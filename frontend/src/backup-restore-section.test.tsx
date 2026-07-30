@@ -92,6 +92,7 @@ describe('BackupRestoreSection', () => {
     render(() => <BackupRestoreSection profileClient={client} />)
     fireEvent.click(screen.getByRole('button', { name: 'Create backup' }))
     await waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
       expect(client.createBackup).toHaveBeenCalled()
     })
   })
@@ -103,9 +104,8 @@ describe('BackupRestoreSection', () => {
     render(() => <BackupRestoreSection profileClient={client} />)
     fireEvent.click(screen.getByRole('button', { name: 'Create backup' }))
     await waitFor(() => {
-      expect(
-        (screen.getByRole('button', { name: 'Creating…' }) as HTMLButtonElement).disabled,
-      ).toBe(true)
+      const btn = screen.getByRole('button', { name: 'Creating…' })
+      expect((btn as HTMLButtonElement).disabled).toBe(true)
     })
   })
 

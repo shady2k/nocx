@@ -209,8 +209,8 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	beforeSnap := snap
 	beforeOverrides := overrides
 
-	if err := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides); err != nil {
-		return nil, fmt.Errorf("journal prepared: %w", err)
+	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides); jerr != nil {
+		return nil, fmt.Errorf("journal prepared: %w", jerr)
 	}
 
 	if err := s.connections.ReplaceConnectionSnapshot(targetSnap); err != nil {

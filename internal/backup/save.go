@@ -53,6 +53,7 @@ func nativeSaveDialog(fileName string) (string, error) {
 }
 
 func zenitySave(fileName string) (string, error) {
+	//nolint:gosec
 	cmd := exec.Command("zenity",
 		"--file-selection",
 		"--save",
@@ -78,6 +79,7 @@ func osascriptSave(fileName string) (string, error) {
 		`POSIX path of (choose file name with prompt "Save backup" default name "%s")`,
 		safe,
 	)
+	//nolint:gosec
 	cmd := exec.Command("osascript", "-e", script)
 	out, err := cmd.Output()
 	if err != nil {

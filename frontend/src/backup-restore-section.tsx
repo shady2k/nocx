@@ -216,7 +216,7 @@ export function BackupRestoreSection(props: Props) {
         <div class="backup-restore__warning">
           <strong>Plaintext warning:</strong> {PLAINTEXT_WARNING}
         </div>
-        <Button variant="primary" disabled={busy()} onClick={handleCreate}>
+        <Button variant="primary" disabled={busy()} onClick={() => { void handleCreate() }}>
           {state.creating ? 'Creating…' : 'Create backup'}
         </Button>
       </section>
@@ -232,7 +232,7 @@ export function BackupRestoreSection(props: Props) {
           disabled={busy()}
           resetKey={state.fileInputResetKey}
           buttonLabel="Choose backup file…"
-          onChange={loadPreview}
+          onChange={(f) => { void loadPreview(f) }}
         />
 
         <Show when={state.contents}>
@@ -273,7 +273,7 @@ export function BackupRestoreSection(props: Props) {
               <table class="backup-restore__counts">
                 <thead>
                   <tr>
-                    <th></th>
+                    <th />
                     <th>Settings</th>
                     <th>Connections</th>
                     <th>Groups</th>
@@ -352,7 +352,7 @@ export function BackupRestoreSection(props: Props) {
               <Button
                 variant={state.strategy === 'replace' ? 'danger' : 'primary'}
                 disabled={busy()}
-                onClick={handleRestore}
+                onClick={() => { void handleRestore() }}
               >
                 {state.restoring
                   ? 'Restoring…'

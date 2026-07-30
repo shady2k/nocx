@@ -578,9 +578,9 @@ func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
 
 func computePreviewToken(contents string, strategy RestoreStrategy, snap profile.ConnectionSnapshot, overrides map[string]any) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%d:", len(contents))
+	_, _ = fmt.Fprintf(h, "%d:", len(contents))
 	h.Write([]byte(contents))
-	fmt.Fprintf(h, ":%s:", strategy)
+	_, _ = fmt.Fprintf(h, ":%s:", strategy)
 	canonicalize(h, snap)
 	canonicalize(h, overrides)
 	return fmt.Sprintf("%x", h.Sum(nil))
@@ -589,10 +589,10 @@ func computePreviewToken(contents string, strategy RestoreStrategy, snap profile
 func canonicalize(h hash.Hash, v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		fmt.Fprintf(h, "err:%v", err)
+		_, _ = fmt.Fprintf(h, "err:%v", err)
 		return
 	}
-	fmt.Fprintf(h, "%d:", len(b))
+	_, _ = fmt.Fprintf(h, "%d:", len(b))
 	h.Write(b)
 }
 
@@ -1061,13 +1061,13 @@ func groupFieldsEqual(bg BackupGroup, cg profile.ProfileGroup) bool {
 	var bgSSH any
 	if bg.Defaults != nil && bg.Defaults.SSH != nil {
 		raw, _ := json.Marshal(bg.Defaults.SSH)
-		json.Unmarshal(raw, &bgSSH)
+		_ = json.Unmarshal(raw, &bgSSH)
 	}
 	var cgSSH any
 	if cg.Defaults != nil {
 		if ssh, ok := cg.Defaults["ssh"]; ok {
 			raw, _ := json.Marshal(ssh)
-			json.Unmarshal(raw, &cgSSH)
+			_ = json.Unmarshal(raw, &cgSSH)
 		}
 	}
 	bgJSON, _ := json.Marshal(bgSSH)

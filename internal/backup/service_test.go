@@ -114,7 +114,6 @@ func mustRestore(t *testing.T, svc *backup.Service, contents string, strategy ba
 	return r
 }
 
-func profilePtr(p profile.SSHProfile) *profile.SSHProfile { return &p }
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
@@ -211,7 +210,7 @@ func TestCreate_SettingsOverridesOnly(t *testing.T) {
 	r := mustCreate(t, svc)
 
 	var doc backup.Document
-	json.Unmarshal([]byte(r.Contents), &doc)
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
 	if v, ok := doc.Settings.Overrides["tab.placement"]; !ok || v != "vertical" {
 		t.Errorf("settings overrides = %v", doc.Settings.Overrides)
 	}
@@ -284,7 +283,7 @@ func TestMerge_PreservesExtraConnections(t *testing.T) {
 	r := mustCreate(t, svc)
 	// Modify created backup to simulate what a user would import.
 	var doc backup.Document
-	json.Unmarshal([]byte(r.Contents), &doc)
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
 	doc.Connections.Profiles = []backup.BackupProfile{
 		{ID: "p1", Type: "ssh", Name: "updated", Options: backup.BackupSSHOptions{Host: "h1"}},
 		{ID: "p3", Type: "ssh", Name: "new", Options: backup.BackupSSHOptions{Host: "h3"}},
@@ -335,7 +334,7 @@ func TestReplace_RemovesExtraConnections(t *testing.T) {
 
 	r := mustCreate(t, svc)
 	var doc backup.Document
-	json.Unmarshal([]byte(r.Contents), &doc)
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
 	// Only p1 in backup.
 	doc.Connections.Profiles = []backup.BackupProfile{
 		{ID: "p1", Type: "ssh", Name: "updated", Options: backup.BackupSSHOptions{Host: "h1"}},
@@ -372,7 +371,7 @@ func TestMerge_PreservesCredentialBinding_UnchangedHost(t *testing.T) {
 
 	r := mustCreate(t, svc)
 	var doc backup.Document
-	json.Unmarshal([]byte(r.Contents), &doc)
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
 	doc.Connections.Profiles = []backup.BackupProfile{
 		{ID: "p1", Type: "ssh", Name: "p1-renamed", Options: backup.BackupSSHOptions{Host: "h", Port: 22}},
 	}
@@ -401,7 +400,7 @@ func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
 
 	r := mustCreate(t, svc)
 	var doc backup.Document
-	json.Unmarshal([]byte(r.Contents), &doc)
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
 	doc.Connections.Profiles = []backup.BackupProfile{
 		{ID: "p1", Type: "ssh", Name: "p1", Options: backup.BackupSSHOptions{Host: "new", Port: 22}},
 	}
@@ -463,7 +462,7 @@ func TestRestore_ReplaceSettings(t *testing.T) {
 
 	// Modify backup to only have one override.
 	var doc backup.Document
-	json.Unmarshal([]byte(r.Contents), &doc)
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
 	doc.Settings.Overrides = map[string]any{"clipboard.osc52Suppressed": false}
 	b, _ := json.Marshal(doc)
 	contents := string(b) + "\n"

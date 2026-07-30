@@ -62,8 +62,12 @@ describe('downloadText', () => {
       const el = origCreateElement(tag)
       if (tag === 'a') {
         Object.defineProperty(el, 'download', {
-          set(v: string) { capturedDownload = v },
-          get() { return capturedDownload },
+          set(v: string) {
+            capturedDownload = v
+          },
+          get() {
+            return capturedDownload
+          },
         })
         vi.spyOn(el, 'click').mockImplementation(() => {})
       }

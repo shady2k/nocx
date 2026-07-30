@@ -593,8 +593,8 @@ type testJournal struct {
 
 func readTestJournal(doc *fakeDocStore) (testJournal, error) {
 	var j struct {
-		Version     int                        `json:"version"`
-		State       string                     `json:"state"`
+		Version     int                         `json:"version"`
+		State       string                      `json:"state"`
 		Connections *profile.ConnectionSnapshot `json:"connections,omitempty"`
 		Settings    *map[string]any             `json:"settings,omitempty"`
 	}

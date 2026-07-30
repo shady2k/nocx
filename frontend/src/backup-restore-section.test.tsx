@@ -9,8 +9,16 @@ function mockClient(overrides: Partial<ProfileClient> = {}): ProfileClient {
   return {
     createBackup: vi.fn().mockResolvedValue({
       fileName: 'nocx-backup-20260730T120000Z.json',
-      contents: '{"format":"nocx-backup","version":1,"createdAt":"2026-07-30T12:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}',
-      summary: { settings: 0, connections: 0, groups: 0, credentialBindingsRemoved: 0, groupCredentialBindingsRemoved: 0, groupDefaultKeysOmitted: 0 },
+      contents:
+        '{"format":"nocx-backup","version":1,"createdAt":"2026-07-30T12:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}',
+      summary: {
+        settings: 0,
+        connections: 0,
+        groups: 0,
+        credentialBindingsRemoved: 0,
+        groupCredentialBindingsRemoved: 0,
+        groupDefaultKeysOmitted: 0,
+      },
     } satisfies BackupCreateResult),
     previewBackupRestore: vi.fn().mockResolvedValue({
       previewToken: 'abc123',
@@ -20,13 +28,22 @@ function mockClient(overrides: Partial<ProfileClient> = {}): ProfileClient {
       connections: { included: 0, added: 0, updated: 0, removed: 0 },
       groups: { included: 0, added: 0, updated: 0, removed: 0 },
       connectionsRequiringCredential: [],
-      omissions: { credentialBindingsRemoved: 0, groupCredentialBindingsRemoved: 0, groupDefaultKeysOmitted: 0 },
+      omissions: {
+        credentialBindingsRemoved: 0,
+        groupCredentialBindingsRemoved: 0,
+        groupDefaultKeysOmitted: 0,
+      },
     } satisfies RestorePreview),
     restoreBackup: vi.fn().mockResolvedValue({
       strategy: 'merge',
-      settingsChanged: 0, settingsReset: 0,
-      connectionsAdded: 0, connectionsUpdated: 0, connectionsRemoved: 0,
-      groupsAdded: 0, groupsUpdated: 0, groupsRemoved: 0,
+      settingsChanged: 0,
+      settingsReset: 0,
+      connectionsAdded: 0,
+      connectionsUpdated: 0,
+      connectionsRemoved: 0,
+      groupsAdded: 0,
+      groupsUpdated: 0,
+      groupsRemoved: 0,
       groupCredentialBindingsRemoved: 0,
       connectionsRequiringCredential: [],
     } satisfies RestoreResult),
@@ -86,7 +103,9 @@ describe('BackupRestoreSection', () => {
     render(() => <BackupRestoreSection profileClient={client} />)
     fireEvent.click(screen.getByRole('button', { name: 'Create backup' }))
     await waitFor(() => {
-      expect((screen.getByRole('button', { name: 'Creating…' }) as HTMLButtonElement).disabled).toBe(true)
+      expect(
+        (screen.getByRole('button', { name: 'Creating…' }) as HTMLButtonElement).disabled,
+      ).toBe(true)
     })
   })
 

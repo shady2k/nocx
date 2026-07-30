@@ -287,7 +287,11 @@ export class ProfileClient {
     return this.call('backup.preview', { contents, strategy })
   }
 
-  async restoreBackup(contents: string, strategy: RestoreStrategy, previewToken: string): Promise<RestoreResult> {
+  async restoreBackup(
+    contents: string,
+    strategy: RestoreStrategy,
+    previewToken: string,
+  ): Promise<RestoreResult> {
     return this.call('backup.restore', { contents, strategy, previewToken })
   }
 
@@ -296,7 +300,9 @@ export class ProfileClient {
   }
 }
 
-export interface SaveFileResult { path: string }
+export interface SaveFileResult {
+  path: string
+}
 
 // ── Backup & Restore types (ADR-0015) ────────────────────────────────────
 

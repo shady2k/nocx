@@ -70,11 +70,7 @@ export function FileInput(props: FileInputProps) {
         id={props.id}
         onChange={onChange}
       />
-      <Button
-        variant="default"
-        disabled={props.disabled === true}
-        onClick={() => input.click()}
-      >
+      <Button variant="default" disabled={props.disabled === true} onClick={() => input.click()}>
         {props.buttonLabel ?? 'Choose file…'}
       </Button>
       <span class="ui-file-input__name" data-empty={fileName() === null ? 'true' : undefined}>

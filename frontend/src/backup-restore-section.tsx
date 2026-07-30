@@ -3,7 +3,13 @@
  */
 import { createEffect, on, Show, For } from 'solid-js'
 import { createStore } from 'solid-js/store'
-import type { ProfileClient, RestoreStrategy, BackupCreateResult, RestorePreview, RestoreResult } from './profiles'
+import type {
+  ProfileClient,
+  RestoreStrategy,
+  BackupCreateResult,
+  RestorePreview,
+  RestoreResult,
+} from './profiles'
 import { readBackupText, MAX_BACKUP_BYTES, downloadText } from './backup-file'
 import { Button, FileInput, Radio, MarkerList } from './ui'
 import { showToast } from './ui/toast'
@@ -49,7 +55,10 @@ export function BackupRestoreSection(props: Props) {
       // Try native save dialog first; fall back to browser download.
       let saved = false
       try {
-        const saveResult = await props.profileClient.saveBackupToFile(result.fileName, result.contents)
+        const saveResult = await props.profileClient.saveBackupToFile(
+          result.fileName,
+          result.contents,
+        )
         if (saveResult !== null) {
           showToast({ message: `Backup saved to ${saveResult.path}`, level: 'success' })
           saved = true
@@ -73,7 +82,10 @@ export function BackupRestoreSection(props: Props) {
         showToast({ message: parts.join(' '), level: 'success' })
       }
     } catch (err) {
-      showToast({ message: `Backup failed: ${err instanceof Error ? err.message : String(err)}`, level: 'danger' })
+      showToast({
+        message: `Backup failed: ${err instanceof Error ? err.message : String(err)}`,
+        level: 'danger',
+      })
     } finally {
       setState('creating', false)
     }
@@ -90,7 +102,12 @@ export function BackupRestoreSection(props: Props) {
       setState('contents', text)
       // The createEffect below reacts to contents change and calls previewBackupRestore.
     } catch (err) {
-      setState({ preview: null, previewError: (err as Error).message, fileInputResetKey: state.fileInputResetKey + 1, previewing: false })
+      setState({
+        preview: null,
+        previewError: (err as Error).message,
+        fileInputResetKey: state.fileInputResetKey + 1,
+        previewing: false,
+      })
     }
   }
 
@@ -118,7 +135,6 @@ export function BackupRestoreSection(props: Props) {
     ),
   )
 
-
   const handleRestore = async () => {
     if (!state.contents || !state.preview) return
     const isReplace = state.strategy === 'replace'
@@ -139,14 +155,21 @@ export function BackupRestoreSection(props: Props) {
       if (result.settingsChanged > 0) parts.push(`${result.settingsChanged} settings changed.`)
       if (result.settingsReset > 0) parts.push(`${result.settingsReset} settings reset.`)
       if (result.connectionsAdded > 0) parts.push(`${result.connectionsAdded} connections added.`)
-      if (result.connectionsUpdated > 0) parts.push(`${result.connectionsUpdated} connections updated.`)
-      if (result.connectionsRemoved > 0) parts.push(`${result.connectionsRemoved} connections removed.`)
+      if (result.connectionsUpdated > 0)
+        parts.push(`${result.connectionsUpdated} connections updated.`)
+      if (result.connectionsRemoved > 0)
+        parts.push(`${result.connectionsRemoved} connections removed.`)
       if (result.connectionsRequiringCredential.length > 0) {
         const names = result.connectionsRequiringCredential.map((c) => c.name).join(', ')
         parts.push(`Connections needing credential reassignment: ${names}.`)
       }
       showToast({ message: parts.join(' '), level: 'success' })
-      setState({ contents: null, preview: null, previewError: null, fileInputResetKey: state.fileInputResetKey + 1 })
+      setState({
+        contents: null,
+        preview: null,
+        previewError: null,
+        fileInputResetKey: state.fileInputResetKey + 1,
+      })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('preview is stale')) {
@@ -180,8 +203,14 @@ export function BackupRestoreSection(props: Props) {
         </p>
         <MarkerList
           items={[
-            { text: 'Settings overrides (non-secret), SSH connections (without credential IDs), and connection groups (typed defaults subset without credential bindings).', tone: 'included' },
-            { text: 'Credential records (УЗ), secret references (SecretID, PassphraseSecretID), OS keychain material, ContentDB (conversations, command history), declared defaults.', tone: 'excluded' },
+            {
+              text: 'Settings overrides (non-secret), SSH connections (without credential IDs), and connection groups (typed defaults subset without credential bindings).',
+              tone: 'included',
+            },
+            {
+              text: 'Credential records (УЗ), secret references (SecretID, PassphraseSecretID), OS keychain material, ContentDB (conversations, command history), declared defaults.',
+              tone: 'excluded',
+            },
           ]}
         />
         <div class="backup-restore__warning">
@@ -282,25 +311,39 @@ export function BackupRestoreSection(props: Props) {
                 <div class="backup-restore__warning">
                   <strong>Connections requiring credential reassignment:</strong>
                   <ul>
-                    <For each={p().connectionsRequiringCredential}>
-                      {(c) => <li>{c.name}</li>}
-                    </For>
+                    <For each={p().connectionsRequiringCredential}>{(c) => <li>{c.name}</li>}</For>
                   </ul>
                 </div>
               </Show>
 
-              <Show when={(p().omissions.credentialBindingsRemoved + p().omissions.groupCredentialBindingsRemoved + p().omissions.groupDefaultKeysOmitted) > 0}>
+              <Show
+                when={
+                  p().omissions.credentialBindingsRemoved +
+                    p().omissions.groupCredentialBindingsRemoved +
+                    p().omissions.groupDefaultKeysOmitted >
+                  0
+                }
+              >
                 <div class="backup-restore__warning">
                   <strong>Omissions:</strong>
                   <ul>
                     <Show when={p().omissions.credentialBindingsRemoved > 0}>
-                      <li>{p().omissions.credentialBindingsRemoved} connection credential binding(s) removed</li>
+                      <li>
+                        {p().omissions.credentialBindingsRemoved} connection credential binding(s)
+                        removed
+                      </li>
                     </Show>
                     <Show when={p().omissions.groupCredentialBindingsRemoved > 0}>
-                      <li>{p().omissions.groupCredentialBindingsRemoved} group credential binding(s) removed</li>
+                      <li>
+                        {p().omissions.groupCredentialBindingsRemoved} group credential binding(s)
+                        removed
+                      </li>
                     </Show>
                     <Show when={p().omissions.groupDefaultKeysOmitted > 0}>
-                      <li>{p().omissions.groupDefaultKeysOmitted} group default key(s) omitted from backup</li>
+                      <li>
+                        {p().omissions.groupDefaultKeysOmitted} group default key(s) omitted from
+                        backup
+                      </li>
                     </Show>
                   </ul>
                 </div>
@@ -311,7 +354,11 @@ export function BackupRestoreSection(props: Props) {
                 disabled={busy()}
                 onClick={handleRestore}
               >
-                {state.restoring ? 'Restoring…' : state.strategy === 'replace' ? 'Replace configuration' : 'Merge backup'}
+                {state.restoring
+                  ? 'Restoring…'
+                  : state.strategy === 'replace'
+                    ? 'Replace configuration'
+                    : 'Merge backup'}
               </Button>
             </div>
           )}

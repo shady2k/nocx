@@ -28,11 +28,11 @@ func SaveToFile(fileName, contents string) (*SaveResult, error) {
 
 	// Ensure parent directory exists.
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create directory %s: %w", dir, err)
 	}
 
-	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		return nil, fmt.Errorf("write file %s: %w", path, err)
 	}
 

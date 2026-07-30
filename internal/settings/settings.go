@@ -826,7 +826,6 @@ func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
 	}, nil
 }
 
-
 // ── Non-secret override snapshot (ADR-0015) ────────────────────────────
 
 // PendingNotification is an opaque token produced by a successful
@@ -969,6 +968,7 @@ func validateValue(d Descriptor, val any) error {
 	}
 	return nil
 }
+
 // ── Reset ──────────────────────────────────────────────────────────────
 
 // Reset restores a setting to its declared default. Secret-class settings

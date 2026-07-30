@@ -9,16 +9,18 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
-const journalDocName = "backup-restore-journal.json"
-const journalVersion = 1
+const (
+	journalDocName = "backup-restore-journal.json"
+	journalVersion = 1
+)
 
 // restoreJournal is the on-disk crash-recovery journal.
 // Absent document = idle. Unknown version/state = recovery error.
 type restoreJournal struct {
-	Version     int                       `json:"version"`
-	State       string                    `json:"state"` // "idle" | "prepared" | "committed"
+	Version     int                         `json:"version"`
+	State       string                      `json:"state"` // "idle" | "prepared" | "committed"
 	Connections *profile.ConnectionSnapshot `json:"connections,omitempty"`
-	Settings    *map[string]any            `json:"settings,omitempty"`
+	Settings    *map[string]any             `json:"settings,omitempty"`
 }
 
 // journalState is the in-memory representation.

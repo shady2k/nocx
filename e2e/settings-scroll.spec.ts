@@ -10,7 +10,7 @@ import { test, expect, type Page } from './harness'
 // and no section that contains rows overflows a short window (measured in WebKit
 // at 1024x520 — Clipboard and Interface both fit, 482px of content in 482px of
 // scroller). The section that does overflow is Backup & Restore, at
-// 1468px, so that is where the chain is now observable. The overflow assertion
+// ~800px, so that is where the chain is now observable. The overflow assertion
 // comes first on purpose: if that section ever shrinks, this test must fail
 // loudly rather than pass because there was nothing to scroll (nocx-pp3y.1).
 
@@ -63,7 +63,7 @@ async function lastSectionReachable(page: Page): Promise<boolean> {
 }
 
 test.describe('settings scroll — normal', () => {
-  test.use({ viewport: { width: 1024, height: 520 } })
+  test.use({ viewport: { width: 1024, height: 380 } })
 
   test('scrolls the last section into view in a short window (nocx-82l9.2)', async ({
     page,

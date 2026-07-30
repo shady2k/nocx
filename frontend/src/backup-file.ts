@@ -7,7 +7,11 @@ export async function readBackupText(file: File): Promise<string> {
   return file.text()
 }
 
-export function downloadText(fileName: string, contents: string, mimeType = 'application/json'): void {
+export function downloadText(
+  fileName: string,
+  contents: string,
+  mimeType = 'application/json',
+): void {
   const blob = new Blob([contents], { type: mimeType })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

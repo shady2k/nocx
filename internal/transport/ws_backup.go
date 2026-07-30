@@ -59,7 +59,6 @@ func (s *WSServer) handleBackupCreate(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 	result, err := s.backupService.Create()
-
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "backup.create: internal error"))
 		s.log.Warn("backup.create failed", "error", err)
@@ -106,7 +105,6 @@ func (s *WSServer) handleBackupPreview(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 	result, err := s.backupService.Preview(params.Contents, strategy)
-
 	if err != nil {
 		if errors.Is(err, backup.ErrInvalidDocument) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "backup.preview: "+err.Error()))
@@ -158,7 +156,6 @@ func (s *WSServer) handleBackupRestore(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 	result, err := s.backupService.Restore(params.Contents, strategy, params.PreviewToken)
-
 	if err != nil {
 		if errors.Is(err, backup.ErrInvalidDocument) {
 			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "backup.restore: "+err.Error()))

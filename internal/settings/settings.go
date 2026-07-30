@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -825,6 +826,149 @@ func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
 	}, nil
 }
 
+
+// ── Non-secret override snapshot (ADR-0015) ────────────────────────────
+
+// PendingNotification is an opaque token produced by a successful
+// ReplaceNonSecretOverrides call. The caller must hold it and later pass it
+// to Publish after the external transaction is committed.
+type PendingNotification struct {
+	ch change
+}
+
+// NonSecretOverrides returns a copy of only the persisted overrides for
+// non-secret settings — values whose DataClass is PublicConfig,
+// PrivateMetadata, or PrivateContent. Declared defaults and secret refs
+// are never included. SecretAuthenticator keys are excluded.
+func (r *Registry) NonSecretOverrides() map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]any, len(r.values))
+	for key, val := range r.values {
+		d := descriptorByKey(key)
+		if d == nil {
+			continue
+		}
+		if d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
+			continue
+		}
+		out[key] = val
+	}
+	return out
+}
+
+// ReplaceNonSecretOverrides validates every key in the supplied map against
+// its Descriptor (known key, correct type, min/max/select constraints,
+// non-secret data class) and then atomically replaces all eligible overrides
+// with the supplied values. Current secret refs are preserved unchanged.
+// The revision is bumped exactly once. Returns a PendingNotification for the
+// caller to Publish after the external transaction is committed.
+func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNotification, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	newValues := copyValues(r.values)
+	var changedKeys []string
+
+	// Validate all keys first — no partial writes.
+	for key, val := range values {
+		d := descriptorByKey(key)
+		if d == nil {
+			return PendingNotification{}, &ValidationError{SettingKey: key, Message: "unknown setting key"}
+		}
+		if d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
+			return PendingNotification{}, &ValidationError{SettingKey: key, Message: "secret-class settings cannot be bulk-replaced"}
+		}
+		if err := validateValue(d, val); err != nil {
+			return PendingNotification{}, err
+		}
+	}
+
+	for key, val := range values {
+		existing, had := newValues[key]
+		if !had || existing != val {
+			changedKeys = append(changedKeys, key)
+		}
+		newValues[key] = val
+	}
+
+	// Remove keys that are absent from the supplied set (reset to default).
+	for key := range newValues {
+		d := descriptorByKey(key)
+		if d == nil || d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
+			continue
+		}
+		if _, kept := values[key]; !kept {
+			changedKeys = append(changedKeys, key)
+			delete(newValues, key)
+		}
+
+	}
+	sort.Strings(changedKeys)
+	ch, err := r.commitLocked(newValues, r.refs, changedKeys)
+	if err != nil {
+		return PendingNotification{}, err
+	}
+	return PendingNotification{ch: ch}, nil
+}
+
+// Publish delivers the deferred notification produced by
+// ReplaceNonSecretOverrides. Must be called after the external transaction
+// is committed and after r.mu is released.
+func (r *Registry) Publish(n PendingNotification) {
+	r.finishCommit(n.ch)
+}
+
+// validateValue checks that val matches the Descriptor's type and constraints.
+func validateValue(d Descriptor, val any) error {
+	switch d.Control() {
+	case ControlToggle:
+		if _, ok := val.(bool); !ok {
+			return &ValidationError{SettingKey: d.Key(), Message: "expected boolean"}
+		}
+	case ControlText:
+		s, ok := val.(string)
+		if !ok {
+			return &ValidationError{SettingKey: d.Key(), Message: "expected string"}
+		}
+		def := d.Default()
+		if def != nil {
+			if ds, ok := def.(string); ok && ds != "" && s == "" {
+				return &ValidationError{SettingKey: d.Key(), Message: "cannot be empty"}
+			}
+		}
+	case ControlNumber:
+		f, ok := toFloat64(val)
+		if !ok {
+			return &ValidationError{SettingKey: d.Key(), Message: "expected number"}
+		}
+		if min := d.Min(); min != nil && f < *min {
+			return &ValidationError{SettingKey: d.Key(), Message: fmt.Sprintf("minimum is %v", *min)}
+		}
+		if max := d.Max(); max != nil && f > *max {
+			return &ValidationError{SettingKey: d.Key(), Message: fmt.Sprintf("maximum is %v", *max)}
+		}
+	case ControlSelect:
+		s, ok := val.(string)
+		if !ok {
+			return &ValidationError{SettingKey: d.Key(), Message: "expected string"}
+		}
+		opts := d.Options()
+		found := false
+		for _, o := range opts {
+			if o.Value == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return &ValidationError{SettingKey: d.Key(), Message: fmt.Sprintf("invalid option %q", s)}
+		}
+	default:
+		return &ValidationError{SettingKey: d.Key(), Message: "unsupported control kind"}
+	}
+	return nil
+}
 // ── Reset ──────────────────────────────────────────────────────────────
 
 // Reset restores a setting to its declared default. Secret-class settings

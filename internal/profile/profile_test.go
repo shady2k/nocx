@@ -316,3 +316,84 @@ func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
 		t.Fatalf("want the bound credential stored, got %+v", creds)
 	}
 }
+
+// ── Connection snapshot (ADR-0015) ─────────────────────────────────────
+
+func TestConnectionSnapshotRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewJSONStore(filepath.Join(dir, "profiles.json"))
+
+	prof := SSHProfile{
+		Base:    Base{ID: "ssh:custom:snap:0001", Type: "ssh", Name: "snap"},
+		Options: SSHProfileOptions{Host: "h.example.com", Port: 22, User: "u"},
+	}
+	grp := ProfileGroup{ID: "g1", Name: "G1"}
+
+	if err := store.SaveProfile(prof.ToPartial()); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+	if err := store.SaveGroup(grp); err != nil {
+		t.Fatalf("SaveGroup: %v", err)
+	}
+
+	snap, err := store.LoadConnectionSnapshot()
+	if err != nil {
+		t.Fatalf("LoadConnectionSnapshot: %v", err)
+	}
+	if len(snap.Profiles) != 1 || snap.Profiles[0].Name != "snap" {
+		t.Errorf("profiles = %+v", snap.Profiles)
+	}
+	if len(snap.Groups) != 1 || snap.Groups[0].ID != "g1" {
+		t.Errorf("groups = %+v", snap.Groups)
+	}
+}
+
+func TestReplaceConnectionSnapshotPreservesCredentials(t *testing.T) {
+	dir := t.TempDir()
+	store := NewJSONStore(filepath.Join(dir, "profiles.json"))
+
+	cred := Credential{
+		ID:       NewCredentialID("keep"),
+		Name:     "keep",
+		Username: "alice",
+		Auth:     AuthPassword,
+		Host:     "keep.example.com",
+	}
+	if err := store.SaveCredential(cred); err != nil {
+		t.Fatalf("SaveCredential: %v", err)
+	}
+	prof := SSHProfile{
+		Base:    Base{ID: "ssh:custom:rep:0001", Type: "ssh", Name: "rep"},
+		Options: SSHProfileOptions{Host: "h.example.com", CredentialID: cred.ID},
+	}
+	if err := store.SaveProfile(prof.ToPartial()); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+
+	newSnap := ConnectionSnapshot{
+		Profiles: []SSHProfile{
+			{Base: Base{ID: "ssh:custom:rep2:0001", Type: "ssh", Name: "rep2"}, Options: SSHProfileOptions{Host: "h2.example.com"}},
+		},
+		Groups: []ProfileGroup{{ID: "g2", Name: "G2"}},
+	}
+	if err := store.ReplaceConnectionSnapshot(newSnap); err != nil {
+		t.Fatalf("ReplaceConnectionSnapshot: %v", err)
+	}
+
+	creds, err := store.LoadCredentials()
+	if err != nil {
+		t.Fatalf("LoadCredentials: %v", err)
+	}
+	if len(creds) != 1 || creds[0].ID != cred.ID {
+		t.Errorf("credentials should be preserved, got %+v", creds)
+	}
+
+	profs, _ := store.LoadProfiles()
+	if len(profs) != 1 || profs[0].Name != "rep2" {
+		t.Errorf("profiles should be replaced, got %+v", profs)
+	}
+	grps, _ := store.LoadGroups()
+	if len(grps) != 1 || grps[0].ID != "g2" {
+		t.Errorf("groups should be replaced, got %+v", grps)
+	}
+}

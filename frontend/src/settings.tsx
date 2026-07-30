@@ -3,7 +3,7 @@
  *
  * Replaces the imperative SettingsViewImpl + SettingsContent rendering
  * (both deleted in this commit).  Domain logic stays in settings-domain.ts.
- * ExportSection is rendered as a child component — no mountExportSection.
+ * BackupRestoreSection is rendered as a child component — no mount helper.
  *
  * Two defects fixed (not preserved):
  *   - nocx-x6w9: exactly ONE search box and ONE modified filter (both in rail)
@@ -31,7 +31,7 @@ import {
   type SettingsMirror,
   type SettingsSnapshot,
 } from './settings-domain'
-import { ExportSection } from './export-section'
+import { BackupRestoreSection } from './backup-restore-section'
 import { log } from './log'
 import {
   Page,
@@ -298,15 +298,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
       id: s,
       title: s,
     }))
-    // Export used to render unconditionally beneath the settings list, which
-    // meant a search for something that matches nothing still showed a page of
-    // export cards under "No settings match your search". It is a page.
-    const exportPage: SettingsPage = {
+    const backupPage: SettingsPage = {
       kind: 'component',
-      id: 'export',
-      title: 'Export / Backup / Import',
+      id: 'backup-restore',
+      title: 'Backup & Restore',
       scrollMode: 'page',
-      renderContent: () => <ExportSection profileClient={props.profileClient} />,
+      renderContent: () => <BackupRestoreSection profileClient={props.profileClient} />,
     }
     const connectionPage: SettingsPage = {
       kind: 'component',
@@ -321,7 +318,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         />
       ),
     }
-    return [...generated, exportPage, connectionPage]
+    return [...generated, backupPage, connectionPage]
   })
 
   /** The active component page, or null when a generated section is showing. */

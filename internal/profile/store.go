@@ -234,3 +234,33 @@ func (s *JSONStore) DeleteCredential(id string) error {
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// Connection snapshot (ADR-0015)
+// ---------------------------------------------------------------------------
+
+// LoadConnectionSnapshot returns an atomic copy of all profiles and groups
+// without credential metadata.
+func (s *JSONStore) LoadConnectionSnapshot() (ConnectionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return ConnectionSnapshot{}, err
+	}
+	return ConnectionSnapshot{Profiles: d.Profiles, Groups: d.Groups}, nil
+}
+
+// ReplaceConnectionSnapshot atomically replaces profiles and groups in a
+// single write, preserving Credential metadata structurally equal.
+func (s *JSONStore) ReplaceConnectionSnapshot(snapshot ConnectionSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	d.Profiles = snapshot.Profiles
+	d.Groups = snapshot.Groups
+	return s.writeLocked(d)
+}

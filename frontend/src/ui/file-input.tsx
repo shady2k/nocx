@@ -20,7 +20,7 @@
  *
  * No `class` prop — identity is always `.ui-file-input` on the wrapper.
  */
-import { createSignal } from 'solid-js'
+import { createSignal, createEffect, on } from 'solid-js'
 import { Button } from './button'
 
 export interface FileInputProps {
@@ -31,11 +31,25 @@ export interface FileInputProps {
   id?: string
   /** Trigger label. Defaults to "Choose file…". */
   buttonLabel?: string
+  /** When this key changes, the selected file is cleared. */
+  resetKey?: number
 }
 
 export function FileInput(props: FileInputProps) {
   const [fileName, setFileName] = createSignal<string | null>(null)
   let input!: HTMLInputElement
+
+  // Reset the input when resetKey changes (deferred — skip initial mount).
+  createEffect(
+    on(
+      () => props.resetKey,
+      () => {
+        if (input) input.value = ''
+        setFileName(null)
+      },
+      { defer: true },
+    ),
+  )
 
   const onChange = (e: Event) => {
     const target = e.currentTarget as HTMLInputElement
@@ -56,14 +70,9 @@ export function FileInput(props: FileInputProps) {
         id={props.id}
         onChange={onChange}
       />
-      {/* No `size` override. It was `sm` at first, which made this the one button
-          on the export page a size smaller than every other — and a file picker is
-          not a lesser action than the Import next to it. */}
       <Button
         variant="default"
         disabled={props.disabled === true}
-        // Delegates to the hidden input rather than reimplementing the picker:
-        // showOpenFilePicker() is not available in every host this app runs in.
         onClick={() => input.click()}
       >
         {props.buttonLabel ?? 'Choose file…'}

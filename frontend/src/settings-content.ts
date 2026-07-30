@@ -2,7 +2,7 @@
 // SettingsContent — wraps the Solid settings component as a TabContent.
 // Thin adapter over SolidTabContent; keeps existing public behaviour
 // (focus, scrollToKey). Page owns the narrow breakpoint
-// (base.css @media max-width: 640px). ExportSection is rendered as a
+// (base.css @media max-width: 640px). BackupRestoreSection is rendered as a
 // child component inside SettingsComponent.
 // ═══════════════════════════════════════════════════════════════════════════
 

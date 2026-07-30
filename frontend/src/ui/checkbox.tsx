@@ -4,7 +4,6 @@
  * Justified by callers:
  * - settings.ts: standalone input[type=checkbox] for toggle controls; filter checkbox in label
  * - connections.ts: checkboxField() helper — div.cm-field > label + input[type=checkbox]
- * - export-section.ts: show/hide password checkbox
  */
 import { Show } from 'solid-js'
 

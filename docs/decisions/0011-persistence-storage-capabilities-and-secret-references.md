@@ -8,6 +8,7 @@
   telemetry — ever), beads `nocx-1ei` (settings registry), `nocx-jap` (config is a
   stub), `nocx-p7g` (PR #11 persistence), `nocx-ea6` (PR #11 rework).
 - **Revises:** the architecture's "plain files in the OS config dir" line, by naming
+- **Partially superseded by:** ADR-0015 (§7 — Export and backup modes)
   three storage classes instead of one, and by admitting a database for one of them.
 
 ## Context

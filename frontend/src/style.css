@@ -45,13 +45,12 @@
 @import './styles/components/page-section.css';
 @import './styles/components/toast.css';
 @import './styles/components/marker-list.css';
-@import './styles/components/code-block.css';
 @import './styles/components/tab-strip.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
-@import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
+@import './styles/surfaces/backup-restore.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
 

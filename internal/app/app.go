@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/connection"
-	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -81,6 +81,13 @@ func New(opts ...Option) (*App, error) {
 	credStore := credential.NewKeychain()
 	settingsRegistry := settings.New(docStore, credStore)
 
+	// Backup service (ADR-0015): uses profile store, settings registry, and
+	// the shared DocumentStore for its crash-recovery journal.
+	backupSvc := backup.NewService(profileStore, settingsRegistry, docStore)
+	if err := backupSvc.Recover(); err != nil {
+		return nil, fmt.Errorf("backup recovery: %w", err)
+	}
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
@@ -88,8 +95,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialStore(credStore),
 		transport.WithProfileResolver(connection.NewResolver(profileStore, profileStore, credStore)),
 		transport.WithSettingsRegistry(settingsRegistry),
-		transport.WithExportPaths(paths),
-		transport.WithExportContentDB(content.NewStub(logger)),
+		transport.WithBackupService(backupSvc),
 	}
 	if o.wsAddr != "" {
 		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))

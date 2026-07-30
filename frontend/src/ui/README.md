@@ -25,7 +25,6 @@ them takes a `class` prop; the structural containers that still do are marked.
 | **FileInput**   | `file-input.tsx`   | `ui-file-input`, `__native`, `__name`        | kit Button as trigger; native input hidden but focusable               |
 | **Toast**       | `toast.tsx`        | `ui-toast-host`, `ui-toast`, `__message`     | `data-level`: info \| success \| warning \| danger                     |
 | **MarkerList**  | `marker-list.tsx`  | `ui-marker-list` + `__item/__marker/__text`  | `data-tone`: included \| excluded \| note                              |
-| **CodeBlock**   | `code-block.tsx`   | `ui-code-block`                              | preformatted machine output; scroll-capped                             |
 | **Badge**       | `badge.tsx`        | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                      |
 | **EmptyState**  | `empty-state.tsx`  | `ui-empty-state` + `__title/__desc/__action` | —                                                                      |
 | **Field**       | `field.tsx`        | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                          |

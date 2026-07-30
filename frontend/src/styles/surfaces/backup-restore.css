@@ -1,0 +1,73 @@
+/* Backup & Restore section (ADR-0015) */
+.backup-restore {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.backup-restore__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.backup-restore__section h3 {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+}
+
+.backup-restore__warning {
+  padding: var(--space-3);
+  border: 1px solid var(--color-warning-border, #856404);
+  border-radius: var(--radius-md);
+  background-color: var(--color-warning-bg, #fff3cd);
+  color: var(--color-warning-text, #856404);
+  font-size: var(--font-size-sm);
+}
+
+.backup-restore__warning ul {
+  margin-top: var(--space-1);
+  padding-left: var(--space-4);
+}
+
+.backup-restore__error {
+  padding: var(--space-3);
+  border: 1px solid var(--color-danger-border, #721c24);
+  border-radius: var(--radius-md);
+  background-color: var(--color-danger-bg, #f8d7da);
+  color: var(--color-danger-text, #721c24);
+}
+
+.backup-restore__status {
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
+.backup-restore__preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.backup-restore__counts {
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.backup-restore__counts th,
+.backup-restore__counts td {
+  padding: var(--space-1) var(--space-3);
+  text-align: right;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.backup-restore__counts th:first-child,
+.backup-restore__counts td:first-child {
+  text-align: left;
+  font-weight: var(--font-weight-medium);
+}
+
+.backup-restore__counts th {
+  font-weight: var(--font-weight-semibold);
+  border-bottom-width: 2px;
+}

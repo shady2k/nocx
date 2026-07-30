@@ -19,7 +19,6 @@ export { FileInput, type FileInputProps } from './file-input'
 export { EmptyState, type EmptyStateProps } from './empty-state'
 export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'
-export { CodeBlock, type CodeBlockProps } from './code-block'
 export {
   createFormValidation,
   required,

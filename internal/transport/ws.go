@@ -1951,6 +1951,13 @@ func (s *WSServer) handleTabbyPreview(wconn *wsConn, req jsonrpcRequest) {
 // handleTabbyExecute executes a previously previewed Tabby import plan.
 // Takes the plan token from the preview response.
 func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.profiles == nil || s.groups == nil || s.credentials == nil || s.profileSvc == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "import not available"))
 		return

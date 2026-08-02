@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-30
-- **Related:** ADR-0006 (reusable credentials), ADR-0011 (persistence: storage capabilities
+- **Related:** ADR-0017 (a connection references a secret), ADR-0011 (persistence: storage capabilities
   and secrets as opaque references)
 - **Revises:** ADR-0011 §7
 

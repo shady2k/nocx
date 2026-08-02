@@ -397,8 +397,14 @@ func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
-			Base:    profile.Base{ID: "p1", Type: "ssh", Name: "p1"},
-			Options: profile.StoredSSHProfileOptions{Host: "old", Port: new(22), PasswordSecret: "cred:drop:abc"},
+			Base: profile.Base{ID: "p1", Type: "ssh", Name: "p1"},
+			Options: profile.StoredSSHProfileOptions{
+				Host:                "old",
+				Port:                new(22),
+				PasswordSecret:      "cred:drop:abc",
+				KeySecret:           "cred:key:abc",
+				KeyPassphraseSecret: "cred:pass:abc",
+			},
 		},
 	}
 
@@ -418,6 +424,12 @@ func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
 	snap, _ := conn.LoadConnectionSnapshot()
 	if snap.Profiles[0].Options.PasswordSecret != "" {
 		t.Errorf("passwordSecret = %q, want empty (cleared on host change)", snap.Profiles[0].Options.PasswordSecret)
+	}
+	if snap.Profiles[0].Options.KeySecret != "" {
+		t.Errorf("keySecret = %q, want empty (cleared on host change)", snap.Profiles[0].Options.KeySecret)
+	}
+	if snap.Profiles[0].Options.KeyPassphraseSecret != "" {
+		t.Errorf("keyPassphraseSecret = %q, want empty (cleared on host change)", snap.Profiles[0].Options.KeyPassphraseSecret)
 	}
 }
 
@@ -613,4 +625,50 @@ func readTestJournal(doc *fakeDocStore) (testJournal, error) {
 		connections: j.Connections,
 		settings:    j.Settings,
 	}, nil
+}
+
+func TestRestore_GroupDefaultsRoundTrip(t *testing.T) {
+	svc, conn, _, _ := newFakeService()
+
+	conn.snap.Groups = []profile.ProfileGroup{
+		{
+			ID:   "g1",
+			Name: "G1",
+			Defaults: &profile.ProfileDefaults{
+				SparseSSHOptions: profile.SparseSSHOptions{
+					Port: new(2222),
+					User: new("alice"),
+				},
+			},
+		},
+	}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
+	if doc.Connections.Groups[0].Defaults == nil || doc.Connections.Groups[0].Defaults.SSH == nil {
+		t.Fatal("group defaults must be carried in the backup")
+	}
+	if doc.Connections.Groups[0].Defaults.SSH.Options.Port != 2222 {
+		t.Errorf("backup group default port = %d, want 2222", doc.Connections.Groups[0].Defaults.SSH.Options.Port)
+	}
+
+	// Restore (replace) into an empty store: defaults must come back.
+	conn.snap.Groups = []profile.ProfileGroup{}
+	b, _ := json.Marshal(doc)
+	contents := string(b) + "\n"
+	preview := mustPreview(t, svc, contents, backup.RestoreReplace)
+	mustRestore(t, svc, contents, backup.RestoreReplace, preview.PreviewToken)
+
+	snap, _ := conn.LoadConnectionSnapshot()
+	if len(snap.Groups) != 1 {
+		t.Fatalf("groups after restore = %d, want 1", len(snap.Groups))
+	}
+	g := snap.Groups[0]
+	if g.Defaults == nil || g.Defaults.Port == nil || *g.Defaults.Port != 2222 {
+		t.Errorf("restored group defaults port = %+v, want 2222", g.Defaults)
+	}
+	if g.Defaults.User == nil || *g.Defaults.User != "alice" {
+		t.Errorf("restored group defaults user = %+v, want alice", g.Defaults)
+	}
 }

@@ -117,7 +117,7 @@ Files exceeding this limit are rejected on both create and restore.
 
 ### Choosing a file
 
-Use the file picker to select a previously created `nocx-backup-v1` JSON file.
+Use the file picker to select a previously created backup file (the `nocx-backup` format, version 1).
 The file is read client-side and validated before preview.
 
 ### Restore strategies

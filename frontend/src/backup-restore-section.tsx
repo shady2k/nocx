@@ -48,6 +48,7 @@ export function BackupRestoreSection(props: Props) {
   const busy = () => state.creating || state.previewing || state.restoring
 
   const handleCreate = async () => {
+    if (state.creating) return
     setState('creating', true)
     try {
       const result: BackupCreateResult = await props.profileClient.createBackup()
@@ -159,6 +160,11 @@ export function BackupRestoreSection(props: Props) {
         parts.push(`${result.connectionsUpdated} connections updated.`)
       if (result.connectionsRemoved > 0)
         parts.push(`${result.connectionsRemoved} connections removed.`)
+      if (result.groupsAdded > 0) parts.push(`${result.groupsAdded} groups added.`)
+      if (result.groupsUpdated > 0) parts.push(`${result.groupsUpdated} groups updated.`)
+      if (result.groupsRemoved > 0) parts.push(`${result.groupsRemoved} groups removed.`)
+      if (result.groupCredentialBindingsRemoved > 0)
+        parts.push(`${result.groupCredentialBindingsRemoved} group binding(s) removed.`)
       if (result.connectionsRequiringCredential.length > 0) {
         const names = result.connectionsRequiringCredential.map((c) => c.name).join(', ')
         parts.push(`Connections needing credential reassignment: ${names}.`)

@@ -400,10 +400,15 @@ func (s *JSONStore) LoadConnectionSnapshot() (ConnectionSnapshot, error) {
 }
 
 // ReplaceConnectionSnapshot atomically replaces profiles and groups in a
-// single write, preserving Credential metadata structurally equal.
+// single write. The group tree is validated before the write so a restore
+// cannot put an inconsistent tree (cycles, missing parents, duplicate ids)
+// into the store — the same invariant every other group write enforces.
 func (s *JSONStore) ReplaceConnectionSnapshot(snapshot ConnectionSnapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ValidateGroupTree(snapshot.Groups); err != nil {
+		return err
+	}
 	d, err := s.load()
 	if err != nil {
 		return err

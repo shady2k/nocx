@@ -10,18 +10,18 @@ import { test, expect, type Page } from './harness'
 // and no section that contains rows overflows a short window (measured in WebKit
 // at 1024x520 — Clipboard and Interface both fit, 482px of content in 482px of
 // scroller). The section that does overflow is Backup & Restore, at
-// ~800px, so that is where the chain is now observable. The overflow assertion
+// roughly 500-600px, so that is where the chain is now observable. The overflow assertion
 // comes first on purpose: if that section ever shrinks, this test must fail
 // loudly rather than pass because there was nothing to scroll (nocx-pp3y.1).
 
-const EXPORT_SECTION = '.ui-settings-section-nav-item[data-section="Backup & Restore"]'
+const BACKUP_SECTION = '.ui-settings-section-nav-item[data-section="Backup & Restore"]'
 
 async function openOverflowingSection(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
   await page.keyboard.press('Meta+,')
   await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-  await page.locator(`${EXPORT_SECTION} button`).click()
+  await page.locator(`${BACKUP_SECTION} button`).click()
 }
 
 /** The scroller must actually have something to scroll, or the rest proves nothing. */

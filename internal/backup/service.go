@@ -428,6 +428,13 @@ func optAuth(v profile.AuthMode) *profile.AuthMode {
 	return &v
 }
 
+func optBeh(v profile.BehaviorOnSessionEnd) *profile.BehaviorOnSessionEnd {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
 // getGroupCredentialID extracts credentialId from an untyped group defaults map.
 func getGroupCredentialID(g profile.ProfileGroup) string {
 	if g.Defaults == nil {
@@ -605,6 +612,28 @@ func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
 		seenGroupIDs[g.ID] = true
 		if g.Name == "" {
 			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has empty name", ErrInvalidDocument, g.ID)
+		}
+		// Group default SSH options get the same validation as profile options:
+		// restore writes them into the store, and invalid values would reach
+		// profiles inheriting from the group.
+		if g.Defaults != nil && g.Defaults.SSH != nil {
+			o := g.Defaults.SSH.Options
+			if o.Port != 0 && (o.Port < 1 || o.Port > 65535) {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has invalid default port %d", ErrInvalidDocument, g.ID, o.Port)
+			}
+			if o.KeepaliveInterval < 0 {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has negative default keepaliveInterval", ErrInvalidDocument, g.ID)
+			}
+			if o.KeepaliveCountMax < 0 {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has negative default keepaliveCountMax", ErrInvalidDocument, g.ID)
+			}
+			if o.ReadyTimeout < 0 {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has negative default readyTimeout", ErrInvalidDocument, g.ID)
+			}
+			validAuth := map[profile.AuthMode]bool{"": true, "password": true, "publicKey": true, "agent": true, "keyboardInteractive": true}
+			if !validAuth[o.Auth] {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q has invalid default auth mode %q", ErrInvalidDocument, g.ID, o.Auth)
+			}
 		}
 	}
 
@@ -922,16 +951,17 @@ func backupToProfile(bp BackupProfile) profile.SSHProfile {
 			IsBuiltin:            bp.IsBuiltin,
 		},
 		Options: profile.StoredSSHProfileOptions{
-			Host:              bp.Options.Host,
-			Port:              optInt(bp.Options.Port),
-			User:              optStr(bp.Options.User),
-			Auth:              optAuth(bp.Options.Auth),
-			KeepaliveInterval: optInt(bp.Options.KeepaliveInterval),
-			KeepaliveCountMax: optInt(bp.Options.KeepaliveCountMax),
-			ReadyTimeout:      optInt(bp.Options.ReadyTimeout),
-			JumpHost:          optStr(bp.Options.JumpHost),
-			AgentForward:      optBool(bp.Options.AgentForward),
-			CanBeJumpServer:   optBool(bp.Options.CanBeJumpServer),
+			Host:                 bp.Options.Host,
+			Port:                 optInt(bp.Options.Port),
+			User:                 optStr(bp.Options.User),
+			Auth:                 optAuth(bp.Options.Auth),
+			KeepaliveInterval:    optInt(bp.Options.KeepaliveInterval),
+			KeepaliveCountMax:    optInt(bp.Options.KeepaliveCountMax),
+			ReadyTimeout:         optInt(bp.Options.ReadyTimeout),
+			JumpHost:             optStr(bp.Options.JumpHost),
+			AgentForward:         optBool(bp.Options.AgentForward),
+			CanBeJumpServer:      optBool(bp.Options.CanBeJumpServer),
+			BehaviorOnSessionEnd: optBeh(bp.BehaviorOnSessionEnd),
 		},
 	}
 }

@@ -544,6 +544,32 @@ describe('TabManager', () => {
     expect(tabButtons[2].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
+  // ── activity signal — terminal output vs user input ─────────────────
+
+  it('terminal output alone does not fire vault onActivity', async () => {
+    const { client, manager } = await mountTabManager()
+    const activity = vi.fn()
+    manager.onActivity = activity
+
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalled()
+    })
+
+    // Fire terminal output on the active session.
+    const session = client._sessions[0]
+    session.fireData('some command output')
+
+    // Terminal output should NOT trigger activity.
+    expect(activity).not.toHaveBeenCalled()
+
+    // Now fire a keyboard shortcut — this SHOULD trigger activity.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true, bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(activity).toHaveBeenCalled()
+    })
+  })
+
   // ── close by middle-click ─────────────────────────────────────────────
 
   it('closes a tab on middle-click', async () => {
@@ -1095,7 +1121,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
     const tab = new Tab(
       content,
       {
@@ -1139,7 +1165,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
     const tab = new Tab(
       content,
       {
@@ -1188,7 +1214,7 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, () => {})
+    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
     const tab = new Tab(
       content,
       {
@@ -1483,7 +1509,9 @@ describe('TabManager', () => {
         makeClipboard(),
         new ClipboardGate(),
         makeBanner(),
+        null,
         () => {},
+        undefined,
       )
       const tab = new Tab(
         content,

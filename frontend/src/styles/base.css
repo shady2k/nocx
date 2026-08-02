@@ -240,6 +240,18 @@ select:focus-visible {
   padding: 20px 28px;
 }
 
+/* The reading measure. A settings row is label-left / control-right, so its
+   width is what decides whether the row reads as one thing or as two things at
+   opposite ends of a maximised window — the Vault diagnostics put "State" and
+   "sealed" about 1500px apart before this existed.
+   72rem is wide enough for the two-column Connections-style content that lives
+   on a page and narrow enough that a row stays a row. Left-aligned rather than
+   centred: the rail is on the left and content that drifts away from it as the
+   window grows reads as unmoored. */
+.ui-page__measure {
+  max-width: 72rem;
+}
+
 /* ── Contained content area (scrollMode: 'contained') ─────────────────
    A bounded flex container that does not scroll — the surface inside owns
    its own scroll containers (e.g. Connections' two-column panels). The

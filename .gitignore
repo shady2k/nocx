@@ -23,7 +23,8 @@ _bmad/core/config.yaml
 **/config.user.toml
 **/config.user.yaml
 /bin/
-/build/
+/build/*
+!/build/darwin/
 /dist/
 /go/build/
 /tools/bin/
@@ -61,3 +62,9 @@ playwright-report/
 .worktrees/nocx-3dk/
 # bd worktree
 .worktrees/nocx-q36/
+
+# local harness state (graphify skill install)
+.pi/
+
+# Disposable home for e2e runs (playwright.config.ts home boundary, nocx-ti8w)
+.e2e/

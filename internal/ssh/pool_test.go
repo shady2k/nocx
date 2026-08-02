@@ -480,3 +480,96 @@ func TestPoolConcurrentDoubleRelease(t *testing.T) {
 		t.Fatalf("pool.Count()=%d, want 0", pool.Count())
 	}
 }
+
+// TestPoolDrainClosesMatchingEntries verifies that Drain closes all
+// connections matching the predicate and leaves non-matching ones intact.
+func TestPoolDrainClosesMatchingEntries(t *testing.T) {
+	pool := NewConnPool(log.NewSlogAdapter(nil))
+	dialCount := 0
+	pool.dial = func(key poolKey) (sshClientConn, error) {
+		dialCount++
+		return &fakeClient{}, nil
+	}
+
+	// Acquire three connections with different identities.
+	h1, err := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id1"})
+	if err != nil {
+		t.Fatalf("Acquire h1: %v", err)
+	}
+	h2, err := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id2"})
+	if err != nil {
+		t.Fatalf("Acquire h2: %v", err)
+	}
+	h3, err := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id3"})
+	if err != nil {
+		t.Fatalf("Acquire h3: %v", err)
+	}
+
+	if pool.Count() != 3 {
+		t.Fatalf("pool.Count()=%d, want 3", pool.Count())
+	}
+
+	// Drain only identity "id1".
+	closed := pool.Drain(func(key poolKey) bool {
+		return key.identity == "id1"
+	})
+	if closed != 1 {
+		t.Fatalf("Drain returned %d, want 1", closed)
+	}
+	if pool.Count() != 2 {
+		t.Fatalf("after drain, pool.Count()=%d, want 2", pool.Count())
+	}
+
+	// h2 and h3 still work.
+	if _, err := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id2"}); err != nil {
+		t.Fatalf("Acquire h2 after drain: %v", err)
+	}
+	if _, err := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id3"}); err != nil {
+		t.Fatalf("Acquire h3 after drain: %v", err)
+	}
+
+	// Release cleanup.
+	pool.Release(h1)
+	pool.Release(h2)
+	pool.Release(h3)
+}
+
+// TestPoolDrainByRoute verifies Drain can match by jump route component.
+func TestPoolDrainByRoute(t *testing.T) {
+	pool := NewConnPool(log.NewSlogAdapter(nil))
+	pool.dial = func(key poolKey) (sshClientConn, error) {
+		return &fakeClient{}, nil
+	}
+
+	h1, _ := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id", jumpRoute: "jump-a"})
+	h2, _ := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id", jumpRoute: "jump-b"})
+	h3, _ := pool.Acquire(context.Background(), poolKey{host: "h", port: 22, user: "u", identity: "id", jumpRoute: ""})
+
+	if pool.Count() != 3 {
+		t.Fatalf("pool.Count()=%d, want 3", pool.Count())
+	}
+
+	// Drain connections with the jump-a route.
+	closed := pool.Drain(func(key poolKey) bool {
+		return key.jumpRoute == "jump-a"
+	})
+	if closed != 1 {
+		t.Fatalf("Drain returned %d, want 1", closed)
+	}
+	if pool.Count() != 2 {
+		t.Fatalf("after drain, pool.Count()=%d, want 2", pool.Count())
+	}
+
+	pool.Release(h1)
+	pool.Release(h2)
+	pool.Release(h3)
+}
+
+// TestPoolDrainEmptyIsSafe verifies that Drain on an empty pool is a no-op.
+func TestPoolDrainEmptyIsSafe(t *testing.T) {
+	pool := NewConnPool(log.NewSlogAdapter(nil))
+	closed := pool.Drain(func(key poolKey) bool { return true })
+	if closed != 0 {
+		t.Fatalf("Drain empty pool returned %d, want 0", closed)
+	}
+}

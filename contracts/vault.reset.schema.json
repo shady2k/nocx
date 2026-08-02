@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.reset.schema.json",
+  "title": "VaultResetResult",
+  "description": "Result of the vault.reset JSON-RPC method: what was actually destroyed, and what could not be. The vault is uninitialized afterwards whether or not every store answered, so this is a success shape with residue rather than an error.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["secretCount", "profileCount", "residue"],
+  "properties": {
+    "secretCount": {
+      "description": "Distinct stored secrets whose references were cleared.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "profileCount": {
+      "description": "Connections that held at least one of them and will ask for a password again.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "residue": {
+      "description": "Stores whose material could not be removed — empty when everything was. The renderer must not say 'everything was deleted' while this is non-empty. Always an array, never null: a null where the renderer's type says list has cost this project a defect once already (nocx-25k9.14).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/residueEntry" }
+    }
+  },
+  "$defs": {
+    "residueEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store"],
+      "properties": {
+        "store": {
+          "description": "Provider id of the store that still holds material.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why it could not be cleared. A code, never a sentence — the renderer owns the wording. Absent when the failure carried no reason code.",
+          "enum": [
+            "no-service",
+            "locked",
+            "denied",
+            "timeout",
+            "unsupported-platform",
+            "unknown-provider"
+          ]
+        }
+      }
+    }
+  }
+}

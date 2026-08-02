@@ -1,4 +1,7 @@
 import { defineConfig, type Project } from '@playwright/test'
+import path from 'node:path'
+
+import { createHomeIsolation } from './e2e/home-isolation'
 
 // e2e drives the whole app, not the frontend alone: `wails dev` serves the
 // built UI *and* the bound Go methods, so a test here exercises the real
@@ -43,6 +46,23 @@ if (wanted?.length && projects.length === 0) {
     `PW_PROJECTS=${process.env.PW_PROJECTS} matched no project; known: ${ALL_PROJECTS.map((p) => p.name).join(', ')}`,
   )
 }
+
+// The disposable home every backend this config launches is given. A fixed path
+// under the repo rather than a fresh mkdtemp, for termic's reason: it survives
+// the run, so a failure can be inspected, and it does not depend on when
+// Playwright evaluates the config relative to globalSetup. `.e2e/` is ignored by
+// git. Runs already serialise on the app port, so sharing it costs nothing that
+// was not already shared.
+//
+// The env below is what stops a suite run rewriting the developer's settings,
+// reinstalling their shell hooks and reading their ~/.ssh/config (nocx-ti8w).
+// __dirname rather than import.meta.url: the root package.json has no
+// "type": "module", so Playwright loads this config as CommonJS.
+const E2E_ROOT = path.join(__dirname, '.e2e')
+const homeIsolation = createHomeIsolation({ inheritedEnv: process.env, root: E2E_ROOT })
+const isolatedEnv: Record<string, string> = Object.fromEntries(
+  Object.entries(homeIsolation.env).filter((e): e is [string, string] => e[1] !== undefined),
+)
 
 export default defineConfig({
   testDir: './e2e',
@@ -96,6 +116,10 @@ export default defineConfig({
     ? {
         webServer: {
           command: 'wails dev',
+          // The boundary. `wails dev` passes its environment to the backend it
+          // builds and runs, so this is the one place the default path can be
+          // isolated — there is no fixture between Playwright and the app.
+          env: isolatedEnv,
           url: WAILS_URL,
           reuseExistingServer: !!process.env.PW_REUSE_SERVER,
           timeout: 240_000,

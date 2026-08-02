@@ -70,7 +70,9 @@ describe('TextField', () => {
   // A caller's class is added alongside, never instead.
   it('carries the kit base class on the wrapper', () => {
     subject({ label: 'Port' })
-    const wrapper = screen.getByText('Port').parentElement
+    const label = screen.getByText('Port')
+    const wrapper = label.closest('.ui-text-field')
+    expect(wrapper).toBeTruthy()
     expect(wrapper?.getAttribute('class')).toBe('ui-text-field')
   })
 
@@ -133,5 +135,73 @@ describe('TextField', () => {
     subject({ required: true })
     const input = screen.getByRole('textbox')
     expect(input).toHaveProperty('required', true)
+  })
+
+  // ── Multiline (textarea) variance ──────────────────────────────────
+  it('renders a textarea when multiline is set', () => {
+    subject({ multiline: true, value: 'key content' })
+    const input = screen.getByRole('textbox')
+    expect(input.tagName).toBe('TEXTAREA')
+  })
+
+  it('existing typed input still renders an input element', () => {
+    const { container } = subject({ type: 'text', value: 'hello' })
+    const input = container.querySelector('input')
+    expect(input, 'Should be an INPUT element').toBeTruthy()
+    expect(input!.tagName).toBe('INPUT')
+  })
+
+  it('preserves newlines in multiline value', () => {
+    const keyContent =
+      '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----'
+    const newlineCount = (keyContent.match(/\n/g) || []).length
+    const { container } = subject({ multiline: true, value: keyContent })
+    const textarea = container.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    expect(textarea!.value).toBe(keyContent)
+    expect((textarea!.value.match(/\n/g) || []).length).toBe(newlineCount)
+    expect(newlineCount).toBeGreaterThan(0)
+  })
+
+  it('renders label on multiline variant', () => {
+    subject({ multiline: true, value: '', label: 'Private Key' })
+    const label = document.querySelector('label')
+    expect(label?.textContent?.trim()).toBe('Private Key')
+  })
+
+  it('renders description on multiline variant', () => {
+    const desc = 'Paste your private key'
+    subject({ multiline: true, value: '', description: desc })
+    expect(screen.getByText(desc)).toBeTruthy()
+  })
+
+  it('renders error text on multiline variant', () => {
+    subject({ multiline: true, value: '', error: 'Invalid key' })
+    expect(screen.getByText('Invalid key')).toBeTruthy()
+    const textarea = screen.getByRole('textbox')
+    expect(textarea.getAttribute('aria-invalid')).toBe('true')
+  })
+})
+
+describe('composition with Field', () => {
+  // TextField's label is optional and Field's was not, so the composition
+  // originally carried `label={props.label!}` — an assertion silencing a case
+  // that genuinely occurs. The result was <label for="x"></label>: an empty
+  // label bound to the control, which announces it as unlabelled. That is a
+  // worse outcome than the duplication the composition removed, so it is
+  // pinned here rather than left to review (nocx-uxs5.5).
+  it('emits no label element when there is no label to show', () => {
+    const { container } = render(() => (
+      <TextField id="cred-x" value="x" error="Required" onInput={() => {}} />
+    ))
+    expect(container.querySelector('label')).toBeNull()
+    expect(container.querySelector('.ui-field-error')?.textContent).toBe('Required')
+  })
+
+  it('still labels the control when a label is given', () => {
+    const { container } = render(() => <TextField id="cred-y" label="Name" value="y" />)
+    const label = container.querySelector('label')
+    expect(label?.getAttribute('for')).toBe('cred-y')
+    expect(label?.textContent?.trim()).toBe('Name')
   })
 })

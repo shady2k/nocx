@@ -105,7 +105,14 @@ echo "=== building devharness ==="
 go build -o "$work/devharness" ./cmd/devharness
 
 echo "=== backend on 127.0.0.1:$WS_PORT ==="
-NOCX_WS_ADDR="127.0.0.1:$WS_PORT" "$work/devharness" >"$work/backend.log" 2>&1 &
+backend_dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
+session_bus="/run/user/$(id -u)/bus"
+if [[ ( -z "$backend_dbus_address" || "$backend_dbus_address" == "disabled:" ) && -S "$session_bus" ]]; then
+	backend_dbus_address="unix:path=$session_bus"
+fi
+DBUS_SESSION_BUS_ADDRESS="$backend_dbus_address" \
+	NOCX_WS_ADDR="127.0.0.1:$WS_PORT" \
+	"$work/devharness" >"$work/backend.log" 2>&1 &
 backend_pid=$!
 
 # The backend prints WSPORT then WSTOKEN once the listener is up; WSTOKEN last,

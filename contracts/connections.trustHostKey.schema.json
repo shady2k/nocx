@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.trustHostKey.schema.json",
+  "title": "TrustHostKeyResult",
+  "description": "Result of the connections.trustHostKey JSON-RPC method: the fingerprint of the key that was appended to known_hosts. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fingerprint"],
+  "properties": {
+    "fingerprint": {
+      "description": "SHA256 fingerprint of the host key appended to known_hosts.",
+      "type": "string"
+    }
+  }
+}

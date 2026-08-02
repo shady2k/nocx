@@ -29,8 +29,14 @@ dialog.nocx-dialog::backdrop {
   border: 1px solid var(--color-border);
   border-radius: var(--control-radius-lg, 8px);
   padding: var(--space-6, 24px);
-  min-width: 320px;
-  max-width: 480px;
+  /* A DEFINITE width, not a cap. A `<dialog>` is `width: fit-content`, so with
+     only a max-width the panel shrank to whatever its body happened to need —
+     and a body with sections then resized the dialog every time the user
+     changed section: 356px on one, the full 560 on the next, with the footer
+     buttons moving out from under the pointer reaching for them. The size prop
+     names the width; the content never gets a say. */
+  width: 480px;
+  max-width: calc(100vw - var(--space-6, 24px) * 2);
   color: var(--color-text);
   /* The panel is the boundary, and it enforces it rather than trusting the
      content to stay inside. A child that names a width or a height larger than
@@ -43,6 +49,21 @@ dialog.nocx-dialog::backdrop {
   flex-direction: column;
   max-height: calc(100vh - var(--space-6, 24px) * 2);
   overflow: hidden;
+  /* Height changes — a section switch, a control revealing fields — are
+     animated so the footer moves visibly instead of teleporting out from
+     under the pointer reaching for it. Dialog measures and pins the height
+     (see dialog.tsx), and this transition runs the change; the reduced-motion
+     override sits below, next to the other components' (toast.css,
+     prompt.css). The panel must stay bounded by its max-height at every point
+     of the animation: both the pin and the target come from measured heights,
+     which CSS clamps to the max-height. */
+  transition: height 180ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nocx-dialog__panel {
+    transition: none;
+  }
 }
 
 .nocx-dialog__panel > * {
@@ -50,11 +71,48 @@ dialog.nocx-dialog::backdrop {
   min-width: 0;
 }
 
-/* The palette width. Its content box is 512px + the 24px padding on each side,
-   so a panel that stopped at the default 480 is what made the list hang out
-   past the panel's own border. */
+/* ── Dialog body ──────────────────────────────────────────────────────────
+   The rhythm between a body's blocks, and the scroll region for a body taller
+   than the panel. `min-height: 0` is what lets a flex child shrink below its
+   content and scroll rather than push the panel past its max-height. */
+.nocx-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* While the panel is mid-transition it is pinned to the height it is leaving,
+   so a body sized for the height it is arriving at overflows and shows a
+   scrollbar for the duration. Suppressing it is not cosmetic: a bar that
+   appears and vanishes inside 180ms is the part of the movement the eye
+   reliably catches, and it reads as a glitch. It returns when the panel
+   settles, because the attribute is removed then and the rule above is all
+   that is left. */
+.nocx-dialog__panel[data-animating] .nocx-dialog__body {
+  overflow-y: hidden;
+}
+
+.nocx-dialog__body > * {
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Section's bottom margin is a page rule — it separates one section from the
+   next down a scrolling surface. Inside a dialog the body owns that distance,
+   and keeping both stacked 32px of margin on top of the body's own gap. */
+.nocx-dialog__body > .ui-section {
+  margin-bottom: 0;
+}
+
+/* The palette width — wide enough to read a host and its label on one line.
+   The number here is the ONLY declaration of it: quick-connect.css used to carry
+   a 512px content width derived from an earlier 560px panel, and when this line
+   moved to 640 the palette kept sitting at 512 with 80px of dead space beside it
+   (nocx-kudf). Content fills this box; it does not restate it. */
 .nocx-dialog__panel[data-size='lg'] {
-  max-width: 560px;
+  width: 640px;
 }
 
 .nocx-dialog__title {
@@ -67,14 +125,20 @@ dialog.nocx-dialog::backdrop {
 .nocx-dialog__message {
   font-size: var(--font-size-md, 14px);
   line-height: 1.5;
-  margin: 0 0 var(--space-6, 24px);
+  margin: 0;
   color: var(--color-text-muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
+/* The distance from the body to the actions belongs here, not to whatever the
+   body's last block happens to be. It used to be the confirm message's own
+   bottom margin, which meant a dialog whose body was a form had no separation
+   at all except the one Section's page margin happened to give it. */
 .nocx-dialog__actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2, 8px);
+  margin-top: var(--space-6, 24px);
+  flex: 0 0 auto;
 }

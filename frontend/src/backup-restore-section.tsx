@@ -1,5 +1,5 @@
 /**
- * BackupRestoreSection — Solid component for Backup & Restore (ADR-0015).
+ * BackupRestoreSection — Solid component for Backup & Restore (ADR-0018).
  */
 import { createEffect, on, Show, For } from 'solid-js'
 import { createStore } from 'solid-js/store'

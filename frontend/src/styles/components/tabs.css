@@ -1,0 +1,125 @@
+/* Tabs — the section rail and the selected section's panel.
+   Identity family: .ui-tabs and the __list/__tab/__panel parts it renders.
+   Not related to .nocx-tab, which is the terminal's tab chrome. */
+
+.ui-tabs {
+  display: flex;
+  /* A flex child of a bounded parent must be allowed to shrink below its
+     content, or the panel pushes the dialog past its max-height instead of
+     scrolling inside it. */
+  min-height: 0;
+  /* The distance from the divider to the section's content. Was
+     `var(--space-5)`, which is not a token — the scale is 1,2,3,4,6,8,12 — and
+     an undefined custom property makes the declaration invalid at computed
+     time, so `gap` fell back to `normal` (zero) and the labels sat against the
+     rule. It fails silently: no console warning, no lint. */
+  gap: var(--space-4);
+}
+
+.ui-tabs[data-orientation='vertical'] {
+  flex-direction: row;
+}
+
+.ui-tabs[data-orientation='horizontal'] {
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ── The rail ─────────────────────────────────────────────────────────── */
+
+.ui-tabs__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 auto;
+  /* More sections than the box is tall is the rail's problem, not the
+     container's. */
+  overflow-y: auto;
+}
+
+.ui-tabs[data-orientation='vertical'] .ui-tabs__list {
+  /* Wide enough for a two-word section name without wrapping, narrow enough
+     that the panel keeps the width that actually holds the form. */
+  width: 9.5rem;
+  border-right: 1px solid var(--color-divider);
+  /* Only on the divider side: the rail's rows start at the container's content
+     edge, aligned with whatever titles it. The left inset tried earlier was
+     the wrong fix for the wrong problem — what looked like a missing gap was
+     the broken `gap` above, on the other side of the rule. */
+  padding-right: var(--space-3);
+}
+
+.ui-tabs[data-orientation='horizontal'] .ui-tabs__list {
+  flex-direction: row;
+  border-bottom: 1px solid var(--color-divider);
+  padding-bottom: var(--space-2);
+}
+
+/* How a rail row sits, and nothing about how it looks — a selected Button's
+   fill, its hover and its weight all live in button.css. The same division the
+   settings rail keeps.
+
+   `display: flex` is load-bearing rather than tidy: a <button> is inline-block,
+   so `justify-content` alone does nothing and the UA's own centring wins. The
+   labels sat centred in the rail for exactly that reason. */
+.ui-tabs[data-orientation='vertical'] .ui-tabs__list > .ui-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* ── Status indicator ────────────────────────────────────────────────── */
+
+/* The dot is the kit's StatusDot (`status-dot.css`). It moved out of this file
+   when the Vault store list needed the same marker outside a tab — two
+   stylesheets drawing one dot is the thing the per-component split exists to
+   prevent. Tabs decides only that a row may carry one. */
+
+/* ── The panel ────────────────────────────────────────────────────────── */
+
+/* The box is the ACTIVE section's size, not the tallest's: the inactive
+   panels are `display: none` (the component marks them `hidden`), so they
+   contribute no height and the cell never sees them. The section switch
+   therefore changes the box's height, and the Dialog that owns this panel
+   animates that change — the footer moves, but visibly and predictably
+   rather than teleporting, which is what the old fixed cell bought.
+
+   `visibility: hidden` was chosen here once precisely BECAUSE it keeps
+   contributing size while removing the panel from the tab order and the
+   accessibility tree. That reasoning is inverted now: the inactive panels
+   must stop contributing size, and `hidden`/`display: none` does that AND
+   the tab-order and accessibility-tree removal. */
+.ui-tabs__panels {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  /* No max-height. The cell takes the active section's height and stops
+     there; the only thing that bounds it is the dialog panel's own
+     viewport-relative max-height, so a section scrolls when it genuinely
+     does not fit on screen and never merely because a number said so.
+     A cap was tried and removed: at 24rem it scrolled the tallest section in
+     a 1000px window with room to spare, which is the worse of the two costs. */
+}
+
+.ui-tabs__panel {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* The component sets `hidden` on inactive panels; this makes the result
+   explicit in the author sheet so a future `display` rule on the panel
+   cannot silently resurrect them (the UA's `[hidden]` rule loses to any
+   author `display` declaration). */
+.ui-tabs__panel:not([data-active]) {
+  display: none;
+}
+
+/* The panel is a scroll container, so it is focusable (tabIndex=0) and needs a
+   visible ring like anything else that takes focus. base.css owns the ring
+   itself; this only keeps it from being clipped by the scroll box. */
+.ui-tabs__panel:focus-visible {
+  outline-offset: -2px;
+}

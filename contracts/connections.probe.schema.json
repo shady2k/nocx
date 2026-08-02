@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.test.schema.json",
+  "title": "ConnectionTestResult",
+  "description": "Result of the connections.test JSON-RPC method. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome"],
+  "properties": {
+    "outcome": {
+      "description": "Typed probe outcome. host-key-unknown means the host is not in known_hosts at all (routine first contact); host-key-changed means the offered key differs from the stored one (the MITM signature). The renderer must never call a changed key 'unknown' or offer the routine accept button for it.",
+      "type": "string",
+      "enum": [
+        "accepted",
+        "rejected",
+        "unreachable",
+        "host-key-unknown",
+        "host-key-changed",
+        "needs-interactive"
+      ]
+    },
+    "detail": {
+      "description": "Human-readable detail sentence for the outcome, suitable for display.",
+      "type": "string"
+    },
+    "hostKey": {
+      "description": "Host-key evidence, present only for the two host-key outcomes. Carries the offered key so the renderer can show its fingerprint and, for a changed key, the stored fingerprint; the renderer echoes host+key back to connections.trustHostKey to accept. A host key is public material (ADR-0011 §3): it may cross the wire and be displayed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "algorithm", "fingerprint", "key"],
+      "properties": {
+        "host": {
+          "description": "Resolved address as probed (host, or host:port), the exact string known_hosts matching used. The trust call must use this same string or the appended line will not match the next probe.",
+          "type": "string"
+        },
+        "algorithm": {
+          "description": "Key algorithm of the offered key, e.g. ssh-ed25519, ecdsa-sha2-nistp256.",
+          "type": "string"
+        },
+        "fingerprint": {
+          "description": "SHA256 fingerprint of the offered key.",
+          "type": "string"
+        },
+        "storedFingerprint": {
+          "description": "Fingerprint(s) recorded in known_hosts for this host. Present only when outcome is host-key-changed: the user cannot judge a changed key without both fingerprints.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Base64-encoded wire-format public key blob of the offered key. Echoed back verbatim by connections.trustHostKey.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

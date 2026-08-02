@@ -1,0 +1,79 @@
+.ui-prompt-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh var(--space-4) var(--space-4);
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--color-scrim), transparent 12%);
+  --wails-draggable: no-drag;
+}
+
+.ui-prompt-overlay[data-placement='top-sheet'] {
+  padding: 0 var(--space-6) var(--space-4);
+}
+
+.ui-prompt {
+  width: 560px;
+  max-width: calc(100vw - var(--space-6) * 2);
+  box-sizing: border-box;
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--color-canvas), black 18%);
+  border: 1px solid color-mix(in srgb, var(--color-border), black 20%);
+  border-radius: var(--control-radius-lg);
+  box-shadow: 0 18px 55px color-mix(in srgb, black, transparent 20%);
+  color: var(--color-text);
+}
+
+.ui-prompt[data-placement='top-sheet'] {
+  width: 760px;
+  max-width: calc(100vw - var(--space-6) * 2);
+  border-top: 0;
+  border-radius: 0 0 var(--control-radius-lg) var(--control-radius-lg);
+  animation: ui-prompt-slide-down 160ms ease-out;
+}
+
+.ui-prompt[data-placement='top-sheet'] .ui-prompt__body > .ui-text-field,
+.ui-prompt[data-placement='top-sheet'] .ui-text-field__input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@keyframes ui-prompt-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-100%);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-prompt[data-placement='top-sheet'] {
+    animation: none;
+  }
+}
+
+.ui-prompt__title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.ui-prompt__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ui-prompt__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}

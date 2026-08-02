@@ -25,6 +25,17 @@ describe('PageScroller', () => {
     expect(document.querySelector('.ui-page__scroll')).not.toBeNull()
   })
 
+  // The scroller fills the window so its scrollbar stays on the window edge;
+  // the measure is what the content is actually poured into. Without the
+  // separation a maximised window puts a Field's label and its control a
+  // thousand pixels apart and the row stops reading as one row.
+  it('pours children into a measure inside the scroller, not into the scroller itself', () => {
+    subject()
+    const measure = document.querySelector('.ui-page__scroll > .ui-page__measure')
+    expect(measure).not.toBeNull()
+    expect(measure!.textContent).toBe('Scroll content')
+  })
+
   it('calls functional handle with a PageScrollerHandle', () => {
     const fn = vi.fn()
     subject({ handle: fn })

@@ -10,7 +10,7 @@
  * Per §3.1: class="ui-badge" always, variance on data-tone.
  */
 
-export type BadgeTone = 'neutral' | 'info' | 'warning' | 'danger'
+export type BadgeTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
 
 export interface BadgeProps {
   children: string

@@ -20,7 +20,7 @@ import type { AgentStatus } from '../agent-status'
 import type { SettingsMirror, SettingsSnapshot } from '../settings-domain'
 import { createMirror } from '../settings-domain'
 import { createBannerState, type BannerState } from './banner-model'
-import type { ProfileGroup, SSHProfile, Credential } from '../profiles'
+import type { ProfileGroup, SSHProfile } from '../profiles'
 import {
   createProfileLists,
   setProfileLists as updateProfileLists,
@@ -153,12 +153,8 @@ export function createAppStore(): [AppState, AppActions] {
     },
 
     // ── Profile transitions ──────────────────────────────────────────────
-    setProfiles: (
-      profiles: readonly SSHProfile[],
-      groups: readonly ProfileGroup[],
-      credentials: readonly Credential[],
-    ) => {
-      setState('profiles', (prev) => updateProfileLists(prev, profiles, groups, credentials))
+    setProfiles: (profiles: readonly SSHProfile[], groups: readonly ProfileGroup[]) => {
+      setState('profiles', (prev) => updateProfileLists(prev, profiles, groups))
     },
 
     // ── Banner transitions ───────────────────────────────────────────────
@@ -216,13 +212,8 @@ export interface AppActions {
   /** Apply a backend snapshot to the settings mirror. */
   applySettingsSnapshot: (snapshot: SettingsSnapshot) => void
 
-  /** Replace all profile lists (profiles, groups, credentials). */
-  setProfiles: (
-    profiles: readonly SSHProfile[],
-    groups: readonly ProfileGroup[],
-    credentials: readonly Credential[],
-  ) => void
-
+  /** Replace the profile lists. */
+  setProfiles: (profiles: readonly SSHProfile[], groups: readonly ProfileGroup[]) => void
   /** Mark the clipboard banner as shown. */
   showBanner: () => void
   /** Clear the clipboard banner shown flag. */

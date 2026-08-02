@@ -570,7 +570,6 @@ test.describe('5. Roving tabindex', () => {
       const activeTab = page.locator('[role="tab"][tabindex="0"]')
       await activeTab.focus()
       await expect(activeTab).toBeFocused()
-
       // ArrowLeft from the second tab should move to the first
       await page.keyboard.press('ArrowLeft')
       await page.waitForTimeout(100)

@@ -121,7 +121,7 @@ jobs:
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
           # Wails v2.13 passes -ldflags to the Go compiler for both slices and
           # joins them with lipo (§4).
-          wails build -platform darwin/universal -ldflags "$LDFLAGS"
+          wails build -platform darwin/universal -tags release -ldflags "$LDFLAGS"
 
       - name: Smoke checks
         run: |
@@ -210,7 +210,7 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          wails build -platform linux/amd64 -ldflags "$LDFLAGS"
+          wails build -platform linux/amd64 -tags release -ldflags "$LDFLAGS"
 
       - name: Smoke checks (binary)
         run: |

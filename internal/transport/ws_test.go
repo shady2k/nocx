@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 type stubPTYFactory struct{ stub *pty.Stub }
@@ -1374,6 +1376,133 @@ func TestWSServer_CloseSessionTearsDownRing(t *testing.T) {
 	_ = json.Unmarshal(respAttach, &cr)
 	if cr.Error == nil || cr.Error.Code != -32602 {
 		t.Fatal("expected -32602 for attach after close")
+	}
+}
+
+type stubSSHFactory struct {
+	connectFn func(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error)
+}
+
+func (f *stubSSHFactory) Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
+	return f.connectFn(ctx, host, opts...)
+}
+
+// TestWSServer_OpenSSHError_ClassifiedError verifies that when the SSH
+// factory returns a typed SSH error, handleOpen classifies it through the
+// same taxonomy the probe uses instead of returning "Internal error".
+func TestWSServer_OpenSSHError_ClassifiedError(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return nil, &ssh.ErrAuthFailed{User: "test", Host: "host.example.com", Err: errors.New("bad password")}
+		},
+	})
+
+	ws := NewWSServer(
+		logger, reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols":      80,
+		"rows":      24,
+		"xpixel":    0,
+		"ypixel":    0,
+		"kind":      "ssh",
+		"profileId": "ssh:test:1",
+	})
+
+	var r struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if r.Error == nil {
+		t.Fatal("expected error, got success")
+	}
+	if !strings.HasPrefix(r.Error.Message, "rejected: ") {
+		t.Errorf("expected message starting with 'rejected: ', got %q", r.Error.Message)
+	}
+}
+
+// TestWSServer_OpenEmptyHost_NoDialAttempt verifies that a profile with an
+// empty host never reaches the SSH dial — the resolver rejects it before any
+// connection attempt is made.
+func TestWSServer_OpenEmptyHost_NoDialAttempt(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+
+	dialCount := 0
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			dialCount++
+			return nil, errors.New("should not be reached")
+		},
+	})
+
+	ws := NewWSServer(
+		logger, reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				// Simulate what the real resolver does for an empty/whitespace host.
+				return "", nil, errors.New("profile host is required and cannot be inherited")
+			},
+		}),
+	)
+
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols":      80,
+		"rows":      24,
+		"xpixel":    0,
+		"ypixel":    0,
+		"kind":      "ssh",
+		"profileId": "ssh:empty:1",
+	})
+
+	var r struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if r.Error == nil {
+		t.Fatal("expected error, got success")
+	}
+	if !strings.Contains(r.Error.Message, "host is required") {
+		t.Errorf("expected message mentioning host required, got %q", r.Error.Message)
+	}
+	if dialCount != 0 {
+		t.Fatalf("expected no dial attempt, got %d", dialCount)
 	}
 }
 

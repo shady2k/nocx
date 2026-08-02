@@ -11,14 +11,13 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-	"github.com/zalando/go-keyring"
 )
 
 func TestProfilesRPC_ListEmpty(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -44,7 +43,7 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -60,10 +59,10 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 			Type: "ssh",
 			Name: "test-host",
 		},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host: "example.com",
-			Port: 22,
-			User: "alice",
+			Port: profile.Ptr(22),
+			User: profile.Ptr("alice"),
 		},
 	}
 
@@ -89,12 +88,12 @@ func TestProfilesRPC_Delete(t *testing.T) {
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	p := profile.SSHProfile{
 		Base:    profile.Base{ID: "ssh:custom:del:0001", Type: "ssh", Name: "del"},
-		Options: profile.SSHProfileOptions{Host: "h"},
+		Options: profile.StoredSSHProfileOptions{Host: "h"},
 	}
-	_ = ps.SaveProfile(p)
+	_ = ps.CreateProfile(p)
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -120,7 +119,7 @@ func TestGroupsRPC_Create(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps))
+		WithProfileRepository(ps), WithGroupRepository(ps))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -143,8 +142,7 @@ func TestGroupsRPC_Create(t *testing.T) {
 	}
 }
 
-func TestCredentialsRPC_MethodNotFound(t *testing.T) {
-	keyring.MockInit()
+func TestProfilesRPC_UnwiredDoesNotCrash(t *testing.T) {
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -176,59 +174,48 @@ func TestCredentialsRPC_MethodNotFound(t *testing.T) {
 // struct fields, so a field added later that carries a secret will fail
 // this test even if no struct-field assertion was written for it.
 func TestNoPlaintextSecretsOnWire(t *testing.T) {
-	keyring.MockInit()
-
 	const targetCanary = "CANARY-TARGET-s3cr3t-do-not-leak"
 	const jumpCanary = "CANARY-JUMP-s3cr3t-do-not-leak"
 
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
-	cs := credential.NewKeychain()
+	cs := newTestStore()
 
-	// Save a credential with password auth (target).
-	tgtPWID := credential.NewSecretID()
-	_ = cs.Set(tgtPWID, credential.NewSecret(targetCanary))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:canary:aaa",
-		Name:     "canary-cred",
-		Username: "canary-user",
-		Auth:     "password",
-		SecretID: string(tgtPWID),
-	})
-
-	// Save a jump credential (public key).
-	jumpPWID := credential.NewSecretID()
-	_ = cs.Set(jumpPWID, credential.NewSecret(jumpCanary))
-	_ = ps.SaveCredential(profile.Credential{
-		ID:       "cred:canary:bbb",
-		Name:     "jump-canary",
-		Username: "jump-canary-user",
-		Auth:     "publicKey",
-		KeyPath:  "/home/canary/.ssh/id_rsa",
-		SecretID: string(jumpPWID),
-	})
-
-	// Create a jump profile.
-	_ = ps.SaveProfile(profile.SSHProfile{
-		Base:    profile.Base{ID: "profile:canary-jump", Name: "canary-jump"},
-		Options: profile.SSHProfileOptions{Host: "jump.canary.example.com", CredentialID: "cred:canary:bbb"},
-	})
-
-	// Create a target profile with a jump host.
-	_ = ps.SaveProfile(profile.SSHProfile{
+	// Target profile carries a bound password secret (ADR-0017): the wire
+	// must never leak its material.
+	tgtPWID, _ := cs.Create(context.Background(), credential.NewSecret(targetCanary))
+	_ = ps.CreateProfile(profile.SSHProfile{
 		Base: profile.Base{ID: "profile:canary-tgt", Name: "canary-target"},
-		Options: profile.SSHProfileOptions{
-			Host:         "target.canary.example.com",
-			Port:         2222,
-			CredentialID: "cred:canary:aaa",
-			JumpHost:     "profile:canary-jump",
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "target.canary.example.com",
+			Port:           profile.Ptr(2222),
+			User:           profile.Ptr("canary"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(tgtPWID),
+			JumpHost:       profile.Ptr("profile:canary-jump"),
 		},
 	})
+
+	// Jump profile with its own bound password secret.
+	jumpPWID, _ := cs.Create(context.Background(), credential.NewSecret(jumpCanary))
+
+	// Create a jump profile.
+	_ = ps.CreateProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:canary-jump", Name: "canary-jump"},
+		Options: profile.StoredSSHProfileOptions{
+			Host:           "jump.canary.example.com",
+			User:           profile.Ptr("jump-canary"),
+			Auth:           profile.Ptr(profile.AuthMode("password")),
+			PasswordSecret: string(jumpPWID),
+		},
+	})
+
+	// The target profile above jumps through it; nothing else to seed.
 
 	resolver := connection.NewResolver(ps, ps, cs)
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileRepository(ps), WithGroupRepository(ps), WithCredentialMetadataRepository(ps),
+		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(cs),
 		WithProfileResolver(resolver),
 	)
@@ -274,4 +261,135 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 		"kind":      "ssh",
 		"profileId": "profile:canary-jump",
 	})
+}
+
+func TestProfilesRPC_CreateRejectsDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	id := profile.NewProfileID("ssh", "web-1")
+	first := map[string]any{
+		"id": id, "type": "ssh", "name": "web-1",
+		"options": map[string]any{"host": "10.0.0.1", "port": 22, "user": "ops"},
+	}
+	jsonrpcCall(t, conn, "profiles.create", first)
+
+	second := map[string]any{
+		"id": id, "type": "ssh", "name": "impostor",
+		"options": map[string]any{"host": "evil.example", "port": 22, "user": "root"},
+	}
+	resp := jsonrpcCall(t, conn, "profiles.create", second)
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for a duplicate create, got %+v", out.Error)
+	}
+
+	stored, err := ps.LoadProfiles()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Options.Host != "10.0.0.1" {
+		t.Fatalf("a refused create overwrote the record: %+v", stored)
+	}
+}
+
+func TestProfilesRPC_UpdateRejectsMissingID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "profiles.update", map[string]any{
+		"id": "ssh:nonexistent:0001", "type": "ssh", "name": "ghost",
+		"options": map[string]any{"host": "10.0.0.1"},
+	})
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for update on missing profile, got %+v", out.Error)
+	}
+}
+
+func TestGroupsRPC_CreateRejectsDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	jsonrpcCall(t, conn, "groups.create", map[string]any{"id": "g1", "name": "Prod"})
+	resp := jsonrpcCall(t, conn, "groups.create", map[string]any{"id": "g1", "name": "Duplicate"})
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for a duplicate group create, got %+v", out.Error)
+	}
+}
+
+func TestGroupsRPC_UpdateRejectsMissingID(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "groups.update", map[string]any{"id": "g-nonexistent", "name": "Ghost"})
+	var out struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Error == nil || out.Error.Code != -32602 {
+		t.Fatalf("want -32602 for update on missing group, got %+v", out.Error)
+	}
 }

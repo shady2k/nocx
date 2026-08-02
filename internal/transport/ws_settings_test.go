@@ -3,6 +3,8 @@ package transport
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -56,7 +58,26 @@ type fakeSecretStore struct {
 	data map[credential.SecretID]string
 }
 
-func (f *fakeSecretStore) Get(id credential.SecretID) (credential.Secret, error) {
+func (f *fakeSecretStore) Create(_ context.Context, value credential.Secret) (credential.SecretID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.data == nil {
+		f.data = make(map[credential.SecretID]string)
+	}
+	var idB [32]byte
+	if _, err := rand.Read(idB[:]); err != nil {
+		return "", err
+	}
+	id := credential.SecretID(hex.EncodeToString(idB[:]))
+	var s string
+	if err := value.Use(func(b []byte) error { s = string(b); return nil }); err != nil {
+		return "", err
+	}
+	f.data[id] = s
+	return id, nil
+}
+
+func (f *fakeSecretStore) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if v, ok := f.data[id]; ok {
@@ -65,28 +86,14 @@ func (f *fakeSecretStore) Get(id credential.SecretID) (credential.Secret, error)
 	return credential.Secret{}, nil
 }
 
-func (f *fakeSecretStore) Set(id credential.SecretID, value credential.Secret) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.data == nil {
-		f.data = make(map[credential.SecretID]string)
-	}
-	var s string
-	if err := value.Use(func(b []byte) error { s = string(b); return nil }); err != nil {
-		return err
-	}
-	f.data[id] = s
-	return nil
-}
-
-func (f *fakeSecretStore) Delete(id credential.SecretID) error {
+func (f *fakeSecretStore) Delete(_ context.Context, id credential.SecretID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.data, id)
 	return nil
 }
 
-func (f *fakeSecretStore) Exists(id credential.SecretID) (bool, error) {
+func (f *fakeSecretStore) Exists(_ context.Context, id credential.SecretID) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	_, ok := f.data[id]

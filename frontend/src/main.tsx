@@ -1,6 +1,7 @@
 import './style.css'
 import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { render } from 'solid-js/web'
+import { Show } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { WSClient } from './ipc'
@@ -9,6 +10,10 @@ import { mountSidebar } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
+import { VaultClient } from './vault-client'
+import { DialogClient } from './dialog-client'
+import { createVaultState, SetupDialog, UnlockDialog } from './vault'
+import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
@@ -22,6 +27,7 @@ import {
   QuickConnectController,
   ActionsQuickConnectProvider,
   SSHQuickConnectProvider,
+  SSHAliasQuickConnectProvider,
   type QuickConnectProvider,
 } from './quick-connect'
 
@@ -74,6 +80,33 @@ async function main() {
   const client = new WSClient(dispatcher)
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(dispatcher)
+  const vaultClient = new VaultClient(dispatcher)
+  const dialogClient = new DialogClient(dispatcher)
+  const vaultObserver = new VaultObserver(dispatcher)
+  const vaultController = createVaultState(vaultClient)
+  vaultObserver.start(() => {
+    void vaultController.refresh()
+  })
+  void vaultController.refresh()
+
+  // ── Vault activity signal (nocx-eg80) ──────────────────────────────
+  // Throttled: at most one call every 3 seconds. Reports user activity
+  // (keyboard, mouse, UI actions) so the vault can reset its idle timer.
+  // Terminal output, background jobs, and WebSocket messages do NOT fire
+  // this — see the e2e test that verifies this distinction.
+  let lastActivity = 0
+  const ACTIVITY_THROTTLE_MS = 3000
+  const reportActivity = () => {
+    const now = Date.now()
+    if (now - lastActivity < ACTIVITY_THROTTLE_MS) return
+    lastActivity = now
+    vaultClient.activity().catch(() => {
+      // Fire-and-forget: a failed activity call is never actionable.
+    })
+  }
+
+  document.addEventListener('keydown', reportActivity, true)
+  document.addEventListener('mousedown', reportActivity, true)
 
   // The generated-screen invariant says no setting key appears in the frontend,
   // and it is about the SCREEN: settings.ts and settings-content.ts render from
@@ -115,6 +148,8 @@ async function main() {
     profileClient,
     tabStrip,
   )
+  tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
+  tm.onActivity = reportActivity
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -122,16 +157,28 @@ async function main() {
   registry.register(SURFACE_ID_SETTINGS, {
     surfaceType: SURFACE_SETTINGS,
     singletonKey: SINGLETON_SETTINGS,
-    // Settings hosts the Connections page (nocx-imkb.3), so it needs the same
-    // connect callback the standalone surface has. Assigned inside the factory,
-    // before mount: the factory builds a fresh SettingsContent each time it is
-    // opened, and a setter applied afterwards would leave the first connect
-    // click of a freshly opened tab with nothing to call.
     factory: () => {
-      const content = new SettingsContent(profileClient)
+      const content = new SettingsContent(
+        profileClient,
+        undefined,
+        vaultController,
+        vaultClient,
+        dialogClient,
+      )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
-        tm.newSSHTab(profile.id, profile.options.host, profile.options.user)
+        // Vault preflight: if sealed, ensureBeforeSave shows UnlockDialog
+        // and defers newSSHTab until after unseal.
+        vaultController.ensureBeforeSave(() => {
+          void tm.newSSHTab(
+            profile.id,
+            profile.options.host,
+            profile.options.user,
+            profile.options.port,
+            profile.name,
+          )
+          return Promise.resolve()
+        }, 'open this connection')
       }
       return content
     },
@@ -234,6 +281,9 @@ async function main() {
       () => openSettingsTab().startNewConnection(),
     ),
     sshProvider,
+    new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
+      tm.newSSHTab('', host, user, port),
+    ),
   ]
 
   const qc = new QuickConnectController()
@@ -293,6 +343,36 @@ async function main() {
       }
     })()
   }, DAY_MS)
+
+  // ── Vault dialogs ────────────────────────────────────────────────────
+  // Mounted at the app level so they float over every page, not just Settings.
+  const vaultRoot = document.createElement('div')
+  document.body.append(vaultRoot)
+  render(
+    () => (
+      <>
+        <Show when={vaultController.showSetup()}>
+          <SetupDialog
+            open={vaultController.showSetup()}
+            onClose={() => vaultController.closeSetup()}
+            onSetupComplete={() => vaultController.onSetupDone()}
+            vaultClient={vaultClient}
+          />
+        </Show>
+        <Show when={vaultController.showUnlock()}>
+          <UnlockDialog
+            open={vaultController.showUnlock()}
+            onClose={() => vaultController.closeUnlock()}
+            onUnsealed={() => vaultController.onUnsealDone()}
+            vaultClient={vaultClient}
+            vaultStatus={vaultController.status()}
+            reason={vaultController.unlockReason()}
+          />
+        </Show>
+      </>
+    ),
+    vaultRoot,
+  )
 }
 
 main().catch((err) => log.error('nocx: main error', { message: (err as Error).message }))

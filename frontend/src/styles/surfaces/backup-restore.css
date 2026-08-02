@@ -1,4 +1,4 @@
-/* Backup & Restore section (ADR-0015) */
+/* Backup & Restore section (ADR-0018) */
 .backup-restore {
   display: flex;
   flex-direction: column;

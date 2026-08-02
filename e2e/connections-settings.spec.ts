@@ -43,7 +43,7 @@ test.describe('Connections inside Settings', () => {
 
     // Fill in the profile form (Name, Host, User).
     //
-    // User is required whenever no credential is selected (nocx-74cn added the
+    // User is required whenever no secret is selected (nocx-74cn added the
     // rule; nocx-vjhz is this spec catching up). Leaving it empty does not fail
     // here — it fails 20 lines down, where Create is refused, no profile is
     // written and the tab count that Connect was supposed to change reads one
@@ -52,7 +52,7 @@ test.describe('Connections inside Settings', () => {
     const inputs = page.locator('.cm-form input')
     await inputs.nth(0).fill('Test SSH')
     await inputs.nth(1).fill('localhost')
-    await page.locator('#profile-user').fill('tester')
+    await page.locator('#profile-auth-user').fill('tester')
 
     // Save the profile first (calls createProfile), then Connect opens a tab.
     await page

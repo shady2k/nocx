@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.inventory.schema.json",
+  "title": "VaultInventory",
+  "description": "Result of the vault.inventory JSON-RPC method. One row per stored secret. The name is the secret's own (ADR-0016) — the vault owns it — with a fallback to the derived label or the kind when it did not land. The row id is an opaque renderer-addressable handle, never a secret reference (nocx-jb20.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entries"],
+  "properties": {
+    "entries": {
+      "description": "Every secret the vault holds, referenced or not. Never null: an empty vault is [].",
+      "type": "array",
+      "items": { "$ref": "#/$defs/inventoryEntry" }
+    }
+  },
+  "$defs": {
+    "inventoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "provider", "ownerId", "usedBy", "reachable"],
+      "properties": {
+        "id": {
+          "description": "Opaque row handle (secrow:...), minted by the backend from the secret's own id. The renderer may hold this; it is not a secret reference, routes nothing, and is the address rename takes.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The secret's display name, owned by the vault. Never blank, never the secret reference: falls back to the derived label where an owner exists, and to the kind otherwise.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "What the material is. The closed vocabulary of the registry (spec §4.1); a new kind is an addition, not a degradation into 'unknown'.",
+          "enum": ["password", "key-passphrase", "private-key", "public-key", "otp-seed"]
+        },
+        "provider": {
+          "description": "Provider tag from the secret reference: sec:v1:<provider>:<32 hex>.",
+          "type": "string"
+        },
+        "ownerId": {
+          "description": "Credential that references this secret, or empty for a secret no connection uses — which ADR-0016 exists to make possible.",
+          "type": "string"
+        },
+        "usedBy": {
+          "description": "How many connections reference the owning credential. 0 for an unowned secret.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "reachable": {
+          "description": "Whether the store that holds this secret answered its last probe.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

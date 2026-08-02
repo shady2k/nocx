@@ -49,6 +49,10 @@ export interface QuickConnectItem {
   readonly label: string
   /** Additional context, e.g. profile display name. */
   readonly detail?: string
+  /** When true, this entry comes from a system source (e.g. ~/.ssh/config),
+   *  not from a user-saved connection. Visually distinguished from saved
+   *  connections. */
+  readonly system?: boolean
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -117,7 +121,7 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
     // connected to; finishing such a profile is what the New-connection action
     // above is for.
     return profiles
-      .filter((p) => p.options.host !== '')
+      .filter((p) => p.options.host != null && p.options.host.trim() !== '')
       .map((p) => {
         const user = p.options.user
         const host = p.options.host
@@ -127,6 +131,63 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
           label,
           detail: p.name,
           run: () => void this.newSSHTab(p.id, host, user),
+        }
+      })
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SSH alias provider — live, read-only aliases from ~/.ssh/config
+// ═══════════════════════════════════════════════════════════════════════════
+
+export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
+  readonly id = 'ssh-aliases'
+  readonly label = 'SSH Aliases'
+
+  constructor(
+    private profileClient: ProfileClient,
+    private newTabByHost: (host: string, user?: string, port?: number) => Tab,
+  ) {}
+
+  async getItems(): Promise<QuickConnectItem[]> {
+    const response = await this.profileClient.listSSHAliases()
+
+    // Degraded resolver: surface the condition rather than hiding it.
+    if (response.unavailable != null) {
+      return [
+        {
+          id: '__ssh_aliases_unavailable__',
+          label: `SSH config: ${response.unavailable.reason}`,
+          detail: response.unavailable.detail,
+          system: true,
+          run: () => {},
+        },
+      ]
+    }
+
+    if (response.aliases.length === 0) {
+      return []
+    }
+
+    // Get saved profiles for deduplication: an alias already targeted by a
+    // saved profile is suppressed (priority is ours).
+    const profiles = await this.profileClient.listProfiles()
+    const coveredAliases = new Set(
+      profiles
+        .filter((p) => p.options.host != null && p.options.host.trim() !== '')
+        .map((p) => p.options.host),
+    )
+
+    return response.aliases
+      .filter((a) => !coveredAliases.has(a.alias))
+      .map((a) => {
+        const label = a.user ? `${a.user}@${a.alias}` : a.alias
+        return {
+          id: `__ssh_alias:${a.alias}`,
+          label,
+          detail: a.hostName !== a.alias ? a.hostName : undefined,
+          system: true,
+          run: () => void this.newTabByHost(a.alias, a.user, a.port),
         }
       })
   }
@@ -297,6 +358,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     class="quick-connect__item"
                     classList={{
                       'quick-connect__item--selected': selectedIndex() === index(),
+                      'quick-connect__item--system': item.system === true,
                     }}
                     role="option"
                     aria-selected={selectedIndex() === index()}
@@ -304,6 +366,9 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     onMouseEnter={() => setSelectedIndex(index())}
                   >
                     <span class="quick-connect__item-label">{item.label}</span>
+                    <Show when={item.system === true}>
+                      <span class="quick-connect__item-badge">alias</span>
+                    </Show>
                     <Show when={item.detail !== undefined}>
                       <span class="quick-connect__item-detail">{item.detail}</span>
                     </Show>

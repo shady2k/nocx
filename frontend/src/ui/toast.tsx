@@ -32,8 +32,9 @@
  * and Solid's reactivity works across roots. The cost is that it is a singleton,
  * which is what a screen-level notification area actually is.
  */
-import { Dynamic } from 'solid-js/web'
-import { For, createSignal, onCleanup, type Component } from 'solid-js'
+import { Dynamic, Portal } from 'solid-js/web'
+import { For, Show, createSignal, onCleanup, type Component } from 'solid-js'
+import { topOverlayElement } from './overlay/stack'
 import { IconButton } from './icon-button'
 import { CloseIcon, InfoIcon, CheckCircleIcon, AlertTriangleIcon, AlertCircleIcon } from './icons'
 
@@ -128,6 +129,24 @@ const LEVEL_ICON: Record<ToastLevel, Component> = {
  */
 export function ToastHost() {
   onCleanup(clearToasts)
+  // Rendered into the topmost open overlay when there is one, and into the body
+  // otherwise. A modal `<dialog>` lives in the browser's top layer, which is
+  // above every z-index in the normal layer — so while one was open, every
+  // toast was painted UNDER it and its scrim: the message arrived, was
+  // announced to a screen reader, and was invisible to everyone else. Being on
+  // top of a top-layer element is not a number, it is a parent.
+  //
+  // `keyed` is load-bearing: Portal reads `mount` once, so the host has to be
+  // rebuilt when the topmost overlay changes. The toasts themselves live in a
+  // module signal and survive that.
+  return (
+    <Show when={topOverlayElement()} keyed fallback={renderHost()}>
+      {(el) => <Portal mount={el}>{renderHost()}</Portal>}
+    </Show>
+  )
+}
+
+function renderHost() {
   return (
     <div class="ui-toast-host" role="status" aria-live="polite">
       <For each={toasts()}>

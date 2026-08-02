@@ -1,29 +1,17 @@
-/* TextField — the wrapper, its label, and the text/number/password input.
-   Rewritten from the `.kit-scope` ancestor onto the component's own identities by T4
-   (nocx-xygp).
+/* TextField — composes Field for label, description, error, and required marker.
+   Only the input-specific styles live here; Field owns layout and label/error/desc.
 
-   Two identities with different duties (§3.1): `ui-text-field` stacks the label,
-   description, input and error and owns the gap between them; `ui-text-field__input` is
-   the control. Neither is inferred from the other, and the input is the one that
-   carries the appearance — which is exactly what it lacked before, being the only part
-   of this component with no class at all. */
-
-/* TextField renders label, description, input and error into a wrapper that had no
-   class and therefore no layout: an inline <label> ended up on the same line as the
-   input with nothing between them, which is what the export passphrase form looked
-   like. The wrapper stacks them and owns the gap. */
+   Two identities with different duties (§3.1): `ui-text-field` wraps the whole
+   control; `ui-text-field__input` is the text/number/password element that carries
+   the appearance. Neither is inferred from the other. */
 
 .ui-text-field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
   min-width: 0;
 }
 
-.ui-text-field > label {
-  font-size: var(--font-size-sm);
-  font-weight: 500;
-  color: var(--color-text-muted);
+.ui-text-field__control {
+  position: relative;
+  min-width: 0;
 }
 
 .ui-text-field__input {
@@ -37,6 +25,22 @@
   font-size: var(--font-size-md);
   outline: none;
   min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ui-text-field__control[data-trailing='true'] .ui-text-field__input {
+  padding-right: 84px;
+}
+
+.ui-text-field__trailing {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .ui-text-field__input:focus {
@@ -63,4 +67,19 @@
 .ui-text-field__input:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Multiline (textarea) variant — overrides input-only sizing while keeping
+   the shared appearance identity (`ui-text-field__input`). The textarea grows
+   with content in supporting browsers and scrolls otherwise. */
+
+.ui-text-field[data-multiline='true'] .ui-text-field__input {
+  height: auto;
+  padding: 8px;
+  resize: vertical;
+  overflow: auto;
+  line-height: 1.5;
+  white-space: pre;
+  min-height: calc(var(--control-height-md) * 2);
+  field-sizing: content;
 }

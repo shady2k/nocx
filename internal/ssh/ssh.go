@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"io"
+	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
@@ -51,45 +52,42 @@ type ConnectConfig struct {
 	// Mirrors Tabby's profile.options.auth enum.
 	AuthMode string
 
-	// JumpHost is the profile name or ID of the jump server to use.
+	// JumpHost is the first hop's hostname or IP. When JumpConfig is also set
+	// (set by the resolver for multi-hop), JumpConfig carries the full
+	// recursive hop configuration and this flat field is the first hop's host.
+	// For backward compatibility, both fields are populated: acquireJumpHost
+	// prefers JumpConfig when non-nil.
 	JumpHost string
-	// JumpPort is the port of the jump server (0 means use default 22).
+	// JumpPort is the port of the first jump server (0 means use default 22).
 	JumpPort int
 	// Jump host credentials — loaded from jump server's profile.
 	JumpUser     string
 	JumpKeyFile  string
 	JumpAuthMode string
 
-	// BoundHost/BoundPort carry the host a linked credential is bound to
-	// (from profile.Credential), set by the resolver. internal/ssh enforces
-	// them after resolveConfig against the *resolved* hostname and effective
-	// port — never the alias the renderer chose. Binding on the alias is
-	// unsound: ~/.ssh/config can map "Host myserver" to "HostName
-	// evil.example.com", so a binding satisfiable by a name the attacker
-	// chooses is not a binding (nocx-mon/PR11-T5). An empty BoundHost means
-	// the credential is unbound and is REFUSED at connect time — "any host"
-	// is exactly the credential-redirection hole. An unset BoundPort (0)
-	// means "this host, any port": host is the load-bearing identity; making
-	// port mandatory would break every existing host-only credential harder
-	// than the hole it would close. Stated exception, not a silent gap.
-	BoundHost string
-	BoundPort int
+	// JumpConfig carries the full recursive jump host configuration for
+	// multi-hop routes. When the resolver builds the config for a target
+	// accessed through a chain of bastions, JumpConfig is the recursive
+	// ConnectConfig of the first hop, which itself may have JumpConfig set
+	// for the next hop, and so on. This is nil for direct connections.
+	// acquireJumpHost reads this field preferentially; the flat Jump* fields
+	// are populated as well for backward compatibility.
+	JumpConfig *ConnectConfig
 
-	// JumpBoundHost/JumpBoundPort are the jump credential's binding, enforced
-	// against the jump host's resolved name and effective port independently
-	// of the target — a target-bound credential must not satisfy the jump
-	// binding and vice versa.
-	JumpBoundHost string
-	JumpBoundPort int
+	// AuthorizedEndpoint carries the endpoint identity that a linked credential
+	// is authorized for, set by the resolver. The value is the profile's Host
+	// resolved through ~/.ssh/config to the canonical hostname (not the alias).
+	// At connect time, after resolveConfig applies ~/.ssh/config to the dial
+	// target, this value is compared against the resolved endpoint: the
+	// credential may only be spent on the endpoint its profile identifies.
+	// An empty AuthorizedEndpoint means no credential is linked (inline auth)
+	// and no check is performed.
+	// Port is included when the effective profile specifies one.
+	AuthorizedEndpoint string
 
-	// JumpSecrets, when set, enables late-bind of the jump host's
-	// password from the SecretStore. Separate from the target's Secrets
-	// so each hop resolves independently.
-	JumpSecrets  credential.SecretStore
-	JumpSecretID credential.SecretID
-	// JumpPassphraseSecretID is the opaque reference to the jump host's key
-	// passphrase in the SecretStore.
-	JumpPassphraseSecretID credential.SecretID
+	// JumpAuthorizedEndpoint is the jump credential's authorized endpoint,
+	// resolved through ~/.ssh/config independently of the target.
+	JumpAuthorizedEndpoint string
 
 	// Secrets, when set, enables late-bind of stored passwords from the
 	// SecretStore by SecretID. The store is the seam between the profile
@@ -100,6 +98,47 @@ type ConnectConfig struct {
 	// PassphraseSecretID is the opaque reference to the stored key
 	// passphrase in the SecretStore.
 	PassphraseSecretID credential.SecretID
+	// KeySecretID is the opaque reference to the stored private key
+	// material in the SecretStore, resolved from the credential version's
+	// KeyMaterialSecretID. Mutually exclusive with KeyFile: when set, the
+	// auth chain loads key bytes from the SecretStore instead of reading
+	// a file. The bytes never touch disk.
+	KeySecretID credential.SecretID
+
+	// JumpSecrets, when set, enables late-bind of the jump host's
+	// password from the SecretStore. Separate from the target's Secrets
+	// so each hop resolves independently.
+	JumpSecrets  credential.SecretStore
+	JumpSecretID credential.SecretID
+	// JumpPassphraseSecretID is the opaque reference to the jump host's key
+	// passphrase in the SecretStore.
+	JumpPassphraseSecretID credential.SecretID
+
+	// KeepaliveInterval controls how often the SSH keepalive probe
+	// ("keepalive@openssh.com") is sent on the connection. Zero disables
+	// keepalive. The profile stores this value in milliseconds; callers
+	// convert to a time.Duration before setting this field.
+	KeepaliveInterval time.Duration
+
+	// KeepaliveCountMax is the number of consecutive keepalive failures
+	// before the connection is considered dead and closed. Only meaningful
+	// when KeepaliveInterval > 0. Zero or negative means a single failure
+	// closes the connection.
+	KeepaliveCountMax int
+
+	// ReadyTimeout is the maximum time to wait for the SSH TCP dial and
+	// handshake to complete. Zero means use the default of 30 seconds.
+	ReadyTimeout time.Duration
+
+	// AgentForward enables SSH agent forwarding (auth-agent-req@openssh.com)
+	// on the session. The request is sent only when agent auth is actually
+	// in play (SSH_AUTH_SOCK is reachable); if set but no agent is available,
+	// the connect fails with an error.
+	AgentForward bool
+
+	// CredentialID identifies which credential this config was resolved from.
+	// Used by revocation to scope session matching by credential.
+	CredentialID string
 }
 
 func WithUser(user string) ConnectOption {
@@ -130,6 +169,28 @@ func WithPTYSize(cols, rows, xpixel, ypixel uint16) ConnectOption {
 		c.XPixel = xpixel
 		c.YPixel = ypixel
 	}
+}
+
+// WithKeepalive sets the keepalive interval and consecutive-failure limit.
+// A zero interval disables keepalive. Negative countMax means a single
+// failure closes the connection.
+func WithKeepalive(interval time.Duration, countMax int) ConnectOption {
+	return func(c *ConnectConfig) {
+		c.KeepaliveInterval = interval
+		c.KeepaliveCountMax = countMax
+	}
+}
+
+// WithTimeout sets the connect timeout for the TCP dial and SSH handshake.
+// Zero means the default of 30 seconds.
+func WithTimeout(timeout time.Duration) ConnectOption {
+	return func(c *ConnectConfig) { c.ReadyTimeout = timeout }
+}
+
+// WithAgentForward enables SSH agent forwarding on the session. It is only
+// honoured when the SSH agent is actually available (SSH_AUTH_SOCK set).
+func WithAgentForward() ConnectOption {
+	return func(c *ConnectConfig) { c.AgentForward = true }
 }
 
 // WithAuthMethods injects explicit ssh.AuthMethod values, bypassing the
@@ -173,6 +234,27 @@ func WithJumpCredentials(store credential.SecretStore, id credential.SecretID) C
 	}
 }
 
+// WithKeySecretID wires the vault-stored private key for the connection:
+// the auth chain loads key bytes from the SecretStore by KeySecretID instead
+// of reading a file. WithPassphraseSecretID pairs the key's stored
+// passphrase with it; both are set by the resolver from the profile's secret
+// bindings (ADR-0017), and the session layer must carry them verbatim.
+func WithKeySecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.KeySecretID = id }
+}
+
+// WithPassphraseSecretID wires the vault-stored passphrase for the
+// connection's private key. Only meaningful alongside WithKeySecretID.
+func WithPassphraseSecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.PassphraseSecretID = id }
+}
+
+// WithJumpPassphraseSecretID wires the vault-stored passphrase for the JUMP
+// host's key. Mirrors WithPassphraseSecretID but for the jump hop.
+func WithJumpPassphraseSecretID(id credential.SecretID) ConnectOption {
+	return func(c *ConnectConfig) { c.JumpPassphraseSecretID = id }
+}
+
 // WithCredentials injects a SecretStore for late-bind of stored
 // passwords by SecretID. The store is the seam between the profile manager
 // and the secret store.
@@ -181,6 +263,20 @@ func WithCredentials(store credential.SecretStore, id credential.SecretID) Conne
 		c.Secrets = store
 		c.SecretID = id
 	}
+}
+
+// WithAuthorizedEndpoint sets the endpoint identity a linked credential is
+// authorized for, set by the resolver. The value is the profile's Host,
+// resolved through ~/.ssh/config to the canonical hostname. At connect time,
+// this is compared against the resolved dial target.
+func WithAuthorizedEndpoint(endpoint string) ConnectOption {
+	return func(c *ConnectConfig) { c.AuthorizedEndpoint = endpoint }
+}
+
+// WithJumpAuthorizedEndpoint sets the jump credential's authorized endpoint,
+// matching WithAuthorizedEndpoint but for the jump host.
+func WithJumpAuthorizedEndpoint(endpoint string) ConnectOption {
+	return func(c *ConnectConfig) { c.JumpAuthorizedEndpoint = endpoint }
 }
 
 type Stub struct {

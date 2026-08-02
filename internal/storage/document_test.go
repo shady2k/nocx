@@ -364,3 +364,38 @@ func TestSchemaVersion_MigrateNonMonotonic(t *testing.T) {
 		t.Fatal("Migrate with To == From (non-monotonic) should error")
 	}
 }
+
+// Delete is what the vault reset needs to return the vault to uninitialized:
+// the absence of the document IS the uninitialized state, so removing it is
+// the operation, not a cleanup after one.
+func TestDocumentStore_Delete(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "docs")
+	store := newDocumentStore(t, dir)
+
+	if err := store.Write("mydoc.json", testDoc{Key: "hello", Value: 42}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := store.Delete("mydoc.json"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	var got testDoc
+	found, err := store.Read("mydoc.json", &got)
+	if err != nil {
+		t.Fatalf("Read after Delete: %v", err)
+	}
+	if found {
+		t.Error("document still readable after Delete")
+	}
+}
+
+// Deleting what is not there is success, not an error. The reset runs this
+// against both vault documents and only one of them need exist — a vault set
+// up with no secrets yet has no file blob at all — and re-running a reset that
+// was interrupted must not fail on the half it already finished.
+func TestDocumentStore_DeleteAbsentIsNotAnError(t *testing.T) {
+	store := newDocumentStore(t, filepath.Join(t.TempDir(), "docs"))
+	if err := store.Delete("never-existed.json"); err != nil {
+		t.Errorf("Delete of an absent document: %v, want nil", err)
+	}
+}

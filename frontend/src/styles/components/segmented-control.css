@@ -1,0 +1,75 @@
+/* SegmentedControl — one row of mutually exclusive choices.
+   Identity family: .ui-segmented-control and the __option it renders. */
+
+.ui-segmented-control {
+  display: flex;
+  align-items: stretch;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  padding: 2px;
+  gap: 2px;
+  /* One row, always. A control whose segments wrap onto a second line has
+     stopped being one control — if the labels do not fit, the caller wanted a
+     column of Radios. min-width: 0 lets the segments share what there is
+     instead of pushing the panel wider. */
+  min-width: 0;
+}
+
+/* A segment is a column: glyph over label. The label WRAPS rather than
+   ellipsizing — an option truncated to "Passwo…" is an option the user has to
+   guess at, and guessing about an authentication method is the wrong place to
+   save a few pixels. Wrapping costs height, which the row has to spare. */
+.ui-segmented-control__option {
+  flex: 1 1 0;
+  min-width: 0;
+  appearance: none;
+  background: none;
+  border: none;
+  border-radius: calc(var(--control-radius-md) - 2px);
+  padding: var(--space-2) var(--space-1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-sm);
+  line-height: 1.25;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  text-align: center;
+}
+
+.ui-segmented-control__icon {
+  display: flex;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.ui-segmented-control__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.ui-segmented-control__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ui-segmented-control__option:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.ui-segmented-control__option[aria-checked='true'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  font-weight: 500;
+}
+
+.ui-segmented-control__option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

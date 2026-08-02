@@ -40,7 +40,9 @@ describe('overlay stack', () => {
   })
 
   it('pop fails for unknown entry', () => {
-    expect(popOverlay({ id: 'ghost', close: () => true, prevFocus: null })).toBe(false)
+    expect(popOverlay({ id: 'ghost', close: () => true, prevFocus: null, element: null })).toBe(
+      false,
+    )
   })
 
   it('pop only the top entry preserves bottom', () => {

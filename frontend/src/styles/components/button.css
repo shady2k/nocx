@@ -15,11 +15,24 @@
    No declarations were dropped; all moved to the appropriate variant or the base. */
 
 .ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
   font: inherit;
   font-size: var(--font-size-sm);
   cursor: pointer;
   white-space: nowrap;
   border-radius: var(--control-radius-sm);
+}
+
+/* An icon inside a labelled Button is part of the button, not free-form
+   content. Without a kit-owned size an SVG uses its intrinsic viewport and can
+   expand to the width of the row. IconButton owns the icon-only case. */
+.ui-button > svg {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
 }
 
 /* ── Default (neutral) — today's secondary, renamed (§3.6 vocabulary) ── */
@@ -91,6 +104,7 @@
    variant, and this is what naming it looks like. */
 
 .ui-button[data-variant='ghost'] {
+  justify-content: flex-start;
   background: transparent;
   border: none;
   color: var(--color-text-muted);

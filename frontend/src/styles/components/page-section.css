@@ -7,3 +7,13 @@
   flex-direction: column;
   gap: var(--space-4);
 }
+
+/* The section's own explanation. Sits between the heading and the content and
+   is quieter than both — it is the reason the section looks the way it does,
+   not a thing to act on. */
+.ui-page-section__desc {
+  margin: calc(var(--space-2) * -1) 0 0;
+  max-width: 72ch;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}

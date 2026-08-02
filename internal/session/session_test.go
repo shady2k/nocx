@@ -96,7 +96,7 @@ func TestRealRegistry_OpenAndClose(t *testing.T) {
 		t.Fatalf("expected 1 session, got %d", len(reg.List()))
 	}
 
-	if err := reg.Close(sess.ID()); err != nil {
+	if closeErr := reg.Close(sess.ID()); closeErr != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if len(reg.List()) != 0 {
@@ -393,5 +393,118 @@ func TestRegistry_OpenWithFakePTY(t *testing.T) {
 	n, err = stub.Read(make([]byte, 100))
 	if err != io.EOF || n != 0 {
 		t.Errorf("expected EOF from stub Read, got err=%v n=%d", err, n)
+	}
+}
+
+// stubUsageTracker records the profile IDs it sees, for testing
+// ProfileUsageTracker integration.
+type stubUsageTracker struct {
+	opened []string
+	closed []string
+}
+
+func (s *stubUsageTracker) SessionOpened(profileID string) {
+	s.opened = append(s.opened, profileID)
+}
+
+func (s *stubUsageTracker) SessionClosed(profileID string) {
+	s.closed = append(s.closed, profileID)
+}
+
+func (s *stubUsageTracker) LastUsedForProfiles(profileIDs []string) (map[string]time.Time, error) {
+	return nil, nil
+}
+
+// TestSessionProfileID proves a session remembers the profile ID it was
+// opened from (nocx-uxs5.4).
+func TestSessionProfileID(t *testing.T) {
+	stub := pty.NewStub(log.NewSlogAdapter(nil))
+	reg := New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: stub})
+
+	sess, err := reg.Open(context.Background(), Config{
+		ProfileID: "ssh:my-host:a1",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.ProfileID(); got != "ssh:my-host:a1" {
+		t.Errorf("ProfileID() = %q, want %q", got, "ssh:my-host:a1")
+	}
+}
+
+// TestProfileUsageTracker_OpenClosed verifies that a wired
+// ProfileUsageTracker receives SessionOpened on Open and SessionClosed
+// on Close.
+func TestProfileUsageTracker_OpenClosed(t *testing.T) {
+	stub := pty.NewStub(log.NewSlogAdapter(nil))
+	tracker := &stubUsageTracker{}
+	reg := New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: stub})
+	reg = reg.WithProfileUsageTracker(tracker)
+
+	sess, err := reg.Open(context.Background(), Config{
+		ProfileID: "ssh:p1:1",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	if len(tracker.opened) != 1 {
+		t.Fatalf("expected 1 open call, got %d", len(tracker.opened))
+	}
+	if tracker.opened[0] != "ssh:p1:1" {
+		t.Errorf("opened[0] = %q, want %q", tracker.opened[0], "ssh:p1:1")
+	}
+
+	if closeErr := reg.Close(sess.ID()); closeErr != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(tracker.closed) != 1 {
+		t.Fatalf("expected 1 close call, got %d", len(tracker.closed))
+	}
+	if tracker.closed[0] != "ssh:p1:1" {
+		t.Errorf("closed[0] = %q, want %q", tracker.closed[0], "ssh:p1:1")
+	}
+}
+
+// TestDeletedProfileSessionContinues proves that closing a session whose
+// profile was "deleted" (tracker missing the profile) still works cleanly.
+// The session must not strand: its registry entry is cleaned up and
+// Close succeeds even when the tracker receives an unknown profile ID.
+func TestDeletedProfileSessionContinues(t *testing.T) {
+	stub := pty.NewStub(log.NewSlogAdapter(nil))
+	tracker := &stubUsageTracker{}
+	reg := New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: stub})
+	reg = reg.WithProfileUsageTracker(tracker)
+
+	// Open with a profile ID.
+	sess, err := reg.Open(context.Background(), Config{
+		ProfileID: "ssh:deleted-profile:1",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Simulate profile deletion: the tracker's behavior doesn't affect
+	// session lifecycle — Open and Close must work regardless.
+	// Close the session as if its profile was deleted.
+	if closeErr := reg.Close(sess.ID()); closeErr != nil {
+		t.Fatalf("Close after profile deletion: %v", err)
+	}
+
+	// Verify the session is removed from the registry.
+	_, err = reg.Get(sess.ID())
+	if err == nil {
+		t.Error("expected error after close, got nil")
+	}
+
+	// The tracker still received Close for the deleted-profile ID.
+	if len(tracker.closed) != 1 {
+		t.Fatalf("expected 1 close call, got %d", len(tracker.closed))
+	}
+	if tracker.closed[0] != "ssh:deleted-profile:1" {
+		t.Errorf("closed[0] = %q, want %q", tracker.closed[0], "ssh:deleted-profile:1")
 	}
 }

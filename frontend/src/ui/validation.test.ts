@@ -170,3 +170,34 @@ describe('createFormValidation', () => {
     })
   })
 })
+
+// Reported from the running app: a host full of characters a host cannot
+// contain sat there looking accepted until Create was pressed. "You have not
+// answered yet" must wait; "what you answered is wrong" must not.
+describe('answer', () => {
+  it('reports a wrong value as soon as there is one, without a blur', () => {
+    createRoot((dispose) => {
+      let host = ''
+      const v = createFormValidation({
+        host: () => combine(required('Host'), hostname())(host),
+      })
+
+      host = 'фывфы'
+      v.answer('host', host)
+      expect(v.error('host')).toBe('Host contains characters that are not valid')
+      dispose()
+    })
+  })
+
+  it('leaves an empty field alone, so required does not fire mid-word', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ host: () => required('Host')('') })
+      v.answer('host', '')
+      expect(v.error('host')).toBeUndefined()
+      // …and a value of nothing but spaces is still no answer.
+      v.answer('host', '   ')
+      expect(v.error('host')).toBeUndefined()
+      dispose()
+    })
+  })
+})

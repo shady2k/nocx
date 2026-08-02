@@ -9,6 +9,7 @@
 import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { type ProfileClient, type SSHProfile } from './profiles'
+import type { VaultController } from './vault'
 import { type SettingsObserver } from './settings-observer'
 import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
@@ -30,6 +31,9 @@ export class SettingsContent extends SolidTabContent {
   constructor(
     private readonly profileClient: ProfileClient,
     private readonly observer?: SettingsObserver,
+    private readonly vaultController?: VaultController,
+    private readonly vaultClient?: import('./vault-client').VaultClient,
+    private readonly dialogClient?: import('./dialog-client').DialogClient,
   ) {
     super()
   }
@@ -39,6 +43,9 @@ export class SettingsContent extends SolidTabContent {
       () =>
         createComponent(SettingsComponent, {
           profileClient: this.profileClient,
+          vaultController: this.vaultController,
+          vaultClient: this.vaultClient,
+          dialogClient: this.dialogClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

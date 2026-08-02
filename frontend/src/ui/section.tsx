@@ -15,6 +15,8 @@ import { Stack } from './stack'
 export interface SectionProps {
   id?: string
   title: string
+  /** When true, forwards to the inner Stack to draw separators between children. */
+  divided?: boolean
   children: JSX.Element
 }
 
@@ -22,7 +24,9 @@ export function Section(props: SectionProps) {
   return (
     <section id={props.id} class="ui-section">
       <h2>{props.title}</h2>
-      <Stack gap="default">{props.children}</Stack>
+      <Stack gap="default" divided={props.divided}>
+        {props.children}
+      </Stack>
     </section>
   )
 }

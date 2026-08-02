@@ -1,0 +1,38 @@
+/* KeyMaterialInput — the three-way private-key input shared by the
+   connection editor and the Secrets page. */
+
+/* The fingerprint caption under a pasted key. It was written twice as an
+   inline style prop — which ADR-0014 forbids — and both copies named
+   `--text-secondary`, a token this repo does not define, so the colour
+   silently did nothing. */
+.cm-key-fingerprint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}
+
+/* A private key file that could not be read (or a native picker that does
+   not exist here). Beside the chooser rather than in a toast: it is about
+   the control the user just used, and the dialog is still open in front of
+   it. */
+.cm-key-file-error {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+
+/* Path mode: the field and its Browse action sit on one line; the button is
+   the dialog's own control, so it must not stretch to the field's width. */
+.km-path-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.km-path-row .ui-text-field {
+  flex: 1 1 auto;
+}
+
+.km-path-row .ui-button {
+  flex: 0 0 auto;
+  margin-top: 1.625rem; /* align with the field's input, not its label */
+}

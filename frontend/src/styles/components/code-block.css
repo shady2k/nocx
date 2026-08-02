@@ -1,0 +1,21 @@
+/* CodeBlock — preformatted machine output.
+   Replaces `.st-export-backup-details`, which declared this same look on the
+   export surface. See code-block.tsx. */
+
+.ui-code-block {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
+  border-radius: var(--control-radius-sm);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* One cap, decided here. Machine output has no length the caller can promise,
+     and a block that grows with the response pushes the rest of the page off
+     screen. */
+  max-height: 200px;
+  overflow: auto;
+}

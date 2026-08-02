@@ -17,7 +17,7 @@ import (
 
 // ── Service ──────────────────────────────────────────────────────────────
 
-// Service implements the Backup & Restore workflow (ADR-0015).
+// Service implements the Backup & Restore workflow (ADR-0018).
 type Service struct {
 	connections ConnectionSnapshotStore
 	settings    SettingsSnapshotStore
@@ -274,12 +274,6 @@ func (s *Service) Recover() error {
 
 // ── Internal: document building ──────────────────────────────────────────
 
-var safeSSHKeys = map[string]bool{
-	"host": true, "port": true, "user": true, "auth": true,
-	"keepaliveInterval": true, "keepaliveCountMax": true, "readyTimeout": true,
-	"jumpHost": true, "agentForward": true, "canBeJumpServer": true,
-}
-
 func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any) (Document, CreateSummary) {
 	doc := Document{
 		Format:  Format,
@@ -306,10 +300,10 @@ func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any) (D
 	for _, p := range snap.Profiles {
 		bp := profileToBackup(p)
 
-		requires := p.Options.CredentialID != ""
+		requires := profileHasSecretRefs(p)
 		if !requires && p.Group != "" {
 			if g, ok := groupMap[p.Group]; ok {
-				if getGroupCredentialID(g) != "" {
+				if groupHasSecretRefs(g) {
 					requires = true
 				}
 			}
@@ -346,20 +340,92 @@ func profileToBackup(p profile.SSHProfile) BackupProfile {
 		BehaviorOnSessionEnd: p.BehaviorOnSessionEnd,
 		Weight:               p.Weight,
 		IsBuiltin:            p.IsBuiltin,
-		IsTemplate:           p.IsTemplate,
 		Options: BackupSSHOptions{
 			Host:              p.Options.Host,
-			Port:              p.Options.Port,
-			User:              p.Options.User,
-			Auth:              p.Options.Auth,
-			KeepaliveInterval: p.Options.KeepaliveInterval,
-			KeepaliveCountMax: p.Options.KeepaliveCountMax,
-			ReadyTimeout:      p.Options.ReadyTimeout,
-			JumpHost:          p.Options.JumpHost,
-			AgentForward:      p.Options.AgentForward,
-			CanBeJumpServer:   p.Options.CanBeJumpServer,
+			Port:              intVal(p.Options.Port),
+			User:              strVal(p.Options.User),
+			Auth:              authVal(p.Options.Auth),
+			KeepaliveInterval: intVal(p.Options.KeepaliveInterval),
+			KeepaliveCountMax: intVal(p.Options.KeepaliveCountMax),
+			ReadyTimeout:      intVal(p.Options.ReadyTimeout),
+			JumpHost:          strVal(p.Options.JumpHost),
+			AgentForward:      boolVal(p.Options.AgentForward),
+			CanBeJumpServer:   boolVal(p.Options.CanBeJumpServer),
 		},
 	}
+}
+
+// profileHasSecretRefs reports whether the profile carries any backend-owned
+// secret reference (ADR-0016/0017). Backups deliberately carry no secrets, so
+// such references are stripped and the restore summary counts them.
+func profileHasSecretRefs(p profile.SSHProfile) bool {
+	return p.Options.PasswordSecret != "" || p.Options.KeySecret != "" || p.Options.KeyPassphraseSecret != ""
+}
+
+// groupHasSecretRefs reports whether the group defaults carry secret refs.
+func groupHasSecretRefs(g profile.ProfileGroup) bool {
+	if g.Defaults == nil {
+		return false
+	}
+	return g.Defaults.PasswordSecret != nil || g.Defaults.KeySecret != nil || g.Defaults.KeyPassphraseSecret != nil
+}
+
+// --- presence-aware deref helpers (StoredSSHProfileOptions) ---------------
+
+func intVal(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func strVal(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func boolVal(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
+}
+
+func authVal(p *profile.AuthMode) profile.AuthMode {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func optInt(v int) *int {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
+func optStr(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+func optBool(v bool) *bool {
+	if !v {
+		return nil
+	}
+	return &v
+}
+
+func optAuth(v profile.AuthMode) *profile.AuthMode {
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 // getGroupCredentialID extracts credentialId from an untyped group defaults map.
@@ -367,16 +433,16 @@ func getGroupCredentialID(g profile.ProfileGroup) string {
 	if g.Defaults == nil {
 		return ""
 	}
-	sshMap, _ := g.Defaults["ssh"].(map[string]any)
-	if sshMap == nil {
-		return ""
+	if g.Defaults.PasswordSecret != nil {
+		return *g.Defaults.PasswordSecret
 	}
-	optsMap, _ := sshMap["options"].(map[string]any)
-	if optsMap == nil {
-		return ""
+	if g.Defaults.KeySecret != nil {
+		return *g.Defaults.KeySecret
 	}
-	cid, _ := optsMap["credentialId"].(string)
-	return cid
+	if g.Defaults.KeyPassphraseSecret != nil {
+		return *g.Defaults.KeyPassphraseSecret
+	}
+	return ""
 }
 
 func groupToBackup(g profile.ProfileGroup) (BackupGroup, int) {
@@ -392,69 +458,47 @@ func groupToBackup(g profile.ProfileGroup) (BackupGroup, int) {
 	omittedCount := 0
 
 	if g.Defaults != nil {
-		sshMap, _ := g.Defaults["ssh"].(map[string]any)
-		if sshMap != nil {
-			bg.Defaults = &BackupGroupDefaults{}
-			bg.Defaults.SSH = &BackupSSHDefaults{}
-
-			optsMap, _ := sshMap["options"].(map[string]any)
-			if optsMap != nil {
-				bg.Defaults.SSH.Options = extractSafeOptions(optsMap)
-
-				if _, ok := optsMap["credentialId"]; ok {
-					cid, _ := optsMap["credentialId"].(string)
-					if cid != "" {
-						bg.CredentialBindingRemoved = true
-					}
-				}
-
-				for key := range optsMap {
-					if !safeSSHKeys[key] && key != "credentialId" {
-						bg.OmittedDefaultKeys = append(bg.OmittedDefaultKeys, "defaults.ssh.options."+key)
-						omittedCount++
-					}
-				}
-				sort.Strings(bg.OmittedDefaultKeys)
-			}
+		bg.Defaults = &BackupGroupDefaults{}
+		bg.Defaults.SSH = &BackupSSHDefaults{}
+		d := g.Defaults
+		bg.Defaults.SSH.Options = BackupSSHOptions{
+			Port:              intVal(d.Port),
+			User:              strVal(d.User),
+			Auth:              authVal(d.Auth),
+			KeepaliveInterval: intVal(d.KeepaliveInterval),
+			KeepaliveCountMax: intVal(d.KeepaliveCountMax),
+			ReadyTimeout:      intVal(d.ReadyTimeout),
+			JumpHost:          strVal(d.JumpHost),
+			AgentForward:      boolVal(d.AgentForward),
 		}
+
+		if groupHasSecretRefs(g) {
+			bg.CredentialBindingRemoved = true
+		}
+
+		// Secret references, key material paths and unknown keys are
+		// deliberately not carried by a backup (ADR-0018): secrets are
+		// never serialized, and unknown keys may be provider-specific.
+		// Secret references are counted via CredentialBindingRemoved, not
+		// listed by name — a backup must not name a secret key at all.
+		omitted := map[string]bool{
+			"defaults.keyPath":              d.KeyPath != nil,
+			"defaults.behaviorOnSessionEnd": d.BehaviorOnSessionEnd != nil,
+		}
+		for _, k := range d.UnknownKeys() {
+			omitted["defaults."+k] = true
+		}
+		for k, present := range omitted {
+			if !present {
+				continue
+			}
+			bg.OmittedDefaultKeys = append(bg.OmittedDefaultKeys, k)
+			omittedCount++
+		}
+		sort.Strings(bg.OmittedDefaultKeys)
 	}
 
 	return bg, omittedCount
-}
-
-func extractSafeOptions(opts map[string]any) BackupSSHOptions {
-	o := BackupSSHOptions{}
-	if v, ok := opts["host"].(string); ok {
-		o.Host = v
-	}
-	if v, ok := opts["port"].(float64); ok {
-		o.Port = int(v)
-	}
-	if v, ok := opts["user"].(string); ok {
-		o.User = v
-	}
-	if v, ok := opts["auth"].(string); ok {
-		o.Auth = profile.AuthMode(v)
-	}
-	if v, ok := opts["keepaliveInterval"].(float64); ok {
-		o.KeepaliveInterval = int(v)
-	}
-	if v, ok := opts["keepaliveCountMax"].(float64); ok {
-		o.KeepaliveCountMax = int(v)
-	}
-	if v, ok := opts["readyTimeout"].(float64); ok {
-		o.ReadyTimeout = int(v)
-	}
-	if v, ok := opts["jumpHost"].(string); ok {
-		o.JumpHost = v
-	}
-	if v, ok := opts["agentForward"].(bool); ok {
-		o.AgentForward = v
-	}
-	if v, ok := opts["canBeJumpServer"].(bool); ok {
-		o.CanBeJumpServer = v
-	}
-	return o
 }
 
 // ── Internal: parse & validate ───────────────────────────────────────────
@@ -564,7 +608,7 @@ func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
 		}
 	}
 
-	// TODO(ADR-0015): validate setting keys against the registry to keep Preview and Restore consistent.
+	// TODO(ADR-0018): validate setting keys against the registry to keep Preview and Restore consistent.
 
 	omissions := RestoreOmissions{}
 	for _, g := range doc.Connections.Groups {
@@ -876,19 +920,18 @@ func backupToProfile(bp BackupProfile) profile.SSHProfile {
 			BehaviorOnSessionEnd: bp.BehaviorOnSessionEnd,
 			Weight:               bp.Weight,
 			IsBuiltin:            bp.IsBuiltin,
-			IsTemplate:           bp.IsTemplate,
 		},
-		Options: profile.SSHProfileOptions{
+		Options: profile.StoredSSHProfileOptions{
 			Host:              bp.Options.Host,
-			Port:              bp.Options.Port,
-			User:              bp.Options.User,
-			Auth:              bp.Options.Auth,
-			KeepaliveInterval: bp.Options.KeepaliveInterval,
-			KeepaliveCountMax: bp.Options.KeepaliveCountMax,
-			ReadyTimeout:      bp.Options.ReadyTimeout,
-			JumpHost:          bp.Options.JumpHost,
-			AgentForward:      bp.Options.AgentForward,
-			CanBeJumpServer:   bp.Options.CanBeJumpServer,
+			Port:              optInt(bp.Options.Port),
+			User:              optStr(bp.Options.User),
+			Auth:              optAuth(bp.Options.Auth),
+			KeepaliveInterval: optInt(bp.Options.KeepaliveInterval),
+			KeepaliveCountMax: optInt(bp.Options.KeepaliveCountMax),
+			ReadyTimeout:      optInt(bp.Options.ReadyTimeout),
+			JumpHost:          optStr(bp.Options.JumpHost),
+			AgentForward:      optBool(bp.Options.AgentForward),
+			CanBeJumpServer:   optBool(bp.Options.CanBeJumpServer),
 		},
 	}
 }
@@ -903,48 +946,18 @@ func backupToGroup(bg BackupGroup) profile.ProfileGroup {
 		Editable:      bg.Editable,
 	}
 	if bg.Defaults != nil && bg.Defaults.SSH != nil {
-		g.Defaults = map[string]any{
-			"ssh": map[string]any{
-				"options": buildOptionsMap(bg.Defaults.SSH.Options),
-			},
-		}
+		o := bg.Defaults.SSH.Options
+		g.Defaults = &profile.ProfileDefaults{}
+		g.Defaults.Port = optInt(o.Port)
+		g.Defaults.User = optStr(o.User)
+		g.Defaults.Auth = optAuth(o.Auth)
+		g.Defaults.KeepaliveInterval = optInt(o.KeepaliveInterval)
+		g.Defaults.KeepaliveCountMax = optInt(o.KeepaliveCountMax)
+		g.Defaults.ReadyTimeout = optInt(o.ReadyTimeout)
+		g.Defaults.JumpHost = optStr(o.JumpHost)
+		g.Defaults.AgentForward = optBool(o.AgentForward)
 	}
 	return g
-}
-
-func buildOptionsMap(o BackupSSHOptions) map[string]any {
-	m := map[string]any{}
-	if o.Host != "" {
-		m["host"] = o.Host
-	}
-	if o.Port != 0 {
-		m["port"] = float64(o.Port)
-	}
-	if o.User != "" {
-		m["user"] = o.User
-	}
-	if o.Auth != "" {
-		m["auth"] = string(o.Auth)
-	}
-	if o.KeepaliveInterval != 0 {
-		m["keepaliveInterval"] = float64(o.KeepaliveInterval)
-	}
-	if o.KeepaliveCountMax != 0 {
-		m["keepaliveCountMax"] = float64(o.KeepaliveCountMax)
-	}
-	if o.ReadyTimeout != 0 {
-		m["readyTimeout"] = float64(o.ReadyTimeout)
-	}
-	if o.JumpHost != "" {
-		m["jumpHost"] = o.JumpHost
-	}
-	if o.AgentForward {
-		m["agentForward"] = true
-	}
-	if o.CanBeJumpServer {
-		m["canBeJumpServer"] = true
-	}
-	return m
 }
 
 func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
@@ -957,29 +970,35 @@ func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
 	mp.BehaviorOnSessionEnd = bp.BehaviorOnSessionEnd
 	mp.Weight = bp.Weight
 	mp.IsBuiltin = bp.IsBuiltin
-	mp.IsTemplate = bp.IsTemplate
+	// Copy the options block so pointer fields are not shared with the caller's
+	// snapshot before the merged values replace them.
+	mp.Options = cp.Options
 	mp.Options.Host = bp.Options.Host
-	mp.Options.Port = bp.Options.Port
-	mp.Options.User = bp.Options.User
-	mp.Options.Auth = bp.Options.Auth
-	mp.Options.KeepaliveInterval = bp.Options.KeepaliveInterval
-	mp.Options.KeepaliveCountMax = bp.Options.KeepaliveCountMax
-	mp.Options.ReadyTimeout = bp.Options.ReadyTimeout
-	mp.Options.JumpHost = bp.Options.JumpHost
-	mp.Options.AgentForward = bp.Options.AgentForward
-	mp.Options.CanBeJumpServer = bp.Options.CanBeJumpServer
+	mp.Options.Port = optInt(bp.Options.Port)
+	mp.Options.User = optStr(bp.Options.User)
+	mp.Options.Auth = optAuth(bp.Options.Auth)
+	mp.Options.KeepaliveInterval = optInt(bp.Options.KeepaliveInterval)
+	mp.Options.KeepaliveCountMax = optInt(bp.Options.KeepaliveCountMax)
+	mp.Options.ReadyTimeout = optInt(bp.Options.ReadyTimeout)
+	mp.Options.JumpHost = optStr(bp.Options.JumpHost)
+	mp.Options.AgentForward = optBool(bp.Options.AgentForward)
+	mp.Options.CanBeJumpServer = optBool(bp.Options.CanBeJumpServer)
 
 	effPort := bp.Options.Port
 	if effPort == 0 {
 		effPort = 22
 	}
-	cpEffPort := cp.Options.Port
+	cpEffPort := intVal(cp.Options.Port)
 	if cpEffPort == 0 {
 		cpEffPort = 22
 	}
 	hostChanged := strings.TrimSpace(bp.Options.Host) != strings.TrimSpace(cp.Options.Host) || effPort != cpEffPort
 	if hostChanged {
-		mp.Options.CredentialID = ""
+		// The identity changed: any secret reference the current profile holds
+		// belonged to the old target (ADR-0016) and must not follow it.
+		mp.Options.PasswordSecret = ""
+		mp.Options.KeySecret = ""
+		mp.Options.KeyPassphraseSecret = ""
 	}
 
 	return mp
@@ -994,40 +1013,33 @@ func mergeGroup(bg BackupGroup, cg profile.ProfileGroup) profile.ProfileGroup {
 	mg.ParentGroupID = bg.ParentGroupID
 
 	if bg.Defaults != nil && bg.Defaults.SSH != nil {
+		// The backup's defaults replace the safe fields; secret references
+		// are never carried and never kept (ADR-0018).
 		if mg.Defaults == nil {
-			mg.Defaults = make(map[string]any)
+			mg.Defaults = &profile.ProfileDefaults{}
 		} else {
-			cp := make(map[string]any, len(mg.Defaults))
-			for k, v := range mg.Defaults {
-				cp[k] = v
-			}
-			mg.Defaults = cp
+			cp := *mg.Defaults
+			mg.Defaults = &cp
 		}
-		mg.Defaults["ssh"] = map[string]any{
-			"options": buildOptionsMap(bg.Defaults.SSH.Options),
-		}
+		o := bg.Defaults.SSH.Options
+		mg.Defaults.Port = optInt(o.Port)
+		mg.Defaults.User = optStr(o.User)
+		mg.Defaults.Auth = optAuth(o.Auth)
+		mg.Defaults.KeepaliveInterval = optInt(o.KeepaliveInterval)
+		mg.Defaults.KeepaliveCountMax = optInt(o.KeepaliveCountMax)
+		mg.Defaults.ReadyTimeout = optInt(o.ReadyTimeout)
+		mg.Defaults.JumpHost = optStr(o.JumpHost)
+		mg.Defaults.AgentForward = optBool(o.AgentForward)
 	} else if mg.Defaults != nil {
-		// Deep-copy to avoid mutating the caller's snapshot.
-		cp := make(map[string]any, len(mg.Defaults))
-		for k, v := range mg.Defaults {
-			cp[k] = v
-		}
-		mg.Defaults = cp
-		if sshMap, ok := mg.Defaults["ssh"].(map[string]any); ok {
-			sshCopy := make(map[string]any, len(sshMap))
-			for k, v := range sshMap {
-				sshCopy[k] = v
-			}
-			mg.Defaults["ssh"] = sshCopy
-			if optsMap, ok := sshCopy["options"].(map[string]any); ok {
-				optsCopy := make(map[string]any, len(optsMap))
-				for k, v := range optsMap {
-					optsCopy[k] = v
-				}
-				delete(optsCopy, "credentialId")
-				sshCopy["options"] = optsCopy
-			}
-		}
+		cp := *mg.Defaults
+		mg.Defaults = &cp
+	}
+	if mg.Defaults != nil {
+		// Strip secret references from the merged group defaults either way:
+		// a group backup never carries them, and stale refs must not survive.
+		mg.Defaults.PasswordSecret = nil
+		mg.Defaults.KeySecret = nil
+		mg.Defaults.KeyPassphraseSecret = nil
 	}
 	return mg
 }
@@ -1036,17 +1048,17 @@ func profileEqual(bp BackupProfile, cp profile.SSHProfile) bool {
 	if bp.Name != cp.Name || bp.Group != cp.Group || bp.Icon != cp.Icon ||
 		bp.Color != cp.Color || bp.DisableDynamicTitle != cp.DisableDynamicTitle ||
 		bp.BehaviorOnSessionEnd != cp.BehaviorOnSessionEnd || bp.Weight != cp.Weight ||
-		bp.IsBuiltin != cp.IsBuiltin || bp.IsTemplate != cp.IsTemplate {
+		bp.IsBuiltin != cp.IsBuiltin {
 		return false
 	}
-	if bp.Options.Host != cp.Options.Host || bp.Options.Port != cp.Options.Port ||
-		bp.Options.User != cp.Options.User || bp.Options.Auth != cp.Options.Auth ||
-		bp.Options.KeepaliveInterval != cp.Options.KeepaliveInterval ||
-		bp.Options.KeepaliveCountMax != cp.Options.KeepaliveCountMax ||
-		bp.Options.ReadyTimeout != cp.Options.ReadyTimeout ||
-		bp.Options.JumpHost != cp.Options.JumpHost ||
-		bp.Options.AgentForward != cp.Options.AgentForward ||
-		bp.Options.CanBeJumpServer != cp.Options.CanBeJumpServer {
+	if bp.Options.Host != cp.Options.Host || bp.Options.Port != intVal(cp.Options.Port) ||
+		bp.Options.User != strVal(cp.Options.User) || bp.Options.Auth != authVal(cp.Options.Auth) ||
+		bp.Options.KeepaliveInterval != intVal(cp.Options.KeepaliveInterval) ||
+		bp.Options.KeepaliveCountMax != intVal(cp.Options.KeepaliveCountMax) ||
+		bp.Options.ReadyTimeout != intVal(cp.Options.ReadyTimeout) ||
+		bp.Options.JumpHost != strVal(cp.Options.JumpHost) ||
+		bp.Options.AgentForward != boolVal(cp.Options.AgentForward) ||
+		bp.Options.CanBeJumpServer != boolVal(cp.Options.CanBeJumpServer) {
 		return false
 	}
 	return true
@@ -1058,23 +1070,77 @@ func groupFieldsEqual(bg BackupGroup, cg profile.ProfileGroup) bool {
 		bg.ParentGroupID != cg.ParentGroupID {
 		return false
 	}
-	// Compare only the SSH defaults subset — non-SSH provider keys in the
-	// current group are out of scope for backup equality.
-	var bgSSH any
+	// Compare only the safe SSH defaults subset — secret references and
+	// unknown keys are out of scope for backup equality.
+	bgSafe := map[string]any{}
 	if bg.Defaults != nil && bg.Defaults.SSH != nil {
-		raw, _ := json.Marshal(bg.Defaults.SSH)
-		_ = json.Unmarshal(raw, &bgSSH)
+		bgSafe = backupSSHToSafeMap(bg.Defaults.SSH.Options)
 	}
-	var cgSSH any
+	cgSafe := map[string]any{}
 	if cg.Defaults != nil {
-		if ssh, ok := cg.Defaults["ssh"]; ok {
-			raw, _ := json.Marshal(ssh)
-			_ = json.Unmarshal(raw, &cgSSH)
-		}
+		cgSafe = sparseDefaultsToSafeMap(cg.Defaults)
 	}
-	bgJSON, _ := json.Marshal(bgSSH)
-	cgJSON, _ := json.Marshal(cgSSH)
+	bgJSON, _ := json.Marshal(bgSafe)
+	cgJSON, _ := json.Marshal(cgSafe)
 	return string(bgJSON) == string(cgJSON)
+}
+
+func backupSSHToSafeMap(o BackupSSHOptions) map[string]any {
+	m := map[string]any{}
+	if o.Port != 0 {
+		m["port"] = o.Port
+	}
+	if o.User != "" {
+		m["user"] = o.User
+	}
+	if o.Auth != "" {
+		m["auth"] = string(o.Auth)
+	}
+	if o.KeepaliveInterval != 0 {
+		m["keepaliveInterval"] = o.KeepaliveInterval
+	}
+	if o.KeepaliveCountMax != 0 {
+		m["keepaliveCountMax"] = o.KeepaliveCountMax
+	}
+	if o.ReadyTimeout != 0 {
+		m["readyTimeout"] = o.ReadyTimeout
+	}
+	if o.JumpHost != "" {
+		m["jumpHost"] = o.JumpHost
+	}
+	if o.AgentForward {
+		m["agentForward"] = true
+	}
+	return m
+}
+
+func sparseDefaultsToSafeMap(d *profile.ProfileDefaults) map[string]any {
+	m := map[string]any{}
+	if d.Port != nil {
+		m["port"] = *d.Port
+	}
+	if d.User != nil {
+		m["user"] = *d.User
+	}
+	if d.Auth != nil {
+		m["auth"] = string(*d.Auth)
+	}
+	if d.KeepaliveInterval != nil {
+		m["keepaliveInterval"] = *d.KeepaliveInterval
+	}
+	if d.KeepaliveCountMax != nil {
+		m["keepaliveCountMax"] = *d.KeepaliveCountMax
+	}
+	if d.ReadyTimeout != nil {
+		m["readyTimeout"] = *d.ReadyTimeout
+	}
+	if d.JumpHost != nil {
+		m["jumpHost"] = *d.JumpHost
+	}
+	if d.AgentForward != nil {
+		m["agentForward"] = *d.AgentForward
+	}
+	return m
 }
 
 func computeRequiringCredential(doc Document, targetProfiles []profile.SSHProfile) []ProfileRef {
@@ -1085,7 +1151,7 @@ func computeRequiringCredential(doc Document, targetProfiles []profile.SSHProfil
 		}
 		for _, tp := range targetProfiles {
 			if tp.ID == bp.ID {
-				if tp.Options.CredentialID == "" {
+				if !profileHasSecretRefs(tp) {
 					refs = append(refs, ProfileRef{ID: bp.ID, Name: bp.Name})
 				}
 				break

@@ -172,3 +172,138 @@ describe('CommandEditor', () => {
     expect(ta.selectionStart).toBe(7) // caret after the inserted text
   })
 })
+
+describe('alias hints', () => {
+  const HINT_ITEMS = [
+    { alias: 'prod-db', hostName: '10.0.0.1', user: 'deploy' },
+    { alias: 'prod-web', hostName: 'web.example.com', port: 2222 },
+    { alias: 'staging-db', hostName: 'staging.example.com' },
+  ]
+
+  const keyDown = (ta: HTMLTextAreaElement, key: string) =>
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+
+  const input = (ta: HTMLTextAreaElement, value: string) => {
+    ta.value = value
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  it('showAliasHints renders items; hideAliasHints clears them', () => {
+    const { ed, container } = setup()
+    const hintEl = container.querySelector('.nocx-editor-hint')!
+    expect(hintEl).toBeTruthy()
+    expect((hintEl as HTMLElement).style.display).toBe('none')
+
+    ed.showAliasHints(HINT_ITEMS)
+    expect((hintEl as HTMLElement).style.display).not.toBe('none')
+    const items = container.querySelectorAll('.nocx-editor-hint__item')
+    expect(items.length).toBe(3)
+
+    ed.hideAliasHints()
+    expect((hintEl as HTMLElement).style.display).toBe('none')
+    expect(container.querySelectorAll('.nocx-editor-hint__item').length).toBe(0)
+  })
+
+  it('showAliasHints with empty list hides the dropdown', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.showAliasHints([])
+    const hintEl = container.querySelector('.nocx-editor-hint') as HTMLElement
+    expect(hintEl.style.display).toBe('none')
+  })
+
+  it('showAliasHints highlights first item by default', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.showAliasHints(HINT_ITEMS)
+    const items = container.querySelectorAll('.nocx-editor-hint__item')
+    expect(items[0].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
+    expect(items[1].classList.contains('nocx-editor-hint__item--selected')).toBe(false)
+  })
+
+  it('ArrowDown/ArrowUp navigates the hint list', () => {
+    const { ed, ta, container } = setup()
+    ed.show()
+    ed.showAliasHints(HINT_ITEMS)
+
+    const items = () => container.querySelectorAll('.nocx-editor-hint__item')
+
+    expect(items()[0].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
+
+    keyDown(ta, 'ArrowDown')
+    expect(items()[0].classList.contains('nocx-editor-hint__item--selected')).toBe(false)
+    expect(items()[1].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
+
+    keyDown(ta, 'ArrowDown')
+    expect(items()[0].classList.contains('nocx-editor-hint__item--selected')).toBe(false)
+    expect(items()[2].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
+
+    // Wrap around
+    keyDown(ta, 'ArrowDown')
+    expect(items()[0].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
+
+    // Back up
+    keyDown(ta, 'ArrowUp')
+    expect(items()[2].classList.contains('nocx-editor-hint__item--selected')).toBe(true)
+  })
+  it('Enter on hint does NOT submit (atomic handoff preserved)', () => {
+    const { ed, ta, submit } = setup()
+    ed.show()
+    input(ta, 'ssh prod')
+    ed.showAliasHints(HINT_ITEMS)
+    keyDown(ta, 'Enter')
+    // The alias was accepted, not submitted as a command
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('Enter on hint accepts the selected alias and replaces the ssh line', () => {
+    const { ed, ta } = setup()
+    ed.show()
+    input(ta, 'ssh prod')
+    ed.showAliasHints(HINT_ITEMS)
+    keyDown(ta, 'Enter')
+    expect(ta.value).toBe('ssh prod-db')
+  })
+
+  it('Escape dismisses hints without clearing the textarea', () => {
+    const { ed, ta, container } = setup()
+    ed.show()
+    input(ta, 'ssh prod')
+    ed.showAliasHints(HINT_ITEMS)
+    const hintEl = container.querySelector('.nocx-editor-hint') as HTMLElement
+    expect(hintEl.style.display).not.toBe('none')
+
+    keyDown(ta, 'Escape')
+    expect(hintEl.style.display).toBe('none')
+    expect(ta.value).toBe('ssh prod') // textarea untouched
+  })
+
+  it('onInputChange fires on every input event with current value', () => {
+    const onInputChange = vi.fn()
+    const c = document.createElement('div')
+    document.body.appendChild(c)
+    const ed = new CommandEditor({ submit: vi.fn(), cancel: vi.fn(), onInputChange })
+    ed.mount(c)
+    ed.show()
+
+    const ta = c.querySelector('textarea')!
+    ta.value = 'hello'
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(onInputChange).toHaveBeenCalledWith('hello')
+
+    ta.value = 'ssh prod'
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(onInputChange).toHaveBeenCalledWith('ssh prod')
+    expect(onInputChange).toHaveBeenCalledTimes(2)
+  })
+
+  it('hints are hidden after hide() is called', () => {
+    const { ed, container } = setup()
+    ed.show()
+    ed.showAliasHints(HINT_ITEMS)
+    const hintEl = container.querySelector('.nocx-editor-hint') as HTMLElement
+    expect(hintEl.style.display).not.toBe('none')
+    ed.hide()
+    expect(hintEl.style.display).toBe('none')
+  })
+})

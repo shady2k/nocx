@@ -6,14 +6,22 @@
 /* The picker is a command palette: wide enough to read a host and its label on
    one line, and tall enough that the list does not look like it ran out.
 
-   The size is FIXED, not derived from the content. A palette whose box grows and
-   shrinks as you type moves the rows out from under the pointer between two
+   The HEIGHT is fixed, not derived from the content. A palette whose box grows
+   and shrinks as you type moves the rows out from under the pointer between two
    keystrokes, and the filter is exactly when a stable target matters most. The
-   list below takes the leftover space and scrolls inside it. */
+   list below takes the leftover space and scrolls inside it.
+
+   The WIDTH is the Dialog's, and this file must not name one. It used to say
+   512px, chosen when `[data-size='lg']` was 560px wide (512 + 24 of padding each
+   side). The panel later moved to 640px and this number did not, so the palette
+   sat in a 592px content box at 512px and left 80px of dead space down its right
+   edge. dialog.css states the rule the mismatch broke: "The size prop names the
+   width; the content never gets a say" (nocx-kudf). */
 .quick-connect {
   display: flex;
   flex-direction: column;
-  width: 512px;
+  width: 100%;
+  box-sizing: border-box;
   height: 420px;
   /* Lets the panel's clamp reach the list's scroll region on a short viewport
      instead of stopping at this box. */
@@ -103,6 +111,33 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── System entries (SSH aliases) ────────────────────────────────────── */
+
+/* System entries are visually distinguishable from saved connections:
+   smaller row area and a subtle badge rather than a full-height row. */
+.quick-connect__item--system {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.quick-connect__item--system .quick-connect__item-label {
+  font-size: var(--font-size-sm);
+}
+
+.quick-connect__item-badge {
+  display: inline-block;
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  padding: 1px 4px;
+  margin-left: 6px;
+  border-radius: 3px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  vertical-align: middle;
 }
 
 /* ── Empty state ──────────────────────────────────────────────────────── */

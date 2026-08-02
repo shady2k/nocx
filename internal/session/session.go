@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
@@ -36,6 +37,14 @@ type Config struct {
 	YPixel uint16
 	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
 	Enhanced bool
+	// ProfileID records the profile this session was opened from, enabling
+	// the connection list to report which rows are live and when they were
+	// last used (nocx-uxs5.4). Empty for ad-hoc/local sessions.
+	ProfileID string
+	// CredentialID records the credential this session was opened with.
+	// Used by revocation to find sessions running that credential.
+	// Empty for sessions with no linked credential (inline auth).
+	CredentialID string
 }
 
 type PTYFactory interface {
@@ -51,11 +60,32 @@ type Session interface {
 	// until a program sets a title; it does NOT follow `cd`, which needs the
 	// OSC 7 events in nocx-5mn.2.
 	Cwd() string
+	// ProfileID returns the profile ID this session was opened from.
+	// Empty for ad-hoc/local sessions (nocx-uxs5.4).
+	ProfileID() string
+
+	// CredentialID returns the credential ID this session was opened with.
+	// Empty for sessions with no linked credential (inline auth) and for
+	// local/ad-hoc sessions.
+	CredentialID() string
+
 	Write(p []byte) (int, error)
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
 	Close() error
 	Done() <-chan struct{}
 	StartOutput(ctx context.Context, onOutput OutputHandler) error
+}
+
+// ProfileUsageTracker records profile session activity (nocx-uxs5.4).
+// Implementations may persist last-used timestamps; a nil tracker is a no-op.
+type ProfileUsageTracker interface {
+	// SessionOpened is called when a session is created for a profile.
+	SessionOpened(profileID string)
+	// SessionClosed is called when a session for a profile ends.
+	SessionClosed(profileID string)
+	// LastUsedForProfiles returns the last-used time for each requested
+	// profile ID. Profiles with no recorded usage are absent from the map.
+	LastUsedForProfiles(profileIDs []string) (map[string]time.Time, error)
 }
 
 type Registry interface {
@@ -90,11 +120,12 @@ func IDToBytes(id ID) ([16]byte, error) {
 }
 
 type Reg struct {
-	log      log.Logger
-	ptf      PTYFactory
-	ssh      SSHFactory
-	mu       sync.Mutex
-	sessions map[ID]*realSession
+	log          log.Logger
+	ptf          PTYFactory
+	ssh          SSHFactory
+	mu           sync.Mutex
+	sessions     map[ID]*realSession
+	usageTracker ProfileUsageTracker
 }
 
 // SSHFactory creates SSH connections (AD-4). Injected at the composition
@@ -114,6 +145,14 @@ func New(logger log.Logger, ptf PTYFactory) *Reg {
 // WithSSHFactory injects an SSH factory, enabling KindRemote sessions.
 func (r *Reg) WithSSHFactory(f SSHFactory) *Reg {
 	r.ssh = f
+	return r
+}
+
+// WithProfileUsageTracker injects a ProfileUsageTracker, enabling last-used
+// persistence and the sessions.status RPC (nocx-uxs5.4). A nil tracker is a
+// no-op — Open and Close work without it.
+func (r *Reg) WithProfileUsageTracker(t ProfileUsageTracker) *Reg {
+	r.usageTracker = t
 	return r
 }
 
@@ -148,19 +187,25 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	}
 
 	id := NewID()
+
 	s := &realSession{
-		id:   id,
-		kind: cfg.Kind,
-		cwd:  resolveSessionCwd(cfg.Cwd),
-		ch:   ch,
-		log:  r.log.With("session_id", string(id)),
+		id:           id,
+		kind:         cfg.Kind,
+		cwd:          resolveSessionCwd(cfg.Cwd),
+		profileID:    cfg.ProfileID,
+		credentialID: cfg.CredentialID,
+		ch:           ch,
+		log:          r.log.With("session_id", string(id)),
 	}
 
 	r.mu.Lock()
 	r.sessions[id] = s
 	r.mu.Unlock()
 
-	r.log.Info("session opened", "id", string(id), "kind", kindName(cfg.Kind))
+	r.log.Info("session opened", "id", string(id), "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
+	if r.usageTracker != nil && cfg.ProfileID != "" {
+		r.usageTracker.SessionOpened(cfg.ProfileID)
+	}
 	return s, nil
 }
 
@@ -188,7 +233,11 @@ func (r *Reg) Close(id ID) error {
 	}
 
 	r.log.Info("session closed", "id", string(id))
-	return s.Close()
+	err := s.Close()
+	if r.usageTracker != nil && s.profileID != "" {
+		r.usageTracker.SessionClosed(s.profileID)
+	}
+	return err
 }
 
 func (r *Reg) List() []Session {
@@ -270,8 +319,28 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.JumpSecrets != nil {
 		opts = append(opts, ssh.WithJumpCredentials(cfg.JumpSecrets, cfg.JumpSecretID))
 	}
+	if cfg.JumpPassphraseSecretID != "" {
+		opts = append(opts, ssh.WithJumpPassphraseSecretID(cfg.JumpPassphraseSecretID))
+	}
 	if cfg.Secrets != nil {
 		opts = append(opts, ssh.WithCredentials(cfg.Secrets, cfg.SecretID))
+	}
+	// The vault-stored key (and its passphrase) ride the same store: without
+	// them the dial sees publicKey auth with nothing to offer — the probe
+	// works because it uses the resolved config directly, the session loses
+	// the binding here. ADR-0017: a connection references a secret.
+	if cfg.KeySecretID != "" {
+		opts = append(opts, ssh.WithKeySecretID(cfg.KeySecretID))
+	}
+	if cfg.PassphraseSecretID != "" {
+		opts = append(opts, ssh.WithPassphraseSecretID(cfg.PassphraseSecretID))
+	}
+
+	if cfg.AuthorizedEndpoint != "" {
+		opts = append(opts, ssh.WithAuthorizedEndpoint(cfg.AuthorizedEndpoint))
+	}
+	if cfg.JumpAuthorizedEndpoint != "" {
+		opts = append(opts, ssh.WithJumpAuthorizedEndpoint(cfg.JumpAuthorizedEndpoint))
 	}
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
@@ -279,10 +348,17 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	return opts
 }
 
+// realSession is the concrete Session implementation.
+//
+// Deleted profile with open session: the session holds its own Channel
+// (SSH connection or PTY) and does not reference the profile store at
 type realSession struct {
-	id        ID
-	kind      Kind
-	cwd       string
+	id           ID
+	kind         Kind
+	cwd          string
+	profileID    string
+	credentialID string
+
 	ch        Channel
 	log       log.Logger
 	handler   OutputHandler
@@ -290,9 +366,11 @@ type realSession struct {
 	closeOnce sync.Once
 }
 
-func (s *realSession) ID() ID      { return s.id }
-func (s *realSession) Kind() Kind  { return s.kind }
-func (s *realSession) Cwd() string { return s.cwd }
+func (s *realSession) ID() ID               { return s.id }
+func (s *realSession) Kind() Kind           { return s.kind }
+func (s *realSession) Cwd() string          { return s.cwd }
+func (s *realSession) ProfileID() string    { return s.profileID }
+func (s *realSession) CredentialID() string { return s.credentialID }
 
 func (s *realSession) Write(p []byte) (int, error) {
 	return s.ch.Write(p)
@@ -302,10 +380,6 @@ func (s *realSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uin
 	return s.ch.Resize(ctx, cols, rows, xpixel, ypixel)
 }
 
-func (s *realSession) Done() <-chan struct{} {
-	return s.ch.Done()
-}
-
 func (s *realSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
@@ -313,6 +387,10 @@ func (s *realSession) Close() error {
 		err = s.ch.Close()
 	})
 	return err
+}
+
+func (s *realSession) Done() <-chan struct{} {
+	return s.ch.Done()
 }
 
 func (s *realSession) StartOutput(ctx context.Context, onOutput OutputHandler) error {

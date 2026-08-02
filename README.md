@@ -286,7 +286,7 @@ docs/                   — living docs (vision, architecture, decisions/)
 
 internal/               — Go backend
   app/                    composition root
-  backup/                 Backup & Restore (ADR-0015)
+  backup/                 Backup & Restore (ADR-0018)
   config/                 settings, themes
   credential/             OS keychain secret store
   log/                    structured logging (slog adapter)

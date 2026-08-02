@@ -1,35 +1,23 @@
 package profile
 
 import (
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestProfileDefaults(t *testing.T) {
-	p := SSHProfile{
-		Base: Base{
-			ID:   "ssh:custom:test:0001",
-			Type: "ssh",
-			Name: "test-host",
-		},
-		Options: SSHProfileOptions{
-			Host: "example.com",
-			User: "alice",
-		},
+func TestHardcodedDefaults(t *testing.T) {
+	d := hardcodedDefaults()
+	if d.Port == nil || *d.Port != 22 {
+		t.Errorf("default port = %v, want 22", d.Port)
 	}
-
-	applyDefaults(&p)
-
-	if p.Options.Port != 22 {
-		t.Errorf("default port = %d, want 22", p.Options.Port)
+	if d.User == nil || *d.User == "" {
+		t.Errorf("default user should be set, got nil/empty")
 	}
-	if p.Options.Auth != AuthAuto {
-		t.Errorf("default auth = %v, want %v", p.Options.Auth, AuthAuto)
-	}
-	if p.BehaviorOnSessionEnd != BehaviorAuto {
-		t.Errorf("default behavior = %v, want %v", p.BehaviorOnSessionEnd, BehaviorAuto)
+	if d.BehaviorOnSessionEnd == nil || *d.BehaviorOnSessionEnd != BehaviorAuto {
+		t.Errorf("default behavior = %v, want auto", d.BehaviorOnSessionEnd)
 	}
 }
 
@@ -119,32 +107,392 @@ func TestGroupPathCycleGuard(t *testing.T) {
 	}
 }
 
-func TestDefaultsMergeOrder(t *testing.T) {
-	hardcoded := SSHProfileOptions{Port: 22, Auth: AuthAuto}
-	providerDefaults := SSHProfileOptions{User: "root", KeepaliveInterval: 5000}
-	globalDefaults := SSHProfileOptions{User: "globaluser", Auth: AuthPassword}
-	groupDefaults := SSHProfileOptions{CredentialID: "cred:prod-key:123"}
+// ---------------------------------------------------------------------------
+// Effective profile resolution
+// ---------------------------------------------------------------------------
 
-	profile := SSHProfileOptions{Host: "example.com"}
-
-	merged := mergeSSHOptions(hardcoded, providerDefaults, globalDefaults, groupDefaults, profile)
-
-	if merged.Port != 22 {
-		t.Errorf("port from hardcoded = %d, want 22", merged.Port)
+func TestResolveEffectiveProfile_BasicInheritance(t *testing.T) {
+	profile := SSHProfile{
+		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
+		Options: StoredSSHProfileOptions{
+			Host: "web.example.com",
+		},
 	}
-	if merged.User != "globaluser" {
-		t.Errorf("user should prefer global over provider: got %q, want globaluser", merged.User)
+	groups := []ProfileGroup{
+		{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				PasswordSecret: new("sec:prod:1"),
+				Port:           new(2222),
+			},
+		}},
 	}
-	if merged.Auth != AuthPassword {
-		t.Errorf("auth should prefer global over provider default: got %v, want %v", merged.Auth, AuthPassword)
+	eff, err := ResolveEffectiveProfile(profile, groups, SparseSSHOptions{})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if merged.CredentialID != "cred:prod-key:123" {
-		t.Errorf("group defaults credential ID not applied: %v", merged.CredentialID)
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (inherited from group)", eff.ResolvedOptions.Port)
 	}
-	if merged.Host != "example.com" {
-		t.Errorf("profile host should win: got %q, want example.com", merged.Host)
+	if eff.ResolvedOptions.PasswordSecret != "sec:prod:1" {
+		t.Errorf("passwordSecret = %q, want sec:prod:1", eff.ResolvedOptions.PasswordSecret)
+	}
+	if src, ok := eff.Source["port"]; !ok || string(src) != "group:g1" {
+		t.Errorf("provenance for port = %q, want group:g1", src)
+	}
+	if src, ok := eff.Source["passwordSecret"]; !ok || string(src) != "group:g1" {
+		t.Errorf("provenance for passwordSecret = %q, want group:g1", src)
 	}
 }
+
+func TestResolveEffectiveProfile_ProfileOverridesGroup(t *testing.T) {
+	profile := SSHProfile{
+		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
+		Options: StoredSSHProfileOptions{
+			Host: "web.example.com",
+			Port: new(2222),
+			User: new("bob"),
+		},
+	}
+	groups := []ProfileGroup{
+		{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				Port: new(2223),
+				User: new("alice"),
+			},
+		}},
+	}
+	eff, err := ResolveEffectiveProfile(profile, groups, SparseSSHOptions{})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveProfile: %v", err)
+	}
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (profile overrides group)", eff.ResolvedOptions.Port)
+	}
+	if eff.ResolvedOptions.User != "bob" {
+		t.Errorf("user = %q, want bob (profile overrides group)", eff.ResolvedOptions.User)
+	}
+	if src := eff.Source["port"]; string(src) != "profile" {
+		t.Errorf("provenance for port = %q, want profile", src)
+	}
+}
+
+func TestResolveEffectiveProfile_InheritedTrueOverriddenToFalse(t *testing.T) {
+	// Group has agentForward = true; profile explicitly overrides to false via
+	// the sparse type (the stored SSHProfileOptions cannot carry explicit false,
+	// but the sparse type can distinguish nil-from-false).
+	groups := []ProfileGroup{
+		{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				AgentForward: new(true),
+			},
+		}},
+	}
+	// Construct a sparse override for the profile layer with explicit false.
+	af := false
+	profileSparse := SparseSSHOptions{AgentForward: &af}
+
+	// Manual merge: start with hardcoded, apply group, then sparse profile.
+	acc := hardcodedDefaults()
+	source := map[string]FieldSource{"port": FieldSourceDefault, "user": FieldSourceDefault, "behaviorOnSessionEnd": FieldSourceDefault}
+	applySparseLayer(&acc, &source, groups[0].Defaults.SparseSSHOptions, fieldSourceForGroup("g1"))
+	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
+
+	if acc.AgentForward == nil {
+		t.Fatal("AgentForward should be set")
+	}
+	if *acc.AgentForward {
+		t.Error("AgentForward = true, want false (profile override)")
+	}
+	if src := source["agentForward"]; string(src) != "profile" {
+		t.Errorf("provenance for agentForward = %q, want profile", src)
+	}
+}
+
+func TestResolveEffectiveProfile_InheritVsExplicitZero(t *testing.T) {
+	// Group global has port = 2222. Profile has no port set.
+	// Effective port should be 2222 from group.
+	profile := SSHProfile{
+		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g1"},
+		Options: StoredSSHProfileOptions{
+			Host: "web.example.com",
+		},
+	}
+	groups := []ProfileGroup{
+		{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				Port: new(2222),
+			},
+		}},
+	}
+	eff, err := ResolveEffectiveProfile(profile, groups, SparseSSHOptions{})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveProfile: %v", err)
+	}
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (inherited)", eff.ResolvedOptions.Port)
+	}
+	if src := eff.Source["port"]; string(src) != "group:g1" {
+		t.Errorf("provenance = %q, want group:g1", src)
+	}
+}
+
+func TestResolveEffectiveProfile_GroupChainPrecedence(t *testing.T) {
+	// Parent group sets port=2222, child group sets port=3333.
+	// Profile inherits from child (nearest ancestor wins).
+	profile := SSHProfile{
+		Base: Base{ID: "p1", Type: "ssh", Name: "web", Group: "g2"},
+		Options: StoredSSHProfileOptions{
+			Host: "web.example.com",
+		},
+	}
+	groups := []ProfileGroup{
+		{ID: "g1", Name: "Prod", Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				Port: new(2222),
+			},
+		}},
+		{ID: "g2", Name: "Staging", ParentGroupID: "g1", Defaults: &ProfileDefaults{
+			SparseSSHOptions: SparseSSHOptions{
+				Port: new(3333),
+			},
+		}},
+	}
+	eff, err := ResolveEffectiveProfile(profile, groups, SparseSSHOptions{})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveProfile: %v", err)
+	}
+	if eff.ResolvedOptions.Port != 3333 {
+		t.Errorf("port = %d, want 3333 (nearest group wins)", eff.ResolvedOptions.Port)
+	}
+	if src := eff.Source["port"]; string(src) != "group:g2" {
+		t.Errorf("provenance = %q, want group:g2", src)
+	}
+}
+
+func TestResolveEffectiveProfile_GlobalDefaults(t *testing.T) {
+	profile := SSHProfile{
+		Base: Base{ID: "p1", Type: "ssh", Name: "web"},
+		Options: StoredSSHProfileOptions{
+			Host: "web.example.com",
+		},
+	}
+	global := SparseSSHOptions{
+		PasswordSecret: new("sec:global:1"),
+		Port:           new(2222),
+	}
+	eff, err := ResolveEffectiveProfile(profile, nil, global)
+	if err != nil {
+		t.Fatalf("ResolveEffectiveProfile: %v", err)
+	}
+	if eff.ResolvedOptions.Port != 2222 {
+		t.Errorf("port = %d, want 2222 (global)", eff.ResolvedOptions.Port)
+	}
+	if src := eff.Source["port"]; string(src) != "global" {
+		t.Errorf("provenance = %q, want global", src)
+	}
+}
+
+func TestResolveEffectiveProfile_HostRequired(t *testing.T) {
+	profile := SSHProfile{
+		Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
+		Options: StoredSSHProfileOptions{},
+	}
+	_, err := ResolveEffectiveProfile(profile, nil, SparseSSHOptions{})
+	if err == nil {
+		t.Fatal("expected error for missing host")
+	}
+}
+
+func TestResolveEffectiveProfile_WhitespaceOnlyHostRejected(t *testing.T) {
+	profile := SSHProfile{
+		Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
+		Options: StoredSSHProfileOptions{Host: "  "},
+	}
+	_, err := ResolveEffectiveProfile(profile, nil, SparseSSHOptions{})
+	if err == nil {
+		t.Fatal("expected error for whitespace-only host")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Group graph validation
+// ---------------------------------------------------------------------------
+
+func TestValidateGroupTree_MissingParent(t *testing.T) {
+	groups := []ProfileGroup{
+		{ID: "g1", ParentGroupID: "nonexistent"},
+	}
+	err := ValidateGroupTree(groups)
+	if err == nil {
+		t.Fatal("expected error for missing parent")
+	}
+}
+
+func TestValidateGroupTree_Cycle(t *testing.T) {
+	groups := []ProfileGroup{
+		{ID: "g1", ParentGroupID: "g2"},
+		{ID: "g2", ParentGroupID: "g1"},
+	}
+	err := ValidateGroupTree(groups)
+	if err == nil {
+		t.Fatal("expected error for cycle")
+	}
+}
+
+func TestValidateGroupTree_DepthExceeded(t *testing.T) {
+	groups := make([]ProfileGroup, maxGroupDepth+1)
+	for i := range maxGroupDepth + 1 {
+		groups[i] = ProfileGroup{
+			ID:   fmt.Sprintf("g%d", i),
+			Name: fmt.Sprintf("Level%d", i),
+		}
+		if i > 0 {
+			groups[i].ParentGroupID = fmt.Sprintf("g%d", i-1)
+		}
+	}
+	err := ValidateGroupTree(groups)
+	if err == nil {
+		t.Fatal("expected error for depth > 32")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DecodeDefaults (legacy map[string]any)
+// ---------------------------------------------------------------------------
+
+func TestDecodeDefaults_UnknownKeyRecorded(t *testing.T) {
+	m := map[string]any{
+		"passwordSecret": "sec:prod:1",
+		"unknownField":   "value",
+	}
+	d, err := DecodeDefaults(m)
+	if err != nil {
+		t.Fatalf("DecodeDefaults should succeed with unknown keys: %v", err)
+	}
+	if keys := d.UnknownKeys(); len(keys) != 1 || keys[0] != "unknownField" {
+		t.Fatalf("UnknownKeys = %v, want [unknownField]", keys)
+	}
+	if err := d.Validate(); err == nil {
+		t.Fatal("Validate should error for unknown keys")
+	}
+}
+
+func TestDecodeDefaults_LegacyMapDecodes(t *testing.T) {
+	m := map[string]any{
+		"passwordSecret": "sec:prod:1",
+		"port":           2222.0,
+		"user":           "bob",
+	}
+	d, err := DecodeDefaults(m)
+	if err != nil {
+		t.Fatalf("DecodeDefaults: %v", err)
+	}
+	s := d.SparseSSHOptions
+	if s.PasswordSecret == nil || *s.PasswordSecret != "sec:prod:1" {
+		t.Errorf("passwordSecret = %v, want sec:prod:1", s.PasswordSecret)
+	}
+	if s.Port == nil || *s.Port != 2222 {
+		t.Errorf("port = %v, want 2222", s.Port)
+	}
+	if s.User == nil || *s.User != "bob" {
+		t.Errorf("user = %v, want bob", s.User)
+	}
+}
+
+func TestDecodeDefaults_UnknownKeysListed(t *testing.T) {
+	m := map[string]any{
+		"host":            "should-not-fail-now",
+		"canBeJumpServer": true,
+	}
+	d, err := DecodeDefaults(m)
+	if err != nil {
+		t.Fatalf("DecodeDefaults should succeed with unknown keys: %v", err)
+	}
+	keys := d.UnknownKeys()
+	if len(keys) != 2 {
+		t.Fatalf("UnknownKeys = %v, want 2 keys", keys)
+	}
+	if err := d.Validate(); err == nil {
+		t.Fatal("Validate should error for unknown keys")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ProfileDefaults custom JSON — unknown keys recorded, not rejected
+// ---------------------------------------------------------------------------
+
+func TestProfileDefaultsUnmarshal_UnknownKeyRecorded(t *testing.T) {
+	data := []byte(`{"passwordSecret":"sec:x","host":"forbidden"}`)
+	var d ProfileDefaults
+	if err := d.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON should not error with unknown keys: %v", err)
+	}
+	if keys := d.UnknownKeys(); len(keys) != 1 || keys[0] != "host" {
+		t.Fatalf("UnknownKeys = %v, want [host]", keys)
+	}
+	if err := d.Validate(); err == nil {
+		t.Fatal("Validate should error for unknown keys")
+	}
+}
+
+func TestProfileDefaultsUnmarshal_ValidKeys(t *testing.T) {
+	data := []byte(`{"passwordSecret":"sec:x","port":2222,"agentForward":true}`)
+	var d ProfileDefaults
+	if err := d.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	s := d.SparseSSHOptions
+	if s.PasswordSecret == nil || *s.PasswordSecret != "sec:x" {
+		t.Errorf("passwordSecret = %v", s.PasswordSecret)
+	}
+	if s.Port == nil || *s.Port != 2222 {
+		t.Errorf("port = %v", s.Port)
+	}
+	if s.AgentForward == nil || !*s.AgentForward {
+		t.Errorf("agentForward = %v, want true", s.AgentForward)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolveGroupChain
+// ---------------------------------------------------------------------------
+
+func TestResolveGroupChain_Simple(t *testing.T) {
+	groups := []ProfileGroup{
+		{ID: "g1", Name: "Root"},
+		{ID: "g2", Name: "Child", ParentGroupID: "g1"},
+		{ID: "g3", Name: "Grandchild", ParentGroupID: "g2"},
+	}
+	chain, err := ResolveGroupChain(groups, "g3")
+	if err != nil {
+		t.Fatalf("ResolveGroupChain: %v", err)
+	}
+	if len(chain) != 2 {
+		t.Fatalf("chain length = %d, want 2", len(chain))
+	}
+	// Returns nearest ancestor first, then parent.
+	if chain[0].ID != "g2" {
+		t.Errorf("chain[0] = %s, want g2", chain[0].ID)
+	}
+	if chain[1].ID != "g1" {
+		t.Errorf("chain[1] = %s, want g1", chain[1].ID)
+	}
+}
+
+func TestResolveGroupChain_CycleError(t *testing.T) {
+	groups := []ProfileGroup{
+		{ID: "g1", ParentGroupID: "g2"},
+		{ID: "g2", ParentGroupID: "g1"},
+	}
+	_, err := ResolveGroupChain(groups, "g1")
+	if err == nil {
+		t.Fatal("expected error for cycle")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Existing JSON store tests
+// ---------------------------------------------------------------------------
 
 func TestJSONStoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -158,19 +506,19 @@ func TestJSONStoreRoundTrip(t *testing.T) {
 			Name:  "roundtrip",
 			Group: "g1",
 		},
-		Options: SSHProfileOptions{
+		Options: StoredSSHProfileOptions{
 			Host: "host.example.com",
-			Port: 2222,
-			User: "bob",
-			Auth: AuthPublicKey,
+			Port: new(2222),
+			User: new("bob"),
+			Auth: new(AuthPublicKey),
 		},
 	}
 	grp := ProfileGroup{ID: "g1", Name: "Prod"}
 
-	if err := store.SaveProfile(prof.ToPartial()); err != nil {
+	if err := store.CreateProfile(prof); err != nil {
 		t.Fatalf("SaveProfile: %v", err)
 	}
-	if err := store.SaveGroup(grp); err != nil {
+	if err := store.CreateGroup(grp); err != nil {
 		t.Fatalf("SaveGroup: %v", err)
 	}
 
@@ -201,9 +549,9 @@ func TestJSONStoreDeleteProfile(t *testing.T) {
 
 	prof := SSHProfile{
 		Base:    Base{ID: "ssh:custom:del:0001", Type: "ssh", Name: "del"},
-		Options: SSHProfileOptions{Host: "h"},
+		Options: StoredSSHProfileOptions{Host: "h"},
 	}
-	_ = store.SaveProfile(prof.ToPartial())
+	_ = store.CreateProfile(prof)
 
 	if err := store.DeleteProfile(prof.ID); err != nil {
 		t.Fatalf("DeleteProfile: %v", err)
@@ -232,7 +580,7 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 	store := NewJSONStore(path)
 
 	prof := SSHProfile{Base: Base{ID: "ssh:custom:atom:0001", Type: "ssh", Name: "atom"}}
-	_ = store.SaveProfile(prof.ToPartial())
+	_ = store.CreateProfile(prof)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -245,79 +593,156 @@ func TestJSONStoreAtomicWrite(t *testing.T) {
 	}
 }
 
-// nocx-wd2m. Host binding is mandatory (nocx-mon), and the rule has to bite at
-// save time. Enforcing it only at connect time — which is where checkBinding
-// lives — means the user stores a secret, walks away, and meets the refusal
-// later as a broken connection instead of a rejected form.
-//
-// The store is the enforcement point on purpose: it is the one path every
-// writer goes through, so a future caller cannot route around the rule the way
-// it could around a check sitting in the transport handler.
-func TestSaveCredentialRejectsMissingHost(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
+// ---------------------------------------------------------------------------
 
-	unbound := Credential{
-		ID:       NewCredentialID("unbound"),
-		Name:     "unbound",
-		Username: "bob",
-		Auth:     AuthPassword,
-	}
-	if err := store.SaveCredential(unbound); err == nil {
-		t.Fatal("SaveCredential accepted a credential with no host; an unbound credential must not be storable")
-	} else if !errors.Is(err, ErrCredentialHostRequired) {
-		t.Fatalf("want ErrCredentialHostRequired, got %T: %v", err, err)
+func TestLoadGroupsThroughUnknownDefaultKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.json")
+
+	// A document with a group whose defaults contain an unknown key.
+	doc := `{
+		"groups": [
+			{
+				"id": "g1",
+				"name": "Prod",
+				"defaults": {
+					"port": 2222,
+					"someOldKey": "still-here",
+					"unknownField": 42
+				}
+			}
+		],
+		"profiles": [
+			{
+				"id": "ssh:custom:web:0001",
+				"type": "ssh",
+				"name": "web",
+				"group": "g1",
+				"options": { "host": "web.example.com" }
+			}
+		]
+	}`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 
-	creds, err := store.LoadCredentials()
+	store := NewJSONStore(path)
+
+	// LoadGroups succeeds and returns the group.
+	groups, err := store.LoadGroups()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadGroups with unknown default keys should succeed: %v", err)
 	}
-	if len(creds) != 0 {
-		t.Fatalf("a rejected credential must not be persisted; store holds %d", len(creds))
+	if len(groups) != 1 || groups[0].ID != "g1" {
+		t.Fatalf("LoadGroups = %+v, want 1 group (g1)", groups)
 	}
-}
+	if groups[0].Defaults == nil {
+		t.Fatal("group defaults should not be nil")
+	}
+	keys := groups[0].Defaults.UnknownKeys()
+	if len(keys) != 2 {
+		t.Fatalf("UnknownKeys = %v, want 2 keys", keys)
+	}
+	// Verify at least one known key survived.
+	opts := groups[0].Defaults.SparseSSHOptions
+	if opts.Port == nil || *opts.Port != 2222 {
+		t.Errorf("port = %v, want 2222", opts.Port)
+	}
 
-func TestSaveCredentialRejectsWhitespaceOnlyHost(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
-
-	// " " is not a host. Accepting it would satisfy the letter of the rule and
-	// none of its purpose — checkBinding compares against a resolved hostname
-	// and would never match, so the credential would be storable and useless.
-	c := Credential{
-		ID:       NewCredentialID("spacey"),
-		Name:     "spacey",
-		Username: "bob",
-		Auth:     AuthPassword,
-		Host:     "   ",
-	}
-	if err := store.SaveCredential(c); !errors.Is(err, ErrCredentialHostRequired) {
-		t.Fatalf("want ErrCredentialHostRequired for a whitespace host, got %v", err)
-	}
-}
-
-func TestSaveCredentialAcceptsBoundCredential(t *testing.T) {
-	store := NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
-
-	c := Credential{
-		ID:       NewCredentialID("bound"),
-		Name:     "bound",
-		Username: "bob",
-		Auth:     AuthPassword,
-		Host:     "prod.example.com",
-	}
-	if err := store.SaveCredential(c); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
-	}
-	creds, err := store.LoadCredentials()
+	// LoadProfiles succeeds and returns the profile.
+	profs, err := store.LoadProfiles()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadProfiles with unknown default keys should succeed: %v", err)
 	}
-	if len(creds) != 1 || creds[0].Host != "prod.example.com" {
-		t.Fatalf("want the bound credential stored, got %+v", creds)
+	if len(profs) != 1 || profs[0].Name != "web" {
+		t.Fatalf("LoadProfiles = %+v, want 1 profile (web)", profs)
 	}
 }
 
-// ── Connection snapshot (ADR-0015) ─────────────────────────────────────
+func TestResolveThroughUnknownDefaultKeysFails(t *testing.T) {
+	// A group with unknown keys must still load but resolving a profile
+	// through that group must fail.
+	groups := []ProfileGroup{
+		{
+			ID:   "g1",
+			Name: "Prod",
+			Defaults: func() *ProfileDefaults {
+				d := ProfileDefaults{}
+				_ = d.UnmarshalJSON([]byte(`{"port":2222,"someOldKey":"still-here"}`))
+				return &d
+			}(),
+		},
+	}
+	profile := SSHProfile{
+		Base: Base{ID: "ssh:custom:web:0001", Type: "ssh", Name: "web", Group: "g1"},
+		Options: StoredSSHProfileOptions{
+			Host: "web.example.com",
+		},
+	}
+
+	_, err := ResolveEffectiveProfile(profile, groups, SparseSSHOptions{})
+	if err == nil {
+		t.Fatal("ResolveEffectiveProfile should fail when a group has unknown keys")
+	}
+	if !strings.Contains(err.Error(), "g1") {
+		t.Errorf("error should name the group id, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "someOldKey") {
+		t.Errorf("error should name the unknown key, got: %v", err)
+	}
+}
+
+func TestSaveGroupRejectsUnknownDefaultKeys(t *testing.T) {
+	// A group whose defaults carry unknown keys must be rejected by
+	// CreateGroup and UpdateGroup.
+	store := NewJSONStore(filepath.Join(t.TempDir(), "p.json"))
+
+	// Create a group with unknown keys (simulate loading from a legacy doc).
+	badDefaults := &ProfileDefaults{}
+	if err := badDefaults.UnmarshalJSON([]byte(`{"port":2222,"someOldKey":"still-here"}`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+
+	g := ProfileGroup{
+		ID:       "g1",
+		Name:     "Prod",
+		Defaults: badDefaults,
+	}
+
+	err := store.CreateGroup(g)
+	if err == nil {
+		t.Fatal("CreateGroup should reject a group with unknown default keys")
+	}
+	if !strings.Contains(err.Error(), "g1") {
+		t.Errorf("error should name group id, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "someOldKey") {
+		t.Errorf("error should name the unknown key, got: %v", err)
+	}
+
+	// Now create a clean group, then try to update it with bad defaults.
+	clean := ProfileGroup{ID: "g2", Name: "Staging"}
+	if cleanErr := store.CreateGroup(clean); cleanErr != nil {
+		t.Fatalf("CreateGroup(clean): %v", cleanErr)
+	}
+
+	err = store.UpdateGroup(ProfileGroup{
+		ID:       "g2",
+		Name:     "Staging",
+		Defaults: badDefaults,
+	})
+	if err == nil {
+		t.Fatal("UpdateGroup should reject a group with unknown default keys")
+	}
+	if !strings.Contains(err.Error(), "g2") {
+		t.Errorf("error should name group id, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "someOldKey") {
+		t.Errorf("error should name the unknown key, got: %v", err)
+	}
+}
+
+// ── Connection snapshot (ADR-0018) ─────────────────────────────────────
 
 func TestConnectionSnapshotRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -325,15 +750,15 @@ func TestConnectionSnapshotRoundTrip(t *testing.T) {
 
 	prof := SSHProfile{
 		Base:    Base{ID: "ssh:custom:snap:0001", Type: "ssh", Name: "snap"},
-		Options: SSHProfileOptions{Host: "h.example.com", Port: 22, User: "u"},
+		Options: StoredSSHProfileOptions{Host: "h.example.com", Port: new(22), User: new("u")},
 	}
 	grp := ProfileGroup{ID: "g1", Name: "G1"}
 
-	if err := store.SaveProfile(prof.ToPartial()); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
+	if err := store.CreateProfile(prof); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
 	}
-	if err := store.SaveGroup(grp); err != nil {
-		t.Fatalf("SaveGroup: %v", err)
+	if err := store.CreateGroup(grp); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
 	}
 
 	snap, err := store.LoadConnectionSnapshot()
@@ -348,31 +773,28 @@ func TestConnectionSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
-func TestReplaceConnectionSnapshotPreservesCredentials(t *testing.T) {
+// ReplaceConnectionSnapshot swaps profiles and groups in a single write. On the
+// current model the profile store holds no credential material at all — secret
+// references live in profile options and are replaced along with the profiles
+// — so the contract to test is the atomic replacement itself.
+func TestReplaceConnectionSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	store := NewJSONStore(filepath.Join(dir, "profiles.json"))
 
-	cred := Credential{
-		ID:       NewCredentialID("keep"),
-		Name:     "keep",
-		Username: "alice",
-		Auth:     AuthPassword,
-		Host:     "keep.example.com",
-	}
-	if err := store.SaveCredential(cred); err != nil {
-		t.Fatalf("SaveCredential: %v", err)
-	}
 	prof := SSHProfile{
 		Base:    Base{ID: "ssh:custom:rep:0001", Type: "ssh", Name: "rep"},
-		Options: SSHProfileOptions{Host: "h.example.com", CredentialID: cred.ID},
+		Options: StoredSSHProfileOptions{Host: "h.example.com"},
 	}
-	if err := store.SaveProfile(prof.ToPartial()); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
+	if err := store.CreateProfile(prof); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	if err := store.CreateGroup(ProfileGroup{ID: "g1", Name: "G1"}); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
 	}
 
 	newSnap := ConnectionSnapshot{
 		Profiles: []SSHProfile{
-			{Base: Base{ID: "ssh:custom:rep2:0001", Type: "ssh", Name: "rep2"}, Options: SSHProfileOptions{Host: "h2.example.com"}},
+			{Base: Base{ID: "ssh:custom:rep2:0001", Type: "ssh", Name: "rep2"}, Options: StoredSSHProfileOptions{Host: "h2.example.com"}},
 		},
 		Groups: []ProfileGroup{{ID: "g2", Name: "G2"}},
 	}
@@ -380,19 +802,17 @@ func TestReplaceConnectionSnapshotPreservesCredentials(t *testing.T) {
 		t.Fatalf("ReplaceConnectionSnapshot: %v", err)
 	}
 
-	creds, err := store.LoadCredentials()
+	profs, err := store.LoadProfiles()
 	if err != nil {
-		t.Fatalf("LoadCredentials: %v", err)
+		t.Fatalf("LoadProfiles: %v", err)
 	}
-	if len(creds) != 1 || creds[0].ID != cred.ID {
-		t.Errorf("credentials should be preserved, got %+v", creds)
-	}
-
-	profs, _ := store.LoadProfiles()
 	if len(profs) != 1 || profs[0].Name != "rep2" {
 		t.Errorf("profiles should be replaced, got %+v", profs)
 	}
-	grps, _ := store.LoadGroups()
+	grps, err := store.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
 	if len(grps) != 1 || grps[0].ID != "g2" {
 		t.Errorf("groups should be replaced, got %+v", grps)
 	}

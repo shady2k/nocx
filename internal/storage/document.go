@@ -16,6 +16,11 @@ import (
 type DocumentStore interface {
 	Read(name string, into any) (found bool, err error)
 	Write(name string, doc any) error
+	// Delete removes the named document. Deleting a document that is not
+	// there succeeds: absence is the desired end state, and an operation
+	// that deletes several documents must be safe to re-run after being
+	// interrupted part-way through.
+	Delete(name string) error
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +134,26 @@ func (s *documentStore) Read(name string, into any) (bool, error) {
 		return false, fmt.Errorf("parse document %s: %w", name, err)
 	}
 	return true, nil
+}
+
+// Delete removes the named document. A document that is not there is not an
+// error — see the interface doc.
+//
+// The directory is synced afterwards for the same reason Write syncs it: the
+// rename or unlink is only durable once the directory entry is. Without it a
+// crash can resurrect a document the caller was told had gone, and for the
+// vault that means a reset that undoes itself.
+func (s *documentStore) Delete(name string) error {
+	if err := os.Remove(s.pathFor(name)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("delete document %s: %w", name, err)
+	}
+	if err := s.syncDir(filepath.Dir(s.pathFor(name))); err != nil {
+		return fmt.Errorf("sync dir after deleting %s: %w", name, err)
+	}
+	return nil
 }
 
 // Write marshals doc to JSON and writes it atomically: temp file in the

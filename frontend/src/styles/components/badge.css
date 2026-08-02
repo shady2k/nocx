@@ -32,6 +32,15 @@
   background: color-mix(in srgb, var(--color-warning), transparent 80%);
   color: var(--color-warning);
 }
+/* `success` arrived with the Vault diagnostics, where "Ready" and "Not ready"
+   sit in the same column and the reader is scanning for the difference. Warning
+   and danger both read as "look here"; without a green there was no tone that
+   reads as "nothing to do", so a healthy store had to be drawn as neutral and
+   looked indistinguishable from a value with no opinion. */
+.ui-badge[data-tone='success'] {
+  background: color-mix(in srgb, var(--color-success), transparent 80%);
+  color: var(--color-success);
+}
 
 .ui-badge[data-tone='danger'] {
   background: color-mix(in srgb, var(--color-danger), transparent 80%);

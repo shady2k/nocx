@@ -53,4 +53,21 @@ describe('Stack', () => {
     const { container } = subject({ id: 'my-stack' })
     expect(container.firstElementChild!.id).toBe('my-stack')
   })
+
+  describe('divided', () => {
+    it('renders data-divided when prop is true', () => {
+      const { container } = subject({ divided: true })
+      expect(container.firstElementChild!.getAttribute('data-divided')).toBe('true')
+    })
+
+    it('omits data-divided when prop is false', () => {
+      const { container } = subject({ divided: false })
+      expect(container.firstElementChild!.hasAttribute('data-divided')).toBe(false)
+    })
+
+    it('omits data-divided when prop is undefined', () => {
+      const { container } = subject()
+      expect(container.firstElementChild!.hasAttribute('data-divided')).toBe(false)
+    })
+  })
 })

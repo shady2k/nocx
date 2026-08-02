@@ -63,7 +63,7 @@ class MockSocket {
   deliver(msg: {
     id?: number
     result?: unknown
-    error?: { code: number; message: string }
+    error?: { code: number; message: string; data?: unknown }
     method?: string
     params?: unknown
   }): void {
@@ -196,6 +196,75 @@ describe('Dispatcher', () => {
     it('rejects immediately if not connected', async () => {
       const d = new Dispatcher()
       await expect(d.call('x', {})).rejects.toThrow('not connected')
+    })
+  })
+
+  describe('onVaultSealed', () => {
+    it('raises the hook on a sealed error and retries the request once', async () => {
+      const d = new Dispatcher()
+      await connectAndAccept(d)
+      const hook = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+      d.onVaultSealed = hook
+
+      const callP = d.call('vault.inventory', {})
+      const first = JSON.parse(lastSocket().sent[0]) as { id: number }
+      lastSocket().deliver({
+        id: first.id,
+        error: { code: -32001, message: 'vault is sealed', data: { reason: 'vault-sealed' } },
+      })
+      expect(hook).toHaveBeenCalledWith('vault.inventory')
+
+      // The hook resolves asynchronously; the re-send lands on a later tick.
+      await vi.waitFor(() => {
+        expect(lastSocket().sent).toHaveLength(2)
+      })
+      const retry = JSON.parse(lastSocket().sent[1]) as {
+        method: string
+        params: unknown
+        id: number
+      }
+      expect(retry.method).toBe('vault.inventory')
+      expect(retry.id).not.toBe(first.id)
+      lastSocket().deliver({ id: retry.id, result: { entries: [] } })
+      await expect(callP).resolves.toEqual({ entries: [] })
+    })
+
+    it('propagates a second sealed error without a second prompt', async () => {
+      const d = new Dispatcher()
+      await connectAndAccept(d)
+      const hook = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+      d.onVaultSealed = hook
+
+      const callP = d.call('vault.inventory', {})
+      const first = JSON.parse(lastSocket().sent[0]) as { id: number }
+      const sealed = {
+        code: -32001,
+        message: 'vault is sealed',
+        data: { reason: 'vault-sealed' },
+      }
+      lastSocket().deliver({ id: first.id, error: sealed })
+      await vi.waitFor(() => {
+        expect(lastSocket().sent).toHaveLength(2)
+      })
+      const retry = JSON.parse(lastSocket().sent[1]) as { id: number }
+      lastSocket().deliver({ id: retry.id, error: sealed })
+
+      expect(hook).toHaveBeenCalledTimes(1)
+      await expect(callP).rejects.toThrow('vault is sealed')
+    })
+
+    it('rejects the caller when the hook rejects (user cancelled)', async () => {
+      const d = new Dispatcher()
+      await connectAndAccept(d)
+      d.onVaultSealed = vi.fn(() => Promise.reject(new Error('cancelled')))
+
+      const callP = d.call('vault.inventory', {})
+      const first = JSON.parse(lastSocket().sent[0]) as { id: number }
+      lastSocket().deliver({
+        id: first.id,
+        error: { code: -32001, message: 'vault is sealed', data: { reason: 'vault-sealed' } },
+      })
+      await expect(callP).rejects.toThrow('cancelled')
     })
   })
 

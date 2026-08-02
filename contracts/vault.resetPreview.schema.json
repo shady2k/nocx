@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.resetPreview.schema.json",
+  "title": "VaultResetPreview",
+  "description": "Result of the vault.resetPreview JSON-RPC method: what resetting the vault would cost, and whether every store can actually be cleared. Changes nothing. Works while the vault is sealed, which is the only state a reset is ever wanted in.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "secretCount",
+    "profileCount",
+    "systemKeychainReachable",
+    "vaultInitialized"
+  ],
+  "properties": {
+    "secretCount": {
+      "description": "Distinct stored secrets that will be destroyed. A secret shared by two connections counts once — it is one thing the user loses.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "profileCount": {
+      "description": "Connections holding at least one of those secrets. Connections that store nothing — agent auth, a key read from a path — are not counted, because they lose nothing. Each of these will ask for a password again afterwards.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "systemKeychainReachable": {
+      "description": "False when the OS keychain is not answering, so secrets stored there cannot be removed and will remain readable. The user is told this BEFORE confirming, so proceeding is an informed choice rather than a surprise half-way through. True when there is no system keychain on this platform at all: an absent store is not a broken one.",
+      "type": "boolean"
+    },
+    "vaultInitialized": {
+      "description": "False when there is no vault to reset. The action is still offered — a reset interrupted part-way leaves no vault document and references that still need clearing.",
+      "type": "boolean"
+    }
+  }
+}

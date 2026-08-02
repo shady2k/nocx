@@ -154,17 +154,10 @@
    matched nothing in any source file and were deleted rather than updated:
    the kit owns the shape now. */
 
-.ui-settings-row {
-  padding: var(--space-3) 0;
-  border-bottom: 1px solid var(--color-divider);
-}
-
-.ui-settings-row:last-child {
-  border-bottom: none;
-}
-
-/* The label's prominence is a Field variant now (labelProminence="primary"), not
-   something this surface paints onto `.ui-field label` from outside. T20, nocx-etu2. */
+/* `.ui-settings-row` declares nothing here any more and that is the point: the row's
+   padding and its separator are Stack's `divided` variant, and the label's prominence
+   is the default for a horizontal Field. The class survives in the markup as the row's
+   id / data-key / modified-state hook, which is a hook and not an appearance (nocx-d3mr). */
 
 /* The control column stacks: the control line first, then hints and errors under
    it, all flush right. The reset affordance is no longer part of that stack — it

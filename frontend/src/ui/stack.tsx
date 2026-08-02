@@ -25,11 +25,22 @@ export interface StackProps {
    * Vertical gap between children. Defaults to `default` (var(--space-4)).
    */
   gap?: StackGap
+  /**
+   * When true, draws a hairline and adds vertical padding between children.
+   * The separator uses `> :not(.st-vis-hidden) ~ :not(.st-vis-hidden)` so it
+   * stays correct when search filtering hides rows.
+   */
+  divided?: boolean
 }
 
 export function Stack(props: StackProps) {
   return (
-    <div id={props.id} class="ui-stack" data-gap={props.gap ?? 'default'}>
+    <div
+      id={props.id}
+      class="ui-stack"
+      data-gap={props.gap ?? 'default'}
+      data-divided={props.divided ? 'true' : undefined}
+    >
       {props.children}
     </div>
   )

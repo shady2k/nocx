@@ -53,4 +53,18 @@ describe('Section', () => {
     const section = document.querySelector('#appearance')
     expect(section).not.toBeNull()
   })
+
+  describe('divided', () => {
+    it('forwards divided prop to inner Stack', () => {
+      subject({ divided: true })
+      const stack = document.querySelector('.ui-stack')
+      expect(stack?.getAttribute('data-divided')).toBe('true')
+    })
+
+    it('omits data-divided when divided is not set', () => {
+      subject()
+      const stack = document.querySelector('.ui-stack')
+      expect(stack?.hasAttribute('data-divided')).toBe(false)
+    })
+  })
 })

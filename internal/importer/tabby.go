@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/profile"
@@ -87,14 +88,23 @@ func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter
 			continue
 		}
 
-		p := convertProfile(tp)
-		key := dedupKey(p)
+		p := ConvertProfile(tp)
+		key := DedupKey(p)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 
-		if err := repo.SaveProfile(p); err != nil {
+		// Create, falling back to Update on duplicate — preserving the
+		// overwrite-on-reimport behaviour today's SaveProfile provided.
+		// Wave 3 routes this through the domain service properly.
+		if err := repo.CreateProfile(p); err != nil {
+			if errors.Is(err, profile.ErrProfileExists) {
+				if upErr := repo.UpdateProfile(p); upErr != nil {
+					return fmt.Errorf("update profile %q: %w", p.Name, upErr)
+				}
+				continue
+			}
 			return fmt.Errorf("save profile %q: %w", p.Name, err)
 		}
 	}
@@ -105,24 +115,74 @@ func ImportProfiles(cfg *TabbyConfig, repo profile.ProfileRepository, typeFilter
 // group repository.
 func ImportGroups(cfg *TabbyConfig, repo profile.GroupRepository) error {
 	for _, tg := range cfg.Groups {
+		var defaults *profile.ProfileDefaults
+		if tg.Defaults != nil {
+			d, err := profile.DecodeDefaults(tg.Defaults)
+			if err != nil {
+				return fmt.Errorf("import group %q defaults: %w", tg.Name, err)
+			}
+			defaults = &d
+		}
 		g := profile.ProfileGroup{
 			ID:            tg.ID,
 			ParentGroupID: tg.ParentGroupID,
 			Name:          tg.Name,
 			Icon:          tg.Icon,
 			Color:         tg.Color,
-			Defaults:      tg.Defaults,
+			Defaults:      defaults,
 			Editable:      true,
 		}
-		if err := repo.SaveGroup(g); err != nil {
+		// Create, falling back to Update on duplicate.
+		if err := repo.CreateGroup(g); err != nil {
+			if errors.Is(err, profile.ErrGroupExists) {
+				if upErr := repo.UpdateGroup(g); upErr != nil {
+					return fmt.Errorf("update group %q: %w", g.Name, upErr)
+				}
+				continue
+			}
 			return fmt.Errorf("save group %q: %w", g.Name, err)
 		}
 	}
 	return nil
 }
 
-// convertProfile maps a TabbyProfile to a nocx SSHProfile.
-func convertProfile(tp TabbyProfile) profile.SSHProfile {
+// ConvertProfile maps a TabbyProfile to a nocx SSHProfile using the
+// presence-aware StoredSSHProfileOptions so nil pointers distinguish
+// "not set" from "explicitly zero/false".
+func ConvertProfile(tp TabbyProfile) profile.SSHProfile {
+	opts := profile.StoredSSHProfileOptions{Host: tp.Options.Host}
+	if tp.Options.Port != 0 {
+		v := tp.Options.Port
+		opts.Port = &v
+	}
+	if tp.Options.User != "" {
+		v := tp.Options.User
+		opts.User = &v
+	}
+	if tp.Options.Auth != "" {
+		v := profile.AuthMode(tp.Options.Auth)
+		opts.Auth = &v
+	}
+	if tp.Options.KeepaliveInterval != 0 {
+		v := tp.Options.KeepaliveInterval
+		opts.KeepaliveInterval = &v
+	}
+	if tp.Options.KeepaliveCountMax != 0 {
+		v := tp.Options.KeepaliveCountMax
+		opts.KeepaliveCountMax = &v
+	}
+	if tp.Options.ReadyTimeout != 0 {
+		v := tp.Options.ReadyTimeout
+		opts.ReadyTimeout = &v
+	}
+	if tp.Options.JumpHost != "" {
+		v := tp.Options.JumpHost
+		opts.JumpHost = &v
+	}
+	if tp.Options.AgentForward {
+		v := true
+		opts.AgentForward = &v
+	}
 	return profile.SSHProfile{
 		Base: profile.Base{
 			ID:    tp.ID,
@@ -132,30 +192,68 @@ func convertProfile(tp TabbyProfile) profile.SSHProfile {
 			Icon:  tp.Icon,
 			Color: tp.Color,
 		},
-		Options: profile.SSHProfileOptions{
-			Host:              tp.Options.Host,
-			Port:              tp.Options.Port,
-			User:              tp.Options.User,
-			Auth:              profile.AuthMode(tp.Options.Auth),
-			KeepaliveInterval: tp.Options.KeepaliveInterval,
-			KeepaliveCountMax: tp.Options.KeepaliveCountMax,
-			ReadyTimeout:      tp.Options.ReadyTimeout,
-			JumpHost:          tp.Options.JumpHost,
-			AgentForward:      tp.Options.AgentForward,
-		},
+		Options: opts,
 	}
 }
 
-// dedupKey builds a dedup key from host+port+user.
-func dedupKey(p profile.SSHProfile) string {
-	return fmt.Sprintf("%s|%d|%s", p.Options.Host, p.Options.Port, p.Options.User)
+// DedupKey builds a dedup key from host+port+user.
+func DedupKey(p profile.SSHProfile) string {
+	port := 0
+	if p.Options.Port != nil {
+		port = *p.Options.Port
+	}
+	user := ""
+	if p.Options.User != nil {
+		user = *p.Options.User
+	}
+	return fmt.Sprintf("%s|%d|%s", p.Options.Host, port, user)
 }
 
 // dedupKeySet builds a set of existing dedup keys.
 func dedupKeySet(profs []profile.SSHProfile) map[string]bool {
 	m := make(map[string]bool, len(profs))
 	for _, p := range profs {
-		m[dedupKey(p)] = true
+		m[DedupKey(p)] = true
 	}
 	return m
+}
+
+// ImportTabbyWithService imports profiles and groups from a Tabby config
+// through the domain service, ensuring atomicity. Returns the ImportResult
+// from the service call, which includes any import errors.
+func ImportTabbyWithService(cfg *TabbyConfig, svc *profile.ProfileService, typeFilter string) *profile.ImportResult {
+	// Collect profiles from config.
+	var profiles []profile.SSHProfile
+	for _, tp := range cfg.Profiles {
+		if tp.Type != typeFilter {
+			continue
+		}
+		profiles = append(profiles, ConvertProfile(tp))
+	}
+
+	// Collect groups from config.
+	var groups []profile.ProfileGroup
+	for _, tg := range cfg.Groups {
+		var defaults *profile.ProfileDefaults
+		if tg.Defaults != nil {
+			d, err := profile.DecodeDefaults(tg.Defaults)
+			if err != nil {
+				result := &profile.ImportResult{}
+				result.ImportErrors = append(result.ImportErrors, fmt.Sprintf("group %q defaults: %v", tg.Name, err))
+				return result
+			}
+			defaults = &d
+		}
+		groups = append(groups, profile.ProfileGroup{
+			ID:            tg.ID,
+			ParentGroupID: tg.ParentGroupID,
+			Name:          tg.Name,
+			Icon:          tg.Icon,
+			Color:         tg.Color,
+			Defaults:      defaults,
+			Editable:      true,
+		})
+	}
+
+	return svc.AtomicImport(profiles, groups)
 }

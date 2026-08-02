@@ -16,7 +16,9 @@ import type { JSX } from 'solid-js'
 import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
+import { SecretsSection } from './secrets'
 import type { ProfileClient, SSHProfile } from './profiles'
+import type { DialogClient } from './dialog-client'
 import { SettingsObserver } from './settings-observer'
 import {
   AcceptedSnapshot,
@@ -32,6 +34,7 @@ import {
   type SettingsSnapshot,
 } from './settings-domain'
 import { BackupRestoreSection } from './backup-restore-section'
+import { VaultSection } from './vault'
 import { log } from './log'
 import {
   Page,
@@ -106,6 +109,9 @@ export interface SettingsComponentProps {
   profileClient: ProfileClient
   observer?: SettingsObserver
   onConnect?: (profile: SSHProfile) => void
+  vaultController?: import('./vault').VaultController
+  vaultClient?: import('./vault-client').VaultClient
+  dialogClient?: DialogClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -308,17 +314,63 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const connectionPage: SettingsPage = {
       kind: 'component',
       id: 'connections',
-      title: 'Connections',
       scrollMode: 'contained',
+      title: 'Connections',
       renderContent: () => (
         <ConnectionsView
           client={props.profileClient}
+          vaultController={props.vaultController}
+          vaultClient={props.vaultClient}
+          dialogClient={props.dialogClient}
           onConnect={props.onConnect}
           newProfileRequest={newConnectionRequest()}
+          onNavigateToSecrets={() => setActiveComponentPage('secrets')}
         />
       ),
     }
-    return [...generated, backupPage, connectionPage]
+    const secretsPage: SettingsPage = {
+      kind: 'component',
+      id: 'secrets',
+      title: 'Secrets',
+      scrollMode: 'contained',
+      renderContent: () => (
+        <Show
+          when={props.vaultClient && props.vaultController}
+          fallback={
+            <PageSection title="Secrets">
+              Vault secrets are not available in this window.
+            </PageSection>
+          }
+        >
+          <SecretsSection
+            vaultClient={props.vaultClient!}
+            vaultController={props.vaultController!}
+            dialogClient={props.dialogClient}
+            profileClient={props.profileClient}
+          />
+        </Show>
+      ),
+    }
+    const vaultPage: SettingsPage = {
+      kind: 'component',
+      id: 'vault',
+      title: 'Vault',
+      scrollMode: 'page',
+      // The section is listed unconditionally — a surface that appears only
+      // once some other state exists is how a feature ships unreachable. The
+      // guard is for the client being absent, which the composition root never
+      // does and a bare-bones embedding might; it renders a sentence rather
+      // than throwing on a non-null assertion.
+      renderContent: () => (
+        <Show
+          when={props.vaultClient && props.vaultController}
+          fallback={<PageSection title="Vault">Vault is not available in this window.</PageSection>}
+        >
+          <VaultSection vaultClient={props.vaultClient!} vaultController={props.vaultController!} />
+        </Show>
+      ),
+    }
+    return [...generated, backupPage, connectionPage, secretsPage, vaultPage]
   })
 
   /** The active component page, or null when a generated section is showing. */
@@ -673,7 +725,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Field
           for={keyToDomId(decl.key)}
           label={decl.label}
-          labelProminence="primary"
           labelMarker={
             // Always rendered, coloured only when modified. Under a `Show` the
             // dot's 6px box and its margin entered the flow the moment a value
@@ -902,7 +953,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
                 return (
                   <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
-                    <PageSection id={'st-section-' + encodeURIComponent(section)} title={section}>
+                    <PageSection
+                      id={'st-section-' + encodeURIComponent(section)}
+                      title={section}
+                      divided
+                    >
                       <For each={sectionDecls()}>
                         {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
                       </For>

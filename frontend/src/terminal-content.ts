@@ -18,6 +18,8 @@ import { log } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
+import { type ProfileClient, type SSHAliasEntry } from './profiles'
+import { RpcError } from './dispatcher'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -99,6 +101,10 @@ export class TerminalContent extends BaseTabContent {
   /** Timestamp until which incoming data is the echo of a resize we sent. */
   private echoUntil = 0
   private host: TabHost | null = null
+  /** Whether the editor currently owns DOM keyboard input (owned from input-state). */
+  private _editorOwned = false
+  /** In-flight alias-fetch counter — generation for stale-request gating. */
+  private _aliasFetchId = 0
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
@@ -121,15 +127,24 @@ export class TerminalContent extends BaseTabContent {
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
+    /** Live SSH config alias source for the editor hint (w7-hint). Null when
+     *  unavailable (tests, raw-mode-only contexts). */
+    private readonly profileClient: ProfileClient | null,
     private readonly onTooltipChange: (tooltip: string) => void,
     private readonly sshOpts?: {
       profileId: string
       host: string
       user?: string
+      port?: number
     },
     /** Pushes the strip's optional second line — the tab's location, or '' when the
      *  title already says it. Only this class holds both halves of that question. */
     private readonly onSubtitleChange?: (subtitle: string) => void,
+    /** Called when the session is an alias (not a saved profile) and can be
+     *  adopted as a nocx connection. True = adoptable, False = not. */
+    private readonly onAdoptabilityChange?: (adoptable: boolean) => void,
+    /** Called when an SSH connection fails because the vault is sealed. */
+    private readonly onVaultSealed?: () => void,
   ) {
     super()
     this._readyPromise = new Promise<boolean>((resolve) => {
@@ -249,7 +264,12 @@ export class TerminalContent extends BaseTabContent {
         // transcript where it belongs — just above the editor — instead of
         // letting it slide underneath.
         resized: () => this.scrollback?.scrollToBottom(),
+        /** Detect `ssh <partial>` pattern and show matching aliases. */
+        onInputChange: (text) => this._onEditorInput(text),
+        /** Hint acceptance — no cache to invalidate. */
+        onAcceptHint: () => {},
       })
+
       this.editor.mount(target)
 
       if (signal.aborted) {
@@ -260,7 +280,15 @@ export class TerminalContent extends BaseTabContent {
         return
       }
 
+      // False until the first OSC 133 marker: a markerless session (plain
+      // SSH) keeps the terminal visible in the unstructured full-pane mode.
+      let shellIntegrated = false
+
       renderer.onCommandMarker((marker) => {
+        // Any OSC 133 marker means the remote shell has nocx integration:
+        // from here the scrollback-block layout owns the presentation and
+        // the unstructured full-pane mode is never used again.
+        shellIntegrated = true
         this.inputState.dispatch({ type: 'marker', kind: marker.kind })
         if (marker.kind === 'D' && marker.exitCode !== undefined) {
           this._lastExitCode = marker.exitCode
@@ -280,13 +308,20 @@ export class TerminalContent extends BaseTabContent {
         this.inputState.dispatch({ type: 'buffer', buffer: type })
         if (type === 'alternate') {
           this.scrollback?.enterFullscreen()
+        } else if (!shellIntegrated) {
+          // A markerless session returning from an alt-screen program must
+          // not collapse to the hidden idle layout: leave fullscreen first
+          // (setUnstructured declines while an alt-screen program owns the
+          // pane), then fill the pane again.
+          this.scrollback?.exitFullscreen()
+          this.scrollback?.setUnstructured()
         } else {
           this.scrollback?.exitFullscreen()
         }
       })
-
       this.inputState.onChange((m) => {
         console.debug('nocx: input-state', m.state, 'trusted=', m.trusted, 'owned=', m.owned)
+        this._editorOwned = m.owned
         if (shouldShowEditor(m.owned, this.nativeMode)) {
           this.editor!.setTime(new Date())
           this.editor!.show()
@@ -301,9 +336,20 @@ export class TerminalContent extends BaseTabContent {
           this.editor!.hide()
           renderer.setReadOnly(false)
           renderer.focus()
-          this.scrollback?.setIdle()
+          // Markerless session (still no OSC 133): the terminal must stay
+          // visible — the scrollback-block model never takes over.
+          if (!shellIntegrated) {
+            this.scrollback?.setUnstructured()
+          } else {
+            this.scrollback?.setIdle()
+          }
         }
       })
+
+      // The input-state machine starts RAW and onChange may not fire for the
+      // initial state: present an unintegrated session with the terminal
+      // visible from the first byte.
+      this.scrollback?.setUnstructured()
 
       // ── Focus bounce (P0-4) ────────────────────────────────────────────
       target.addEventListener('focusin', () => {
@@ -395,9 +441,18 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // Open the session at the renderer's actual grid size.
+      // Alias tab: profileId is empty, open by host so the backend
+      // resolves through ~/.ssh/config (ssh -G). Saved-profile tabs
+      // use openSSHSession with the real profileId.
       const session = this.sshOpts
-        ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+        ? this.sshOpts.profileId
+          ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+          : await this.client.openSSHSessionByHost(
+              this.cols,
+              this.rows,
+              this.sshOpts.host,
+              this.sshOpts.user,
+            )
         : await this.client.openSession(this.cols, this.rows, true)
 
       if (signal.aborted) {
@@ -428,6 +483,14 @@ export class TerminalContent extends BaseTabContent {
       } else {
         this.cwdTitle = directoryLabel(session.cwd)
         this.onTooltipChange(cwdTooltip(session.cwd, false))
+      }
+
+      // Signal adoptability for alias tabs (no saved profile yet).
+      // Must come after the session opens so adoption is only offered
+      // to sessions that actually connected — a failed connect never
+      // reaches this point (it throws to the outer catch).
+      if (this.sshOpts && !this.sshOpts.profileId) {
+        this.onAdoptabilityChange?.(true)
       }
       this.pushTitle()
 
@@ -583,6 +646,15 @@ export class TerminalContent extends BaseTabContent {
         this.viewportChanged(this._latestViewport)
       }
     } catch (err) {
+      // Vault-sealed errors should surface as Unlock dialog, not generic error.
+      if (err instanceof RpcError) {
+        const data = err.data as { reason?: string } | undefined
+        if (data?.reason === 'vault-sealed') {
+          this.onVaultSealed?.()
+          this._readyResolve(false)
+          return
+        }
+      }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Terminal failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
@@ -753,5 +825,62 @@ export class TerminalContent extends BaseTabContent {
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
+  }
+
+  // ── SSH alias hint support (w7-hint) ─────────────────────────────────
+
+  /** Called on every textarea input change. Detects `ssh <partial>` commands
+   *  and fetches matching aliases from the live ~/.ssh/config source.
+   *  No client-side caching — every activation fetches fresh (coordinator contract). */
+  private _onEditorInput(text: string): void {
+    // Only when the editor owns keyboard input (PROMPT_READY with owned=true).
+    if (!this._editorOwned || !this.profileClient) {
+      this.editor?.hideAliasHints()
+      return
+    }
+
+    // Detect `ssh <partial>` at the start of the line (possibly after whitespace).
+    const trimmed = text.trimStart()
+    const match = trimmed.match(/^ssh\s+(\S*)/)
+    if (!match) {
+      this.editor?.hideAliasHints()
+      return
+    }
+
+    const partial = match[1]
+    const fetchId = ++this._aliasFetchId
+
+    // Fetch fresh aliases on every activation. Guard against stale responses
+    // with a generation counter: a newer fetch invalidates an older one.
+    this.profileClient
+      .listSSHAliases()
+      .then((resp) => {
+        if (fetchId !== this._aliasFetchId) return // stale — newer text superseded this
+        if (resp.unavailable) {
+          this.editor?.hideAliasHints()
+          return
+        }
+        const filtered = this._filterAliases(resp.aliases, partial)
+        this.editor?.showAliasHints(filtered)
+      })
+      .catch(() => {
+        // Fetch failed (network, backend down). Silently hide hints — the
+        // feature degrades transparently rather than showing stale/flaky data.
+        this.editor?.hideAliasHints()
+      })
+  }
+
+  /** Filter SSH config aliases by case-insensitive prefix match.
+   *  Excludes wildcard patterns (Host * etc. are rules, not targets). */
+  private _filterAliases(aliases: SSHAliasEntry[], partial: string): SSHAliasEntry[] {
+    const lower = partial.toLowerCase()
+    return aliases.filter(
+      // No wildcard filter here on purpose. sshConfig.aliases already excludes
+      // patterns on the backend (internal/ssh/aliases.go, containsWildcard),
+      // and a second copy of that rule in the renderer is a rule that drifts —
+      // the two versions of it disagreed on '!' and on brackets before this
+      // line was removed.
+      (a) => a.alias.toLowerCase().startsWith(lower),
+    )
   }
 }

@@ -7,6 +7,7 @@ import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
 import solid from 'eslint-plugin-solid'
+import globals from 'globals'
 import { readFileSync, existsSync } from 'node:fs'
 import { relative, resolve, basename } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -762,7 +763,10 @@ export default tseslint.config(
   // lint-fixtures/ holds the negative fixtures for eslint-plugin-solid and the
   // nocx/no-raw-controls fixture. They are excluded here and linted explicitly
   // by lint-fixtures/gate.sh with --no-ignore, which asserts each required rule fires.
-  { ignores: ['dist/**', 'wailsjs/**', 'lint-fixtures/**'] },
+  // `src/generated/**` is produced by `npm run contracts` from contracts/*.schema.json.
+  // Linting it would be linting the generator's output style, and any fix would be
+  // overwritten on the next run — the schema is the file to change.
+  { ignores: ['dist/**', 'wailsjs/**', 'lint-fixtures/**', 'src/generated/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
@@ -786,6 +790,14 @@ export default tseslint.config(
   {
     files: ['lint-fixtures/**'],
     extends: [tseslint.configs.disableTypeChecked],
+  },
+  // Build scripts run in Node and are outside both tsconfigs, so type-aware
+  // rules have no program to consult, and the browser globals the rest of the
+  // config assumes are the wrong set for them.
+  {
+    files: ['scripts/**'],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: { globals: globals.node },
   },
   // SolidJS lint rules (ADR-0012 §3). Combined with the recommended base
   // from the plugin into a single files-restricted block so severity and

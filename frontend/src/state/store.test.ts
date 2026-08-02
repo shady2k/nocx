@@ -166,11 +166,7 @@ describe('settings actions', () => {
 describe('profile actions', () => {
   it('setProfiles replaces lists', () => {
     withStore(([state, actions]) => {
-      actions.setProfiles(
-        [{ id: 'p1', name: 'Server', options: { host: 'x.com' } } as never],
-        [],
-        [],
-      )
+      actions.setProfiles([{ id: 'p1', name: 'Server', options: { host: 'x.com' } } as never], [])
       expect(state.profiles.profiles).toHaveLength(1)
       expect(state.profiles.profiles[0].name).toBe('Server')
     })

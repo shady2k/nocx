@@ -59,7 +59,15 @@ export function PageScroller(props: PageScrollerProps) {
       }}
       class="ui-page__scroll"
     >
-      {props.children}
+      {/* The scroller and the measure are two jobs and must be two elements.
+          The scroller has to fill the page, or its scrollbar detaches from the
+          window edge and floats in the middle of the surface. The content must
+          NOT fill the page: a horizontal Field puts its label at the left edge
+          and its control at the right, so on a maximised window the two ends of
+          one row end up a thousand pixels apart with nothing between them, and
+          the row stops reading as a row at all. Capping the scroller itself
+          would fix the second at the cost of the first. */}
+      <div class="ui-page__measure">{props.children}</div>
     </div>
   )
 }

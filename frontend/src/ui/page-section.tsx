@@ -27,12 +27,18 @@
  * that cannot see it. Placement belongs to the parent's own selector, which rule 3
  * permits (nocx-zeti).
  */
-import type { JSX } from 'solid-js'
+import { Show, type JSX } from 'solid-js'
 import { Stack } from './stack'
 
 export interface PageSectionProps {
   id?: string
   title: string
+  /** One explanation for the whole section. The alternative — repeating it as
+   *  each row's description — is what put "Vault is locked." on the Vault page
+   *  three times, once under every control the lock disabled. */
+  description?: string
+  /** When true, forwards to the inner Stack to draw separators between children. */
+  divided?: boolean
   children: JSX.Element
 }
 
@@ -40,7 +46,12 @@ export function PageSection(props: PageSectionProps) {
   return (
     <section id={props.id} class="ui-page-section">
       <h2>{props.title}</h2>
-      <Stack gap="default">{props.children}</Stack>
+      <Show when={props.description !== undefined}>
+        <p class="ui-page-section__desc">{props.description}</p>
+      </Show>
+      <Stack gap="default" divided={props.divided}>
+        {props.children}
+      </Stack>
     </section>
   )
 }

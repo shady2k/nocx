@@ -5,7 +5,7 @@
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
 
-export type LiveRegionMode = 'idle' | 'running' | 'fullscreen'
+export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 export interface ScrollbackControllerOpts {
   /** The pane this controller owns the scrollback inside. */
@@ -159,6 +159,23 @@ export class ScrollbackController {
     this.xtermInner.className = 'xterm-inner'
     this._updateSeparator()
     this._scrollToBottom()
+  }
+
+  /** Fill the pane with the live region — for sessions with no shell
+   *  integration (no OSC 133 markers yet, e.g. a plain SSH shell): the
+   *  scrollback-block model never takes over, so the terminal itself must be
+   *  visible at full size. The FIRST marker transitions back to the normal
+   *  layout (setIdle/setRunning/enterFullscreen all override this mode).
+   *  Class mirrors live-fullscreen's fill treatment; the semantics differ —
+   *  this is not an alt-screen program. */
+  setUnstructured(): void {
+    if (this._mode === 'fullscreen') return
+    this._mode = 'unstructured'
+    this.xtermLiveContainer.className = 'xterm-live-container live-unstructured'
+    this.xtermInner.className = 'xterm-inner inner-fullscreen'
+    this._setFilledPane(true)
+    const max = this.scrollbackArea.clientHeight
+    if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
   }
 
   /**

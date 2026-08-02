@@ -52,6 +52,15 @@ require_docker() {
 # `go test -race ./...` with the module mounted read-only. CGO/race needs a C
 # compiler, which the full bookworm image carries. The container starts as root
 # to chown the cache mounts, then drops to the host user for the test run.
+#
+# No `-count=1`. Go's test cache is keyed on the test binary and everything it
+# reads, so a package whose code changed re-runs and one that did not is reused;
+# defeating it buys nothing. Measured on this repo: 30s with the flag, 1s warm
+# without it, 18 packages cached. It was never a decision — neither d7f2ef5 (the
+# commit that introduced the gate) nor 6a170a2 (which moved tests into
+# containers) mentions the cache — so this comment exists to stop it returning
+# by reflex. If a test ever genuinely needs to bypass the cache, that test is
+# reading something Go cannot see, and the fix is in the test (nocx-ro3h).
 go_test_containerized() {
     require_docker || return 1
     docker run --rm \
@@ -67,7 +76,7 @@ go_test_containerized() {
         sh -euc '
             chown "$RUN_UID:$RUN_GID" /cache/gomod /cache/gobuild
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
-                go test -race -count=1 ./...
+                go test -race ./...
         '
 }
 

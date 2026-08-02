@@ -39,6 +39,7 @@
   border-radius: var(--control-radius-sm);
   --wails-draggable: no-drag;
   position: relative;
+  flex: 0 0 auto;
 }
 
 /* The quietest step: an affordance that sits beside a control rather than being

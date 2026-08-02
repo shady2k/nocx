@@ -12,24 +12,87 @@ Every one renders a stable **base class** naming itself, on the element that car
 appearance — not merely on a wrapper. Variance is a typed `data-*` attribute. None of
 them takes a `class` prop; the structural containers that still do are marked.
 
-| Component       | Module             | Identity                                     | Variance                                                               |
-| --------------- | ------------------ | -------------------------------------------- | ---------------------------------------------------------------------- |
-| **Stack**       | `stack.tsx`        | `ui-stack`                                   | `data-gap`: default \| loose                                           |
-| **Button**      | `button.tsx`       | `ui-button`                                  | `data-variant`: default \| primary \| danger \| ghost; `data-size`     |
-| **IconButton**  | `icon-button.tsx`  | `ui-icon-button`                             | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required** |
-| **TextField**   | `text-field.tsx`   | `ui-text-field`, `ui-text-field__input`      | input types text \| number \| password                                 |
-| **SearchField** | `search-field.tsx` | `ui-search-field`, `__input`, `__icon`       | —                                                                      |
-| **Select**      | `select.tsx`       | `ui-select`                                  | native `<select>`, `appearance: none` (ADR-0014)                       |
-| **Checkbox**    | `checkbox.tsx`     | `ui-checkbox`, `ui-checkbox__control`        | `data-variant`: checkbox \| switch                                     |
-| **Radio**       | `radio.tsx`        | `ui-radio`, `ui-radio__control`              | —                                                                      |
-| **FileInput**   | `file-input.tsx`   | `ui-file-input`, `__native`, `__name`        | kit Button as trigger; native input hidden but focusable               |
-| **Toast**       | `toast.tsx`        | `ui-toast-host`, `ui-toast`, `__message`     | `data-level`: info \| success \| warning \| danger                     |
-| **MarkerList**  | `marker-list.tsx`  | `ui-marker-list` + `__item/__marker/__text`  | `data-tone`: included \| excluded \| note                              |
-| **Badge**       | `badge.tsx`        | `ui-badge`                                   | `data-tone`: neutral \| info \| warning \| danger                      |
-| **EmptyState**  | `empty-state.tsx`  | `ui-empty-state` + `__title/__desc/__action` | —                                                                      |
-| **Field**       | `field.tsx`        | `ui-field`, `+ ui-field-horizontal`          | `orientation`                                                          |
-| **Section**     | `section.tsx`      | `ui-section`                                 | children spaced by Stack; no `class` passthrough                       |
-| **Toolbar**     | `toolbar.tsx`      | `ui-toolbar`                                 | keeps `class`, **layout only**                                         |
+| Component            | Module                  | Identity                                                                | Variance                                                                                                                       |
+| -------------------- | ----------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Stack**            | `stack.tsx`             | `ui-stack`                                                              | `data-gap`: default \| loose; `data-divided`                                                                                   |
+| **Button**           | `button.tsx`            | `ui-button`                                                             | `data-variant`: default \| primary \| danger \| ghost; `data-size`                                                             |
+| **IconButton**       | `icon-button.tsx`       | `ui-icon-button`                                                        | `data-size`; `selected` → `aria-selected`; `ariaLabel` is **required**                                                         |
+| **TextField**        | `text-field.tsx`        | `ui-text-field`, `ui-text-field__input`                                 | input types text \| number \| password; `data-multiline` → `<textarea>`; composes Field for label/desc/error                   |
+| **SearchField**      | `search-field.tsx`      | `ui-search-field`, `__input`, `__icon`                                  | —                                                                                                                              |
+| **Select**           | `select.tsx`            | `ui-select`                                                             | native `<select>`, `appearance: none` (ADR-0014)                                                                               |
+| **Checkbox**         | `checkbox.tsx`          | `ui-checkbox`, `ui-checkbox__control`                                   | `data-variant`: checkbox \| switch                                                                                             |
+| **Radio**            | `radio.tsx`             | `ui-radio`, `ui-radio__control`                                         | —                                                                                                                              |
+| **SegmentedControl** | `segmented-control.tsx` | `ui-segmented-control`, `__option`                                      | one row; same `radiogroup` ARIA as Radio, for few and short options                                                            |
+| **FileInput**        | `file-input.tsx`        | `ui-file-input`, `__native`, `__name`                                   | kit Button as trigger; native input hidden but focusable                                                                       |
+| **Toast**            | `toast.tsx`             | `ui-toast-host`, `ui-toast`, `__message`                                | `data-level`: info \| success \| warning \| danger                                                                             |
+| **MarkerList**       | `marker-list.tsx`       | `ui-marker-list` + `__item/__marker/__text`                             | `data-tone`: included \| excluded \| note                                                                                      |
+| **Badge**            | `badge.tsx`             | `ui-badge`                                                              | `data-tone`: neutral \| info \| warning \| danger                                                                              |
+| **EmptyState**       | `empty-state.tsx`       | `ui-empty-state` + `__icon/__title/__desc/__action`                     | optional `icon`                                                                                                                |
+| **StatusCard**       | `status-card.tsx`       | `ui-status-card` + `__icon/__body/__title/__desc/__action`              | `data-tone`: neutral \| ok \| warning \| danger; a state and the one action for it                                             |
+| **CollectionView**   | `collection-view.tsx`   | `ui-collection-view`, `ui-collection-row`                               | Searchable manager shell and shared list row                                                                                   |
+| **Prompt**           | `prompt.tsx`            | `ui-prompt-overlay`, `ui-prompt`                                        | `data-placement`: floating \| top-sheet                                                                                        |
+| **Field**            | `field.tsx`             | `ui-field`, `+ ui-field-horizontal`                                     | `orientation`; `data-label` follows orientation (horizontal→primary)                                                           |
+| **Section**          | `section.tsx`           | `ui-section`                                                            | children spaced by Stack; `divided`; no `class` passthrough                                                                    |
+| **Toolbar**          | `toolbar.tsx`           | `ui-toolbar`                                                            | keeps `class`, **layout only**                                                                                                 |
+| **Tabs**             | `tabs.tsx`              | `ui-tabs`, `ui-tabs__list`, `ui-tabs__panel`; row marker is `StatusDot` | `data-orientation`: vertical \| horizontal; rows are ghost Buttons; optional `data-tone` on `__status`: ok \| warning \| error |
+
+## A container's size is the container's decision, never its content's
+
+**A component that holds swappable content declares a definite size for it.**
+Not a `max-width`, not a `min-height` — a size the content cannot argue with.
+There is one honest exception, and the trade it makes is documented below.
+
+`Dialog`'s panel was `max-width: 480px` on a `<dialog>`, which is
+`width: fit-content`: the panel therefore shrank to whatever the body needed,
+so a body with sections redrew the dialog at a different width on every
+section — 356px on one, the full 560 on the next. The visible symptom is the
+same as Tabs' and it is not cosmetic: **the footer buttons move out from under
+the pointer that is reaching for them**, and a control that moves while being
+aimed at is a control that gets misclicked. `Dialog` names its width through
+`size` — a definite width, not a cap.
+
+Height is the exception, and the exception is real. Width can be named because
+it is one number for every form the dialog holds; height is a different number
+for each. Naming it was tried twice and both numbers were wrong — 420px sat
+below the panel's natural height and did nothing at all, and 45rem left a
+third of the dialog empty below the footer. A guessed height is either too
+small, and then a short section scrolls in a window with room to spare, or too
+large, and then every section but one sits in a half-empty box.
+
+So `Tabs` **sizes to the section it is showing**: the inactive panels are
+`hidden` (`display: none`), which keeps them out of the tab order and the
+accessibility tree and also stops them contributing height, so the box is the
+active section's size rather than the tallest's. Switching sections therefore
+changes the dialog's height — and `Dialog` **animates that change**, which is
+what buys the stability back. The footer moves, but it moves visibly and
+predictably instead of teleporting, so it never escapes a pointer mid-reach.
+
+The animation is measure-and-transition, owned by `Dialog` because it owns the
+panel and its `max-height`: the settled height is pinned, the new natural
+height is measured (with the `max-height` applied, so a short viewport still
+scrolls rather than overflow), the panel transitions between them, and it
+releases back to `auto` on `transitionend`. Transitioning to and from
+`height: auto` itself would need `interpolate-size` / `calc-size()`, which is
+above both declared browser floors (ADR-0013 §3), so the pin-and-release is
+the technique. Under `prefers-reduced-motion: reduce` there is no transition.
+
+The general form: if switching what is inside a component can change that
+component's outer size and you cannot name a size (one number that is right
+for every content), then you animate the change — the size stays the content's
+decision, and the movement stays the container's.
+
+## Dialog body text is body text
+
+Prose inside a dialog is set at the body size. Not `--font-size-sm`, not smaller
+"because it is only supporting detail" — a dialog is the one surface where the reader
+has been interrupted and is being asked to decide something, and the delete
+confirmation had the smallest type on screen carrying the most consequential question.
+`--font-size-sm` is for a caption beside a control that already says what it is: a
+provenance label, a row's second line. Not for a sentence.
+
+`Dialog` takes an `onSubmit` for the dialog's obvious yes, so Enter in a single-line
+field confirms rather than doing nothing. It is opt-in: Enter must not fire a
+destructive confirmation, and a dialog whose body is a message has nothing to submit.
 
 ## Vertical rhythm: Stack
 
@@ -37,6 +100,11 @@ them takes a `class` prop; the structural containers that still do are marked.
 Surfaces must not add their own margins between stacked controls — that constraint
 is enforced by the `surface-spacing-kit` lint rule. Prefer Stack over a plain `<div>`
 with a hand-rolled gap.
+
+`divided` (`data-divided="true"`) turns the Stack into a divided list: each child
+gets row padding and a hairline separator between visible children. The selector uses
+`:not(.st-vis-hidden)` so search-filtered rows do not leave a gap or orphaned divider.
+Settings pages and the Vault panel use divided Stacks for their row rhythm.
 
 ## Button variant rules
 
@@ -106,10 +174,53 @@ sticky, because an error the user was not looking at is an error they never saw.
 explicit `duration` overrides the level's default and `0` means sticky, which is what a
 half-succeeded import uses.
 
+**A Toast raised from inside a modal Dialog is visible.** `Dialog` uses `showModal()`, so
+it paints in the browser's **top layer**, above every `z-index` in the normal layer —
+`ToastHost`'s 300 included. Being above a top-layer element is not a number, it is a
+parent: `ToastHost` portals itself into the topmost open overlay (`topOverlayElement`) and
+falls back to the body when none is open. Raise outcomes with `showToast` from inside a
+dialog freely; do not re-derive the answer from z-index and conclude otherwise.
+
+What belongs on the field instead is **field validation** — "Enter your passphrase" is
+about what is in the box, is answered by editing the box, and clears as you type. The
+outcome of the call the box triggered is a Toast.
+
 The rule this replaces a pattern for: **a message about an action does not live in the
 document flow.** The export page kept a `.st-export-status` div under every action,
 holding an empty line on four sections forever so that a message could appear without
 shifting the layout — and shifting it anyway when the message ran to two lines.
+
+## Prompt: a modal that is not a `<dialog>`
+
+**Prompt** (`prompt.tsx`) is the overlay treatment for asking one thing of the
+user without burying what is behind it. `data-placement="top-sheet"` slides a
+panel down from the top edge and leaves the surface it interrupted visible —
+that is why the vault's password prompts are top-sheets while the New
+Connection form they interrupt stays a `Dialog`.
+
+Everything a `<dialog>` gives for free is either supplied by the overlay stack
+or by Prompt itself, and the boundary matters:
+
+- **Escape** comes from the overlay stack's document-level handler — Prompt
+  registers with `pushOverlay` like every other overlay, so Escape closes the
+  topmost one. Tested, not assumed.
+- **Enter** is `onSubmit`, opt-in with the same contract as `Dialog`'s: a
+  single-line input fires it, a textarea and a button own their own Enter, and
+  an IME's Enter accepts a candidate. The vault prompts all pass one.
+- **Focus** is Prompt's job: on open it focuses the `autofocus` field, else
+  the first field, else the first button (the same order a native modal
+  chooses); on close it restores focus to whatever had it before — the overlay
+  stack records that on push.
+- **Toasts are visible from inside a Prompt.** `ToastHost` portals into the
+  topmost overlay's element, and a Prompt's element is on the stack, so a
+  toast raised while the prompt is open renders inside it. A one-time
+  recovery code that cannot be copied is reported by a sticky toast — it must
+  survive, and it does.
+
+One trap the kit records for the next reader: **a component body executes
+once.** Switching a surface between a Prompt and a Dialog on state is a
+`<Show>` with the two as branches — a top-level ternary freezes on the first
+branch and the second can never appear.
 
 **`Tab` is not a kit primitive either.** It carries `role=tab`, drag and reorder,
 middle-click close, activity indicators, `aria-controls` and two orientations: a
@@ -126,23 +237,23 @@ behavioural unit, not a styled button. Feature components like it are declared i
 
 ### Page primitives (separate ownership — not merged with kit Section)
 
-| Component    | Module              | Notes                                                          |
-| ------------ | ------------------- | -------------------------------------------------------------- |
-| Page         | `page.tsx`          | Page layout container                                          |
-| PageHeader   | `page-header.tsx`   | Page header                                                    |
-| PageBody     | `page-body.tsx`     | Page body                                                      |
-| PageRail     | `page-rail.tsx`     | Side navigation rail                                           |
-| PageScroller | `page-scroller.tsx` | Scroll owner                                                   |
-| PageSection  | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking |
-| SidebarView  | `sidebar-view.tsx`  | Sidebar view wrapper                                           |
+| Component       | Module              | Notes                                                                                                                         |
+| --------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Page            | `page.tsx`          | Page layout container                                                                                                         |
+| PageHeader      | `page-header.tsx`   | Page header                                                                                                                   |
+| PageBody        | `page-body.tsx`     | Page body                                                                                                                     |
+| PageRail        | `page-rail.tsx`     | Side navigation rail                                                                                                          |
+| PageScroller    | `page-scroller.tsx` | Scroll owner                                                                                                                  |
+| **PageSection** | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking; accepts `divided` and one `description` for the whole section |
+| SidebarView     | `sidebar-view.tsx`  | Sidebar view wrapper                                                                                                          |
 
 ### `Section` vs `PageSection` overlap
 
 `Section` (kit) and `PageSection` (page layout) both render an `h2` + children.
 They differ in:
 
-- **`Section`** — `<section>` element, `id` for anchor targeting, `class` passthrough. Part of the kit.
-- **`PageSection`** — `<section>` element, `id` for deep-linking, gets page-specific spacing from `surface.css`.
+- **`Section`** — `<section>` element, `id` for anchor targeting, `class` passthrough. Part of the kit. Accepts `divided` to forward to its inner Stack.
+- **`PageSection`** — `<section>` element, `id` for deep-linking, gets page-specific spacing from `surface.css`. Accepts `divided` to forward to its inner Stack.
 
 **Recommendation: do not merge them.** `Section` is a generic kit component for form
 groups and control sections within any surface. `PageSection` is a layout primitive

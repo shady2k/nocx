@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
+import { createSignal } from 'solid-js'
 import { Select, type SelectProps } from './select'
 
 afterEach(() => cleanup())
@@ -65,5 +66,27 @@ describe('Select', () => {
     subject()
     const sel = screen.getByRole('combobox')
     expect(sel.tagName).toBe('SELECT')
+  })
+
+  // The vault pickers load their options asynchronously AFTER the bound value
+  // is known. A controlled select whose options land late must re-apply the
+  // selection, or the bound secret reads as "None" (b5bu).
+  it('keeps the value selected when options arrive after the value', () => {
+    function Harness() {
+      const [opts, setOpts] = createSignal<{ value: string; label: string }[]>([])
+      return (
+        <>
+          <button onClick={() => setOpts([{ value: 'secrow:bound', label: 'Bound secret' }])}>
+            load
+          </button>
+          <Select value="secrow:bound" onChange={vi.fn()} options={opts()} />
+        </>
+      )
+    }
+    render(() => <Harness />)
+    const sel = screen.getByRole<HTMLSelectElement>('combobox')
+    expect(sel.value).toBe('')
+    fireEvent.click(screen.getByText('load'))
+    expect(sel.value).toBe('secrow:bound')
   })
 })

@@ -1,0 +1,24 @@
+/* StatusDot — the health marker on a rail row or a list row.
+   Identity: .ui-status-dot. Variance: data-tone.
+   Lived in tabs.css as .ui-tabs__status until the Vault store list needed the
+   same marker outside a tab; the rules moved here verbatim. */
+
+.ui-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.ui-status-dot[data-tone='ok'] {
+  background: var(--color-success);
+}
+
+.ui-status-dot[data-tone='warning'] {
+  background: var(--color-warning);
+}
+
+.ui-status-dot[data-tone='error'] {
+  background: var(--color-danger);
+}

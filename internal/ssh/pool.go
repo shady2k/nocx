@@ -2,10 +2,13 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/log"
+	gossh "golang.org/x/crypto/ssh"
+	agent "golang.org/x/crypto/ssh/agent"
 )
 
 // sshClientConn is the subset of *gossh.Client we need: Close. The real
@@ -25,11 +28,41 @@ type pooledSSHConn struct {
 	client    sshClientConn
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
+
+	// stopKeepalive cancels the keepalive goroutine when non-nil. Set by
+	// the dial factory when KeepaliveInterval > 0; called from Close before
+	// closing the transport so the ticker stops before the connection goes
+	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
+	// disabled or this is a test fake.
+	stopKeepalive func()
+
+	// agentForwardOnce guards agent.ForwardToRemote so it is called exactly
+	// once per pooled connection, even when multiple tabs share the client.
+	agentForwardOnce sync.Once
+}
+
+// initAgentForward registers the auth-agent@openssh.com channel handler on
+// the underlying *gossh.Client exactly once per pooled connection. It is a
+// no-op (nil error) when addr is empty or the handler was already registered
+// by a previous tab sharing this connection. addr should be the local SSH
+// agent socket path (os.Getenv("SSH_AUTH_SOCK")).
+func (c *pooledSSHConn) initAgentForward(gclient *gossh.Client, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	var setupErr error
+	c.agentForwardOnce.Do(func() {
+		setupErr = agent.ForwardToRemote(gclient, addr)
+	})
+	return setupErr
 }
 
 func (c *pooledSSHConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		if c.stopKeepalive != nil {
+			c.stopKeepalive()
+		}
 		err = c.client.Close()
 		if c.release != nil {
 			c.release()
@@ -47,15 +80,21 @@ func (c *pooledSSHConn) Close() error {
 //   - host/port/user: the network endpoint and the account on it. Two
 //     different users on one host are different principals; sharing a
 //     connection means one user's session carries the other's traffic.
-//   - identity: the credential principal. A stored credential is bound to
-//     one principal (nocx-mon/PR11-T5); two different stored credentials
-//     for the same host+user are different principals and MUST NOT share,
-//     or one credential's session carries the other's traffic. For inline
-//     auth (no stored credential) we key on the private key path: a
-//     different key file is a different principal. When neither applies
-//     (agent-only / prompt-password), identity is empty and the entries
-//     share — those auth methods are not credential-bound, so there is no
-//     second principal to isolate.
+//   - identity: the credential principal. A stored credential is isolated
+//     by its SecretID — which is reminted on every password change, so a
+//     rotated credential cannot reuse a transport authenticated with the
+//     old secret (that is the distinction the "stored-credential ID" name
+//     misses). For inline auth (no stored credential) we key on the SHA256
+//     fingerprint of the public key, not the file path, so replacing the
+//     file contents at the same path changes the pool identity. When neither
+//     applies (agent-only / prompt-password), identity is empty by EXPLICIT
+//     DESIGN: the agent authenticates each channel independently (every
+//     shell/session request goes through the agent socket), so sharing the
+//     transport does not share the authentication — each tab still proves
+//     its identity through the agent for its own channel. If the agent's
+//     loaded keys change (e.g. ssh-add -D), new transports use the updated
+//     key set but existing transports remain valid. There is no credential
+//     principal to isolate; pooling by host+user+port is correct.
 //   - jumpRoute: the resolved identity of the bastion the connection is
 //     dialed through. The same target reached via two different bastions
 //     is a different route; pooling them together would let one bastion's
@@ -68,7 +107,7 @@ type poolKey struct {
 	host      string
 	port      int
 	user      string
-	identity  string // stored-credential ID, else inline key path, else ""
+	identity  string // SecretID, public-key SHA256 fingerprint, or empty for agent/prompt auth
 	jumpRoute string // resolved jump identity (see jumpRouteKey), "" for direct
 }
 
@@ -229,6 +268,13 @@ func (p *ConnPool) acquire(ctx context.Context, key poolKey, dial func(key poolK
 	if err != nil {
 		p.mu.Unlock()
 		close(d.done) // wake waiters so they can see the failure / retry
+		// A typed domain error already names the user and the host — wrapping
+		// it here printed them twice in one sentence, which is how a message
+		// stops being read. Only an untyped failure needs the context added.
+		var noAuth *ErrNoAuthMethod
+		if errors.As(err, &noAuth) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("dial %s@%s:%d: %w", key.user, key.host, key.port, err)
 	}
 	// A concurrent Acquire that waited on our done channel cannot have
@@ -299,6 +345,34 @@ func (p *ConnPool) CloseAll() {
 	for _, c := range toClose {
 		_ = c.Close()
 	}
+}
+
+// Drain closes all pooled connections matching the predicate, regardless
+// of refcount. Existing sessions on those connections will fail. Entries
+// not matching the predicate are unaffected. Returns the number of
+// connections drained.
+//
+// This is used when a credential version is retired: the pool key has
+// changed (so new Acquire calls get a new transport), but the old entries
+// are still in the pool. Drain removes them, forcing new dials.
+func (p *ConnPool) Drain(match func(key poolKey) bool) int {
+	p.mu.Lock()
+	toClose := make([]sshClientConn, 0)
+	closed := 0
+	for key, entry := range p.pool {
+		if match(key) {
+			toClose = append(toClose, entry.conn)
+			delete(p.pool, key)
+			closed++
+			p.log.Debug("pool connection drained",
+				"host", key.host, "user", key.user, "port", key.port, "identity", key.identity)
+		}
+	}
+	p.mu.Unlock()
+	for _, c := range toClose {
+		_ = c.Close()
+	}
+	return closed
 }
 
 // Count returns the number of pooled connections (for testing/diagnostics).

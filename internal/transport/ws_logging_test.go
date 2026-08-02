@@ -118,7 +118,7 @@ func TestControlFrameLogging(t *testing.T) {
 		buf.Reset()
 		// Starts with '{' (passes isJSONObject) but is not valid JSON —
 		// hits the -32700 branch at ws.go:427.
-		frame := `{"jsonrpc":"2.0","id":1,"method":"credentials.savePassword","params":{"password":"` + password
+		frame := `{"jsonrpc":"2.0","id":1,"method":"secrets.savePassword","params":{"password":"` + password
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
 			t.Fatalf("write: %v", err)
 		}

@@ -21,9 +21,9 @@ func TestNewOSPaths_Linux(t *testing.T) {
 		t.Setenv("XDG_DATA_HOME", "/xdg/data")
 		t.Setenv("XDG_CACHE_HOME", "/xdg/cache")
 
-		p, err := NewOSPaths("nocx")
+		p, err := newOSPaths("nocx")
 		if err != nil {
-			t.Fatalf("NewOSPaths() error: %v", err)
+			t.Fatalf("newOSPaths() error: %v", err)
 		}
 
 		if p.ConfigDir() != filepath.Join("/xdg/config", "nocx") {
@@ -43,9 +43,9 @@ func TestNewOSPaths_Linux(t *testing.T) {
 		t.Setenv("XDG_DATA_HOME", "")
 		t.Setenv("XDG_CACHE_HOME", "")
 
-		p, err := NewOSPaths("nocx")
+		p, err := newOSPaths("nocx")
 		if err != nil {
-			t.Fatalf("NewOSPaths() error: %v", err)
+			t.Fatalf("newOSPaths() error: %v", err)
 		}
 
 		if p.ConfigDir() != filepath.Join(home, ".config", "nocx") {
@@ -68,7 +68,7 @@ func TestNewOSPaths_Linux(t *testing.T) {
 			_ = os.Unsetenv(k)
 		}
 
-		p, err := NewOSPaths("nocx")
+		p, err := newOSPaths("nocx")
 		if err == nil {
 			t.Errorf("expected error, got nil (paths: config=%q data=%q cache=%q)", p.ConfigDir(), p.DataDir(), p.CacheDir())
 		}
@@ -88,7 +88,7 @@ func TestNewOSPaths_Linux(t *testing.T) {
 		_ = os.Unsetenv("HOME")
 		_ = os.Unsetenv("XDG_DATA_HOME")
 
-		p, err := NewOSPaths("nocx")
+		p, err := newOSPaths("nocx")
 		if err == nil {
 			t.Errorf("expected error for unresolvable data dir, got nil (paths: config=%q data=%q cache=%q)", p.ConfigDir(), p.DataDir(), p.CacheDir())
 		}
@@ -99,9 +99,9 @@ func TestNewOSPaths_Linux(t *testing.T) {
 
 	t.Run("all three methods return distinct roles", func(t *testing.T) {
 		t.Setenv("HOME", home)
-		p, err := NewOSPaths("myapp")
+		p, err := newOSPaths("myapp")
 		if err != nil {
-			t.Fatalf("NewOSPaths() error: %v", err)
+			t.Fatalf("newOSPaths() error: %v", err)
 		}
 
 		c, d, ch := p.ConfigDir(), p.DataDir(), p.CacheDir()
@@ -134,9 +134,9 @@ func TestNewOSPaths_macOS(t *testing.T) {
 
 	t.Run("config and data are the same Application Support dir", func(t *testing.T) {
 		t.Setenv("HOME", home)
-		p, err := NewOSPaths("nocx")
+		p, err := newOSPaths("nocx")
 		if err != nil {
-			t.Fatalf("NewOSPaths() error: %v", err)
+			t.Fatalf("newOSPaths() error: %v", err)
 		}
 
 		wantCD := filepath.Join(home, "Library", "Application Support", "nocx")
@@ -150,9 +150,9 @@ func TestNewOSPaths_macOS(t *testing.T) {
 
 	t.Run("cache is under Caches", func(t *testing.T) {
 		t.Setenv("HOME", home)
-		p, err := NewOSPaths("nocx")
+		p, err := newOSPaths("nocx")
 		if err != nil {
-			t.Fatalf("NewOSPaths() error: %v", err)
+			t.Fatalf("newOSPaths() error: %v", err)
 		}
 
 		wantCh := filepath.Join(home, "Library", "Caches", "nocx")

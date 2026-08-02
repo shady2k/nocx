@@ -39,6 +39,21 @@ describe('EmptyState', () => {
     expect(document.querySelector('.ui-empty-state__action')).toBeNull()
   })
 
+  // A wall of text in the middle of an empty page reads as something that
+  // failed to load. A glyph above it says the emptiness is the message.
+  it('renders the icon it is given, above the title', () => {
+    subject({ icon: <svg /> })
+    const icon = document.querySelector('.ui-empty-state__icon')
+    expect(icon).not.toBeNull()
+    expect(icon!.querySelector('svg')).not.toBeNull()
+    expect(icon!.nextElementSibling?.classList.contains('ui-empty-state__title')).toBe(true)
+  })
+
+  it('does not render an icon slot when there is no icon', () => {
+    subject()
+    expect(document.querySelector('.ui-empty-state__icon')).toBeNull()
+  })
+
   // Identity, not passthrough. The old case asserted that a caller's class was
   // merged in; the `class` prop is gone (§3.6), so what matters now is that the
   // element names itself and nothing else — a stray class here would mean some

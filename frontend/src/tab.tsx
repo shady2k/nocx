@@ -43,6 +43,10 @@ export interface TabProps {
   /** The row's second line in vertical placement: the tab's location. Empty when the
    *  title already carries it, in which case no second line is drawn. */
   subtitle?: string
+  /** When true, the tab offers a save action (alias adoption). */
+  adoptable?: boolean
+  /** Triggered when the user clicks the save action. */
+  onAdopt?: () => void
   /** Called when the tab is clicked. */
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
@@ -112,6 +116,19 @@ export function Tab(props: TabProps) {
           <span class="nocx-tab-subtitle">{props.subtitle}</span>
         </Show>
       </span>
+      <Show when={props.adoptable === true}>
+        <IconButton
+          size="sm"
+          ariaLabel="Save as connection"
+          onClick={(e: MouseEvent) => {
+            e.stopPropagation()
+            props.onAdopt?.()
+          }}
+          square
+        >
+          {'+'}
+        </IconButton>
+      </Show>
       <IconButton
         size="sm"
         ariaLabel="Close tab"

@@ -76,6 +76,64 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+      # The shipped profile directory lives behind `-tags release`
+      # (internal/storage/appdir.go), so the ordinary run never compiles it. One
+      # package, one assertion — but without it a typo there ships an app that
+      # cannot find any existing installation's documents.
+      - name: Test (release build tag)
+        run: go test -race -count=1 -tags release ./internal/storage/...
+
+  # backend-linux — Go tests on Linux, with and without a Secret Service.
+  #
+  # Runner decision: ubuntu-latest is the standard CI Linux image. The macOS
+  # backend job tests the target OS; this job tests Linux behaviour, which
+  # matters because go-keyring's back end is platform-specific and the
+  # release pipeline ships a linux/amd64 AppImage.
+  #
+  # Matrix decision: two variants (with-keyring: true / false) in one job
+  # rather than two separate jobs. Rationale: common steps (checkout,
+  # setup-go, build) appear once; GitHub auto-labels each variant; one job
+  # ID for required checks.
+  backend-linux:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        with-keyring: [true, false]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Install Secret Service & dbus-x11
+        if: matrix.with-keyring
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gnome-keyring dbus-x11
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (with Secret Service)
+        if: matrix.with-keyring
+        run: |
+          dbus-run-session -- bash <<'TESTEOF'
+          set -euo pipefail
+          echo "=== Starting gnome-keyring-daemon ==="
+          eval "$(echo -n "nocx-ci" | gnome-keyring-daemon --daemonize --login)"
+          echo "=== Unlocking login keyring ==="
+          echo -n "nocx-ci" | gnome-keyring-daemon --unlock
+          echo "=== Running tests ==="
+          go test -race -count=1 ./...
+          TESTEOF
+
+      - name: Test (no Secret Service)
+        if: '!matrix.with-keyring'
+        run: go test -race -count=1 ./...
+
   frontend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest

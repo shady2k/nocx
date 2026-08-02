@@ -13,12 +13,15 @@
  *   - nocx-ucxl: clicking a rail section always changes the content pane
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import type { Declaration } from './settings'
 import type { TabHost } from './tab-content'
-
+import { VaultSection } from './vault'
+import type { VaultClient } from './vault-client'
+import { render, cleanup } from '@solidjs/testing-library'
 // ── Test declarations ────────────────────────────────────────────────
 // 5 declarations spanning 3 sections and all control types.
 
@@ -229,7 +232,15 @@ describe('SettingsContent', () => {
     // (nocx-imkb.3 put Connections here, and Backup became one too) follow
     // them, so asserting the whole list rather than a prefix keeps a stray
     // insertion visible.
-    expect(labels).toEqual(['Terminal', 'Application', 'AI', 'Backup & Restore', 'Connections'])
+    expect(labels).toEqual([
+      'Terminal',
+      'Application',
+      'AI',
+      'Backup & Restore',
+      'Connections',
+      'Secrets',
+      'Vault',
+    ])
   })
 
   it('section nav shows per-section modified counts', async () => {
@@ -478,5 +489,90 @@ describe('SettingsContent', () => {
     expect(labels).toContain('Terminal')
     expect(labels).toContain('Application')
     expect(labels).toContain('AI')
+  })
+})
+
+describe('horizontal Field gate — every settings row must use primary label', () => {
+  let target: HTMLDivElement
+  let client: ProfileClient
+  let content: SettingsContent
+  let host: TabHost
+  let signal: AbortSignal
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+    target = document.createElement('div')
+    document.body.append(target)
+    client = new ProfileClient(new Dispatcher())
+    content = new SettingsContent(client)
+    host = mockTabHost()
+    signal = new AbortController().signal
+  })
+
+  it('mounts generated settings pages with every horizontal Field defaulting to data-label=primary', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const horizontals = target.querySelectorAll<HTMLElement>('.ui-field-horizontal')
+    expect(horizontals.length).toBeGreaterThan(0)
+    for (const el of horizontals) {
+      expect(el.getAttribute('data-label')).toBe('primary')
+    }
+  })
+
+  it('every vault-section horizontal Field defaults to data-label=primary', () => {
+    const vaultStatus = {
+      state: 'unsealed' as const,
+      osKeyAvailable: true,
+      osKeyCapable: true,
+      hasPassphrase: true,
+      autoSealMinutes: 15,
+      providers: [{ id: 'test-provider', writable: true, ready: true, reason: undefined }],
+      defaultProvider: 'test-provider',
+    }
+    const vaultController = {
+      status: () => vaultStatus,
+      refresh: vi.fn().mockResolvedValue(true),
+      seal: vi.fn().mockResolvedValue(undefined),
+      setDefaultProvider: vi.fn().mockResolvedValue(undefined),
+      showSetup: vi.fn().mockReturnValue(false),
+      showUnlock: vi.fn().mockReturnValue(false),
+      unlockReason: vi.fn().mockReturnValue(null),
+      ensureBeforeSave: vi.fn(),
+      onSetupDone: vi.fn(),
+      onUnsealDone: vi.fn(),
+      openUnlock: vi.fn(),
+      openSetup: vi.fn(),
+      closeSetup: vi.fn(),
+      closeUnlock: vi.fn(),
+      saveSecretWithVault: vi.fn(),
+      changePassphrase: vi.fn(),
+      regenerateRecovery: vi.fn(),
+    }
+    const vaultClient = {
+      status: vi.fn(),
+      setup: vi.fn(),
+      unseal: vi.fn(),
+      seal: vi.fn(),
+      changePassphrase: vi.fn(),
+      regenerateRecovery: vi.fn(),
+      setDefaultProvider: vi.fn(),
+      setAutoSeal: vi.fn().mockResolvedValue(undefined),
+      activity: vi.fn(),
+    } as unknown as VaultClient
+
+    const { container } = render(() =>
+      createComponent(VaultSection, { vaultClient, vaultController }),
+    )
+
+    try {
+      const horizontals = container.querySelectorAll<HTMLElement>('.ui-field-horizontal')
+      expect(horizontals.length).toBeGreaterThan(0)
+      for (const el of horizontals) {
+        expect(el.getAttribute('data-label')).toBe('primary')
+      }
+    } finally {
+      cleanup()
+    }
   })
 })

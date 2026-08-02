@@ -13,6 +13,8 @@
  * ADR-0014 estimate: 300–500 lines for the overlay core (all modules combined).
  */
 
+import { createSignal } from 'solid-js'
+
 export interface OverlayEntry {
   /** Unique id for this overlay instance. */
   readonly id: string
@@ -25,10 +27,31 @@ export interface OverlayEntry {
    * terminal-owned code).
    */
   readonly prevFocus: Element | null
+  /**
+   * The overlay's own element, when it has one.
+   *
+   * Kept so that things which must appear ABOVE the topmost overlay can be
+   * rendered inside it. A modal `<dialog>` lives in the browser's top layer,
+   * which no z-index in the normal layer can reach — so "on top" is not a
+   * number, it is a parent.
+   */
+  readonly element: HTMLElement | null
 }
 
 let idCounter = 0
 const stack: OverlayEntry[] = []
+
+const [topOverlayElement, setTopOverlayElement] = createSignal<HTMLElement | null>(null)
+
+/**
+ * The topmost overlay's element, or null when nothing is open. Reactive, so a
+ * component can re-parent itself into the top layer as overlays come and go.
+ */
+export { topOverlayElement }
+
+function syncTopElement(): void {
+  setTopOverlayElement(stack.length > 0 ? stack[stack.length - 1].element : null)
+}
 
 let escapeHandler: ((e: KeyboardEvent) => void) | null = null
 
@@ -80,13 +103,19 @@ function uninstallEscapeHandler(): void {
  * Registers the document-level Escape handler (one-at-a-time).
  * Returns the assigned entry (with id populated).
  */
-export function pushOverlay(close: () => boolean, prevFocus?: Element | null): OverlayEntry {
+export function pushOverlay(
+  close: () => boolean,
+  prevFocus?: Element | null,
+  element?: HTMLElement | null,
+): OverlayEntry {
   const entry: OverlayEntry = {
     id: nextId(),
     close,
     prevFocus: prevFocus ?? document.activeElement,
+    element: element ?? null,
   }
   stack.push(entry)
+  syncTopElement()
   installEscapeHandler()
   return entry
 }
@@ -99,6 +128,7 @@ export function popOverlay(entry: OverlayEntry): boolean {
   const idx = stack.indexOf(entry)
   if (idx === -1) return false
   stack.splice(idx, 1)
+  syncTopElement()
   uninstallEscapeHandler()
   return true
 }
@@ -146,11 +176,13 @@ export function restoreFocus(entry: OverlayEntry): void {
   const el = entry.prevFocus
   if (!el) return
 
-  // HTMLDialogElement has special focus behaviour when closed — the browser
-  // restores focus automatically. Do NOT double-focus in that case.
-  if (el instanceof HTMLDialogElement || el.closest?.('dialog[open]')) {
-    return
-  }
+  // A <dialog> restores focus itself when it closes, so doing it again here
+  // would fight the browser — but only a <dialog> does. Both halves matter:
+  // keying on `prevFocus` alone made a Prompt raised over a dialog drop focus
+  // onto <body> when it closed, because the focus it should have returned was
+  // inside a dialog that is still open and nothing was going to restore it.
+  const closingDialog = entry.element instanceof HTMLDialogElement
+  if (closingDialog && (el instanceof HTMLDialogElement || el.closest?.('dialog[open]'))) return
 
   // xterm stores focus in a hidden textarea that is not a normal focusable
   // element. A standard .focus() call does not work on it in some webview

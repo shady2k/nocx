@@ -69,4 +69,24 @@ describe('Field', () => {
     const wrapper = screen.getByText('Hostname').closest('.ui-field')
     expect(wrapper?.getAttribute('class')).toBe('ui-field ui-field-horizontal')
   })
+
+  describe('data-label default', () => {
+    it('vertical defaults to secondary', () => {
+      subject()
+      const wrapper = screen.getByText('Hostname').closest('.ui-field')
+      expect(wrapper?.getAttribute('data-label')).toBe('secondary')
+    })
+
+    it('horizontal defaults to primary', () => {
+      subject({ orientation: 'horizontal' })
+      const wrapper = screen.getByText('Hostname').closest('.ui-field')
+      expect(wrapper?.getAttribute('data-label')).toBe('primary')
+    })
+
+    it('horizontal respects explicit labelProminence override', () => {
+      subject({ orientation: 'horizontal', labelProminence: 'secondary' })
+      const wrapper = screen.getByText('Hostname').closest('.ui-field')
+      expect(wrapper?.getAttribute('data-label')).toBe('secondary')
+    })
+  })
 })

@@ -12,6 +12,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/update"
@@ -113,6 +114,14 @@ func (w *WailsApp) startup(ctx context.Context) {
 		Logger:         w.backend.Logger,
 	})
 
+	// The native file dialog is a control-plane capability (AD-1): the
+	// renderer reaches the Wails runtime through dialog.openFile on the
+	// WebSocket, and this is the only place the Wails context exists to back
+	// it. Wired before Start so no renderer request can observe the unset
+	// state. The dev-web harness never runs this — the method then reports
+	// itself unavailable and the surfaces fall back to typing paths.
+	w.backend.SetDialogService(&wailsDialogService{ctx: ctx})
+
 	// Settle any transaction in flight from a previous launch.
 	if err := w.backend.Updater.Reconcile(ctx); err != nil {
 		w.backend.Logger.Warn("update reconcile at startup failed", "error", err)
@@ -121,6 +130,22 @@ func (w *WailsApp) startup(ctx context.Context) {
 	if err := w.backend.Start(ctx); err != nil {
 		w.backend.Logger.Error("failed to start backend", "error", err)
 	}
+}
+
+// wailsDialogService opens the platform file picker through the Wails
+// runtime. The renderer never calls it directly; it is the backend of the
+// dialog.openFile control-plane method.
+type wailsDialogService struct {
+	ctx context.Context
+}
+
+func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
+	return runtime.OpenFileDialog(d.ctx, runtime.OpenDialogOptions{
+		Title: "Choose a private key",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "All files", Pattern: "*"},
+		},
+	})
 }
 
 // upgradeInstallPath derives the path to the installed bundle from the

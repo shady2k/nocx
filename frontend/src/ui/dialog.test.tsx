@@ -46,7 +46,9 @@ describe('overlay stack', () => {
   })
 
   it('pop returns false for unknown entry', () => {
-    expect(popOverlay({ id: 'ghost', close: () => true, prevFocus: null })).toBe(false)
+    expect(popOverlay({ id: 'ghost', close: () => true, prevFocus: null, element: null })).toBe(
+      false,
+    )
   })
 
   it('closeTopmost calls close on the top entry', () => {
@@ -273,6 +275,190 @@ describe('Dialog', () => {
   })
 })
 
+/* ── Panel height animation ──────────────────────────────────────────── */
+
+// A `cancel` from a descendant is not the dialog's cancel. `input[type=file]`
+// fires one when the OS file picker is dismissed, and it bubbles — so choosing
+// "Choose file" in the connection editor and then pressing Cancel in the
+// picker closed the whole editor and discarded the form. Reported from the
+// running app.
+describe('Dialog cancel', () => {
+  it('closes on its own cancel', () => {
+    const onClose = vi.fn()
+    const { container } = render(() => (
+      <Dialog open={true} onClose={onClose} title="T">
+        body
+      </Dialog>
+    ))
+    const dialog = container.querySelector('dialog') as HTMLDialogElement
+    fireEvent(dialog, new Event('cancel', { bubbles: true }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a cancel bubbling up from a descendant, such as a file picker', () => {
+    const onClose = vi.fn()
+    const { container } = render(() => (
+      <Dialog open={true} onClose={onClose} title="T">
+        <input type="file" data-testid="picker" />
+      </Dialog>
+    ))
+    const picker = container.querySelector('input[type=file]') as HTMLInputElement
+    fireEvent(picker, new Event('cancel', { bubbles: true }))
+    expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
+describe('Dialog panel height animation', () => {
+  // jsdom has no layout and ResizeObserver is stubbed to never fire, so we
+  // capture the callback the component registers and drive it by hand, with
+  // getBoundingClientRect stubbed to report the heights a browser would.
+  let roCallback: (() => void) | null = null
+
+  beforeEach(() => {
+    roCallback = null
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      constructor(cb: () => void) {
+        roCallback = cb
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  })
+
+  function subject(overrides?: Partial<DialogProps>) {
+    const props: DialogProps = {
+      open: true,
+      onClose: vi.fn(),
+      title: 'Test Dialog',
+      children: 'Dialog body content',
+      ...overrides,
+    }
+    return render(() => <Dialog {...props} />)
+  }
+
+  function stubPanelHeight(panel: HTMLElement, height: number) {
+    Object.defineProperty(panel, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        width: 480,
+        height,
+        top: 0,
+        left: 0,
+        right: 480,
+        bottom: height,
+        toJSON: () => ({}),
+      }),
+    })
+  }
+
+  function fireResize() {
+    expect(roCallback).not.toBeNull()
+    roCallback!()
+  }
+
+  function endTransition(panel: HTMLElement) {
+    const ev = new Event('transitionend', { bubbles: true })
+    Object.defineProperty(ev, 'propertyName', { value: 'height' })
+    fireEvent(panel, ev)
+  }
+
+  // The artefact a user actually sees. Mid-transition the panel is pinned to
+  // the height it is leaving while the body is already sized for the height it
+  // is arriving at, so the body overflows and flashes a scrollbar for the whole
+  // 180ms. Reported from the running app, not from any test — every assertion
+  // about heights passed while the transition looked broken.
+  it('does not let the body flash a scrollbar while the panel is mid-transition', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    expect(panel.hasAttribute('data-animating')).toBe(false)
+
+    stubPanelHeight(panel, 320)
+    fireResize()
+    // The marker the stylesheet hangs `overflow-y: hidden` on.
+    expect(panel.hasAttribute('data-animating')).toBe(true)
+
+    endTransition(panel)
+    // And it must come back: a body that genuinely does not fit still scrolls
+    // once the panel has settled.
+    expect(panel.hasAttribute('data-animating')).toBe(false)
+  })
+
+  it('pins the panel height to the new size when the content resizes', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    // At rest the height is auto — nothing pinned.
+    expect(panel.style.height).toBe('')
+
+    // The body grows (a section switch, a revealed field): the panel must be
+    // measured at the settled size, pinned, and transitioned to the new one —
+    // the footer moves visibly instead of teleporting.
+    stubPanelHeight(panel, 400)
+    fireResize()
+    expect(panel.style.height).toBe('400px')
+  })
+
+  it('releases the panel back to auto when the height transition ends', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    stubPanelHeight(panel, 400)
+    fireResize()
+    expect(panel.style.height).toBe('400px')
+
+    endTransition(panel)
+    // Back to auto so the CSS max-height, not a stale inline number, governs.
+    expect(panel.style.height).toBe('')
+    expect(panel.style.transition).toBe('')
+  })
+
+  it('never pins a height above the panel max-height', () => {
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    panel.style.maxHeight = '300px'
+    stubPanelHeight(panel, 200)
+    fireResize()
+    // A body whose natural height (500px) exceeds the cap: a real browser
+    // clamps the measurement to the max-height, and the animation must pin to
+    // that clamped value — a short viewport scrolls instead of overflowing.
+    stubPanelHeight(panel, 300)
+    fireResize()
+    expect(panel.style.height).toBe('300px')
+  })
+
+  it('does not animate under prefers-reduced-motion', () => {
+    // jsdom ships no matchMedia; install a reduce-answering one. The
+    // component must skip pinning and transitioning entirely under it.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: () => ({
+        matches: true,
+        media: '(prefers-reduced-motion: reduce)',
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      }),
+    })
+    const { container } = subject()
+    const panel = container.querySelector('.nocx-dialog__panel') as HTMLElement
+    stubPanelHeight(panel, 200)
+    fireResize()
+    stubPanelHeight(panel, 400)
+    fireResize()
+    // No pin, no transition: the height jumps, as reduced motion requires.
+    expect(panel.style.height).toBe('')
+  })
+})
 /* ── showConfirm imperative helper ─────────────────────────────────── */
 
 describe('showConfirm', () => {

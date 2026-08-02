@@ -5,6 +5,13 @@
 
 const MAX_ROWS = 10
 
+export interface AliasSuggestion {
+  alias: string
+  hostName: string
+  user?: string
+  port?: number
+}
+
 export interface EditorActions {
   submit: (doc: string) => void
   // cancel discards the composed line the way Ctrl-C does at a shell prompt:
@@ -12,12 +19,20 @@ export interface EditorActions {
   // Without it, Ctrl-C in the textarea is a no-op and the stale text corrupts
   // the next command.
   cancel: () => void
+  /** Fired on every textarea input event with the current value.
+   *  Use to drive external hint/filter logic without coupling the hint
+   *  data source to the editor. */
+  onInputChange?: (text: string) => void
   /**
    * Fired when the editor's own height changes, because that changes how much
    * room the scrollback has. Optional: an editor with nothing above it — a test,
    * or a future host — has nobody to tell.
    */
   resized?: () => void
+  /** Fired when the user accepts a hint suggestion (Enter/click on hint item).
+   *  Receives the suggested alias value. The editor replaces the partial `ssh ` line
+   *  with `ssh <alias>` before calling this hook. */
+  onAcceptHint?: (alias: string) => void
 }
 
 export class CommandEditor {
@@ -26,6 +41,14 @@ export class CommandEditor {
   private chrome: HTMLElement
   private cwdChip: HTMLElement
   private timeChip: HTMLElement
+  /** Hint dropdown — lives between the chrome and textarea. */
+  private hintContainer: HTMLElement
+  /** Current hint items (empty when hidden). */
+  private _hintItems: AliasSuggestion[] = []
+  /** Whether the user explicitly dismissed the hint this editor session. */
+  private _hintDismissed = false
+  /** Index of the currently highlighted item in _hintItems. */
+  private _hintSelectedIndex = 0
 
   constructor(private readonly actions: EditorActions) {
     this.root = document.createElement('div')
@@ -44,6 +67,12 @@ export class CommandEditor {
     this.timeChip.className = 'nocx-chip nocx-editor-time'
     this.chrome.append(this.cwdChip, this.timeChip)
     this.root.appendChild(this.chrome)
+
+    // ── Hint dropdown popup ─────────────────────────────────────────────
+    this.hintContainer = document.createElement('div')
+    this.hintContainer.className = 'nocx-editor-hint'
+    this.hintContainer.style.display = 'none'
+    this.root.appendChild(this.hintContainer)
 
     // ── Textarea ────────────────────────────────────────────────────────
     this.ta = document.createElement('textarea')
@@ -115,10 +144,12 @@ export class CommandEditor {
 
   private onInput = (): void => {
     this._grow()
+    this.actions.onInputChange?.(this.ta.value)
   }
 
   /** Submit the current textarea value, then hide and clear (ADR-0004 §2). */
   private submit(): void {
+    this.hideAliasHints()
     const doc = this.ta.value
     // Atomic handoff (ADR-0004 §2): hide + clear BEFORE sending, so the
     // committed command is painted once by the shell, not echoed twice.
@@ -128,7 +159,52 @@ export class CommandEditor {
     this.actions.submit(doc)
   }
 
+  /** Accept the currently highlighted hint, replacing `ssh <partial>` with the
+   *  chosen alias, then fire onAcceptHint so the caller can track the event. */
+  private acceptHint(): void {
+    const item = this._hintItems[this._hintSelectedIndex]
+    if (!item) return
+    const v = this.ta.value
+    const sshIdx = v.search(/\bssh\s+/)
+    if (sshIdx === -1) return
+    const before = v.slice(0, sshIdx + 4) // "ssh "
+    const after = v.slice(sshIdx).replace(/^ssh\s+\S*/, '')
+    const cmd = `${before}${item.alias}${after}`
+    this.ta.value = cmd
+    this._grow()
+    this.hideAliasHints()
+    this.actions.onAcceptHint?.(item.alias)
+  }
+
   private onKeydown = (e: KeyboardEvent): void => {
+    if (this._hintItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        this._hintSelectedIndex = (this._hintSelectedIndex + 1) % this._hintItems.length
+        this._renderHints()
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        this._hintSelectedIndex =
+          (this._hintSelectedIndex - 1 + this._hintItems.length) % this._hintItems.length
+        this._renderHints()
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        this.acceptHint()
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        this._hintDismissed = true
+        this.hideAliasHints()
+        return
+      }
+    }
+
+    // Standard editor keys when no hint is active.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       this.submit()
@@ -152,6 +228,66 @@ export class CommandEditor {
     }
   }
 
+  // ── hint management ───────────────────────────────────────────────────
+
+  /** Populate and show the alias hint dropdown with matching items.
+   *  Caller is responsible for filtering by the current partial text. */
+  showAliasHints(items: AliasSuggestion[]): void {
+    if (items.length === 0 || this._hintDismissed) {
+      this.hideAliasHints()
+      return
+    }
+    this._hintItems = items
+    this._hintSelectedIndex = 0
+    this._renderHints()
+    this.hintContainer.style.display = ''
+  }
+
+  /** Hide the hint dropdown and clear its items. */
+  hideAliasHints(): void {
+    this._hintItems = []
+    this._hintSelectedIndex = 0
+    this.hintContainer.style.display = 'none'
+    this.hintContainer.innerHTML = ''
+  }
+
+  /** Rebuild the hint dropdown DOM from _hintItems. */
+  private _renderHints(): void {
+    this.hintContainer.innerHTML = ''
+    for (let i = 0; i < this._hintItems.length; i++) {
+      const item = this._hintItems[i]
+      const el = document.createElement('div')
+      el.className = 'nocx-editor-hint__item'
+      if (i === this._hintSelectedIndex) {
+        el.classList.add('nocx-editor-hint__item--selected')
+      }
+      // Primary label: alias
+      const aliasSpan = document.createElement('span')
+      aliasSpan.className = 'nocx-editor-hint__alias'
+      aliasSpan.textContent = item.alias
+      el.appendChild(aliasSpan)
+      // Secondary label: resolved host + optional user
+      const detailParts: string[] = [item.hostName]
+      if (item.user) detailParts.unshift(`${item.user}@`)
+      if (item.port && item.port !== 22) detailParts.push(`:${item.port}`)
+      const detailSpan = document.createElement('span')
+      detailSpan.className = 'nocx-editor-hint__detail'
+      detailSpan.textContent = detailParts.join('')
+      el.appendChild(detailSpan)
+      // Click handler on the item (not on the label spans).
+      el.addEventListener('mouseenter', () => {
+        this._hintSelectedIndex = i
+        this._renderHints()
+      })
+      el.addEventListener('mousedown', (me) => {
+        me.preventDefault()
+        this._hintSelectedIndex = i
+        this.acceptHint()
+      })
+      this.hintContainer.appendChild(el)
+    }
+  }
+
   // ── visibility ────────────────────────────────────────────────────────
 
   /**
@@ -168,6 +304,7 @@ export class CommandEditor {
    */
   show(): void {
     this.root.style.display = ''
+    this._hintDismissed = false
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
     // a real size — and `visibility`, unlike `display`, is overridable by a
@@ -210,6 +347,7 @@ export class CommandEditor {
     this.stopClock()
     this.ta.blur()
     this.root.style.display = 'none'
+    this.hideAliasHints()
   }
 
   get isVisible(): boolean {

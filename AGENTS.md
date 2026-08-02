@@ -45,6 +45,25 @@ If a push stops with a beads failure, fix the sync — do not reach for
 `--no-verify`. That path leaves everyone else on a backlog that looks current
 and is not, which is precisely the failure this setup exists to prevent.
 
+**Your dev profile is not the installed app's.** Anything you build or run from
+this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
+which launches a backend of its own — resolves `nocx-dev` rather than `nocx`,
+because the directory is chosen by the build tag and only `-tags release` picks
+the shipped one (`internal/storage/appdir.go`). So a dev stand starts with no
+profiles and no vault, and that is correct: before this, an e2e run wrote the
+developer's real settings and reset their theme on every pass (nocx-ti8w). If
+you want your real SSH profiles in the dev stand, copy them across by hand —
+nothing migrates them for you, and nothing should.
+
+**And the e2e suite gets a disposable `$HOME`.** On the default path
+`playwright.config.ts` applies it to the `wails dev` backend and you need do
+nothing. On the **headless** path you start the backend yourself, so the suite
+cannot isolate it and refuses to run until you say you have: export
+`NOCX_E2E_HOME_DIR` and launch devharness with that `HOME` — `e2e/preflight.ts`
+prints the exact command when it stops you. Do not work around it by unsetting
+`NOCX_WS_PORT`; the boundary is what keeps a run off your settings, your vault
+documents, your `~/.nocx` and your shell rc files.
+
 ## Repository layout
 
 - `docs/` — living source-of-truth docs (`vision.md`, `architecture.md`, `decisions/` ADRs).
@@ -62,6 +81,198 @@ and is not, which is precisely the failure this setup exists to prevent.
 4. Keep it green: language-specific format, lint, and tests all pass (pre-commit runs them).
    The pre-commit hook is the gate on every commit; CI validates release branches and tags.
 5. Update the task in beads; record any non-obvious decision as an ADR in `docs/decisions/`.
+
+### A test asserts what a user can do, not what the code currently does
+
+**Before you call anything done, exercise it the way a user reaches it — end to end, through
+the seam a person actually touches.** Not the unit. Not the handler in isolation. The whole
+path: the button exists, it is clickable, and the thing it promises actually happens on the
+other side.
+
+This is not a style preference. A test written by reading the implementation cannot report a
+missing feature, because it has no notion of what is absent — it can only confirm that what
+was written does what it was written to do. That is the failure mode, and it is silent:
+every gate stays green while the product does not work.
+
+Measured on 2026-07-29, one session, all found by a user clicking:
+
+- **The connection manager shipped with no way to create a group.** Eight epics closed, 1041
+  frontend tests green, `deadcode` clean, every acceptance criterion read clause by clause.
+  `ConnectionsView` had a full group **editor** — impact preview, danger confirmation,
+  delete — reachable only from a group header that only appeared once a group already
+  existed. No test noticed, because every test mounted the component and asserted what it
+  rendered.
+- **`groups.create` refused every call the UI could make.** `JSONStore.CreateGroup` requires
+  a non-empty id and the handler minted none, so it answered `group ID is required`. There
+  are nine backend tests for `groups.create` and **all nine pass an explicit id**
+  (`ProfileGroup{ID: "g1", …}`). They encoded the caller's convenience, which was true for a
+  test and false for the renderer. One test with an empty id would have caught it.
+- **An empty group rendered as nothing at all**, so the button — once it existed — looked
+  broken, and the group could not be reached to be renamed or deleted.
+
+Three defects, one shape: each unit was correct and the user's task was impossible.
+
+So, concretely:
+
+- **Added an RPC method?** Call it the way the renderer calls it, including the fields the
+  renderer leaves empty. A handler tested only with fully-populated params is tested against
+  its author's assumptions.
+- **Added a UI action?** Assert the control is present and enabled from the state a user
+  starts in, that activating it reaches the client method, and that the result appears in the
+  list afterwards. "The dialog opens" is not the feature.
+- **Wired something new into the composition root?** The reachability checks in the next
+  section tell you whether it is connected. They do not tell you whether it works.
+
+The existing rule below — _"Coverage proves a unit works. It says nothing about whether the
+product uses it"_ — is the same lesson one level down, learned when the vault's 26 tested
+functions turned out to be unreachable. This one is its sibling: **reachable is not usable.**
+
+### More tests will not save you. These three habits will
+
+The rule above is about tests that miss a feature. This one is about tests that miss a **defect**
+in the feature they cover, which is a different failure and is not fixed by writing more of them.
+
+Measured on 2026-07-30, on `internal/vault/vault.go`: eighteen tests, `go vet` clean,
+`golangci-lint` clean, `go test -race` green. An adversarial read against the spec then found ten
+correctness defects, two of them release-blocking — a `Setup` that returns four times while
+holding its mutex, deadlocking every later operation, and a `Create` that deletes the journal
+record it had just written, reopening precisely the crash gap the journal exists to close. Every
+one of those survived every gate. Adding a nineteenth test of the same kind would have changed
+nothing.
+
+**1. Ask what the failure paths do, not only what the happy path does.**
+
+Of those eighteen tests, none made a dependency return an error. All four deadlocking returns in
+`Setup` had zero coverage. The metric that matters is not how many tests exist but how many
+**dependency-failure paths** are exercised: for every external call your code makes, there is a
+test where that call fails. It is mechanical, it is cheap, and it would have caught five of the
+ten defects on its own.
+
+For a procedure with several steps that touches more than one store, go further and enumerate the
+partial failures: step 3 of 5 fails — what is now true on disk, in the OS keychain, and in memory,
+and how does the next start recover? "It returns an error" is not an answer.
+
+**2. State invariants as intervals, not as moments.**
+
+The journal defect was specified into existence. The acceptance criterion read: _"`Create` writes
+`PhasePrepared` **before** calling the provider — prove it with a `Put` that panics."_ The worker
+implemented exactly that, and the test passes. But the property that matters is not a moment, it
+is a span: the record must exist **from before the write until metadata references the secret**. A
+criterion that names only the start of the interval buys a test that guards only the start.
+
+So write invariants with both ends: what event makes this true, and what event is allowed to end
+it. If you cannot name the closing event, you do not yet understand the invariant.
+
+**3. Do not let the author of the code be the only author of its tests.**
+
+A test written by the implementer, in the same pass, encodes the implementer's model of the
+problem — including the parts that are wrong. The worker believed clearing the journal on success
+was correct, so the test asserts that it is cleared. Nothing inside that loop can discover the
+belief is mistaken; the code and the test agree, and they are wrong together.
+
+Two ways out, in increasing cost. Cheapest and almost always worth it: **write the acceptance
+criteria as assertions rather than prose**, in the task itself, so there is nothing left to
+interpret — `after Create the journal holds a PhaseSecretWritten entry for the id; after Commit it
+does not`. Expensive, and reserved for code where a defect is costly — the vault, the updater, the
+transport: **have someone who did not write the implementation write the tests from the spec**, or
+have an independent reader check the code against the spec afterwards. That second reading is what
+found eight of the ten defects above, and it cost one round trip.
+
+**4. Before accepting any new symbol, ask who calls it.** One `grep`, every time.
+
+This is not a new rule — the reachability checks two sections down have always said it. It is here
+because knowing the check and running it are different things, and on the same day as the defects
+above, the same reviewer skipped it twice. Once caught, once not:
+
+- `frontend/src/vault.tsx` — 18 passing tests, imported by nothing. Found, because someone thought
+  to grep for the import.
+- `internal/vault/system/SecretServiceAvailable` — written to guard a keyring integration test,
+  compiled on every platform, given a non-Linux stub, accepted. Called by nothing. The CI job that
+  exists to run that test stands up a real Secret Service, goes green, and exercises the keyring in
+  zero tests. Nobody grepped.
+
+Both were reviewed carefully. Careful is not the same as systematic, which is why this is a listed
+habit and not advice.
+
+Note what this section is not. Mutation testing (`nocx-u4b`) answers a narrower question — does a
+test assert on the line it executes — and it would have flagged the weak assertions here. It cannot
+find the deadlock or the lifecycle races, because those are _missing_ code and thread
+interleavings, and mutation operators only delete and replace what is already written. It is a
+complement to this section, not a substitute for it.
+
+### Two green suites, one broken feature: the wire is a party to the contract
+
+The two sections above are about a test agreeing with the code it was written from. This
+one is what happens when **two** codebases each agree with themselves and disagree with
+each other, and there is nothing in between to notice.
+
+Measured on 2026-07-31. `vault.status` had never sent `defaultProvider`. The renderer's
+`VaultStatus` declared the field, the Vault page read it on every render to mark which
+store new secrets go to, and `vault.SetDefaultProvider` wrote a value nobody could ever
+read back. The page therefore showed two storage providers, neither marked, both
+offering to become the default one of them already was. Found by a user looking at the
+screen; every gate was green, on both sides.
+
+Neither side was under-tested. They were tested **separately**, and each side's tests
+were written from that side's belief about the wire:
+
+- The Go tests decode the result into an anonymous struct naming the two or three fields
+  that test is about. **A field nobody names is a field whose absence nobody notices** —
+  there is no assertion in the language for "and nothing else".
+- The frontend tests mock the client with hand-written fixtures, and those fixtures were
+  written _from the interface_. They contained `defaultProvider` because the renderer
+  wanted it, not because the backend sent it. The mock encoded the wish.
+
+So: **every JSON-RPC result shape is declared once, as a JSON Schema in `contracts/`.**
+The renderer's types are **generated** from it; the Go transport is **validated** against
+it. Not two declarations checked against each other — one declaration that belongs to
+neither party.
+
+```
+                  contracts/vault.status.schema.json
+                                 │
+               ┌─────────────────┴──────────────────┐
+     generated │                                    │ validated
+               ▼                                    ▼
+frontend/src/generated/vault.status.ts     the marshalled Go DTO, and the
+(committed; never hand-edited)             real result off the WebSocket
+```
+
+The two directions are deliberately not symmetric. On the renderer, drift is
+**impossible**: the types are generated and committed, `vault-client.ts` re-exports them
+and declares nothing of its own, so a type that wants a field the wire does not carry
+cannot be written. On the Go side it is **reliably detected** rather than impossible —
+generating Go wire DTOs would either infect the domain types or need a mapping layer, and
+this seam has not earned that. `additionalProperties: false` plus an explicit `required`
+is what makes the check exact in both directions; a schema without both is theatre.
+
+Three checks, and the third is the point:
+
+- `npm run contracts:check` (pre-commit) — the committed generated file still matches the
+  schema.
+- `TestVaultStatus_DTOConformsToContract` — the Go struct marshals to something the schema
+  accepts. Catches field tags, `omitempty`, a nil slice becoming `null`, an enum spelled
+  differently.
+- `TestVaultStatus_OverTheWireConformsToContract` — the **real result, off the real
+  socket**, satisfies the schema. This is the one that would have caught
+  `defaultProvider`. A test that validates a payload the test itself built proves the
+  struct is well-formed, not that the server sends it.
+
+Two things learned by getting them wrong, both within an hour of writing the above:
+
+- **A sample is not a contract.** The first version of `contracts/` was a fully-populated
+  sample response compared by key set. It cannot express types, nullability or enums —
+  changing `autoSealMinutes` from `int` to `string` kept it green. A schema replaced it.
+- **The schema finds things immediately, so write it before you believe the code.** On its
+  first run it caught a second defect: `providers` marshalled as `null` rather than `[]`
+  when no providers are registered, which is the same class as `nocx-25k9.14` and would
+  have thrown on the renderer's first `.map`.
+
+`contracts/` covers `vault.status` today and is filled in **as methods are touched** — a
+method you add or change gets its schema in the same commit (`nocx-bt3w` tracks the
+sweep). See `contracts/README.md` for how to add one. Until a method has a schema its wire
+format is unchecked, and you should assume the two sides disagree, because once they
+demonstrably did.
 
 ### Before you fix anything: find out whether it is already decided or already filed
 

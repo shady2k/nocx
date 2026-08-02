@@ -7,7 +7,7 @@ import (
 	"github.com/shady2k/nocx/internal/backup"
 )
 
-// --- backup.* control-plane handlers (ADR-0015) -------------------------
+// --- backup.* control-plane handlers (ADR-0018) -------------------------
 
 // handleBackupMethod dispatches backup.create/preview/restore RPCs.
 // Returns -32601 when backup service is not wired.

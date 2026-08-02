@@ -21,9 +21,15 @@
  * Not while the user is still typing the first character of an empty field: a
  * form that turns red before you have finished answering it is reporting your
  * progress as failure. A message appears when the user has left the field
- * (`touch`) or when they have tried to submit (`revealAll`). `valid()` and
- * `firstError()` ignore both and answer about the values themselves, which is
- * what a submit handler needs.
+ * (`touch`), when they have typed something for it to judge (`answer`), or when
+ * they have tried to submit (`revealAll`). `valid()` and `firstError()` ignore
+ * all three and answer about the values themselves, which is what a submit
+ * handler needs.
+ *
+ * The distinction that matters is between "you have not answered yet" and "what
+ * you answered is wrong". The first must wait — the second should not. A host
+ * with a space in it is wrong the moment the space is typed, and holding that
+ * back until Create is pressed makes the form look like it accepted the value.
  */
 import { createSignal } from 'solid-js'
 
@@ -107,6 +113,15 @@ export interface FormValidation<K extends string> {
   error(field: K): string | undefined
   /** Mark a field as answered. Call from the control's `onBlur`. */
   touch(field: K): void
+  /**
+   * Mark a field as answered *if there is an answer*. Call from the control's
+   * `onInput`, passing what the user has typed so far.
+   *
+   * An empty value is ignored, which is the whole point: `required` still waits
+   * for a blur or a submit, while a rule that judges content — a host with a
+   * space, a port of `70000` — reports as soon as there is content to judge.
+   */
+  answer(field: K, value: string): void
   /** Show every failing field at once. Call when submit is attempted. */
   revealAll(): void
   /** Whether the values pass, regardless of what is currently shown. */
@@ -136,11 +151,16 @@ export function createFormValidation<K extends string>(
   const [revealed, setRevealed] = createSignal(false)
   const keys = Object.keys(rules) as K[]
   const messageOf = (field: K) => rules[field]()
+  const touch = (field: K) =>
+    setTouched((current) => (current.has(field) ? current : new Set([...current, field])))
 
   return {
     error: (field) => (revealed() || touched().has(field) ? messageOf(field) : undefined),
-    touch: (field) =>
-      setTouched((current) => (current.has(field) ? current : new Set([...current, field]))),
+    touch,
+    answer: (field, value) => {
+      if (value.trim() === '') return
+      touch(field)
+    },
     revealAll: () => setRevealed(true),
     valid: () => keys.every((key) => messageOf(key) === undefined),
     firstError: () => {

@@ -34,6 +34,13 @@ func (f *fakeDocStore) Write(name string, doc any) error {
 	return nil
 }
 
+func (f *fakeDocStore) Delete(name string) error {
+	if f.data != nil {
+		delete(f.data, name)
+	}
+	return nil
+}
+
 type fakeConnStore struct {
 	snap profile.ConnectionSnapshot
 }
@@ -122,7 +129,7 @@ func TestCreate_RoundTrip(t *testing.T) {
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
 			Base:    profile.Base{ID: "ssh:custom:p1:0001", Type: "ssh", Name: "p1"},
-			Options: profile.SSHProfileOptions{Host: "h.example.com", Port: 22, User: "u"},
+			Options: profile.StoredSSHProfileOptions{Host: "h.example.com", Port: new(22), User: new("u")},
 		},
 	}
 	conn.snap.Groups = []profile.ProfileGroup{
@@ -168,19 +175,17 @@ func TestCreate_NoCredentialKeys(t *testing.T) {
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
 			Base:    profile.Base{ID: "ssh:custom:p1:0001", Type: "ssh", Name: "p1"},
-			Options: profile.SSHProfileOptions{Host: "h", CredentialID: "cred:xyz:abc"},
+			Options: profile.StoredSSHProfileOptions{Host: "h", PasswordSecret: "cred:xyz:abc"},
 		},
 	}
 	conn.snap.Groups = []profile.ProfileGroup{
 		{
 			ID:   "g1",
 			Name: "G1",
-			Defaults: map[string]any{
-				"ssh": map[string]any{
-					"options": map[string]any{
-						"credentialId": "cred:group:def",
-						"port":         float64(2222),
-					},
+			Defaults: &profile.ProfileDefaults{
+				SparseSSHOptions: profile.SparseSSHOptions{
+					PasswordSecret: new("cred:group:def"),
+					Port:           new(2222),
 				},
 			},
 		},
@@ -189,7 +194,7 @@ func TestCreate_NoCredentialKeys(t *testing.T) {
 	r := mustCreate(t, svc)
 
 	// The JSON must not contain credentialId, secretId, passphraseSecretId anywhere.
-	for _, forbidden := range []string{"credentialId", "secretId", "passphraseSecretId"} {
+	for _, forbidden := range []string{"credentialId", "passwordSecret", "keySecret", "keyPassphraseSecret"} {
 		if strings.Contains(r.Contents, forbidden) {
 			t.Errorf("backup JSON contains forbidden key %q", forbidden)
 		}
@@ -274,8 +279,8 @@ func TestMerge_PreservesExtraConnections(t *testing.T) {
 
 	// Existing: two profiles.
 	conn.snap.Profiles = []profile.SSHProfile{
-		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "keep"}, Options: profile.SSHProfileOptions{Host: "h1"}},
-		{Base: profile.Base{ID: "p2", Type: "ssh", Name: "extra"}, Options: profile.SSHProfileOptions{Host: "h2"}},
+		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "keep"}, Options: profile.StoredSSHProfileOptions{Host: "h1"}},
+		{Base: profile.Base{ID: "p2", Type: "ssh", Name: "extra"}, Options: profile.StoredSSHProfileOptions{Host: "h2"}},
 	}
 
 	// Backup: only p1 (updated name), plus p3 (new).
@@ -327,8 +332,8 @@ func TestReplace_RemovesExtraConnections(t *testing.T) {
 	svc, conn, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
-		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "keep"}, Options: profile.SSHProfileOptions{Host: "h1"}},
-		{Base: profile.Base{ID: "p2", Type: "ssh", Name: "extra"}, Options: profile.SSHProfileOptions{Host: "h2"}},
+		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "keep"}, Options: profile.StoredSSHProfileOptions{Host: "h1"}},
+		{Base: profile.Base{ID: "p2", Type: "ssh", Name: "extra"}, Options: profile.StoredSSHProfileOptions{Host: "h2"}},
 	}
 
 	r := mustCreate(t, svc)
@@ -364,7 +369,7 @@ func TestMerge_PreservesCredentialBinding_UnchangedHost(t *testing.T) {
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
 			Base:    profile.Base{ID: "p1", Type: "ssh", Name: "p1"},
-			Options: profile.SSHProfileOptions{Host: "h", Port: 22, CredentialID: "cred:keep:abc"},
+			Options: profile.StoredSSHProfileOptions{Host: "h", Port: new(22), PasswordSecret: "cred:keep:abc"},
 		},
 	}
 
@@ -382,8 +387,8 @@ func TestMerge_PreservesCredentialBinding_UnchangedHost(t *testing.T) {
 	mustRestore(t, svc, contents, backup.RestoreMerge, preview.PreviewToken)
 
 	snap, _ := conn.LoadConnectionSnapshot()
-	if snap.Profiles[0].Options.CredentialID != "cred:keep:abc" {
-		t.Errorf("credentialId = %q, want 'cred:keep:abc' (preserved)", snap.Profiles[0].Options.CredentialID)
+	if snap.Profiles[0].Options.PasswordSecret != "cred:keep:abc" {
+		t.Errorf("passwordSecret = %q, want 'cred:keep:abc' (preserved)", snap.Profiles[0].Options.PasswordSecret)
 	}
 }
 
@@ -393,7 +398,7 @@ func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
 			Base:    profile.Base{ID: "p1", Type: "ssh", Name: "p1"},
-			Options: profile.SSHProfileOptions{Host: "old", Port: 22, CredentialID: "cred:drop:abc"},
+			Options: profile.StoredSSHProfileOptions{Host: "old", Port: new(22), PasswordSecret: "cred:drop:abc"},
 		},
 	}
 
@@ -411,8 +416,8 @@ func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
 	mustRestore(t, svc, contents, backup.RestoreMerge, preview.PreviewToken)
 
 	snap, _ := conn.LoadConnectionSnapshot()
-	if snap.Profiles[0].Options.CredentialID != "" {
-		t.Errorf("credentialId = %q, want empty (cleared on host change)", snap.Profiles[0].Options.CredentialID)
+	if snap.Profiles[0].Options.PasswordSecret != "" {
+		t.Errorf("passwordSecret = %q, want empty (cleared on host change)", snap.Profiles[0].Options.PasswordSecret)
 	}
 }
 
@@ -420,7 +425,7 @@ func TestPreviewToken_StaleAfterMutation(t *testing.T) {
 	svc, conn, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
-		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "p1"}, Options: profile.SSHProfileOptions{Host: "h"}},
+		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "p1"}, Options: profile.StoredSSHProfileOptions{Host: "h"}},
 	}
 
 	r := mustCreate(t, svc)
@@ -428,7 +433,7 @@ func TestPreviewToken_StaleAfterMutation(t *testing.T) {
 
 	// Mutate state after preview.
 	conn.snap.Profiles = append(conn.snap.Profiles, profile.SSHProfile{
-		Base: profile.Base{ID: "p2", Type: "ssh", Name: "p2"}, Options: profile.SSHProfileOptions{Host: "h2"},
+		Base: profile.Base{ID: "p2", Type: "ssh", Name: "p2"}, Options: profile.StoredSSHProfileOptions{Host: "h2"},
 	})
 
 	_, err := svc.Restore(r.Contents, backup.RestoreMerge, preview.PreviewToken)
@@ -492,7 +497,7 @@ func TestRecover_Prepared_RollsBack(t *testing.T) {
 	svc, conn, sett, doc := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
-		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "original"}, Options: profile.SSHProfileOptions{Host: "h"}},
+		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "original"}, Options: profile.StoredSSHProfileOptions{Host: "h"}},
 	}
 	sett.overrides["clipboard.osc52Suppressed"] = true
 
@@ -503,7 +508,7 @@ func TestRecover_Prepared_RollsBack(t *testing.T) {
 
 	// Mutate state (simulating partial write).
 	conn.snap.Profiles = []profile.SSHProfile{
-		{Base: profile.Base{ID: "p2", Type: "ssh", Name: "corrupted"}, Options: profile.SSHProfileOptions{Host: "x"}},
+		{Base: profile.Base{ID: "p2", Type: "ssh", Name: "corrupted"}, Options: profile.StoredSSHProfileOptions{Host: "x"}},
 	}
 	sett.overrides["clipboard.osc52Suppressed"] = false
 
@@ -530,7 +535,7 @@ func TestRecover_Committed_KeepsState(t *testing.T) {
 	svc, conn, sett, doc := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
-		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "committed-state"}, Options: profile.SSHProfileOptions{Host: "h"}},
+		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "committed-state"}, Options: profile.StoredSSHProfileOptions{Host: "h"}},
 	}
 	sett.overrides["clipboard.osc52Suppressed"] = true
 

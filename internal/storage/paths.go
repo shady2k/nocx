@@ -33,10 +33,27 @@ func (p *osPaths) ConfigDir() string { return p.configDir }
 func (p *osPaths) DataDir() string   { return p.dataDir }
 func (p *osPaths) CacheDir() string  { return p.cacheDir }
 
-// NewOSPaths resolves the three roles for appName on the current platform.
+// NewAppPaths resolves the three roles for the profile THIS build owns:
+// AppDirName, which the build tag decides (appdir.go). It is the only way to
+// reach the application's paths from outside this package — the app name is
+// deliberately not a parameter, so no caller can name a profile and no
+// composition root can name the wrong one.
+//
+// That is the whole guarantee. A parameter would have to be got right in the
+// app, in cmd/devharness, and in whatever launches the e2e backend next, which
+// is the arrangement that produced nocx-ti8w in the first place.
+func NewAppPaths() (Paths, error) {
+	return newOSPaths(AppDirName)
+}
+
+// newOSPaths resolves the three roles for appName on the current platform.
 // It returns an error when any role cannot be resolved; there is no fallback
 // (ADR-0011: failure to resolve is explicit, never a silent /tmp write).
-func NewOSPaths(appName string) (Paths, error) {
+//
+// Unexported on purpose: see NewAppPaths. It stays a parameterised function
+// because the tests need to resolve a profile other than this build's in order
+// to assert the two are disjoint.
+func newOSPaths(appName string) (Paths, error) {
 	switch runtime.GOOS {
 	case "linux":
 		return newLinuxPaths(appName)

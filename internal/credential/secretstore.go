@@ -1,92 +1,43 @@
+// Package credential provides the Secret type and the SecretStore capability.
+//
+// It deliberately contains no store implementation. Secrets are held by
+// providers under internal/vault, and the Vault is what the composition root
+// wires (ADR-0011 as amended by the vault design).
 package credential
 
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
-
-	"github.com/zalando/go-keyring"
-)
+import "context"
 
 // SecretID is an opaque, stable handle to secret material held by a
 // SecretStore. It is the ONLY form in which a secret may appear in a
 // persisted domain record or cross a package boundary (ADR-0011 §2).
+//
+// NewSecretID is deliberately NOT exported after V1.10. The provider is
+// encoded in the reference itself (spec §4.1), and minting is the Vault's
+// job — any caller outside internal/vault that creates a SecretID would
+// be choosing a provider, which is routing policy, not a consumer concern.
 type SecretID string
 
-// NewSecretID mints a fresh, collision-free ID: "sec:" + random hex.
-func NewSecretID() SecretID {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return SecretID("sec:" + hex.EncodeToString(b[:]))
-}
-
-// SecretStore holds authenticators in the OS keychain. Its operations are
-// deliberately set/delete/exists plus a backend-only Get; there is no API
-// that hands plaintext to the renderer (ADR-0011 §2).
+// SecretStore is the consumer contract for writing and reading secrets.
+// Implementations are responsible for the confidentiality and integrity of
+// the stored material (ADR-0011 §2).
+//
+// ctx bounds how long the caller waits for an answer. It does NOT cancel
+// the effect — a storage backend (e.g. go-keyring) may take no context, so
+// a Create or Delete that timed out may still land. That is precisely why
+// the Vault journals before delegating (spec §4.2).
 type SecretStore interface {
-	Get(id SecretID) (Secret, error) // empty Secret, nil error when absent
-	Set(id SecretID, value Secret) error
-	Delete(id SecretID) error
-	Exists(id SecretID) (bool, error)
-}
+	// Create stores value and returns the assigned SecretID. The caller
+	// receives the id the store chose — minting is not a consumer concern.
+	Create(ctx context.Context, value Secret) (SecretID, error)
 
-// ---------------------------------------------------------------------------
-// Keychain-backed SecretStore
-// ---------------------------------------------------------------------------
+	// Get retrieves the secret identified by id. Returns an empty Secret
+	// with a nil error when the id is not found.
+	Get(ctx context.Context, id SecretID) (Secret, error)
 
-// keychainSecretService is the single service name for all nocx secrets in the
-// OS keychain. Account = string(id); nothing is ever re-derived from a file
-// path or from a key's contents (ADR-0011 §1).
-const keychainSecretService = "nocx"
+	// Delete removes the secret identified by id. Deleting an absent id
+	// is not an error.
+	Delete(ctx context.Context, id SecretID) error
 
-// KeychainSecretStore implements SecretStore backed by the OS keychain via
-// zalando/go-keyring. One service name for all nocx secrets.
-type KeychainSecretStore struct{}
-
-// NewKeychainSecretStore creates a keychain-backed SecretStore.
-func NewKeychainSecretStore() *KeychainSecretStore {
-	return &KeychainSecretStore{}
-}
-
-func (k *KeychainSecretStore) Get(id SecretID) (Secret, error) {
-	val, err := keyring.Get(keychainSecretService, string(id))
-	if err != nil {
-		if err == keyring.ErrNotFound {
-			return Secret{}, nil // absent is not an error
-		}
-		return Secret{}, fmt.Errorf("keychain get %s: %w", id, err)
-	}
-	return NewSecret(val), nil
-}
-
-func (k *KeychainSecretStore) Set(id SecretID, value Secret) error {
-	var plaintext string
-	if err := value.Use(func(b []byte) error { plaintext = string(b); return nil }); err != nil {
-		return fmt.Errorf("secret use: %w", err)
-	}
-	if err := keyring.Set(keychainSecretService, string(id), plaintext); err != nil {
-		return fmt.Errorf("keychain set %s: %w", id, err)
-	}
-	return nil
-}
-
-func (k *KeychainSecretStore) Delete(id SecretID) error {
-	if err := keyring.Delete(keychainSecretService, string(id)); err != nil {
-		if err == keyring.ErrNotFound {
-			return nil // already absent is success
-		}
-		return fmt.Errorf("keychain delete %s: %w", id, err)
-	}
-	return nil
-}
-
-func (k *KeychainSecretStore) Exists(id SecretID) (bool, error) {
-	_, err := keyring.Get(keychainSecretService, string(id))
-	if err == nil {
-		return true, nil
-	}
-	if err == keyring.ErrNotFound {
-		return false, nil
-	}
-	return false, fmt.Errorf("keychain exists %s: %w", id, err)
+	// Exists reports whether a secret with the given id exists.
+	Exists(ctx context.Context, id SecretID) (bool, error)
 }

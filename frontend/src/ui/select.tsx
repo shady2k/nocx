@@ -9,7 +9,7 @@
  * The open popup is platform-owned and unstylable — accepted tradeoff.
  */
 
-import { For, Show } from 'solid-js'
+import { For, Show, createEffect } from 'solid-js'
 
 export interface SelectOption {
   value: string
@@ -27,6 +27,19 @@ export interface SelectProps {
 }
 
 export function Select(props: SelectProps) {
+  let ref: HTMLSelectElement | undefined
+
+  createEffect(() => {
+    // Re-apply the selection whenever the option set changes: options often
+    // arrive asynchronously (vault rows, loaded lists), and a controlled
+    // select whose options land after its value was set would otherwise sit
+    // on the placeholder even though the value matches an option — the bound
+    // secret would read as "None".
+    void props.value
+    void props.options
+    if (ref) ref.value = props.value
+  })
+
   const onChange = (e: Event) => {
     const target = e.currentTarget as HTMLSelectElement
     props.onChange(target.value)
@@ -34,6 +47,7 @@ export function Select(props: SelectProps) {
 
   return (
     <select
+      ref={ref}
       class="ui-select"
       value={props.value}
       disabled={props.disabled === true}

@@ -1,8 +1,11 @@
 package settings_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -34,12 +37,18 @@ func (f *fakeDoc) Write(name string, doc any) error {
 	return nil
 }
 
-// fakeSecretStore implements credential.SecretStore in memory.
-type fakeSecretStore struct {
-	data map[credential.SecretID]string
+func (f *fakeDoc) Delete(name string) error {
+	delete(f.data, name)
+	return nil
 }
 
-func (f *fakeSecretStore) Get(id credential.SecretID) (credential.Secret, error) {
+// fakeSecretStore implements credential.SecretStore in memory.
+type fakeSecretStore struct {
+	data    map[credential.SecretID]string
+	counter atomic.Int64
+}
+
+func (f *fakeSecretStore) Get(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
 	v, ok := f.data[id]
 	if !ok {
 		return credential.Secret{}, nil
@@ -47,24 +56,26 @@ func (f *fakeSecretStore) Get(id credential.SecretID) (credential.Secret, error)
 	return credential.NewSecret(v), nil
 }
 
-func (f *fakeSecretStore) Set(id credential.SecretID, value credential.Secret) error {
+func (f *fakeSecretStore) Create(ctx context.Context, value credential.Secret) (credential.SecretID, error) {
 	var plaintext string
 	if err := value.Use(func(b []byte) error { plaintext = string(b); return nil }); err != nil {
-		return err
+		return "", err
 	}
 	if f.data == nil {
 		f.data = make(map[credential.SecretID]string)
 	}
+	n := f.counter.Add(1)
+	id := credential.SecretID(fmt.Sprintf("ss%016x", n))
 	f.data[id] = plaintext
-	return nil
+	return id, nil
 }
 
-func (f *fakeSecretStore) Delete(id credential.SecretID) error {
+func (f *fakeSecretStore) Delete(ctx context.Context, id credential.SecretID) error {
 	delete(f.data, id)
 	return nil
 }
 
-func (f *fakeSecretStore) Exists(id credential.SecretID) (bool, error) {
+func (f *fakeSecretStore) Exists(ctx context.Context, id credential.SecretID) (bool, error) {
 	_, ok := f.data[id]
 	return ok, nil
 }
@@ -598,7 +609,7 @@ func findSecret(t *testing.T, reg *settings.Registry, key string) *settings.Secr
 	return nil
 }
 
-// ── Non-secret override snapshot (ADR-0015) ────────────────────────────
+// ── Non-secret override snapshot (ADR-0018) ────────────────────────────
 
 type notifierTracker struct {
 	calls [][]string

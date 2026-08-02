@@ -1,0 +1,102 @@
+/* ── Vault surface — dialogs for vault setup and unlock ─────────────────
+   Layout-only rules: placement (flex, position, margin) per ADR-0014.
+   Appearance lives in the kit component stylesheets. */
+
+/* Wrapper around CodeBlock — holds the copy/download row in place */
+.ui-vault-code-block-wrap {
+  position: relative;
+}
+
+/* Row of actions below the recovery code (copy, download) */
+.ui-vault-action-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Row of unlock-means buttons (OS key, passphrase, recovery) */
+.ui-vault-means-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* Descriptive text inside the unlock dialog body */
+.ui-vault-desc-text {
+  margin: 0;
+}
+
+/* ── A store in "Where it is stored" ─────────────────────────────────────
+   A row per store, not a tab. Layout only — the Button, Badge and status dot
+   bring their own appearance. */
+
+.ui-vault-store__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The name takes the space, so the actions land on the right edge of the
+   measure and line up down the list however long the names are. This is what
+   the fixed-width rail could not do: it clipped instead. */
+.ui-vault-store__name {
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.ui-vault-store__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* Indented to the name rather than to the dot: the sentence belongs to the
+   store, and starting it under the dot would read as a second column. */
+.ui-vault-store__state {
+  margin: var(--space-1) 0 0 calc(8px + var(--space-2));
+  max-width: 72ch;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}
+
+/* Diagnostics disclosure — collapsed by default, wraps raw diagnostic info */
+/* No type-size override. It was set one step below body, which is the wrong
+   instruction for a block whose whole job is to be legible when something has
+   gone wrong and someone is reading it into a bug report. Badge already sits a
+   register below its row's label; making the row smaller too compounded it. */
+/* The disclosure owns the gap between its summary and its content through its
+   own `gap`, not through a margin on the Stack inside it — the rows' rhythm
+   belongs to Stack and the integrity gate is right to refuse a surface reaching
+   in to set it. The rows used to be a bare <div> and sat flush against each
+   other for exactly that reason: nothing was spacing them at all. */
+.ui-vault-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+.ui-vault-diagnostics summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+/* ── Reset confirmation ─────────────────────────────────────────────────
+   The two lines a user reads before deciding. Layout and emphasis only —
+   the dialog, the checkbox and the danger button are all kit components. */
+
+/* What will be destroyed, in numbers. Body weight, not muted: this is the
+   sentence the decision is made on, and dimming it would file it as fine
+   print next to the paragraph above. */
+.ui-vault-reset-impact {
+  margin: 0;
+  color: var(--color-text);
+}
+
+/* Stated before the choice, so it has to be seen. */
+.ui-vault-reset-warning {
+  margin: 0;
+  color: var(--color-warning);
+}

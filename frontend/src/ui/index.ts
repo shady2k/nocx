@@ -28,7 +28,6 @@ export {
 export { Prompt, type PromptProps } from './prompt'
 export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'
-export { CodeBlock, type CodeBlockProps } from './code-block'
 export {
   createFormValidation,
   required,

@@ -263,6 +263,13 @@ type secretMintResult struct {
 }
 
 func (s *WSServer) handleSecretMintMethod(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	switch req.Method {
 	case "secrets.savePassword":
 		var params struct {

@@ -57,8 +57,8 @@
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
-@import './styles/surfaces/export.css';
 @import './styles/surfaces/connections.css';
+@import './styles/surfaces/backup-restore.css';
 @import './styles/surfaces/secrets.css';
 @import './styles/surfaces/vault.css';
 

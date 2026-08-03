@@ -896,6 +896,13 @@ func newUUID() string {
 // Suppress unused import safety — uuid helper.
 var _ = hex.EncodeToString
 
+// ConnectionSnapshot is an atomic projection of profiles and groups suitable
+// for backup/restore — credentials are deliberately absent (ADR-0018).
+type ConnectionSnapshot struct {
+	Profiles []SSHProfile   `json:"profiles"`
+	Groups   []ProfileGroup `json:"groups"`
+}
+
 // ---------------------------------------------------------------------------
 // Effective profile DTO — wire format with closed-enum source kinds
 // ---------------------------------------------------------------------------

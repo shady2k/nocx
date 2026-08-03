@@ -382,3 +382,38 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 
 	return s.writeLocked(d)
 }
+
+// ---------------------------------------------------------------------------
+// Connection snapshot (ADR-0018)
+// ---------------------------------------------------------------------------
+
+// LoadConnectionSnapshot returns an atomic copy of all profiles and groups
+// without credential metadata.
+func (s *JSONStore) LoadConnectionSnapshot() (ConnectionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return ConnectionSnapshot{}, err
+	}
+	return ConnectionSnapshot{Profiles: d.Profiles, Groups: d.Groups}, nil
+}
+
+// ReplaceConnectionSnapshot atomically replaces profiles and groups in a
+// single write. The group tree is validated before the write so a restore
+// cannot put an inconsistent tree (cycles, missing parents, duplicate ids)
+// into the store — the same invariant every other group write enforces.
+func (s *JSONStore) ReplaceConnectionSnapshot(snapshot ConnectionSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ValidateGroupTree(snapshot.Groups); err != nil {
+		return err
+	}
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	d.Profiles = snapshot.Profiles
+	d.Groups = snapshot.Groups
+	return s.writeLocked(d)
+}

@@ -608,3 +608,184 @@ func findSecret(t *testing.T, reg *settings.Registry, key string) *settings.Secr
 	t.Fatalf("secret setting %q not found", key)
 	return nil
 }
+
+// ── Non-secret override snapshot (ADR-0018) ────────────────────────────
+
+type notifierTracker struct {
+	calls [][]string
+}
+
+func (n *notifierTracker) track(_ int, keys []string) {
+	n.calls = append(n.calls, keys)
+}
+
+func TestNonSecretOverrides_ExcludesSecrets(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	// Set a non-secret and a secret setting.
+	cb := findBool(t, reg, "clipboard.osc52Suppressed")
+	if err := reg.SetBool(cb, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	testSecret := findSecret(t, reg, "test.secretExample")
+	if err := reg.SecretSet(testSecret, "s3cret"); err != nil {
+		t.Fatalf("SecretSet: %v", err)
+	}
+
+	overrides := reg.NonSecretOverrides()
+	if _, hasSecret := overrides["test.secretExample"]; hasSecret {
+		t.Error("SecretAuthenticator key should not appear in overrides")
+	}
+	if v, ok := overrides["clipboard.osc52Suppressed"]; !ok || v != true {
+		t.Errorf("non-secret override missing or wrong: %v", overrides)
+	}
+}
+
+func TestNonSecretOverrides_ExcludesDefaults(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	overrides := reg.NonSecretOverrides()
+	if len(overrides) != 0 {
+		t.Errorf("fresh registry should have no overrides, got %d", len(overrides))
+	}
+}
+
+func TestReplaceNonSecretOverrides_ValidBatch(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	cb := findBool(t, reg, "clipboard.osc52Suppressed")
+	sel := findSelect(t, reg, "tab.placement")
+
+	pn, err := reg.ReplaceNonSecretOverrides(map[string]any{
+		"clipboard.osc52Suppressed": true,
+		"tab.placement":             "vertical",
+	})
+	if err != nil {
+		t.Fatalf("ReplaceNonSecretOverrides: %v", err)
+	}
+
+	// Check values are applied.
+	v, _ := reg.GetBool(cb)
+	if !v {
+		t.Error("bool override not applied")
+	}
+	s, _ := reg.GetSelect(sel)
+	if s != "vertical" {
+		t.Errorf("select override not applied: %q", s)
+	}
+
+	// Notifier should NOT fire yet (but we haven't set one, so just publish).
+	reg.Publish(pn)
+}
+
+func TestReplaceNonSecretOverrides_RejectsSecretClass(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	_, err := reg.ReplaceNonSecretOverrides(map[string]any{
+		"test.secretExample": "value",
+	})
+	if err == nil {
+		t.Fatal("expected error for secret-class key")
+	}
+}
+
+func TestReplaceNonSecretOverrides_InvalidBatchNoPartialWrite(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	cb := findBool(t, reg, "clipboard.osc52Suppressed")
+	_ = reg.SetBool(cb, false)
+
+	_, err := reg.ReplaceNonSecretOverrides(map[string]any{
+		"clipboard.osc52Suppressed": true,
+		"test.secretExample":        "value", // invalid
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid batch")
+	}
+
+	// First key must NOT be partially written.
+	v, _ := reg.GetBool(cb)
+	if v {
+		t.Error("bool should not have been changed after invalid batch")
+	}
+}
+
+func TestReplaceNonSecretOverrides_NotifierAfterPublish(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	var tracker notifierTracker
+	reg.SetNotifier(tracker.track)
+
+	pn, err := reg.ReplaceNonSecretOverrides(map[string]any{
+		"clipboard.osc52Suppressed": true,
+	})
+	if err != nil {
+		t.Fatalf("ReplaceNonSecretOverrides: %v", err)
+	}
+
+	// Notifier should NOT have fired yet.
+	if len(tracker.calls) != 0 {
+		t.Errorf("notifier fired before Publish: %v", tracker.calls)
+	}
+
+	reg.Publish(pn)
+
+	if len(tracker.calls) != 1 {
+		t.Fatalf("notifier should have fired once after Publish, got %d", len(tracker.calls))
+	}
+}
+
+func TestReplaceNonSecretOverrides_SecretRefsSurvive(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	testSecret := findSecret(t, reg, "test.secretExample")
+	if err := reg.SecretSet(testSecret, "s3cret"); err != nil {
+		t.Fatalf("SecretSet: %v", err)
+	}
+
+	_, err := reg.ReplaceNonSecretOverrides(map[string]any{
+		"clipboard.osc52Suppressed": true,
+	})
+	if err != nil {
+		t.Fatalf("ReplaceNonSecretOverrides: %v", err)
+	}
+
+	exists, err := reg.SecretExists(testSecret)
+	if err != nil || !exists {
+		t.Errorf("secret ref should survive replace: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestReplaceNonSecretOverrides_ResetsAbsentKeys(t *testing.T) {
+	doc := &fakeDoc{}
+	sec := &fakeSecretStore{}
+	reg := settings.New(doc, sec)
+
+	cb := findBool(t, reg, "clipboard.osc52Suppressed")
+	_ = reg.SetBool(cb, true)
+
+	// Replace with empty set — clipboard.osc52Suppressed should reset.
+	_, err := reg.ReplaceNonSecretOverrides(map[string]any{})
+	if err != nil {
+		t.Fatalf("ReplaceNonSecretOverrides: %v", err)
+	}
+
+	v, _ := reg.GetBool(cb)
+	if v {
+		t.Error("bool should have been reset to default after empty replace")
+	}
+}

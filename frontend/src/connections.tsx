@@ -5,7 +5,7 @@
  * Spec §5 of the connection manager design: nothing hidden, nothing asked twice.
  *
  * Pattern follows the manager surfaces: full-width list, editing in a Dialog.
- * Tabby import moved to Export / Backup / Import section.
+ * Tabby import runs from the import dialog in this page.
  */
 import { For, Show, createSignal, createMemo, createEffect, on, onMount, type JSX } from 'solid-js'
 import { Button } from './ui/button'
@@ -52,7 +52,6 @@ import type {
   ProbeOutcome,
   ConnectionTestResult,
   GroupImpactResponse,
-  ConfigExport,
   SSHConfigPathResult,
   ImportResult,
   TabbyPreviewResponse,
@@ -196,7 +195,7 @@ export function decideSaveRoute(profile: SSHProfile, dirty: ReadonlySet<string>)
  * other two are files the user picks. That difference is why the dialog's file
  * picker is conditional rather than always shown and sometimes ignored.
  */
-type ImportSource = 'sshConfig' | 'tabby' | 'backup'
+type ImportSource = 'sshConfig' | 'tabby'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -408,7 +407,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       // option is named without one rather than with a plausible fiction.
       { value: 'sshConfig', label: cfg?.path ? `SSH config (${cfg.path})` : 'SSH config' },
       { value: 'tabby', label: 'Tabby config (.yml/.yaml)' },
-      { value: 'backup', label: 'nocx configuration export (.json)' },
     ]
   })
 
@@ -424,7 +422,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
       case 'tabby':
         return 'Connections, groups and secrets from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.'
-      case 'backup':
     }
   })
 
@@ -500,11 +497,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           setPreviewResult(preview)
           closeImportDialog()
           setPreviewOpen(true)
-          break
-        }
-        case 'backup': {
-          const data = JSON.parse(await file!.text()) as ConfigExport
-          reportImport(await props.client.importConfig(data))
           break
         }
       }

@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/connection"
-	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -141,6 +141,13 @@ func New(opts ...Option) (*App, error) {
 		connection.WithConfigResolver(sshCfgResolver),
 	)
 
+	// Backup service (ADR-0018): uses profile store, settings registry, and
+	// the shared DocumentStore for its crash-recovery journal.
+	backupSvc := backup.NewService(profileStore, settingsRegistry, docStore)
+	if err := backupSvc.Recover(); err != nil {
+		return nil, fmt.Errorf("backup recovery: %w", err)
+	}
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
@@ -149,9 +156,8 @@ func New(opts ...Option) (*App, error) {
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithProfileResolver(resolver),
 		transport.WithSettingsRegistry(settingsRegistry),
+		transport.WithBackupService(backupSvc),
 		transport.WithProfileUsageStore(usageStore),
-		transport.WithExportPaths(paths),
-		transport.WithExportContentDB(content.NewStub(logger)),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),

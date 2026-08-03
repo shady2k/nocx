@@ -286,14 +286,18 @@ docs/                   — living docs (vision, architecture, decisions/)
 
 internal/               — Go backend
   app/                    composition root
+  backup/                 Backup & Restore (ADR-0018)
   config/                 settings, themes
+  credential/             OS keychain secret store
   log/                    structured logging (slog adapter)
+  profile/                SSH profiles, groups, credential metadata
   pty/                    local pseudo-terminals
   session/                session registry and lifecycle
+  settings/               typed settings registry
   ssh/                    SSH client (x/crypto/ssh)
   shellintegration/       OSC 7/133 substrate
+  storage/                atomic DocumentStore, path resolution
   transport/              WebSocket server
-
 frontend/               — TypeScript frontend (xterm.js + Wails)
   src/
     renderers/            xterm.js

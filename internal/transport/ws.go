@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
@@ -23,7 +23,6 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -121,12 +120,14 @@ type WSServer struct {
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
 
-	// When nil, export.* methods return a JSON-RPC error.
-	// The fields are populated by WithPaths, WithContentDB.
-	// The credential.CredentialStore is deliberately absent —
-	// no export mode may resolve a secret (ADR-0011 §2).
-	exportPaths     storage.Paths
-	exportContentDB content.ContentDB
+	// Backup service (ADR-0018). When nil, backup.* methods return -32601.
+	backupService *backup.Service
+
+	// configMu serialises configuration mutations (backup create/preview/restore,
+	// profile CRUD, group CRUD, credential CRUD, settings mutations, open).
+	// backup handlers take exclusive; others take shared.
+	configMu  sync.RWMutex
+	configErr error // non-nil → config gate is poisoned; all config methods fail
 
 	// ringsMu protects rx and stopped. One sessionRx per session;
 	// keyed by session.ID. When stopped is true, getOrCreateRx returns nil
@@ -312,17 +313,10 @@ func WithSettingsRegistry(r *settings.Registry) WSServerOption {
 	}
 }
 
-// WithExportPaths attaches storage path resolution for the export.backup
-// JSON-RPC method (same-machine backup manifest).
-func WithExportPaths(p storage.Paths) WSServerOption {
-	return func(s *WSServer) { s.exportPaths = p }
-}
-
-// WithExportContentDB attaches a content database for the
-// export.portableEncrypted JSON-RPC method. A stub is correct when
-// content.db has not yet been created (ADR-0011 §5).
-func WithExportContentDB(db content.ContentDB) WSServerOption {
-	return func(s *WSServer) { s.exportContentDB = db }
+// WithBackupService attaches the backup service for backup.create/preview/restore
+// JSON-RPC methods (ADR-0018).
+func WithBackupService(svc *backup.Service) WSServerOption {
+	return func(s *WSServer) { s.backupService = svc }
 }
 
 // WithProfileService attaches a profile domain service for import
@@ -760,9 +754,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
 		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
 		s.handleSettingsMethod(wconn, req)
-	case "export.manifest", "export.configExport", "export.portableEncrypted",
-		"export.backup", "export.import", "export.importPortable":
-		s.handleExportMethod(wconn, req)
+	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile":
+		s.handleBackupMethod(wconn, req)
 	case "sessions.status":
 		s.handleSessionsStatus(wconn, req)
 	case "connections.test":
@@ -803,6 +796,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 // correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
 func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	var params openParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
@@ -1310,6 +1310,13 @@ func (s *WSServer) closeSession(sid session.ID) {
 // not wired (WithProfileRepository/WithGroupRepository not called).
 
 func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.profiles == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
@@ -1389,6 +1396,13 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 }
 
 func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
 		return
@@ -1937,6 +1951,13 @@ func (s *WSServer) handleTabbyPreview(wconn *wsConn, req jsonrpcRequest) {
 // handleTabbyExecute executes a previously previewed Tabby import plan.
 // Takes the plan token from the preview response.
 func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.profiles == nil || s.groups == nil || s.credentials == nil || s.profileSvc == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "import not available"))
 		return
@@ -2020,6 +2041,13 @@ func privateKeyLabel(hash string) string {
 }
 
 func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
 		return
@@ -2230,6 +2258,13 @@ func (s *WSServer) findDescriptor(key string) settings.Descriptor {
 
 // handleSettingsMethod dispatches settings.* RPCs. Returns -32601 when the
 func (s *WSServer) handleSettingsMethod(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.settings == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
 		return

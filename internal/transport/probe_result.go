@@ -90,9 +90,9 @@ type ProbeResultRecord struct {
 //
 //	Export/import is exposed as an API on the store, not as dedicated
 //	RPC methods. The rotation wave (wave 8) wires frontend-accessible
-//	RPCs if the UI demands live querying; the existing export.backup
-//	path feeds the store's Export through a narrow interface if a
-//	forensic snapshot is needed. Neither is built here because §6
+//	RPCs if the UI demands live querying; the backup surface (ADR-0018)
+//	does not cover operational evidence, and no other path feeds this
+//	store's Export. Neither is built here because §6
 //	specifies the *behaviour*, not the transport — and the ownership
 //	rule (operational evidence, not profile configuration) is satisfied
 //	by the documented policy above.

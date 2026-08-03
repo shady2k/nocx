@@ -8,7 +8,6 @@
  * Justified by callers:
  * - connections.ts: div.cm-field > label + input (credential selector, jump host)
  * - settings.ts: st-control-col > label + select/input (all setting rows)
- * - export-section.ts: label + input pairs
  *
  * Every form row should use this instead of ad-hoc markup.
  */

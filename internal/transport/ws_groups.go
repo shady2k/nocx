@@ -523,6 +523,13 @@ func computeProfileMoveImpact(
 // in three separate lock acquisitions, this handler delegates to the store's
 // ApplyGroups which loads, validates, and writes under a single lock.
 func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.configErr != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Configuration recovery is required; restart nocx"))
+		return
+	}
+
 	if s.groups == nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
 		return

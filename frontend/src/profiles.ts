@@ -538,36 +538,48 @@ export class ProfileClient {
   secretExists(key: string): Promise<{ exists: boolean }> {
     return this.call('settings.secretExists', { key })
   }
-  // ── Export/backup/import RPC methods ──────────────────────────────────
 
-  exportManifest(mode: string): Promise<ExportManifest> {
-    return this.call('export.manifest', { mode })
+  // ── Backup & Restore RPC methods ─────────────────────────────────────
+
+  async createBackup(): Promise<BackupCreateResult> {
+    return this.call('backup.create', {})
   }
 
-  configExport(): Promise<ConfigExport> {
-    return this.call('export.configExport', {})
+  async previewBackupRestore(contents: string, strategy: RestoreStrategy): Promise<RestorePreview> {
+    return this.call('backup.preview', { contents, strategy })
   }
 
-  portableEncryptedExport(
-    passphrase: string,
-    includePrivateContent?: boolean,
-  ): Promise<PortableEncryptedExport> {
-    return this.call('export.portableEncrypted', {
-      passphrase,
-      includePrivateContent: includePrivateContent ?? false,
-    })
+  async restoreBackup(
+    contents: string,
+    strategy: RestoreStrategy,
+    previewToken: string,
+  ): Promise<RestoreResult> {
+    return this.call('backup.restore', { contents, strategy, previewToken })
   }
 
-  backup(): Promise<BackupManifest> {
-    return this.call('export.backup', {})
+  async saveBackupToFile(fileName: string, contents: string): Promise<SaveFileResult | null> {
+    return this.call('backup.saveToFile', { fileName, contents })
   }
+}
 
-  importConfig(data: ConfigExport): Promise<ImportResult> {
-    return this.call('export.import', { data })
-  }
+export interface SaveFileResult {
+  path: string
+}
 
-  importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
-    return this.call('export.portableImport', { payload: payloadBase64, passphrase })
+// ── Backup & Restore types (ADR-0018) ────────────────────────────────────
+
+export type RestoreStrategy = 'merge' | 'replace'
+
+export interface BackupCreateResult {
+  fileName: string
+  contents: string
+  summary: {
+    settings: number
+    connections: number
+    groups: number
+    credentialBindingsRemoved: number
+    groupCredentialBindingsRemoved: number
+    groupDefaultKeysOmitted: number
   }
 }
 
@@ -599,34 +611,33 @@ export interface SessionStatus {
   lastUsed?: string
 }
 
-// ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────
-
-export interface ExportManifest {
-  mode: string
-  carries: string[]
-  omits: string[]
-  notes?: string[]
+export interface RestorePreview {
+  previewToken: string
+  createdAt: string
+  strategy: RestoreStrategy
+  settings: { included: number; changed: number; reset: number }
+  connections: { included: number; added: number; updated: number; removed: number }
+  groups: { included: number; added: number; updated: number; removed: number }
+  connectionsRequiringCredential: Array<{ id: string; name: string }>
+  omissions: {
+    credentialBindingsRemoved: number
+    groupCredentialBindingsRemoved: number
+    groupDefaultKeysOmitted: number
+  }
 }
 
-export interface ConfigExport {
-  profiles: SSHProfile[]
-  groups: ProfileGroup[]
-  settings?: Record<string, unknown>
-}
-
-export interface PortableEncryptedExport {
-  payload: string // base64-encoded NaCl secretbox ciphertext
-  includePrivateContent?: boolean
-}
-
-export interface BackupManifest {
-  mode: string
-  configDir: string
-  contentDbPath?: string
-  contentDbAbsent: boolean
-  secretsStatement: string
-  carries: string[]
-  omits: string[]
+export interface RestoreResult {
+  strategy: RestoreStrategy
+  settingsChanged: number
+  settingsReset: number
+  connectionsAdded: number
+  connectionsUpdated: number
+  connectionsRemoved: number
+  groupsAdded: number
+  groupsUpdated: number
+  groupsRemoved: number
+  groupCredentialBindingsRemoved: number
+  connectionsRequiringCredential: Array<{ id: string; name: string }>
 }
 
 export interface ImportResult {

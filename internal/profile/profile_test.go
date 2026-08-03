@@ -741,3 +741,79 @@ func TestSaveGroupRejectsUnknownDefaultKeys(t *testing.T) {
 		t.Errorf("error should name the unknown key, got: %v", err)
 	}
 }
+
+// ── Connection snapshot (ADR-0018) ─────────────────────────────────────
+
+func TestConnectionSnapshotRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewJSONStore(filepath.Join(dir, "profiles.json"))
+
+	prof := SSHProfile{
+		Base:    Base{ID: "ssh:custom:snap:0001", Type: "ssh", Name: "snap"},
+		Options: StoredSSHProfileOptions{Host: "h.example.com", Port: new(22), User: new("u")},
+	}
+	grp := ProfileGroup{ID: "g1", Name: "G1"}
+
+	if err := store.CreateProfile(prof); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	if err := store.CreateGroup(grp); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	snap, err := store.LoadConnectionSnapshot()
+	if err != nil {
+		t.Fatalf("LoadConnectionSnapshot: %v", err)
+	}
+	if len(snap.Profiles) != 1 || snap.Profiles[0].Name != "snap" {
+		t.Errorf("profiles = %+v", snap.Profiles)
+	}
+	if len(snap.Groups) != 1 || snap.Groups[0].ID != "g1" {
+		t.Errorf("groups = %+v", snap.Groups)
+	}
+}
+
+// ReplaceConnectionSnapshot swaps profiles and groups in a single write. On the
+// current model the profile store holds no credential material at all — secret
+// references live in profile options and are replaced along with the profiles
+// — so the contract to test is the atomic replacement itself.
+func TestReplaceConnectionSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store := NewJSONStore(filepath.Join(dir, "profiles.json"))
+
+	prof := SSHProfile{
+		Base:    Base{ID: "ssh:custom:rep:0001", Type: "ssh", Name: "rep"},
+		Options: StoredSSHProfileOptions{Host: "h.example.com"},
+	}
+	if err := store.CreateProfile(prof); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	if err := store.CreateGroup(ProfileGroup{ID: "g1", Name: "G1"}); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	newSnap := ConnectionSnapshot{
+		Profiles: []SSHProfile{
+			{Base: Base{ID: "ssh:custom:rep2:0001", Type: "ssh", Name: "rep2"}, Options: StoredSSHProfileOptions{Host: "h2.example.com"}},
+		},
+		Groups: []ProfileGroup{{ID: "g2", Name: "G2"}},
+	}
+	if err := store.ReplaceConnectionSnapshot(newSnap); err != nil {
+		t.Fatalf("ReplaceConnectionSnapshot: %v", err)
+	}
+
+	profs, err := store.LoadProfiles()
+	if err != nil {
+		t.Fatalf("LoadProfiles: %v", err)
+	}
+	if len(profs) != 1 || profs[0].Name != "rep2" {
+		t.Errorf("profiles should be replaced, got %+v", profs)
+	}
+	grps, err := store.LoadGroups()
+	if err != nil {
+		t.Fatalf("LoadGroups: %v", err)
+	}
+	if len(grps) != 1 || grps[0].ID != "g2" {
+		t.Errorf("groups should be replaced, got %+v", grps)
+	}
+}

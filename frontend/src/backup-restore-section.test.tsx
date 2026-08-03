@@ -124,4 +124,34 @@ describe('BackupRestoreSection', () => {
     expect(screen.queryByText('Merge backup')).toBeNull()
     expect(screen.queryByText('Replace configuration')).toBeNull()
   })
+
+  it('ignores a superseded file read', async () => {
+    const client = mockClient()
+    const { container } = render(() => <BackupRestoreSection profileClient={client} />)
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement
+
+    let resolveFirst!: (text: string) => void
+    const firstText = new Promise<string>((resolve) => {
+      resolveFirst = resolve
+    })
+    const first = new File([], 'first.json', { type: 'application/json' })
+    Object.defineProperty(first, 'text', { value: () => firstText })
+    const second = new File(['second backup'], 'second.json', { type: 'application/json' })
+
+    Object.defineProperty(input, 'files', { configurable: true, value: [first] })
+    fireEvent.change(input)
+    Object.defineProperty(input, 'files', { configurable: true, value: [second] })
+    fireEvent.change(input)
+
+    await waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      expect(client.previewBackupRestore).toHaveBeenCalledWith('second backup', 'merge')
+    })
+
+    resolveFirst('first backup')
+    await Promise.resolve()
+    await Promise.resolve()
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    expect(client.previewBackupRestore).toHaveBeenCalledTimes(1)
+  })
 })

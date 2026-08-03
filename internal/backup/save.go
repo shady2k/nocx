@@ -26,17 +26,68 @@ func SaveToFile(fileName, contents string) (*SaveResult, error) {
 		return nil, nil
 	}
 
-	// Ensure parent directory exists.
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create directory %s: %w", dir, err)
-	}
-
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+	if err := writeBackupFile(path, []byte(contents)); err != nil {
 		return nil, fmt.Errorf("write file %s: %w", path, err)
 	}
 
 	return &SaveResult{Path: path}, nil
+}
+
+// writeBackupFile replaces a selected backup path without exposing partially
+// written data. The temporary file lives beside the target so Rename is atomic.
+func writeBackupFile(path string, contents []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create directory %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".nocx-backup-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary backup: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set backup permissions: %w", err)
+	}
+	if _, err := tmp.Write(contents); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary backup: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary backup: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary backup: %w", err)
+	}
+
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to overwrite symlink at %s", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect target %s: %w", path, err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace backup: %w", err)
+	}
+	if err := syncBackupDirectory(dir); err != nil {
+		return fmt.Errorf("sync backup directory: %w", err)
+	}
+	return nil
+}
+
+func syncBackupDirectory(dir string) error {
+	f, err := os.Open(dir) //nolint:gosec // directory is selected by the user
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Sync()
 }
 
 // nativeSaveDialog opens the OS file-save dialog and returns the chosen path.

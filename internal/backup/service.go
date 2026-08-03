@@ -744,9 +744,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 			if cv, ok := overrides[key]; ok && cv == doc.Settings.Overrides[key] {
 				continue
 			}
-			if _, ok := overrides[key]; ok {
-				p.Settings.Changed++
-			}
+			p.Settings.Changed++
 		}
 		for key := range overrides {
 			if _, inDoc := doc.Settings.Overrides[key]; !inDoc {
@@ -808,9 +806,7 @@ func computeRestore(doc Document, snap profile.ConnectionSnapshot, overrides map
 			if cv, ok := overrides[key]; ok && cv == doc.Settings.Overrides[key] {
 				continue
 			}
-			if _, ok := overrides[key]; ok {
-				result.SettingsChanged++
-			}
+			result.SettingsChanged++
 		}
 		for key := range overrides {
 			if _, inDoc := doc.Settings.Overrides[key]; !inDoc {

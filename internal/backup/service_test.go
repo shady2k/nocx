@@ -476,22 +476,33 @@ func TestRestore_ReplaceSettings(t *testing.T) {
 
 	r := mustCreate(t, svc)
 
-	// Modify backup to only have one override.
+	// Modify backup to retain one existing override and add one that is new locally.
 	var doc backup.Document
 	_ = json.Unmarshal([]byte(r.Contents), &doc)
-	doc.Settings.Overrides = map[string]any{"clipboard.osc52Suppressed": false}
+	doc.Settings.Overrides = map[string]any{
+		"clipboard.osc52Suppressed": false,
+		"backup.newOverride":        true,
+	}
 	b, _ := json.Marshal(doc)
 	contents := string(b) + "\n"
 
 	preview := mustPreview(t, svc, contents, backup.RestoreReplace)
-	if preview.Settings.Reset == 0 {
-		t.Errorf("settings reset = %d, want >0 (tab.placement should reset)", preview.Settings.Reset)
+	if preview.Settings.Changed != 2 {
+		t.Errorf("settings changed = %d, want 2", preview.Settings.Changed)
+	}
+	if preview.Settings.Reset != 1 {
+		t.Errorf("settings reset = %d, want 1 (tab.placement should reset)", preview.Settings.Reset)
 	}
 
-	mustRestore(t, svc, contents, backup.RestoreReplace, preview.PreviewToken)
-
+	result := mustRestore(t, svc, contents, backup.RestoreReplace, preview.PreviewToken)
+	if result.SettingsChanged != 2 {
+		t.Errorf("result settings changed = %d, want 2", result.SettingsChanged)
+	}
 	if sett.overrides["clipboard.osc52Suppressed"] != false {
 		t.Errorf("clipboard = %v, want false", sett.overrides["clipboard.osc52Suppressed"])
+	}
+	if sett.overrides["backup.newOverride"] != true {
+		t.Errorf("backup.newOverride = %v, want true", sett.overrides["backup.newOverride"])
 	}
 	if _, ok := sett.overrides["tab.placement"]; ok {
 		t.Error("tab.placement should be reset (absent after replace)")

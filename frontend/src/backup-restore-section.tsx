@@ -45,6 +45,7 @@ export function BackupRestoreSection(props: Props) {
   })
 
   let previewGen = 0
+  let fileGen = 0
   const busy = () => state.creating || state.previewing || state.restoring
 
   const handleCreate = async () => {
@@ -93,16 +94,20 @@ export function BackupRestoreSection(props: Props) {
   }
 
   const loadPreview = async (file: File | null) => {
+    const gen = ++fileGen
+    previewGen++
     if (!file) {
-      setState({ contents: null, preview: null, previewError: null })
+      setState({ contents: null, preview: null, previewError: null, previewing: false })
       return
     }
     setState({ previewing: true, previewError: null, preview: null })
     try {
       const text = await readBackupText(file)
+      if (gen !== fileGen) return
       setState('contents', text)
       // The createEffect below reacts to contents change and calls previewBackupRestore.
     } catch (err) {
+      if (gen !== fileGen) return
       setState({
         preview: null,
         previewError: (err as Error).message,
@@ -111,7 +116,6 @@ export function BackupRestoreSection(props: Props) {
       })
     }
   }
-
   // Single preview path: reacts to file selection (via contents) and strategy changes.
   createEffect(
     on(

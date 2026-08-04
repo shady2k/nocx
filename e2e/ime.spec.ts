@@ -30,7 +30,7 @@ test('a composition produces its text exactly once and survives Enter while comp
   page,
 }) => {
   await page.goto('/')
-  await expect(page.locator('.nocx-tab')).toHaveCount(1)
+  await expect(page.getByRole('tab')).toHaveCount(1)
   await promptReady(page)
 
   // Start the composition but do not end it yet.

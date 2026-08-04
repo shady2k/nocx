@@ -34,8 +34,8 @@ async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Pr
  * Caller must have exactly two tabs present before calling.
  */
 async function assertFocusSurvivesReorder(page: Page): Promise<void> {
-  const secondTab = page.locator('.nocx-tab').nth(1)
-  const firstTab = page.locator('.nocx-tab').first()
+  const secondTab = page.getByRole('tab').nth(1)
+  const firstTab = page.getByRole('tab').first()
   const tabIdSecond = await secondTab.getAttribute('data-tab-id')
   const tabIdFirst = await firstTab.getAttribute('data-tab-id')
   expect(tabIdFirst).not.toBeNull()
@@ -62,46 +62,36 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
   // Capture a JSHandle to the focused element so we can compare identity
   // after the reorder (proves the DOM node itself survived, not merely
   // that a node with the same data-tab-id is focused).
-  const focusedHandle = await page.evaluateHandle(() => document.activeElement)
+  const focusedHandle = await secondTab.elementHandle()
+  expect(focusedHandle).not.toBeNull()
 
-  // Snapshot the active element's data-tab-id before the drag
-  const preId = await page.evaluate(() => document.activeElement?.getAttribute('data-tab-id'))
-  expect(preId).toBe(tabIdSecond)
-
-  // Snapshot pre-reorder tab order for post-reorder comparison
-  const preOrder = await page.evaluate(() => {
-    const tabs = document.querySelectorAll('.nocx-tab')
-    return Array.from(tabs).map((t) => t.getAttribute('data-tab-id'))
-  })
+  // Snapshot pre-reorder tab order for post-reorder comparison.
+  const preOrder = await page
+    .getByRole('tab')
+    .evaluateAll((tabs) => tabs.map((tab) => tab.getAttribute('data-tab-id')))
   expect(preOrder).toEqual([tabIdFirst, tabIdSecond])
 
-  // Dispatch native HTML5 DragEvent sequence: dragstart → dragover → drop → dragend
-  // Dragging the SECOND tab onto the FIRST tab triggers a real reorder
-  // (reorderTab moves the dragged tab before the target tab).
+  // Dispatch events on locator-derived handles. They resolve through the tab
+  // strip shadow root, while preserving focus exactly as a real tab drop does.
+  const firstHandle = await firstTab.elementHandle()
+  expect(firstHandle).not.toBeNull()
   await page.evaluate(
-    ({ draggedId }: { draggedId: string }) => {
-      const src = document.querySelector(`[data-tab-id="${draggedId}"]`) as HTMLElement | null
-      const targets = document.querySelectorAll('.nocx-tab')
-      const tgt = targets[0] as HTMLElement | null // drop on FIRST tab
-      if (!src || !tgt) throw new Error('Source or target tab not found')
+    ({ source, target, draggedId }) => {
+      const src = source as HTMLElement
+      const tgt = target as HTMLElement
+      const dataTransfer = new DataTransfer()
+      dataTransfer.setData('text/plain', draggedId)
 
-      const dt = new DataTransfer()
-      dt.setData('text/plain', draggedId)
-
-      src.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }))
+      src.dispatchEvent(new DragEvent('dragstart', { dataTransfer, bubbles: true }))
       src.classList.add('dragging')
-
       tgt.dispatchEvent(
-        new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true }),
+        new DragEvent('dragover', { dataTransfer, bubbles: true, cancelable: true }),
       )
-      tgt.dispatchEvent(
-        new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }),
-      )
-
-      src.dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true }))
+      tgt.dispatchEvent(new DragEvent('drop', { dataTransfer, bubbles: true, cancelable: true }))
+      src.dispatchEvent(new DragEvent('dragend', { dataTransfer, bubbles: true }))
       src.classList.remove('dragging')
     },
-    { draggedId: tabIdSecond! },
+    { source: focusedHandle, target: firstHandle, draggedId: tabIdSecond! },
   )
 
   // Wait for the reorder to be observable rather than sleeping for it. A fixed
@@ -111,25 +101,31 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
   await expect
     .poll(
       () =>
-        page.evaluate(() =>
-          Array.from(document.querySelectorAll('.nocx-tab')).map((t) =>
-            t.getAttribute('data-tab-id'),
-          ),
-        ),
+        page
+          .getByRole('tab')
+          .evaluateAll((tabs) => tabs.map((tab) => tab.getAttribute('data-tab-id'))),
       { timeout: 5000, message: 'tab order did not settle after the drag' },
     )
     .toEqual([tabIdSecond, tabIdFirst])
 
-  // Assert 1: the exact same DOM node (JSHandle identity) is still activeElement
-  const sameNode = await page.evaluate((handle) => document.activeElement === handle, focusedHandle)
+  // Assert 1: the original focused node moved to the first position and
+  // remains focused. Role locators pierce the strip's component shadow root.
+  const reorderedFirst = page.getByRole('tab').first()
+  await expect(reorderedFirst).toBeFocused()
+  const reorderedHandle = await reorderedFirst.elementHandle()
+  expect(reorderedHandle).not.toBeNull()
+  const sameNode = await focusedHandle.evaluate(
+    (el, reordered) => el === reordered,
+    reorderedHandle,
+  )
   expect(sameNode).toBe(true)
 
   // Assert 2: document.activeElement still has the original data-tab-id
-  const postId = await page.evaluate(() => document.activeElement?.getAttribute('data-tab-id'))
+  const postId = await page.evaluate((handle) => handle.getAttribute('data-tab-id'), focusedHandle)
   expect(postId).toBe(tabIdSecond)
 
-  // Assert 3: the locator chain agrees
-  await expect(page.locator(`[data-tab-id="${tabIdSecond}"]`)).toBeFocused()
+  // The reordered first tab is the original focused second tab.
+  await expect(page.getByRole('tab').first()).toBeFocused()
 }
 
 // ── Specs ───────────────────────────────────────────────────────────────
@@ -147,7 +143,7 @@ test.describe('focus survives tab reorder', () => {
   test('horizontal orientation: focus survives drag reorder', async ({ page }) => {
     // Add a second tab so there is something to reorder.
     await page.locator('[aria-label="New tab"]').click()
-    await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     await assertFocusSurvivesReorder(page)
   })
@@ -158,7 +154,7 @@ test.describe('focus survives tab reorder', () => {
 
     // Add a second tab in the vertical strip.
     await page.locator('[aria-label="New tab"]').click()
-    await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     await assertFocusSurvivesReorder(page)
   })

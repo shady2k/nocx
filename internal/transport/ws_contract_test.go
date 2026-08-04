@@ -14,6 +14,8 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
@@ -59,6 +61,89 @@ func validateJSON(t *testing.T, s *jsonschema.Schema, raw []byte, what string) {
 	if err := s.Validate(doc); err != nil {
 		t.Errorf("%s does not satisfy its contract:\n%v\n\npayload was:\n%s", what, err, raw)
 	}
+}
+
+// ── sandbox.status and open ─────────────────────────────────────────────
+
+func TestSandboxStatus_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "sandbox.status.schema.json")
+	for _, status := range []sandbox.Status{
+		{Available: true, Backend: sandbox.BackendLandlock, ABI: 9},
+		{Available: false, Backend: sandbox.BackendUnsupported, Reason: sandbox.ReasonUnsupportedPlatform, Detail: "unsupported"},
+	} {
+		raw, err := json.Marshal(sandboxStatusResponse{
+			Available: status.Available,
+			Backend:   status.Backend,
+			Reason:    status.Reason,
+			Detail:    status.Detail,
+			ABI:       status.ABI,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		validateJSON(t, schema, raw, "sandbox.status DTO")
+	}
+}
+
+func TestSandboxStatus_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "sandbox.status.schema.json")
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock, ABI: 9}}
+	ws, _ := newSandboxHarness(t, svc)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	var response struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	raw := jsonrpcCall(t, conn, "sandbox.status", map[string]any{})
+	if err := json.Unmarshal(raw, &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Error != nil {
+		t.Fatalf("unexpected error: %+v", response.Error)
+	}
+	validateJSON(t, schema, response.Result, "sandbox.status result")
+}
+
+func TestOpen_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "open.schema.json")
+	workspace := t.TempDir()
+	svc := &sandboxTestService{
+		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
+		policy: &sandbox.Policy{
+			Workspace:     workspace,
+			WritableRoots: []string{workspace},
+		},
+	}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	var response struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	raw := jsonrpcCall(t, conn, "open", sandboxOpenParams(workspace))
+	if err := json.Unmarshal(raw, &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if response.Error != nil {
+		t.Fatalf("unexpected error: %+v", response.Error)
+	}
+	validateJSON(t, schema, response.Result, "sandboxed open result")
+
+	raw = jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "enhanced": true})
+	if err := json.Unmarshal(raw, &response); err != nil {
+		t.Fatalf("unmarshal ordinary response: %v", err)
+	}
+	if response.Error != nil {
+		t.Fatalf("ordinary open error: %+v", response.Error)
+	}
+	validateJSON(t, schema, response.Result, "ordinary open result")
 }
 
 // ── vault.status ───────────────────────────────────────────────────────
@@ -537,7 +622,7 @@ func TestDialogOpenFile_DTOConformsToContract(t *testing.T) {
 func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "dialog.openFile.schema.json")
 	h := newInventoryHarness(t)
-	h.ws.SetDialogService(&fakeDialogService{path: "/home/dev/.ssh/id_ed25519"})
+	h.ws.SetDialogService(&fakeDialogService{filePath: "/home/dev/.ssh/id_ed25519"})
 
 	resp := jsonrpcCall(t, h.conn, "dialog.openFile", map[string]any{})
 	var envelope struct {

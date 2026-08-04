@@ -39,7 +39,7 @@ import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { queryHistory, recordCommand } from './history-client'
 import { log } from './log'
-import type { WSClient, SessionHandle } from './ipc'
+import type { WSClient, SessionHandle, SessionSandboxInfo } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
@@ -107,6 +107,13 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+  /** Filesystem-isolated local-session request and its fail-closed error path. */
+  sandbox?: {
+    workspace: string
+    onOpenError?: (message: string) => void
+  }
+  /** Reports sandbox confirmation from the open response to the owning tab. */
+  onSandboxedChange?: (sandboxed: boolean) => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -132,6 +139,16 @@ function directoryLabel(cwd: string): string {
 function cwdTooltip(cwd: string, fromOSC7: boolean): string {
   if (!cwd) return ''
   return fromOSC7 ? cwd : `${cwd} (initial cwd)`
+}
+
+/**
+ * Tooltip for a sandboxed tab: the initial cwd plus the backend and the
+ * realized writable roots — the sandbox state is always visible
+ * (ADR-0019 §3.3, invariant I11).
+ */
+function sandboxTooltip(cwd: string, info: SessionSandboxInfo): string {
+  const writable = info.writableRoots.join(', ')
+  return `${cwd ? cwd + ' (initial cwd)\n' : ''}Sandboxed (${info.backend}) — writable: ${writable}`
 }
 
 /**
@@ -831,7 +848,9 @@ export class TerminalContent extends BaseTabContent {
 
       // Alias tab: profileId is empty, open by host so the backend
       // resolves through ~/.ssh/config (ssh -G). Saved-profile tabs
-      // use openSSHSession with the real profileId.
+      // use openSSHSession with the real profileId. A sandboxed tab opens
+      // a filesystem-isolated local session in the picked workspace
+      // (ADR-0019 §3.2) — the backend canonicalizes it and owns the policy.
       const session = this.sshOpts
         ? this.sshOpts.profileId
           ? await this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
@@ -841,7 +860,13 @@ export class TerminalContent extends BaseTabContent {
               this.sshOpts.host,
               this.sshOpts.user,
             )
-        : await this.client.openSession(this.cols, this.rows, true)
+        : this.hooks.sandbox
+          ? await this.client.openSandboxedSession(
+              this.cols,
+              this.rows,
+              this.hooks.sandbox.workspace,
+            )
+          : await this.client.openSession(this.cols, this.rows, true)
 
       if (signal.aborted) {
         session.close()
@@ -862,12 +887,21 @@ export class TerminalContent extends BaseTabContent {
       this.scrollback?.blockManager.setLocation(this.sshOpts ? this.locationLine() : '')
       this.editor?.setCwd(session.cwd || '')
 
+      // Sandboxed session: flip the tab's lock/shield marker (immutable for
+      // the tab's lifetime) and name backend + writable roots in the tooltip
+      // (ADR-0019 §3.3).
+      const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
+      this.hooks.onSandboxedChange?.(sandboxInfo != null)
+
       // Push initial title + tooltip. Title composition lives here.
       if (this.sshOpts) {
         this.programTitle = this.sshOpts.host
         this.onTooltipChange(
           `SSH ${this.sshOpts.user ? this.sshOpts.user + '@' : ''}${this.sshOpts.host}`,
         )
+      } else if (sandboxInfo) {
+        this.cwdTitle = directoryLabel(session.cwd)
+        this.onTooltipChange(sandboxTooltip(session.cwd, sandboxInfo))
       } else {
         this.cwdTitle = directoryLabel(session.cwd)
         this.onTooltipChange(cwdTooltip(session.cwd, false))
@@ -1042,6 +1076,15 @@ export class TerminalContent extends BaseTabContent {
           this._readyResolve(false)
           return
         }
+      }
+      // A failed SANDBOX launch fails closed: toast the typed reason and
+      // let the caller close the tab — no tab survives a failed launch and
+      // there is never an unsandboxed fallback (design spec §3.4).
+      if (this.hooks.sandbox) {
+        this.hooks.onSandboxedChange?.(false)
+        this.hooks.sandbox.onOpenError?.(err instanceof Error ? err.message : String(err))
+        this._readyResolve(false)
+        return
       }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'

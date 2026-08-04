@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/open.schema.json",
+  "title": "OpenResult",
+  "description": "Result of the open JSON-RPC method. Sandbox metadata is present only for a successfully opened sandboxed local session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "cwd"],
+  "properties": {
+    "sessionId": { "type": "string", "minLength": 1 },
+    "cwd": { "type": "string" },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "workspace", "writableRoots"],
+      "properties": {
+        "backend": { "type": "string", "enum": ["landlock", "seatbelt"] },
+        "workspace": { "type": "string", "minLength": 1 },
+        "writableRoots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

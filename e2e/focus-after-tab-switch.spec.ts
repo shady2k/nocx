@@ -18,7 +18,6 @@ import { test, expect, promptReady } from './harness'
  */
 
 const TITLE = '.nocx-tab-title'
-const TAB = '.nocx-tab'
 const TAB_ADD = '[aria-label="New tab"]'
 
 /** The class of the focused element, scoped to nothing — focus is global. */
@@ -28,18 +27,18 @@ const focusedClass = (page: import('@playwright/test').Page) =>
 test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
   test('the returned-to tab owns the keyboard without a click', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator(TAB)).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await promptReady(page)
 
     await page.locator(TAB_ADD).click()
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
     await promptReady(page)
     const tab2Title = await page.locator(TITLE).nth(1).textContent()
 
     // Back to tab 1 — by clicking its TAB, which is not the same as clicking
     // into its content. Nothing else touches the pane from here on.
-    await page.locator(TAB).first().click()
-    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab').first().click()
+    await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'true')
 
     // (1) Focus is in an editor input, not in the read-only grid's textarea.
     await expect.poll(() => focusedClass(page), { timeout: 5000 }).toContain('nocx-editor-input')
@@ -82,10 +81,10 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await page.goto('/')
     await promptReady(page)
     await page.locator(TAB_ADD).click()
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
     await promptReady(page)
-    await page.locator(TAB).first().click()
-    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab').first().click()
+    await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'true')
 
     const painted = await page.evaluate(() =>
       [...document.querySelectorAll('.nocx-editor')]
@@ -99,10 +98,10 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await page.goto('/')
     await promptReady(page)
     await page.locator(TAB_ADD).click()
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
     await promptReady(page)
 
-    await page.locator(TAB).first().click()
+    await page.getByRole('tab').first().click()
 
     // The click the user reported as not helping either. Aimed near the bottom
     // of the pane, where the prompt editor sits.

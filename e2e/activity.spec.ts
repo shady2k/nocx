@@ -4,7 +4,6 @@ import { test, expect } from './harness'
 // methods together), so this exercises the real transport, PTY and renderer.
 // The activity indicator is invisible to jsdom — no layout, no GPU, no focus.
 
-const TAB = '.nocx-tab'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 test('a background tab lights the activity indicator on normal-buffer output', async ({ page }) => {
@@ -12,7 +11,7 @@ test('a background tab lights the activity indicator on normal-buffer output', a
   page.on('console', (m) => logs.push(m.text()))
 
   await page.goto('/')
-  await expect(page.locator(TAB)).toHaveCount(1)
+  await expect(page.getByRole('tab')).toHaveCount(1)
 
   // The first tab is activated and focused on load, so typing goes straight in.
   await page.keyboard.type('sleep 3; echo PROBE-OUTPUT')
@@ -20,8 +19,8 @@ test('a background tab lights the activity indicator on normal-buffer output', a
 
   // Open a second tab; the first drops to the background.
   await page.locator('[aria-label="New tab"]').click()
-  await expect(page.locator(TAB)).toHaveCount(2)
-  await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
+  await expect(page.getByRole('tab')).toHaveCount(2)
+  await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'false')
 
   // Assert the indicator is visible — Playwright polls until found. The
   // shell `sleep 3` is a genuine ordering constraint (output must arrive
@@ -29,14 +28,13 @@ test('a background tab lights the activity indicator on normal-buffer output', a
   console.log('--- console from the page ---')
   for (const l of logs.filter((l) => l.includes('NOCXDBG'))) console.log(l)
 
-  const state = await page.evaluate(() => {
-    const tabs = [...document.querySelectorAll('.nocx-tab')]
-    return tabs.map((t) => ({
-      selected: t.getAttribute('aria-selected'),
-      activity: t.querySelector('.nocx-tab-indicator')?.getAttribute('data-activity'),
-    }))
-  })
+  const state = await page.getByRole('tab').evaluateAll((tabs) =>
+    tabs.map((tab) => ({
+      selected: tab.getAttribute('aria-selected'),
+      activity: tab.querySelector('.nocx-tab-indicator')?.getAttribute('data-activity'),
+    })),
+  )
   console.log('--- tab state ---', JSON.stringify(state, null, 1))
 
-  await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 10000 })
+  await expect(page.getByRole('tab').first().locator(ACTIVITY)).toBeAttached({ timeout: 10000 })
 })

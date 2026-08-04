@@ -99,8 +99,8 @@ test.describe('Vault — no keyring, full round trip', () => {
     backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   test('saves password, sets up vault, persists across restart, unlocks with passphrase, connects', async ({
@@ -275,8 +275,8 @@ test.describe('Vault — recovery code unseal', () => {
     backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   test('unseals with recovery code after restart', async ({ page }) => {
@@ -498,7 +498,7 @@ test.describe('Vault — with keyring, silent setup', () => {
         timeout: 3000,
       })
     } finally {
-      backend?.stop()
+      await backend?.stop()
     }
   })
 })

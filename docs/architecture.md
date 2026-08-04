@@ -30,6 +30,7 @@ graph TB
         transport["transport<br/>(WS server, session mux)"]
         session["session<br/>(registry, lifecycle)"]
         pty["pty<br/>(local shells)"]
+        sandbox["sandbox<br/>(per-tab filesystem policy, experimental)"]
         ssh["ssh<br/>(x/crypto/ssh, conn pool)"]
         config["config<br/>(settings, themes, vault seam)"]
         shellint["shellintegration<br/>(OSC 7/133 substrate)"]
@@ -44,6 +45,7 @@ graph TB
     session --> pty
     session --> ssh
     session --> shellint
+    pty -.->|"sandbox request only"| sandbox
     core --> config
     ssh -.->|"scp + metadata feed"| remote
 ```
@@ -80,6 +82,7 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 | Module             | SRP responsibility                                                                                                                                                                                              |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pty`              | Spawn and manage local pseudo-terminals; stream their I/O.                                                                                                                                                      |
+| `sandbox`          | Construct and enforce the experimental per-tab local-filesystem policy; reject sandbox launches that cannot be enforced.                                                                                                       |
 | `ssh`              | Establish and manage SSH connections/channels via `x/crypto/ssh`, honoring `~/.ssh/config`; own a **ref-counted `ssh.Client` connection pool** keyed by host+identity (channels multiplex over one connection). |
 | `session`          | Own session lifecycle; act as the registry mapping session-id → one PTY/SSH channel + one goroutine. Owns the **channel**; references (never owns) a pooled `ssh` connection.                                   |
 | `transport`        | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10).                             |
@@ -175,6 +178,13 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Prevents: OOM, dropped bytes, and cross-tab head-of-line stalls on the shared WS.
 - Rule: bounded in-flight-byte **credit per session**; when the credit is exhausted, apply backpressure to the PTY/SSH read (throttle the source — **never drop, never grow unbounded**). Bytes are lossless and ordered; per-session fairness ensures one busy tab cannot starve others.
 
+**AD-11 — Per-tab filesystem sandbox: renderer asks, backend owns (experimental, [ADR-0019](decisions/0019-native-per-tab-filesystem-sandbox.md)).**
+
+- Binds: `internal/sandbox` + local-PTY creation only; the frontend Quick Connect action; the `open`/`sandbox.status`/`dialog.openDirectory` control-plane surface.
+- Prevents: renderer-built policy (the renderer must never decide what a cage allows) and a second policy owner beside `internal/sandbox`.
+- Rule: the renderer requests only `{workspace}`; the backend canonicalizes it and owns policy construction and enforcement. A sandboxed tab is created exclusively through the `sandbox.enabled`-gated `Sandboxed shell…` opt-in action that opens a **new** local tab; ordinary local tabs, SSH tabs, the initial tab, `+`, and `Cmd/Ctrl+T` are untouched, and enabling/disabling the flag never alters a running tab.
+- Security invariant: opt-in sandbox launches **fail closed** — a request that cannot be enforced is rejected (reserved codes `-32010`/`-32011`/`-32012` with stable `data.reason`) and never degrades to an unsandboxed shell; a session is registered only after enforcement is confirmed. The guarantee is filesystem-only; network, environment, credentials, IPC, devices, and processes stay outside the boundary.
+
 ## Cross-Cutting Concerns
 
 **DI / replaceability.** Modules depend only on abstractions; the composition root is the one place concrete implementations are chosen and wired. Swapping SSH backends, transports, or loggers is a one-line change at the root, and every module is independently testable via injected fakes.
@@ -192,6 +202,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - **Build & CI.** GitHub Actions builds, lints, formats, and tests every change. `release.yml` triggers on a version tag, calls `ci.yml` as its gate, builds the universal macOS bundle, and publishes a GitHub Release carrying a `.dmg` (human install), a `.zip` (the updater payload), and an ed25519-signed `manifest.json` — no app store and no publisher signature, the reasoning is in ADR-0003. The single Go codebase cross-compiles to multiple targets: desktop backend, web server, and (Phase 2) the remote helper.
 - **macOS packaging.** Wails v2 packages the desktop app (`.app` bundle) with the Go backend embedded and the frontend bundle served into WKWebView. macOS and Linux ship now — Linux as an AppImage (linuxdeploy + GTK plugin) bundling the GTK/WebKitGTK stack into one self-replaceable file (ADR-0007); Windows is Phase 3.
 - **Config / data locations.** Plain files in the OS config dir — `~/Library/Application Support/nocx` on macOS. Settings/themes/keybindings as JSON or TOML [ASSUMPTION: exact format TBD]; tab-restore as a small session file. The Phase-2 vault is a separate encrypted, single-machine store with no sync.
+- **Per-tab filesystem sandbox (experimental, [ADR-0019](decisions/0019-native-per-tab-filesystem-sandbox.md)).** Support envelope: Linux requires a kernel with **Landlock ABI >= 3** (fail closed below); macOS uses the **deprecated, runtime-probed `sandbox-exec`/Seatbelt** and ships only while the real packaged `.app` passes the platform smoke suite; **Windows is unsupported in V1**. The full policy and lifecycle live in the [design spec](../.internal/specs/2026-08-02-native-filesystem-sandbox-design.md), not here.
 - **Development and release own separate profiles.** The directory name is chosen by the build, not by a caller: `-tags release` resolves `nocx`, and every other build resolves `nocx-dev` (`internal/storage/appdir.go`). So `wails dev`, `make dev-web` and the Playwright suite — which launches a backend of its own — cannot read or overwrite the documents an installed nocx owns. The tag is on the release side deliberately: forgetting it costs a developer an empty profile, never a user their data. This replaces nothing else; it is the safe default underneath the per-run state directory that parallel e2e workers will additionally need (nocx-ti8w).
 - **Tab-restore ownership.** The restore record is assembled at persist time from backend-owned `{sessionId, kind, host}` plus a frontend-supplied `cwd` snapshot; `config` persists, the frontend supplies — one writer, defined inputs.
 - **Web target deploy (later).** The same Go core runs as a network service serving the frontend bundle + WS. Security invariant: auth token + bind-to-localhost by default; exposure beyond localhost is an explicit, deliberate configuration.

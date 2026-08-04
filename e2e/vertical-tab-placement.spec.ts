@@ -48,7 +48,7 @@ test.describe('vertical tab placement', () => {
     // activity bar, which is app-level chrome and keeps the window edge, and
     // left of the panes it lists. It was a sibling of #body and therefore the
     // leftmost thing in the window, pushing the activity bar inward.
-    const firstTab = page.locator('.nocx-tab').first()
+    const firstTab = page.getByRole('tab').first()
     const activityBar = page.locator('#activitybar')
     const panes = page.locator('#panes')
 
@@ -80,7 +80,7 @@ test.describe('vertical tab placement', () => {
     const strip = page.locator('#vertical-tabstrip')
     const plus = await strip.locator('[aria-label="New tab"]').boundingBox()
     const caret = await strip.locator('[aria-label="Quick connect"]').boundingBox()
-    const firstTab = await strip.locator('.nocx-tab').first().boundingBox()
+    const firstTab = await strip.getByRole('tab').first().boundingBox()
 
     expect(plus!.y + plus!.height).toBeLessThanOrEqual(firstTab!.y + 1)
     // On one line with each other, not at opposite ends of the column.
@@ -110,11 +110,11 @@ test.describe('vertical tab placement', () => {
 
     // Add a second tab that will have no tooltip initially
     await page.locator('[aria-label="New tab"]').click()
-    await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     // Both rows should have the same height (fixed at 52px)
-    const firstTab = page.locator('.nocx-tab').nth(0)
-    const secondTab = page.locator('.nocx-tab').nth(1)
+    const firstTab = page.getByRole('tab').nth(0)
+    const secondTab = page.getByRole('tab').nth(1)
     const firstBox = await firstTab.boundingBox()
     const secondBox = await secondTab.boundingBox()
     expect(firstBox).not.toBeNull()

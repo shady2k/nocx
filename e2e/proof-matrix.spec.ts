@@ -513,7 +513,7 @@ test.describe('4. Scroll ownership — measured', () => {
 test.describe('5. Roving tabindex', () => {
   test.describe('tab strip', () => {
     test('exactly one tab has tabIndex=0', async ({ page }) => {
-      const tabs = page.locator('[role="tab"]')
+      const tabs = page.getByRole('tab')
       await expect(tabs.first()).toBeAttached()
 
       const tabIndexes = await tabs.evaluateAll((els) =>
@@ -524,7 +524,7 @@ test.describe('5. Roving tabindex', () => {
     })
 
     test('ArrowRight moves focus to next tab', async ({ page }) => {
-      const tabs = page.locator('[role="tab"]')
+      const tabs = page.getByRole('tab')
       await expect(tabs.first()).toBeAttached()
 
       // Open a second tab so there is a tab to navigate to
@@ -536,52 +536,38 @@ test.describe('5. Roving tabindex', () => {
       const initialId = await tabs.first().getAttribute('data-tab-id')
       expect(initialId).not.toBeNull()
 
-      // Put keyboard focus on the first tab. Playwright's .focus() on a
-      // tabindex="-1" element may be redirected by the roving handler, so
-      // we check the active element's data-tab-id after focusing.
-      await page.evaluate(() => {
-        ;(document.querySelector('[role="tab"]') as HTMLElement)?.focus()
-      })
-      await page.waitForTimeout(50)
+      // Role locators traverse the tab strip's component shadow boundary.
+      await tabs.first().focus()
+      await expect(tabs.first()).toBeFocused()
 
       // Press ArrowRight
       await page.keyboard.press('ArrowRight')
       await page.waitForTimeout(50)
 
-      // The next tab should now be focused
-      const focusedId = await page.evaluate(() =>
-        document.activeElement?.getAttribute('data-tab-id'),
-      )
-      expect(focusedId).not.toBeNull()
-      // The focused element should differ from the initial first tab
-      expect(focusedId).not.toBe(initialId)
+      // The second role-resolved tab should now own focus.
+      await expect(tabs.nth(1)).toBeFocused()
     })
+
     test('ArrowLeft moves focus to previous tab', async ({ page }) => {
-      const tabs = page.locator('[role="tab"]')
+      const tabs = page.getByRole('tab')
       await expect(tabs.first()).toBeAttached()
 
-      // Open a second tab first so arrow navigation has room
+      // Open a second tab first so arrow navigation has room.
       await page.locator('[aria-label="New tab"]').click()
       await expect(tabs).toHaveCount(2)
       await page.waitForTimeout(100)
 
-      // Focus the active tab (tabindex="0" — the second tab). Playwright's
-      // .focus() works here because tabindex >= 0.
-      const activeTab = page.locator('[role="tab"][tabindex="0"]')
+      // Opening a tab activates it, so the second tab owns the roving stop.
+      const activeTab = tabs.nth(1)
       await activeTab.focus()
       await expect(activeTab).toBeFocused()
-      // ArrowLeft from the second tab should move to the first
-      await page.keyboard.press('ArrowLeft')
+      await activeTab.press('ArrowLeft')
       await page.waitForTimeout(100)
-
-      // Check that focus moved to the first tab
-      const firstTab = tabs.first()
-      const isFirstFocused = await firstTab.evaluate((el) => el === document.activeElement)
-      expect(isFirstFocused).toBe(true)
+      await expect(tabs.first()).toBeFocused()
     })
 
     test('Home focuses the first tab', async ({ page }) => {
-      const tabs = page.locator('[role="tab"]')
+      const tabs = page.getByRole('tab')
       await expect(tabs.first()).toBeAttached()
 
       // Open a second tab so we can go right then Home
@@ -589,67 +575,45 @@ test.describe('5. Roving tabindex', () => {
       await expect(tabs).toHaveCount(2)
       await page.waitForTimeout(100)
 
-      // Focus the first tab via evaluate (Playwright .focus() on tabindex="-1"
-      // is redirected by the roving handler to the active tab)
-      await page.evaluate(() => {
-        ;(document.querySelector('[role="tab"]') as HTMLElement)?.focus()
-      })
-      await page.waitForTimeout(50)
+      await tabs.first().focus()
+      await expect(tabs.first()).toBeFocused()
 
       // Move right, then Home
       await page.keyboard.press('ArrowRight')
       await page.keyboard.press('Home')
       await page.waitForTimeout(50)
 
-      // The first tab should be focused
-      const isFirst = await page.evaluate(() => {
-        const first = document.querySelector('[role="tab"]')
-        return document.activeElement === first
-      })
-      expect(isFirst).toBe(true)
+      await expect(tabs.first()).toBeFocused()
     })
 
     test('End focuses the last tab', async ({ page }) => {
-      const tabs = page.locator('[role="tab"]')
+      const tabs = page.getByRole('tab')
       await expect(tabs.first()).toBeAttached()
 
       // With one tab, End stays on the same tab — that's correct behavior.
       // Just verify it doesn't crash and focus stays.
       await tabs.first().focus()
       await page.keyboard.press('End')
-      const focusedId = await page.evaluate(() => {
-        const el = document.activeElement
-        return el?.getAttribute('role')
-      })
-      expect(focusedId).toBe('tab')
+      await expect(tabs.first()).toBeFocused()
     })
 
     test('Tab moves focus out of the tab strip (one stop)', async ({ page }) => {
-      await page.locator('[role="tab"][tabindex="0"]').focus()
+      const tabs = page.getByRole('tab')
+      await tabs.first().focus()
 
-      // Tab should move to the next focusable element after the strip
+      // Tab should move to the next focusable element after the strip.
       await page.keyboard.press('Tab')
-
-      // The active element should not be a tab
-      const activeIsTab = await page.evaluate(() => {
-        const el = document.activeElement
-        return el?.getAttribute('role') === 'tab'
-      })
-      expect(activeIsTab).toBe(false)
+      await expect(tabs.first()).not.toBeFocused()
     })
 
     test('Shift+Tab moves focus into the tab strip', async ({ page }) => {
-      await page.locator('[role="tab"]').first().focus()
+      const firstTab = page.getByRole('tab').first()
+      await firstTab.focus()
 
-      // Tab forward out, then Shift+Tab back in
+      // Tab forward out, then Shift+Tab back in.
       await page.keyboard.press('Tab')
       await page.keyboard.press('Shift+Tab')
-
-      const activeIsTab = await page.evaluate(() => {
-        const el = document.activeElement
-        return el?.getAttribute('role') === 'tab'
-      })
-      expect(activeIsTab).toBe(true)
+      await expect(firstTab).toBeFocused()
     })
   })
 

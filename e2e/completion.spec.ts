@@ -38,7 +38,7 @@ test.describe('tab completion', () => {
     page,
   }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await promptReady(page)
 
     // `pri` is a prefix of `printf` — a bash BUILTIN, so the OSC 636
@@ -72,7 +72,7 @@ test.describe('tab completion', () => {
 
   test('ghost text: the top candidate renders inline and Right accepts it', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await promptReady(page)
 
     await page.keyboard.type('pri')
@@ -94,7 +94,7 @@ test.describe('tab completion', () => {
     const fixture = fixtureDir()
     try {
       await page.goto('/')
-      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await expect(page.getByRole('tab')).toHaveCount(1)
       await promptReady(page)
 
       // The probe is a DIRECTORY: `cd` takes directories only (the
@@ -128,7 +128,7 @@ test.describe('tab completion', () => {
     page,
   }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await promptReady(page)
 
     // A prefix that matches no command, no history row and no path.
@@ -181,7 +181,7 @@ test.describe('tab completion', () => {
     fs.writeFileSync(path.join(downloads, 'nocx-backup.enc'), 'x')
     try {
       await page.goto('/')
-      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await expect(page.getByRole('tab')).toHaveCount(1)
       await promptReady(page)
       await cdInto(page, fixture)
 
@@ -207,7 +207,7 @@ test.describe('tab completion', () => {
     fs.mkdirSync(path.join(fixture, 'alpha'))
     try {
       await page.goto('/')
-      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await expect(page.getByRole('tab')).toHaveCount(1)
       await promptReady(page)
       await cdInto(page, fixture)
 
@@ -240,7 +240,7 @@ test.describe('tab completion', () => {
     fs.mkdirSync(path.join(fixture, 'beta'))
     try {
       await page.goto('/')
-      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await expect(page.getByRole('tab')).toHaveCount(1)
       await promptReady(page)
 
       await cdInto(page, fixture)
@@ -328,7 +328,7 @@ test.describe('tab completion', () => {
     fs.mkdirSync(path.join(fixture, 'repos', 'meshynet', 'graphify-output'))
     try {
       await page.goto('/')
-      await expect(page.locator('.nocx-tab')).toHaveCount(1)
+      await expect(page.getByRole('tab')).toHaveCount(1)
       await promptReady(page)
       await cdInto(page, fixture)
 

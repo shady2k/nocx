@@ -14,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -36,6 +37,9 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
+	// Sandbox is the per-tab filesystem sandbox backend (ADR-0019). Injected
+	// here — the single composition root — and nowhere else.
+	Sandbox sandbox.Service
 
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
@@ -136,8 +140,16 @@ func New(opts ...Option) (*App, error) {
 	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger := log.NewSlogAdapter(slogger)
 
+	// Storage paths resolve first: the sandbox backend needs the cache dir
+	// for its per-session runtime trees (design spec §5.2).
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		return nil, fmt.Errorf("storage paths: %w", err)
+	}
+
 	shint := shellintegration.New(logger)
-	ptf := &localPTYFactory{log: logger, shint: shint}
+	sandboxSvc := sandbox.New(logger, paths.CacheDir())
+	ptf := &localPTYFactory{log: logger, shint: shint, sandbox: sandboxSvc}
 	sess := session.New(logger, ptf)
 
 	// SSH config resolver: shared by both the SSH client and the profile
@@ -158,10 +170,6 @@ func New(opts ...Option) (*App, error) {
 	// Vault (ADR-0011 as amended): owns provider routing, key material and
 	// the seal lifecycle. Two providers are compiled on every platform:
 	// system (OS keychain) and file (encrypted document).
-	paths, err := storage.NewAppPaths()
-	if err != nil {
-		return nil, fmt.Errorf("storage paths: %w", err)
-	}
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
 
@@ -300,6 +308,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
+		transport.WithSandboxService(sandboxSvc),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -322,6 +331,7 @@ func New(opts ...Option) (*App, error) {
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,
+		Sandbox:          sandboxSvc,
 		vaultCloser:      v,
 	}
 
@@ -330,13 +340,14 @@ func New(opts ...Option) (*App, error) {
 }
 
 type localPTYFactory struct {
-	log   log.Logger
-	shint shellintegration.ShellIntegration
+	log     log.Logger
+	shint   shellintegration.ShellIntegration
+	sandbox sandbox.Service
 }
 
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	env := f.shint.ActivationEnv(cfg.Enhanced)
-	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env), pty.WithSandboxService(f.sandbox))
 }
 
 func (a *App) Start(ctx context.Context) error {

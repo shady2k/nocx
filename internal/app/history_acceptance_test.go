@@ -30,12 +30,11 @@ import (
 )
 
 func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
-	cfgHome := t.TempDir()
-	dataHome := t.TempDir()
-	cacheHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgHome)
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	noKeystore := func(context.Context) bool { return false }
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -49,17 +48,18 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 		t.Fatalf("Start: %v", startErr)
 	}
 
-	// The derived-key artifacts landed where the design says: the salt in
-	// the CONFIG directory — a copy of the data directory carries nothing
-	// that opens it — and the database in the DATA directory.
-	// storage.AppDirName, never the literal: dev and release own separate
-	// profile directories (nocx-ti8w), and a test that hardcodes one asserts
-	// against a build it is not running.
-	saltPath := filepath.Join(cfgHome, storage.AppDirName, "contentkey.salt")
+	// The derived-key artifacts land in the OS-specific directories for the
+	// development profile. Resolve them from the same storage contract App.New
+	// uses: Linux honors XDG while macOS honors the isolated HOME.
+	paths, pathErr := storage.NewAppPaths()
+	if pathErr != nil {
+		t.Fatalf("NewAppPaths: %v", pathErr)
+	}
+	saltPath := filepath.Join(paths.ConfigDir(), "contentkey.salt")
 	if _, statErr := os.Stat(saltPath); statErr != nil {
 		t.Fatalf("salt not minted in config dir: %v", statErr)
 	}
-	dbPath := filepath.Join(dataHome, storage.AppDirName, "content.db")
+	dbPath := filepath.Join(paths.DataDir(), "content.db")
 	if _, statErr := os.Stat(dbPath); statErr != nil {
 		t.Fatalf("content.db not created in data dir: %v", statErr)
 	}
@@ -183,12 +183,11 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 // the row reads sk-p...7890, the entry says one secret was masked and of
 // what kind, and the raw key appears nowhere in the marshalled result.
 func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
-	cfgHome := t.TempDir()
-	dataHome := t.TempDir()
-	cacheHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgHome)
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	noKeystore := func(context.Context) bool { return false }
 
 	ctx, cancel := context.WithCancel(context.Background())

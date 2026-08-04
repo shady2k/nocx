@@ -5,14 +5,13 @@ import { test, expect, promptReady } from './harness'
 // keystrokes when it is active, regardless of how many other tabs exist.
 
 const TITLE = '.nocx-tab-title'
-const TAB = '.nocx-tab'
 const TAB_ADD = '[aria-label="New tab"]'
 const PANE = '.pane.active'
 
 test.describe('multi-tab input (nocx-4ff.28)', () => {
   test('first tab still accepts input after second tab is created', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator(TAB)).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await promptReady(page)
 
     // Record tab 1's current title so we can assert it changes.
@@ -20,7 +19,7 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
 
     // Create a second tab.
     await page.locator(TAB_ADD).click()
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     // Wait for tab 2's prompt to be ready.
     await promptReady(page)
@@ -29,7 +28,7 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
     const tab2InitialTitle = await page.locator(TITLE).nth(1).textContent()
 
     // Switch back to tab 1 by clicking its tab button.
-    await page.locator(TAB).first().click()
+    await page.getByRole('tab').first().click()
 
     // Click into the editor area of tab 1 to give it focus.
     // Post tab-switch the editor may not auto-focus (nocx-4ff.29); this
@@ -68,12 +67,12 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
 
   test('second tab accepts input while it is active', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator(TAB)).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await promptReady(page)
 
     // Create a second tab.
     await page.locator(TAB_ADD).click()
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
     await promptReady(page)
 
     // Tab 2 is now active. Type a command into it.

@@ -19,6 +19,7 @@ function makeTab(id: number, title: string, tooltip: string): TabView {
     subtitle: '',
     hasActivity: false,
     agentStatus: null,
+    sandboxed: false,
     paneId: `pane-${id}`,
     onDisplayChange: null,
   }

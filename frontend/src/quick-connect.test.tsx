@@ -29,28 +29,76 @@ describe('ActionsQuickConnectProvider', () => {
     expect(items[1].label).toBe('New connection')
   })
 
-  it('calls newTab when the local-shell item runs', () => {
+  it('calls newTab when the local-shell item runs', async () => {
     const newTab = vi.fn()
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newTab, newConnection)
 
-    provider.getItems()[0].run()
+    const items = await provider.getItems()
+    items[0].run()
 
     expect(newTab).toHaveBeenCalledOnce()
     expect(newConnection).not.toHaveBeenCalled()
   })
 
-  it('opens the connection editor when the new-connection item runs', () => {
+  it('opens the connection editor when the new-connection item runs', async () => {
     const newTab = vi.fn()
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newTab, newConnection)
 
-    provider.getItems()[1].run()
+    const items = await provider.getItems()
+    items[1].run()
 
     // Not a tab: this entry used to be an unconfigured profile, and running it
     // opened a terminal on an empty host that failed to start.
     expect(newConnection).toHaveBeenCalledOnce()
     expect(newTab).not.toHaveBeenCalled()
+  })
+
+  it('hides the sandbox action while the flag is off', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), {
+      state: () => Promise.resolve({ enabled: false, status: null }),
+      open: vi.fn(),
+    })
+
+    const items = await provider.getItems()
+    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__'])
+  })
+
+  it('renders the sandbox action when the flag is on and the backend is available', async () => {
+    const open = vi.fn()
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), {
+      state: () =>
+        Promise.resolve({
+          enabled: true,
+          status: { available: true, backend: 'landlock' },
+        }),
+      open,
+    })
+
+    const items = await provider.getItems()
+    const sandboxItem = items.find((i) => i.id === '__sandboxed_local__')
+    expect(sandboxItem).toBeDefined()
+    expect(sandboxItem?.label).toBe('Sandboxed shell…')
+    sandboxItem?.run()
+    expect(open).toHaveBeenCalledOnce()
+  })
+
+  it('renders the non-activatable unavailable row when the backend is unavailable', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), {
+      state: () =>
+        Promise.resolve({
+          enabled: true,
+          status: { available: false, backend: 'landlock', reason: 'landlock-abi-too-old' },
+        }),
+      open: vi.fn(),
+    })
+
+    const items = await provider.getItems()
+    const unavailable = items.find((i) => i.id === '__sandbox_unavailable__')
+    expect(unavailable).toBeDefined()
+    expect(unavailable?.detail).toBe('landlock-abi-too-old')
+    expect(items.find((i) => i.id === '__sandboxed_local__')).toBeUndefined()
   })
 })
 

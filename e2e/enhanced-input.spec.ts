@@ -9,7 +9,7 @@ const INPUT = '.nocx-editor-input'
 test.describe('enhanced input raw routing', () => {
   test('read command receives input after enhanced submit', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await promptReady(page)
 
@@ -33,7 +33,7 @@ test.describe('enhanced input raw routing', () => {
 
   test('Ctrl-C at a prompt does not trap input', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await promptReady(page)
 
@@ -73,7 +73,7 @@ test.describe('enhanced input raw routing', () => {
 
   test('multiple submits in succession all route raw', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await promptReady(page)
 

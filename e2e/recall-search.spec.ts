@@ -50,30 +50,23 @@ const PORT = 19880
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 
-interface XdgDirsResult {
+interface DisposableRootResult {
   root: string
-  data: string
   config: string
-  cache: string
 }
 
-function createXdgDirs(): XdgDirsResult {
+function createDisposableRoot(): DisposableRootResult {
   const root = mkdtempSync(join(tmpdir(), 'nocx-recall-search-'))
-  for (const d of ['data', 'config', 'cache'] as const) {
-    mkdirSync(join(root, d), { recursive: true })
-  }
-  return {
-    root,
-    data: join(root, 'data'),
-    config: join(root, 'config'),
-    cache: join(root, 'cache'),
-  }
+  const home = join(root, 'home')
+  const config =
+    process.platform === 'darwin'
+      ? join(home, 'Library', 'Application Support', 'nocx-dev')
+      : join(home, '.config', 'nocx-dev')
+  mkdirSync(config, { recursive: true })
+  return { root, config }
 }
 
-function asXdgDirs(r: XdgDirsResult): DisposableRoot {
-  // VaultBackend isolates the backend's WHOLE home inside a disposable root
-  // (harness.ts) — the XDG trio alone never covered ~/.nocx and the rc
-  // files, so the root travels with it.
+function asDisposableRoot(r: DisposableRootResult): DisposableRoot {
   return { root: r.root }
 }
 
@@ -95,21 +88,19 @@ async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void
     { p: endpoint.port, t: endpoint.token },
   )
 }
-
 const test = base
 
 test.describe('recall: typing narrows, and the panel states its coverage', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
   let backend: VaultBackend
-  let xdg: XdgDirsResult
+  let xdg: DisposableRootResult
 
   test.beforeAll(() => {
-    xdg = createXdgDirs()
+    xdg = createDisposableRoot()
     // Seed retention before the backend starts — the coverage line's reason
     // for existing is a store that cannot see all of history.
-    const settingsDir = join(xdg.config, 'nocx')
-    mkdirSync(settingsDir, { recursive: true })
+    const settingsDir = xdg.config
     writeFileSync(
       join(settingsDir, 'settings.json'),
       JSON.stringify({
@@ -118,11 +109,11 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
         secretRefs: {},
       }),
     )
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   test('run three commands, type a substring, only the match remains, coverage line visible', async ({

@@ -8,7 +8,7 @@ const QUICK_CONNECT_SEARCH = '.quick-connect__search input'
 test.describe('quick-connect picker', () => {
   test('opens the picker when the caret is clicked', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     // Click the caret beside +.
     await page.locator(CARET).click()
@@ -21,7 +21,7 @@ test.describe('quick-connect picker', () => {
 
   test('Escape closes the picker and restores focus to the caret', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     // Click the caret to open the picker.
     await page.locator(CARET).click()
@@ -39,7 +39,7 @@ test.describe('quick-connect picker', () => {
 
   test('typing filters the list', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await page.locator(CARET).click()
     await expect(page.locator(QUICK_CONNECT_LIST)).toBeVisible()
@@ -58,7 +58,7 @@ test.describe('quick-connect picker', () => {
 
   test('Enter on "Local shell" opens a new tab', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await page.locator(CARET).click()
     await expect(page.locator(QUICK_CONNECT_LIST)).toBeVisible()
@@ -73,7 +73,7 @@ test.describe('quick-connect picker', () => {
     await page.keyboard.press('Enter')
 
     // A new tab opens.
-    await expect(page.locator('.nocx-tab')).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     // The picker closes.
     await expect(page.locator(QUICK_CONNECT_LIST)).not.toBeVisible()
@@ -81,7 +81,7 @@ test.describe('quick-connect picker', () => {
 
   test('keyboard shortcut Ctrl+Shift+P opens the picker', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     // Use the keyboard shortcut.
     await page.keyboard.press('Control+Shift+P')
@@ -96,7 +96,7 @@ test.describe('quick-connect picker', () => {
 
   test('terminal host element persists through picker open/close', async ({ page }) => {
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     // The terminal host element exists.
     const pane = page.locator('.pane.active')

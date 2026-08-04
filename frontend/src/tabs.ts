@@ -47,6 +47,7 @@ export class Tab implements TabHost {
   private _tooltip = ''
   private _subtitle = ''
   private _adoptable = false
+  private _sandboxed = false
   private _onAdopt: (() => void) | null = null
   private _disposed = false
   private _mountAbort = new AbortController()
@@ -115,6 +116,12 @@ export class Tab implements TabHost {
     return this._adoptable
   }
 
+  /** True once the session confirmed it is a sandboxed local tab (the
+   *  lock/shield marker renders). Immutable for the tab's lifetime. */
+  get sandboxed(): boolean {
+    return this._sandboxed
+  }
+
   get onAdopt(): (() => void) | null {
     return this._onAdopt
   }
@@ -161,6 +168,16 @@ export class Tab implements TabHost {
   updateTooltip(tooltip: string): void {
     if (this._disposed) return
     this._tooltip = tooltip
+    this.onDisplayChange?.()
+  }
+
+  /** Marks the tab as sandboxed once the session metadata arrives; the
+   *  marker and its tooltip are immutable for the tab's lifetime
+   *  (ADR-0019 §3.3). */
+  setSandboxed(sandboxed: boolean): void {
+    if (this._disposed) return
+    if (this._sandboxed === sandboxed) return
+    this._sandboxed = sandboxed
     this.onDisplayChange?.()
   }
 
@@ -445,7 +462,6 @@ export class TabManager {
     tabRef.current = tab
     return tab
   }
-
   newSSHTab(profileId: string, host: string, user?: string, port?: number, title?: string): Tab {
     log.info('nocx: newSSHTab called', { profileId, host, user, port, title })
     const sshOpts = { profileId, host, user, port } as const
@@ -484,6 +500,54 @@ export class TabManager {
     const tab = this.addTab(content, descriptor)
     tabRef.current = tab
     return tab
+  }
+
+  /** Create a new sandboxed LOCAL terminal tab for the picked workspace
+   *  (ADR-0019 §3.2). The session metadata (backend, workspace, writable
+   *  roots) arrives with the open result and flips the lock/shield marker.
+   *  restoreDescriptor is null in V1: a filesystem grant requires a fresh
+   *  picker action after restart. A failed sandbox setup closes the tab and
+   *  shows a toast — no tab survives a failed launch. */
+  newSandboxedTab(workspace: string): Tab {
+    const tabRef = { current: undefined as Tab | undefined }
+    const content = new TerminalContent(
+      this.client,
+      this.clipboard,
+      this.gate,
+      this.banner,
+      this.profileClient,
+      (tooltip) => tabRef.current?.updateTooltip(tooltip),
+      undefined,
+      {
+        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onSetupVault: this.onSetupVault,
+        onCreateSecret: this.onCreateSecret,
+        sandbox: {
+          workspace,
+          onOpenError: (message) => this._closeSandboxedTabOnError(tabRef.current, message),
+        },
+        onSandboxedChange: (sandboxed) => tabRef.current?.setSandboxed(sandboxed),
+      },
+    )
+    const descriptor: ContentDescriptor = {
+      surfaceType: SURFACE_TERMINAL,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: true,
+      defaultTitle: '',
+    }
+    const tab = this.addTab(content, descriptor)
+    tabRef.current = tab
+    return tab
+  }
+
+  /** Fail-closed frontend counterpart of the backend: a sandboxed launch
+   *  that failed produces a toast and no tab (design spec §3.4). */
+  private _closeSandboxedTabOnError(tab: Tab | undefined, message: string): void {
+    if (tab) {
+      this.closeTab(tab)
+    }
+    showToast({ level: 'danger', message })
   }
 
   /** Adopt an SSH alias as a saved nocx profile. Creates the profile and switches

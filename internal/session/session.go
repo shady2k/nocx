@@ -13,6 +13,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -45,6 +46,9 @@ type Config struct {
 	// Used by revocation to find sessions running that credential.
 	// Empty for sessions with no linked credential (inline auth).
 	CredentialID string
+	// Sandbox is the wire opt-in for a filesystem-isolated local tab
+	// (ADR-0019). nil for ordinary local and all SSH sessions.
+	Sandbox *sandbox.Request
 }
 
 type PTYFactory interface {
@@ -68,6 +72,10 @@ type Session interface {
 	// Empty for sessions with no linked credential (inline auth) and for
 	// local/ad-hoc sessions.
 	CredentialID() string
+
+	// SandboxInfo returns the immutable sandbox metadata for a sandboxed
+	// local tab, or nil for ordinary/SSH sessions (design spec §3.3).
+	SandboxInfo() *sandbox.SessionInfo
 
 	Write(p []byte) (int, error)
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
@@ -160,6 +168,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	var ch Channel
 	var err error
 
+	var pt pty.Pty
 	if cfg.Kind == KindRemote {
 		if r.ssh == nil {
 			return nil, fmt.Errorf("SSH sessions not available (no SSH factory wired)")
@@ -172,13 +181,15 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
 	} else {
-		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
+		var perr error
+		pt, perr = r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:      cfg.Cwd,
 			Cols:     cfg.Cols,
 			Rows:     cfg.Rows,
 			XPixel:   cfg.XPixel,
 			YPixel:   cfg.YPixel,
 			Enhanced: cfg.Enhanced,
+			Sandbox:  cfg.Sandbox,
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)
@@ -196,6 +207,12 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		credentialID: cfg.CredentialID,
 		ch:           ch,
 		log:          r.log.With("session_id", string(id)),
+	}
+	// Sandbox metadata rides up from the PTY so the open result can carry
+	// {backend, workspace, writableRoots} without the transport owning any
+	// policy (design spec §4.5). Only local PTYs can be sandboxed.
+	if pi, ok := pt.(pty.SandboxInfoProvider); ok {
+		s.sandboxInfo = pi.SandboxInfo()
 	}
 
 	r.mu.Lock()
@@ -364,6 +381,9 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
+	// sandboxInfo is the immutable sandbox metadata for a sandboxed local
+	// tab, nil otherwise (design spec §3.3).
+	sandboxInfo *sandbox.SessionInfo
 }
 
 func (s *realSession) ID() ID               { return s.id }
@@ -371,6 +391,9 @@ func (s *realSession) Kind() Kind           { return s.kind }
 func (s *realSession) Cwd() string          { return s.cwd }
 func (s *realSession) ProfileID() string    { return s.profileID }
 func (s *realSession) CredentialID() string { return s.credentialID }
+func (s *realSession) SandboxInfo() *sandbox.SessionInfo {
+	return s.sandboxInfo
+}
 
 func (s *realSession) Write(p []byte) (int, error) {
 	return s.ch.Write(p)

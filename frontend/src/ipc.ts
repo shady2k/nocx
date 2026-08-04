@@ -1,5 +1,15 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import type { OpenResult } from './generated/open'
+import type { SandboxStatus } from './generated/sandbox.status'
+
+// ── Sandbox wire types (ADR-0019 §3.3, §4.2) ────────────────────────────
+
+export type { SandboxStatus }
+
+/** Immutable sandbox metadata carried by a sandboxed tab and by the open
+ *  result: backend, canonical workspace, and the realized writable roots. */
+export type SessionSandboxInfo = NonNullable<OpenResult['sandbox']>
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
 // a fast-scrolling terminal would flood the control plane with thousands of
@@ -162,6 +172,9 @@ export class SessionHandle {
     /** Where the shell started, ~-abbreviated. Names the tab until a program
      *  sets a title; does not follow `cd` (that needs OSC 7, nocx-5mn.2). */
     readonly cwd: string,
+    /** Immutable sandbox metadata for a sandboxed session; undefined for
+     *  ordinary/SSH sessions (ADR-0019 §3.3). */
+    readonly sandbox?: SessionSandboxInfo,
   ) {}
 
   send(data: string): void {
@@ -331,7 +344,7 @@ export class WSClient {
   // prompt gap can occur (nocx-4ff.10).
   openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle> {
     return this.dispatcher
-      .call<{ sessionId?: string; cwd?: string }>('open', {
+      .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
@@ -351,8 +364,49 @@ export class WSClient {
           exitCallback: null,
           resetCallback: null,
         })
-        return new SessionHandle(this, sid, result?.cwd ?? '')
+        return new SessionHandle(this, sid, result?.cwd ?? '', result?.sandbox)
       })
+  }
+
+  // openSandboxedSession opens a filesystem-isolated LOCAL session in the
+  // given workspace (ADR-0019 §3.2). The workspace is the renderer's only
+  // input; the backend canonicalizes it and owns the policy. A rejected
+  // promise carries the typed JSON-RPC error (-32010/-32011/-32012) — the
+  // caller surfaces it and creates no tab.
+  openSandboxedSession(cols: number, rows: number, workspace: string): Promise<SessionHandle> {
+    return this.dispatcher
+      .call<OpenResult>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        enhanced: true,
+        sandbox: { workspace },
+      })
+      .then((result) => {
+        const sid = result?.sessionId
+        if (!sid || !isSessionID(sid)) {
+          throw new Error(`nocx: invalid session-id from server: ${sid}`)
+        }
+        if (!result?.sandbox) {
+          throw new Error('nocx: sandboxed open did not return sandbox metadata')
+        }
+        this.sessions.set(sid, {
+          decoder: new UTF8StreamDecoder(),
+          offset: 0,
+          dataCallback: null,
+          pendingData: '',
+          exitCallback: null,
+          resetCallback: null,
+        })
+        return new SessionHandle(this, sid, result?.cwd ?? '', result?.sandbox)
+      })
+  }
+
+  // sandboxStatus reports the backend availability for the sandboxed-shell
+  // action (design spec §4.2): {available, backend, reason?, detail?, abi?}.
+  sandboxStatus(): Promise<SandboxStatus> {
+    return this.dispatcher.call<SandboxStatus>('sandbox.status', {})
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend

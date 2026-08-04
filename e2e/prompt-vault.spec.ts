@@ -110,8 +110,8 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   const PASS = 'prompt-vault-master-pass'

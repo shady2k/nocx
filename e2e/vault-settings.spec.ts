@@ -189,8 +189,8 @@ test.describe('Vault settings — change passphrase', () => {
     backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   test('change passphrase then unseal with new passphrase and connect', async ({ page }) => {
@@ -292,8 +292,8 @@ test.describe('Vault settings — reissue recovery code', () => {
     backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   test('reissue recovery code then unseal with new code and connect', async ({ page }) => {

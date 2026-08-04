@@ -52,6 +52,25 @@ test:
 conformance:
 	NOCX_TEST_SSH_G=1 $(GO) test -v -count=1 -run Conformance ./internal/ssh/...
 
+# Real Landlock enforcement smoke (ADR-0019 §8). Proves the cage behaves, not
+# just that the source compiles. Requires a kernel with Landlock ABI >= 3 and
+# FAILS LOUDLY below it — it is a release gate, not an env-gated convenience.
+# The ABI probe is go-landlock's own cmd, resolved from the module cache.
+sandbox-smoke-linux:
+	@abi=$$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0); \
+	echo "=== Landlock enforcement smoke (detected ABI $$abi, floor 3) ==="; \
+	if [ "$$abi" -lt 3 ]; then echo "FAIL: Landlock ABI $$abi < 3 — enforcement smoke cannot run on this kernel"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestLandlockEnforcement' ./internal/sandbox/
+
+# Real Seatbelt enforcement smoke (ADR-0019 §9.4). Runs the shared probe
+# inside a real sandbox-exec cage on macOS. Absence is a failed release gate:
+# a successful release must prove enforcement rather than skip the check.
+sandbox-smoke-macos:
+	@echo "=== Seatbelt enforcement smoke (macOS) ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — enforcement smoke cannot run"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService' ./internal/sandbox/
+
 clean:
 	$(GO) clean -cache
 	rm -rf build/

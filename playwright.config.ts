@@ -67,6 +67,11 @@ const isolatedEnv: Record<string, string> = Object.fromEntries(
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
+  // A fresh Vite transform plus the first authenticated WebSocket session can
+  // exceed Playwright's 5s default on a cold macOS hosted runner. Keep tests
+  // fail-fast, but give first-page readiness the same realistic ceiling in
+  // Chromium and WebKit rather than reporting a mounted app as absent.
+  expect: { timeout: 10_000 },
 
   // Refuse to start when the disk is nearly full.
   //

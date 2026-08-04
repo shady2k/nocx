@@ -45,6 +45,9 @@ export interface TabProps {
   subtitle?: string
   /** When true, the tab offers a save action (alias adoption). */
   adoptable?: boolean
+  /** True once the session confirmed a sandboxed local tab (lock/shield
+   *  marker renders; ADR-0019 §3.3). */
+  sandboxed?: boolean
   /** Triggered when the user clicks the save action. */
   onAdopt?: () => void
   /** Called when the tab is clicked. */
@@ -65,6 +68,7 @@ export function Tab(props: TabProps) {
       aria-selected={props.active}
       data-tab-id={String(props.tabId)}
       data-agent-status={props.agentStatus ?? undefined}
+      data-sandboxed={props.sandboxed === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
       // subtitle, but that line ellipses — so dropping the native tooltip there
@@ -110,6 +114,11 @@ export function Tab(props: TabProps) {
             centre. Wrapping the pair keeps the column at exactly two children. */}
         <span class="nocx-tab-line">
           <span class="nocx-tab-status" />
+          <Show when={props.sandboxed === true}>
+            <span class="nocx-tab-sandboxed-marker" aria-label="Sandboxed">
+              {'\u26e8'}
+            </span>
+          </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>
         <Show when={props.orientation === 'vertical' && (props.subtitle ?? '') !== ''}>

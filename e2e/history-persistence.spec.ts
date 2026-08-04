@@ -34,7 +34,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, type BackendEndpoint, type XdgDirs } from './harness'
+import { VaultBackend, type BackendEndpoint, type DisposableRoot } from './harness'
 
 const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
 
@@ -48,28 +48,24 @@ const SECOND_PORT = 19879
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 
-interface XdgDirsResult {
+interface DisposableRootResult {
   root: string
-  data: string
   config: string
-  cache: string
 }
 
-function createXdgDirs(): XdgDirsResult {
+function createDisposableRoot(): DisposableRootResult {
   const root = mkdtempSync(join(tmpdir(), 'nocx-history-'))
-  for (const d of ['data', 'config', 'cache'] as const) {
-    mkdirSync(join(root, d), { recursive: true })
-  }
-  return {
-    root,
-    data: join(root, 'data'),
-    config: join(root, 'config'),
-    cache: join(root, 'cache'),
-  }
+  const home = join(root, 'home')
+  const config =
+    process.platform === 'darwin'
+      ? join(home, 'Library', 'Application Support', 'nocx-dev')
+      : join(home, '.config', 'nocx-dev')
+  mkdirSync(config, { recursive: true })
+  return { root, config }
 }
 
-function asXdgDirs(r: XdgDirsResult): XdgDirs {
-  return { data: r.data, config: r.config, cache: r.cache }
+function asDisposableRoot(r: DisposableRootResult): DisposableRoot {
+  return { root: r.root }
 }
 
 /** Inject Wails stubs pointing at the given backend endpoint (the same
@@ -100,16 +96,15 @@ test.describe('history: a command survives a restart and recall answers from the
   test.use({ viewport: { width: 1280, height: 900 } })
 
   let backend: VaultBackend
-  let xdg: XdgDirsResult
+  let xdg: DisposableRootResult
 
   test.beforeAll(() => {
-    xdg = createXdgDirs()
+    xdg = createDisposableRoot()
     // Seed the profile with the owner's retention value before the backend
     // starts (nocx-rtg0.16 — see the header comment): the age sweep must be
     // live for this spec to prove anything, and it must run against real
     // wall-clock timestamps.
-    const settingsDir = join(xdg.config, 'nocx')
-    mkdirSync(settingsDir, { recursive: true })
+    const settingsDir = xdg.config
     writeFileSync(
       join(settingsDir, 'settings.json'),
       JSON.stringify({
@@ -120,11 +115,11 @@ test.describe('history: a command survives a restart and recall answers from the
     )
     // `true` = no Secret Service for this backend, regardless of the
     // session the suite runs in — the derived-key branch is the point.
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   test('run a command, restart, press Up: the command is there, source=store', async ({ page }) => {

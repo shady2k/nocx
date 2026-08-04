@@ -76,11 +76,28 @@ export const test = base.extend({
 //   // … test …
 //   const { port: p2, token: t2 } = await backend.restart(secondPort)
 
-import { spawn, execSync, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import { createHomeIsolation, type HomeIsolation } from './home-isolation'
+
+function waitForExit(proc: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (proc.exitCode !== null) return Promise.resolve(true)
+
+  const { promise, resolve } = Promise.withResolvers<boolean>()
+  let timer: NodeJS.Timeout
+  const exited = () => {
+    clearTimeout(timer)
+    resolve(true)
+  }
+  timer = setTimeout(() => {
+    proc.removeListener('exit', exited)
+    resolve(false)
+  }, timeoutMs)
+  proc.once('exit', exited)
+  return promise
+}
 
 /**
  * A disposable directory the caller owns and cleans up. The backend's whole
@@ -180,30 +197,26 @@ export class VaultBackend {
     throw new Error(`devharness did not print WSTOKEN within ${timeoutMs}ms`)
   }
 
-  /** Stop the running devharness. */
-  stop(): void {
+  async stop(): Promise<void> {
     if (!this.proc) return
     const p = this.proc
     this.proc = null
     try {
       p.kill('SIGTERM')
     } catch {
-      /* already dead */
+      return
     }
-    // Give it 2 s to shut down gracefully, then SIGKILL.
-    try {
-      execSync(`timeout 2 sh -c 'while kill -0 ${p.pid} 2>/dev/null; do sleep 0.1; done'`)
-    } catch {
-      /* the wait timed out — fall through to SIGKILL */
-    }
+    if (await waitForExit(p, 2_000)) return
+
     try {
       p.kill('SIGKILL')
     } catch {
-      /* fine */
+      return
     }
+    await waitForExit(p, 2_000)
   }
   async restart(port: number): Promise<BackendEndpoint> {
-    this.stop()
+    await this.stop()
     // Brief quiescent period so the OS releases the old listen socket.
     const { promise, resolve: wait } = Promise.withResolvers<void>()
     setTimeout(wait, 500)

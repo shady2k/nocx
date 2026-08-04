@@ -33,8 +33,9 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 	// number describes one exact pair of scripts, and rewriting it in place is
 	// the same as not having the check.
 	digests := map[string]string{
-		"8": "ca89bf20e58c0a4669ecfb0754173ce721e436273b0b06549c7e0162e9b06dc8",
-		"9": "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
+		"8":  "ca89bf20e58c0a4669ecfb0754173ce721e436273b0b06549c7e0162e9b06dc8",
+		"9":  "26ee0a75cf83df3a773c97ee39265c96912629c4bcdb629edea51ba5bcc5529d",
+		"10": "2f8035f9e87404c0079560663ee931cceb1920d151073502f692aa6d3d22fdff",
 	}
 
 	h := sha256.New()

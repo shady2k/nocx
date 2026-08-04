@@ -10,14 +10,14 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
   // Wait for the initial tab to populate its title (session is ready).
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
-  await expect(page.locator('.nocx-tab')).toHaveCount(1)
+  await expect(page.getByRole('tab')).toHaveCount(1)
 
   // Click the + button to add a second tab.
   await page.locator('[aria-label="New tab"]').click()
 
   // Both tabs must be present and visible.
-  await expect(page.locator('.nocx-tab')).toHaveCount(2)
-  const tabs = page.locator('.nocx-tab')
+  await expect(page.getByRole('tab')).toHaveCount(2)
+  const tabs = page.getByRole('tab')
   await expect(tabs.nth(0)).toBeVisible()
   await expect(tabs.nth(1)).toBeVisible()
 
@@ -36,7 +36,6 @@ test('adding a second tab preserves layout with both tabs visible', async ({ pag
 
 const PLACEMENT_ROW = '.ui-settings-row[data-key="tab.placement"]'
 const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
-const TAB = '.nocx-tab'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 test.describe('vertical tab placement', () => {
@@ -93,19 +92,19 @@ test.describe('vertical tab placement', () => {
   test('tabs render and activate in vertical placement', async ({ page }) => {
     await switchPlacement(page, 'vertical')
 
-    await expect(page.locator(TAB)).toHaveCount(1)
-    const tab = page.locator(TAB).first()
+    await expect(page.getByRole('tab')).toHaveCount(1)
+    const tab = page.getByRole('tab').first()
     await expect(tab).toBeVisible()
     await expect(tab).toHaveAttribute('aria-selected', 'true')
 
     await page.keyboard.press('Meta+t')
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     await page.keyboard.press('Meta+1')
-    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'true')
 
     await page.keyboard.press('Meta+2')
-    await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('tab').nth(1)).toHaveAttribute('aria-selected', 'true')
   })
 
   /**
@@ -128,15 +127,15 @@ test.describe('vertical tab placement', () => {
     page,
   }) => {
     await page.keyboard.press('Meta+t')
-    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.getByRole('tab')).toHaveCount(2)
 
     await switchPlacement(page, 'vertical')
 
     const strip = page.locator('#vertical-tabstrip')
-    await expect(strip.locator(TAB)).toHaveCount(2)
+    await expect(strip.getByRole('tab')).toHaveCount(2)
 
-    const first = await strip.locator(TAB).first().boundingBox()
-    const second = await strip.locator(TAB).nth(1).boundingBox()
+    const first = await strip.getByRole('tab').first().boundingBox()
+    const second = await strip.getByRole('tab').nth(1).boundingBox()
     const add = await strip.locator('[aria-label="New tab"]').boundingBox()
     const stripBox = await strip.boundingBox()
 
@@ -166,9 +165,9 @@ test.describe('vertical tab placement', () => {
     await page.keyboard.press('Enter')
 
     await page.keyboard.press('Meta+t')
-    await expect(page.locator(TAB)).toHaveCount(2)
-    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
-    await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 15000 })
+    await expect(page.getByRole('tab')).toHaveCount(2)
+    await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'false')
+    await expect(page.getByRole('tab').first().locator(ACTIVITY)).toBeAttached({ timeout: 15000 })
   })
 
   test('switching placement repositions the strip without a restart', async ({ page }) => {
@@ -178,7 +177,7 @@ test.describe('vertical tab placement', () => {
     const paneHandle = await page.evaluateHandle(() => document.querySelector('.pane.active'))
 
     await switchPlacement(page, 'vertical')
-    await expect(page.locator(TAB)).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     // Verify the terminal host is the same DOM node.
     // ADR-0012 §1: must not remount the terminal host element.
@@ -189,8 +188,8 @@ test.describe('vertical tab placement', () => {
     expect(same).toBe(true)
 
     await switchPlacement(page, 'horizontal')
-    await expect(page.locator(TAB)).toHaveCount(1)
-    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('tab')).toHaveCount(1)
+    await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'true')
   })
 
   /**
@@ -206,7 +205,7 @@ test.describe('vertical tab placement', () => {
     await switchPlacement(page, 'vertical')
 
     // A freshly opened local tab: the title is the directory, so no second line.
-    await expect(page.locator(TAB)).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
     await expect(page.locator('.nocx-tab-subtitle')).toHaveCount(0)
 
     // Give the tab a name of its own via OSC 0. Now the location is extra information
@@ -226,7 +225,7 @@ test.describe('vertical tab placement', () => {
   test('vertical label text starts near the left edge (not centred)', async ({ page }) => {
     await switchPlacement(page, 'vertical')
 
-    const tab = page.locator(TAB).first()
+    const tab = page.getByRole('tab').first()
     const title = tab.locator('.nocx-tab-title')
     const tabBox = await tab.boundingBox()
     const titleBox = await title.boundingBox()
@@ -241,7 +240,7 @@ test.describe('vertical tab placement', () => {
     // beforeEach already reset to horizontal, but make sure.
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)
 
-    const tab = page.locator(TAB).first()
+    const tab = page.getByRole('tab').first()
     const title = tab.locator('.nocx-tab-title')
     const tabBox = await tab.boundingBox()
     const titleBox = await title.boundingBox()

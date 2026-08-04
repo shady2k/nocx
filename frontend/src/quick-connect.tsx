@@ -37,6 +37,7 @@ import type { ProfileClient } from './profiles'
 import type { Tab } from './tabs'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
+import type { SandboxStatus } from './ipc'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public interfaces
@@ -79,10 +80,16 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
   constructor(
     private newTab: () => Tab,
     private newConnection: () => void,
+    /** Sandbox action state (ADR-0019 §3.1-§3.2): live flag + backend status
+     *  read on every open, plus the picker→tab flow. Absent = feature off. */
+    private sandbox?: {
+      state: () => Promise<{ enabled: boolean; status: SandboxStatus | null }>
+      open: () => void
+    },
   ) {}
 
-  getItems(): QuickConnectItem[] {
-    return [
+  async getItems(): Promise<QuickConnectItem[]> {
+    const items: QuickConnectItem[] = [
       {
         id: '__local__',
         label: 'Local shell',
@@ -96,6 +103,37 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         run: () => this.newConnection(),
       },
     ]
+    if (!this.sandbox) return items
+
+    // The flag gates VISIBILITY only; the backend also rejects a request
+    // while it is off, so UI and wire agree even if this read is stale.
+    let state: { enabled: boolean; status: SandboxStatus | null }
+    try {
+      state = await this.sandbox.state()
+    } catch {
+      return items
+    }
+    if (!state.enabled) return items
+
+    if (state.status && !state.status.available) {
+      // Non-activatable row carrying the typed reason (design spec §3.4).
+      items.push({
+        id: '__sandbox_unavailable__',
+        label: 'Sandbox unavailable',
+        detail: state.status.reason,
+        system: true,
+        run: () => {},
+      })
+      return items
+    }
+
+    items.push({
+      id: '__sandboxed_local__',
+      label: 'Sandboxed shell…',
+      detail: 'Choose a workspace and open a filesystem-isolated local tab',
+      run: () => this.sandbox!.open(),
+    })
+    return items
   }
 }
 

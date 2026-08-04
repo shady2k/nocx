@@ -481,7 +481,11 @@ func TestBashSnapshotEmitsHelloThenSnapshot(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
 
+	// Keep this ordering test independent of the host's PATH size and scheduler
+	// contention; TestBashSnapshotFirstPromptBoundedWait covers the slow path.
 	prog := `
+enable -n compgen
+compgen() { printf 'pwd\n'; }
 export NOCX_SHELL_INTEGRATION=1
 source "$1"
 __nocx_prompt_command
@@ -554,6 +558,7 @@ enable -n compgen
 compgen() { printf 'pwd\n'; sleep 1; }
 export NOCX_SHELL_INTEGRATION=1
 source "$1"
+export LC_NUMERIC=C
 TIMEFORMAT='PROMPT_MS=%R'
 { time __nocx_prompt_command; } 2>&1
 `

@@ -46,7 +46,7 @@ test.describe('copy-on-select', () => {
   test('selecting terminal text copies it to the clipboard', async ({ page }) => {
     await disableWailsRuntime(page)
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await promptReady(page)
 
@@ -95,7 +95,7 @@ test.describe('paste', () => {
   test('right-click pastes clipboard text at the cursor', async ({ page }) => {
     await disableWailsRuntime(page)
     await page.goto('/')
-    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await expect(page.getByRole('tab')).toHaveCount(1)
 
     await promptReady(page)
 

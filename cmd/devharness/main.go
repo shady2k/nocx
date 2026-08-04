@@ -11,9 +11,17 @@ import (
 	"syscall"
 
 	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
 
 func main() {
+	// Sandboxed shells are launched by re-exec'ing this binary as the
+	// __sandbox-landlock-exec helper (ADR-0019 §8.2); the helper never
+	// returns.
+	if sandbox.MaybeHelper() {
+		return
+	}
+
 	opts := []app.Option{}
 	if addr := os.Getenv("NOCX_WS_ADDR"); addr != "" {
 		opts = append(opts, app.WithWSAddr(addr))

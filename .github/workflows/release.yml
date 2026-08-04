@@ -149,6 +149,13 @@ jobs:
           #    round trip (§9) asserts is preserved through packaging.
           codesign --verify --deep --strict "$APP"
 
+      # Real Seatbelt enforcement smoke (ADR-0019 §9.4) on the release
+      # machine: the deprecated mechanism ships only while the packaged-app
+      # platform still enforces it. Fails loudly when sandbox-exec cannot
+      # run — the gate is never silently skipped.
+      - name: Sandbox enforcement smoke (Seatbelt)
+        run: make sandbox-smoke-macos
+
       - name: Package .dmg and .zip
         run: |
           set -euo pipefail
@@ -221,6 +228,12 @@ jobs:
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
+
+      # Real Landlock enforcement smoke (ADR-0019 §8). The release gate:
+      # a tagged release without a passing cage on the shipped platform is
+      # a failed release — the gate fails loudly, it is never skipped.
+      - name: Sandbox enforcement smoke (Landlock)
+        run: make sandbox-smoke-linux
 
       - name: Package AppImage
         run: |

@@ -72,7 +72,7 @@ test.describe('the e2e home boundary is obeyed, not just handed over', () => {
       // backend resolved that home and wrote there.
       expect(realShellIntegrationStamp()).toBe(before)
     } finally {
-      backend.stop()
+      await backend.stop()
       execSync(`rm -rf ${JSON.stringify(root)}`)
     }
   })

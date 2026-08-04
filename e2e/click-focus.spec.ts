@@ -26,7 +26,7 @@ const INPUT = '.nocx-editor-input'
 
 test('a click into the pane leaves the terminal taking keystrokes', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator('.nocx-tab')).toHaveCount(1)
+  await expect(page.getByRole('tab')).toHaveCount(1)
   // Wait for the prompt to be OWNED, not merely for a title. Ownership is what
   // gives the editor focus, so typing before that transition is a race.
   await promptReady(page)

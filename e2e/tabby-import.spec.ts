@@ -59,6 +59,7 @@ vault:
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 interface XdgDirsResult {
+  root: string
   data: string
   config: string
   cache: string
@@ -70,6 +71,7 @@ function createXdgDirs(): XdgDirsResult {
   mkdirSync(join(baseDir, 'config'), { recursive: true })
   mkdirSync(join(baseDir, 'cache'), { recursive: true })
   return {
+    root: baseDir,
     data: join(baseDir, 'data'),
     config: join(baseDir, 'config'),
     cache: join(baseDir, 'cache'),
@@ -119,8 +121,8 @@ test.describe('Tabby import preview + execute', () => {
     writeFileSync(configPath, CONFIG_YAML, 'utf-8')
   })
 
-  test.afterAll(() => {
-    backend?.stop()
+  test.afterAll(async () => {
+    await backend?.stop()
   })
 
   // The whole path, including the vault setup the import triggers on a machine
@@ -189,14 +191,13 @@ test.describe('Tabby import preview + execute', () => {
     // Importing secrets needs a vault, and this backend has no OS keychain, so
     // the import correctly stops and asks for one. The preview dialog stays
     // open underneath: the import is deferred, not cancelled.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
+    await expect(page.getByRole('dialog', { name: 'Set Up Vault' })).toBeVisible({
       timeout: 10_000,
     })
     await page.locator('#vault-setup-passphrase').fill('tabby-import-passphrase')
     await page.locator('#vault-setup-confirm').fill('tabby-import-passphrase')
     await page
-      .getByRole('dialog')
-      .filter({ hasText: 'Set Up Vault' })
+      .getByRole('dialog', { name: 'Set Up Vault' })
       .getByRole('button', { name: /Set Up/i })
       .click()
     await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({

@@ -19,12 +19,11 @@ import (
 )
 
 func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
-	cfgHome := t.TempDir()
-	dataHome := t.TempDir()
-	cacheHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgHome)
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	noKeystore := func(context.Context) bool { return false }
 
 	ctx, cancel := context.WithCancel(context.Background())

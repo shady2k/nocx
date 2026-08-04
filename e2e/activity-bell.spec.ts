@@ -1,6 +1,5 @@
 import { test, expect } from './harness'
 
-const TAB = '.nocx-tab'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
 // A full-screen TUI repaints constantly in the alternate buffer, and those
@@ -11,7 +10,7 @@ const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 // useless in the case it was built for.
 test('a bell lights the indicator from inside the alternate buffer', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator(TAB)).toHaveCount(1)
+  await expect(page.getByRole('tab')).toHaveCount(1)
 
   // Enter the alternate screen, wait, ring the bell, then block forever.
   // The shell `sleep 3` is a genuine ordering constraint that cannot be
@@ -38,10 +37,10 @@ test('a bell lights the indicator from inside the alternate buffer', async ({ pa
   })
 
   await page.keyboard.press('Meta+t')
-  await expect(page.locator(TAB)).toHaveCount(2)
-  await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
+  await expect(page.getByRole('tab')).toHaveCount(2)
+  await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'false')
 
   // Wait for the activity indicator — replaces waitForTimeout(6000).
   // Playwright's expect polls every ~100ms until found.
-  await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 10000 })
+  await expect(page.getByRole('tab').first().locator(ACTIVITY)).toBeAttached({ timeout: 10000 })
 })

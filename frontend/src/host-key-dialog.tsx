@@ -3,7 +3,7 @@ import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { Stack } from './ui/stack'
 
-export interface HostKeyDecisionEvidence {
+interface HostKeyDecisionEvidence {
   host: string
   changed: boolean
   fingerprint: string

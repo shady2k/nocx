@@ -2,16 +2,14 @@ package ssh
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha1" //nolint:gosec // known_hosts hashes host names with HMAC-SHA1; the file format fixes the algorithm.
 	"crypto/sha256"
 	"encoding/base32"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -363,18 +361,60 @@ func knownHostsTargetAddr(targetAddr string, cfg *ConnectConfig) string {
 // pressing "trust the new key"; appending the new line and leaving the old one
 // in place would keep the old key valid too, because knownhosts accepts a
 // presented key that matches any line for the host — so the party holding the
-// key the user has just rejected would still pass. Every line naming this host
-// with the SAME key algorithm is dropped first; lines for the host's other
-// algorithms are left alone, since a changed ed25519 key says nothing about
-// its RSA one. Hashed entries (|1|salt|hash, what OpenSSH writes with
-// HashKnownHosts on) are matched by recomputing the HMAC, the same way
-// ssh-keygen -R finds them.
+// key the user has just rejected would still pass.
 //
-// A file with nothing to replace is appended to and never rewritten. A fresh
-// store creates its parent directories 0700 and the file 0600. A rewrite goes
-// through a temp file in the same directory and a rename, so an interrupt
-// cannot leave a half-written known_hosts. An existing file keeps its own mode,
-// which is the user's to choose.
+// # Which lines cover the host is knownhosts' question to answer, not ours
+//
+// The file format is OpenSSH's: host fields carry `*`/`?` wildcards, may list
+// several comma-separated patterns, may negate one with `!`, and may be hashed.
+// knownhosts implements all of that, and it is the same package that VERIFIES
+// the key on the next connection (hostKeyCallbackFor). This function therefore
+// asks it rather than deciding for itself: a second derivation of "does this
+// line cover this host" is what nocx-9224 was — the two agreed everywhere
+// anybody looked and disagreed on wildcards, so a `*.example.com` line survived
+// the write and went on verifying the key the user had just rejected.
+//
+// The query is a probe with a key that cannot be in any file (knownHostsProbe),
+// which makes knownhosts report EVERY covering line instead of stopping at the
+// first that matches, with the line numbers to act on.
+//
+// # What happens to each covering line
+//
+//   - A line naming only this host (one exact pattern, or one hashed pattern —
+//     a hash names exactly one host) is REMOVED.
+//   - A wildcard, or a list naming other hosts too, is NARROWED: `!<addr>` is
+//     appended to its pattern list, which stops the line covering this host and
+//     leaves every sibling it was written for untouched. Deleting it instead
+//     would silently revoke trust for hosts the user never asked about.
+//   - `@cert-authority` is LEFT ALONE. It authorises host certificates, which is
+//     a different trust mechanism from the raw key that was rejected.
+//   - `@revoked` cannot appear: knownhosts indexes revocations by key, globally,
+//     and never puts them among the host lines. That is load-bearing — deleting
+//     one would re-enable a deliberately banned key for every host.
+//
+// Every algorithm goes, not just the presented one. A changed host identity that
+// left the host's old RSA key valid would still admit whoever holds it, which is
+// the attack the mismatch warning exists to report; `ssh-keygen -R` removes all
+// of a host's entries for the same reason.
+//
+// # Refusing
+//
+// A file knownhosts cannot parse is one whose meaning we cannot establish, so
+// the write refuses and names the file. Appending to it would report a trust
+// that was not achieved — and the read path currently degrades such a file to
+// "host unknown" on every connection, so the user is already not being verified.
+//
+// A missing file is not that case: it is an empty store, created 0600 under
+// parents created 0700.
+//
+// # Atomicity
+//
+// A rewrite goes to a temp file in the same directory, is VALIDATED there, and
+// only then renamed — validating after the rename would leave a bad file in
+// place while returning an error. The postcondition is asserted, not assumed:
+// exactly one raw-key line covers the host afterwards, it carries the accepted
+// key, and the only other survivors are the same `@cert-authority` lines as
+// before. An existing file keeps its own mode, which is the user's to choose.
 //
 // keyBlob is the wire-format marshalled public key (gossh.PublicKey.Marshal),
 // as carried by ErrUnknownHostKey.Key / ErrHostKeyMismatch.Key. addr is the
@@ -397,9 +437,7 @@ func (rc *RealClient) TrustHostKey(addr string, keyBlob []byte) (fingerprint str
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return "", fmt.Errorf("trust host key: read %s: %w", rc.knownHostsFile, readErr)
 	}
-
-	kept, replaced := dropHostKeyLines(string(existing), addr, key.Type())
-	if !replaced {
+	if errors.Is(readErr, os.ErrNotExist) || len(existing) == 0 {
 		f, openErr := os.OpenFile(rc.knownHostsFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 		if openErr != nil {
 			return "", fmt.Errorf("trust host key: open %s: %w", rc.knownHostsFile, openErr)
@@ -411,16 +449,177 @@ func (rc *RealClient) TrustHostKey(addr string, keyBlob []byte) (fingerprint str
 		return gossh.FingerprintSHA256(key), nil
 	}
 
-	if err := rc.rewriteKnownHosts(kept + line); err != nil {
+	covering, coverErr := coveringLines(dir, string(existing), addr)
+	if coverErr != nil {
+		return "", fmt.Errorf("trust host key: %s: %w", rc.knownHostsFile, coverErr)
+	}
+	if len(covering) == 0 {
+		f, openErr := os.OpenFile(rc.knownHostsFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if openErr != nil {
+			return "", fmt.Errorf("trust host key: open %s: %w", rc.knownHostsFile, openErr)
+		}
+		defer func() { _ = f.Close() }()
+		if _, writeErr := f.WriteString(line); writeErr != nil {
+			return "", fmt.Errorf("trust host key: append to %s: %w", rc.knownHostsFile, writeErr)
+		}
+		return gossh.FingerprintSHA256(key), nil
+	}
+
+	rewritten, authorities := revokeCoveringLines(string(existing), covering, addr)
+	if err := rc.replaceKnownHosts(rewritten+line, addr, key, authorities); err != nil {
 		return "", err
 	}
 	return gossh.FingerprintSHA256(key), nil
 }
 
-// rewriteKnownHosts replaces the file's contents atomically, keeping the mode
-// the file already had — a temp file beside it and a rename, so an interrupt
-// leaves either the old file or the new one and never a truncated one.
-func (rc *RealClient) rewriteKnownHosts(content string) error {
+// knownHostsProbe is a public key no known_hosts line can carry. knownhosts
+// compares keys by their marshalled bytes and never verifies a signature on
+// this path, and a parsed key always marshals to a length-prefixed type name —
+// so a one-byte blob matches nothing that parsed. Probing with it makes the
+// library enumerate every line covering a host instead of stopping at the first
+// whose key matches, which is how this package asks "which lines cover this
+// host" without owning a second answer to the question.
+type knownHostsProbe struct{}
+
+func (knownHostsProbe) Type() string    { return "nocx-known-hosts-probe" }
+func (knownHostsProbe) Marshal() []byte { return []byte{0} }
+func (knownHostsProbe) Verify([]byte, *gossh.Signature) error {
+	return errors.New("nocx: the known_hosts probe key never verifies anything")
+}
+
+// coveringLines returns the 1-based physical line numbers of every entry in
+// content that knownhosts would consult when verifying addr, in ascending
+// order. The snapshot is written to a temp file beside the store and parsed
+// from there, so the numbers describe the bytes this operation is about to
+// rewrite rather than whatever the file says by the time we look again.
+func coveringLines(dir, content, addr string) ([]int, error) {
+	snapshot, createErr := os.CreateTemp(dir, ".known_hosts-probe-*")
+	if createErr != nil {
+		return nil, fmt.Errorf("create probe snapshot in %s: %w", dir, createErr)
+	}
+	name := snapshot.Name()
+	defer func() { _ = os.Remove(name) }()
+	if _, writeErr := snapshot.WriteString(content); writeErr != nil {
+		_ = snapshot.Close()
+		return nil, fmt.Errorf("write probe snapshot: %w", writeErr)
+	}
+	if closeErr := snapshot.Close(); closeErr != nil {
+		return nil, fmt.Errorf("close probe snapshot: %w", closeErr)
+	}
+	return coveringLinesInFile(name, addr)
+}
+
+// coveringLinesInFile is coveringLines against a file that already exists.
+func coveringLinesInFile(path, addr string) ([]int, error) {
+	cb, newErr := knownhosts.New(path)
+	if newErr != nil {
+		// The verifier cannot read this file either. Say so rather than
+		// appending to something whose meaning is unknown.
+		return nil, fmt.Errorf("known_hosts does not parse: %w", newErr)
+	}
+	err := cb(addr, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}, knownHostsProbe{})
+	if err == nil {
+		// Unreachable: the probe key cannot equal a parsed key. Treated as
+		// "nothing covers the host" rather than trusted silently.
+		return nil, nil
+	}
+	var keyErr *knownhosts.KeyError
+	if !errors.As(err, &keyErr) {
+		return nil, fmt.Errorf("known_hosts lookup: %w", err)
+	}
+	lines := make([]int, 0, len(keyErr.Want))
+	for _, want := range keyErr.Want {
+		lines = append(lines, want.Line)
+	}
+	sort.Ints(lines)
+	return lines, nil
+}
+
+// revokeCoveringLines rewrites the numbered lines so none of them covers addr,
+// and reports the @cert-authority lines it deliberately left in place — the
+// only entries allowed to still cover the host afterwards.
+//
+// Untouched lines are preserved byte for byte, including their line endings and
+// whether the file ends in a newline, because this is the user's file.
+func revokeCoveringLines(content string, covering []int, addr string) (rewritten string, authorities []string) {
+	target := make(map[int]bool, len(covering))
+	for _, n := range covering {
+		target[n] = true
+	}
+	negation := "!" + knownhosts.Normalize(addr)
+
+	var b strings.Builder
+	for i, physical := range strings.SplitAfter(content, "\n") {
+		lineNo := i + 1
+		if !target[lineNo] {
+			b.WriteString(physical)
+			continue
+		}
+		body := strings.TrimSuffix(physical, "\n")
+		if isCertAuthorityLine(body) {
+			authorities = append(authorities, strings.TrimSpace(body))
+			b.WriteString(physical)
+			continue
+		}
+		narrowed, keep := narrowHostField(body, knownhosts.Normalize(addr), negation)
+		if !keep {
+			continue
+		}
+		b.WriteString(narrowed)
+		if strings.HasSuffix(physical, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	rewritten = b.String()
+	if rewritten != "" && !strings.HasSuffix(rewritten, "\n") {
+		rewritten += "\n"
+	}
+	return rewritten, authorities
+}
+
+// isCertAuthorityLine reports whether a line declares a host certificate
+// authority rather than a raw host key.
+func isCertAuthorityLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "@cert-authority")
+}
+
+// narrowHostField stops a line covering one host. A line whose pattern list is
+// only that host is dropped (keep=false) rather than left as a contradiction;
+// anything else keeps its key and gains a negation, so the hosts it was written
+// for keep theirs.
+func narrowHostField(line, normalized, negation string) (narrowed string, keep bool) {
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	rest := line[len(indent):]
+	// Fields are separated by a space OR a tab, the same way knownhosts splits
+	// them. Cutting on the space alone would leave a tab-separated line's key
+	// inside the host field and write a pattern that matches nothing.
+	sep := strings.IndexAny(rest, " \t")
+	if sep < 0 {
+		// No key on the line; knownhosts would not have parsed it, so this is
+		// unreachable. Leave it alone rather than mangle it.
+		return line, true
+	}
+	field, tail := rest[:sep], rest[sep+1:]
+	separator := rest[sep : sep+1]
+	patterns := strings.Split(field, ",")
+	if len(patterns) == 1 && (patterns[0] == normalized || strings.HasPrefix(patterns[0], "|")) {
+		return "", false
+	}
+	return indent + field + "," + negation + separator + tail, true
+}
+
+// replaceKnownHosts installs content atomically and only if it means what the
+// caller intended. The candidate is written beside the store, VALIDATED there,
+// and renamed last: validating after the rename would leave a file we know to
+// be wrong in place while returning an error, which is the opposite of what an
+// atomic write is for. An interrupt therefore leaves either the old file or the
+// new one, never a truncated or a wrong one. The file keeps the mode it had.
+//
+// The postcondition is the security statement of the whole operation, so it is
+// checked rather than believed: after the write, the accepted key verifies for
+// addr, exactly one raw-key entry covers addr, and the only other entries that
+// cover it are the same @cert-authority lines that covered it before.
+func (rc *RealClient) replaceKnownHosts(content, addr string, key gossh.PublicKey, authorities []string) error {
 	mode := os.FileMode(0o600)
 	if info, statErr := os.Stat(rc.knownHostsFile); statErr == nil {
 		mode = info.Mode().Perm()
@@ -443,97 +642,51 @@ func (rc *RealClient) rewriteKnownHosts(content string) error {
 	if chmodErr := os.Chmod(tmpName, mode); chmodErr != nil {
 		return fmt.Errorf("trust host key: chmod %s: %w", tmpName, chmodErr)
 	}
+	if err := validateTrustWrite(tmpName, content, addr, key, authorities); err != nil {
+		return fmt.Errorf("trust host key: refusing to install %s: %w", rc.knownHostsFile, err)
+	}
 	if renameErr := os.Rename(tmpName, rc.knownHostsFile); renameErr != nil {
 		return fmt.Errorf("trust host key: rename onto %s: %w", rc.knownHostsFile, renameErr)
 	}
 	return nil
 }
 
-// dropHostKeyLines returns the file with every line that names addr under the
-// given key algorithm removed, and whether anything was removed. Comments and
-// blank lines survive untouched: this is the user's file.
-func dropHostKeyLines(content, addr, keyAlgo string) (kept string, dropped bool) {
-	var b strings.Builder
-	for _, line := range strings.SplitAfter(content, "\n") {
-		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\n"))
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") &&
-			lineKeyAlgo(trimmed) == keyAlgo && lineNamesHost(trimmed, addr) {
-			dropped = true
+// validateTrustWrite asks knownhosts what the candidate file means for addr and
+// refuses anything but the intended outcome.
+func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authorities []string) error {
+	cb, newErr := knownhosts.New(path)
+	if newErr != nil {
+		return fmt.Errorf("the rewritten file does not parse: %w", newErr)
+	}
+	remote := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 22}
+	if err := cb(addr, remote, key); err != nil {
+		return fmt.Errorf("the accepted key would not verify: %w", err)
+	}
+
+	covering, coverErr := coveringLinesInFile(path, addr)
+	if coverErr != nil {
+		return coverErr
+	}
+	physical := strings.SplitAfter(content, "\n")
+	rawKeyLines := 0
+	survivingAuthorities := 0
+	for _, lineNo := range covering {
+		if lineNo < 1 || lineNo > len(physical) {
+			return fmt.Errorf("line %d is outside the rewritten file", lineNo)
+		}
+		if isCertAuthorityLine(strings.TrimSuffix(physical[lineNo-1], "\n")) {
+			survivingAuthorities++
 			continue
 		}
-		b.WriteString(line)
+		rawKeyLines++
 	}
-	kept = b.String()
-	if kept != "" && !strings.HasSuffix(kept, "\n") {
-		kept += "\n"
+	if rawKeyLines != 1 {
+		return fmt.Errorf("%d raw host-key entries would still cover %s, want exactly the accepted one", rawKeyLines, addr)
 	}
-	return kept, dropped
-}
-
-// knownHostsFields strips a leading @cert-authority / @revoked marker and
-// returns the line's fields: host patterns, key algorithm, key.
-func knownHostsFields(line string) []string {
-	fields := strings.Fields(line)
-	if len(fields) > 0 && strings.HasPrefix(fields[0], "@") {
-		fields = fields[1:]
+	if survivingAuthorities != len(authorities) {
+		return fmt.Errorf("%d certificate-authority entries survived, want %d", survivingAuthorities, len(authorities))
 	}
-	return fields
-}
-
-// lineKeyAlgo is the key algorithm a known_hosts line carries, or "".
-func lineKeyAlgo(line string) string {
-	fields := knownHostsFields(line)
-	if len(fields) < 3 {
-		return ""
-	}
-	return fields[1]
-}
-
-// lineNamesHost reports whether a known_hosts line's host field names addr,
-// plain or hashed. Negations (!host) are treated as naming it — a line that
-// mentions the host at all is one this operation must not silently leave
-// contradicting the key it just wrote.
-func lineNamesHost(line, addr string) bool {
-	fields := knownHostsFields(line)
-	if len(fields) < 3 {
-		return false
-	}
-	normalized := knownhosts.Normalize(addr)
-	for _, pattern := range strings.Split(fields[0], ",") {
-		pattern = strings.TrimPrefix(pattern, "!")
-		if strings.HasPrefix(pattern, "|1|") {
-			if hashedPatternMatches(pattern, normalized) {
-				return true
-			}
-			continue
-		}
-		if pattern == normalized {
-			return true
-		}
-	}
-	return false
-}
-
-// hashedPatternMatches answers the |1|salt|hash form OpenSSH writes when
-// HashKnownHosts is on. The construction is fixed by the file format —
-// HMAC-SHA1 over the normalized host with the line's own salt — so SHA-1 here
-// is reading somebody else's format, not choosing a hash.
-func hashedPatternMatches(pattern, normalizedHost string) bool {
-	parts := strings.Split(pattern, "|")
-	if len(parts) != 4 {
-		return false
-	}
-	salt, saltErr := base64.StdEncoding.DecodeString(parts[2])
-	if saltErr != nil {
-		return false
-	}
-	want, hashErr := base64.StdEncoding.DecodeString(parts[3])
-	if hashErr != nil {
-		return false
-	}
-	mac := hmac.New(sha1.New, salt)
-	mac.Write([]byte(normalizedHost))
-	return hmac.Equal(mac.Sum(nil), want)
+	return nil
 }
 
 // shellStartCommand decides what the remote session runs and whether shell

@@ -258,15 +258,16 @@ func knownHostsLinesFor(t *testing.T, path, addr string) []string {
 	if err != nil {
 		t.Fatalf("read known_hosts: %v", err)
 	}
+	// Asks the same authority the verifier and the trust write ask, so this
+	// helper cannot drift away from what the file actually means.
+	covering, coverErr := coveringLinesInFile(path, addr)
+	if coverErr != nil {
+		t.Fatalf("covering lines for %s: %v", addr, coverErr)
+	}
+	physical := strings.Split(string(body), "\n")
 	var out []string
-	for _, line := range strings.Split(string(body), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if lineNamesHost(trimmed, addr) {
-			out = append(out, trimmed)
-		}
+	for _, lineNo := range covering {
+		out = append(out, strings.TrimSpace(physical[lineNo-1]))
 	}
 	return out
 }
@@ -323,9 +324,13 @@ func TestTrustHostKey_ExistingFileKeepsModeAndAppends(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
+	// A real key, not a hand-typed lookalike: the trust write asks knownhosts
+	// what the file means, so a file knownhosts cannot parse is refused rather
+	// than appended to. This test is about a mode and an append order, so it
+	// must not also be a malformed-file test by accident.
 	existing := []string{
 		"# nocx trust test — existing line 1",
-		"existing.host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC7cYlRke1RKYrV9ZnJqRrrT5JxLTuvz1RzVvJxTc3c",
+		knownhosts.Line([]string{"existing.host"}, newTestHostKey(t)),
 		"# nocx trust test — existing line 3",
 	}
 	khPath := filepath.Join(t.TempDir(), "known_hosts")

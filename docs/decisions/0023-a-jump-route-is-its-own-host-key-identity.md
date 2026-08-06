@@ -72,7 +72,15 @@ comment.
   derives either — a second derivation on the renderer side is the defect this shape exists
   to prevent.
 - Every hop is still verified on its own hostname, as a bastion is not itself jumped.
-- `nocx-9224` is open and independent: `TrustHostKey` compares `known_hosts` names
-  literally while verification applies wildcards, so a `*.example.com` line survives a trust
-  write and keeps a rejected key valid. Opaque route identities cannot match a wildcard, so
-  that bug reaches the direct route only.
+- `nocx-9224` was independent and is now fixed: `TrustHostKey` compared `known_hosts` names
+  literally while verification applied wildcards, so a `*.example.com` line survived a trust
+  write and kept a rejected key valid. The fix removed the second comparison rather than
+  teaching it wildcards — `knownhosts` is asked which lines cover a host, since it is the
+  package that will later verify against them.
+
+  The claim first written here, that opaque route identities "cannot match a wildcard", was
+  too absolute and is corrected: a deliberately broad pattern (`*`, or `nocx-v1-*`) does
+  match one, because the identity carries port 22 like any other. What the digest actually
+  prevents is _accidental_ capture by the domain-shaped patterns people really write —
+  `*.example.com` cannot reach a `nocx-v1-…` host — which is why that bug reached the direct
+  route only. The conclusion held; the reasoning was stronger than the facts.

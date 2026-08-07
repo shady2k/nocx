@@ -45,7 +45,9 @@ export interface TabProps {
   subtitle?: string
   /** When true, the tab offers a save action (alias adoption). */
   adoptable?: boolean
-  /** Triggered when the user clicks the save action. */
+  /** True once the session confirmed a sandboxed local tab (lock/shield
+   *  marker renders; ADR-0019 §3.3). */
+  sandboxed?: boolean
   onAdopt?: () => void
   /** The environment degraded or became uncertain (nocx-4t37.2): renders
    *  the small warning mark in the status line. */
@@ -68,6 +70,7 @@ export function Tab(props: TabProps) {
       aria-selected={props.active}
       data-tab-id={String(props.tabId)}
       data-agent-status={props.agentStatus ?? undefined}
+      data-sandboxed={props.sandboxed === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
       // subtitle, but that line ellipses — so dropping the native tooltip there
@@ -119,6 +122,11 @@ export function Tab(props: TabProps) {
               aria-label="Environment degraded"
               title="Shell integration degraded or uncertain"
             />
+          </Show>
+          <Show when={props.sandboxed === true}>
+            <span class="nocx-tab-sandboxed-marker" aria-label="Sandboxed">
+              {'\u26e8'}
+            </span>
           </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>

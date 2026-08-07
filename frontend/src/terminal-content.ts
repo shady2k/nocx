@@ -56,7 +56,7 @@ import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { queryHistory, recordCommand } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle } from './ipc'
+import type { WSClient, SessionHandle, SessionSandboxInfo } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import {
@@ -220,6 +220,10 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+  /** Filesystem-isolated local-session request (ADR-0019 §3.2). */
+  sandboxWorkspace?: string
+  /** Reports sandbox confirmation from the open response to the owning tab. */
+  onSandboxedChange?: (sandboxed: boolean) => void
 }
 
 /** The rewrite half of an ssh submit, carried from beforeSubmit to submit:
@@ -819,6 +823,9 @@ export class TerminalContent extends BaseTabContent {
 
   private openRequestedSession(): Promise<SessionHandle> {
     if (!this.sshOpts) {
+      if (this.hooks.sandboxWorkspace) {
+        return this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandboxWorkspace)
+      }
       return this.client.openSession(this.cols, this.rows, true)
     }
     if (this.sshOpts.profileId) {
@@ -1779,6 +1786,18 @@ export class TerminalContent extends BaseTabContent {
       // disagree with it.
       this._policy = session.desiredMode ?? 'script'
       this._openReason = session.shellIntegrationReason ?? ''
+      // Sandboxed session: flip the tab's lock/shield marker (immutable for
+      // the tab's lifetime) and name backend + writable roots in the tooltip
+      // (ADR-0019 §3.3).
+      const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
+      this.hooks.onSandboxedChange?.(sandboxInfo != null)
+      if (sandboxInfo) {
+        const writable = sandboxInfo.writableRoots.join(', ')
+        this.host.setTitle(sandboxInfo.workspace || session.cwd || '')
+        this.host.updateTooltip(
+          `${session.cwd ? session.cwd + ' (initial cwd)\n' : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable}`,
+        )
+      }
       if (this._openReason !== '') {
         // A launcher decline on an auto profile is the soft degrade
         // AGENTS.md demands be visible in the product, never log-only.

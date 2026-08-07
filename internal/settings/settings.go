@@ -610,6 +610,19 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// SandboxEnabled gates the opt-in "Sandboxed shell…" action (ADR-0019 §3.1).
+// It is a capability/visibility gate, not "sandbox every tab": it only
+// exposes an opt-in action for NEW local tabs, never changes a running tab,
+// and the backend rejects a sandbox request while the flag is off.
+var SandboxEnabled = MustRegisterBool(BoolSpec{
+	Key:         "sandbox.enabled",
+	Section:     "Experimental",
+	Label:       "Filesystem sandbox",
+	Description: "Expose an opt-in action that opens new local tabs inside a filesystem-isolated sandbox (experimental). Existing tabs are never affected, and the flag alone never sandboxes anything.",
+	DataClass:   PublicConfig,
+	Default:     false,
+})
+
 // ── Document shape ─────────────────────────────────────────────────────
 
 const settingsDocName = "settings.json"

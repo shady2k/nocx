@@ -128,6 +128,7 @@ function mockReady(
 function mockTabHost(): TabHost {
   return {
     setTitle: vi.fn(),
+    updateTooltip: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
   }

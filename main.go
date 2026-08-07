@@ -15,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -28,6 +29,13 @@ func main() {
 	// build metadata and exit, never opening a terminal.
 	if versionRequested() {
 		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
+		return
+	}
+
+	// Sandboxed shells are launched by re-exec'ing this binary as the
+	// __sandbox-landlock-exec helper (ADR-0019 §8.2). The helper path must
+	// run before any backend or window exists: it never returns.
+	if sandbox.MaybeHelper() {
 		return
 	}
 
@@ -166,6 +174,14 @@ func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
 		Filters: []runtime.FileFilter{
 			{DisplayName: "All files", Pattern: "*"},
 		},
+	})
+}
+
+// OpenDirectory opens the native folder picker for the sandboxed-shell
+// workspace (ADR-0019 §3.2). Directories have no filters.
+func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
+	return runtime.OpenDirectoryDialog(d.ctx, runtime.OpenDialogOptions{
+		Title: "Choose a workspace",
 	})
 }
 

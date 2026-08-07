@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -47,7 +48,9 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
-
+	// Sandbox is the per-tab filesystem sandbox backend (ADR-0019). Injected
+	// here — the single composition root — and nowhere else.
+	Sandbox sandbox.Service
 	// UnlockRequester lets backend code request a vault unlock from the
 	// user (the second direction, nocx-25k9.22). Behind an interface so
 	// app.New() never reaches into the transport directly (AD-8). Set
@@ -242,10 +245,13 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	shint := shellintegration.New(logger)
-	ptf := &localPTYFactory{log: logger, shint: shint}
+	// Sandbox backend (ADR-0019): the per-tab filesystem sandbox needs the
+	// cache dir for its per-session runtime trees (design spec §5.2).
+	sandboxSvc := sandbox.New(logger, paths.CacheDir())
+	ptf := &localPTYFactory{log: logger, shint: shint, sandbox: sandboxSvc}
 	sess := session.New(logger, ptf)
 
-	// SSH config resolver: shared by both the SSH client and the profile
+	// SSH config resolver
 	// resolver so the authorization comparison matches canonical hostnames.
 	// AD-4: nocx asks OpenSSH via ssh -G; the injected resolver is the sole
 	// path through which ~/.ssh/config is read.
@@ -414,9 +420,10 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProfileRepository(profileStore),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
+		transport.WithSettingsRegistry(settingsRegistry),
+		transport.WithSandboxService(sandboxSvc),
 		transport.WithVaultLifecycle(v),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
-		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithProfileUsageStore(usageStore),
 		transport.WithExportPaths(paths),
 		// One ContentDB at the composition root (AD-8): the same store backs
@@ -545,7 +552,7 @@ func New(opts ...Option) (*App, error) {
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,
-		vaultCloser:      v,
+		Sandbox:          sandboxSvc,
 		discoverySched:   discoverySched,
 		UnlockRequester:  tp,
 		logFilePath:      logFilePath,
@@ -719,13 +726,14 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 }
 
 type localPTYFactory struct {
-	log   log.Logger
-	shint shellintegration.ShellIntegration
+	log     log.Logger
+	shint   shellintegration.ShellIntegration
+	sandbox sandbox.Service
 }
 
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	env := f.shint.ActivationEnv(cfg.Enhanced)
-	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env), pty.WithSandboxService(f.sandbox))
 }
 
 func (a *App) Start(ctx context.Context) error {

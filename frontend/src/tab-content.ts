@@ -80,6 +80,8 @@ export interface ActiveOrigin {
  */
 export interface TabHost {
   setTitle(title: string): void
+  /** Update the tab's tooltip (ADR-0019 §3.3 — sandbox tooltip). */
+  updateTooltip(tooltip: string): void
   requestAttention(): void
   requestClose(): void
 }

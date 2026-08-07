@@ -76,11 +76,11 @@ describe('ActionsQuickConnectProvider', () => {
     expect(run).not.toHaveBeenCalled()
   })
 
-  it('calls integrateShell when the integrate-this-shell item runs', () => {
+  it('calls integrateShell when the integrate-this-shell item runs', async () => {
     const integrateShell = vi.fn()
     const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), integrateShell)
-
-    provider.getItems()[2].run()
+    const items = await provider.getItems()
+    items[2].run()
 
     expect(integrateShell).toHaveBeenCalledOnce()
   })
@@ -95,23 +95,25 @@ describe('ActionsQuickConnectProvider', () => {
     expect(items.some((i) => i.label === 'Ports')).toBe(false)
   })
 
-  it('calls newTab when the local-shell item runs', () => {
+  it('calls newTab when the local-shell item runs', async () => {
     const newTab = vi.fn()
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newTab, newConnection)
 
-    provider.getItems()[0].run()
+    const items = await provider.getItems()
+    items[0].run()
 
     expect(newTab).toHaveBeenCalledOnce()
     expect(newConnection).not.toHaveBeenCalled()
   })
 
-  it('opens the connection editor when the new-connection item runs', () => {
+  it('opens the connection editor when the new-connection item runs', async () => {
     const newTab = vi.fn()
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newTab, newConnection)
 
-    provider.getItems()[1].run()
+    const items = await provider.getItems()
+    items[1].run()
 
     // Not a tab: this entry used to be an unconfigured profile, and running it
     // opened a terminal on an empty host that failed to start.

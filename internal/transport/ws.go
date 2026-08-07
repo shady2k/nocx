@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
 
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -109,6 +110,12 @@ type WSServer struct {
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings   *settings.Registry
 	resolverOK bool
+
+	// sandboxSvc is the per-tab filesystem sandbox backend (ADR-0019),
+	// answering sandbox.status and preparing sandboxed open requests. The
+	// transport never renders policy — it validates the request and maps the
+	// backend's typed errors to reserved codes.
+	sandboxSvc sandbox.Service
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
 	// When nil, the handler returns a JSON-RPC error. The resolver
@@ -456,6 +463,26 @@ func WithSettingsRegistry(r *settings.Registry) WSServerOption {
 			s.broadcastSettingsChanged(revision, keys)
 		})
 	}
+}
+
+// WithSandboxService attaches the filesystem sandbox backend, enabling
+// sandbox.status and sandboxed open requests. Without it, sandbox.status
+// reports -32601 and a sandboxed open fails closed at -32010 (no service to
+// confirm the flag).
+func WithSandboxService(svc sandbox.Service) WSServerOption {
+	return func(s *WSServer) { s.sandboxSvc = svc }
+}
+
+// sandboxEnabled reports whether the opt-in feature flag is on. The flag is
+// the sole gate: a sandbox request while it is off is rejected (-32010), so
+// UI and wire behavior agree even if the renderer is stale (design spec
+// §3.1). A missing registry fails closed.
+func (s *WSServer) sandboxEnabled() bool {
+	if s.settings == nil {
+		return false
+	}
+	on, err := s.settings.GetBool(settings.SandboxEnabled)
+	return err == nil && on
 }
 
 // WithExportPaths attaches storage path resolution for the export.backup
@@ -843,6 +870,10 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// Sandbox is the opt-in filesystem sandbox request (ADR-0019). Presence
+	// is the sole wire opt-in; the renderer supplies only the workspace, the
+	// backend canonicalizes and owns policy and enforcement.
+	Sandbox *openSandboxParams `json:"sandbox,omitempty"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher
@@ -852,6 +883,11 @@ type openParams struct {
 	// meaningless pin, and the launcher refuses unmapped kinds rather
 	// than guessing if one slips past).
 	Shell string `json:"shell,omitempty"`
+}
+
+// openSandboxParams is the sandbox block of open (design spec §4.1).
+type openSandboxParams struct {
+	Workspace string `json:"workspace"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -1051,8 +1087,10 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleTunnelStop(wconn, req)
 	case "ports.status", "ports.sample", "ports.pause", "ports.visible":
 		s.handlePortsMethod(wconn, req)
-	case "dialog.openFile":
-		s.handleDialogOpenFile(wconn, req)
+	case "sandbox.status":
+		s.handleSandboxStatus(wconn, req)
+	case "dialog.openFile", "dialog.openDirectory":
+		s.handleDialogMethod(wconn, req)
 	case "shell.environmentObserved":
 		s.handleShellEnvironmentObserved(wconn, req)
 	case "history.query":
@@ -1129,6 +1167,31 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		return
 	}
 
+	// Sandbox validation (design spec §4.1): local-only, feature flag on,
+	// workspace canonicalized once. Failures are -32602 for invalid params,
+	// -32010 when the flag is off.
+	var sandboxReq *sandbox.Request
+	if params.Sandbox != nil {
+		if params.Kind == "ssh" || params.ProfileID != "" || params.Host != "" {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: sandbox is only valid for local sessions")
+			_ = wconn.writeJSON(resp)
+			return
+		}
+		if !s.sandboxEnabled() {
+			resp := newJSONRPCError(req.ID, -32010, "Filesystem sandbox is disabled")
+			resp.Error.Data = map[string]any{"reason": "feature-disabled"}
+			_ = wconn.writeJSON(resp)
+			return
+		}
+		canon, err := sandbox.CanonicalizeWorkspace(params.Sandbox.Workspace)
+		if err != nil {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error())
+			_ = wconn.writeJSON(resp)
+			return
+		}
+		sandboxReq = &sandbox.Request{Workspace: canon}
+	}
+
 	cfg := session.Config{
 		Kind:     session.KindLocal,
 		Cols:     params.Cols,
@@ -1136,6 +1199,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		XPixel:   params.XPixel,
 		YPixel:   params.YPixel,
 		Enhanced: params.Enhanced,
+		Sandbox:  sandboxReq,
 	}
 	// ProfileID is deliberately NOT set here. It is recorded below, only once
 	// the resolver has accepted it, because a local PTY has no profile and
@@ -1262,7 +1326,23 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	sess, err := s.registry.Open(ctx, cfg)
 	if err != nil {
 		s.log.Error("failed to open session", "error", err)
-		// A sealed vault surfaces here for EVERY connection that needs it —
+		// Sandbox failures are typed: -32011 carries the backend status
+		// reason, -32012 a setup failure (policy, helper handshake, native
+		// launch). The logs above carry backend/reason only — never paths.
+		var statusErr *sandbox.StatusError
+		var setupErr *sandbox.SetupError
+		switch {
+		case errors.As(err, &statusErr):
+			resp := newJSONRPCError(req.ID, -32011, statusErr.Status.Reason)
+			resp.Error.Data = map[string]any{"reason": statusErr.Status.Reason}
+			_ = wconn.writeJSON(resp)
+			return
+		case errors.As(err, &setupErr):
+			resp := newJSONRPCError(req.ID, -32012, "sandbox setup failed")
+			resp.Error.Data = map[string]any{"reason": "setup-failed"}
+			_ = wconn.writeJSON(resp)
+			return
+		}
 		// this is still a vault access, and the renderer must get the reason
 		// so the vault-owned unlock prompt appears instead of an error
 		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
@@ -1331,11 +1411,17 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	// consent-gated. It is the mode, never proof integration succeeded: the
 	// reason field and the arrival of markers are what confirm or downgrade
 	// the tab's state.
-	result := map[string]string{
+	// A sandboxed session additionally carries its immutable
+	// {backend, workspace, writableRoots} metadata; ordinary and SSH results
+	// omit it (design spec §4.5).
+	result := map[string]any{
 		"sessionId":              string(sess.ID()),
 		"cwd":                    sess.Cwd(),
 		"shellIntegrationReason": string(sess.ShellIntegrationReason()),
 		"desiredMode":            desiredModeForAck(cfg.Remote),
+	}
+	if si := sess.SandboxInfo(); si != nil {
+		result["sandbox"] = si
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)

@@ -455,3 +455,13 @@
 .tabstrip-vertical .nocx-tab-index {
   left: 10px;
 }
+
+/* ── Sandboxed tab marker (ADR-0019 §3.3) ─────────────────────────────── */
+
+.nocx-tab-sandboxed-marker {
+  flex: none;
+  align-self: center;
+  font-size: 0.7em;
+  opacity: 0.7;
+  color: var(--text-secondary, inherit);
+}

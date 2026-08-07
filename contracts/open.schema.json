@@ -39,6 +39,20 @@
         "script",
         "relay"
       ]
+    },
+    "sandbox": {
+      "description": "Immutable sandbox metadata for a sandboxed local session (ADR-0019). Absent for ordinary and SSH sessions.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "workspace", "writableRoots"],
+      "properties": {
+        "backend": { "type": "string", "enum": ["landlock", "seatbelt"] },
+        "workspace": { "type": "string", "minLength": 1 },
+        "writableRoots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
     }
   }
 }

@@ -9,6 +9,7 @@
 
 import type { Dispatcher } from './dispatcher'
 import type { DialogOpenFile } from './generated/dialog.openFile'
+import type { DialogOpenDirectory } from './generated/dialog.openDirectory'
 
 export class DialogClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -18,5 +19,12 @@ export class DialogClient {
    *  exists — the surface must degrade to typing the path by hand. */
   openFileDialog(): Promise<DialogOpenFile> {
     return this.dispatcher.call('dialog.openFile', {})
+  }
+
+  /** Open the native folder picker for the sandboxed-shell workspace
+   *  (ADR-0019 §3.2). Resolves to the chosen ABSOLUTE directory, or an
+   *  empty path when the user cancelled (a no-op for the action). */
+  openDirectoryDialog(): Promise<DialogOpenDirectory> {
+    return this.dispatcher.call('dialog.openDirectory', {})
   }
 }

@@ -55,6 +55,7 @@ export class Tab implements TabHost {
   private _adoptable = false
   private _onAdopt: (() => void) | null = null
   private _warning = false
+  private _sandboxed = false
   private _disposed = false
   private _mountAbort = new AbortController()
   // ── B.5 geometry authority ──────────────────────────────────────────
@@ -146,6 +147,18 @@ export class Tab implements TabHost {
 
   get warning(): boolean {
     return this._warning
+  }
+
+  get sandboxed(): boolean {
+    return this._sandboxed
+  }
+
+  /** Mark the tab as sandboxed (ADR-0019 §3.3): the lock/shield marker
+   *  renders in the tab chrome. Set once at open, never toggled. */
+  setSandboxed(): void {
+    if (this._disposed) return
+    this._sandboxed = true
+    this.onDisplayChange?.()
   }
 
   setActive(active: boolean): void {
@@ -472,6 +485,43 @@ export class TabManager {
       // then replaced it, which reads as a flicker rather than as loading
       // (nocx-83a). An empty title is honest and the strip's width is fixed, so
       // nothing moves when the real one lands.
+      defaultTitle: '',
+    }
+    const tab = this.addTab(content, descriptor)
+    tabRef.current = tab
+    return tab
+  }
+
+  /** Create a new sandboxed local terminal tab (ADR-0019 §3.2): opens a
+   *  filesystem-isolated session in the given workspace. The backend
+   *  canonicalizes the workspace and enforces the sandbox before the session
+   *  is registered; a failure rejects the open and the tab closes. */
+  newSandboxedTab(workspace: string): Tab {
+    const tabRef = { current: undefined as Tab | undefined }
+    const content = new TerminalContent(
+      this.client,
+      this.clipboard,
+      this.gate,
+      this.banner,
+      this.profileClient,
+      (tooltip) => tabRef.current?.updateTooltip(tooltip),
+      undefined,
+      {
+        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onPortsTargetChange: () => this.onActiveTabChange?.(),
+        onActiveOriginChange: () => this.onActiveTabChange?.(),
+        onSetupVault: this.onSetupVault,
+        onCreateSecret: this.onCreateSecret,
+        sandboxWorkspace: workspace,
+        onSandboxedChange: () => tabRef.current?.setSandboxed(),
+      },
+    )
+    const descriptor: ContentDescriptor = {
+      surfaceType: SURFACE_TERMINAL,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: true,
       defaultTitle: '',
     }
     const tab = this.addTab(content, descriptor)

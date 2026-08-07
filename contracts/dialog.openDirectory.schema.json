@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/dialog.openDirectory.schema.json",
+  "title": "DialogOpenDirectory",
+  "description": "Result of the dialog.openDirectory JSON-RPC method: the native folder picker behind the sandboxed-shell workspace action (ADR-0019 §3.2, §4.3). The chosen ABSOLUTE directory, or an empty string when the user cancelled. The method reports itself unavailable (-32601) when no native runtime exists — the dev-web harness has no Wails at all — and the action surface renders the unavailable row instead.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "description": "The absolute path of the chosen directory, or \"\" when the picker was cancelled.",
+      "type": "string"
+    }
+  }
+}

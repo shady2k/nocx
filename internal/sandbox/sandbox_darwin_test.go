@@ -1,0 +1,182 @@
+//go:build darwin
+
+package sandbox
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestDarwinChildProcess is the child entry of the macOS enforcement suite:
+// with envProbe set the test binary runs the shared probe assertions INSIDE
+// the sandbox-exec cage.
+func TestDarwinChildProcess(t *testing.T) {
+	if os.Getenv(envProbe) == "1" {
+		os.Exit(runProbe())
+	}
+}
+
+// TestSeatbeltEnforcement is the real enforcement smoke: it launches
+// /usr/bin/sandbox-exec -p <rendered profile> <test binary> with the probe
+// env and verifies the probe's verdict inside the cage. This is the test the
+// sandbox-smoke-macos target and the release gate run on macOS; it cannot
+// run on Linux and is skipped loudly, not silently.
+func TestSeatbeltEnforcement(t *testing.T) {
+	if _, err := os.Stat(sandboxExecPath); err != nil {
+		t.Skipf("seatbelt enforcement requires %s (skipped loudly: %v)", sandboxExecPath, err)
+	}
+
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	home := filepath.Join(base, "runtime", "home")
+	tmp := filepath.Join(base, "runtime", "tmp")
+	sentinel := filepath.Join(base, "sentinel-secret.txt")
+	for _, d := range []string{workspace, home, tmp} {
+		if mkErr := os.MkdirAll(d, 0o750); mkErr != nil {
+			t.Fatalf("mkdir %s: %v", d, mkErr)
+		}
+	}
+	if wErr := os.WriteFile(sentinel, []byte("top secret"), 0o600); wErr != nil {
+		t.Fatalf("write sentinel: %v", wErr)
+	}
+	preHard := filepath.Join(workspace, "pre-hard-link")
+	if lErr := os.Link(sentinel, preHard); lErr != nil {
+		t.Fatalf("pre-link sentinel: %v", lErr)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("executable: %v", err)
+	}
+	probeEnv := append(os.Environ(),
+		envProbe+"=1",
+		"NOCX_SB_WORKSPACE="+workspace,
+		"NOCX_SB_SENTINEL="+sentinel,
+		"NOCX_SB_PREHARD="+preHard,
+		"NOCX_SB_HOME="+home,
+		"NOCX_SB_TMP="+tmp,
+	)
+
+	pol, err := BuildPolicy(workspace, exe, filepath.Join(base, "runtime"), probeEnv)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	profile, err := renderProfile(pol)
+	if err != nil {
+		t.Fatalf("renderProfile: %v", err)
+	}
+
+	cmd := exec.Command(sandboxExecPath, "-p", profile, exe, "-test.run=TestDarwinChildProcess") //nolint:gosec // test injects the sandbox-exec seam; arguments are asserted below
+	cmd.Env = probeEnv
+	cmd.Dir = workspace
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("probe inside the Seatbelt cage failed: %v\noutput:\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "PROBE RESULT: ok") {
+		t.Fatalf("probe did not report success:\n%s", out.String())
+	}
+}
+
+// TestDarwinServicePrepare_ConstructsWrapper asserts the wrapper shape
+// (sandbox-exec -p <profile> <shell> <args>), the environment, the working
+// directory, the runtime tree lifecycle, and fail-closed behaviour — without
+// launching anything (construction-only, runnable in CI).
+func TestDarwinServicePrepare_ConstructsWrapper(t *testing.T) {
+	origPath, origProbe := sandboxExecPath, sandboxExecProbe
+	defer func() {
+		sandboxExecPath = origPath
+		sandboxExecProbe = origProbe
+	}()
+	sandboxExecPath = "/usr/bin/true" // exists; probe seam below keeps Status available
+	sandboxExecProbe = func(_ context.Context, _ string) error { return nil }
+
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	for _, d := range []string{ws, filepath.Join(base, "rt", "home"), filepath.Join(base, "rt", "tmp")} {
+		if mkErr := os.MkdirAll(d, 0o750); mkErr != nil {
+			t.Fatalf("mkdir %s: %v", d, mkErr)
+		}
+	}
+
+	svc := New(nil, base)
+	pc, err := svc.Prepare(context.Background(), Request{Workspace: ws},
+		CommandSpec{Path: "/bin/sh", Args: []string{"-i"}, Dir: ws, Env: []string{"A=B", "NOCX_SANDBOX=filesystem"}})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	cmd := pc.Cmd
+	if cmd.Path != "/usr/bin/true" {
+		t.Errorf("Cmd.Path = %q, want seam path", cmd.Path)
+	}
+	if len(cmd.Args) < 5 || cmd.Args[1] != "-p" || cmd.Args[3] != "/bin/sh" || cmd.Args[4] != "-i" {
+		t.Fatalf("Cmd.Args = %v, want [<path> -p <profile> /bin/sh -i]", cmd.Args)
+	}
+	if !strings.Contains(cmd.Args[2], "(deny default)") {
+		t.Error("rendered profile must start with deny default")
+	}
+	if cmd.Dir != ws {
+		t.Errorf("Cmd.Dir = %q, want %q", cmd.Dir, ws)
+	}
+	if !strings.Contains(strings.Join(cmd.Env, "\n"), "A=B") || !strings.Contains(strings.Join(cmd.Env, "\n"), "NOCX_SANDBOX=filesystem") {
+		t.Errorf("Cmd.Env missing expected vars: %v", cmd.Env)
+	}
+
+	// The per-session runtime tree exists under the cache dir until Close.
+	entries, rErr := os.ReadDir(filepath.Join(base, "sandbox-sessions"))
+	if rErr != nil || len(entries) != 1 {
+		t.Fatalf("sandbox-sessions entries = %v (%v), want exactly one runtime tree", entries, rErr)
+	}
+	pc.Close()
+	pc.Close() // idempotent
+	if entries, rErr := os.ReadDir(filepath.Join(base, "sandbox-sessions")); rErr == nil && len(entries) != 0 {
+		t.Errorf("runtime tree not removed after Close: %v", entries)
+	}
+}
+
+// TestDarwinServicePrepare_FailClosed covers the typed failure paths.
+func TestDarwinServicePrepare_FailClosed(t *testing.T) {
+	origPath, origProbe := sandboxExecPath, sandboxExecProbe
+	defer func() {
+		sandboxExecPath = origPath
+		sandboxExecProbe = origProbe
+	}()
+
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if mkErr := os.MkdirAll(ws, 0o750); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	spec := CommandSpec{Path: "/bin/sh", Args: []string{"-i"}, Dir: ws}
+
+	t.Run("backend unavailable is StatusError", func(t *testing.T) {
+		sandboxExecPath = "/nonexistent/sandbox-exec"
+		svc := New(nil, base)
+		var se *StatusError
+		_, err := svc.Prepare(context.Background(), Request{Workspace: ws}, spec)
+		if !errors.As(err, &se) {
+			t.Fatalf("err = %v, want StatusError", err)
+		}
+	})
+
+	t.Run("invalid workspace is ValidationError and cleans up", func(t *testing.T) {
+		sandboxExecPath = "/usr/bin/true"
+		sandboxExecProbe = func(_ context.Context, _ string) error { return nil }
+		svc := New(nil, base)
+		_, err := svc.Prepare(context.Background(), Request{Workspace: "relative/ws"}, spec)
+		if !errors.Is(err, ErrInvalidWorkspace) {
+			t.Fatalf("err = %v, want ErrInvalidWorkspace", err)
+		}
+		if entries, rErr := os.ReadDir(filepath.Join(base, "sandbox-sessions")); rErr == nil && len(entries) != 0 {
+			t.Errorf("runtime tree leaked after validation failure: %v", entries)
+		}
+	})
+}

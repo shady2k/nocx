@@ -1540,7 +1540,15 @@ func (s *WSServer) handleResize(wconn *wsConn, state *connState, req jsonrpcRequ
 		return
 	}
 
-	if err := sess.Resize(context.Background(), params.Cols, params.Rows, params.XPixel, params.YPixel); err != nil {
+	// A hung SSH channel (NAT timeout, jump host drop) makes the underlying
+	// window-change request hang indefinitely. handleResize runs on the single
+	// readLoop, so an unbounded wait freezes every tab on this WebSocket —
+	// local keystrokes queue behind the blocked resize and never reach the
+	// PTY (nocx-rl8s). A bounded context caps the damage: a dead channel
+	// loses its resize, not the whole transport.
+	resizeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := sess.Resize(resizeCtx, params.Cols, params.Rows, params.XPixel, params.YPixel); err != nil {
 		resp := newJSONRPCError(req.ID, -32603, "Internal error")
 		_ = wconn.writeJSON(resp)
 		return

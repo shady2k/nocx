@@ -467,9 +467,25 @@ jobs:
           name: manifest
           path: dist
 
+      # GH_REPO, because this job never checks the repository out — it only
+      # downloads the three artefacts above — and `gh` falls back to asking
+      # git which remote it is talking about. With no .git it does not fail
+      # over to the Actions context; it stops with "failed to run git: fatal:
+      # not a git repository" and the release is never created (nocx-kqqh).
+      #
+      # A checkout would also work and is the wrong fix: this job has no use
+      # for the source, and cloning it to satisfy an implicit lookup hides
+      # what the lookup actually needed. Naming the repository says it.
+      #
+      # This step had never run before v0.1.0. `publish` is gated on
+      # validate.outputs.release, which only a tag sets, so every dry run
+      # skipped it — the same blind spot that once hid the keyring check
+      # sitting in this very job (nocx-94kl). A step no rehearsal reaches is
+      # a step that is first executed for real.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           gh release create "v${VERSION}" \

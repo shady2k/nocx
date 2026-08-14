@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"slices"
@@ -169,5 +172,104 @@ func TestSessionEnv_NamesTheShellTheFixtureActuallyRuns(t *testing.T) {
 	// And it still carries a terminal, which the integration scripts need.
 	if !slices.Contains(env, "TERM=xterm-256color") {
 		t.Error("the session environment lost TERM")
+	}
+}
+
+// startFixture starts the in-process server the way run() does and returns
+// everything a client needs to reach it: the address, the host key, and the
+// user key's signer (the server accepts exactly that key). The listener is
+// closed by the test's cleanup.
+func startFixture(t *testing.T) (addr string, hostKey gossh.PublicKey, userSigner gossh.Signer) {
+	t.Helper()
+	hostSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("host signer: %v", err)
+	}
+	userSigner, _, _, err = signer()
+	if err != nil {
+		t.Fatalf("user signer: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			config := buildConfig(userSigner, hostSigner, "", "", func() {})
+			go serveConn(conn, config)
+		}
+	}()
+	return ln.Addr().String(), hostSigner.PublicKey(), userSigner
+}
+
+// dial opens a client connection to the fixture, trusting exactly the host
+// key startFixture returned.
+func dial(t *testing.T, addr string, hostKey gossh.PublicKey, userSigner gossh.Signer) *gossh.Client {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	config := &gossh.ClientConfig{
+		User: "e2e",
+		Auth: []gossh.AuthMethod{gossh.PublicKeys(userSigner)},
+		HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
+			if string(key.Marshal()) != string(hostKey.Marshal()) {
+				return fmt.Errorf("host key mismatch")
+			}
+			return nil
+		},
+	}
+	sshConn, chans, reqs, err := gossh.NewClientConn(conn, addr, config)
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("ssh connect: %v", err)
+	}
+	client := gossh.NewClient(sshConn, chans, reqs)
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// TestExecChannelIsPtyLess proves the fixture is faithful to sshd for exec
+// channels: no pty means no line discipline, so a binary frame survives.
+// A pty would turn the 0x0A into 0x0D 0x0A and echo the input back.
+func TestExecChannelIsPtyLess(t *testing.T) {
+	addr, hostKey, signer := startFixture(t)
+	client := dial(t, addr, hostKey, signer)
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin: %v", err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout: %v", err)
+	}
+	if err = sess.Start("cat"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	want := []byte{0x00, 0x0A, 0x0D, 0x0A, 0xFF, 'x'}
+	if _, err = stdin.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = stdin.Close()
+
+	got, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("bytes mangled: want %v, got %v", want, got)
 	}
 }

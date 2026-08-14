@@ -32,8 +32,9 @@ const version = proto.Version
 // Fixed names inside ~/.nocx/helper. Nothing else under the home is ever
 // created or modified (N4's discipline, applied to the helper's own tree).
 const (
-	// helperRootName is the D7 install root under the remote home.
-	helperRootName = "helper"
+	// HelperRootName is the D7 install root under the remote home — the
+	// directory the deploy package owns and may prune or uninstall.
+	HelperRootName = "helper"
 	// markerName makes a directory complete: its presence is the claim
 	// "every byte of the binary is durable". A directory without it is
 	// removed and reinstalled, never used.
@@ -87,7 +88,7 @@ var ErrHashMismatch = errors.New("deploy: installed helper does not match its co
 // or the same login on both) resolves to two directories, each holding the
 // binary for its own platform.
 func installDir(home string, p Platform, contentHash string) string {
-	return path.Join(home, ".nocx", helperRootName, version+"-"+p.GOOS+"-"+p.GOARCH+"-"+contentHash)
+	return path.Join(home, ".nocx", HelperRootName, version+"-"+p.GOOS+"-"+p.GOARCH+"-"+contentHash)
 }
 
 // Ensure installs the artifact for p if it is not already complete, and

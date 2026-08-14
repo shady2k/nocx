@@ -213,6 +213,63 @@ func TestPruneKeepsTheNamedDirectory(t *testing.T) {
 	}
 }
 
+// TestUninstallRemovesTheWholeHelperTree is D25's removal half: the whole
+// ~/.nocx/helper tree goes — every installed version AND a directory left
+// incomplete by an interrupted install (no .install-complete marker), which
+// is exactly the kind a user cannot otherwise get rid of — and nothing else
+// under the home is touched: the shell bundle's files and unrelated files
+// survive. (The channel-close half of D25 is the CALLER's ordering: no
+// helper may be running out of a directory being deleted, so the caller
+// closes the helper's channel before calling Uninstall. The deploy package
+// states that contract and removes the tree.)
+func TestUninstallRemovesTheWholeHelperTree(t *testing.T) {
+	fs := newFakeFS()
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "amd64"}); err != nil {
+		t.Fatalf("amd64 install: %v", err)
+	}
+	if _, _, err := deploy.Ensure(context.Background(), fs, syntheticSource{}, "/home/u", deploy.Platform{"linux", "arm64"}); err != nil {
+		t.Fatalf("arm64 install: %v", err)
+	}
+	// An interrupted install: a versioned directory with no
+	// .install-complete marker. Uninstall must take it with the rest — a
+	// markerless directory is the one a later Ensure removes and
+	// reinstalls, and a user cannot remove it any other way from the
+	// surface (D25).
+	incomplete := filepath.Join("/home/u", ".nocx", "helper", "1-linux-amd64-"+strings.Repeat("1", 64))
+	fs.mkdirAll(incomplete)
+	fs.touch(filepath.Join(incomplete, "nocx-helper"))
+	// The shell bundle and unrelated files live alongside the helper tree
+	// and must survive an uninstall.
+	fs.touch("/home/u/.nocx/manifest.json")
+	fs.touch("/home/u/notes.txt")
+
+	if err := deploy.Uninstall(context.Background(), fs, "/home/u"); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if fs.exists("/home/u/.nocx/helper") == nil {
+		t.Fatal("uninstall left ~/.nocx/helper behind")
+	}
+	if fs.exists(incomplete) == nil {
+		t.Fatal("uninstall left an incomplete install directory behind")
+	}
+	if fs.exists("/home/u/.nocx/manifest.json") != nil {
+		t.Fatal("uninstall removed a shell-bundle file it does not own")
+	}
+	if fs.exists("/home/u/notes.txt") != nil {
+		t.Fatal("uninstall removed an unrelated file outside the helper tree")
+	}
+}
+
+// TestUninstallIsIdempotent: removing an absent tree is not an error — a
+// host with nothing installed uninstalls cleanly, and a user clicking
+// remove twice never sees a failure.
+func TestUninstallIsIdempotent(t *testing.T) {
+	fs := newFakeFS()
+	if err := deploy.Uninstall(context.Background(), fs, "/home/u"); err != nil {
+		t.Fatalf("uninstall on a bare host: %v", err)
+	}
+}
+
 // TestEnsureHonoursContextCancellation: a cancelled install stops between
 // phases instead of ploughing on.
 func TestEnsureHonoursContextCancellation(t *testing.T) {

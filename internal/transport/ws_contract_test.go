@@ -2228,7 +2228,24 @@ func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
 	raw, err = json.Marshal(shellFootprintStatusResult{
 		Destinations: []shellFootprintDestination{},
 		Helpers: []shellFootprintHelper{{
-			Identity:    "u@db01:22",
+			Identity:           "u@db01:22",
+			Fingerprint:        "SHA256:deadbeef",
+			Path:               "~/.nocx/helper/1-linux-amd64-abc/",
+			Hash:               "abc",
+			InstalledAt:        time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+			RemovableProfileID: &removable,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal helpers: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (helper install)")
+
+	// A helper install with no saved connection: removableProfileId null.
+	raw, err = json.Marshal(shellFootprintStatusResult{
+		Destinations: []shellFootprintDestination{},
+		Helpers: []shellFootprintHelper{{
+			Identity:    "root@10.0.0.7:22",
 			Fingerprint: "SHA256:deadbeef",
 			Path:        "~/.nocx/helper/1-linux-amd64-abc/",
 			Hash:        "abc",
@@ -2236,9 +2253,9 @@ func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("marshal helpers: %v", err)
+		t.Fatalf("marshal non-removable helper: %v", err)
 	}
-	validateJSON(t, schema, raw, "shell.footprint.status DTO (helper install)")
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (non-removable helper)")
 }
 
 // OverTheWire: the real handler, a real fact store holding one
@@ -2321,6 +2338,68 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Helpers[0].Fingerprint != "SHA256:deadbeef" || got.Helpers[0].Identity != "u@db01:22" {
 		t.Errorf("helper row = %+v, want the recorded install", got.Helpers[0])
+	}
+}
+
+// ── shell.footprint.helperUninstall ──────────────────────────────────────
+
+func TestShellFootprintHelperUninstall_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.helperUninstall.schema.json")
+
+	raw, err := json.Marshal(shellFootprintHelperUninstallResult{Removed: true})
+	if err != nil {
+		t.Fatalf("marshal removed: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.helperUninstall DTO (removed)")
+
+	raw, err = json.Marshal(shellFootprintHelperUninstallResult{Removed: false})
+	if err != nil {
+		t.Fatalf("marshal no-op: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.helperUninstall DTO (nothing installed)")
+}
+
+// OverTheWire: the real handler with recording seams — the closer and the
+// remover are the same doubles the handler tests use, so the D25 order and
+// the schema are proven on the real socket in one pass.
+func TestShellFootprintHelperUninstall_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.helperUninstall.schema.json")
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	closer := &recordingHelperCloser{}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, events := footprintHelperUninstallHarness(t, installs, closer, remover)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId":   "p_01",
+		"fingerprint": "SHA256:deadbeef",
+		"path":        "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 3)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.helperUninstall: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.helperUninstall result (real socket)")
+
+	// D25's order survived the socket: close, then remove.
+	want := []string{"close", "remove"}
+	if len(*events) != len(want) {
+		t.Fatalf("events = %v, want %v", *events, want)
+	}
+	for i := range want {
+		if (*events)[i] != want[i] {
+			t.Fatalf("events = %v, want %v — the close must precede the removal", *events, want)
+		}
 	}
 }
 

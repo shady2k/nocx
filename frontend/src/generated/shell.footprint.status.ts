@@ -70,5 +70,9 @@ export interface ShellFootprintStatusResult {
      * When nocx last observed this install complete.
      */
     installedAt: string
+    /**
+     * The saved connection that resolves to this machine and can remove the helper, or null when none does. Absence is the explanation: removal needs a saved connection, and the path field is what a user removes by hand instead.
+     */
+    removableProfileId: string | null
   }[]
 }

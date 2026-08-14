@@ -58,6 +58,21 @@ const WITH_HELPER: ShellFootprintStatusResult = {
       path: '~/.nocx/helper/1-linux-amd64-abc/',
       hash: 'abcdef0123456789',
       installedAt: '2026-08-10T09:00:00Z',
+      removableProfileId: 'ssh:p1',
+    },
+  ],
+}
+
+const WITH_HELPER_NO_SAVED_CONNECTION: ShellFootprintStatusResult = {
+  destinations: [],
+  helpers: [
+    {
+      identity: 'root@10.0.0.7:22',
+      fingerprint: 'SHA256:deadbeef',
+      path: '~/.nocx/helper/1-linux-amd64-abc/',
+      hash: 'abcdef0123456789',
+      installedAt: '2026-08-10T09:00:00Z',
+      removableProfileId: null,
     },
   ],
 }
@@ -70,6 +85,9 @@ function mountWithFootprint(status: ShellFootprintStatusResult) {
     removed: ['integration/v10/nocx.zsh', 'manifest.json'],
     conflicts: ['integration/v10/nocx.bash'],
   })
+  const helperUninstallSpy = vi
+    .spyOn(footprintClient, 'helperUninstall')
+    .mockResolvedValue({ removed: true })
   const container = document.body.appendChild(document.createElement('div'))
   render(
     () => (
@@ -82,7 +100,7 @@ function mountWithFootprint(status: ShellFootprintStatusResult) {
     ),
     { container },
   )
-  return { container, statusSpy, uninstallSpy }
+  return { container, statusSpy, uninstallSpy, helperUninstallSpy }
 }
 
 afterEach(() => {
@@ -182,7 +200,7 @@ describe('remote footprint', () => {
     expect(container.textContent).toContain('nocx has not left shell integration on any host')
   })
 
-  it('lists the installed helper and says what it serves', async () => {
+  it('lists the installed helper and offers to remove it where a saved connection exists', async () => {
     const { container } = mountWithFootprint(WITH_HELPER)
 
     await vi.waitFor(() => {
@@ -192,8 +210,85 @@ describe('remote footprint', () => {
     expect(text).toContain('Remote helper')
     expect(text).toContain('~/.nocx/helper/')
     expect(text).toContain('hash abcdef012345')
-    // The consent copy (D8): the helper serves other remote features, not
-    // only git — the footprint row says so where the user meets it.
-    expect(text).toContain('serves git and other remote features')
+    // A saved connection resolves to this machine, so the row offers the
+    // uninstall action — an action that is valid from the state the user
+    // is in (AGENTS.md rule 1).
+    const uninstallButtons = [...container.querySelectorAll('button')].filter((b) =>
+      b.textContent?.includes('Uninstall'),
+    )
+    expect(uninstallButtons.length).toBe(1)
+  })
+
+  it('removes the helper through the saved connection after confirmation, stating what stays', async () => {
+    const { container, statusSpy, helperUninstallSpy } = mountWithFootprint(WITH_HELPER)
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('u@db01:22')
+    })
+
+    // The next status read (after the uninstall) answers an empty helper
+    // list — the observation was forgotten on the backend.
+    statusSpy.mockResolvedValueOnce({ destinations: [], helpers: [] })
+
+    const uninstallButton = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Uninstall'),
+    )!
+    fireEvent.click(uninstallButton)
+
+    // The confirmation names the boundary AND the consent decision: the
+    // whole helper tree is removed, but the relay-tier consent for this
+    // machine stays — uninstall is not a silent revocation, and the
+    // helper is reinstalled when a remote feature next needs it.
+    await vi.waitFor(() => {
+      expect(
+        [...document.querySelectorAll('dialog')].some((d) =>
+          d.textContent?.includes('Consent for this machine stays'),
+        ),
+      ).toBe(true)
+    })
+    const dialog = [...document.querySelectorAll('dialog')].find((d) =>
+      d.textContent?.includes('Consent for this machine stays'),
+    )!
+    expect(dialog.textContent).toContain('u@db01:22')
+
+    const confirm = [...dialog.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Uninstall'),
+    )!
+    fireEvent.click(confirm)
+
+    await vi.waitFor(() => {
+      expect(helperUninstallSpy).toHaveBeenCalledWith(
+        'ssh:p1',
+        'SHA256:deadbeef',
+        '~/.nocx/helper/1-linux-amd64-abc/',
+      )
+    })
+    await vi.waitFor(() => {
+      expect(toasts().some((t) => t.message.includes('Removed the helper from u@db01:22'))).toBe(
+        true,
+      )
+    })
+    // The surface refreshes to what remains — the row is gone from the
+    // product, which is the acceptance criterion: a user can remove the
+    // helper from a host, and the screen stops advertising it.
+    await vi.waitFor(() => {
+      expect(container.textContent).not.toContain('u@db01:22')
+    })
+    expect(statusSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('says plainly when no saved connection can remove the helper', async () => {
+    const { container } = mountWithFootprint(WITH_HELPER_NO_SAVED_CONNECTION)
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('root@10.0.0.7:22')
+    })
+    const text = container.textContent ?? ''
+    expect(text).toContain('Removal needs a saved connection')
+    expect(text).toContain('~/.nocx/helper/1-linux-amd64-abc/')
+    const uninstallButtons = [...container.querySelectorAll('button')].filter((b) =>
+      b.textContent?.includes('Uninstall'),
+    )
+    expect(uninstallButtons.length).toBe(0)
   })
 })

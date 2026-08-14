@@ -567,7 +567,8 @@ func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitF
 	t.Helper()
 	stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	return helperGitFactory(provider, store, installs, discardLogger())
+	factory, _ := helperGitFactory(provider, store, installs, discardLogger())
+	return factory
 }
 
 // TestHelperSelectorInstallsTheArtifact is the deploy wiring (D7): the
@@ -619,7 +620,7 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 	t.Cleanup(func() { deploy.DefaultSource = orig })
 
 	var buf bytes.Buffer
-	sel := helperGitFactory(&fakeLaneProvider{}, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
+	sel, _ := helperGitFactory(&fakeLaneProvider{}, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection with no artifacts = %+v, want the empty refusal", got)
 	}
@@ -637,7 +638,7 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 // (D20), and the refusal stands rather than an install attempt.
 func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel := helperGitFactory(provider, nil, nil, discardLogger())
+	sel, _ := helperGitFactory(provider, nil, nil, discardLogger())
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
 		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
 	}
@@ -738,6 +739,61 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 	_ = repoB.Close()
 }
 
+// TestHelperCloseHelpersForClosesOnlyTheMachine is D25's closer: an
+// uninstall must close the exec channel of every live helper on the
+// machine being uninstalled BEFORE the directory is removed, and it must
+// not touch any other machine's helpers — the backend knows its own
+// channels by the host-key fingerprint that keys consent.
+func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	stubArtifacts(t)
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	if err := store.Grant("SHA256:machine-a"); err != nil {
+		t.Fatalf("grant a: %v", err)
+	}
+	if err := store.Grant("SHA256:machine-b"); err != nil {
+		t.Fatalf("grant b: %v", err)
+	}
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	factory, reg := helperGitFactory(provider, store, installs, discardLogger())
+	dir := fixtureRepo(t)
+
+	selA := factory(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:machine-a"})
+	selB := factory(&fakeRemoteSession{id: "s2", host: "host.other", fingerprint: "SHA256:machine-b"})
+	repoA, outcome, err := selA.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open A: %v %+v", err, outcome)
+	}
+	repoB, outcome, err := selB.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open B: %v %+v", err, outcome)
+	}
+	if got := provider.laneCount(); got != 2 {
+		t.Fatalf("two machines brought up %d helpers, want 2", got)
+	}
+
+	reg.CloseHelpersFor("SHA256:machine-a")
+
+	// The machine named by the fingerprint lost its helper channel; the
+	// other machine's helper is untouched.
+	if got := provider.lane(0).closeCount(); got != 1 {
+		t.Fatalf("machine-a's helper closed %d times, want 1 (its channel is closed first, D25)", got)
+	}
+	if got := provider.lane(1).closeCount(); got != 0 {
+		t.Fatalf("machine-b's helper closed %d times, want 0 — the closer must not touch other machines", got)
+	}
+	// The closed helper is forgotten: the next open redials it instead of
+	// reusing a dead client.
+	if _, ok := reg.hosts["s1"]; ok {
+		t.Fatal("the closed helper is still registered")
+	}
+	_ = repoB.Close()
+	_ = repoA.Close()
+
+	// An unknown fingerprint closes nothing and is not an error.
+	reg.CloseHelpersFor("SHA256:nobody")
+}
+
 // TestHelperDialFactory_RefusingOpenClosesTheLane: an open that answers
 // notARepository carries no repo, and nothing else references the helper
 // process — the factory must close the client (and so the lane) rather
@@ -801,7 +857,7 @@ func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 	stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
 	if !selection.ConsentRequired {
@@ -827,7 +883,7 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 	stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
 	if selection.Factory != nil || selection.ConsentRequired {
@@ -849,7 +905,7 @@ func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 	stubArtifacts(t)
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if selection.Factory == nil {
@@ -872,7 +928,7 @@ func TestHelperSelectionExplicitScriptIsNeverSilentlyUpgraded(t *testing.T) {
 	stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
-	sel := helperGitFactory(provider, store, installs, discardLogger())
+	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
 	if !selection.ConsentRequired {

@@ -446,6 +446,12 @@ func New(opts ...Option) (*App, error) {
 	// and nowhere else (AGENTS.md check 5).
 	helperConsent := consent.NewStore(logger, docStore, "helper-consent.json")
 	helperInstalls := consent.NewInstallStore(logger, docStore, "helper-installs.json")
+	// The helper-backed git factory and the registry that owns its live
+	// helper channels (remote-helper design D8, D25): one registry serves
+	// both the factory's per-session helpers and the uninstall surface's
+	// close-before-remove, so a machine's channels are closed by the same
+	// bookkeeping that started them.
+	helperFactory, helperReg := helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -694,8 +700,23 @@ func New(opts ...Option) (*App, error) {
 		// machine's consent resolves to relay, and the refusal (or the
 		// consentRequired ask) stands otherwise. The helper client, the
 		// git factory over it and the consent path are reachable from
-		// main() only through this line (AGENTS.md check 5).
-		transport.WithGitHelperFactory(helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)),
+		// main() only through this line (AGENTS.md check 5). The second
+		// return is the registry that OWNS the live helper channels; the
+		// uninstall surface needs it to close them before removing an
+		// install directory (D25), so the same registry is wired there.
+		transport.WithGitHelperFactory(helperFactory),
+		// The D25 channel closer (remote-helper design D25): the registry
+		// closes every live helper channel on a machine before
+		// shell.footprint.helperUninstall removes its install directory —
+		// no helper may be running out of a directory being deleted.
+		transport.WithHelperChannelCloser(helperReg),
+		// The helper-removal capability (remote-helper design D25):
+		// *ssh.RealClient satisfies transport.RemoteHelperUninstaller
+		// without an adapter — the signatures are identical. The
+		// capability owns the dial-and-remove (acquire the write-capable
+		// install lease, discover the remote home, run deploy.Uninstall
+		// over SFTP); the raw SSH client never leaves internal/ssh.
+		transport.WithRemoteHelperUninstaller(sshClient),
 	}
 	// The lifecycle publication boundary (ADR-0024 decision 7, bead
 	// nocx-u7uh.5): one kernel, one publisher, and the transport as its

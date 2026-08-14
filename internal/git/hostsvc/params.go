@@ -51,3 +51,25 @@ type LogParams struct {
 	BindingID string `json:"bindingId"`
 	Max       int    `json:"max"`
 }
+
+// StageParams is git.stage and git.unstage's params: the pathspecs to
+// move between the index and the worktree. Paths is the one legitimate
+// []string on the wire (D8) — the nocx:"pathspec" tag is what the host's
+// D3 audit accepts, and no path ever reaches a command line: local writes
+// them to git's stdin as NUL-separated literal pathspecs, so a path with
+// a space, a quote, a leading dash or a newline stages exactly itself.
+type StageParams struct {
+	BindingID string   `json:"bindingId"`
+	Paths     []string `json:"paths" nocx:"pathspec"`
+}
+
+// CommitParams is git.commit's params: the message and whether it amends
+// HEAD. The message crosses as a JSON string and reaches git through
+// commit -F - over stdin — never argv (D8) — which is what makes a
+// multi-line message with quotes and non-ASCII the normal case, not an
+// escape.
+type CommitParams struct {
+	BindingID string `json:"bindingId"`
+	Message   string `json:"message"`
+	Amend     bool   `json:"amend"`
+}

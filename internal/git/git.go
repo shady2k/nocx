@@ -273,6 +273,14 @@ type CommitState string
 const (
 	CommitOK     CommitState = "ok"
 	CommitFailed CommitState = "failed"
+	// CommitIndeterminate — the transport died between a mutation's
+	// request and its response (remote-helper D12): the commit may have
+	// happened, hooks and all, and the caller must say so — never a
+	// failure (which would invite a retry that commits twice), never a
+	// retry. Produced by the helper-backed repo on transport loss; the
+	// local implementation never produces it, because a local child
+	// either ran or was killed and the process can tell which.
+	CommitIndeterminate CommitState = "indeterminate"
 )
 
 // CommitOutcome is the result of one commit. Output is git's stdout and

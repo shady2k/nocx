@@ -38,10 +38,14 @@ type Response struct {
 	Error  *Error          `json:"error,omitempty"`
 }
 
-// Error is the machine-readable half of a refusal.
+// Error is the machine-readable half of a refusal. Details carries the
+// structured error when a code needs fields the message cannot round-trip
+// (the git service's ErrConflicted path); it is omitted when absent, so
+// an older peer that does not send it still parses.
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string          `json:"code"`
+	Message string          `json:"message"`
+	Details json.RawMessage `json:"details,omitempty"`
 }
 
 // Error codes are the closed set of refusals a helper can answer. The host

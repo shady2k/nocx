@@ -146,7 +146,7 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
-			return &RefusalError{Code: resp.Error.Code, Message: resp.Error.Message}
+			return &RefusalError{Code: resp.Error.Code, Message: resp.Error.Message, Details: resp.Error.Details}
 		}
 		if out != nil && len(resp.Result) > 0 {
 			if err := json.Unmarshal(resp.Result, out); err != nil {

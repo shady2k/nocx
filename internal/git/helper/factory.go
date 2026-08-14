@@ -9,8 +9,8 @@ package helper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/git"
@@ -89,12 +89,6 @@ func (r *repo) Status(ctx context.Context) (git.Status, error) {
 // carried from the open outcome: stable for the helper's lifetime.
 func (r *repo) EnvState() (git.EnvState, string) { return r.envState, r.envReason }
 
-// errOpNotServed is the honest answer for every op the helper does not
-// serve yet: the mutations land with nocx-dyib, and a repo that answers
-// them must say so rather than inventing a local fallback — the panel's
-// remote half is the helper's, by construction (D16).
-var errOpNotServed = errors.New("helper: git operation not served by the helper yet")
-
 // Diff sends one git.diff operation. The byte bound is the HELPER's to
 // apply (D9): it travels in the params, and the bounded git.Diff — the
 // retained prefix, the tooLarge state, the truncated flag — is what comes
@@ -117,32 +111,87 @@ func (r *repo) Log(ctx context.Context, max int) (git.Log, error) {
 	return lg, nil
 }
 
+// Stage sends one git.stage operation. The pathspecs ride in the params as
+// a NUL-joined literal list (D8) and reach git on the remote host through
+// --pathspec-from-file=- — never argv; the fresh status is what comes
+// back, field for field what local returns for the same repository.
 func (r *repo) Stage(ctx context.Context, paths []string) (git.Status, error) {
-	return git.Status{}, fmt.Errorf("%w: stage", errOpNotServed)
+	var st git.Status
+	if err := r.f.client.Call(mutationCtx(ctx), "git", "stage",
+		hostsvc.StageParams{BindingID: r.bindingID, Paths: paths}, &st); err != nil {
+		return git.Status{}, classifyRefusal(err)
+	}
+	return st, nil
 }
 
 func (r *repo) Unstage(ctx context.Context, paths []string) (git.Status, error) {
-	return git.Status{}, fmt.Errorf("%w: unstage", errOpNotServed)
+	var st git.Status
+	if err := r.f.client.Call(mutationCtx(ctx), "git", "unstage",
+		hostsvc.StageParams{BindingID: r.bindingID, Paths: paths}, &st); err != nil {
+		return git.Status{}, classifyRefusal(err)
+	}
+	return st, nil
 }
 
 func (r *repo) StageAll(ctx context.Context) (git.Status, error) {
-	return git.Status{}, fmt.Errorf("%w: stageAll", errOpNotServed)
+	var st git.Status
+	if err := r.f.client.Call(mutationCtx(ctx), "git", "stageAll",
+		hostsvc.BindingParams{BindingID: r.bindingID}, &st); err != nil {
+		return git.Status{}, classifyRefusal(err)
+	}
+	return st, nil
 }
 
 func (r *repo) UnstageAll(ctx context.Context) (git.Status, error) {
-	return git.Status{}, fmt.Errorf("%w: unstageAll", errOpNotServed)
+	var st git.Status
+	if err := r.f.client.Call(mutationCtx(ctx), "git", "unstageAll",
+		hostsvc.BindingParams{BindingID: r.bindingID}, &st); err != nil {
+		return git.Status{}, classifyRefusal(err)
+	}
+	return st, nil
 }
 
+// Commit sends one git.commit operation: the message crosses as a JSON
+// string and reaches git through commit -F - over stdin on the remote host
+// (D8), never argv. Transport loss between the request and its response is
+// D12's indeterminate — the commit may have happened, hooks and all — so
+// the outcome says so instead of reporting a failure a retry would double.
 func (r *repo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error) {
-	return git.CommitOutcome{}, fmt.Errorf("%w: commit", errOpNotServed)
+	var out git.CommitOutcome
+	err := r.f.client.Call(mutationCtx(ctx), "git", "commit",
+		hostsvc.CommitParams{BindingID: r.bindingID, Message: msg, Amend: amend}, &out)
+	if err != nil {
+		if errors.Is(err, client.ErrLost) {
+			return git.CommitOutcome{State: git.CommitIndeterminate}, nil
+		}
+		return git.CommitOutcome{}, classifyRefusal(err)
+	}
+	return out, nil
 }
 
+// HeadMessage is the Amend prefill: the full HEAD message, fetched once
+// when the box is ticked. A read, like the reads above: cancellable, and
+// an unborn branch's "none" is a domain state inside the result.
 func (r *repo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
-	return git.HeadMessage{}, fmt.Errorf("%w: headMessage", errOpNotServed)
+	var hm git.HeadMessage
+	if err := r.f.client.Call(ctx, "git", "headMessage",
+		hostsvc.BindingParams{BindingID: r.bindingID}, &hm); err != nil {
+		return git.HeadMessage{}, classifyRefusal(err)
+	}
+	return hm, nil
 }
 
+// RemoteURL is the "open on its hosting" fact, derived by git on the
+// remote host. A detached HEAD, a branch with no upstream or a deleted
+// remote answer ErrNoRemote — the ordinary "no link to draw" state, never
+// an error.
 func (r *repo) RemoteURL(ctx context.Context) (string, error) {
-	return "", fmt.Errorf("%w: remoteURL", errOpNotServed)
+	var url string
+	if err := r.f.client.Call(ctx, "git", "remoteURL",
+		hostsvc.BindingParams{BindingID: r.bindingID}, &url); err != nil {
+		return "", classifyRefusal(err)
+	}
+	return url, nil
 }
 
 // Close releases the shared helper client when this was the last repo of
@@ -151,4 +200,49 @@ func (r *repo) RemoteURL(ctx context.Context) (string, error) {
 func (r *repo) Close() error {
 	r.closeOnce.Do(r.f.release)
 	return nil
+}
+
+// mutationCtx strips the caller's cancellation from a mutation's call
+// (D11): the helper refuses a cancel naming a mutation, and the backend
+// must not even ask — half-applying a commit is worse than waiting for
+// it. The caller's ctx stays alive in the background so the call runs to
+// its real answer or the transport dies; a cancelled caller can no longer
+// race the lost transport in Call's select, which is what makes D12's
+// indeterminate deterministic.
+func mutationCtx(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
+}
+
+// classifyRefusal rebuilds the git domain errors the service coded on the
+// wire (D11/D12): the transport switches on the typed errors, so a
+// refusal that crossed as "git.nothing_to_commit" must arrive as
+// *git.ErrNothingToCommit — fields intact, which is why ErrConflicted's
+// path rides in the refusal's structured details — not as an opaque
+// refusal. Anything that is not a coded refusal (a transport loss, a
+// protocol refusal) passes through untouched.
+func classifyRefusal(err error) error {
+	var refusal *client.RefusalError
+	if !errors.As(err, &refusal) {
+		return err
+	}
+	switch refusal.Code {
+	case hostsvc.ErrCodeNothingToCommit:
+		return &git.ErrNothingToCommit{}
+	case hostsvc.ErrCodeAmendUnborn:
+		return &git.ErrAmendUnborn{}
+	case hostsvc.ErrCodeConflicted:
+		var c git.ErrConflicted
+		if len(refusal.Details) > 0 {
+			if uerr := json.Unmarshal(refusal.Details, &c); uerr != nil {
+				// A malformed detail must not lose the refusal: the
+				// type still says conflicted, the message still names
+				// the path.
+				return &git.ErrConflicted{}
+			}
+		}
+		return &c
+	case hostsvc.ErrCodeNoRemote:
+		return &git.ErrNoRemote{}
+	}
+	return err
 }

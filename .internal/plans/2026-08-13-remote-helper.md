@@ -25,6 +25,8 @@
 
 **A note on this plan's code blocks.** Where a step shows Go, the code is the contract — signatures, types and test assertions are exact and later tasks depend on them. Where a step says **read first**, the implementer must read the named file before writing: those are places where the surrounding code's shape decides the implementation, and inventing it from this document would produce something that compiles against a codebase that does not exist.
 
+**But the code blocks were written, not compiled, and they are not lint-clean by construction.** Task 2's test shipped two `err :=` inside `if` statements that shadow an outer `err`; `golangci-lint` runs govet with `enable-all`, so shadow is on, and the pre-commit hook rejected the commit. `go vet` did not catch it — shadow is not in vet's default set — so the worker followed this plan's own verification steps, saw green, and was stopped at the gate with a brief telling it the test was verbatim and not to be edited. **"Verbatim" governs the assertions and the signatures, never the lint hygiene.** A worker that finds a code block failing a repo gate should fix the hygiene, keep the assertions byte-identical, and say so in the commit body.
+
 ---
 
 ### Task 1: Amend the git-manager spec so two documents cannot disagree
@@ -121,12 +123,17 @@ func TestExecChannelIsPtyLess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout: %v", err)
 	}
-	if err := sess.Start("cat"); err != nil {
+	// `err =`, not `err :=`: golangci-lint runs govet with enable-all, so
+	// shadow is on, and a fresh err inside the if would fail the pre-commit
+	// gate. `go vet` alone does not catch it — shadow is not in its default
+	// set — so a worker following this plan's own verification steps sees
+	// green and is then stopped at the hook.
+	if err = sess.Start("cat"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
 	want := []byte{0x00, 0x0A, 0x0D, 0x0A, 0xFF, 'x'}
-	if _, err := stdin.Write(want); err != nil {
+	if _, err = stdin.Write(want); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	_ = stdin.Close()
@@ -1077,3 +1084,35 @@ git commit   # test(e2e): a commit from the panel, on a remote host, through a h
 ```
 
 Tasks 1, 2 and 3 have no dependencies on each other and can run in parallel. Task 9 needs Task 5 (there must be a binary to install) but not Task 7. Task 11 needs 8, 9 and 10.
+
+### Landing groups — which tasks share a commit, and why
+
+A task's dependency order is not the same question as whether it can be
+committed on its own, and this plan got the second one wrong. The pre-commit
+deadcode ratchet (`.githooks/check-deadcode.mjs`) fails any commit that adds a
+function no `main()` reaches, and `update-deadcode-baseline.mjs` refuses to
+write a baseline that grows — so a package landing before its first consumer has
+no committable path at all. Task 4 hit exactly that: `internal/helper/proto` has
+no importer until `cmd/nocx-helper` exists, and the worker implementing it
+correctly stopped without writing a line (`nocx-7t3e`, the same defect
+`nocx-z7s6` found in the snippets plan).
+
+The gate is right and must not be routed around — a package written, covered and
+called by nobody is the defect AGENTS.md records shipping twice. So:
+
+- **Tasks 4 + 5 are one commit.** `cmd/nocx-helper` is what makes the codec
+  reachable. Neither half is committable alone.
+- **Tasks 7 + 8 are expected to be committable together**, since a git service
+  registers into the host and is reached through `cmd/nocx-helper`. Expected, not
+  established — measure it.
+- **Tasks 6, 9 and 10 are unmeasured and probably not committable alone**:
+  `internal/helper/client`, the deploy package and the consent path are reached
+  only once Task 11 wires them into `app.go`. Establish the grouping by running
+  `node .githooks/check-deadcode.mjs` against the real tree before dispatching
+  them, not by reasoning about it — reasoning about it is what produced this
+  section.
+
+**Every worker on this plan must pass the pre-commit hook.** The instruction not
+to run `make ci-full` or the containerized jobs does not exempt them from it, and
+per `nocx-z7s6` one worker has already read it that way and committed through
+`git -c core.hooksPath=/dev/null`. Say so in the brief.

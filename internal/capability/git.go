@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -24,7 +25,7 @@ type GitOpenService interface {
 	OpenBinding(ctx context.Context, sid session.ID, cwd string) (bindingID string, outcome git.OpenOutcome, err error)
 	// Acquire takes the use-guard for one binding — the same per-call
 	// authorisation every git.* method applies (D15).
-	Acquire(id string, caller git.Caller) (git.Handle, func(), error)
+	Acquire(id string, caller registry.Caller) (registry.Handle, func(), error)
 }
 
 // GitOpenOperation is the typed operation for git.open. Its gates are
@@ -40,7 +41,7 @@ func NewGitOpenOperation(
 	sessionGate, gitGate, lane control.Admission,
 	registry session.Registry,
 	factory git.RepoFactory,
-	reg *git.Registry,
+	reg *registry.Registry,
 ) GitOpenOperation {
 	g := &guard{}
 	return newOperation[GitOpenService](
@@ -51,7 +52,7 @@ func NewGitOpenOperation(
 }
 
 // newGitOpenService builds the concrete git.open service bound to guard g.
-func newGitOpenService(g *guard, registry session.Registry, factory git.RepoFactory, reg *git.Registry) *gitOpenService {
+func newGitOpenService(g *guard, registry session.Registry, factory git.RepoFactory, reg *registry.Registry) *gitOpenService {
 	return &gitOpenService{guard: g, registry: registry, factory: factory, reg: reg}
 }
 
@@ -59,7 +60,7 @@ type gitOpenService struct {
 	guard    *guard
 	registry session.Registry
 	factory  git.RepoFactory
-	reg      *git.Registry
+	reg      *registry.Registry
 }
 
 func (s *gitOpenService) Get(id session.ID) (session.Session, error) {
@@ -106,7 +107,7 @@ func (s *gitOpenService) OpenBinding(ctx context.Context, sid session.ID, cwd st
 	return bid, outcome, nil
 }
 
-func (s *gitOpenService) Acquire(id string, caller git.Caller) (git.Handle, func(), error) {
+func (s *gitOpenService) Acquire(id string, caller registry.Caller) (registry.Handle, func(), error) {
 	if err := s.guard.check(); err != nil {
 		return nil, nil, err
 	}
@@ -117,7 +118,7 @@ func (s *gitOpenService) Acquire(id string, caller git.Caller) (git.Handle, func
 // after git.open. A binding id is validated per call by Acquire — bindings
 // close at any moment, so a construction-time check would be a lie.
 type GitBindingService interface {
-	Acquire(id string, caller git.Caller) (git.Handle, func(), error)
+	Acquire(id string, caller registry.Caller) (registry.Handle, func(), error)
 	Close(id string) error
 	CloseSession(sessionID session.ID)
 }
@@ -130,23 +131,23 @@ type GitBindingOperation interface {
 
 // NewGitBindingOperation builds the git-binding operation, acquiring the
 // git gate before the execution lane.
-func NewGitBindingOperation(gitGate, lane control.Admission, reg *git.Registry) GitBindingOperation {
+func NewGitBindingOperation(gitGate, lane control.Admission, reg *registry.Registry) GitBindingOperation {
 	g := &guard{}
 	return newOperation[GitBindingService](control.NewComposite(gitGate, lane), g, newGitBindingService(g, reg))
 }
 
 // newGitBindingService builds the concrete git-binding service bound to
 // guard g.
-func newGitBindingService(g *guard, reg *git.Registry) *gitBindingService {
+func newGitBindingService(g *guard, reg *registry.Registry) *gitBindingService {
 	return &gitBindingService{guard: g, reg: reg}
 }
 
 type gitBindingService struct {
 	guard *guard
-	reg   *git.Registry
+	reg   *registry.Registry
 }
 
-func (s *gitBindingService) Acquire(id string, caller git.Caller) (git.Handle, func(), error) {
+func (s *gitBindingService) Acquire(id string, caller registry.Caller) (registry.Handle, func(), error) {
 	if err := s.guard.check(); err != nil {
 		return nil, nil, err
 	}

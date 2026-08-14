@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -292,7 +293,7 @@ type WSServer struct {
 	// §5.1). When nil, those methods return -32601. The repo factory rides
 	// a separate option; the transport never constructs a repository
 	// itself (AD-8).
-	git        *git.Registry
+	git        *registry.Registry
 	gitFactory git.RepoFactory
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
@@ -700,7 +701,7 @@ func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 // composition root constructs the registry (internal/app/app.go); without
 // this line the whole git package is reachable from its own tests and
 // nowhere else (AGENTS.md check 5).
-func WithGitRegistry(r *git.Registry) WSServerOption {
+func WithGitRegistry(r *registry.Registry) WSServerOption {
 	return func(s *WSServer) { s.git = r }
 }
 

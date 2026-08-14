@@ -1,6 +1,9 @@
-// Package git is the session-aware git backend: the Repo and RepoFactory
-// contracts, the binding registry that guards a bound Repo, the domain types
-// every operation returns, and the errors the transport switches on.
+// Package git is the session-aware git domain: the Repo and RepoFactory
+// contracts, the domain types every operation returns, and the git-semantic
+// errors the transport switches on. The binding registry that guards a bound
+// Repo lives in internal/git/registry — it is the one part of the git plane
+// that imports internal/session, and the helper binary links this package
+// standalone (plan Task 3, D18).
 //
 // # Why the git binary, not a library (spec D5)
 //
@@ -35,19 +38,18 @@
 //
 // # The structural guarantee (spec §5.1)
 //
-// A bound Repo is unreachable except through Registry.Acquire. Binding holds
-// its repo in an unexported field, so "every handler must remember to check"
-// is not a discipline anybody has to keep: a handler cannot forget a check it
-// never performs. Acquire performs the one authorisation check — the caller
-// must Own the binding's session (D15) — and takes the use-guard that keeps
-// the binding alive for the call's duration.
+// The registry in internal/git/registry is where a bound Repo exists, and
+// Registry.Acquire is the only route to one. Binding holds its repo in an
+// unexported field, so "every handler must remember to check" is not a
+// discipline anybody has to keep: a handler cannot forget a check it never
+// performs. Acquire performs the one authorisation check — the caller must
+// Own the binding's session (D15) — and takes the use-guard that keeps the
+// binding alive for the call's duration.
 package git
 
 import (
 	"context"
 	"time"
-
-	"github.com/shady2k/nocx/internal/session"
 )
 
 // Repo is one repository on one machine. It is the whole local/remote seam:
@@ -103,19 +105,6 @@ type Repo interface {
 // answer. One round trip, not three.
 type RepoFactory interface {
 	Open(ctx context.Context, cwd string) (Repo, OpenOutcome, error)
-}
-
-// Caller is who is asking. git declares it and transport satisfies it — the
-// direction internal/filesystem already established, and the only one
-// available: connState and wsConn are unexported in transport, and a package
-// that imported transport would point the dependency backwards.
-//
-// internal/filesystem declares an identical interface; git deliberately does
-// not import it. A consumer-declared interface is the Go idiom, and importing
-// across feature packages would couple them permanently for the sake of one
-// method signature (spec D15).
-type Caller interface {
-	Owns(sessionID session.ID) bool
 }
 
 // OpenState is the outcome table of git.open (spec §5.1). noCwd and

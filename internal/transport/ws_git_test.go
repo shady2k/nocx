@@ -24,6 +24,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/local"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -250,7 +251,7 @@ func newGitTestEnv(t *testing.T, opts ...WSServerOption) *gitTestEnv {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	all := append([]WSServerOption{WithGitRegistry(git.New())}, opts...)
+	all := append([]WSServerOption{WithGitRegistry(registry.New())}, opts...)
 	ws := NewWSServer(logger, reg, all...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -343,7 +344,7 @@ func TestGitOpen_RemoteSessionRefusedBeforeTheFactory(t *testing.T) {
 	})
 	factory := newStubGitFactory()
 	ws := NewWSServer(logger, reg,
-		WithGitRegistry(git.New()),
+		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {

@@ -25,8 +25,8 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
-	"github.com/shady2k/nocx/internal/git"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -672,7 +672,7 @@ func New(opts ...Option) (*App, error) {
 		// AGENTS.md check 5 exists to catch. There is no remote factory:
 		// git.open refuses an ssh session before it reaches this, and the
 		// remote case waits on the relay (spec D3).
-		transport.WithGitRegistry(git.New()),
+		transport.WithGitRegistry(registry.New()),
 		// The factory resolves the shell environment in the background from
 		// construction (nocx-6pz0) and is stopped at shutdown, so no
 		// resolution child can outlive the process; nothing after this point

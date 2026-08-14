@@ -756,7 +756,7 @@ git commit   # feat(git): the helper's git service and client, read operations (
 - Modify: `internal/git/hostsvc/hostsvc.go` (ops `stage`, `unstage`, `stageAll`, `unstageAll`, `commit`, `headMessage`, `remoteURL`)
 - Modify: `internal/git/helper/repo.go`
 - Modify: `internal/git/git.go` — add `CommitIndeterminate` to `CommitState` (D12)
-- Modify: `frontend/src/git/*` — render the indeterminate outcome
+- Modify: `frontend/src/git/*` — render the indeterminate outcome — **moved to `nocx-1xxa` on 2026-08-14**: producing the state and rendering it are separate jobs, and the panel, the §6 states and the contract schema all land together there
 - Test: `internal/git/hostsvc/mutate_test.go`, `internal/git/helper/indeterminate_test.go`
 
 **Interfaces:**

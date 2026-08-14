@@ -59,11 +59,13 @@ type gitOpenParams struct {
 	Cwd       string `json:"cwd,omitempty"`
 }
 
-// gitOpenResult is the open outcome table (spec §5.1). state is the
-// discriminator: every outcome is a RESULT state, never a JSON-RPC error,
-// because each one is something the panel can render. The optional fields
-// are present iff their state needs them; status rides the open result so
-// an open is one round trip (spec §5.2).
+// gitOpenResult is the open outcome table (spec §5.1, remote-helper design
+// §6). state is the discriminator: every outcome is a RESULT state, never
+// a JSON-RPC error, because each one is something the panel can render.
+// The optional fields are present iff their state needs them; message is
+// the refusal's account (what failed and what to do), present when state
+// is one of the §6 refusal states; status rides the open result so an open
+// is one round trip (spec §5.2).
 type gitOpenResult struct {
 	State      string         `json:"state"`
 	BindingID  string         `json:"bindingId,omitempty"`  // present iff ok
@@ -71,6 +73,7 @@ type gitOpenResult struct {
 	GitVersion string         `json:"gitVersion,omitempty"` // present when the probe ran
 	EnvState   string         `json:"envState,omitempty"`   // "resolved" | "degraded" (D6)
 	EnvReason  string         `json:"envReason,omitempty"`  // why degraded; present when degraded
+	Message    string         `json:"message,omitempty"`    // the refusal's account; present iff a §6 refusal state
 	Status     *gitStatusWire `json:"status,omitempty"`     // first status; absent when the inline read failed
 }
 
@@ -328,8 +331,11 @@ func (s *WSServer) forgetBinding(bid string) {
 type gitOpenHandlers struct {
 	op capability.GitOpenOperation
 	// helperFor resolves the helper-backed factory for an SSH session
-	// (the remote-helper design). nil — or a nil answer for the session —
-	// keeps the OpenRemoteUnsupported refusal standing (design D16).
+	// (the remote-helper design). nil — or a selection answering none of
+	// Factory, ConsentRequired and Refusal — is the not-available answer:
+	// an error carrying the reason, the one exception to the outcome
+	// table's "every outcome is a RESULT state" rule (the machine has no
+	// earned state — raw, a denied answer).
 	helperFor GitFactoryFor
 	r         Responder
 	bindings  gitBindingsSeam
@@ -342,11 +348,14 @@ type gitOpenHandlers struct {
 // call carries. sessionId appears exactly once on the wire — here (D1) —
 // and the authorisation is connState's, not the global registry's (D15).
 //
-// noCwd and remoteUnsupported are decided HERE, from the session's origin,
-// before the factory is invoked; the factory itself answers ok,
-// notARepository, gitUnavailable or gitTooOld (spec §5.1). The remote
-// refusal is a RESULT state, not an error: on an SSH tab the panel shows
-// one honest state and offers nothing (D3, D14).
+// noCwd and the §6 refusal states are decided HERE, from the session's
+// origin, before the factory is invoked; the factory itself answers ok,
+// notARepository, gitUnavailable or gitTooOld (spec §5.1, remote-helper
+// design §6). The refusals are RESULT states, not errors: on an SSH tab
+// the panel shows one honest state naming what to do (D3, D14). The one
+// exception is a machine the selection refuses with no earned state (raw,
+// a denied answer): that answers the not-available error carrying the
+// reason, and the panel renders the reason with its recovery.
 func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req jsonrpcRequest) {
 	if h.op == nil {
 		if h.wired {
@@ -374,11 +383,13 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 		}
 		if sess.Kind() != session.KindLocal {
 			// D3 as amended 2026-08-13: the remote case is the helper's.
-			// The selection is tri-state (D8): a factory to open through,
-			// consentRequired when the machine has no relay-tier answer,
-			// or neither — the zero-install refusal stands (design D16).
+			// The selection answers one of a factory, consentRequired, a
+			// §6 refusal (unsupportedPlatform, deployFailed,
+			// execForbidden) or — for a machine with no earned state
+			// (raw, denied) — nothing, and the not-available error is
+			// the answer (remote-helper design §6).
 			if h.helperFor == nil {
-				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
+				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open not available for SSH sessions (no helper factory wired)"})
 				return nil
 			}
 			sel := h.helperFor(sess)
@@ -387,7 +398,18 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 				return nil
 			}
 			if sel.Factory == nil {
-				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
+				if sel.Refusal != nil && sel.Refusal.State != "" {
+					_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
+						State:   string(sel.Refusal.State),
+						Message: sel.Refusal.Message,
+					}))
+					return nil
+				}
+				reason := "no helper available for this SSH session"
+				if sel.Refusal != nil && sel.Refusal.Message != "" {
+					reason = sel.Refusal.Message
+				}
+				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open: " + reason})
 				return nil
 			}
 		}
@@ -409,6 +431,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 			_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
 				State:      string(outcome.State),
 				GitVersion: outcome.GitVersion,
+				Message:    outcome.Message,
 			}))
 			return nil
 		}
@@ -1019,7 +1042,7 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 					return nil
 				}
 				// The refusal decision has already answered
-				// consentRequired and refused states; this second
+				// consentRequired and the refusal states; this second
 				// consultation is the open itself, and only a selection
 				// carrying a factory may proceed (D8).
 				return s.gitHelperFor(sess).Factory

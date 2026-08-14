@@ -107,10 +107,13 @@ type RepoFactory interface {
 	Open(ctx context.Context, cwd string) (Repo, OpenOutcome, error)
 }
 
-// OpenState is the outcome table of git.open (spec §5.1). noCwd and
-// remoteUnsupported are produced by the composition layer, which decides them
-// from the caller's origin before the factory is invoked; the factory itself
-// answers ok, notARepository, gitUnavailable or gitTooOld.
+// OpenState is the outcome table of git.open (spec §5.1, remote-helper
+// design §6). noCwd is produced by the composition layer from the caller's
+// origin before the factory is invoked; the §6 refusal states
+// (consentRequired, unsupportedPlatform, deployFailed, execForbidden,
+// helperVersionMismatch) are produced by the helper selection and the
+// helper dial — the composition layer again, never the factory; the
+// factory itself answers ok, notARepository, gitUnavailable or gitTooOld.
 type OpenState string
 
 const (
@@ -120,9 +123,6 @@ const (
 	OpenNotARepository OpenState = "notARepository"
 	// OpenNoCwd — the caller had no verified cwd to offer.
 	OpenNoCwd OpenState = "noCwd"
-	// OpenRemoteUnsupported — the session is an SSH session (D3); the remote
-	// case waits for the relay (nocx-if6 phase B).
-	OpenRemoteUnsupported OpenState = "remoteUnsupported"
 	// OpenGitUnavailable — no git on the environment's PATH.
 	OpenGitUnavailable OpenState = "gitUnavailable"
 	// OpenGitTooOld — below the version floor; the result carries what it found.
@@ -135,6 +135,21 @@ const (
 	// decision, before the factory is invoked — the producer of a state
 	// owns declaring it, so the state lives here with its siblings.
 	OpenConsentRequired OpenState = "consentRequired"
+	// OpenUnsupportedPlatform — the session's host runs an OS/arch we build
+	// no helper for (D20), or the helper artifact was not built (`make
+	// helpers` has not run). Message names which, and what to do about it.
+	OpenUnsupportedPlatform OpenState = "unsupportedPlatform"
+	// OpenDeployFailed — uploading or installing the helper on the host
+	// failed (D7). Message carries what failed.
+	OpenDeployFailed OpenState = "deployFailed"
+	// OpenExecForbidden — the server refused the exec that would run the
+	// helper, or answered with something that is not our helper (D5).
+	// Message carries what was seen.
+	OpenExecForbidden OpenState = "execForbidden"
+	// OpenHelperVersionMismatch — an incompatible helper answered (D6):
+	// a protocol version or content hash that is not the one installed.
+	// Non-retryable until the helper is reinstalled.
+	OpenHelperVersionMismatch OpenState = "helperVersionMismatch"
 )
 
 // OpenOutcome carries the resolved repository's identity and the two facts
@@ -142,6 +157,11 @@ const (
 // (D6). Toplevel and GitDir are both load-bearing — they are the binding's
 // identity, because two linked worktrees of one repository are different
 // working trees (spec §5.1) — and both are set only when State is OpenOK.
+// Message is the refusal's account: what failed and what to do about it,
+// set when State is one of the §6 refusal states (unsupportedPlatform,
+// deployFailed, execForbidden, helperVersionMismatch). A state that
+// renders a generic error is not done (brief, nocx-1xxa) — the panel says
+// what the state means and names the recovery.
 type OpenOutcome struct {
 	State      OpenState
 	Toplevel   string   // the worktree root; "" unless ok
@@ -149,6 +169,7 @@ type OpenOutcome struct {
 	GitVersion string   // "2.55.0"; set when the probe ran
 	EnvState   EnvState // D6: resolved, or degraded
 	EnvReason  string   // why the environment is degraded; "" when resolved
+	Message    string   // the refusal's account; "" unless a §6 refusal state
 }
 
 // EnvState reports whether git will run in the resolved environment or in the

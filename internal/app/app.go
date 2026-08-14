@@ -622,6 +622,7 @@ func New(opts ...Option) (*App, error) {
 		// The helper footprint row (remote-helper design D8): the observed
 		// helper installs behind shell.footprint.status. Wired here so the
 		// listing and the consent path share the composition root.
+		transport.WithHelperConsentStore(helperConsent),
 		transport.WithHelperInstallStore(helperInstalls),
 		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
 		// satisfies transport.RemoteUninstaller without an adapter — the

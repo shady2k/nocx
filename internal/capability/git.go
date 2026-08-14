@@ -15,9 +15,9 @@ import (
 // session" (AD-8; the files domain's ProviderFactory is the same shape).
 // Local sessions resolve to the local factory; SSH sessions resolve to the
 // helper-backed factory when one is available, and to nil when the
-// OpenRemoteUnsupported refusal must stand. It must be side-effect-free:
-// git.open consults it twice (the handler's refusal decision, then the
-// open), and the two calls must agree.
+// selection refuses the session (remote-helper design §6). It must be
+// side-effect-free: git.open consults it twice (the handler's refusal
+// decision, then the open), and the two calls must agree.
 type GitOpenFactory func(sess session.Session) git.RepoFactory
 
 // GitOpenService is the git.open surface: resolve the session, open the
@@ -26,7 +26,8 @@ type GitOpenFactory func(sess session.Session) git.RepoFactory
 // GitOpenOperation hands its callback.
 type GitOpenService interface {
 	// Get resolves the session the connection owns (D15) — the handler
-	// decides noCwd/remoteUnsupported from its Kind before opening.
+	// decides noCwd and the §6 refusal states from its Kind before
+	// opening.
 	Get(id session.ID) (session.Session, error)
 	// OpenBinding opens the repository at cwd through the wired factory
 	// and registers it for the session, returning the minted binding id
@@ -87,10 +88,10 @@ func (s *gitOpenService) OpenBinding(ctx context.Context, sess session.Session, 
 	}
 	f := s.factory(sess)
 	if f == nil {
-		// No factory for this session. The transport answers the
-		// OpenRemoteUnsupported refusal from the session's origin before
-		// opening, so this is the service's honest answer if the two
-		// ever disagree.
+		// No factory for this session. The transport answers the §6
+		// refusal states and the not-available error from the session's
+		// origin before opening, so this is the service's honest answer
+		// if the two ever disagree.
 		return "", git.OpenOutcome{}, errNoFactoryForSession
 	}
 	repo, outcome, err := f.Open(ctx, cwd)
@@ -188,9 +189,10 @@ func (s *gitBindingService) CloseSession(sessionID session.ID) {
 }
 
 // errNoFactoryForSession reports a git.open that reached the factory
-// selector with no factory for the session. The transport answers the
-// OpenRemoteUnsupported refusal from the session's origin before opening,
-// so this is the service's honest answer if the two ever disagree.
+// selector with no factory for the session. The transport answers the §6
+// refusal states and the not-available error from the session's origin
+// before opening, so this is the service's honest answer if the two ever
+// disagree.
 var errNoFactoryForSession = errors.New("git.open: no repo factory for this session")
 
 // openOutcomeCloseError reports a refusing git.open outcome whose live repo

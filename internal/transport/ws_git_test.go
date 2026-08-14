@@ -331,10 +331,13 @@ func (e *gitTestEnv) gitBindingCount(sid string) int {
 
 // ── the two guards ────────────────────────────────────────────────────────
 
-// TestGitOpen_RemoteSessionRefusedBeforeTheFactory is D3 on the wire: an
-// SSH session answers the remoteUnsupported RESULT state, and the factory
-// is never consulted (nothing is spawned).
-func TestGitOpen_RemoteSessionRefusedBeforeTheFactory(t *testing.T) {
+// TestGitOpen_RemoteSessionWithoutHelperSelectionIsNotAvailable: a server
+// with no helper factory wired answers the not-available error for an SSH
+// session, and the factory is never consulted (nothing is spawned). This
+// is the one error exception to the outcome table — a machine the
+// selection cannot even be asked about has no earned state
+// (remote-helper design §6).
+func TestGitOpen_RemoteSessionWithoutHelperSelectionIsNotAvailable(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
 	reg.WithSSHFactory(&stubSSHFactory{
@@ -346,6 +349,7 @@ func TestGitOpen_RemoteSessionRefusedBeforeTheFactory(t *testing.T) {
 	ws := NewWSServer(logger, reg,
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
+		// No WithGitHelperFactory: the helper plane is not wired at all.
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -394,17 +398,17 @@ func TestGitOpen_RemoteSessionRefusedBeforeTheFactory(t *testing.T) {
 	if err := json.Unmarshal(resp, &got); err != nil {
 		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
 	}
-	if got.Error != nil {
-		t.Fatalf("git.open: %+v", got.Error)
+	if got.Error == nil || got.Error.Code != -32603 {
+		t.Fatalf("git.open = %+v, want the -32603 not-available error for an SSH session with no helper selection", got)
 	}
-	if got.Result.State != string(git.OpenRemoteUnsupported) {
-		t.Errorf("state = %q, want %q", got.Result.State, git.OpenRemoteUnsupported)
+	if got.Result.State != "" {
+		t.Errorf("git.open answered state %q alongside an error, want no result", got.Result.State)
 	}
 	factory.mu.Lock()
 	opens := factory.opens
 	factory.mu.Unlock()
 	if opens != 0 {
-		t.Errorf("factory consulted %d times for a remote session, want 0 — the refusal must happen before anything is spawned", opens)
+		t.Errorf("factory consulted %d times for a remote session, want 0 — nothing may be spawned", opens)
 	}
 }
 
@@ -506,11 +510,11 @@ func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
 	}
 }
 
-// TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal: a helper factory
-// that answers nil for the session is "no helper available", and the
-// OpenRemoteUnsupported refusal stands unchanged (design D16 — the
-// zero-install fallback).
-func TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal(t *testing.T) {
+// TestGitOpen_RemoteSessionRefusedByTheSelectionAnswersTheError: a
+// selection that answers none of Factory, ConsentRequired and Refusal —
+// the resolver's Refused (raw, a denied answer) — gets the not-available
+// error carrying the reason, and the local factory is never consulted.
+func TestGitOpen_RemoteSessionRefusedByTheSelectionAnswersTheError(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
 	reg.WithSSHFactory(&stubSSHFactory{
@@ -522,10 +526,13 @@ func TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal(t *testing.T) {
 	ws := NewWSServer(logger, reg,
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
-		// A helper selection that knows this host has no helper: an empty
-		// selection must keep the refusal, exactly as an unwired selection
-		// does.
-		WithGitHelperFactory(func(session.Session) GitOpenSelection { return GitOpenSelection{} }),
+		// The machine's mode forbids the helper: the selection carries
+		// the reason with no earned state.
+		WithGitHelperFactory(func(session.Session) GitOpenSelection {
+			return GitOpenSelection{Refusal: &GitOpenRefusal{
+				Message: "this connection is set to Raw, which does not run the nocx helper",
+			}}
+		}),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -554,17 +561,173 @@ func TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal(t *testing.T) {
 	if err := json.Unmarshal(resp, &got); err != nil {
 		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
 	}
-	if got.Error != nil {
-		t.Fatalf("git.open: %+v", got.Error)
+	if got.Error == nil || got.Error.Code != -32603 {
+		t.Fatalf("git.open = %+v, want the -32603 not-available error carrying the reason", got)
 	}
-	if got.Result.State != string(git.OpenRemoteUnsupported) {
-		t.Errorf("state = %q, want %q — no helper for the session keeps the refusal", got.Result.State, git.OpenRemoteUnsupported)
+	if !strings.Contains(got.Error.Message, "Raw") {
+		t.Errorf("error message = %q, want it to name the recovery (the Raw mode)", got.Error.Message)
 	}
 	factory.mu.Lock()
 	opens := factory.opens
 	factory.mu.Unlock()
 	if opens != 0 {
 		t.Errorf("factory consulted %d times for a refused remote session, want 0", opens)
+	}
+}
+
+// TestGitOpen_SSHSelectionRefusalsAreResultStates: each §6 refusal the
+// selection can carry (unsupportedPlatform, deployFailed, execForbidden)
+// arrives as a RESULT state with its message naming what to do — never an
+// error — and nothing is opened (remote-helper design §6).
+func TestGitOpen_SSHSelectionRefusalsAreResultStates(t *testing.T) {
+	cases := map[string]GitOpenRefusal{
+		"unsupportedPlatform": {
+			State:   git.OpenUnsupportedPlatform,
+			Message: "we build no helper for darwin/amd64",
+		},
+		"deployFailed": {
+			State:   git.OpenDeployFailed,
+			Message: "installing the helper on host.example failed: upload refused",
+		},
+		"execForbidden": {
+			State:   git.OpenExecForbidden,
+			Message: "the host refused the probe that would run the helper: exec request failed",
+		},
+	}
+	for name, refusal := range cases {
+		t.Run(name, func(t *testing.T) {
+			logger := log.NewSlogAdapter(nil)
+			reg := newRegWithStub(logger)
+			reg.WithSSHFactory(&stubSSHFactory{
+				connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+					return ssh.NewStubChannel(logger), nil
+				},
+			})
+			factory := newStubGitFactory()
+			r := refusal
+			ws := NewWSServer(logger, reg,
+				WithGitRegistry(registry.New()),
+				WithGitRepoFactory(factory),
+				WithGitHelperFactory(func(session.Session) GitOpenSelection {
+					return GitOpenSelection{Refusal: &r}
+				}),
+				WithProfileResolver(&fakeResolver{
+					resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+						return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+					},
+				}),
+			)
+			ctx := context.Background()
+			if err := ws.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(func() { _ = ws.Stop(ctx) })
+			conn := connectWS(t, ws)
+			t.Cleanup(func() { _ = conn.Close() })
+			sid := openSSHSession(t, conn)
+
+			resp := jsonrpcCallWithID(t, conn, "git.open", map[string]any{
+				"sessionId": sid,
+				"cwd":       "/some/cwd",
+			}, 2)
+			var got struct {
+				Result struct {
+					State   string `json:"state"`
+					Message string `json:"message"`
+				} `json:"result"`
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &got); err != nil {
+				t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
+			}
+			if got.Error != nil {
+				t.Fatalf("git.open: %+v — a §6 refusal is a RESULT state, never an error", got.Error)
+			}
+			if got.Result.State != string(refusal.State) {
+				t.Errorf("state = %q, want %q", got.Result.State, refusal.State)
+			}
+			if got.Result.Message != refusal.Message {
+				t.Errorf("message = %q, want %q — the refusal names what to do", got.Result.Message, refusal.Message)
+			}
+			factory.mu.Lock()
+			opens := factory.opens
+			factory.mu.Unlock()
+			if opens != 0 {
+				t.Errorf("factory consulted %d times for a refused remote session, want 0", opens)
+			}
+		})
+	}
+}
+
+// TestGitOpen_HelperVersionMismatchIsAStateFromTheFactory: the dial's
+// version/content refusal reaches the wire as the helperVersionMismatch
+// RESULT state with its message — the panel says reinstall, never a
+// generic error (D6, remote-helper design §6). The outcome comes from the
+// factory's Open (the helper handshake), so it must not be collapsed into
+// an error or a generic gitUnavailable.
+func TestGitOpen_HelperVersionMismatchIsAStateFromTheFactory(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	local := newStubGitFactory()
+	helper := &stubGitFactory{
+		mkRepo: nil,
+		outcome: git.OpenOutcome{
+			State:   git.OpenHelperVersionMismatch,
+			Message: "the helper installed on host.example answered with a different protocol version or content than nocx installed — reinstall it to recover",
+		},
+	}
+	ws := NewWSServer(logger, reg,
+		WithGitRegistry(registry.New()),
+		WithGitRepoFactory(local),
+		WithGitHelperFactory(func(session.Session) GitOpenSelection {
+			return GitOpenSelection{Factory: helper}
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHSession(t, conn)
+
+	resp := jsonrpcCallWithID(t, conn, "git.open", map[string]any{
+		"sessionId": sid,
+		"cwd":       "/some/cwd",
+	}, 2)
+	var got struct {
+		Result struct {
+			State     string `json:"state"`
+			Message   string `json:"message"`
+			BindingID string `json:"bindingId"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if got.Error != nil {
+		t.Fatalf("git.open: %+v — a version mismatch is a RESULT state, never an error", got.Error)
+	}
+	if got.Result.State != string(git.OpenHelperVersionMismatch) {
+		t.Errorf("state = %q, want %q", got.Result.State, git.OpenHelperVersionMismatch)
+	}
+	if got.Result.Message == "" {
+		t.Error("message empty, want it to name the reinstall recovery")
+	}
+	if got.Result.BindingID != "" {
+		t.Errorf("bindingId = %q, want empty for a refused open", got.Result.BindingID)
 	}
 }
 

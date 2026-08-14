@@ -33,7 +33,6 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
-	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -764,8 +763,9 @@ func TestHelperDialFactory_RefusingOpenClosesTheLane(t *testing.T) {
 }
 
 // TestHelperDialFactory_ExecForbiddenClosesTheLane: a server that refuses
-// the exec is a helper that cannot start — Dial reports the sentinel, and
-// the lane the factory acquired is closed rather than leaked.
+// the exec is a helper that cannot start — the open answers the
+// execForbidden §6 outcome (remote-helper design §6), and the lane the
+// factory acquired is closed rather than leaked.
 func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 	provider := &fakeLaneProvider{
 		peer:     func(io.Reader, io.Writer) int { return 0 },
@@ -777,9 +777,15 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 		t.Fatal("selection returned no factory")
 	}
 	factory := selection.Factory
-	_, _, err := factory.Open(context.Background(), "/some/cwd")
-	if !errors.Is(err, client.ErrExecForbidden) {
-		t.Fatalf("open error = %v, want ErrExecForbidden", err)
+	repo, outcome, err := factory.Open(context.Background(), "/some/cwd")
+	if err != nil {
+		t.Fatalf("open error = %v, want the execForbidden outcome, not an error", err)
+	}
+	if repo != nil {
+		t.Fatal("open returned a repo for a refused exec")
+	}
+	if outcome.State != git.OpenExecForbidden || outcome.Message == "" {
+		t.Fatalf("outcome = %+v, want execForbidden with a message naming the recovery", outcome)
 	}
 	if got := provider.lane(0).closeCount(); got != 1 {
 		t.Fatalf("lane closed %d times, want 1", got)
@@ -813,7 +819,9 @@ func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
 }
 
 // TestHelperSelectionExplicitRawWritesNothing: a machine at explicit raw is
-// never asked and never written to (consent design §4.2).
+// never asked and never written to (consent design §4.2); the selection
+// answers the resolver's Refused as a reason with no earned state, and
+// git.open's not-available error carries it.
 func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
 	stubArtifacts(t)
@@ -823,7 +831,10 @@ func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
 	if selection.Factory != nil || selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want the empty refusal for explicit raw", selection)
+		t.Fatalf("selection = %+v, want no factory and no ask for explicit raw", selection)
+	}
+	if selection.Refusal == nil || selection.Refusal.State != "" || selection.Refusal.Message == "" {
+		t.Fatalf("selection = %+v, want the Refused reason naming what to do", selection)
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
 		t.Fatalf("explicit raw wrote %d uploads, want 0", provider.install.uploadCount())

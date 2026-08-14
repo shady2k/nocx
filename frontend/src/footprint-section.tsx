@@ -111,6 +111,32 @@ export function FootprintSection(props: FootprintSectionProps) {
     }
   }
 
+  const uninstallHelper = async (h: HelperInstall): Promise<void> => {
+    if (!props.client || !h.removableProfileId) return
+    const ok = await showConfirm(
+      `Remove the remote helper from ${h.identity}? The whole ${h.path} tree is removed. Consent for this machine stays — the helper is reinstalled the next time a remote feature here needs it.`,
+      'Uninstall',
+      'Cancel',
+    )
+    if (!ok) return
+    setBusy(h.identity)
+    try {
+      const res = await props.client.helperUninstall(h.removableProfileId, h.fingerprint, h.path)
+      showToast({
+        level: 'success',
+        message: res.removed
+          ? `Removed the helper from ${h.identity}`
+          : `Nothing was installed on ${h.identity}`,
+      })
+      await load()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      showToast({ level: 'danger', message: `Uninstall failed: ${msg}` })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const refresh = (): void => {
     setDestinations(null)
     void load()
@@ -204,9 +230,23 @@ export function FootprintSection(props: FootprintSectionProps) {
                     </>
                   }
                   actions={
-                    <span class="cm-item-meta">
-                      The helper serves git and other remote features on this machine
-                    </span>
+                    h.removableProfileId !== null ? (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={busy() !== null}
+                        onClick={() => void uninstallHelper(h)}
+                        ariaLabel={`Uninstall the helper from ${h.identity}`}
+                      >
+                        <TrashIcon />
+                        {busy() === h.identity ? 'Removing…' : 'Uninstall'}
+                      </Button>
+                    ) : (
+                      <span class="cm-item-meta">
+                        The helper serves git and other remote features on this machine. Removal
+                        needs a saved connection &mdash; remove {h.path} by hand
+                      </span>
+                    )
                   }
                 />
               )}

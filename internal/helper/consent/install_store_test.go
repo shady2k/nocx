@@ -104,3 +104,115 @@ func TestInstallStoreOneMachineTwoHomes(t *testing.T) {
 		t.Fatalf("one machine, two homes: All = %d rows, want 2", len(got))
 	}
 }
+
+// TestInstallStoreRemoveForgetsOneRow: removing an observed install clears
+// exactly that row — the machine AND the install directory name it, because
+// one machine can carry a helper footprint in more than one home (consent
+// design §3.2) — and leaves every other row listed.
+func TestInstallStoreRemoveForgetsOneRow(t *testing.T) {
+	s := newTestInstallStore(t)
+	one := testInstall("SHA256:one")
+	two := testInstall("SHA256:two")
+	two.Path = "/home/other/.nocx/helper/v1-linux-amd64-def/"
+	if err := s.Record(one); err != nil {
+		t.Fatalf("Record one: %v", err)
+	}
+	if err := s.Record(two); err != nil {
+		t.Fatalf("Record two: %v", err)
+	}
+	if err := s.Remove("SHA256:one", one.Path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	got := s.All()
+	if len(got) != 1 || got[0].Fingerprint != "SHA256:two" {
+		t.Fatalf("All after Remove = %+v, want only the other machine's row", got)
+	}
+	// The same fingerprint under a DIFFERENT path is a different row: the
+	// machine's other-home install is untouched.
+	if err := s.Remove("SHA256:one", "/home/u/.nocx/helper/other/"); err != nil {
+		t.Fatalf("Remove non-matching path: %v", err)
+	}
+	if got := s.All(); len(got) != 1 {
+		t.Fatalf("Remove with a non-matching path dropped a row: %v", got)
+	}
+}
+
+// TestInstallStoreRemoveIsIdempotent: removing a row that is not there is a
+// no-op, not an error — clicking remove twice, or uninstalling a host whose
+// observation was already cleared, never fails.
+func TestInstallStoreRemoveIsIdempotent(t *testing.T) {
+	s := newTestInstallStore(t)
+	if err := s.Remove("SHA256:never", "/home/u/.nocx/helper/v1-linux-amd64-abc/"); err != nil {
+		t.Fatalf("Remove on an empty store: %v", err)
+	}
+	if err := s.Record(testInstall("SHA256:one")); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := s.Remove("SHA256:one", "/home/u/.nocx/helper/v1-linux-amd64-abc/"); err != nil {
+		t.Fatalf("first Remove: %v", err)
+	}
+	if err := s.Remove("SHA256:one", "/home/u/.nocx/helper/v1-linux-amd64-abc/"); err != nil {
+		t.Fatalf("second Remove (already gone): %v", err)
+	}
+}
+
+// TestInstallStoreRemoveIsDurable: the cleared observation survives a store
+// reconstruction — the next start must not resurrect a removed helper on
+// the footprint screen.
+func TestInstallStoreRemoveIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	store := NewInstallStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "helper-installs.json")
+	if err := store.Record(testInstall("SHA256:one")); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := store.Remove("SHA256:one", "/home/u/.nocx/helper/v1-linux-amd64-abc/"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	again := NewInstallStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "helper-installs.json")
+	if got := again.All(); len(got) != 0 {
+		t.Fatalf("removed observation resurrected across store instances: %v", got)
+	}
+}
+
+// failSecondWrite is a DocumentStore whose Write fails on its second call,
+// then behaves normally: the shape a Remove failure takes after a
+// successful Record.
+type failSecondWrite struct {
+	storage.DocumentStore
+	writes int
+}
+
+func (f *failSecondWrite) Write(name string, doc any) error {
+	f.writes++
+	if f.writes == 2 {
+		return os.ErrPermission
+	}
+	return f.DocumentStore.Write(name, doc)
+}
+
+// TestInstallStoreRemoveFailureLeavesMemoryUnchanged: a failed persist is
+// not a removal — the in-memory listing stays as it was (and the document
+// with it), so the footprint surface keeps showing the row until the store
+// can durably forget it.
+func TestInstallStoreRemoveFailureLeavesMemoryUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	ds := &failSecondWrite{DocumentStore: storage.NewDocumentStore(dir)}
+	s := NewInstallStore(log.NewSlogAdapter(nil), ds, "helper-installs.json")
+	if err := s.Record(testInstall("SHA256:one")); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := s.Remove("SHA256:one", "/home/u/.nocx/helper/v1-linux-amd64-abc/"); err == nil {
+		t.Fatal("Remove against a failing write must fail")
+	}
+	if got := s.All(); len(got) != 1 {
+		t.Fatalf("failed Remove changed the in-memory listing: %v", got)
+	}
+	again := NewInstallStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "helper-installs.json")
+	if got := again.All(); len(got) != 1 {
+		t.Fatalf("failed Remove changed the durable document: %v", got)
+	}
+	// Healed: the same store can still forget the row.
+	if err := s.Remove("SHA256:one", "/home/u/.nocx/helper/v1-linux-amd64-abc/"); err != nil {
+		t.Fatalf("Remove after heal: %v", err)
+	}
+}

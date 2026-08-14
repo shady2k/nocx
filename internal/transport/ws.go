@@ -194,6 +194,20 @@ type WSServer struct {
 	// nothing — the status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
 
+	// helperUninstaller removes a helper install tree on a remote host,
+	// owning the dial-and-call (remote-helper design D25). Wired through
+	// WithRemoteHelperUninstaller; when nil, shell.footprint.helperUninstall
+	// answers an error and removes nothing — the status surface never
+	// offers the button without it.
+	helperUninstaller RemoteHelperUninstaller
+	// helperCloser closes every live helper channel on a machine before
+	// its install directory is removed — the D25 order (remote-helper
+	// design D25). Wired through WithHelperChannelCloser; when nil,
+	// shell.footprint.helperUninstall refuses: without a closer the
+	// handler cannot prove the close-before-remove invariant that is the
+	// whole point of the rule.
+	helperCloser HelperChannelCloser
+
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
 	localCompleter completion.Completer

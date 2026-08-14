@@ -61,7 +61,14 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["identity", "fingerprint", "path", "hash", "installedAt"],
+        "required": [
+          "identity",
+          "fingerprint",
+          "path",
+          "hash",
+          "installedAt",
+          "removableProfileId"
+        ],
         "properties": {
           "identity": {
             "description": "The destination identity (user@host:port) the footprint screen shows.",
@@ -83,6 +90,10 @@
             "description": "When nocx last observed this install complete.",
             "type": "string",
             "format": "date-time"
+          },
+          "removableProfileId": {
+            "description": "The saved connection that resolves to this machine and can remove the helper, or null when none does. Absence is the explanation: removal needs a saved connection, and the path field is what a user removes by hand instead.",
+            "type": ["string", "null"]
           }
         }
       }

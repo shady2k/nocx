@@ -68,7 +68,7 @@ type helperInstallProvider interface {
 // installs idempotently, and an already-complete directory uploads nothing
 // (D7), so both consultations converge on the same install. The dial
 // happens inside the returned factory's Open, never here.
-func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) transport.GitFactoryFor {
+func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
 	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
 	return func(sess session.Session) transport.GitOpenSelection {
 		// The platform probe is the one bounded remote exec the decision
@@ -131,6 +131,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 				reg:        reg,
 				sid:        sess.ID(),
 				host:       sess.Host(),
+				fp:         sess.HostKeyFingerprint(),
 				opts:       sess.SSHOptions(),
 				command:    command,
 				expectHash: hash,
@@ -164,7 +165,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 				Message: refusedHelperReason(sess, store),
 			}}
 		}
-	}
+	}, reg
 }
 
 // helperProbeRefusal maps a probe failure onto the §6 refusal it is: an
@@ -379,13 +380,47 @@ func (r *helperRegistry) forget(f *sessionFactory) {
 	r.mu.Unlock()
 }
 
+// CloseHelpersFor closes every live helper channel on the machine whose
+// host public-key fingerprint is fp — the D25 order an uninstall is bound
+// by: no helper may be running out of a directory being deleted, so the
+// channels the backend KNOWS about (its own, per session) are closed
+// before the install directory is removed. The registry's channels are
+// the backend's whole knowledge: a helper running from a DIFFERENT nocx
+// instance sharing the same $HOME is out of reach, which the design
+// accepts because the backend can only account for its own channels.
+// A closed helper is forgotten; the next open redials it, and a machine
+// whose install directory is gone answers the honest dial refusal (D6).
+func (r *helperRegistry) CloseHelpersFor(fp string) {
+	if fp == "" {
+		return
+	}
+	r.mu.Lock()
+	var victims []*hostHelper
+	for _, h := range r.hosts {
+		if h.f.fp == fp {
+			victims = append(victims, h)
+		}
+	}
+	r.mu.Unlock()
+	// closeLocked takes h.mu (an open in flight finishes first, so the
+	// close is exact) and calls reg.forget, which re-takes r.mu — the
+	// iteration therefore releases r.mu before closing.
+	for _, h := range victims {
+		h.closeLocked()
+	}
+}
+
 // sessionFactory is a git.RepoFactory for one session: stateless (the state
 // lives in the registry), so the two times git.open consults the selection
 // both resolve to the same shared helper.
 type sessionFactory struct {
-	reg        *helperRegistry
-	sid        session.ID
-	host       string
+	reg  *helperRegistry
+	sid  session.ID
+	host string
+	// fp is the machine's host public-key fingerprint — the consent key —
+	// captured at selection time so the registry can close every live
+	// helper channel on a machine without holding a session (D25).
+	fp         string
 	opts       []ssh.ConnectOption
 	command    string
 	expectHash string

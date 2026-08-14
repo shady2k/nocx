@@ -99,6 +99,36 @@ func (s *InstallStore) Record(install Install) error {
 	return nil
 }
 
+// Remove durably forgets one observed installation, named by the machine
+// (fingerprint) and the install directory on it (path) — the same key the
+// listing uses (installKey), because one machine can carry a helper
+// footprint in more than one home and the fingerprint alone cannot name a
+// row. Removing a row that is not there is a no-op, not an error: clicking
+// remove twice, or uninstalling a host whose observation was already
+// cleared, never fails. Only after the write succeeds does the in-memory
+// state change — a failed write leaves the listing as it was, and the next
+// start reads the durable truth.
+func (s *InstallStore) Remove(fingerprint, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	key := installKey(Install{Fingerprint: fingerprint, Path: path})
+	if _, ok := s.installs[key]; !ok {
+		return nil // nothing observed, nothing to forget
+	}
+	next := make(map[string]Install, len(s.installs))
+	for k, v := range s.installs {
+		if k != key {
+			next[k] = v
+		}
+	}
+	if err := s.writeDoc(next); err != nil {
+		return err
+	}
+	s.installs = next
+	return nil
+}
+
 // All returns every recorded install, ordered by identity so the footprint
 // surface never depends on Go map iteration order. Same fail-closed reading
 // as the rest of the store: a missing or corrupt document is an empty list.

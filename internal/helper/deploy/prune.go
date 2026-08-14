@@ -1,15 +1,11 @@
 package deploy
 
-// Pruning (D25): pruning bounds the footprint to the version in use — it
-// never touches the directory named as keep. Neither pruning nor anything
-// else in this package ever follows a symlink or touches anything else
-// under the home: ~/.nocx's other contents belong to the shell bundle, and
-// the shell bundle's own uninstall is the publisher's. (Uninstall — the
-// removal of the whole ~/.nocx/helper tree — is deliberately not here yet:
-// nothing in the product offers a user a way to revoke a helper from a
-// host, and a function with no caller does not land. The implementation
-// and its D25 tests are parked at park/nocx-aggw-uninstall and land with
-// the consent surface that calls them, nocx-aggw.)
+// Pruning and uninstall (D25): pruning bounds the footprint to the version
+// in use — it never touches the directory named as keep — and uninstall
+// removes the whole ~/.nocx/helper tree. Neither ever follows a symlink and
+// neither touches anything else under the home: ~/.nocx's other contents
+// belong to the shell bundle, and the shell bundle's own uninstall is the
+// publisher's.
 
 import (
 	"context"
@@ -32,7 +28,7 @@ var installDirName = regexp.MustCompile(`^[0-9]+-[^-]+-[^-]+-[0-9a-f]{64}$`)
 // naming pattern are candidates; anything else in the directory is left
 // strictly alone.
 func Prune(ctx context.Context, fs RemoteFS, home string, keep string) error {
-	root := path.Join(home, ".nocx", helperRootName)
+	root := path.Join(home, ".nocx", HelperRootName)
 	entries, err := fs.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, iofs.ErrNotExist) {
@@ -59,6 +55,19 @@ func Prune(ctx context.Context, fs RemoteFS, home string, keep string) error {
 		}
 	}
 	return nil
+}
+
+// Uninstall removes the whole ~/.nocx/helper tree (D25). The CALLER closes
+// any running helper's channel before calling Uninstall — no helper may be
+// running out of a directory being deleted — and this function never
+// touches anything else under the home. A host with nothing installed
+// uninstalls cleanly.
+func Uninstall(ctx context.Context, fs RemoteFS, home string) error {
+	root := path.Join(home, ".nocx", HelperRootName)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return removeTree(fs, root)
 }
 
 // removeTree removes dir and everything under it without ever following a

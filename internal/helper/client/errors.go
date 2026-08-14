@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -40,10 +41,13 @@ const exitVersionMismatch = 42
 
 // RefusalError is a request the helper refused: the machine-readable code
 // and message from the wire (proto.Error). It is a refusal, never a loss —
-// errors.Is(err, ErrLost) is false for it.
+// errors.Is(err, ErrLost) is false for it. Details carries the structured
+// half of the refusal (the git service's ErrConflicted path) so the caller
+// can reconstruct the typed domain error, fields intact.
 type RefusalError struct {
 	Code    string
 	Message string
+	Details json.RawMessage
 }
 
 func (e *RefusalError) Error() string {

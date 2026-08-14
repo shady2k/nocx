@@ -22,6 +22,27 @@ type fakeService struct {
 	name   string
 	ops    map[string]any
 	callFn func(ctx context.Context, op string, params json.RawMessage) (any, error)
+	// refuses is an optional D11 policy: the ops a cancel must be refused for.
+	refuses map[string]bool
+	// refusalFn is an optional RefusalCoder: codes the errors the service
+	// recognises, so they cross with their code and details instead of
+	// internal.
+	refusalFn func(err error) (string, json.RawMessage)
+}
+
+// RefusesCancel is the optional CancelPolicy capability: false when the
+// test did not declare a policy, which leaves cancellation ordinary.
+func (f *fakeService) RefusesCancel(op string) bool {
+	return f.refuses != nil && f.refuses[op]
+}
+
+// Refusal is the optional RefusalCoder capability: no special code when
+// the test did not declare a coder.
+func (f *fakeService) Refusal(err error) (string, json.RawMessage) {
+	if f.refusalFn == nil {
+		return "", nil
+	}
+	return f.refusalFn(err)
 }
 
 func (f *fakeService) Name() string { return f.name }
@@ -750,4 +771,126 @@ func TestChunkingPinsTheFrameBoundary(t *testing.T) {
 			t.Fatalf("serve: %v", err)
 		}
 	})
+}
+
+// TestCancelRefusedWhenTheServiceDeclaresIt is D11's mechanism at the
+// host: a service that declares an op refuses cancellation is answered
+// with ErrCodeCancelRefused — a refusal is a fact the caller can act on, a
+// no-op looks like success — and the operation runs to completion. The
+// handler's result arriving after the refusal is the proof it was never
+// stopped.
+func TestCancelRefusedWhenTheServiceDeclaresIt(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	h.Register(&fakeService{
+		name:    "test",
+		ops:     map[string]any{"mutate": struct{}{}},
+		refuses: map[string]bool{"mutate": true},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			close(started)
+			<-release
+			return "done", nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 7, Service: "test", Op: "mutate"}))
+	<-started // the mutation is now in flight
+
+	writeFrame(t, inW, proto.TypeCancel, mustJSON(struct {
+		ID uint64 `json:"id"`
+	}{ID: 7}))
+	refusal := readResponse(t, outCh)
+	if refusal.ID != 7 {
+		t.Fatalf("want the refused request's id (7), got %d", refusal.ID)
+	}
+	if refusal.Error == nil || refusal.Error.Code != proto.ErrCodeCancelRefused {
+		t.Fatalf("want a cancel_refused refusal, got %+v", refusal.Error)
+	}
+
+	close(release)
+	resp := readResponse(t, outCh)
+	if resp.Error != nil {
+		t.Fatalf("the mutation must complete despite the refused cancel: %+v", resp.Error)
+	}
+	if resp.ID != 7 {
+		t.Fatalf("want the mutation's own response (id 7), got %d", resp.ID)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestServiceErrorCrossesWithCodeAndDetails pins the RefusalCoder
+// mechanism: a service that codes one of its errors sees the code and the
+// structured details cross on the wire, so the backend can rebuild the
+// typed error — fields intact — instead of seeing an opaque internal
+// failure. An uncoded error still crosses as internal.
+func TestServiceErrorCrossesWithCodeAndDetails(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"coded": struct{}{}, "plain": struct{}{}},
+		refusalFn: func(err error) (string, json.RawMessage) {
+			if err.Error() == "the coded failure" {
+				return "git.conflicted", mustJSON(struct {
+					Path string `json:"path"`
+				}{Path: "f.txt"})
+			}
+			return "", nil
+		},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			if op == "coded" {
+				return nil, errors.New("the coded failure")
+			}
+			return nil, errors.New("the plain failure")
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "test", Op: "coded"}))
+	coded := readResponse(t, outCh)
+	if coded.Error == nil || coded.Error.Code != "git.conflicted" {
+		t.Fatalf("want the coded refusal, got %+v", coded.Error)
+	}
+	if !strings.Contains(string(coded.Error.Details), `"f.txt"`) {
+		t.Fatalf("the details must carry the structured path, got %s", coded.Error.Details)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 2, Service: "test", Op: "plain"}))
+	plain := readResponse(t, outCh)
+	if plain.Error == nil || plain.Error.Code != proto.ErrCodeInternal {
+		t.Fatalf("an uncoded error must stay internal, got %+v", plain.Error)
+	}
+	if len(plain.Error.Details) != 0 {
+		t.Fatalf("an uncoded error carries no details, got %s", plain.Error.Details)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
 }

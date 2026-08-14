@@ -44,12 +44,22 @@ type Host struct {
 	// concurrent responses from interleaving mid-frame.
 	mu       sync.Mutex
 	services []Service
-	requests map[uint64]context.CancelFunc
+	requests map[uint64]pendingRequest
 
 	// streamSeq mints the stream ids chunked responses are keyed by (D14):
 	// the sentinel and its chunks may interleave with other responses, and
 	// the stream id is what routes them.
 	streamSeq uint64
+}
+
+// pendingRequest is the per-request state a TypeCancel reaches: the
+// request's own stop function plus the service and op it is serving, which
+// is what lets a cancel decide whether the operation refuses cancellation
+// (D11).
+type pendingRequest struct {
+	stop    context.CancelFunc
+	service string
+	op      string
 }
 
 // New builds a host over in and out. out is the wire: sentinel line, then
@@ -60,8 +70,8 @@ func New(in io.Reader, out io.Writer, contentHash, instanceID string, log *slog.
 		out:         out,
 		contentHash: contentHash,
 		instanceID:  instanceID,
+		requests:    make(map[uint64]pendingRequest),
 		log:         log,
-		requests:    make(map[uint64]context.CancelFunc),
 	}
 }
 
@@ -193,7 +203,7 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 func (h *Host) request(ctx context.Context, req proto.Request) {
 	reqCtx, stop := context.WithCancel(ctx)
 	h.mu.Lock()
-	h.requests[req.ID] = stop
+	h.requests[req.ID] = pendingRequest{stop: stop, service: req.Service, op: req.Op}
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
@@ -224,7 +234,8 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 	}
 	result, err := svc.Call(reqCtx, req.Op, req.Params)
 	if err != nil {
-		resp.Error = &proto.Error{Code: proto.ErrCodeInternal, Message: err.Error()}
+		code, details := refusal(svc, err)
+		resp.Error = &proto.Error{Code: code, Message: err.Error(), Details: details}
 		h.respond(resp)
 		return
 	}
@@ -238,9 +249,29 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 	h.respond(resp)
 }
 
+// refusal codes a service error for the wire: the service's own
+// machine-readable code and structured details when it declares them
+// (RefusalCoder), internal otherwise. One call for both halves, so a
+// coder cannot produce a code and details that disagree.
+func refusal(svc Service, err error) (string, json.RawMessage) {
+	coder, ok := svc.(RefusalCoder)
+	if !ok {
+		return proto.ErrCodeInternal, nil
+	}
+	code, details := coder.Refusal(err)
+	if code == "" {
+		return proto.ErrCodeInternal, nil
+	}
+	return code, details
+}
+
 // cancel reaches the per-request context of the named request. Whether the
 // cancellation is honoured is the handler's decision; mutations are never
-// cancelled (D11), which the git service enforces when it lands.
+// cancelled (D11), which the git service enforces when it lands: a cancel
+// naming an operation the service declares refuses cancellation is
+// answered with ErrCodeCancelRefused — a refusal is a fact the caller can
+// act on, a no-op looks like success — and the operation runs to
+// completion. Everything else is cancelled.
 func (h *Host) cancel(payload []byte) {
 	var c struct {
 		ID uint64 `json:"id"`
@@ -250,11 +281,21 @@ func (h *Host) cancel(payload []byte) {
 		return
 	}
 	h.mu.Lock()
-	stop, ok := h.requests[c.ID]
+	entry, ok := h.requests[c.ID]
 	h.mu.Unlock()
-	if ok {
-		stop()
+	if !ok {
+		return
 	}
+	if svc := h.serviceByName(entry.service); svc != nil {
+		if policy, ok := svc.(CancelPolicy); ok && policy.RefusesCancel(entry.op) {
+			h.respond(proto.Response{ID: c.ID, Error: &proto.Error{
+				Code:    proto.ErrCodeCancelRefused,
+				Message: "operation refuses cancellation",
+			}})
+			return
+		}
+	}
+	entry.stop()
 }
 
 // serviceByName finds a service by name through Services(), the same

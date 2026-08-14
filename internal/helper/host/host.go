@@ -1,0 +1,284 @@
+// Package host is the remote-helper's serving half: it reads one TypeHello
+// over the wire, and on a version match writes the sentinel line and a
+// TypeHelloOK echo, then serves requests until stdin reaches EOF. It hosts
+// a closed set of named operations grouped into services (D2); registering
+// a service is the whole extension point.
+//
+// stdout is the wire and nothing else (D22). Every diagnostic goes to the
+// logger the host was constructed with — the caller builds it over stderr —
+// so one stray write to stdout corrupts a frame and surfaces far away.
+package host
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"sync"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
+)
+
+// ExitVersionMismatch is the helper's exit code for a hello carrying the
+// wrong protocol version. The helper writes nothing to stdout first (D5).
+const ExitVersionMismatch = 42
+
+// ErrVersionMismatch reports a hello whose Version disagrees with
+// proto.Version. main maps it to ExitVersionMismatch.
+var ErrVersionMismatch = errors.New("host: helper version mismatch")
+
+// Host serves one helper connection: hello, sentinel, then requests until
+// the input stream ends. It is safe for use by one goroutine per request,
+// plus the goroutine running Serve.
+type Host struct {
+	in          io.Reader
+	out         io.Writer
+	contentHash string
+	instanceID  string
+	log         *slog.Logger
+
+	// mu guards out, services and requests. One mutex is enough: the
+	// critical sections are tiny, and the writer mutex is what keeps
+	// concurrent responses from interleaving mid-frame.
+	mu       sync.Mutex
+	services []Service
+	requests map[uint64]context.CancelFunc
+}
+
+// New builds a host over in and out. out is the wire: sentinel line, then
+// frames, nothing else. The logger is the only place diagnostics go.
+func New(in io.Reader, out io.Writer, contentHash, instanceID string, log *slog.Logger) *Host {
+	return &Host{
+		in:          in,
+		out:         out,
+		contentHash: contentHash,
+		instanceID:  instanceID,
+		log:         log,
+		requests:    make(map[uint64]context.CancelFunc),
+	}
+}
+
+// Register adds a service to the host. The name session is reserved (D15):
+// registering it panics at construction, and requests for it answer
+// ErrCodeUnknownService like any other name. D3 is enforced here, not just
+// audited: every op of the service must declare its params type, and an op
+// whose params carry a free-form string list is refused at registration —
+// a rule the registration path cannot get past is stronger than a rule a
+// test must remember to check.
+func (h *Host) Register(s Service) {
+	if s.Name() == "session" {
+		panic(`host: "session" is a reserved service name (D15)`)
+	}
+	for _, op := range s.Ops() {
+		schema := s.ParamsSchema(op)
+		if schema == nil {
+			panic(fmt.Sprintf("host: %s.%s declares no params schema", s.Name(), op))
+		}
+		for _, field := range schema.Fields() {
+			if field.IsFreeFormStringList() {
+				panic(fmt.Sprintf("host: %s.%s takes %q: no operation may accept argv (D3)", s.Name(), op, field.Name))
+			}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.services = append(h.services, s)
+}
+
+// Services returns the registered services. The dispatcher finds a service
+// by name through this accessor — there is no second lookup table beside
+// it — and the D3 audit walks the same list.
+func (h *Host) Services() []Service {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]Service(nil), h.services...)
+}
+
+// Serve runs the connection: it reads one TypeHello, refuses a version
+// mismatch without writing a byte, otherwise writes the sentinel line and a
+// TypeHelloOK echo, then serves frames until the input reaches EOF, at which
+// point it returns nil.
+func (h *Host) Serve(ctx context.Context) error {
+	var helloErr error
+	helloDone := false
+	dec := proto.NewDecoder(func(ty proto.FrameType, seq, ack uint32, payload []byte) {
+		if !helloDone {
+			helloDone = true
+			helloErr = h.hello(ty, payload)
+			return
+		}
+		h.frame(ctx, ty, payload)
+	}, func(n int) {
+		h.log.Warn("decoder resync", "garbage", n)
+	})
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := h.in.Read(buf)
+		if n > 0 {
+			if ferr := dec.Feed(buf[:n]); ferr != nil {
+				return ferr
+			}
+			if helloErr != nil {
+				return helloErr
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+// hello handles the first frame of the connection. A mismatch must write
+// nothing to stdout (D5): the sentinel is only written after the version
+// check passes.
+func (h *Host) hello(ty proto.FrameType, payload []byte) error {
+	if ty != proto.TypeHello {
+		return fmt.Errorf("host: first frame is type %d, want %d", ty, proto.TypeHello)
+	}
+	var hello proto.Hello
+	if err := json.Unmarshal(payload, &hello); err != nil {
+		return fmt.Errorf("host: malformed hello: %w", err)
+	}
+	if hello.Version != proto.Version {
+		return fmt.Errorf("host: version %q, want %q: %w", hello.Version, proto.Version, ErrVersionMismatch)
+	}
+	h.mu.Lock()
+	_, err := fmt.Fprintf(h.out, "nocx-helper %s ready\n", proto.Version)
+	h.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("host: sentinel: %w", err)
+	}
+	ok := proto.HelloOK{Version: proto.Version, Nonce: hello.Nonce, ContentHash: h.contentHash, InstanceID: h.instanceID}
+	raw, err := json.Marshal(ok)
+	if err != nil {
+		return fmt.Errorf("host: helloOK: %w", err)
+	}
+	h.writeFrame(proto.TypeHelloOK, raw)
+	return nil
+}
+
+// frame handles every frame after the hello.
+func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
+	switch ty {
+	case proto.TypeRequest:
+		var req proto.Request
+		if err := json.Unmarshal(payload, &req); err != nil {
+			h.log.Warn("malformed request", "err", err)
+			return
+		}
+		go h.request(ctx, req)
+	case proto.TypeCancel:
+		h.cancel(payload)
+	case proto.TypeKeepAlive:
+		// nothing to answer; keepalives keep the transport warm
+	default:
+		h.log.Warn("unexpected frame", "type", ty)
+	}
+}
+
+// request serves one request on its own goroutine, so a blocking handler
+// never stalls the read loop or another request (D13). The per-request
+// context is stored by id so a TypeCancel can reach it.
+func (h *Host) request(ctx context.Context, req proto.Request) {
+	reqCtx, stop := context.WithCancel(ctx)
+	h.mu.Lock()
+	h.requests[req.ID] = stop
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.requests, req.ID)
+		h.mu.Unlock()
+		stop()
+	}()
+
+	h.log.Info("request", "id", req.ID, "service", req.Service, "op", req.Op, "corr", req.Corr) // D26
+
+	resp := proto.Response{ID: req.ID}
+	svc := h.serviceByName(req.Service)
+	if svc == nil {
+		resp.Error = &proto.Error{Code: proto.ErrCodeUnknownService, Message: "no service named " + req.Service}
+		h.respond(resp)
+		return
+	}
+	schema := svc.ParamsSchema(req.Op)
+	if schema == nil {
+		resp.Error = &proto.Error{Code: proto.ErrCodeUnknownOp, Message: "no op " + req.Op + " on service " + req.Service}
+		h.respond(resp)
+		return
+	}
+	if _, err := schema.Decode(req.Params); err != nil {
+		resp.Error = &proto.Error{Code: proto.ErrCodeBadParams, Message: err.Error()}
+		h.respond(resp)
+		return
+	}
+	result, err := svc.Call(reqCtx, req.Op, req.Params)
+	if err != nil {
+		resp.Error = &proto.Error{Code: proto.ErrCodeInternal, Message: err.Error()}
+		h.respond(resp)
+		return
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		resp.Error = &proto.Error{Code: proto.ErrCodeInternal, Message: "result: " + err.Error()}
+		h.respond(resp)
+		return
+	}
+	resp.Result = raw
+	h.respond(resp)
+}
+
+// cancel reaches the per-request context of the named request. Whether the
+// cancellation is honoured is the handler's decision; mutations are never
+// cancelled (D11), which the git service enforces when it lands.
+func (h *Host) cancel(payload []byte) {
+	var c struct {
+		ID uint64 `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &c); err != nil {
+		h.log.Warn("malformed cancel", "err", err)
+		return
+	}
+	h.mu.Lock()
+	stop, ok := h.requests[c.ID]
+	h.mu.Unlock()
+	if ok {
+		stop()
+	}
+}
+
+// serviceByName finds a service by name through Services(), the same
+// accessor the D3 audit reads — the lookup and the audit cannot drift.
+func (h *Host) serviceByName(name string) Service {
+	for _, s := range h.Services() {
+		if s.Name() == name {
+			return s
+		}
+	}
+	return nil
+}
+
+func (h *Host) respond(resp proto.Response) {
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		h.log.Error("marshal response", "err", err)
+		return
+	}
+	h.writeFrame(proto.TypeResponse, raw)
+}
+
+// writeFrame writes one frame to the wire under the writer mutex, so
+// concurrent responses cannot interleave mid-frame.
+func (h *Host) writeFrame(ty proto.FrameType, raw []byte) {
+	frame := proto.EncodeFrame(ty, 0, 0, raw)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, err := h.out.Write(frame); err != nil {
+		h.log.Error("write frame", "type", ty, "err", err)
+	}
+}

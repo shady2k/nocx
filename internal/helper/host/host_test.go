@@ -1,0 +1,623 @@
+package host_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
+)
+
+// fakeService implements host.Service over a per-op params table and one
+// call function, so tests can declare ops with real params types and steer
+// what the handler does.
+type fakeService struct {
+	name   string
+	ops    map[string]any
+	callFn func(ctx context.Context, op string, params json.RawMessage) (any, error)
+}
+
+func (f *fakeService) Name() string { return f.name }
+
+func (f *fakeService) Ops() []string {
+	ops := make([]string, 0, len(f.ops))
+	for op := range f.ops {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	return ops
+}
+
+func (f *fakeService) ParamsSchema(op string) *host.Schema {
+	t, ok := f.ops[op]
+	if !ok {
+		return nil
+	}
+	return host.SchemaFor(t)
+}
+
+func (f *fakeService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	return f.callFn(ctx, op, params)
+}
+
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func writeFrame(t *testing.T, w io.Writer, ty proto.FrameType, payload []byte) {
+	t.Helper()
+	if _, err := w.Write(proto.EncodeFrame(ty, 0, 0, payload)); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+}
+
+type frame struct {
+	ty      proto.FrameType
+	payload []byte
+}
+
+// startReader decodes every frame the host writes to r and pushes it to the
+// returned channel, so tests read responses as they arrive without racing
+// the writer.
+func startReader(t *testing.T, r io.Reader) <-chan frame {
+	t.Helper()
+	ch := make(chan frame, 16)
+	go func() {
+		d := proto.NewDecoder(func(ty proto.FrameType, seq, ack uint32, p []byte) {
+			ch <- frame{ty: ty, payload: append([]byte(nil), p...)}
+		}, func(int) {})
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				if ferr := d.Feed(buf[:n]); ferr != nil {
+					return
+				}
+			}
+			if err != nil {
+				close(ch)
+				return
+			}
+		}
+	}()
+	return ch
+}
+
+// readFrame waits for the next frame. Waiting on the frame itself — an
+// observable state change — is the repo's timing rule: a broken host that
+// can never produce a frame hangs the test, which go test's own timeout
+// reports, rather than a pass depending on a duration.
+func readFrame(t *testing.T, ch <-chan frame) frame {
+	t.Helper()
+	f, ok := <-ch
+	if !ok {
+		t.Fatal("output stream ended before the frame arrived")
+	}
+	return f
+}
+
+func readSentinel(t *testing.T, r io.Reader) {
+	t.Helper()
+	want := "nocx-helper " + proto.Version + " ready\n"
+	got := make([]byte, 0, len(want))
+	one := make([]byte, 1)
+	for {
+		if _, err := r.Read(one); err != nil {
+			t.Fatalf("reading sentinel: %v", err)
+		}
+		got = append(got, one[0])
+		if one[0] == '\n' {
+			break
+		}
+	}
+	if string(got) != want {
+		t.Fatalf("sentinel: want %q, got %q", want, got)
+	}
+}
+
+func readResponse(t *testing.T, ch <-chan frame) proto.Response {
+	t.Helper()
+	f := readFrame(t, ch)
+	if f.ty != proto.TypeResponse {
+		t.Fatalf("want a response frame, got type %v", f.ty)
+	}
+	var resp proto.Response
+	if err := json.Unmarshal(f.payload, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp
+}
+
+func TestHelloVersionMismatchWritesNothing(t *testing.T) {
+	var out bytes.Buffer
+	in := bytes.NewReader(proto.EncodeFrame(proto.TypeHello, 0, 0,
+		mustJSON(proto.Hello{Version: "999", Nonce: "n"})))
+	h := host.New(in, &out, "hash", "inst", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := h.Serve(context.Background())
+	if !errors.Is(err, host.ErrVersionMismatch) {
+		t.Fatalf("want ErrVersionMismatch, got %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a mismatched hello must write nothing, wrote %q", out.Bytes())
+	}
+}
+
+func TestHelloOKEchoesTheNonce(t *testing.T) {
+	var out bytes.Buffer
+	in := bytes.NewReader(proto.EncodeFrame(proto.TypeHello, 0, 0,
+		mustJSON(proto.Hello{Version: proto.Version, Nonce: "abc123"})))
+	h := host.New(in, &out, "hash", "inst", discardLogger())
+	if err := h.Serve(context.Background()); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+
+	sentinel := "nocx-helper " + proto.Version + " ready\n"
+	if !bytes.HasPrefix(out.Bytes(), []byte(sentinel)) {
+		t.Fatalf("want sentinel %q prefix, got %q", sentinel, out.Bytes())
+	}
+	var gotType proto.FrameType
+	var got []byte
+	d := proto.NewDecoder(func(ty proto.FrameType, seq, ack uint32, p []byte) {
+		gotType, got = ty, append([]byte(nil), p...)
+	}, func(int) { t.Error("unexpected gap") })
+	if err := d.Feed(out.Bytes()[len(sentinel):]); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if gotType != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK after the sentinel, got %v", gotType)
+	}
+	var ok proto.HelloOK
+	if err := json.Unmarshal(got, &ok); err != nil {
+		t.Fatalf("unmarshal helloOK: %v", err)
+	}
+	if ok.Version != proto.Version || ok.Nonce != "abc123" || ok.ContentHash != "hash" || ok.InstanceID != "inst" {
+		t.Fatalf("helloOK mismatch: %+v", ok)
+	}
+}
+
+// TestGarbageBeforeHelloIsResynced feeds the real garbage a remote shell
+// prints when the helper binary is missing, ahead of a valid hello. The
+// decoder resyncs and the host still serves; the garbage is reported to the
+// logger (stderr) and never leaks onto stdout (D22).
+func TestGarbageBeforeHelloIsResynced(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	var out bytes.Buffer
+	garbage := []byte("bash: nocx-helper: command not found\n")
+	inBytes := append(append([]byte(nil), garbage...),
+		proto.EncodeFrame(proto.TypeHello, 0, 0, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))...)
+	h := host.New(bytes.NewReader(inBytes), &out, "hash", "inst", logger)
+	if err := h.Serve(context.Background()); err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	sentinel := "nocx-helper " + proto.Version + " ready\n"
+	if !bytes.HasPrefix(out.Bytes(), []byte(sentinel)) {
+		t.Fatalf("stdout must begin with the sentinel, got %q", out.Bytes())
+	}
+	if bytes.Contains(out.Bytes(), garbage) {
+		t.Fatal("garbage leaked onto stdout (D22): diagnostics belong to the logger")
+	}
+	if !strings.Contains(logs.String(), "decoder resync") {
+		t.Fatalf("the resync must be logged, logged: %q", logs.String())
+	}
+}
+
+// TestASlowOperationDoesNotStallAnother is D13: two blocking handlers are
+// served concurrently. The slow handler signals when it is blocked, the fast
+// handler signals when it runs; the fast response is read and verified while
+// the slow handler is still waiting, and only then is the slow one released.
+// Every step waits on an observable event — never on a duration.
+func TestASlowOperationDoesNotStallAnother(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fastStarted := make(chan struct{})
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"slow": struct{}{}, "fast": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			switch op {
+			case "slow":
+				close(started)
+				<-release
+				return map[string]any{"op": "slow"}, nil
+			case "fast":
+				close(fastStarted)
+				return map[string]any{"op": "fast"}, nil
+			default:
+				return map[string]any{"op": op}, nil
+			}
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "test", Op: "slow", Corr: "c1"}))
+	<-started // the slow handler is now blocked on release
+
+	// The fast handler must run while the slow one is still blocked on
+	// release: its started signal is the observable proof of D13, and the
+	// response is verified before release is closed, so the ordering cannot
+	// depend on a duration.
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 2, Service: "test", Op: "fast", Corr: "c2"}))
+	<-fastStarted
+	resp := readResponse(t, outCh)
+	if resp.ID != 2 {
+		t.Fatalf("want the fast response (id 2) first, got id %d", resp.ID)
+	}
+	if resp.Error != nil {
+		t.Fatalf("fast response errored: %+v", resp.Error)
+	}
+
+	close(release)
+	slowResp := readResponse(t, outCh)
+	if slowResp.ID != 1 {
+		t.Fatalf("want the slow response (id 1) after release, got id %d", slowResp.ID)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+func TestUnknownServiceAndOpDoNotCloseTheConnection(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"known": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "nope", Op: "x"}))
+	resp := readResponse(t, outCh)
+	if resp.ID != 1 || resp.Error == nil || resp.Error.Code != proto.ErrCodeUnknownService {
+		t.Fatalf("want unknown service, got %+v", resp)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 2, Service: "test", Op: "nope"}))
+	resp = readResponse(t, outCh)
+	if resp.ID != 2 || resp.Error == nil || resp.Error.Code != proto.ErrCodeUnknownOp {
+		t.Fatalf("want unknown op, got %+v", resp)
+	}
+
+	// The connection is still alive: a third request is served and answered.
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 3, Service: "test", Op: "known", Corr: "c3"}))
+	resp = readResponse(t, outCh)
+	if resp.ID != 3 || resp.Error != nil {
+		t.Fatalf("want the known op answered, got %+v", resp)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+func TestBadParamsAnswersErrCodeBadParams(t *testing.T) {
+	type statusParams struct {
+		Path string `json:"path"`
+	}
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	h.Register(&fakeService{
+		name: "git",
+		ops:  map[string]any{"status": statusParams{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	// The params are shape-invalid on purpose: an array where the op's
+	// schema declares a struct. The envelope parses, so the host can answer
+	// with an id; the schema decode is what refuses.
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{
+		ID: 1, Service: "git", Op: "status", Params: json.RawMessage(`[1,2,3]`),
+	}))
+	resp := readResponse(t, outCh)
+	if resp.ID != 1 || resp.Error == nil || resp.Error.Code != proto.ErrCodeBadParams {
+		t.Fatalf("want bad params, got %+v", resp)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestCancelReachesTheRequestContext exercises the per-request context the
+// host stores by id: a TypeCancel naming the request unblocks a handler that
+// waits on its context. The handler's response arriving after the cancel is
+// the proof the cancel reached it.
+func TestCancelReachesTheRequestContext(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	started := make(chan struct{})
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"wait": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 7, Service: "test", Op: "wait"}))
+	<-started // the handler is now blocked on its context
+
+	writeFrame(t, inW, proto.TypeCancel, mustJSON(struct {
+		ID uint64 `json:"id"`
+	}{ID: 7}))
+	resp := readResponse(t, outCh)
+	if resp.ID != 7 {
+		t.Fatalf("want the cancelled request's response (id 7), got id %d", resp.ID)
+	}
+	if resp.Error == nil {
+		t.Fatal("want the cancelled handler to answer its cancellation, got success")
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestSessionIsReserved pins D15: registering a service named session panics
+// at construction, and the name answers ErrCodeUnknownService like any other.
+func TestSessionIsReserved(t *testing.T) {
+	h := host.New(nil, io.Discard, "h", "i", discardLogger())
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("want Register to panic for the reserved session name")
+			}
+		}()
+		h.Register(&fakeService{name: "session"})
+	}()
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h2 := host.New(inR, outW, "h", "i", discardLogger())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h2.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "session", Op: "x"}))
+	resp := readResponse(t, outCh)
+	if resp.ID != 1 || resp.Error == nil || resp.Error.Code != proto.ErrCodeUnknownService {
+		t.Fatalf("want a request for session answered unknown service, got %+v", resp)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestEveryRequestLogsItsCorr pins D26: the log line the host emits for a
+// request carries the request's Corr, so a trace can be followed across the
+// wire.
+func TestEveryRequestLogsItsCorr(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", logger)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"known": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"op": op}, nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "test", Op: "known", Corr: "corr-xyz"}))
+	if resp := readResponse(t, outCh); resp.ID != 1 || resp.Error != nil {
+		t.Fatalf("want the known op answered, got %+v", resp)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	if !strings.Contains(logs.String(), "corr-xyz") {
+		t.Fatalf("the request log line must carry the corr, logged: %q", logs.String())
+	}
+}
+
+// TestNoOperationAcceptsArgv is D3 with teeth. An operation whose params carry
+// a list of strings destined for a command line turns this helper into a
+// remote shell, and the closed set of named operations into a fiction. orca
+// kept exactly one such operation and paid for it with a 300-line allowlist
+// validator; we keep none, and this test is why that stays true.
+func TestNoOperationAcceptsArgv(t *testing.T) {
+	h := host.New(nil, io.Discard, "h", "i", discardLogger())
+	h.Register(&fakeService{
+		name: "git",
+		ops: map[string]any{
+			"status": struct{}{},
+			"log":    struct{}{},
+		},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return nil, nil
+		},
+	})
+	for _, svc := range h.Services() {
+		for _, op := range svc.Ops() {
+			schema := svc.ParamsSchema(op) // every op declares its params type
+			for _, field := range schema.Fields() {
+				if field.IsFreeFormStringList() {
+					t.Errorf("%s.%s takes %q: no operation may accept argv (D3)",
+						svc.Name(), op, field.Name)
+				}
+			}
+		}
+	}
+}
+
+// TestIsFreeFormStringListDiscriminates proves the D3 detector can tell the
+// one legal string list — a pathspec, tagged nocx:"pathspec" (D8) — from a
+// bare []string, and that only that tag matters. Without this, a vacuous D3
+// test could not tell the checker from a no-op.
+func TestIsFreeFormStringListDiscriminates(t *testing.T) {
+	type pathspecParams struct {
+		Paths []string `nocx:"pathspec"`
+	}
+	type freeParams struct {
+		Args []string
+	}
+	type otherParams struct {
+		Name string
+	}
+	tests := []struct {
+		name   string
+		schema *host.Schema
+		want   bool
+	}{
+		{"pathspec is not free-form", host.SchemaFor(pathspecParams{}), false},
+		{"bare string slice is free-form", host.SchemaFor(freeParams{}), true},
+		{"a json tag does not save it", host.SchemaFor(struct {
+			Args []string `json:"args"`
+		}{}), true},
+		{"scalar is not a list", host.SchemaFor(otherParams{}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := false
+			for _, f := range tt.schema.Fields() {
+				if f.IsFreeFormStringList() {
+					got = true
+				}
+			}
+			if got != tt.want {
+				t.Fatalf("IsFreeFormStringList = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRegisterPanicsOnFreeFormList pins D3 as enforced rather than tested:
+// the registration path itself refuses a service whose op declares a
+// free-form string list, so the rule cannot be forgotten by a future
+// service author.
+func TestRegisterPanicsOnFreeFormList(t *testing.T) {
+	type argvParams struct {
+		Args []string
+	}
+	h := host.New(nil, io.Discard, "h", "i", discardLogger())
+	svc := &fakeService{
+		name: "test",
+		ops:  map[string]any{"run": argvParams{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return nil, nil
+		},
+	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("want Register to panic for a free-form string list (D3)")
+		}
+	}()
+	h.Register(svc)
+}
+
+// schemaLessService claims an op in Ops() but declares no params type for
+// it — the service-author bug Register must refuse.
+type schemaLessService struct {
+	fakeService
+	ops []string
+}
+
+func (s *schemaLessService) Ops() []string {
+	return s.ops
+}
+
+func (s *schemaLessService) ParamsSchema(op string) *host.Schema {
+	return nil
+}
+
+// TestRegisterPanicsOnMissingSchema pins the counterpart of "every op
+// declares its params type": an op in Ops() with no schema is a service bug
+// the dispatcher would otherwise answer as an unknown op.
+func TestRegisterPanicsOnMissingSchema(t *testing.T) {
+	h := host.New(nil, io.Discard, "h", "i", discardLogger())
+	svc := &schemaLessService{fakeService: fakeService{name: "test"}, ops: []string{"ghost"}}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("want Register to panic for an op with no params schema")
+		}
+	}()
+	h.Register(svc)
+}

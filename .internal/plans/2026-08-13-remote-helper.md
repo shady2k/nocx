@@ -1100,8 +1100,22 @@ correctly stopped without writing a line (`nocx-7t3e`, the same defect
 The gate is right and must not be routed around — a package written, covered and
 called by nobody is the defect AGENTS.md records shipping twice. So:
 
-- **Tasks 4 + 5 are one commit.** `cmd/nocx-helper` is what makes the codec
-  reachable. Neither half is committable alone.
+- **Tasks 4 + 5 + the helper half of Task 7 are one commit** (`nocx-aoh7`).
+  Measured, not guessed: tasks 4+5 together still left four unreachable
+  functions. Two were `Schema.Fields` and `Field.IsFreeFormStringList`, audit
+  machinery only the D3 test read — resolved by making `Register` _enforce_ D3
+  (it walks each op's schema and panics on a free-form string list) rather than
+  leaving it to a test somebody must remember to run. The other two were
+  `Host.Register` and `SchemaFor`, unreachable for one reason: Task 5's
+  `cmd/nocx-helper` "registers nothing yet", so the extension point had no
+  caller. **A helper that serves nothing is not a product**, and that is what the
+  ratchet was reporting. So the binary registers a real `git` service — ops
+  `open`, `status`, `envState` over `internal/git/local` — and Task 7 splits:
+  its helper half joins this commit, its client half (`internal/git/helper/`,
+  built on `client.Call`) stays behind Task 6. `diff`, `log`, chunking (D14) and
+  process-group cancellation (D10) stay in Task 7 as well; they are whole
+  features and bundling them would only have made the commit bigger, not more
+  honest.
 - **Tasks 7 + 8 are expected to be committable together**, since a git service
   registers into the host and is reached through `cmd/nocx-helper`. Expected, not
   established — measure it.

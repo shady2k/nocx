@@ -49,6 +49,19 @@ const INSTALLED: ShellFootprintStatusResult = {
   ],
 }
 
+const WITH_HELPER: ShellFootprintStatusResult = {
+  destinations: [],
+  helpers: [
+    {
+      identity: 'u@db01:22',
+      fingerprint: 'SHA256:deadbeef',
+      path: '~/.nocx/helper/1-linux-amd64-abc/',
+      hash: 'abcdef0123456789',
+      installedAt: '2026-08-10T09:00:00Z',
+    },
+  ],
+}
+
 function mountWithFootprint(status: ShellFootprintStatusResult) {
   const client = mockProfileClient()
   const footprintClient = new FootprintClient(new Dispatcher())
@@ -167,5 +180,20 @@ describe('remote footprint', () => {
       expect(container.textContent).toContain('Nothing installed')
     })
     expect(container.textContent).toContain('nocx has not left shell integration on any host')
+  })
+
+  it('lists the installed helper and says what it serves', async () => {
+    const { container } = mountWithFootprint(WITH_HELPER)
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('u@db01:22')
+    })
+    const text = container.textContent ?? ''
+    expect(text).toContain('Remote helper')
+    expect(text).toContain('~/.nocx/helper/')
+    expect(text).toContain('hash abcdef012345')
+    // The consent copy (D8): the helper serves other remote features, not
+    // only git — the footprint row says so where the user meets it.
+    expect(text).toContain('serves git and other remote features')
   })
 })

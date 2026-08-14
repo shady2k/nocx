@@ -28,14 +28,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/log"
+
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
 )
 
@@ -432,18 +437,23 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 }
 
 // fakeRemoteSession is a session.Session whose only interesting facts are
-// the id, kind, host and SSH options the helper selection reads.
+// the id, kind, host, fingerprint, mode and SSH options the helper
+// selection reads.
 type fakeRemoteSession struct {
-	id   session.ID
-	host string
+	id          session.ID
+	host        string
+	fingerprint string
+	mode        profile.DesiredMode
 }
 
-func (s *fakeRemoteSession) ID() session.ID            { return s.id }
-func (s *fakeRemoteSession) Kind() session.Kind        { return session.KindRemote }
-func (s *fakeRemoteSession) Host() string              { return s.host }
-func (s *fakeRemoteSession) Cwd() string               { return "" }
-func (s *fakeRemoteSession) ProfileID() string         { return "" }
-func (s *fakeRemoteSession) CredentialID() string      { return "" }
+func (s *fakeRemoteSession) ID() session.ID     { return s.id }
+func (s *fakeRemoteSession) Kind() session.Kind { return session.KindRemote }
+func (s *fakeRemoteSession) Host() string       { return s.host }
+func (s *fakeRemoteSession) Cwd() string        { return "" }
+func (s *fakeRemoteSession) ProfileID() string  { return "" }
+func (s *fakeRemoteSession) CredentialID() string {
+	return ""
+}
 func (s *fakeRemoteSession) Write([]byte) (int, error) { return 0, nil }
 func (s *fakeRemoteSession) EnqueueWrite([]byte) bool  { return false }
 func (s *fakeRemoteSession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
@@ -458,7 +468,23 @@ func (s *fakeRemoteSession) StartOutput(context.Context, session.OutputHandler) 
 	return nil
 }
 func (s *fakeRemoteSession) ShellIntegrationReason() ssh.RefusalReason { return ssh.ReasonNone }
-func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption           { return nil }
+
+// HostKeyFingerprint defaults to a stable test identity so a granted store
+// can answer for the default session; a test that wants a specific machine
+// sets the field.
+func (s *fakeRemoteSession) HostKeyFingerprint() string {
+	if s.fingerprint == "" {
+		return "SHA256:test-host"
+	}
+	return s.fingerprint
+}
+
+func (s *fakeRemoteSession) SSHOptions() []ssh.ConnectOption {
+	if s.mode == "" {
+		return nil
+	}
+	return []ssh.ConnectOption{ssh.WithDesiredMode(string(s.mode))}
+}
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -526,10 +552,23 @@ func stubArtifacts(t *testing.T) {
 	t.Cleanup(func() { deploy.DefaultSource = orig })
 }
 
+// testConsentStores builds the consent store (pre-granted for the default
+// test machine) and the install-observation store the selection writes.
+// The grant is seeded as the document the accept-write path (nocx-1xxa)
+// persists — this bead owns no writer for it.
+func testConsentStores(t *testing.T) (*consent.Store, *consent.InstallStore) {
+	t.Helper()
+	logger := log.NewSlogAdapter(discardLogger())
+	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
+	installs := consent.NewInstallStore(logger, storage.NewDocumentStore(t.TempDir()), "installs.json")
+	return store, installs
+}
+
 func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitFactoryFor {
 	t.Helper()
 	stubArtifacts(t)
-	return helperGitFactory(provider, discardLogger())
+	store, installs := testConsentStores(t)
+	return helperGitFactory(provider, store, installs, discardLogger())
 }
 
 // TestHelperSelectorInstallsTheArtifact is the deploy wiring (D7): the
@@ -542,9 +581,9 @@ func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
 	sel := configuredSelector(t, provider)
 	sess := &fakeRemoteSession{id: "s1", host: "host.example"}
 
-	factory := sel(sess)
-	if factory == nil {
-		t.Fatal("selection returned nil after a successful install")
+	selection := sel(sess)
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory after a successful install")
 	}
 	if provider.install == nil {
 		t.Fatal("the selection never acquired an install lease")
@@ -554,9 +593,9 @@ func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
 	}
 
 	before := provider.install.uploadCount()
-	factory2 := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	if factory2 == nil {
-		t.Fatal("second consultation returned nil after a complete install")
+	selection2 := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection2.Factory == nil {
+		t.Fatal("second consultation returned no factory after a complete install")
 	}
 	if got := provider.install.uploadCount() - before; got != 0 {
 		t.Fatalf("second consultation performed %d uploads, want 0 — a complete install must not be reinstalled", got)
@@ -581,9 +620,9 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 	t.Cleanup(func() { deploy.DefaultSource = orig })
 
 	var buf bytes.Buffer
-	sel := helperGitFactory(&fakeLaneProvider{}, slog.New(slog.NewTextHandler(&buf, nil)))
-	if got := sel(&fakeRemoteSession{host: "host.example"}); got != nil {
-		t.Fatalf("selection with no artifacts = %v, want nil", got)
+	sel := helperGitFactory(&fakeLaneProvider{}, nil, nil, slog.New(slog.NewTextHandler(&buf, nil)))
+	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
+		t.Fatalf("selection with no artifacts = %+v, want the empty refusal", got)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "not built") {
@@ -599,9 +638,9 @@ func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
 // (D20), and the refusal stands rather than an install attempt.
 func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
-	sel := helperGitFactory(provider, discardLogger())
-	if got := sel(&fakeRemoteSession{host: "host.example"}); got != nil {
-		t.Fatalf("selection on an unsupported platform = %v, want nil", got)
+	sel := helperGitFactory(provider, nil, nil, discardLogger())
+	if got := sel(&fakeRemoteSession{host: "host.example"}); got.Factory != nil {
+		t.Fatalf("selection on an unsupported platform = %+v, want the empty refusal", got)
 	}
 }
 
@@ -612,7 +651,11 @@ func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
 func TestHelperSharesOneProcessAcrossOpens(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
 	sel := configuredSelector(t, provider)
-	factory := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory")
+	}
+	factory := selection.Factory
 	dir := fixtureRepo(t)
 
 	repo1, outcome, err := factory.Open(context.Background(), dir)
@@ -674,8 +717,13 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 	sel := configuredSelector(t, provider)
 	dir := fixtureRepo(t)
 
-	factoryA := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
-	factoryB := sel(&fakeRemoteSession{id: "s2", host: "host.example"})
+	selectionA := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	selectionB := sel(&fakeRemoteSession{id: "s2", host: "host.example"})
+	if selectionA.Factory == nil || selectionB.Factory == nil {
+		t.Fatal("selection returned no factory for one of the sessions")
+	}
+	factoryA := selectionA.Factory
+	factoryB := selectionB.Factory
 	repoA, _, err := factoryA.Open(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("session A open: %v", err)
@@ -698,7 +746,11 @@ func TestHelperSessionsDoNotShareAProcess(t *testing.T) {
 func TestHelperDialFactory_RefusingOpenClosesTheLane(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
 	sel := configuredSelector(t, provider)
-	factory := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory")
+	}
+	factory := selection.Factory
 	_, outcome, err := factory.Open(context.Background(), t.TempDir()) // not a repository
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -720,12 +772,102 @@ func TestHelperDialFactory_ExecForbiddenClosesTheLane(t *testing.T) {
 		startErr: errors.New("exec request failed"),
 	}
 	sel := configuredSelector(t, provider)
-	factory := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory")
+	}
+	factory := selection.Factory
 	_, _, err := factory.Open(context.Background(), "/some/cwd")
 	if !errors.Is(err, client.ErrExecForbidden) {
 		t.Fatalf("open error = %v, want ErrExecForbidden", err)
 	}
 	if got := provider.lane(0).closeCount(); got != 1 {
 		t.Fatalf("lane closed %d times, want 1", got)
+	}
+}
+
+// TestHelperSelectionConsentRequiredWritesNothing is D8's zero-write
+// invariant at the selection: a machine with no relay-tier answer gets the
+// ask — and not a byte is written to the host. No install lease is
+// acquired, no platform probe is even needed to decide that.
+func TestHelperSelectionConsentRequiredWritesNothing(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	stubArtifacts(t)
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel := helperGitFactory(provider, store, installs, discardLogger())
+
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", fingerprint: "SHA256:never-answered"})
+	if !selection.ConsentRequired {
+		t.Fatalf("selection = %+v, want consentRequired for a machine with no answer", selection)
+	}
+	if provider.install != nil && provider.install.uploadCount() != 0 {
+		t.Fatalf("consentRequired wrote %d uploads, want 0 — the ask must not leave a footprint", provider.install.uploadCount())
+	}
+	if got := provider.laneCount(); got != 0 {
+		t.Fatalf("consentRequired brought up %d helper lanes, want 0", got)
+	}
+	if got := installs.All(); len(got) != 0 {
+		t.Fatalf("consentRequired recorded %d installs, want 0", len(got))
+	}
+}
+
+// TestHelperSelectionExplicitRawWritesNothing: a machine at explicit raw is
+// never asked and never written to (consent design §4.2).
+func TestHelperSelectionExplicitRawWritesNothing(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	stubArtifacts(t)
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel := helperGitFactory(provider, store, installs, discardLogger())
+
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredRaw})
+	if selection.Factory != nil || selection.ConsentRequired {
+		t.Fatalf("selection = %+v, want the empty refusal for explicit raw", selection)
+	}
+	if provider.install != nil && provider.install.uploadCount() != 0 {
+		t.Fatalf("explicit raw wrote %d uploads, want 0", provider.install.uploadCount())
+	}
+}
+
+// TestHelperSelectionRecordsTheFootprintObservation: the footprint screen's
+// data is written only when the install actually succeeded — after a grant,
+// the selection installs and the observation store lists the machine.
+func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	stubArtifacts(t)
+	store := seedGrantedDocument(t, t.TempDir(), "SHA256:test-host")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel := helperGitFactory(provider, store, installs, discardLogger())
+
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory after a grant")
+	}
+	got := installs.All()
+	if len(got) != 1 {
+		t.Fatalf("install observations = %d, want 1 after a successful install", len(got))
+	}
+	if got[0].Fingerprint != "SHA256:test-host" || got[0].Identity == "" || got[0].Hash == "" {
+		t.Fatalf("observation = %+v, want fingerprint, identity and hash recorded", got[0])
+	}
+}
+
+// TestHelperSelectionExplicitScriptIsNeverSilentlyUpgraded: a machine at
+// explicit script is asked at the feature — never silently raised to relay
+// by the mere existence of a binary (D8).
+func TestHelperSelectionExplicitScriptIsNeverSilentlyUpgraded(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	stubArtifacts(t)
+	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "installs.json")
+	sel := helperGitFactory(provider, store, installs, discardLogger())
+
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
+	if !selection.ConsentRequired {
+		t.Fatalf("selection = %+v, want consentRequired for explicit script — the ask, never a silent upgrade", selection)
+	}
+	if provider.install != nil && provider.install.uploadCount() != 0 {
+		t.Fatalf("explicit script wrote %d uploads, want 0", provider.install.uploadCount())
 	}
 }

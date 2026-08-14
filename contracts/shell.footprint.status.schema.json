@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "shell.footprint.status.schema.json",
   "title": "shell.footprint.status result",
-  "description": "The visible footprint of nocx's silent install (P10, delivery-modes design §4.1): every resolved destination with an installed fact — what was written (generation, protocol and script version), where (~/.nocx), and when nocx last SAW it. Read-only and fact-backed: this call never connects, so lastObservedAt is an observation, never a claim about what is on the host right now. removableProfileId names a saved connection that resolves to the destination and can remove it; its absence IS the explanation — the surface renders the manual-removal note from that one field and offers no button.",
+  "description": "The visible footprint of nocx's silent install (P10, delivery-modes design §4.1): every resolved destination with an installed fact — what was written (generation, protocol and script version), where (~/.nocx), and when nocx last SAW it. Read-only and fact-backed: this call never connects, so lastObservedAt is an observation, never a claim about what is on the host right now. removableProfileId names a saved connection that resolves to the destination and can remove it; its absence IS the explanation — the surface renders the manual-removal note from that one field and offers no button. helpers lists the observed remote-helper installs (remote-helper design D8): recorded when an install completed, keyed by the host public-key fingerprint, never a claim about the host's current state.",
   "type": "object",
   "additionalProperties": false,
   "required": ["destinations"],
@@ -51,6 +51,38 @@
           "removableProfileId": {
             "description": "The saved connection that resolves to this destination and can remove it, or null when none does. Absence is the explanation: removal needs a saved connection, and the path field is what a user removes by hand instead.",
             "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "helpers": {
+      "description": "Every observed helper installation, ordered by identity. Absent when nothing has been recorded (never null).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["identity", "fingerprint", "path", "hash", "installedAt"],
+        "properties": {
+          "identity": {
+            "description": "The destination identity (user@host:port) the footprint screen shows.",
+            "type": "string"
+          },
+          "fingerprint": {
+            "description": "The host public-key fingerprint the consent answer is keyed by (consent design §3.2) — the same machine reached any way is one row.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The versioned helper install directory on the remote host, e.g. ~/.nocx/helper/1-linux-amd64-<hash>/.",
+            "type": "string"
+          },
+          "hash": {
+            "description": "The content hash of the installed binary (D7).",
+            "type": "string"
+          },
+          "installedAt": {
+            "description": "When nocx last observed this install complete.",
+            "type": "string",
+            "format": "date-time"
           }
         }
       }

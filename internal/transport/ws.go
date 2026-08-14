@@ -27,6 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -168,6 +169,13 @@ type WSServer struct {
 	// the footprint surface answers an empty list (the P7 observation RPC
 	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
+	// helperInstalls is the observed helper footprint (remote-helper
+	// design D8): the persisted memory of which machines carry an
+	// installed helper, recorded when the install completed. Wired through
+	// WithHelperInstallStore; when nil, the footprint surface answers an
+	// empty helpers list — nothing is claimed installed that cannot be
+	// shown.
+	helperInstalls *consent.InstallStore
 	// installedFactSeen bounds the write to once per domain: a lane
 	// publishes a fact at every prompt, and the installation it reports does
 	// not change while the shell that reported it is alive.
@@ -719,18 +727,32 @@ func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
 	return func(s *WSServer) { s.gitFactory = f }
 }
 
-// GitFactoryFor resolves the helper-backed repo factory git.open uses for
-// an SSH session — the composition root's answer to "is a helper available
-// for this host" (the remote-helper design). Returning nil keeps the
-// OpenRemoteUnsupported refusal standing for that session. It must be
-// side-effect-free: git.open consults it twice (the handler's refusal
-// decision, then the open), and the two calls must agree.
-type GitFactoryFor func(sess session.Session) git.RepoFactory
+// GitOpenSelection is the tri-state answer of the helper-backed factory
+// selection for one SSH session (remote-helper design D8): a factory to
+// open through, consentRequired to answer, or neither for the zero-install
+// refusal. ConsentRequired and Factory are mutually exclusive — the ask is
+// the alternative to opening, never a factory that answers it.
+type GitOpenSelection struct {
+	Factory git.RepoFactory
+	// ConsentRequired — the session's machine has no relay-tier answer;
+	// git.open must answer the consentRequired state and the panel offers
+	// the consent flow. Set means Factory is nil.
+	ConsentRequired bool
+}
 
-// WithGitHelperFactory attaches the helper-backed repo factory selection
-// for SSH sessions (the remote-helper design). The composition root wires
-// it from the helper's install configuration; when absent — or when the
-// selection returns nil for a session — git.open answers the
+// GitFactoryFor resolves the helper-backed factory selection git.open uses
+// for an SSH session — the composition root's answer to "is a helper
+// available for this host, and may it be used" (the remote-helper design).
+// An empty selection keeps the OpenRemoteUnsupported refusal standing for
+// that session; ConsentRequired answers the consentRequired state instead.
+// It must be side-effect-free: git.open consults it twice (the handler's
+// refusal decision, then the open), and the two calls must agree.
+type GitFactoryFor func(sess session.Session) GitOpenSelection
+
+// WithGitHelperFactory attaches the helper-backed factory selection for SSH
+// sessions (the remote-helper design). The composition root wires it from
+// the helper's install configuration and the consent store; when absent —
+// or when the selection is empty for a session — git.open answers the
 // OpenRemoteUnsupported refusal, the zero-install fallback (design D16).
 func WithGitHelperFactory(f GitFactoryFor) WSServerOption {
 	return func(s *WSServer) { s.gitHelperFor = f }

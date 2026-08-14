@@ -36,6 +36,9 @@ import type { ShellFootprintStatusResult } from './generated/shell.footprint.sta
 /** One destination's footprint row — the generated result's element type. */
 type FootprintDestination = ShellFootprintStatusResult['destinations'][number]
 
+/** One helper install row — the generated result's element type. */
+type HelperInstall = NonNullable<ShellFootprintStatusResult['helpers']>[number]
+
 export interface FootprintSectionProps {
   /** Absent in the dev-web harness and in surfaces that predate the RPC;
    *  without a client the section shows nothing rather than offering an
@@ -54,17 +57,23 @@ function formatLastSeen(iso: string): string {
 export function FootprintSection(props: FootprintSectionProps) {
   /** null = loading; [] = loaded, nothing installed. */
   const [destinations, setDestinations] = createSignal<FootprintDestination[] | null>(null)
+  /** The observed helper footprint (remote-helper design D8); null until
+   *  the first load answers, [] once it has. */
+  const [helpers, setHelpers] = createSignal<HelperInstall[] | null>(null)
   /** The identity currently being uninstalled, to disable its row. */
   const [busy, setBusy] = createSignal<string | null>(null)
 
   const load = async (): Promise<void> => {
     if (!props.client) return
     try {
-      setDestinations((await props.client.status()).destinations)
+      const res = await props.client.status()
+      setDestinations(res.destinations)
+      setHelpers(res.helpers ?? [])
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       showToast({ level: 'danger', message: `Could not read the remote footprint: ${msg}` })
       setDestinations([])
+      setHelpers([])
     }
   }
 
@@ -169,6 +178,35 @@ export function FootprintSection(props: FootprintSectionProps) {
                         Removal needs a saved connection &mdash; remove {d.path} by hand
                       </span>
                     )
+                  }
+                />
+              )}
+            </For>
+          </Stack>
+        </Show>
+        <Show when={helpers() !== null && helpers()!.length > 0}>
+          <div class="cm-item-meta" role="heading" aria-level={3}>
+            Remote helper
+          </div>
+          <Stack divided dense>
+            <For each={helpers()}>
+              {(h) => (
+                <CollectionRow
+                  info={
+                    <>
+                      <div class="cm-item-name">{h.identity}</div>
+                      <div class="cm-item-meta">
+                        <Badge tone="info">helper</Badge>
+                        <span>{h.path}</span>
+                        <span>hash {h.hash.slice(0, 12)}…</span>
+                        <span>installed {formatLastSeen(h.installedAt)}</span>
+                      </div>
+                    </>
+                  }
+                  actions={
+                    <span class="cm-item-meta">
+                      The helper serves git and other remote features on this machine
+                    </span>
                   }
                 />
               )}

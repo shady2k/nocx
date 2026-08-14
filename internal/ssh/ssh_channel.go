@@ -22,6 +22,11 @@ type RealChannel struct {
 	// decided by openShell when the session started (nocx-r52q). ReasonNone
 	// means integration succeeded or was never attempted.
 	shellIntegrationReason RefusalReason
+	// hostKeyFingerprint is the SHA256 fingerprint of the target host's
+	// public key, as presented and verified when the connection was dialed
+	// (the consent design keys consent by it). Empty for channels not
+	// created from a dial that captured it (stubs, tests).
+	hostKeyFingerprint string
 
 	closeOnce sync.Once
 	closeCb   func()
@@ -109,6 +114,11 @@ func (c *RealChannel) Done() <-chan struct{} {
 func (c *RealChannel) ShellIntegrationReason() RefusalReason {
 	return c.shellIntegrationReason
 }
+
+// HostKeyFingerprint returns the target host's public-key fingerprint
+// observed at dial time — the consent key (consent design §3.2). Empty
+// when the channel was not created from a capturing dial.
+func (c *RealChannel) HostKeyFingerprint() string { return c.hostKeyFingerprint }
 
 // Resize sends a window-change request to the remote end.
 //

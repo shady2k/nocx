@@ -373,10 +373,20 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 			return nil
 		}
 		if sess.Kind() != session.KindLocal {
-			// D3 as amended 2026-08-13: the remote case is the helper's;
-			// the refusal stands when no helper is available for this
-			// session (the zero-install fallback, design D16).
-			if h.helperFor == nil || h.helperFor(sess) == nil {
+			// D3 as amended 2026-08-13: the remote case is the helper's.
+			// The selection is tri-state (D8): a factory to open through,
+			// consentRequired when the machine has no relay-tier answer,
+			// or neither — the zero-install refusal stands (design D16).
+			if h.helperFor == nil {
+				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
+				return nil
+			}
+			sel := h.helperFor(sess)
+			if sel.ConsentRequired {
+				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenConsentRequired)}))
+				return nil
+			}
+			if sel.Factory == nil {
 				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
 				return nil
 			}
@@ -1002,15 +1012,17 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 	if gitWired && s.gitFactory != nil {
 		// The factory selection is the composition root's answer to
 		// "which git runs for this session" (AD-8): local sessions get
-		// the local factory; SSH sessions get the helper-backed factory
-		// when one is available, and nil keeps the OpenRemoteUnsupported
-		// refusal (design D3 as amended 2026-08-13).
+		// the local factory; SSH sessions get the helper-backed selection.
 		factoryFor := capability.GitOpenFactory(func(sess session.Session) git.RepoFactory {
 			if sess.Kind() != session.KindLocal {
 				if s.gitHelperFor == nil {
 					return nil
 				}
-				return s.gitHelperFor(sess)
+				// The refusal decision has already answered
+				// consentRequired and refused states; this second
+				// consultation is the open itself, and only a selection
+				// carrying a factory may proceed (D8).
+				return s.gitHelperFor(sess).Factory
 			}
 			return s.gitFactory
 		})

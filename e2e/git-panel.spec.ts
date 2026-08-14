@@ -42,6 +42,8 @@ const SUBJECT = '#git-commit-subject'
 const BODY = '#git-commit-body'
 const COMMIT_OUTPUT = '[data-testid="git-commit-output"]'
 const CONFLICT_REFUSAL = '[data-testid="git-conflict-refusal"]'
+const CONSENT = '[data-testid="git-consent-required"]'
+const ACCEPT = '[data-testid="git-consent-accept"]'
 const LOG_ROW = '[data-testid="git-log-row"]'
 const ROW = '.ui-collection-row'
 const TAB = '.nocx-tab'
@@ -592,7 +594,7 @@ test('a filter survives a view switch — the store outlives the panel (design �
   }
 })
 
-// ── The remote refusal (design D3, D14; §7) ────────────────────────────────
+// ── The remote no-consent path (remote-helper design D8; §7) ──────────────
 
 /** The disposable home the backend was launched with (headless path exports
  *  it; the wails-dev path uses the config's fixed .e2e/home) — where the
@@ -696,7 +698,7 @@ async function rpc<T>(
   )
 }
 
-test('on an SSH tab the mutation controls are absent from the DOM, not merely disabled', async ({
+test('on an SSH tab with no consent the consent offer is present and the mutation controls are absent', async ({
   page,
 }) => {
   test.setTimeout(120_000)
@@ -739,7 +741,13 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
         port: Number(fixture.addr.split(':')[1]),
         user: 'e2e',
         keyPath: fixture.userKey,
-        shellIntegration: 'ask',
+        // No desiredMode option: the default (script — N3) wraps and
+        // installs the launcher automatically, which is what lands the
+        // OSC 7 that makes the cwd verified and lets the git store reach
+        // git.open — and with it the consent ask. The shellIntegration:
+        // 'ask' this spec used to pass is dead vocabulary from the
+        // pre-helper model, and a conventional session would strand the
+        // panel on noCwd (the same recipe git-remote.spec.ts uses).
       },
     })
     createdProfileId = created?.id ?? null
@@ -757,16 +765,24 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
     await page.keyboard.press('Enter')
     // The SSH tab opens and becomes active (opening a tab activates it).
     // The git panel must answer for THAT tab, not the local one — the
-    // remote EmptyState only renders for an ssh origin, so asserting it is
-    // also the proof of which tab is active.
-    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 20_000 })
+    // consent card only renders for an ssh origin whose cwd landed
+    // verified, so asserting it is also the proof of which tab is active.
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
     await page.locator(VIEW_GIT).click()
 
-    await expect(page.locator(PANEL)).toBeVisible({ timeout: 20_000 })
-    await expect(page.locator(PANEL)).toContainText("Git on a remote host isn't supported yet")
+    // A fresh fixture spawn mints fresh host keys, so this machine has no
+    // consent on record: git.open answers consentRequired and the panel
+    // OFFERS the flow (remote-helper design D8). The accept is the positive
+    // path e2e/git-remote.spec.ts already owns, so this spec stops at the
+    // offer and asserts it is really there.
+    await expect(page.locator(PANEL)).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator(CONSENT)).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator(ACCEPT)).toBeVisible()
 
-    // D14: what the panel cannot do it does not draw — the controls are
-    // ABSENT, not disabled. Each asserted to count zero in the DOM.
+    // D14: what the panel cannot do it does not draw — with no consent the
+    // mutation controls are ABSENT, not disabled. Each asserted to count
+    // zero in the DOM, beside the offer that is present.
+
     const mutationControls = [
       STAGE_ALL,
       UNSTAGE_ALL,

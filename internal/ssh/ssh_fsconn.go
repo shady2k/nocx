@@ -174,109 +174,17 @@ func newFSConn(client *gossh.Client, release func(), ctx context.Context) (*fsCo
 }
 
 func newFSConnLane(client *gossh.Client, release func(), ctx context.Context, hardTimeout time.Duration) (*fsConn, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		release()
-		return nil, classifyFSConnectError(err)
-	}
-	// The pipes are the sftp client's wire endpoints; the session stays
-	// with the lease so shutdown can close the channel itself. Closing only
-	// the client would send EOF (CloseWrite) and then WAIT for the server
-	// to close the channel — a non-replying server never does, so the
-	// session is what close-to-cancel closes.
-	pw, err := sess.StdinPipe()
-	if err != nil {
-		_ = sess.Close()
-		release()
-		return nil, err
-	}
-	pr, err := sess.StdoutPipe()
-	if err != nil {
-		_ = sess.Close()
-		release()
-		return nil, err
-	}
-	if err := sess.RequestSubsystem("sftp"); err != nil {
-		_ = sess.Close()
-		release()
-		// x/crypto/ssh returns exactly "ssh: subsystem request failed" when
-		// the server replies false; anything else at this step is a
-		// transport failure — the connection died before the request could
-		// be answered. The shape is pinned by go.mod at v0.54.0 (mirrors
-		// classifyExecError), and the partition is complete: on a healthy
-		// connection a subsystem request can only be answered true or false.
-		if err.Error() == "ssh: subsystem request failed" {
-			return nil, fmt.Errorf("%w: %v", ErrFSSubsystemRefused, err)
-		}
-		return nil, fmt.Errorf("%w: %v", ErrFSLost, err)
-	}
-
-	type openResult struct {
-		client *sftp.Client
-		err    error
-	}
-	resCh := make(chan openResult, 1)
-	go func() {
-		cl, err := sftp.NewClientPipe(pr, pw)
-		resCh <- openResult{cl, err}
-	}()
-
-	// The version handshake can hang against a server that accepts the
-	// subsystem and never answers INIT. Closing the session unblocks the
-	// handshake goroutine, exactly as Close unblocks a wedged call; the
-	// watcher fires on ctx.Done (including the hard-timeout deadline, so a
-	// Background ctx still cannot hang FSConn forever).
 	openCtx, cancel := context.WithTimeout(ctx, hardTimeout)
 	defer cancel()
-	watchDone := make(chan struct{})
-	watchExit := make(chan struct{})
-	go func() {
-		defer close(watchExit)
-		select {
-		case <-openCtx.Done():
-			_ = sess.Close()
-		case <-watchDone:
-		}
-	}()
-
-	var res openResult
-	select {
-	case res = <-resCh:
-	case <-openCtx.Done():
-		_ = sess.Close()
-		res = <-resCh // the close unblocked it; no goroutine outlives FSConn
-	}
-	close(watchDone)
-	<-watchExit
-	// The deadline is the deterministic answer whenever it fired, even if
-	// the handshake result and the deadline became ready in the same
-	// select: a client that completed at the same moment the deadline
-	// fired is closed again, never handed out.
-	if ctxErr := openCtx.Err(); ctxErr != nil {
-		_ = sess.Close()
-		if res.client != nil {
-			_ = res.client.Close()
-		}
+	sess, sftpClient, err := openSFTPSubsystem(client, openCtx)
+	if err != nil {
 		release()
-		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			return nil, fmt.Errorf("%w: remote did not complete the sftp version handshake", ErrFSTimedOut)
-		}
-		return nil, ctxErr
-	}
-	if res.err != nil {
-		_ = sess.Close()
-		release()
-		if errors.Is(res.err, io.EOF) || errors.Is(res.err, io.ErrUnexpectedEOF) {
-			// The server accepted the subsystem and then the transport
-			// died before the version handshake completed.
-			return nil, fmt.Errorf("%w: %v", ErrFSLost, res.err)
-		}
-		return nil, fmt.Errorf("ssh: sftp handshake: %w", res.err)
+		return nil, err
 	}
 
 	c := &fsConn{
 		sess:        sess,
-		sftp:        res.client,
+		sftp:        sftpClient,
 		done:        make(chan struct{}),
 		closed:      make(chan struct{}),
 		dead:        make(chan struct{}),
@@ -297,6 +205,112 @@ func newFSConnLane(client *gossh.Client, release func(), ctx context.Context, ha
 		})
 	}()
 	return c, nil
+}
+
+// openSFTPSubsystem acquires an SFTP subsystem on client: a fresh session
+// channel, an accepted sftp subsystem request, and a completed version
+// handshake. Every step is cancellable: the handshake runs in a goroutine
+// over the session's pipes, and closing the session — the only handle the
+// caller holds from the outside — is what unblocks it, so the function
+// always returns within ctx and never leaks a goroutine. On failure the
+// session is closed and nil returned; the caller still owns the pooled
+// reference and must release it. Both the FSConn lease and the
+// helper-install lease acquire through here, so the negotiation and its
+// refusal classification have one implementation.
+func openSFTPSubsystem(client *gossh.Client, ctx context.Context) (*gossh.Session, *sftp.Client, error) {
+	sess, err := client.NewSession()
+	if err != nil {
+		return nil, nil, classifyFSConnectError(err)
+	}
+	// The pipes are the sftp client's wire endpoints; the session stays
+	// with the lease so shutdown can close the channel itself. Closing only
+	// the client would send EOF (CloseWrite) and then WAIT for the server
+	// to close the channel — a non-replying server never does, so the
+	// session is what close-to-cancel closes.
+	pw, err := sess.StdinPipe()
+	if err != nil {
+		_ = sess.Close()
+		return nil, nil, err
+	}
+	pr, err := sess.StdoutPipe()
+	if err != nil {
+		_ = sess.Close()
+		return nil, nil, err
+	}
+	if err := sess.RequestSubsystem("sftp"); err != nil {
+		_ = sess.Close()
+		// x/crypto/ssh returns exactly "ssh: subsystem request failed" when
+		// the server replies false; anything else at this step is a
+		// transport failure — the connection died before the request could
+		// be answered. The shape is pinned by go.mod at v0.54.0 (mirrors
+		// classifyExecError), and the partition is complete: on a healthy
+		// connection a subsystem request can only be answered true or false.
+		if err.Error() == "ssh: subsystem request failed" {
+			return nil, nil, fmt.Errorf("%w: %v", ErrFSSubsystemRefused, err)
+		}
+		return nil, nil, fmt.Errorf("%w: %v", ErrFSLost, err)
+	}
+
+	type openResult struct {
+		client *sftp.Client
+		err    error
+	}
+	resCh := make(chan openResult, 1)
+	go func() {
+		cl, err := sftp.NewClientPipe(pr, pw)
+		resCh <- openResult{cl, err}
+	}()
+
+	// The version handshake can hang against a server that accepts the
+	// subsystem and never answers INIT. Closing the session unblocks the
+	// handshake goroutine, exactly as Close unblocks a wedged call; the
+	// watcher fires on ctx.Done (including the caller's hard-timeout
+	// deadline, so a Background ctx still cannot hang the acquisition
+	// forever).
+	watchDone := make(chan struct{})
+	watchExit := make(chan struct{})
+	go func() {
+		defer close(watchExit)
+		select {
+		case <-ctx.Done():
+			_ = sess.Close()
+		case <-watchDone:
+		}
+	}()
+
+	var res openResult
+	select {
+	case res = <-resCh:
+	case <-ctx.Done():
+		_ = sess.Close()
+		res = <-resCh // the close unblocked it; no goroutine outlives the call
+	}
+	close(watchDone)
+	<-watchExit
+	// The deadline is the deterministic answer whenever it fired, even if
+	// the handshake result and the deadline became ready in the same
+	// select: a client that completed at the same moment the deadline
+	// fired is closed again, never handed out.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = sess.Close()
+		if res.client != nil {
+			_ = res.client.Close()
+		}
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return nil, nil, fmt.Errorf("%w: remote did not complete the sftp version handshake", ErrFSTimedOut)
+		}
+		return nil, nil, ctxErr
+	}
+	if res.err != nil {
+		_ = sess.Close()
+		if errors.Is(res.err, io.EOF) || errors.Is(res.err, io.ErrUnexpectedEOF) {
+			// The server accepted the subsystem and then the transport
+			// died before the version handshake completed.
+			return nil, nil, fmt.Errorf("%w: %v", ErrFSLost, res.err)
+		}
+		return nil, nil, fmt.Errorf("ssh: sftp handshake: %w", res.err)
+	}
+	return sess, res.client, nil
 }
 
 func (c *fsConn) Done() <-chan struct{} { return c.done }

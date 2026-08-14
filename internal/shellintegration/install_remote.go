@@ -2,10 +2,7 @@ package shellintegration
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"os"
 	"path"
 	"strings"
@@ -13,114 +10,30 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/pkg/sftp"
+
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
-// sftpFS is the publisher's filesystem seam backed by an *sftp.Client
-// (AD-8: the SFTP carrier and the self-installing launcher implement the
-// same FS interface; the publisher holds no SFTP knowledge). Modes are set
-// at creation and never left to the server's umask, exactly like osFS, and
-// no path is followed through a symlink — lstat semantics throughout
-// (design §4.1).
+// sftpFS is the publisher's filesystem seam backed by the shared SFTP
+// adapter in internal/ssh (AD-8: the SFTP carrier and the self-installing
+// launcher implement the same FS interface; the publisher holds no SFTP
+// knowledge). The write primitives — mkdir+chmod, create+chmod, rename,
+// removal, fsync tolerance and SFTP status translation — were moved out of
+// this package so ONE implementation serves both the shell bundle's
+// publisher and the remote helper's install lease (the remote-helper
+// design, D7). Create is the one method that must delegate by hand: the
+// shared adapter's File is internal/ssh's, and this seam names its own —
+// the value is the same file handle, structurally identical.
 type sftpFS struct {
-	client *sftp.Client
+	*ssh.SFTPFS
 }
 
-func (f sftpFS) Lstat(path string) (fs.FileInfo, error) { return f.client.Lstat(path) }
-
-// Mkdir creates the directory and then chmods it: the SFTP server applies
-// its own umask to the requested mode, which would silently widen 0700 into
-// 0755 on a permissive host ("modes are set at creation, never left to
-// umask"). The SFTP protocol answers EEXIST as a generic failure, so a path
-// that already exists as a directory is translated to fs.ErrExist — the
-// publisher's concurrent-create race tolerance reads it through that error.
-func (f sftpFS) Mkdir(path string, mode os.FileMode) error {
-	if err := f.client.Mkdir(path); err != nil {
-		if isSFTPStatus(err, uint32(sftp.ErrSSHFxFailure)) {
-			if info, lerr := f.client.Lstat(path); lerr == nil && info.IsDir() {
-				return fs.ErrExist
-			}
-		}
-		return err
-	}
-	return f.client.Chmod(path, mode)
-}
-
-// Create opens the file for writing (truncating if present) and then chmods
-// it for the same umask reason. The returned File is the write boundary:
-// Write, Sync and Close are separate fault-injectable steps.
 func (f sftpFS) Create(path string, mode os.FileMode) (File, error) {
-	fh, err := f.client.Create(path)
+	fh, err := f.SFTPFS.Create(path, mode)
 	if err != nil {
 		return nil, err
 	}
-	if err := fh.Chmod(mode); err != nil {
-		_ = fh.Close()
-		return nil, err
-	}
-	return &sftpFile{File: fh}, nil
-}
-
-// SyncDir no-ops: SFTP has no directory fsync, and the seam's own carve-out
-// says transports without it may no-op. Durability scope is stated, not
-// assumed (design §4).
-func (f sftpFS) SyncDir(string) error { return nil }
-
-func (f sftpFS) Rename(src, dst string) error { return f.client.Rename(src, dst) }
-
-// Remove deletes a single file, retrying as a directory removal when
-// SSH_FXP_REMOVE refuses (the publisher removes the empty lock directory
-// this way). Absence is reported through fs.ErrNotExist, which the
-// publisher tolerates.
-func (f sftpFS) Remove(path string) error {
-	err := f.client.Remove(path)
-	if err == nil || errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	if rerr := f.client.RemoveDirectory(path); rerr != nil {
-		return err
-	}
-	return nil
-}
-
-// ReadDir lists the entries of dir with lstat semantics: the SFTP server
-// fills attrs from readdir(3), so a symlink entry is reported as a symlink,
-// never followed.
-func (f sftpFS) ReadDir(path string) ([]fs.FileInfo, error) { return f.client.ReadDir(path) }
-
-func (f sftpFS) ReadFile(path string) ([]byte, error) {
-	fh, err := f.client.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = fh.Close() }()
-	return io.ReadAll(fh)
-}
-
-// sftpFile adapts *sftp.File to the publisher's File boundary.
-type sftpFile struct {
-	*sftp.File
-}
-
-// Sync requests a flush to stable storage when the server advertises the
-// fsync@openssh.com extension. The SFTP protocol has no mandatory fsync: a
-// server without the extension answers OP_UNSUPPORTED, and durability is
-// then the server's promise — stated, not assumed (design §4). Every other
-// failure is a real publish boundary.
-func (f *sftpFile) Sync() error {
-	err := f.File.Sync()
-	if err == nil || isSFTPStatus(err, uint32(sftp.ErrSSHFxOpUnsupported)) {
-		return nil
-	}
-	return err
-}
-
-// isSFTPStatus reports whether err is an SFTP status reply carrying the
-// given protocol code. The SFTP protocol answers EEXIST and directory
-// removal refusals as generic failures, so the carrier maps those to the fs
-// semantics the publisher expects.
-func isSFTPStatus(err error, code uint32) bool {
-	var se *sftp.StatusError
-	return errors.As(err, &se) && se.Code == code
+	return fh, nil
 }
 
 // EnsureInstalledRemote publishes the integration bundle on a remote host
@@ -145,7 +58,7 @@ func (s *Impl) EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Clien
 	defer func() { _ = sftpClient.Close() }()
 
 	root := path.Join(remoteHome, dirName)
-	res, err := NewPublisher(s.log, sftpFS{client: sftpClient}, root).Publish(launchBundle())
+	res, err := NewPublisher(s.log, sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)}, root).Publish(launchBundle())
 	if err != nil {
 		// The publish outcome is a delivery decision, logged at INFO with
 		// the refusal as a value — the fail-open side: the session still
@@ -179,7 +92,7 @@ func (s *Impl) UninstallRemote(ctx context.Context, sshClient *gossh.Client, rem
 	defer func() { _ = sftpClient.Close() }()
 
 	root := path.Join(remoteHome, dirName)
-	res, err := NewPublisher(s.log, sftpFS{client: sftpClient}, root).Uninstall()
+	res, err := NewPublisher(s.log, sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)}, root).Uninstall()
 	if err != nil {
 		return nil, nil, fmt.Errorf("shellintegration: remote uninstall: %w", err)
 	}

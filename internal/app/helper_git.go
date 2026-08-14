@@ -2,22 +2,26 @@ package app
 
 // The helper-backed git factory selection (the remote-helper design): the
 // composition root's answer to transport.GitFactoryFor. An SSH session gets
-// a helper-backed git.RepoFactory when a helper is configured for this
+// a helper-backed git.RepoFactory when the helper is INSTALLED for this
 // machine; otherwise nil, and git.open keeps its OpenRemoteUnsupported
 // refusal — the zero-install fallback (design D3 as amended 2026-08-13,
-// D16).
+// D16). The factory's command and expected hash are never configuration:
+// each consultation installs the artifact on the session's host (D7) and
+// takes them from what was installed.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
-	"os"
+	"path"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/git"
 	helpergit "github.com/shady2k/nocx/internal/git/helper"
 	"github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -31,47 +35,136 @@ type helperLaneProvider interface {
 	HelperConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperConn, error)
 }
 
-// helperCommandEnvVar and helperHashEnvVar are the composition-root knobs
-// that say a remote helper is available: the command to run on a remote
-// host and the content hash to expect from it (D21). They are env vars, not
-// settings, for the same reason the log level is — the value is owned by
-// another module (the deploy bead, nocx-jwye, which writes the D7 install
-// layout the command names and whose hash is the directory key), and a
-// setting would drag the store and the renderer into a knob only the
-// installer reads. Unset — either one — means no helper is available and
-// the OpenRemoteUnsupported refusal stands.
-const (
-	helperCommandEnvVar = "NOCX_HELPER_COMMAND"
-	helperHashEnvVar    = "NOCX_HELPER_HASH"
-)
+// helperInstallProvider is the full composition-root surface the factory
+// needs to bring a helper up on a host: the exec lane the helper rides
+// (D19), the write-capable install lease the deploy package installs
+// through (D7), and the bounded one-shot exec the platform probe uses
+// (D20). *ssh.RealClient satisfies all three; the interface exists so the
+// factory is testable against doubles without a live connection. The
+// registry itself keeps the narrow helperLaneProvider — install is a
+// selection-time concern, not a per-session one.
+type helperInstallProvider interface {
+	helperLaneProvider
+	HelperInstallConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.HelperInstallConn, error)
+	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
+}
 
 // helperGitFactory is the composition root's answer to
-// transport.GitFactoryFor: for an SSH session it resolves the helper
-// configuration and returns a factory that serves git over one helper
-// process on that session's pooled connection, or nil when no helper is
-// configured — nil is what keeps git.open's OpenRemoteUnsupported refusal
-// standing. The function is side-effect-free: git.open consults it twice
-// (the refusal decision, then the open), and the dial happens inside the
-// returned factory's Open, never here.
-func helperGitFactory(lanes helperLaneProvider, log *slog.Logger) transport.GitFactoryFor {
+// transport.GitFactoryFor: for an SSH session it installs the helper
+// artifact on that session's host (D7) and returns a factory that serves
+// git over one helper process on that session's pooled connection, or nil
+// when no helper is available — nil is what keeps git.open's
+// OpenRemoteUnsupported refusal standing. git.open consults the selection
+// twice (the refusal decision, then the open); each consultation installs
+// idempotently, and an already-complete directory uploads nothing (D7), so
+// both consultations converge on the same install. The dial happens inside
+// the returned factory's Open, never here.
+func helperGitFactory(lanes helperInstallProvider, log *slog.Logger) transport.GitFactoryFor {
 	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
 	return func(sess session.Session) git.RepoFactory {
-		command, hash, ok := helperConfigFromEnv()
-		if !ok {
+		command, hash, err := installHelperFor(sess, lanes)
+		if err != nil {
+			// Fail-open (D16): a host with no helper keeps the refusal. The
+			// failure is a fact about the host or the build — an exec that
+			// cannot be probed, a platform we do not build for, artifacts
+			// that were never built — and it is logged, never silent, so a
+			// soft degrade stays visible (AGENTS.md).
+			log.Info("helper unavailable; the zero-install refusal stands",
+				"host", sess.Host(), "error", err)
 			return nil
 		}
-		return &sessionFactory{reg: reg, sid: sess.ID(), host: sess.Host(), opts: sess.SSHOptions(), command: command, expectHash: hash}
+		return &sessionFactory{
+			reg:        reg,
+			sid:        sess.ID(),
+			host:       sess.Host(),
+			opts:       sess.SSHOptions(),
+			command:    command,
+			expectHash: hash,
+		}
 	}
 }
 
-func helperConfigFromEnv() (command, expectHash string, ok bool) {
-	command = os.Getenv(helperCommandEnvVar)
-	expectHash = os.Getenv(helperHashEnvVar)
-	if command == "" || expectHash == "" {
-		return "", "", false
+// installHelperFor installs the helper artifact on sess's host and returns
+// the absolute command path and the content hash to expect from it (D7,
+// D21): the deploy wiring, replacing the env-configuration the factory used
+// to read. The context is background — the selection has no caller context
+// — and the install lease's own hard timeout is what bounds the acquisition
+// (the filesystemProviderFactory precedent).
+func installHelperFor(sess session.Session, lanes helperInstallProvider) (command, hash string, err error) {
+	ctx := context.Background()
+
+	probe, err := lanes.DiscoveryConn(ctx, sess.Host(), sess.SSHOptions()...)
+	if err != nil {
+		return "", "", fmt.Errorf("probe lease for %s: %w", sess.Host(), err)
 	}
-	return command, expectHash, true
+	defer func() { _ = probe.Close() }()
+	platform, err := deploy.Probe(ctx, probeExec{probe})
+	if err != nil {
+		return "", "", err
+	}
+
+	conn, err := lanes.HelperInstallConn(ctx, sess.Host(), sess.SSHOptions()...)
+	if err != nil {
+		return "", "", fmt.Errorf("install lease for %s: %w", sess.Host(), err)
+	}
+	defer func() { _ = conn.Close() }()
+	home, err := conn.Home()
+	if err != nil {
+		return "", "", fmt.Errorf("remote home for %s: %w", sess.Host(), err)
+	}
+	fsys := installFS{conn}
+	command, hash, err = deploy.Ensure(ctx, fsys, deploy.DefaultSource, home, platform)
+	if err != nil {
+		return "", "", err
+	}
+	// Bound the footprint: every superseded install on the host goes, the
+	// one just installed never (D25).
+	if err := deploy.Prune(ctx, fsys, home, path.Base(path.Dir(command))); err != nil {
+		return "", "", fmt.Errorf("prune for %s: %w", sess.Host(), err)
+	}
+	return command, hash, nil
 }
+
+// probeExec adapts a DiscoveryConn to the deploy package's ExecOnce: the
+// platform probe's one bounded command. DiscoveryConn.Exec is the existing
+// bounded exec capability (output cap, cancellation, session-refusal
+// classification); the adapter exists only because deploy declares its own
+// narrow seam and must not import internal/ssh.
+type probeExec struct{ conn ssh.DiscoveryConn }
+
+func (e probeExec) Exec(ctx context.Context, cmd string) ([]byte, error) {
+	res, err := e.conn.Exec(ctx, cmd)
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitStatus != 0 {
+		return nil, fmt.Errorf("deploy probe: command exited %d", res.ExitStatus)
+	}
+	return res.Stdout, nil
+}
+
+// installFS adapts an ssh.HelperInstallConn to the deploy package's
+// RemoteFS seam: the same shape, with each package's own File type name.
+// Create is the one method whose return type differs; the rest pass
+// through.
+type installFS struct{ conn ssh.HelperInstallConn }
+
+func (a installFS) Lstat(p string) (fs.FileInfo, error) { return a.conn.Lstat(p) }
+func (a installFS) Mkdir(p string, m fs.FileMode) error { return a.conn.Mkdir(p, m) }
+
+func (a installFS) Create(p string, m fs.FileMode) (deploy.File, error) {
+	f, err := a.conn.Create(p, m)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (a installFS) SyncDir(p string) error                  { return a.conn.SyncDir(p) }
+func (a installFS) Rename(s, d string) error                { return a.conn.Rename(s, d) }
+func (a installFS) Remove(p string) error                   { return a.conn.Remove(p) }
+func (a installFS) ReadDir(p string) ([]fs.FileInfo, error) { return a.conn.ReadDir(p) }
+func (a installFS) ReadFile(p string) ([]byte, error)       { return a.conn.ReadFile(p) }
 
 // helperRegistry owns the helper processes the composition root started:
 // one per session, shared by every binding that session opens. A session is

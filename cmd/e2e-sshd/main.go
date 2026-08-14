@@ -1,6 +1,8 @@
 // Command e2e-sshd runs an in-process SSH server for the nocx e2e suite
 // (e2e/shell-mode.spec.ts, e2e/nocxify-journey.spec.ts) that executes REAL
-// commands on a REAL PTY with the REAL shell. The nocx integration path needs
+// commands on a REAL PTY with the REAL shell — or, for a pty-less exec
+// channel, on pipes, as sshd serves `ssh host cmd` and as the remote helper
+// protocol requires. The nocx integration path needs
 // the far side to actually run `exec bash --rcfile <(...) -i` (or a plain
 // `bash -i` shell) and emit OSC 133 markers — an echo server cannot. Hermetic
 // and deterministic: keys are minted at startup, the address is ephemeral,
@@ -402,6 +404,22 @@ type sessionState struct {
 	rows    uint16
 	slave   *os.File
 	started bool
+	// ptyReq records whether a pty-req preceded the command request. sshd
+	// treats the pty as an option on the session: a client that wants a
+	// terminal asks for one first, and a client that does not (`ssh host
+	// cmd`) gets pipes. The fixture must make the same choice — the remote
+	// helper protocol (Task 6 of the remote-helper plan) is built on a
+	// pty-less exec, and a pty would translate \n to \r\n and echo input
+	// back, corrupting binary frames (plan D19).
+	ptyReq bool
+}
+
+// sawPtyReq reports whether this session's client requested a pty before the
+// command request. Callers use it to pick the pipe path over the pty path.
+func (s *sessionState) sawPtyReq() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ptyReq
 }
 
 // clampU16 bounds a window-size field before the narrowing conversion
@@ -435,6 +453,7 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 					st.mu.Lock()
 					st.cols = clampU16(p.Cols)
 					st.rows = clampU16(p.Rows)
+					st.ptyReq = true
 					st.mu.Unlock()
 				}
 				_ = req.Reply(true, nil)
@@ -468,7 +487,11 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 					continue
 				}
 				_ = req.Reply(true, nil)
-				startCommand(ch, st, e.Command)
+				if st.sawPtyReq() {
+					startCommand(ch, st, e.Command)
+				} else {
+					startPipeCommand(ch, st, e.Command)
+				}
 			default:
 				_ = req.Reply(false, nil)
 			}
@@ -588,5 +611,67 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	go func() {
 		_, _ = io.Copy(master, ch)
 		_ = master.Close()
+	}()
+}
+
+// startPipeCommand runs the given command with the channel itself as its
+// stdio — no pty, no line discipline. This is how sshd serves an exec
+// channel when the client never asked for a terminal: the command's stdin
+// and stdout are pipes, so 0x0A stays 0x0A, nothing is echoed, and binary
+// data survives byte-identical. The remote helper protocol is built on
+// exactly this lane (plan Task 6): frames are binary, and the pty path
+// would corrupt them (plan D19).
+//
+// The command is wrapped in `bash -c` and given sessionEnv for the same
+// reasons the pty path states on startCommand: launcher strings execute as
+// shell constructs, and SHELL is published rather than inherited.
+// cmd.Wait() returns only after the exec/stdout and exec/stderr copy
+// goroutines have flushed everything into the channel (os/exec pipes the
+// non-*os.File stdio), so when the status is sent below, every byte the
+// command wrote has already reached the client — the same ordering the pty
+// path documents above: exit-status first, then channel close.
+func startPipeCommand(ch gossh.Channel, st *sessionState, command string) {
+	st.mu.Lock()
+	if st.started {
+		st.mu.Unlock()
+		return
+	}
+	st.started = true
+	st.mu.Unlock()
+
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd: bash not found:", err)
+		return
+	}
+	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
+	cmd := exec.Command(bash, "-c", command)
+	cmd.Env = sessionEnv(bash)
+	cmd.Stdin = ch
+	cmd.Stdout = ch
+	cmd.Stderr = ch.Stderr()
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd: spawn:", err)
+		return
+	}
+
+	go func() {
+		_ = cmd.Wait()
+		code := 0
+		if cmd.ProcessState != nil {
+			code = cmd.ProcessState.ExitCode()
+		}
+		// A negative code means the process was signalled; the wire field is
+		// unsigned, and the fixture only has to be faithful about ordinary
+		// exits, so a signal reports as 255 the way a shell would.
+		if code < 0 {
+			code = 255
+		}
+		_, _ = ch.SendRequest(
+			"exit-status",
+			false,
+			gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)}), // #nosec G115 — clamped non-negative just above.
+		)
+		_ = ch.Close()
 	}()
 }

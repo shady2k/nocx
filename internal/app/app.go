@@ -669,15 +669,23 @@ func New(opts ...Option) (*App, error) {
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line
 		// existed the whole package was unreachable, which is the state
-		// AGENTS.md check 5 exists to catch. There is no remote factory:
-		// git.open refuses an ssh session before it reaches this, and the
-		// remote case waits on the relay (spec D3).
+		// AGENTS.md check 5 exists to catch. The remote case is the
+		// helper's (design D3 as amended 2026-08-13): WithGitHelperFactory
+		// selects a helper-backed factory for SSH sessions when one is
+		// configured, and git.open keeps its OpenRemoteUnsupported refusal
+		// when none is — the zero-install fallback (D16).
 		transport.WithGitRegistry(registry.New()),
 		// The factory resolves the shell environment in the background from
 		// construction (nocx-6pz0) and is stopped at shutdown, so no
 		// resolution child can outlive the process; nothing after this point
 		// in New can fail, so the factory needs no earlier-return cleanup.
 		transport.WithGitRepoFactory(gitFactory),
+		// The helper-backed factory selection (remote-helper design): SSH
+		// sessions get a repository served over the helper when one is
+		// configured, and the refusal stands otherwise. The helper client
+		// and the git factory over it are reachable from main() only
+		// through this line (AGENTS.md check 5).
+		transport.WithGitHelperFactory(helperGitFactory(sshClient, slogger)),
 	}
 	// The lifecycle publication boundary (ADR-0024 decision 7, bead
 	// nocx-u7uh.5): one kernel, one publisher, and the transport as its

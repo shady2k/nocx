@@ -408,6 +408,165 @@ func TestGitOpen_RemoteSessionRefusedBeforeTheFactory(t *testing.T) {
 	}
 }
 
+// openSSHSession opens a remote (ssh-kind) session over the wire and
+// returns its server-authoritative sessionId — the setup the remote git
+// tests share.
+func openSSHSession(t *testing.T, conn *websocket.Conn) string {
+	t.Helper()
+	openResp := jsonrpcCallWithID(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"kind": "ssh", "profileId": "ssh:test:1",
+	}, 1)
+	var openEnv struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openResp, &openEnv); err != nil {
+		t.Fatalf("open: unmarshal: %v", err)
+	}
+	if openEnv.Error != nil {
+		t.Fatalf("open: %+v", openEnv.Error)
+	}
+	var openGot struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(openEnv.Result, &openGot); err != nil {
+		t.Fatalf("open: decode: %v", err)
+	}
+	if openGot.SessionID == "" {
+		t.Fatal("open returned an empty sessionId")
+	}
+	return openGot.SessionID
+}
+
+// TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory is D3 as
+// amended 2026-08-13 on the wire: an SSH session with a helper factory
+// wired answers ok THROUGH the helper factory, and the local factory is
+// never consulted.
+func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	local := newStubGitFactory()
+	helper := newStubGitFactory()
+	ws := NewWSServer(logger, reg,
+		WithGitRegistry(registry.New()),
+		WithGitRepoFactory(local),
+		WithGitHelperFactory(func(session.Session) git.RepoFactory { return helper }),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHSession(t, conn)
+
+	resp := jsonrpcCallWithID(t, conn, "git.open", map[string]any{
+		"sessionId": sid,
+		"cwd":       "/some/cwd",
+	}, 2)
+	var got struct {
+		Result struct {
+			State     string `json:"state"`
+			BindingID string `json:"bindingId"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if got.Error != nil {
+		t.Fatalf("git.open: %+v", got.Error)
+	}
+	if got.Result.State != string(git.OpenOK) || got.Result.BindingID == "" {
+		t.Errorf("state = %q bindingId = %q, want ok with a binding — the helper factory must serve the SSH session", got.Result.State, got.Result.BindingID)
+	}
+	helper.mu.Lock()
+	helperOpens := helper.opens
+	helper.mu.Unlock()
+	local.mu.Lock()
+	localOpens := local.opens
+	local.mu.Unlock()
+	if helperOpens != 1 {
+		t.Errorf("helper factory consulted %d times, want 1", helperOpens)
+	}
+	if localOpens != 0 {
+		t.Errorf("local factory consulted %d times for an SSH session, want 0", localOpens)
+	}
+}
+
+// TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal: a helper factory
+// that answers nil for the session is "no helper available", and the
+// OpenRemoteUnsupported refusal stands unchanged (design D16 — the
+// zero-install fallback).
+func TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	factory := newStubGitFactory()
+	ws := NewWSServer(logger, reg,
+		WithGitRegistry(registry.New()),
+		WithGitRepoFactory(factory),
+		// A helper selection that knows this host has no helper: nil must
+		// keep the refusal, exactly as an unwired selection does.
+		WithGitHelperFactory(func(session.Session) git.RepoFactory { return nil }),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHSession(t, conn)
+
+	resp := jsonrpcCallWithID(t, conn, "git.open", map[string]any{
+		"sessionId": sid,
+		"cwd":       "/some/cwd",
+	}, 2)
+	var got struct {
+		Result struct {
+			State string `json:"state"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if got.Error != nil {
+		t.Fatalf("git.open: %+v", got.Error)
+	}
+	if got.Result.State != string(git.OpenRemoteUnsupported) {
+		t.Errorf("state = %q, want %q — no helper for the session keeps the refusal", got.Result.State, git.OpenRemoteUnsupported)
+	}
+	factory.mu.Lock()
+	opens := factory.opens
+	factory.mu.Unlock()
+	if opens != 0 {
+		t.Errorf("factory consulted %d times for a refused remote session, want 0", opens)
+	}
+}
+
 // TestGitOpen_NoCwdRefusedBeforeTheFactory: no verified OSC 7 cwd means no
 // repository (D2), decided from the caller's origin before the factory.
 func TestGitOpen_NoCwdRefusedBeforeTheFactory(t *testing.T) {

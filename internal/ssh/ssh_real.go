@@ -190,7 +190,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		}
 	}
 
-	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc)
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
@@ -825,7 +825,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 // write). lc is the established lifecycle channel, or nil (refused or not
 // wired); it is closed on every path that does not hand the shell a
 // channel-using start command, and otherwise transferred to the channel.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
 	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
 
 	session, err := gclient.NewSession()
@@ -905,6 +905,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		stdout:                 stdout,
 		done:                   make(chan struct{}),
 		shellIntegrationReason: reason,
+		hostKeyFingerprint:     hostKeyFingerprint,
 		closeCb: func() {
 			_ = session.Close()
 		},

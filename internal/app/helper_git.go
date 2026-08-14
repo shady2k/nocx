@@ -16,12 +16,16 @@ import (
 	"io/fs"
 	"log/slog"
 	"path"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	helpergit "github.com/shady2k/nocx/internal/git/helper"
 	"github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
@@ -50,58 +54,126 @@ type helperInstallProvider interface {
 }
 
 // helperGitFactory is the composition root's answer to
-// transport.GitFactoryFor: for an SSH session it installs the helper
-// artifact on that session's host (D7) and returns a factory that serves
-// git over one helper process on that session's pooled connection, or nil
-// when no helper is available — nil is what keeps git.open's
-// OpenRemoteUnsupported refusal standing. git.open consults the selection
+// transport.GitFactoryFor: for an SSH session it decides whether the
+// helper may be used for that machine at all (D8) — the consent decision
+// comes before any remote write — and when it may, installs the helper
+// artifact on the session's host (D7) and returns a factory that serves
+// git over one helper process on that session's pooled connection. The
+// tri-state selection answers consentRequired when the machine has no
+// relay-tier answer, and the zero-install refusal (empty selection) when
+// it is denied, raw, or nothing to offer. git.open consults the selection
 // twice (the refusal decision, then the open); each consultation installs
 // idempotently, and an already-complete directory uploads nothing (D7), so
 // both consultations converge on the same install. The dial happens inside
 // the returned factory's Open, never here.
-func helperGitFactory(lanes helperInstallProvider, log *slog.Logger) transport.GitFactoryFor {
+func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) transport.GitFactoryFor {
 	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
-	return func(sess session.Session) git.RepoFactory {
-		command, hash, err := installHelperFor(sess, lanes)
-		if err != nil {
-			// Fail-open (D16): a host with no helper keeps the refusal. The
-			// failure is a fact about the host or the build — an exec that
-			// cannot be probed, a platform we do not build for, artifacts
-			// that were never built — and it is logged, never silent, so a
-			// soft degrade stays visible (AGENTS.md).
-			log.Info("helper unavailable; the zero-install refusal stands",
-				"host", sess.Host(), "error", err)
-			return nil
-		}
-		return &sessionFactory{
-			reg:        reg,
-			sid:        sess.ID(),
-			host:       sess.Host(),
-			opts:       sess.SSHOptions(),
-			command:    command,
-			expectHash: hash,
+	return func(sess session.Session) transport.GitOpenSelection {
+		// The platform probe is the one bounded remote exec the decision
+		// runs before the user has accepted anything — it writes nothing.
+		// The install, the prune and the footprint observation are reached
+		// only when the machine resolves to relay (D8: consent is asked
+		// when the user reaches for the feature, not when a connection is
+		// made; nothing is written before the ask is answered).
+		platform, available, perr := probeHelperPlatform(sess, lanes)
+		r := newResolver(
+			withStore(store),
+			withHelperArtifactAvailable(available),
+			withHelperRequested(true), // git.open is the surface reaching for the helper
+		)
+		switch r.Resolve(Machine{Fingerprint: sess.HostKeyFingerprint(), Mode: effectiveModeFor(sess)}) {
+		case DesiredRelay:
+			if perr != nil {
+				log.Info("helper unavailable; the zero-install refusal stands",
+					"host", sess.Host(), "error", perr)
+				return transport.GitOpenSelection{}
+			}
+			command, hash, err := installHelperFor(sess, lanes, platform)
+			if err != nil {
+				// Fail-open (D16): a host whose install failed keeps the
+				// refusal. The failure is a fact about the host or the
+				// build, and it is logged, never silent, so a soft degrade
+				// stays visible (AGENTS.md).
+				log.Info("helper unavailable; the zero-install refusal stands",
+					"host", sess.Host(), "error", err)
+				return transport.GitOpenSelection{}
+			}
+			// The footprint observation is recorded only after Ensure
+			// succeeded — the never-connect footprint surface must never
+			// list a footprint that was not written remotely (consent
+			// design §3.3). A failed observation is a logged warning, not
+			// an install failure: the helper is up and serving.
+			// installs is always wired at the composition root; the guard
+			// keeps a nil store (a test double) from panicking the relay
+			// path it never exercises.
+			if fp := sess.HostKeyFingerprint(); fp != "" && installs != nil {
+				if rerr := installs.Record(consent.Install{
+					Fingerprint: fp,
+					Identity:    destinationIdentityFor(sess),
+					Path:        path.Dir(command),
+					Hash:        hash,
+					InstalledAt: time.Now().UTC(),
+				}); rerr != nil {
+					log.Warn("helper installed but the footprint observation was not recorded",
+						"host", sess.Host(), "error", rerr)
+				}
+			}
+			return transport.GitOpenSelection{Factory: &sessionFactory{
+				reg:        reg,
+				sid:        sess.ID(),
+				host:       sess.Host(),
+				opts:       sess.SSHOptions(),
+				command:    command,
+				expectHash: hash,
+			}}
+		case ConsentRequired:
+			// The ask is a RESULT state, never an install: nothing was
+			// written to the host.
+			return transport.GitOpenSelection{ConsentRequired: true}
+		default:
+			if perr != nil {
+				// A host that could not be probed, or a platform we do not
+				// build for, is a fact the operator should see — never a
+				// silent degrade (AGENTS.md).
+				log.Info("helper unavailable; the zero-install refusal stands",
+					"host", sess.Host(), "error", perr)
+			}
+			return transport.GitOpenSelection{}
 		}
 	}
 }
 
-// installHelperFor installs the helper artifact on sess's host and returns
-// the absolute command path and the content hash to expect from it (D7,
-// D21): the deploy wiring, replacing the env-configuration the factory used
-// to read. The context is background — the selection has no caller context
-// — and the install lease's own hard timeout is what bounds the acquisition
-// (the filesystemProviderFactory precedent).
-func installHelperFor(sess session.Session, lanes helperInstallProvider) (command, hash string, err error) {
+// probeHelperPlatform asks the session's host what platform it is (D20)
+// and whether an artifact exists for it — the deployment side of the
+// resolver's "a suitable binary exists for that platform" arm. The probe
+// is one bounded exec and writes nothing; it is the only remote command
+// the consent decision runs before the user has accepted.
+func probeHelperPlatform(sess session.Session, lanes helperInstallProvider) (deploy.Platform, bool, error) {
 	ctx := context.Background()
-
 	probe, err := lanes.DiscoveryConn(ctx, sess.Host(), sess.SSHOptions()...)
 	if err != nil {
-		return "", "", fmt.Errorf("probe lease for %s: %w", sess.Host(), err)
+		return deploy.Platform{}, false, fmt.Errorf("probe lease for %s: %w", sess.Host(), err)
 	}
 	defer func() { _ = probe.Close() }()
 	platform, err := deploy.Probe(ctx, probeExec{probe})
 	if err != nil {
-		return "", "", err
+		return deploy.Platform{}, false, err
 	}
+	if _, _, aerr := deploy.DefaultSource.Artifact(platform); aerr != nil {
+		return platform, false, aerr
+	}
+	return platform, true, nil
+}
+
+// installHelperFor installs the helper artifact on sess's host for the
+// already-probed platform and returns the absolute command path and the
+// content hash to expect from it (D7, D21): the deploy wiring, replacing
+// the env-configuration the factory used to read. The context is
+// background — the selection has no caller context — and the install
+// lease's own hard timeout is what bounds the acquisition (the
+// filesystemProviderFactory precedent).
+func installHelperFor(sess session.Session, lanes helperInstallProvider, platform deploy.Platform) (command, hash string, err error) {
+	ctx := context.Background()
 
 	conn, err := lanes.HelperInstallConn(ctx, sess.Host(), sess.SSHOptions()...)
 	if err != nil {
@@ -123,6 +195,40 @@ func installHelperFor(sess session.Session, lanes helperInstallProvider) (comman
 		return "", "", fmt.Errorf("prune for %s: %w", sess.Host(), err)
 	}
 	return command, hash, nil
+}
+
+// effectiveModeFor re-derives the session's resolved desired mode from the
+// connect options the session was opened with (session.Reg stamps the
+// resolved cascade answer as WithDesiredMode). An absent answer is the
+// hardcoded auto default — the resolver treats "" as auto.
+func effectiveModeFor(sess session.Session) profile.DesiredMode {
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range sess.SSHOptions() {
+		o(cfg)
+	}
+	return profile.DesiredMode(cfg.DesiredMode)
+}
+
+// destinationIdentityFor renders the display identity (user@host:port) the
+// footprint surface shows for a helper installation — the same spelling a
+// saved connection would resolve to, as far as the session's own options
+// carry it.
+func destinationIdentityFor(sess session.Session) string {
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range sess.SSHOptions() {
+		o(cfg)
+	}
+	host := sess.Host()
+	if host == "" {
+		return ""
+	}
+	if cfg.User != "" {
+		host = cfg.User + "@" + host
+	}
+	if cfg.Port != 0 {
+		host = host + ":" + strconv.Itoa(cfg.Port)
+	}
+	return host
 }
 
 // probeExec adapts a DiscoveryConn to the deploy package's ExecOnce: the

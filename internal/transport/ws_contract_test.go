@@ -18,6 +18,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -2221,6 +2222,22 @@ func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
 		t.Fatalf("marshal empty: %v", err)
 	}
 	validateJSON(t, schema, raw, "shell.footprint.status DTO (empty)")
+
+	// A helper install rides the same result (remote-helper design D8).
+	raw, err = json.Marshal(shellFootprintStatusResult{
+		Destinations: []shellFootprintDestination{},
+		Helpers: []shellFootprintHelper{{
+			Identity:    "u@db01:22",
+			Fingerprint: "SHA256:deadbeef",
+			Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+			Hash:        "abc",
+			InstalledAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal helpers: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (helper install)")
 }
 
 // OverTheWire: the real handler, a real fact store holding one
@@ -2246,10 +2263,22 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record install: %v", err)
+	}
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithInstalledFactStore(facts),
+		WithHelperInstallStore(installs),
 		WithSSHConfigResolver(resolver, "/nonexistent/config"),
 		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
 		WithProfileRepository(&footprintTestProfileRepo{profiles: []profile.SSHProfile{{
@@ -2285,6 +2314,12 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Destinations[1].RemovableProfileID != nil {
 		t.Errorf("direct-host destination removableProfileId = %v, want null", *got.Destinations[1].RemovableProfileID)
+	}
+	if len(got.Helpers) != 1 {
+		t.Fatalf("helpers = %d, want 1 — the recorded helper install must ride the status result", len(got.Helpers))
+	}
+	if got.Helpers[0].Fingerprint != "SHA256:deadbeef" || got.Helpers[0].Identity != "u@db01:22" {
+		t.Errorf("helper row = %+v, want the recorded install", got.Helpers[0])
 	}
 }
 

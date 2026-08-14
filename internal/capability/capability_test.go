@@ -466,6 +466,7 @@ func (f *fakeSession) StartOutput(context.Context, session.OutputHandler) error 
 }
 func (f *fakeSession) ShellIntegrationReason() ssh.RefusalReason { return "" }
 func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return nil }
+func (f *fakeSession) HostKeyFingerprint() string                { return "" }
 
 // fakeHistoryRepo is a minimal content.CommandHistoryRepository.
 type fakeHistoryRepo struct {

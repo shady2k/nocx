@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -80,10 +81,23 @@ type footprintHandlers struct {
 	r           Responder
 	facts       *ssh.InstalledFactStore
 	uninstaller RemoteUninstaller
-	resolver    *resolverHolder // profile resolver, readable post-construction
-	sshCfg      ssh.ConfigResolver
-	profiles    profile.ProfileRepository
-	log         log.Logger
+	// helperInstalls is the observed-helper-installs store (remote-helper
+	// design D8): the memory that lets the same surface list the helper
+	// footprint without connecting. When nil, the helpers list is empty —
+	// nothing is claimed installed that cannot be shown.
+	helperInstalls *consent.InstallStore
+	resolver       *resolverHolder // profile resolver, readable post-construction
+	sshCfg         ssh.ConfigResolver
+	profiles       profile.ProfileRepository
+	log            log.Logger
+}
+
+// WithHelperInstallStore attaches the observed helper installs behind
+// shell.footprint.status (remote-helper design D8): the helper row of the
+// footprint screen. Without it the surface answers an empty helpers list —
+// never a claim the surface cannot back.
+func WithHelperInstallStore(store *consent.InstallStore) WSServerOption {
+	return func(s *WSServer) { s.helperInstalls = store }
 }
 
 // shellFootprintDestination is one destination's footprint on the wire,
@@ -114,10 +128,34 @@ type shellFootprintDestination struct {
 	RemovableProfileID *string `json:"removableProfileId"`
 }
 
+// shellFootprintHelper is one observed helper installation on one machine,
+// matching contracts/shell.footprint.status.schema.json exactly. Like the
+// destinations, it is an observation recorded when the install completed —
+// this call never connects, so the row is "installed, as last observed",
+// never a claim about the host's current state.
+type shellFootprintHelper struct {
+	// Identity is the destination identity (user@host:port) the screen
+	// shows.
+	Identity string `json:"identity"`
+	// Fingerprint is the host public-key fingerprint the consent answer
+	// is keyed by (consent design §3.2) — the same machine reached any
+	// way is one row.
+	Fingerprint string `json:"fingerprint"`
+	// Path is the versioned install directory on the remote host.
+	Path string `json:"path"`
+	// Hash is the content hash of the installed binary (D7).
+	Hash string `json:"hash"`
+	// InstalledAt is when nocx last observed this install complete.
+	InstalledAt time.Time `json:"installedAt"`
+}
+
 // shellFootprintStatusResult is the result of shell.footprint.status,
-// matching contracts/shell.footprint.status.schema.json exactly.
+// matching contracts/shell.footprint.status.schema.json exactly. helpers is
+// the observed helper footprint (remote-helper design D8); it is absent
+// when no install has been recorded, never null.
 type shellFootprintStatusResult struct {
 	Destinations []shellFootprintDestination `json:"destinations"`
+	Helpers      []shellFootprintHelper      `json:"helpers,omitempty"`
 }
 
 // shellFootprintUninstallResult is the result of shell.footprint.uninstall,
@@ -130,10 +168,11 @@ type shellFootprintUninstallResult struct {
 }
 
 // handleFootprintStatus serves shell.footprint.status: every recorded
-// installed fact, plus which destinations a saved connection can remove.
+// installed fact and every observed helper install, plus which
+// destinations a saved connection can remove.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.footprint.status"}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"destinations":[{"identity":"pi@192.168.0.93:22","generation":"v10","path":"~/.nocx","protocolVersion":"1","scriptVersion":"0.6.0","lastObservedAt":"…","removableProfileId":"p_01"}]}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"destinations":[{"identity":"pi@192.168.0.93:22","generation":"v10","path":"~/.nocx","protocolVersion":"1","scriptVersion":"0.6.0","lastObservedAt":"…","removableProfileId":"p_01"}],"helpers":[{"identity":"u@db01:22","fingerprint":"SHA256:…","path":"~/.nocx/helper/1-linux-amd64-…/","hash":"…","installedAt":"…"}]}}
 //
 // The removable pass resolves every saved profile through the SAME ssh -G
 // oracle path and cache the fact-writer uses — never a reconstructed
@@ -159,8 +198,23 @@ func (h footprintHandlers) handleFootprintStatus(ctx context.Context, req jsonrp
 			})
 		}
 	}
+	// The helper footprint (D8): recorded installs only — an observation,
+	// never a claim about what is on the host right now.
+	helpers := make([]shellFootprintHelper, 0)
+	if h.helperInstalls != nil {
+		for _, in := range h.helperInstalls.All() {
+			helpers = append(helpers, shellFootprintHelper{
+				Identity:    in.Identity,
+				Fingerprint: in.Fingerprint,
+				Path:        in.Path,
+				Hash:        in.Hash,
+				InstalledAt: in.InstalledAt,
+			})
+		}
+	}
 	_ = h.r.TryResult(req.ID, mustMarshal(shellFootprintStatusResult{
 		Destinations: destinations,
+		Helpers:      helpers,
 	}))
 }
 

@@ -162,11 +162,12 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// methods below outlive them — they read the fact store, which stays.
 		regResponder(s.lane, "shell.footprint.status", func(r Responder) handlerFunc {
 			h := footprintHandlers{
-				r:        r,
-				facts:    s.installedFacts,
-				resolver: s.resolver,
-				sshCfg:   s.sshConfigResolver,
-				profiles: s.profiles,
+				r:              r,
+				facts:          s.installedFacts,
+				helperInstalls: s.helperInstalls,
+				resolver:       s.resolver,
+				sshCfg:         s.sshConfigResolver,
+				profiles:       s.profiles,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),

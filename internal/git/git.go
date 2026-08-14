@@ -127,6 +127,14 @@ const (
 	OpenGitUnavailable OpenState = "gitUnavailable"
 	// OpenGitTooOld — below the version floor; the result carries what it found.
 	OpenGitTooOld OpenState = "gitTooOld"
+	// OpenConsentRequired — the session is an SSH session whose machine has
+	// no relay-tier answer (remote-helper design D8): the user has not yet
+	// accepted the helper for this host. The panel offers the consent flow;
+	// accepting raises the machine to the relay tier and the next git.open
+	// proceeds. Produced by the composition layer from the consent
+	// decision, before the factory is invoked — the producer of a state
+	// owns declaring it, so the state lives here with its siblings.
+	OpenConsentRequired OpenState = "consentRequired"
 )
 
 // OpenOutcome carries the resolved repository's identity and the two facts

@@ -456,7 +456,7 @@ func TestGitOpen_RemoteSessionResolvesThroughTheHelperFactory(t *testing.T) {
 	ws := NewWSServer(logger, reg,
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(local),
-		WithGitHelperFactory(func(session.Session) git.RepoFactory { return helper }),
+		WithGitHelperFactory(func(session.Session) GitOpenSelection { return GitOpenSelection{Factory: helper} }),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -522,9 +522,10 @@ func TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal(t *testing.T) {
 	ws := NewWSServer(logger, reg,
 		WithGitRegistry(registry.New()),
 		WithGitRepoFactory(factory),
-		// A helper selection that knows this host has no helper: nil must
-		// keep the refusal, exactly as an unwired selection does.
-		WithGitHelperFactory(func(session.Session) git.RepoFactory { return nil }),
+		// A helper selection that knows this host has no helper: an empty
+		// selection must keep the refusal, exactly as an unwired selection
+		// does.
+		WithGitHelperFactory(func(session.Session) GitOpenSelection { return GitOpenSelection{} }),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
 				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
@@ -564,6 +565,69 @@ func TestGitOpen_RemoteSessionWithoutHelperKeepsTheRefusal(t *testing.T) {
 	factory.mu.Unlock()
 	if opens != 0 {
 		t.Errorf("factory consulted %d times for a refused remote session, want 0", opens)
+	}
+}
+
+// TestGitOpen_ConsentRequiredIsAResultState is D8 on the wire: an SSH
+// session whose machine has no relay-tier answer gets the consentRequired
+// RESULT state — the panel's offer — and nothing is opened and nothing is
+// written.
+func TestGitOpen_ConsentRequiredIsAResultState(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	factory := newStubGitFactory()
+	ws := NewWSServer(logger, reg,
+		WithGitRegistry(registry.New()),
+		WithGitRepoFactory(factory),
+		// The machine has no relay-tier answer: the selection answers
+		// consentRequired, never a factory.
+		WithGitHelperFactory(func(session.Session) GitOpenSelection {
+			return GitOpenSelection{ConsentRequired: true}
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHSession(t, conn)
+
+	resp := jsonrpcCallWithID(t, conn, "git.open", map[string]any{
+		"sessionId": sid,
+		"cwd":       "/some/cwd",
+	}, 2)
+	var got struct {
+		Result struct {
+			State string `json:"state"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("git.open: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if got.Error != nil {
+		t.Fatalf("git.open: %+v", got.Error)
+	}
+	if got.Result.State != string(git.OpenConsentRequired) {
+		t.Errorf("state = %q, want %q — the ask is a RESULT state, not a refusal", got.Result.State, git.OpenConsentRequired)
+	}
+	factory.mu.Lock()
+	opens := factory.opens
+	factory.mu.Unlock()
+	if opens != 0 {
+		t.Errorf("factory consulted %d times for a consentRequired open, want 0 — the ask must not spawn anything", opens)
 	}
 }
 

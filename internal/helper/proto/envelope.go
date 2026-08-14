@@ -62,3 +62,14 @@ type ChunkedResult struct {
 	TotalBytes      int    `json:"totalBytes"`
 	ChunkCount      int    `json:"chunkCount"`
 }
+
+// Chunk is the payload of one TypeChunk frame (D14): the stream id names
+// the ChunkedResult sentinel that preceded the chunk, and Bytes are one
+// piece of the original result, in order — the receiver concatenates them
+// to recover the value. Bytes rides as base64 so the envelope keeps the
+// frame's "payload is JSON" rule; the sentinel's stream id is what routes
+// the chunk, so concurrent chunked responses cannot interleave (D13).
+type Chunk struct {
+	ChunkedStreamID uint64 `json:"chunkedStreamId"`
+	Bytes           []byte `json:"bytes"`
+}

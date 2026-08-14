@@ -10,12 +10,15 @@ package helper_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +28,7 @@ import (
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // fixtureRepo builds a real repository with a commit, a modified file and
@@ -138,32 +142,8 @@ func TestHelperRepoStatusMatchesLocal(t *testing.T) {
 		t.Fatalf("local status: %v", err)
 	}
 
-	conn := newFakeConn(func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, "testhash", "instance-1",
-			slog.New(slog.NewTextHandler(io.Discard, nil)))
-		h.Register(hostsvc.New(localgit.NewFactory()))
-		if serveErr := h.Serve(context.Background()); serveErr != nil {
-			return 1
-		}
-		return 0
-	})
-	c, err := client.Dial(context.Background(), client.Config{
-		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: 5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("helper dial: %v", err)
-	}
-	defer func() { _ = c.Close() }()
-
-	factory := helpergit.NewFactory(c)
-	repoHelper, outcome, err := factory.Open(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("helper open: %v", err)
-	}
-	if outcome.State != git.OpenOK {
-		t.Fatalf("helper open outcome = %s", outcome.State)
-	}
-	defer func() { _ = repoHelper.Close() }()
+	c := dialHelper(t, helperPeer(t))
+	repoHelper := openHelper(t, c, dir)
 
 	got, err := repoHelper.Status(context.Background())
 	if err != nil {
@@ -171,5 +151,187 @@ func TestHelperRepoStatusMatchesLocal(t *testing.T) {
 	}
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("helper-backed status disagrees with local:\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+// helperPeer runs the real helper host over an io.Pipe pair, serving the
+// real git service. The host applies the production frame bound — the
+// chunking test exercises D14 by crossing it with a large diff, not by
+// lowering it.
+func helperPeer(t *testing.T) func(io.Reader, io.Writer) int {
+	t.Helper()
+	return func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, "testhash", "instance-1",
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		h.Register(hostsvc.New(localgit.NewFactory()))
+		if serveErr := h.Serve(context.Background()); serveErr != nil {
+			return 1
+		}
+		return 0
+	}
+}
+
+// dialHelper brings up a client over the real host serving the real git
+// service, in process, no SSH.
+func dialHelper(t *testing.T, peer func(io.Reader, io.Writer) int) *client.Client {
+	t.Helper()
+	conn := newFakeConn(peer)
+	c, err := client.Dial(context.Background(), client.Config{
+		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("helper dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// openHelper opens dir through the helper-backed factory and returns the
+// repo, registering its close with the test.
+func openHelper(t *testing.T, c *client.Client, dir string) git.Repo {
+	t.Helper()
+	factory := helpergit.NewFactory(c)
+	repo, outcome, err := factory.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("helper open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("helper open outcome = %s", outcome.State)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	return repo
+}
+
+// bigDiffRepo makes the working-tree change large enough that the diff
+// exceeds proto.MaxFrameBytes, so the chunking test crosses the REAL frame
+// bound — the production path — rather than a lowered one.
+func bigDiffRepo(t *testing.T) string {
+	t.Helper()
+	dir := fixtureRepo(t)
+	var b strings.Builder
+	for i := range 90000 {
+		fmt.Fprintf(&b, "rewritten line %d\n", i)
+	}
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestHelperRepoDiffMatchesLocal is the diff half of the one contract: the
+// helper-backed repo's diff is only correct if it agrees with the local
+// implementation on the same repository, field by field, through the real
+// protocol.
+func TestHelperRepoDiffMatchesLocal(t *testing.T) {
+	dir := fixtureRepo(t)
+
+	local := localgit.NewFactory()
+	repoLocal, outcome, err := local.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("local open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("local open outcome = %s", outcome.State)
+	}
+	defer func() { _ = repoLocal.Close() }()
+	want, err := repoLocal.Diff(context.Background(), "f.txt", git.SideUnstaged, 1<<20)
+	if err != nil {
+		t.Fatalf("local diff: %v", err)
+	}
+
+	got, err := openHelper(t, dialHelper(t, helperPeer(t)), dir).Diff(context.Background(), "f.txt", git.SideUnstaged, 1<<20)
+	if err != nil {
+		t.Fatalf("helper diff: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("helper-backed diff disagrees with local:\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+// TestHelperRepoLogMatchesLocal is the log half of the same contract.
+func TestHelperRepoLogMatchesLocal(t *testing.T) {
+	dir := fixtureRepo(t)
+
+	local := localgit.NewFactory()
+	repoLocal, outcome, err := local.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("local open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("local open outcome = %s", outcome.State)
+	}
+	defer func() { _ = repoLocal.Close() }()
+	want, err := repoLocal.Log(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("local log: %v", err)
+	}
+
+	got, err := openHelper(t, dialHelper(t, helperPeer(t)), dir).Log(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("helper log: %v", err)
+	}
+	if !logEqual(want, got) {
+		t.Fatalf("helper-backed log disagrees with local:\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+// logEqual compares two logs field by field with the one comparison a JSON
+// boundary demands: AuthoredAt as an instant (time.Equal), not as Go's
+// internal representation. A time parsed from git's %aI offset and the same
+// time after a JSON round trip are the same instant with the same wire
+// form, but reflect.DeepEqual sees different Location pointers and calls
+// them unequal — which is exactly what the panel never sees.
+func logEqual(a, b git.Log) bool {
+	if a.Total != b.Total || a.Completeness != b.Completeness || len(a.Entries) != len(b.Entries) {
+		return false
+	}
+	for i := range a.Entries {
+		wa, wb := a.Entries[i], b.Entries[i]
+		if wa.Hash != wb.Hash || wa.ShortHash != wb.ShortHash || wa.Subject != wb.Subject ||
+			wa.AuthorName != wb.AuthorName || !wa.AuthoredAt.Equal(wb.AuthoredAt) ||
+			!reflect.DeepEqual(wa.Refs, wb.Refs) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestChunkedDiffReassemblesIdentically is D14 end to end at the REAL
+// bound: a diff too large for one frame crosses as a ChunkedResult sentinel
+// plus TypeChunk frames, and the client reassembles them into the identical
+// git.Diff the local implementation returns. The diff is large enough to
+// cross proto.MaxFrameBytes — a test at a lowered bound could prove the
+// reassembly at 512 bytes and still ship a wrong production constant.
+func TestChunkedDiffReassemblesIdentically(t *testing.T) {
+	dir := bigDiffRepo(t)
+
+	local := localgit.NewFactory()
+	repoLocal, outcome, err := local.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("local open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("local open outcome = %s", outcome.State)
+	}
+	defer func() { _ = repoLocal.Close() }()
+	want, err := repoLocal.Diff(context.Background(), "f.txt", git.SideUnstaged, 4<<20)
+	if err != nil {
+		t.Fatalf("local diff: %v", err)
+	}
+	wire, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	if len(wire) <= proto.MaxFrameBytes {
+		t.Fatalf("fixture diff is %d bytes, under the %d-byte frame bound — the test is vacuous", len(wire), proto.MaxFrameBytes)
+	}
+
+	got, err := openHelper(t, dialHelper(t, helperPeer(t)), dir).Diff(context.Background(), "f.txt", git.SideUnstaged, 4<<20)
+	if err != nil {
+		t.Fatalf("helper diff: %v", err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("chunked helper-backed diff disagrees with local:\nwant: %+v\ngot:  %+v", want, got)
 	}
 }

@@ -33,3 +33,21 @@ type EnvStateResult struct {
 	State  git.EnvState `json:"state"`
 	Reason string       `json:"reason,omitempty"`
 }
+
+// DiffParams addresses one file's diff on a held repository: the path and
+// side the panel clicked, and the byte bound the HELPER applies (D9). The
+// bound travels to where the work happens; the backend never bounds after
+// the bytes have arrived.
+type DiffParams struct {
+	BindingID string   `json:"bindingId"`
+	Path      string   `json:"path"`
+	Side      git.Side `json:"side"`
+	MaxBytes  int64    `json:"maxBytes"`
+}
+
+// LogParams addresses one repository's recent history (git.log): the
+// caller-named max bound, applied where the work happens (D9).
+type LogParams struct {
+	BindingID string `json:"bindingId"`
+	Max       int    `json:"max"`
+}

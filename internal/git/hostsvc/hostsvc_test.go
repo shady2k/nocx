@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
@@ -30,7 +32,11 @@ func mustJSON(t *testing.T, v any) []byte {
 // leaves the committed tree untouched, so every status list is empty.
 // internal/git/local's own fixture is unexported, so this is the same recipe
 // inline rather than a second implementation with a different shape.
-func fixtureRepo(t *testing.T, dirty bool) string {
+// repoTooling resolves git and builds the hermetic environment the fixture
+// repositories run under: a disposable HOME with a minimal gitconfig, so a
+// stray user config never changes what a fixture sees, and a PATH that
+// finds the resolved git first.
+func repoTooling(t *testing.T) (gitBin string, env []string) {
 	t.Helper()
 	gitBin, err := exec.LookPath("git")
 	if err != nil {
@@ -41,7 +47,7 @@ func fixtureRepo(t *testing.T, dirty bool) string {
 	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{
+	env = []string{
 		"PATH=" + filepath.Dir(gitBin) + ":" + os.Getenv("PATH"),
 		"HOME=" + home,
 		"LANG=C",
@@ -49,6 +55,12 @@ func fixtureRepo(t *testing.T, dirty bool) string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
+	return gitBin, env
+}
+
+func fixtureRepo(t *testing.T, dirty bool) string {
+	t.Helper()
+	gitBin, env := repoTooling(t)
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -323,4 +335,301 @@ func TestOpenErrorSurfaces(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("want the factory error through, got %v", err)
 	}
+}
+
+func diffThroughService(t *testing.T, svc *hostsvc.Service, id, path string, side git.Side, maxBytes int64) git.Diff {
+	t.Helper()
+	result, err := svc.Call(context.Background(), "diff", mustJSON(t, hostsvc.DiffParams{BindingID: id, Path: path, Side: side, MaxBytes: maxBytes}))
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	d, ok := result.(git.Diff)
+	if !ok {
+		t.Fatalf("diff result is %T, want git.Diff", result)
+	}
+	return d
+}
+
+func logThroughService(t *testing.T, svc *hostsvc.Service, id string, max int) git.Log {
+	t.Helper()
+	result, err := svc.Call(context.Background(), "log", mustJSON(t, hostsvc.LogParams{BindingID: id, Max: max}))
+	if err != nil {
+		t.Fatalf("log: %v", err)
+	}
+	lg, ok := result.(git.Log)
+	if !ok {
+		t.Fatalf("log result is %T, want git.Log", result)
+	}
+	return lg
+}
+
+// bigDiffRepo builds a clean repository whose working tree differs from
+// HEAD on every line of a 500-line file, so the unstaged diff dwarfs the
+// byte bound the too-large test applies.
+func bigDiffRepo(t *testing.T) string {
+	t.Helper()
+	dir := fixtureRepo(t, false)
+	var b strings.Builder
+	for i := range 500 {
+		fmt.Fprintf(&b, "line %d was changed\n", i)
+	}
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// emptyRepo is a repository with no commits at all — the unborn state an
+// empty log must answer with [].
+func emptyRepo(t *testing.T) string {
+	t.Helper()
+	gitBin, env := repoTooling(t)
+	dir := t.TempDir()
+	cmd := exec.Command(gitBin, "init", "-q") // #nosec G204 — gitBin is LookPath-resolved; args are test literals
+	cmd.Dir = dir
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	return dir
+}
+
+// TestServiceDiffMatchesLocal is the diff half of the one contract: the
+// panel must say the same thing on both machines, so the service's diff is
+// only correct if it agrees with the local implementation on the same
+// repository — every field, including the state and the truncated flag.
+func TestServiceDiffMatchesLocal(t *testing.T) {
+	dir := fixtureRepo(t, true)
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+
+	repoLocal, outcome, err := factory.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("local open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("local open outcome = %s", outcome.State)
+	}
+	defer func() { _ = repoLocal.Close() }()
+	want, err := repoLocal.Diff(context.Background(), "file.txt", git.SideUnstaged, 1<<20)
+	if err != nil {
+		t.Fatalf("local diff: %v", err)
+	}
+
+	got := diffThroughService(t, svc, openThroughService(t, svc, dir).BindingID, "file.txt", git.SideUnstaged, 1<<20)
+	if !reflect.DeepEqual(want, got) {
+		w, _ := json.MarshalIndent(want, "", "  ")
+		g, _ := json.MarshalIndent(got, "", "  ")
+		t.Fatalf("service diff disagrees with local:\nwant: %s\ngot:  %s", w, g)
+	}
+}
+
+// TestServiceLogMatchesLocal is the log half of the same contract.
+func TestServiceLogMatchesLocal(t *testing.T) {
+	dir := fixtureRepo(t, true)
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+
+	repoLocal, outcome, err := factory.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("local open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("local open outcome = %s", outcome.State)
+	}
+	defer func() { _ = repoLocal.Close() }()
+	want, err := repoLocal.Log(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("local log: %v", err)
+	}
+
+	got := logThroughService(t, svc, openThroughService(t, svc, dir).BindingID, 20)
+	if !reflect.DeepEqual(want, got) {
+		w, _ := json.MarshalIndent(want, "", "  ")
+		g, _ := json.MarshalIndent(got, "", "  ")
+		t.Fatalf("service log disagrees with local:\nwant: %s\ngot:  %s", w, g)
+	}
+}
+
+// TestServiceDiffOverTheBoundIsTooLarge is D9 through the service: the byte
+// bound is applied where the work happens, so the retained text is a prefix
+// of the full diff cut at the bound and the state says so. A reader that
+// bounded the bytes after they arrived could only have produced the same
+// prefix — the assertion tells the two apart because the unbounded text
+// never exists on this side of the wire.
+func TestServiceDiffOverTheBoundIsTooLarge(t *testing.T) {
+	dir := bigDiffRepo(t)
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+	id := openThroughService(t, svc, dir).BindingID
+
+	full := diffThroughService(t, svc, id, "file.txt", git.SideUnstaged, 1<<20)
+	if full.State != git.DiffOK || full.Truncated {
+		t.Fatalf("the full diff must be ok and untruncated, got %s/%v", full.State, full.Truncated)
+	}
+	bounded := diffThroughService(t, svc, id, "file.txt", git.SideUnstaged, 64)
+	if bounded.State != git.DiffTooLarge || !bounded.Truncated {
+		t.Fatalf("want tooLarge/truncated, got %s/%v", bounded.State, bounded.Truncated)
+	}
+	if len(bounded.Text) > 64 {
+		t.Fatalf("retained %d bytes, over the 64-byte bound", len(bounded.Text))
+	}
+	if !strings.HasPrefix(full.Text, bounded.Text) {
+		t.Fatalf("the retained text is not a prefix of the full diff — the bound was applied after the bytes existed")
+	}
+}
+
+// TestEmptyLogEntriesMarshalAsArrays pins the wire contract for log: an
+// empty history is [], never null — the same defect the first contract
+// schema in this repository caught for status.
+func TestEmptyLogEntriesMarshalAsArrays(t *testing.T) {
+	dir := emptyRepo(t)
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+
+	lg := logThroughService(t, svc, openThroughService(t, svc, dir).BindingID, 20)
+	if lg.Entries == nil {
+		t.Fatal("entries must be non-nil")
+	}
+	wire, err := json.Marshal(lg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(wire, &fields); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if strings.TrimSpace(string(fields["entries"])) == "null" {
+		t.Fatalf("entries marshals as null: %s", wire)
+	}
+}
+
+// waitForFile polls until the file exists — the observable that the filter
+// is running. Waiting on the file, never on a duration, is the repo's
+// timing rule; the deadline only bounds the failure case.
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared", path)
+}
+
+// assertFileNeverAppears polls for the absence of a file over a window: the
+// positive path is observable (the file either appears or it does not), and
+// the window only bounds the failure case.
+func assertFileNeverAppears(t *testing.T, path string, window time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			t.Fatalf("%s appeared — a process that should have been killed is still alive", path)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// slowFilterRepo builds a repository whose tracked file diffs through a
+// textconv filter that blocks until a release file appears, then writes a
+// marker file and exits. The filter signals that it is genuinely running by
+// creating a started file, so a test cancels only once the diff is in
+// flight inside the filter — a cancel that lands before the filter starts
+// would prove nothing about the group kill.
+func slowFilterRepo(t *testing.T, started, release, marker string) string {
+	t.Helper()
+	gitBin, env := repoTooling(t)
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(gitBin, args...) // #nosec G204 — gitBin is LookPath-resolved; args are test literals
+		cmd.Dir = dir
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v: %s", args, err, out)
+		}
+	}
+	filter := filepath.Join(t.TempDir(), "slow-textconv.sh")
+	script := "#!/bin/sh\ntouch '" + started + "'\nwhile [ ! -e '" + release + "' ]; do sleep 0.05; done\ntouch '" + marker + "'\ncat \"$1\"\n"
+	// #nosec G306 — a test fixture script, deliberately executable
+	if err := os.WriteFile(filter, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "-q")
+	run("config", "user.name", "Test User")
+	run("config", "user.email", "test@nocx.invalid")
+	run("config", "diff.slow.textconv", filter)
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("big.bin diff=slow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&b, "original line %d\n", i)
+	}
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".gitattributes", "big.bin")
+	run("commit", "-q", "-m", "with the slow filter")
+	b.Reset()
+	for i := range 200 {
+		fmt.Fprintf(&b, "rewritten line %d\n", i)
+	}
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestCancelledDiffKillsTheProcessGroup is D10's mechanism, asserted where
+// the work happens: a cancel naming an in-flight diff stops git AND its
+// process group — textconv filter included — inside the helper. local's
+// INT→TERM→KILL escalation (local.go:132) already does the killing; the
+// filter's own marker file is the witness. The service returning with
+// context.Canceled is the observable that the child was reaped and the
+// group took the escalation, so releasing the filter afterwards cannot race
+// the kill: a filter that survived would write the marker.
+func TestCancelledDiffKillsTheProcessGroup(t *testing.T) {
+	work := t.TempDir()
+	started := filepath.Join(work, "filter-started")
+	release := filepath.Join(work, "filter-release")
+	marker := filepath.Join(work, "filter-marker")
+	dir := slowFilterRepo(t, started, release, marker)
+
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+	id := openThroughService(t, svc, dir).BindingID
+
+	ctx, cancel := context.WithCancel(context.Background())
+	diffDone := make(chan error, 1)
+	go func() {
+		_, err := svc.Call(ctx, "diff", mustJSON(t, hostsvc.DiffParams{BindingID: id, Path: "big.bin", Side: git.SideUnstaged, MaxBytes: 1 << 20}))
+		diffDone <- err
+	}()
+
+	waitForFile(t, started)
+	cancel()
+	if err := <-diffDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("diff returned %v, want context.Canceled", err)
+	}
+	// The service has returned, so the child is reaped and the group has
+	// taken the escalation. Releasing the filter now must never produce the
+	// marker.
+	// #nosec G306 — a test marker file, not a secret
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertFileNeverAppears(t, marker, 5*time.Second)
 }

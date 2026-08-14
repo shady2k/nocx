@@ -621,3 +621,133 @@ func TestRegisterPanicsOnMissingSchema(t *testing.T) {
 	}()
 	h.Register(svc)
 }
+
+// bigHost starts a host over fresh pipes serving one "big" op that returns
+// the given payload, completes the hello handshake, and returns the frame
+// channel, the request-side writer and the serve result channel.
+func bigHost(t *testing.T, payload string) (<-chan frame, io.WriteCloser, <-chan error) {
+	t.Helper()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"big": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			return map[string]any{"data": payload}, nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+	return outCh, inW, serveDone
+}
+
+// TestChunkingPinsTheFrameBoundary is D14's wire half at the REAL bound: a
+// response one byte above proto.MaxFrameBytes is sent as a ChunkedResult
+// sentinel followed by TypeChunk frames whose payloads concatenate to the
+// original result, and a response one byte below it is one ordinary frame.
+// The sizes are derived from the marshalled payloads, so an off-by-one in
+// the constant or the threshold fails the test — a test at a lowered bound
+// could prove the logic at 512 bytes and still ship a wrong production
+// constant.
+func TestChunkingPinsTheFrameBoundary(t *testing.T) {
+	// overhead is the marshaled bytes a response carries around the result
+	// string: the response envelope, the result object and the string's
+	// quotes. Measured from a zero-length probe so the boundary sizes below
+	// are exact for this payload shape, never hardcoded.
+	overhead := len(mustJSON(proto.Response{ID: 7, Result: json.RawMessage(`{"data":""}`)}))
+
+	t.Run("one byte below the bound is one frame", func(t *testing.T) {
+		payload := strings.Repeat("x", proto.MaxFrameBytes-overhead-1)
+		outCh, inW, serveDone := bigHost(t, payload)
+		writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 7, Service: "test", Op: "big", Corr: "c"}))
+
+		f := readFrame(t, outCh)
+		if f.ty != proto.TypeResponse {
+			t.Fatalf("below the bound must be one response frame, got %v", f.ty)
+		}
+		want := mustJSON(proto.Response{ID: 7, Result: mustJSON(map[string]any{"data": payload})})
+		if len(want) != proto.MaxFrameBytes-1 {
+			t.Fatalf("fixture response is %d bytes, want %d — the boundary case is not pinned", len(want), proto.MaxFrameBytes-1)
+		}
+		if !bytes.Equal(f.payload, want) {
+			t.Fatalf("response below the bound differs from the expected single frame: %d vs %d bytes", len(f.payload), len(want))
+		}
+
+		_ = inW.Close()
+		if err := <-serveDone; err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	})
+
+	t.Run("one byte above the bound is chunked", func(t *testing.T) {
+		payload := strings.Repeat("x", proto.MaxFrameBytes-overhead+1)
+		outCh, inW, serveDone := bigHost(t, payload)
+		writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 7, Service: "test", Op: "big", Corr: "c"}))
+
+		f := readFrame(t, outCh)
+		if f.ty != proto.TypeResponse {
+			t.Fatalf("want the ChunkedResult sentinel first, got %v", f.ty)
+		}
+		// Prove the payload really straddles the threshold: the response
+		// the host would have marshalled un-chunked is one byte over the
+		// frame bound, so the chunking below is the production path doing
+		// its job, not a smaller bound.
+		rawAbove := mustJSON(proto.Response{ID: 7, Result: mustJSON(map[string]any{"data": payload})})
+		if len(rawAbove) != proto.MaxFrameBytes+1 {
+			t.Fatalf("fixture response is %d bytes, want %d — the boundary case is not pinned", len(rawAbove), proto.MaxFrameBytes+1)
+		}
+		var sentinel proto.Response
+		if err := json.Unmarshal(f.payload, &sentinel); err != nil {
+			t.Fatalf("unmarshal sentinel: %v", err)
+		}
+		if sentinel.ID != 7 {
+			t.Fatalf("sentinel id = %d, want 7", sentinel.ID)
+		}
+		var cr proto.ChunkedResult
+		if err := json.Unmarshal(sentinel.Result, &cr); err != nil {
+			t.Fatalf("unmarshal ChunkedResult: %v", err)
+		}
+		if cr.ChunkCount < 2 {
+			t.Fatalf("a payload one byte over the bound must split into at least two chunks, got %d", cr.ChunkCount)
+		}
+
+		var got []byte
+		for range cr.ChunkCount {
+			f := readFrame(t, outCh)
+			if f.ty != proto.TypeChunk {
+				t.Fatalf("want a TypeChunk frame, got %v", f.ty)
+			}
+			if len(f.payload) > proto.MaxFrameBytes {
+				t.Fatalf("chunk frame payload is %d bytes, over the %d-byte bound", len(f.payload), proto.MaxFrameBytes)
+			}
+			var ch proto.Chunk
+			if err := json.Unmarshal(f.payload, &ch); err != nil {
+				t.Fatalf("unmarshal chunk: %v", err)
+			}
+			if ch.ChunkedStreamID != cr.ChunkedStreamID {
+				t.Fatalf("chunk stream = %d, want %d", ch.ChunkedStreamID, cr.ChunkedStreamID)
+			}
+			got = append(got, ch.Bytes...)
+		}
+		want := mustJSON(map[string]any{"data": payload})
+		if !bytes.Equal(got, want) {
+			t.Fatalf("chunks do not concatenate to the original result: %d vs %d bytes", len(got), len(want))
+		}
+		if len(got) != cr.TotalBytes {
+			t.Fatalf("reassembled %d bytes, sentinel promised %d", len(got), cr.TotalBytes)
+		}
+
+		_ = inW.Close()
+		if err := <-serveDone; err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	})
+}

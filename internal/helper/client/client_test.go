@@ -355,3 +355,59 @@ func TestCallFailsOnTransportLoss(t *testing.T) {
 		t.Fatal("Done did not close on transport loss")
 	}
 }
+
+// blockUntilCancelledService blocks its one op until the request context is
+// cancelled, so a test can observe that a cancel frame reached the host and
+// was honoured — the remote half of D10.
+type blockUntilCancelledService struct {
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
+func (s *blockUntilCancelledService) Name() string  { return "block" }
+func (s *blockUntilCancelledService) Ops() []string { return []string{"wait"} }
+func (s *blockUntilCancelledService) ParamsSchema(op string) *host.Schema {
+	return host.SchemaFor(struct{}{})
+}
+
+func (s *blockUntilCancelledService) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
+	close(s.started)
+	<-ctx.Done()
+	close(s.cancelled)
+	return nil, ctx.Err()
+}
+
+// TestCallSendsCancelOnContextCancellation is D10's client half: a caller
+// that gives up on a read must tell the helper, or git keeps running on the
+// remote host. The wire cancel names the in-flight request; the host
+// cancels its request context — observed here through a service that blocks
+// until that context dies. Abandoning the wait client-side could never
+// promise the remote stop; the cancel frame is the promise.
+func TestCallSendsCancelOnContextCancellation(t *testing.T) {
+	svc := &blockUntilCancelledService{started: make(chan struct{}), cancelled: make(chan struct{})}
+	conn := newFakeConn(hostPeer("testhash", svc))
+	c, err := client.Dial(context.Background(), client.Config{
+		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	callDone := make(chan error, 1)
+	go func() { callDone <- c.Call(ctx, "block", "wait", nil, nil) }()
+
+	<-svc.started
+	cancel()
+	if err := <-callDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Call returned %v, want context.Canceled", err)
+	}
+	select {
+	case <-svc.cancelled:
+		// The host cancelled the request context: the cancel frame crossed
+		// the wire and named the in-flight request.
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request context on the host was never cancelled — no cancel frame arrived")
+	}
+}

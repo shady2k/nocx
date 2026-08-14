@@ -90,17 +90,31 @@ func (r *repo) Status(ctx context.Context) (git.Status, error) {
 func (r *repo) EnvState() (git.EnvState, string) { return r.envState, r.envReason }
 
 // errOpNotServed is the honest answer for every op the helper does not
-// serve yet: diff, log and the mutations land with nocx-w3i1, and a repo
-// that answers them must say so rather than inventing a local fallback —
-// the panel's remote half is the helper's, by construction (D16).
+// serve yet: the mutations land with nocx-dyib, and a repo that answers
+// them must say so rather than inventing a local fallback — the panel's
+// remote half is the helper's, by construction (D16).
 var errOpNotServed = errors.New("helper: git operation not served by the helper yet")
 
+// Diff sends one git.diff operation. The byte bound is the HELPER's to
+// apply (D9): it travels in the params, and the bounded git.Diff — the
+// retained prefix, the tooLarge state, the truncated flag — is what comes
+// back. The backend never sees the bytes beyond the bound.
 func (r *repo) Diff(ctx context.Context, path string, side git.Side, maxBytes int64) (git.Diff, error) {
-	return git.Diff{}, fmt.Errorf("%w: diff", errOpNotServed)
+	var d git.Diff
+	if err := r.f.client.Call(ctx, "git", "diff", hostsvc.DiffParams{BindingID: r.bindingID, Path: path, Side: side, MaxBytes: maxBytes}, &d); err != nil {
+		return git.Diff{}, err
+	}
+	return d, nil
 }
 
+// Log sends one git.log operation. Completeness and Total are computed by
+// the helper, where the repository is (D9); the client never counts.
 func (r *repo) Log(ctx context.Context, max int) (git.Log, error) {
-	return git.Log{}, fmt.Errorf("%w: log", errOpNotServed)
+	var lg git.Log
+	if err := r.f.client.Call(ctx, "git", "log", hostsvc.LogParams{BindingID: r.bindingID, Max: max}, &lg); err != nil {
+		return git.Log{}, err
+	}
+	return lg, nil
 }
 
 func (r *repo) Stage(ctx context.Context, paths []string) (git.Status, error) {

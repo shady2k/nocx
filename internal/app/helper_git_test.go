@@ -11,20 +11,28 @@ package app
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
+	iofs "io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/client"
+	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -138,13 +146,24 @@ func (f *fakeLaneConn) closeCount() int {
 }
 
 // fakeLaneProvider hands out a fresh scripted lane per HelperConn call and
-// records them, so a test can prove how many helpers were brought up.
+// records them, so a test can prove how many helpers were brought up. It
+// also serves the install surface the selection needs: a scripted probe
+// answer and an in-memory install lease, so the REAL deploy.Ensure runs
+// against a fake transport — the wiring under test is the production
+// wiring, only the SSH is fake.
 type fakeLaneProvider struct {
 	peer     func(in io.Reader, out io.Writer) int
 	startErr error
 
+	uname       string // the probe's canned answer; default "Linux x86_64"
+	home        string // the install lease's home; default "/home/u"
+	probeFail   error  // when set, DiscoveryConn fails
+	installFail error  // when set, HelperInstallConn fails
+
 	mu    sync.Mutex
 	conns []*fakeLaneConn
+
+	install *fakeInstallConn
 }
 
 func (p *fakeLaneProvider) HelperConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperConn, error) {
@@ -154,6 +173,31 @@ func (p *fakeLaneProvider) HelperConn(_ context.Context, _ string, _ ...ssh.Conn
 	p.conns = append(p.conns, c)
 	p.mu.Unlock()
 	return c, nil
+}
+
+func (p *fakeLaneProvider) DiscoveryConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.DiscoveryConn, error) {
+	if p.probeFail != nil {
+		return nil, p.probeFail
+	}
+	uname := p.uname
+	if uname == "" {
+		uname = "Linux x86_64"
+	}
+	return &fakeProbeConn{uname: uname}, nil
+}
+
+func (p *fakeLaneProvider) HelperInstallConn(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.HelperInstallConn, error) {
+	if p.installFail != nil {
+		return nil, p.installFail
+	}
+	home := p.home
+	if home == "" {
+		home = "/home/u"
+	}
+	if p.install == nil {
+		p.install = newFakeInstallConn(home)
+	}
+	return p.install, nil
 }
 
 func (p *fakeLaneProvider) laneCount() int {
@@ -168,10 +212,217 @@ func (p *fakeLaneProvider) lane(i int) *fakeLaneConn {
 	return p.conns[i]
 }
 
-// realHelperPeer serves the REAL helper host with the REAL git service.
+// fakeProbeConn is a DiscoveryConn that answers the platform probe with a
+// canned uname line — the only exec the selection runs.
+type fakeProbeConn struct {
+	uname string
+}
+
+func (f *fakeProbeConn) Exec(_ context.Context, _ string) (*ssh.ExecResult, error) {
+	return &ssh.ExecResult{Stdout: []byte(f.uname)}, nil
+}
+func (f *fakeProbeConn) Done() <-chan struct{} { return make(chan struct{}) }
+func (f *fakeProbeConn) LostErr() error        { return nil }
+func (f *fakeProbeConn) Close() error          { return nil }
+
+// fakeInstallConn is a HelperInstallConn whose FS is an in-memory map. The
+// REAL deploy.Ensure runs against it, so the selection's install path is
+// the production one; only the transport is fake. uploads counts binary
+// writes so a test can assert D7's uploads-nothing-on-complete without
+// timing.
+type fakeInstallConn struct {
+	mu      sync.Mutex
+	dirs    map[string]bool
+	files   map[string][]byte
+	home    string
+	uploads int
+}
+
+func newFakeInstallConn(home string) *fakeInstallConn {
+	return &fakeInstallConn{
+		dirs:  map[string]bool{"/": true},
+		files: map[string][]byte{},
+		home:  home,
+	}
+}
+
+// hasCompleteInstall reports whether SOME install directory under the
+// helper root carries the completion marker — the marker lives inside the
+// versioned install directory, whose name the test does not need to know.
+func (f *fakeInstallConn) hasCompleteInstall(home string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	root := path.Join(home, ".nocx", "helper") + "/"
+	for p := range f.files {
+		if path.Base(p) == ".install-complete" && strings.HasPrefix(p, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeInstallConn) uploadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.uploads
+}
+
+func (f *fakeInstallConn) Lstat(p string) (iofs.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dirs[p] {
+		return fakeInstallInfo{name: path.Base(p), dir: true}, nil
+	}
+	if data, ok := f.files[p]; ok {
+		return fakeInstallInfo{name: path.Base(p), size: int64(len(data))}, nil
+	}
+	return nil, iofs.ErrNotExist
+}
+
+func (f *fakeInstallConn) Mkdir(p string, mode os.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dirs[p] {
+		return iofs.ErrExist
+	}
+	if _, ok := f.files[p]; ok {
+		return errors.New("fakeinstall: not a directory")
+	}
+	if parent := path.Dir(p); !f.dirs[parent] {
+		return iofs.ErrNotExist
+	}
+	f.dirs[p] = true
+	return nil
+}
+
+func (f *fakeInstallConn) Create(p string, mode os.FileMode) (ssh.File, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.dirs[path.Dir(p)] {
+		return nil, iofs.ErrNotExist
+	}
+	if path.Base(p) != ".install-complete" {
+		f.uploads++
+	}
+	return &fakeInstallFile{fs: f, path: p}, nil
+}
+
+func (f *fakeInstallConn) SyncDir(string) error { return nil }
+
+func (f *fakeInstallConn) Rename(src, dst string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if data, ok := f.files[src]; ok {
+		delete(f.files, src)
+		f.files[dst] = data
+		return nil
+	}
+	if f.dirs[src] {
+		delete(f.dirs, src)
+		f.dirs[dst] = true
+		return nil
+	}
+	return iofs.ErrNotExist
+}
+
+func (f *fakeInstallConn) Remove(p string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.files[p]; ok {
+		delete(f.files, p)
+		return nil
+	}
+	if f.dirs[p] {
+		delete(f.dirs, p)
+		return nil
+	}
+	return iofs.ErrNotExist
+}
+
+func (f *fakeInstallConn) ReadDir(dir string) ([]iofs.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.dirs[dir] {
+		return nil, iofs.ErrNotExist
+	}
+	var out []iofs.FileInfo
+	for p := range f.dirs {
+		if path.Dir(p) == dir && p != dir {
+			out = append(out, fakeInstallInfo{name: path.Base(p), dir: true})
+		}
+	}
+	for p := range f.files {
+		if path.Dir(p) == dir {
+			out = append(out, fakeInstallInfo{name: path.Base(p), size: int64(len(f.files[p]))})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeInstallConn) ReadFile(p string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[p]
+	if !ok {
+		return nil, iofs.ErrNotExist
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func (f *fakeInstallConn) Home() (string, error) { return f.home, nil }
+func (f *fakeInstallConn) Done() <-chan struct{} { return make(chan struct{}) }
+func (f *fakeInstallConn) LostErr() error        { return nil }
+
+func (f *fakeInstallConn) Close() error {
+	return nil
+}
+
+// fakeInstallFile is the lease's File handle; content becomes visible on
+// Close, like the real adapter's write boundary.
+type fakeInstallFile struct {
+	fs   *fakeInstallConn
+	path string
+	buf  []byte
+}
+
+func (ff *fakeInstallFile) Write(p []byte) (int, error) {
+	ff.fs.mu.Lock()
+	defer ff.fs.mu.Unlock()
+	ff.buf = append(ff.buf, p...)
+	return len(p), nil
+}
+
+func (ff *fakeInstallFile) Sync() error { return nil }
+
+func (ff *fakeInstallFile) Close() error {
+	ff.fs.mu.Lock()
+	defer ff.fs.mu.Unlock()
+	ff.fs.files[ff.path] = ff.buf
+	return nil
+}
+
+type fakeInstallInfo struct {
+	name string
+	size int64
+	dir  bool
+}
+
+func (fi fakeInstallInfo) Name() string       { return fi.name }
+func (fi fakeInstallInfo) Size() int64        { return fi.size }
+func (fi fakeInstallInfo) Mode() os.FileMode  { return 0o600 }
+func (fi fakeInstallInfo) ModTime() time.Time { return time.Time{} }
+func (fi fakeInstallInfo) IsDir() bool        { return fi.dir }
+func (fi fakeInstallInfo) Sys() any           { return nil }
+
+// realHelperPeer serves the REAL helper host with the REAL git service. The
+// reported content hash is syntheticArtifact's: the in-process helper
+// stands in for the installed binary, and the stub artifact source is what
+// the selection installed — the client's D21 verification is the real one,
+// and it must not depend on the embedded binaries existing.
 func realHelperPeer() func(in io.Reader, out io.Writer) int {
+	contentHash := syntheticArtifactHash
 	return func(in io.Reader, out io.Writer) int {
-		h := host.New(in, out, "testhash", "instance-1", discardLogger())
+		h := host.New(in, out, contentHash, "instance-1", discardLogger())
 		h.Register(hostsvc.New(localgit.NewFactory()))
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
@@ -213,42 +464,144 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// syntheticPayload is the stand-in for the embedded helper: real gzip
+// bytes whose decompressed content hashes to syntheticHash. The selector
+// tests exercise the wiring — the selection reaching install, computing
+// the D7 path and hash, wiring the factory — none of which needs a genuine
+// 4 MB binary, and all of which must run identically whether or not `make
+// helpers` has run (CI's fresh checkout has no embedded artifacts).
+var syntheticPayload = []byte("fake nocx-helper for selector wiring tests\n")
+
+// syntheticArtifactCompressed and syntheticArtifactHash are the stand-in
+// artifact: real gzip bytes whose decompressed content hashes to the hash.
+// Built once at package init from syntheticPayload.
+var (
+	syntheticArtifactCompressed []byte
+	syntheticArtifactHash       string
+)
+
+func init() {
+	syntheticArtifactCompressed, syntheticArtifactHash = makeSyntheticArtifact()
+}
+
+func makeSyntheticArtifact() (compressed []byte, contentHash string) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(syntheticPayload); err != nil {
+		panic("syntheticArtifact: " + err.Error())
+	}
+	if err := zw.Close(); err != nil {
+		panic("syntheticArtifact: " + err.Error())
+	}
+	sum := sha256.Sum256(syntheticPayload)
+	return buf.Bytes(), hex.EncodeToString(sum[:])
+}
+
+// syntheticSource is the app tests' ArtifactSource: it serves the synthetic
+// bytes built above. The selection under test is the composition root, so
+// it installs from deploy.DefaultSource; these tests substitute the
+// synthetic source for the duration (DefaultSource is a variable precisely
+// so the composition root can substitute a source — the readFileFn shape)
+// and restore it via t.Cleanup.
+type syntheticSource struct{}
+
+func (syntheticSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
+	return syntheticArtifactCompressed, syntheticArtifactHash, nil
+}
+
+// refusingSource is an ArtifactSource that answers ErrArtifactsNotBuilt —
+// the state of a fresh checkout before `make helpers` — for workspaces
+// where the embedded binaries ARE present and the real source would not
+// produce the refusal.
+type refusingSource struct{}
+
+func (refusingSource) Artifact(_ deploy.Platform) ([]byte, string, error) {
+	return nil, "", deploy.ErrArtifactsNotBuilt
+}
+
+func stubArtifacts(t *testing.T) {
+	t.Helper()
+	orig := deploy.DefaultSource
+	deploy.DefaultSource = syntheticSource{}
+	t.Cleanup(func() { deploy.DefaultSource = orig })
+}
+
 func configuredSelector(t *testing.T, provider *fakeLaneProvider) transport.GitFactoryFor {
 	t.Helper()
-	t.Setenv(helperCommandEnvVar, "/opt/nocx-helper")
-	t.Setenv(helperHashEnvVar, "testhash")
+	stubArtifacts(t)
 	return helperGitFactory(provider, discardLogger())
 }
 
-// TestHelperConfigFromEnv: the helper is available only when BOTH the
-// command and the expected hash are set — a half-set configuration is no
-// configuration, and the refusal stands.
-func TestHelperConfigFromEnv(t *testing.T) {
-	t.Setenv(helperCommandEnvVar, "")
-	t.Setenv(helperHashEnvVar, "")
-	if _, _, ok := helperConfigFromEnv(); ok {
-		t.Fatal("no configuration must answer not-ok")
+// TestHelperSelectorInstallsTheArtifact is the deploy wiring (D7): the
+// selection obtains the factory's command and hash by INSTALLING the
+// artifact on the session's host — the fake install lease carries a
+// complete install afterwards — and a second consultation of the same host
+// uploads nothing (an already-complete directory is not reinstalled).
+func TestHelperSelectorInstallsTheArtifact(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	sel := configuredSelector(t, provider)
+	sess := &fakeRemoteSession{id: "s1", host: "host.example"}
+
+	factory := sel(sess)
+	if factory == nil {
+		t.Fatal("selection returned nil after a successful install")
 	}
-	t.Setenv(helperCommandEnvVar, "/opt/nocx-helper")
-	if _, _, ok := helperConfigFromEnv(); ok {
-		t.Fatal("a command without a hash must answer not-ok")
+	if provider.install == nil {
+		t.Fatal("the selection never acquired an install lease")
 	}
-	t.Setenv(helperHashEnvVar, "abc123")
-	command, hash, ok := helperConfigFromEnv()
-	if !ok || command != "/opt/nocx-helper" || hash != "abc123" {
-		t.Fatalf("configured: got (%q, %q, %v), want (/opt/nocx-helper, abc123, true)", command, hash, ok)
+	if !provider.install.hasCompleteInstall("/home/u") {
+		t.Fatal("the selection did not install the artifact (no complete install directory)")
+	}
+
+	before := provider.install.uploadCount()
+	factory2 := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if factory2 == nil {
+		t.Fatal("second consultation returned nil after a complete install")
+	}
+	if got := provider.install.uploadCount() - before; got != 0 {
+		t.Fatalf("second consultation performed %d uploads, want 0 — a complete install must not be reinstalled", got)
 	}
 }
 
-// TestHelperSelectorUnconfiguredIsNil: no configuration means no helper is
-// available — the selection returns nil, which keeps the transport's
-// OpenRemoteUnsupported refusal standing.
-func TestHelperSelectorUnconfiguredIsNil(t *testing.T) {
-	t.Setenv(helperCommandEnvVar, "")
-	t.Setenv(helperHashEnvVar, "")
-	sel := helperGitFactory(&fakeLaneProvider{}, discardLogger())
+// TestHelperSelectorFallsBackWhenArtifactsNotBuilt is the fresh-checkout
+// path CI exercises: with no artifacts built, asking to install is a
+// VISIBLE ErrArtifactsNotBuilt refusal naming the missing build step —
+// never an unsupported-platform confusion, which would be a silent degrade
+// the UI contradicts (AGENTS.md). The selection returns nil and the
+// zero-install refusal stands (D16); the log carries the distinct refusal.
+// On CI (no embedded artifacts) the REAL artifact source is what produces
+// the refusal; in a workspace where `make helpers` has run, the same path
+// is exercised through the stub, so the test asserts identically in both
+// worlds and never depends on which one it is in.
+func TestHelperSelectorFallsBackWhenArtifactsNotBuilt(t *testing.T) {
+	orig := deploy.DefaultSource
+	if _, _, err := orig.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); !errors.Is(err, deploy.ErrArtifactsNotBuilt) {
+		deploy.DefaultSource = refusingSource{}
+	}
+	t.Cleanup(func() { deploy.DefaultSource = orig })
+
+	var buf bytes.Buffer
+	sel := helperGitFactory(&fakeLaneProvider{}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if got := sel(&fakeRemoteSession{host: "host.example"}); got != nil {
-		t.Fatalf("unconfigured selection = %v, want nil", got)
+		t.Fatalf("selection with no artifacts = %v, want nil", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "not built") {
+		t.Fatalf("the refusal was not visible: log says %q, want it to name the missing build step", out)
+	}
+	if strings.Contains(out, "no helper artifact for this platform") {
+		t.Fatalf("no artifacts must not look like an unsupported platform: log says %q", out)
+	}
+}
+
+// TestHelperSelectorFallsBackOnUnsupportedPlatform: a host we build no
+// helper for gets none — darwin/amd64 is deliberately not a build target
+// (D20), and the refusal stands rather than an install attempt.
+func TestHelperSelectorFallsBackOnUnsupportedPlatform(t *testing.T) {
+	provider := &fakeLaneProvider{uname: "Darwin x86_64"}
+	sel := helperGitFactory(provider, discardLogger())
+	if got := sel(&fakeRemoteSession{host: "host.example"}); got != nil {
+		t.Fatalf("selection on an unsupported platform = %v, want nil", got)
 	}
 }
 

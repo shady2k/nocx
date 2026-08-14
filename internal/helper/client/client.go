@@ -61,8 +61,13 @@ type Client struct {
 
 	writeMu sync.Mutex
 
+	// mu guards pending, streams, nextID and lost. pending routes each
+	// response to its waiting Call by request id; streams holds the D14
+	// reassembly state of each chunked response in flight, keyed by the
+	// stream id the ChunkedResult sentinel minted.
 	mu      sync.Mutex
 	pending map[uint64]chan proto.Response
+	streams map[uint64]*chunkStream
 	nextID  uint64
 	lost    bool
 
@@ -73,6 +78,19 @@ type Client struct {
 	closeOnce sync.Once
 
 	lostErr error
+}
+
+// chunkStream is the reassembly state of one chunked response (D14): the
+// request it answers, the byte and chunk counts the sentinel promised, and
+// the bytes collected so far, in stream order. The chunks arrive over one
+// connection in order; the counts are what make a truncated or interleaved
+// stream detectable instead of silently corrupt.
+type chunkStream struct {
+	reqID      uint64
+	totalBytes int
+	chunkCount int
+	got        int
+	buf        []byte
 }
 
 // InstanceID is the helper's self-issued instance id from the hello-ok
@@ -137,6 +155,12 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 		}
 		return nil
 	case <-ctx.Done():
+		// The caller gave up on the answer. Tell the helper, so the work
+		// actually stops on the remote host (D10) — abandoning the wait
+		// client-side would leave git running there. Whether the helper
+		// honours the cancel is the operation's decision: a mutation
+		// refuses it (D11).
+		c.Cancel(id)
 		return ctx.Err()
 	case <-c.done:
 		return fmt.Errorf("%w: %v", ErrLost, c.lostErr)
@@ -190,9 +214,9 @@ func (c *Client) lose(reason error) {
 }
 
 // onFrame routes one decoded frame. The hello-ok belongs to the handshake;
-// responses go to their waiting Call by id; chunk frames cannot arrive
-// until the service chunks (D14 lands with nocx-w3i1), and keepalives have
-// no answer.
+// responses go to their waiting Call by id; chunk frames feed the D14
+// reassembly of a response whose sentinel registered a stream; keepalives
+// have no answer.
 func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 	switch ty {
 	case proto.TypeHelloOK:
@@ -200,7 +224,7 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 	case proto.TypeResponse:
 		c.deliverResponse(payload)
 	case proto.TypeChunk:
-		c.log.Warn("chunk frame before chunking lands", "bytes", len(payload))
+		c.deliverChunk(payload)
 	case proto.TypeKeepAlive:
 		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeNotify:
@@ -210,12 +234,38 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 	}
 }
 
+// deliverResponse routes one response frame. A response whose result is a
+// ChunkedResult sentinel does not answer the request yet: it registers the
+// stream the following TypeChunk frames will fill, and the pending entry
+// stays until the last chunk delivers. Any other response answers its
+// waiting Call directly.
 func (c *Client) deliverResponse(payload []byte) {
 	var resp proto.Response
 	if err := json.Unmarshal(payload, &resp); err != nil {
 		c.log.Warn("malformed response", "err", err)
 		return
 	}
+	var cr proto.ChunkedResult
+	if len(resp.Result) > 0 && json.Unmarshal(resp.Result, &cr) == nil && cr.ChunkedStreamID != 0 {
+		c.mu.Lock()
+		if _, ok := c.pending[resp.ID]; ok {
+			c.streams[cr.ChunkedStreamID] = &chunkStream{
+				reqID:      resp.ID,
+				totalBytes: cr.TotalBytes,
+				chunkCount: cr.ChunkCount,
+			}
+		}
+		c.mu.Unlock()
+		return
+	}
+	c.deliver(resp)
+}
+
+// deliver sends one completed response to the request waiting for it. The
+// pending entry is consumed whether or not a Call is still listening — a
+// response that arrives after its Call gave up is dropped, never delivered
+// twice.
+func (c *Client) deliver(resp proto.Response) {
 	c.mu.Lock()
 	ch, ok := c.pending[resp.ID]
 	if ok {
@@ -225,4 +275,42 @@ func (c *Client) deliverResponse(payload []byte) {
 	if ok {
 		ch <- resp
 	}
+}
+
+// deliverChunk reassembles one TypeChunk frame into its stream. The stream
+// was registered by the ChunkedResult sentinel; chunks arrive over one
+// connection in stream order. When the declared chunk count has arrived,
+// the concatenated bytes are delivered as the response to the request the
+// sentinel named — or as an internal error if the byte count does not add
+// up, so a corrupt stream surfaces instead of hanging the call.
+func (c *Client) deliverChunk(payload []byte) {
+	var ch proto.Chunk
+	if err := json.Unmarshal(payload, &ch); err != nil {
+		c.log.Warn("malformed chunk", "err", err)
+		return
+	}
+	c.mu.Lock()
+	st, ok := c.streams[ch.ChunkedStreamID]
+	if !ok {
+		c.mu.Unlock()
+		c.log.Warn("chunk for unknown stream", "stream", ch.ChunkedStreamID)
+		return
+	}
+	st.got++
+	st.buf = append(st.buf, ch.Bytes...)
+	complete := st.got == st.chunkCount
+	if complete {
+		delete(c.streams, ch.ChunkedStreamID)
+	}
+	c.mu.Unlock()
+	if !complete {
+		return
+	}
+	resp := proto.Response{ID: st.reqID}
+	if len(st.buf) == st.totalBytes {
+		resp.Result = st.buf
+	} else {
+		resp.Error = &proto.Error{Code: proto.ErrCodeInternal, Message: fmt.Sprintf("helper: chunk reassembly: %d of %d bytes", len(st.buf), st.totalBytes)}
+	}
+	c.deliver(resp)
 }

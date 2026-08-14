@@ -41,10 +41,9 @@ func New(factory git.RepoFactory) *Service {
 // Name is the reserved service name the host registers it under.
 func (s *Service) Name() string { return "git" }
 
-// Ops is the closed set of operations this service serves. diff and log
-// arrive with the mutation task (nocx-w3i1).
+// Ops is the closed set of operations this service serves.
 func (s *Service) Ops() []string {
-	return []string{"open", "status", "envState"}
+	return []string{"open", "status", "envState", "diff", "log"}
 }
 
 // ParamsSchema declares each op's params type; the host decodes a request's
@@ -55,6 +54,10 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(OpenParams{})
 	case "status", "envState":
 		return host.SchemaFor(BindingParams{})
+	case "diff":
+		return host.SchemaFor(DiffParams{})
+	case "log":
+		return host.SchemaFor(LogParams{})
 	}
 	return nil
 }
@@ -68,6 +71,10 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		return s.status(ctx, params)
 	case "envState":
 		return s.envState(ctx, params)
+	case "diff":
+		return s.diff(ctx, params)
+	case "log":
+		return s.log(ctx, params)
 	}
 	return nil, fmt.Errorf("hostsvc: no op %q", op)
 }
@@ -146,6 +153,58 @@ func (s *Service) envState(ctx context.Context, raw json.RawMessage) (any, error
 	state, reason := repo.EnvState()
 	s.mu.Unlock()
 	return EnvStateResult{State: state, Reason: reason}, nil
+}
+
+// diff and log hold the service lock across their repo call, exactly as
+// status does: a concurrent open that replaces a binding closes the old
+// repo, and the seam says Close may release real resources. The bound the
+// caller names is applied by the repo, where the work happens (D9) — the
+// bytes beyond it never reach this side of the wire.
+func (s *Service) diff(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p DiffParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	repo, ok := s.repos[p.BindingID]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("hostsvc: no binding %q", p.BindingID)
+	}
+	d, err := repo.Diff(ctx, p.Path, p.Side, p.MaxBytes)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (s *Service) log(ctx context.Context, raw json.RawMessage) (any, error) {
+	var p LogParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	repo, ok := s.repos[p.BindingID]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("hostsvc: no binding %q", p.BindingID)
+	}
+	lg, err := repo.Log(ctx, p.Max)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return normalizeLog(lg), nil
+}
+
+// normalizeLog is the log half of the same wire guard: Entries is never nil
+// — an empty history marshals as [], never null.
+func normalizeLog(lg git.Log) git.Log {
+	if lg.Entries == nil {
+		lg.Entries = []git.LogEntry{}
+	}
+	return lg
 }
 
 // normalizeStatus is the service boundary's wire guard: the domain contract

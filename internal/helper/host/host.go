@@ -39,12 +39,17 @@ type Host struct {
 	instanceID  string
 	log         *slog.Logger
 
-	// mu guards out, services and requests. One mutex is enough: the
-	// critical sections are tiny, and the writer mutex is what keeps
+	// mu guards out, services, requests and streamSeq. One mutex is enough:
+	// the critical sections are tiny, and the writer mutex is what keeps
 	// concurrent responses from interleaving mid-frame.
 	mu       sync.Mutex
 	services []Service
 	requests map[uint64]context.CancelFunc
+
+	// streamSeq mints the stream ids chunked responses are keyed by (D14):
+	// the sentinel and its chunks may interleave with other responses, and
+	// the stream id is what routes them.
+	streamSeq uint64
 }
 
 // New builds a host over in and out. out is the wire: sentinel line, then
@@ -263,13 +268,87 @@ func (h *Host) serviceByName(name string) Service {
 	return nil
 }
 
+// respond sends one response. A response whose frame would exceed the
+// payload bound is chunked (D14): a ChunkedResult sentinel followed by
+// TypeChunk frames, which the receiver reassembles by concatenation.
 func (h *Host) respond(resp proto.Response) {
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		h.log.Error("marshal response", "err", err)
 		return
 	}
+	if len(raw) > proto.MaxFrameBytes && resp.Error == nil {
+		h.respondChunked(resp.ID, resp.Result)
+		return
+	}
 	h.writeFrame(proto.TypeResponse, raw)
+}
+
+// respondChunked sends one response as a ChunkedResult sentinel followed by
+// TypeChunk frames: the result bytes, split into pieces that each fit
+// proto.MaxFrameBytes once wrapped in a Chunk envelope. The receiver
+// concatenates the pieces in stream-id order to recover the original
+// result. The
+// sentinel and its chunks may interleave with other responses on the wire —
+// the stream id routes them, which is what keeps chunking compatible with
+// one goroutine per request (D13).
+func (h *Host) respondChunked(id uint64, result json.RawMessage) {
+	h.mu.Lock()
+	h.streamSeq++
+	streamID := h.streamSeq
+	h.mu.Unlock()
+
+	chunkSize := chunkPayloadCapacity(proto.MaxFrameBytes)
+	if chunkSize < 1 {
+		chunkSize = 1
+	}
+	chunks := splitChunks(result, chunkSize)
+	sentinelResult, err := json.Marshal(proto.ChunkedResult{
+		ChunkedStreamID: streamID,
+		TotalBytes:      len(result),
+		ChunkCount:      len(chunks),
+	})
+	if err != nil {
+		h.log.Error("marshal chunked sentinel", "err", err)
+		return
+	}
+	sentinel := proto.Response{ID: id, Result: sentinelResult}
+	raw, err := json.Marshal(sentinel)
+	if err != nil {
+		h.log.Error("marshal chunked response", "err", err)
+		return
+	}
+	h.writeFrame(proto.TypeResponse, raw)
+	for _, piece := range chunks {
+		raw, err = json.Marshal(proto.Chunk{ChunkedStreamID: streamID, Bytes: piece})
+		if err != nil {
+			h.log.Error("marshal chunk", "err", err)
+			return
+		}
+		h.writeFrame(proto.TypeChunk, raw)
+	}
+}
+
+// chunkPayloadCapacity is the largest raw result piece whose Chunk envelope
+// — the stream id and the base64 bytes, in JSON — still fits within the
+// given payload bound. The 64 bytes cover the envelope's fixed overhead,
+// and 3/4 is base64's expansion; both are deliberately conservative.
+func chunkPayloadCapacity(maxPayload int) int {
+	return (maxPayload - 64) * 3 / 4
+}
+
+// splitChunks divides b into pieces of at most size bytes, preserving order.
+func splitChunks(b []byte, size int) [][]byte {
+	if len(b) == 0 {
+		return nil
+	}
+	var out [][]byte
+	for len(b) > size {
+		out = append(out, b[:size])
+		b = b[size:]
+	}
+	out = append(out, b)
+	return out
 }
 
 // writeFrame writes one frame to the wire under the writer mutex, so

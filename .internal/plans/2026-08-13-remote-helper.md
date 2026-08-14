@@ -825,9 +825,49 @@ git commit   # feat(git): remote mutations, and the indeterminate outcome (<bead
 **Files:**
 
 - Create: `internal/helper/deploy/build.go` (the embedded artifacts), `internal/helper/deploy/install.go`, `internal/helper/deploy/platform.go`, `internal/helper/deploy/prune.go`
-- Create: `build/helpers/.gitignore` (build output, not committed)
+- Create: `internal/helper/deploy/artifacts/.gitignore` — **package-local, and committed**
+- Create: `internal/ssh/ssh_helperinstall.go` — the write-capable install lease
 - Modify: `Makefile` — a `helpers` target and a release dependency on it
 - Test: `internal/helper/deploy/install_test.go`, `internal/helper/deploy/platform_test.go`
+
+> **Amended 2026-08-14, after a worker stopped on two blockers that were both real.**
+>
+> **The embed directory must be package-local, and the original plan's was not embeddable at
+> all.** `//go:embed` paths are relative to the source package and may not contain `..`, so
+> `internal/helper/deploy/build.go` could never have embedded a repo-root `build/helpers/`.
+> Use `internal/helper/deploy/artifacts/` with a **committed** `.gitignore`, and the pattern
+> `//go:embed all:artifacts`. Every pattern must match at least one file or the build fails,
+> and a plain `artifacts/*` does **not** match `.gitignore` because ordinary patterns skip
+> names beginning with `.` or `_` — the `all:` prefix is what includes it, and it is what
+> makes a fresh checkout compile. Never list the three binaries as individual patterns: a
+> missing one fails compilation. `make helpers` writes into that package-local directory, and
+> is a prerequisite of the release build and of the acceptance test, never of `go build`.
+> `Artifact` translates `fs.ErrNotExist` into an exported `ErrArtifactsNotBuilt`, and asking
+> to install then produces a **visible** "the remote helper artifacts were not built"
+> refusal — not a silent fallback to "unsupported remote", which is the soft degrade
+> AGENTS.md forbids. This matters beyond CI: `go build ./...`, `go test`, `golangci-lint` and
+> the deadcode ratchet all load the package, so a zero-match embed breaks every gate before
+> anything runs.
+>
+> **The write-capable remote FS is SSH's to own, not shellintegration's to export.** Add
+> `RealClient.HelperInstallConn`, built with `acquirePooled` exactly as `RealClient.FSConn`
+> is (`internal/ssh/ssh_fsconn.go:566`), so the install gets the same resolved credentials,
+> authorization, jump route and pool key as the tab, on its own lease. `internal/ssh/
+ssh_uninstall.go` already establishes this boundary: the raw `*ssh.Client` stays inside
+> `internal/ssh` and callers receive purpose-specific capabilities. **Move** the SFTP write
+> primitives out of `shellintegration.sftpFS` into that lease rather than copying them, so
+> mkdir+chmod, create+chmod, rename, removal, fsync and SFTP status translation keep one
+> implementation.
+>
+> Reusing the shell-integration path directly is not available and would be wrong if it were.
+> Not available: `EnsureInstalledRemote` creates and closes a transient `sftp.Client`
+> (`install_remote.go:136`) inside `RealClient.shellStartCommand` during `Connect`
+> (`ssh_real.go:755`), bound to shell startup and the `RemoteInstaller` lifecycle, whereas
+> `helper_git.go` runs later from `sessionFactory.Open` holding only a host and
+> `sess.SSHOptions()`. Wrong anyway: `Publisher`'s manifest, generation, locking and
+> foreign-root semantics belong to the shell bundle under `~/.nocx`, and the helper has its
+> own content-addressed layout and pruning rules — one publisher serving both would couple
+> two unrelated deployment protocols.
 
 **Read first:** `internal/shellintegration/install_remote.go` and `internal/shellintegration/publisher.go`. The SFTP publisher already exists and already knows how to write a bundle to a remote home without touching rc files; this task extends its use, it does not write a second uploader.
 

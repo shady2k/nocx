@@ -9,12 +9,14 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -271,5 +273,87 @@ func TestExecChannelIsPtyLess(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("bytes mangled: want %v, got %v", want, got)
+	}
+}
+
+// TestSFTPSubsystemServesTheRealFilesystem proves the fixture is faithful
+// to sshd for the sftp subsystem: the helper install path (plan Task 9,
+// internal/ssh.HelperInstallConn) writes the versioned binary through an
+// SFTP lease, and a fixture that refuses the subsystem would make every
+// remote helper install answer deployFailed instead of serving the panel.
+// pkg/sftp's server serves the real filesystem with absolute paths, which
+// is exactly what the installer needs — its paths are absolute
+// (~/.nocx/helper/<version>-<goos>-<goarch>-<hash>/), and a server rooted
+// at a virtual directory would fail the install in a different way. The
+// create-and-read round trip through an absolute path is the assertion,
+// not merely that the subsystem request was accepted.
+func TestSFTPSubsystemServesTheRealFilesystem(t *testing.T) {
+	addr, hostKey, signer := startFixture(t)
+	client := dial(t, addr, hostKey, signer)
+
+	conn, err := sftp.NewClient(client)
+	if err != nil {
+		t.Fatalf("sftp connect: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	target := filepath.Join(t.TempDir(), "installed-helper")
+	want := []byte{0x00, 0x0A, 0x0D, 0xFF, 'f', 'r', 'a', 'm', 'e'}
+	f, err := conn.Create(target)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err = f.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	rf, err := conn.Open(target)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	got, err := io.ReadAll(rf)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	_ = rf.Close()
+	if !bytes.Equal(got, want) {
+		t.Fatalf("bytes mangled: want %v, got %v", want, got)
+	}
+}
+
+// TestSFTPRootIsTheAccountHomeNotTheProcessCwd pins the sftp server's
+// relative-path root: a real sshd's sftp-server starts in the user's home,
+// and the helper install lease discovers that home via SFTP RealPath(".")
+// (internal/ssh.HelperInstallConn.Home). The fixture chdirs into the seeded
+// repository at -repo, so a server rooted at the process cwd would answer
+// the repository path as the home and install the helper INTO the
+// repository — the acceptance test caught exactly that. The process cwd is
+// moved away from the home before the assertion, which is the condition
+// that used to fail.
+func TestSFTPRootIsTheAccountHomeNotTheProcessCwd(t *testing.T) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		t.Skip("no HOME to assert the sftp root against")
+	}
+	t.Chdir(t.TempDir()) // the server must NOT root relative paths here
+
+	addr, hostKey, signer := startFixture(t)
+	client := dial(t, addr, hostKey, signer)
+
+	conn, err := sftp.NewClient(client)
+	if err != nil {
+		t.Fatalf("sftp connect: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	got, err := conn.Getwd() // client Getwd is the server's RealPath(".")
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if got != home {
+		t.Fatalf("sftp root = %q, want the account home %q", got, home)
 	}
 }

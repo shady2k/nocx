@@ -2,12 +2,23 @@ package capability
 
 import (
 	"context"
+	"errors"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
+
+// GitOpenFactory resolves the repo factory git.open uses for a resolved
+// session — the composition root's answer to "which git runs for this
+// session" (AD-8; the files domain's ProviderFactory is the same shape).
+// Local sessions resolve to the local factory; SSH sessions resolve to the
+// helper-backed factory when one is available, and to nil when the
+// OpenRemoteUnsupported refusal must stand. It must be side-effect-free:
+// git.open consults it twice (the handler's refusal decision, then the
+// open), and the two calls must agree.
+type GitOpenFactory func(sess session.Session) git.RepoFactory
 
 // GitOpenService is the git.open surface: resolve the session, open the
 // repository through the factory and register the binding, and hold the
@@ -22,7 +33,7 @@ type GitOpenService interface {
 	// and the open outcome. It owns the ownership-transfer rule (spec
 	// §5.1): a live repo on a refusing outcome is closed before the
 	// refusal is returned, and a Register failure closes the repo.
-	OpenBinding(ctx context.Context, sid session.ID, cwd string) (bindingID string, outcome git.OpenOutcome, err error)
+	OpenBinding(ctx context.Context, sess session.Session, cwd string) (bindingID string, outcome git.OpenOutcome, err error)
 	// Acquire takes the use-guard for one binding — the same per-call
 	// authorisation every git.* method applies (D15).
 	Acquire(id string, caller registry.Caller) (registry.Handle, func(), error)
@@ -40,7 +51,7 @@ type GitOpenOperation interface {
 func NewGitOpenOperation(
 	sessionGate, gitGate, lane control.Admission,
 	registry session.Registry,
-	factory git.RepoFactory,
+	factory GitOpenFactory,
 	reg *registry.Registry,
 ) GitOpenOperation {
 	g := &guard{}
@@ -52,14 +63,14 @@ func NewGitOpenOperation(
 }
 
 // newGitOpenService builds the concrete git.open service bound to guard g.
-func newGitOpenService(g *guard, registry session.Registry, factory git.RepoFactory, reg *registry.Registry) *gitOpenService {
+func newGitOpenService(g *guard, registry session.Registry, factory GitOpenFactory, reg *registry.Registry) *gitOpenService {
 	return &gitOpenService{guard: g, registry: registry, factory: factory, reg: reg}
 }
 
 type gitOpenService struct {
 	guard    *guard
 	registry session.Registry
-	factory  git.RepoFactory
+	factory  GitOpenFactory
 	reg      *registry.Registry
 }
 
@@ -70,11 +81,19 @@ func (s *gitOpenService) Get(id session.ID) (session.Session, error) {
 	return s.registry.Get(id)
 }
 
-func (s *gitOpenService) OpenBinding(ctx context.Context, sid session.ID, cwd string) (string, git.OpenOutcome, error) {
+func (s *gitOpenService) OpenBinding(ctx context.Context, sess session.Session, cwd string) (string, git.OpenOutcome, error) {
 	if err := s.guard.check(); err != nil {
 		return "", git.OpenOutcome{}, err
 	}
-	repo, outcome, err := s.factory.Open(ctx, cwd)
+	f := s.factory(sess)
+	if f == nil {
+		// No factory for this session. The transport answers the
+		// OpenRemoteUnsupported refusal from the session's origin before
+		// opening, so this is the service's honest answer if the two
+		// ever disagree.
+		return "", git.OpenOutcome{}, errNoFactoryForSession
+	}
+	repo, outcome, err := f.Open(ctx, cwd)
 	if err != nil {
 		return "", git.OpenOutcome{}, err
 	}
@@ -92,7 +111,7 @@ func (s *gitOpenService) OpenBinding(ctx context.Context, sid session.ID, cwd st
 		// The other direction of the same lie: ok with no repository.
 		return "", git.OpenOutcome{}, &openOutcomeNilRepoError{}
 	}
-	bid, err := s.reg.Register(repo, sid)
+	bid, err := s.reg.Register(repo, sess.ID())
 	if err != nil {
 		// Always a typed error, close outcome or not: the transport's
 		// git.open answers every register failure with the "git.open:"
@@ -167,6 +186,12 @@ func (s *gitBindingService) CloseSession(sessionID session.ID) {
 	}
 	s.reg.CloseSession(sessionID)
 }
+
+// errNoFactoryForSession reports a git.open that reached the factory
+// selector with no factory for the session. The transport answers the
+// OpenRemoteUnsupported refusal from the session's origin before opening,
+// so this is the service's honest answer if the two ever disagree.
+var errNoFactoryForSession = errors.New("git.open: no repo factory for this session")
 
 // openOutcomeCloseError reports a refusing git.open outcome whose live repo
 // could not be closed. The repo must not leak, and a failed close is a fact

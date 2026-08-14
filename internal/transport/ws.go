@@ -295,6 +295,11 @@ type WSServer struct {
 	// itself (AD-8).
 	git        *registry.Registry
 	gitFactory git.RepoFactory
+	// gitHelperFor resolves the helper-backed repo factory git.open uses
+	// for an SSH session (the remote-helper design). When nil, or when it
+	// returns nil for a session, git.open keeps the OpenRemoteUnsupported
+	// refusal — the zero-install fallback (design D16).
+	gitHelperFor GitFactoryFor
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -712,6 +717,23 @@ func WithGitRegistry(r *registry.Registry) WSServerOption {
 // error.
 func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
 	return func(s *WSServer) { s.gitFactory = f }
+}
+
+// GitFactoryFor resolves the helper-backed repo factory git.open uses for
+// an SSH session — the composition root's answer to "is a helper available
+// for this host" (the remote-helper design). Returning nil keeps the
+// OpenRemoteUnsupported refusal standing for that session. It must be
+// side-effect-free: git.open consults it twice (the handler's refusal
+// decision, then the open), and the two calls must agree.
+type GitFactoryFor func(sess session.Session) git.RepoFactory
+
+// WithGitHelperFactory attaches the helper-backed repo factory selection
+// for SSH sessions (the remote-helper design). The composition root wires
+// it from the helper's install configuration; when absent — or when the
+// selection returns nil for a session — git.open answers the
+// OpenRemoteUnsupported refusal, the zero-install fallback (design D16).
+func WithGitHelperFactory(f GitFactoryFor) WSServerOption {
+	return func(s *WSServer) { s.gitHelperFor = f }
 }
 
 // WithFilesRevealer attaches the OS file-manager reveal capability

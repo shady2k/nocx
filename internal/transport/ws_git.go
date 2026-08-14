@@ -38,6 +38,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -968,7 +969,7 @@ func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 // panel surfaces.
 func gitErrorCode(err error) int {
 	switch err.(type) {
-	case *git.ErrUnknownBinding, *git.ErrNotOwned, *git.ErrHandleReleased,
+	case *registry.ErrUnknownBinding, *registry.ErrNotOwned, *registry.ErrHandleReleased,
 		*git.ErrNothingToCommit, *git.ErrAmendUnborn, *git.ErrConflicted:
 		return -32602
 	default:

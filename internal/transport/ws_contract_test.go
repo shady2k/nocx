@@ -18,6 +18,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
@@ -2385,6 +2386,145 @@ func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+// ── shell.footprint.consent ─────────────────────────────────────────────
+
+func TestShellFootprintConsent_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.consent.schema.json")
+	raw, err := json.Marshal(shellFootprintConsentResult{State: "granted"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.consent DTO")
+}
+
+// fingerprintChannel is a StubChannel that carries a host public-key
+// fingerprint — the session-level fact shell.footprint.consent keys the
+// grant by (consent design §3.2).
+type fingerprintChannel struct {
+	*ssh.StubChannel
+	fingerprint string
+}
+
+func (c *fingerprintChannel) HostKeyFingerprint() string { return c.fingerprint }
+
+// TestShellFootprintConsent_OverTheWireConformsToContract runs the real
+// method off the real socket: an SSH session whose machine has no answer
+// is granted through the RPC, the result validates against the schema, and
+// the grant is durable — a store reconstruction reads it back.
+func TestShellFootprintConsent_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.consent.schema.json")
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+	dir := t.TempDir()
+	consents := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return &fingerprintChannel{StubChannel: ssh.NewStubChannel(logger), fingerprint: "SHA256:consented"}, nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithHelperConsentStore(consents),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSSHSession(t, conn)
+	resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.consent: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.consent result (real socket)")
+
+	// The grant is durable: a store reconstructed over the same directory
+	// reads the answer the RPC persisted.
+	again := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
+	if ans, ok := again.Lookup("SHA256:consented"); !ok || ans != consent.Granted {
+		t.Fatalf("Lookup after the RPC and a store reopen = %q/%v, want granted", ans, ok)
+	}
+}
+
+// TestShellFootprintConsent_OwnershipAndKeyRefusals: the accept is
+// authorised by connState (a connection grants only for a session it
+// owns) and a session with no host key never grants (consent design §3.2).
+func TestShellFootprintConsent_OwnershipAndKeyRefusals(t *testing.T) {
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+	consents := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			// No fingerprint: the stub channel carries none.
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithHelperConsentStore(consents),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	sid := openSSHSession(t, conn)
+
+	// A session whose host key was never captured must not grant.
+	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("consent for a keyless session = %+v, want the -32602 key refusal", resp)
+	}
+	// Missing sessionId: -32602.
+	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{}, 3); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("consent without sessionId = %+v, want -32602", resp)
+	}
+}
+
+// TestShellFootprintConsent_UnwiredStoreRefuses: a server with no consent
+// store wired refuses the accept — a consent prompt offered by a server
+// that cannot record the answer would fail at click time (AGENTS.md rule
+// 1).
+func TestShellFootprintConsent_UnwiredStoreRefuses(t *testing.T) {
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	sid := openSSHSession(t, conn)
+	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2); resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("consent without a store = %+v, want -32603", resp)
+	}
+}
+
 // ── files.* ──────────────────────────────────────────────────────────────
 //
 // The seven wire shapes of the file-tree control plane (fm-w8): six
@@ -2950,11 +3090,27 @@ func TestGitOpen_DTOConformsToContract(t *testing.T) {
 			State: "ok", BindingID: "ab12", Toplevel: "/tmp/repo",
 			GitVersion: "2.55.0", EnvState: "resolved",
 		},
-		"not a repository":   {State: "notARepository"},
-		"git unavailable":    {State: "gitUnavailable"},
-		"git too old":        {State: "gitTooOld", GitVersion: "2.20.1"},
-		"no cwd":             {State: "noCwd"},
-		"remote unsupported": {State: "remoteUnsupported"},
+		"not a repository": {State: "notARepository"},
+		"git unavailable":  {State: "gitUnavailable"},
+		"git too old":      {State: "gitTooOld", GitVersion: "2.20.1"},
+		"no cwd":           {State: "noCwd"},
+		"consent required": {State: "consentRequired"},
+		"unsupported platform": {
+			State:   "unsupportedPlatform",
+			Message: "we build no helper for darwin/amd64",
+		},
+		"deploy failed": {
+			State:   "deployFailed",
+			Message: "installing the helper on host.example failed: upload refused",
+		},
+		"exec forbidden": {
+			State:   "execForbidden",
+			Message: "the host refused the probe that would run the helper: exec request failed",
+		},
+		"helper version mismatch": {
+			State:   "helperVersionMismatch",
+			Message: "the helper installed on host.example answered with a different protocol version or content than nocx installed — reinstall it to recover",
+		},
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -3259,6 +3415,69 @@ func TestGitOpen_OverTheWireConformsToContract(t *testing.T) {
 
 	raw := gitWireCall(t, e, "git.open", map[string]any{"sessionId": sid, "cwd": "/tmp/repo"}, 2)
 	validateJSON(t, schema, raw, "git.open result (real socket)")
+}
+
+// TestGitOpen_OverTheWireConformsToContract_SSHHelper is the SSH half of
+// the over-the-wire contract: an SSH session served through the helper
+// factory answers ok with a binding off the real socket, and that binding
+// is fully operational — git.status and git.commit work through it — so
+// the panel renders its mutation controls (git D14: what the panel cannot
+// do it does not draw, and now it can).
+func TestGitOpen_OverTheWireConformsToContract_SSHHelper(t *testing.T) {
+	openSchema := loadSchema(t, "git.open.schema.json")
+	statusSchema := loadSchema(t, "git.status.schema.json")
+	commitSchema := loadSchema(t, "git.commit.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	helper := newStubGitFactory()
+	ws := NewWSServer(logger, reg,
+		WithGitRegistry(registry.New()),
+		WithGitRepoFactory(newStubGitFactory()),
+		WithGitHelperFactory(func(session.Session) GitOpenSelection {
+			return GitOpenSelection{Factory: helper}
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHSession(t, conn)
+
+	raw := gitWireCall(t, &gitTestEnv{ws: ws, conn: conn}, "git.open",
+		map[string]any{"sessionId": sid, "cwd": "/some/cwd"}, 2)
+	validateJSON(t, openSchema, raw, "git.open result off the real socket (SSH helper)")
+	var open struct {
+		State     string `json:"state"`
+		BindingID string `json:"bindingId"`
+	}
+	if err := json.Unmarshal(raw, &open); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	if open.State != "ok" || open.BindingID == "" {
+		t.Fatalf("open = %+v, want ok with a binding — the helper serves the SSH session", open)
+	}
+
+	// The binding the panel would hold answers the poll and the mutation
+	// controls: status, then a commit, each against its schema.
+	statusRaw := gitWireCall(t, &gitTestEnv{ws: ws, conn: conn}, "git.status",
+		map[string]any{"bindingId": open.BindingID}, 3)
+	validateJSON(t, statusSchema, statusRaw, "git.status result off the real socket (SSH helper)")
+	commitRaw := gitWireCall(t, &gitTestEnv{ws: ws, conn: conn}, "git.commit",
+		map[string]any{"bindingId": open.BindingID, "message": "a remote commit", "amend": false}, 4)
+	validateJSON(t, commitSchema, commitRaw, "git.commit result off the real socket (SSH helper)")
 }
 
 func TestGitStatus_OverTheWireConformsToContract(t *testing.T) {

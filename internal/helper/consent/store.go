@@ -14,6 +14,8 @@
 package consent
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -83,13 +85,60 @@ func (s *Store) Lookup(fingerprint string) (Answer, bool) {
 	return a, ok
 }
 
-// The accept-write half — persisting a grant — deliberately lives with its
-// caller (nocx-1xxa, the git panel's consent prompt): this store is reached
-// from main() through the lookup the resolver performs and the footprint
-// surface reads, and a write primitive with no caller would fail the
-// deadcode ratchet (the fourth time this plan produced a function whose
-// caller lives in a later bead). The document format below is the contract
-// that caller writes; Lookup reads it unchanged.
+// ErrEmptyFingerprint refuses a grant under "": consent under an empty
+// fingerprint would make every machine share one answer — the exact defect
+// consent exists to prevent. The accept-write path refuses before anything
+// is loaded or written; loadLocked's drop of "" keys is the second half of
+// the same rule, applied at the one choke point every lookup passes
+// through.
+var ErrEmptyFingerprint = errors.New("helper consent: refusing a grant under an empty host fingerprint")
+
+// Grant records that the machine identified by the remote host's public-key
+// fingerprint has been raised to the relay tier (D8): the user accepted the
+// helper for this host from the git panel's consent prompt. Consent is per
+// machine — keyed by the host key, never the session, the tab or the
+// account (consent design §3.2) — and the answer persists for the next
+// git.open, even across a store reconstruction.
+//
+// The in-memory answer is committed only when the document write
+// succeeded: a grant this process could not persist must not be believed
+// here and forgotten on the next start — an unwritable store never
+// authorizes a remote write it cannot show (consent design §6).
+func (s *Store) Grant(fingerprint string) error {
+	if fingerprint == "" {
+		return ErrEmptyFingerprint
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	prev, existed := s.answers[fingerprint]
+	s.answers[fingerprint] = Granted
+	if err := s.writeDocLocked(); err != nil {
+		// Roll the in-memory answer back: a failed persist is not a
+		// grant. The map must never report what the document does not.
+		if existed {
+			s.answers[fingerprint] = prev
+		} else {
+			delete(s.answers, fingerprint)
+		}
+		return err
+	}
+	return nil
+}
+
+// writeDocLocked persists the answers document atomically (the
+// DocumentStore's temp-file+fsync discipline): a torn write never leaves a
+// half-grant, and the next start reads either the whole document or none
+// of it.
+func (s *Store) writeDocLocked() error {
+	if err := s.docStore.Write(s.docName, answerDocument{
+		Version: answerDocumentVersion,
+		Answers: s.answers,
+	}); err != nil {
+		return fmt.Errorf("helper consent: persist %s: %w", s.docName, err)
+	}
+	return nil
+}
 
 // loadLocked reads the document once, on first use. Corruption of any kind
 // degrades to an empty store with a one-time warning: never a partially

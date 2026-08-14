@@ -117,6 +117,9 @@ func (c *Client) Call(ctx context.Context, service, op string, params, out any) 
 		raw = b
 	}
 	req := proto.Request{ID: id, Service: service, Op: op, Params: raw, Corr: randomCorr()}
+	// D26: the correlation id the helper logs for this request is the
+	// SAME value the backend logs here — one trace across the two hops.
+	c.log.Debug("helper request", "service", service, "op", op, "corr", req.Corr)
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("helper: request: %w", err)

@@ -289,6 +289,61 @@ func TestDialAndCallRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEveryCallLogsTheSameCorrOnBothSides is D26 end to end over the real
+// host: the backend's log line for one operation and the helper's log line
+// for the same operation carry the SAME correlation id — one trace across
+// the two hops (nocx-if6: "the moment there are two hops a log line
+// without correlation is useless").
+func TestEveryCallLogsTheSameCorrOnBothSides(t *testing.T) {
+	var hostLog, clientLog bytes.Buffer
+	hostLogger := slog.New(slog.NewTextHandler(&hostLog, nil))
+	clientLogger := slog.New(slog.NewTextHandler(&clientLog, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	conn := newFakeConn(func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, "testhash", "instance-1", hostLogger)
+		h.Register(stubService{})
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	})
+	c, err := client.Dial(context.Background(), client.Config{
+		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash",
+		SentinelTTL: time.Second, Log: clientLogger,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	var got string
+	if err := c.Call(context.Background(), "stub", "ping", pingParams{Msg: "hi"}, &got); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	clientCorr := logCorr(t, clientLog.String())
+	hostCorr := logCorr(t, hostLog.String())
+	if clientCorr == "" || hostCorr == "" {
+		t.Fatalf("corr missing: backend logged %q, helper logged %q", clientCorr, hostCorr)
+	}
+	if clientCorr != hostCorr {
+		t.Fatalf("corr differs across the hops: backend logged %q, helper logged %q", clientCorr, hostCorr)
+	}
+}
+
+// logCorr extracts the first corr=<value> from a text-handler log line.
+func logCorr(t *testing.T, s string) string {
+	t.Helper()
+	const key = "corr="
+	i := strings.Index(s, key)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(key):]
+	if end := strings.IndexAny(rest, " \n\t"); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest
+}
+
 // TestCallRefusalSurfacesTheHelpersError: a service refusal is a wire fact
 // with a code and a message; the caller must receive both, and must be able
 // to tell a refusal from a transport loss.

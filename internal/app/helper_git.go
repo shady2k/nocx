@@ -3,11 +3,12 @@ package app
 // The helper-backed git factory selection (the remote-helper design): the
 // composition root's answer to transport.GitFactoryFor. An SSH session gets
 // a helper-backed git.RepoFactory when the helper is INSTALLED for this
-// machine; otherwise nil, and git.open keeps its OpenRemoteUnsupported
-// refusal — the zero-install fallback (design D3 as amended 2026-08-13,
-// D16). The factory's command and expected hash are never configuration:
-// each consultation installs the artifact on the session's host (D7) and
-// takes them from what was installed.
+// machine; otherwise the selection answers the honest §6 refusal — which
+// platform is unsupported, what failed to install, the exec the host
+// refused, the consent ask — never the deleted remoteUnsupported
+// (remote-helper design §6, D16). The factory's command and expected hash
+// are never configuration: each consultation installs the artifact on the
+// session's host (D7) and takes them from what was installed.
 
 import (
 	"context"
@@ -59,13 +60,14 @@ type helperInstallProvider interface {
 // comes before any remote write — and when it may, installs the helper
 // artifact on the session's host (D7) and returns a factory that serves
 // git over one helper process on that session's pooled connection. The
-// tri-state selection answers consentRequired when the machine has no
-// relay-tier answer, and the zero-install refusal (empty selection) when
-// it is denied, raw, or nothing to offer. git.open consults the selection
-// twice (the refusal decision, then the open); each consultation installs
-// idempotently, and an already-complete directory uploads nothing (D7), so
-// both consultations converge on the same install. The dial happens inside
-// the returned factory's Open, never here.
+// selection answers one of a factory, consentRequired, a §6 refusal
+// (unsupportedPlatform, deployFailed, execForbidden — each with the
+// message naming what to do), or the resolver's Refused (raw, a denied
+// answer) as a reason with no earned state. git.open consults the
+// selection twice (the refusal decision, then the open); each consultation
+// installs idempotently, and an already-complete directory uploads nothing
+// (D7), so both consultations converge on the same install. The dial
+// happens inside the returned factory's Open, never here.
 func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) transport.GitFactoryFor {
 	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
 	return func(sess session.Session) transport.GitOpenSelection {
@@ -84,19 +86,26 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 		switch r.Resolve(Machine{Fingerprint: sess.HostKeyFingerprint(), Mode: effectiveModeFor(sess)}) {
 		case DesiredRelay:
 			if perr != nil {
-				log.Info("helper unavailable; the zero-install refusal stands",
+				// The probe's failure is a fact with a state (§6), never
+				// a silent degrade: an artifact the matrix does not ship
+				// (or was not built) is unsupportedPlatform; anything
+				// else that stopped the probe is execForbidden.
+				log.Info("helper unavailable: the platform probe failed",
 					"host", sess.Host(), "error", perr)
-				return transport.GitOpenSelection{}
+				return helperProbeRefusal(platform, perr)
 			}
 			command, hash, err := installHelperFor(sess, lanes, platform)
 			if err != nil {
-				// Fail-open (D16): a host whose install failed keeps the
-				// refusal. The failure is a fact about the host or the
-				// build, and it is logged, never silent, so a soft degrade
-				// stays visible (AGENTS.md).
-				log.Info("helper unavailable; the zero-install refusal stands",
+				// The upload or install failed (D7). The failure is a
+				// fact about the host or the build, carried by the
+				// deployFailed state with what failed — the panel names
+				// the recovery instead of a generic error (brief).
+				log.Info("helper unavailable: install failed",
 					"host", sess.Host(), "error", err)
-				return transport.GitOpenSelection{}
+				return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
+					State:   git.OpenDeployFailed,
+					Message: "installing the helper on " + sess.Host() + " failed: " + err.Error(),
+				}}
 			}
 			// The footprint observation is recorded only after Ensure
 			// succeeded — the never-connect footprint surface must never
@@ -131,16 +140,79 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 			// written to the host.
 			return transport.GitOpenSelection{ConsentRequired: true}
 		default:
-			if perr != nil {
-				// A host that could not be probed, or a platform we do not
-				// build for, is a fact the operator should see — never a
-				// silent degrade (AGENTS.md).
-				log.Info("helper unavailable; the zero-install refusal stands",
+			// Refused — raw, a denied answer, or nothing to offer. The
+			// probe failure and the missing artifact are facts with
+			// states; a machine that refused has no earned state and the
+			// transport answers the not-available error with the reason.
+			if !available && perr != nil {
+				log.Info("helper unavailable: the platform probe failed",
 					"host", sess.Host(), "error", perr)
+				return helperProbeRefusal(platform, perr)
 			}
-			return transport.GitOpenSelection{}
+			if !available {
+				// No artifact for the probed platform (D20): the build
+				// matrix does not ship this OS/arch. The message names
+				// which platform — never a generic error (brief).
+				log.Info("helper unavailable: no artifact for the platform",
+					"host", sess.Host(), "goos", platform.GOOS, "goarch", platform.GOARCH)
+				return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
+					State:   git.OpenUnsupportedPlatform,
+					Message: "we build no helper for " + platform.GOOS + "/" + platform.GOARCH,
+				}}
+			}
+			return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
+				Message: refusedHelperReason(sess, store),
+			}}
 		}
 	}
+}
+
+// helperProbeRefusal maps a probe failure onto the §6 refusal it is: an
+// artifact the matrix does not ship (ErrUnsupportedPlatform) or that was
+// not built (ErrArtifactsNotBuilt) is unsupportedPlatform with the message
+// naming the platform and the recovery; anything else that stopped the
+// probe — a refused exec, a dead lane — is execForbidden with what was
+// seen. The error is the probe's own, never re-derived.
+func helperProbeRefusal(platform deploy.Platform, err error) transport.GitOpenSelection {
+	switch {
+	case errors.Is(err, deploy.ErrUnsupportedPlatform), errors.Is(err, deploy.ErrArtifactsNotBuilt):
+		return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
+			State:   git.OpenUnsupportedPlatform,
+			Message: unsupportedPlatformMessage(platform, err),
+		}}
+	default:
+		return transport.GitOpenSelection{Refusal: &transport.GitOpenRefusal{
+			State:   git.OpenExecForbidden,
+			Message: "the host refused the probe that would run the helper: " + err.Error(),
+		}}
+	}
+}
+
+// unsupportedPlatformMessage names which fact the refusal is: a platform
+// the build matrix deliberately does not ship, or an artifact that was not
+// built. artifactErr is the Artifact error the probe already saw (or nil
+// when the probe did not reach the artifact decision).
+func unsupportedPlatformMessage(p deploy.Platform, artifactErr error) string {
+	if errors.Is(artifactErr, deploy.ErrArtifactsNotBuilt) {
+		return "the helper artifact for " + p.GOOS + "/" + p.GOARCH + " was not built — run `make helpers` to build it"
+	}
+	return "we build no helper for " + p.GOOS + "/" + p.GOARCH
+}
+
+// refusedHelperReason is the resolver's Refused account for a machine whose
+// mode or stored answer forbids the helper: the actionable reason the
+// not-available error carries, never a generic refusal.
+func refusedHelperReason(sess session.Session, store *consent.Store) string {
+	switch effectiveModeFor(sess) {
+	case profile.DesiredRaw:
+		return "this connection is set to Raw, which does not run the nocx helper — change the connection mode to Auto or Relay to open repositories here"
+	}
+	if store != nil {
+		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok && ans == consent.Denied {
+			return "this machine has declined to run the nocx helper — set the connection mode to Relay, or change the answer in the footprint screen, to allow it"
+		}
+	}
+	return "no helper available for this SSH session"
 }
 
 // probeHelperPlatform asks the session's host what platform it is (D20)
@@ -369,6 +441,14 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 			// Dial's contract: on failure the lane is left for the caller
 			// to close.
 			_ = lane.Close()
+			// The dial refusals are the §6 states, not errors: the panel
+			// renders a version-mismatched helper or a refused exec as an
+			// honest state naming the recovery (remote-helper design §6).
+			// ErrLost is not a refusal — it passes through so the caller's
+			// one retry (sessionFactory.Open) can heal the session.
+			if outcome, ok := dialFailure(err, h.f.host); ok {
+				return nil, outcome, nil
+			}
 			return nil, git.OpenOutcome{}, err
 		}
 		h.client = c
@@ -391,6 +471,31 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 	}
 	h.refs++
 	return &refRepo{Repo: repo, released: h.released}, outcome, nil
+}
+
+// dialFailure maps a helper dial error onto the §6 open outcome it is,
+// and reports whether the error is a refusal at all. A protocol version
+// or content-hash mismatch is helperVersionMismatch — the file at the
+// install path is not the binary nocx installed (D6); the one automatic
+// reinstall of D6 is not implemented in this bead, so the state's own
+// "non-retryable until reinstall" is exactly what happens. A refused exec,
+// a peer that never answered within the sentinel deadline, or something
+// else that answered is execForbidden (D5). ErrLost — the transport died
+// during the handshake — is not a refusal: the caller's one retry heals
+// it, and a mutation never would be retried (D12).
+func dialFailure(err error, host string) (git.OpenOutcome, bool) {
+	outcome := git.OpenOutcome{Message: err.Error()}
+	switch {
+	case errors.Is(err, client.ErrVersionMismatch), errors.Is(err, client.ErrHashMismatch):
+		outcome.State = git.OpenHelperVersionMismatch
+		outcome.Message = "the helper installed on " + host + " answered with a different protocol version or content than nocx installed — reinstall it to recover (" + err.Error() + ")"
+	case errors.Is(err, client.ErrExecForbidden), errors.Is(err, client.ErrNotOurHelper), errors.Is(err, client.ErrSentinelTimeout):
+		outcome.State = git.OpenExecForbidden
+		outcome.Message = "the host did not answer with the nocx helper: " + err.Error()
+	default:
+		return git.OpenOutcome{}, false
+	}
+	return outcome, true
 }
 
 // released is called by the wrapping repo when a binding closes. The

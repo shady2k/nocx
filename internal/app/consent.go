@@ -32,8 +32,9 @@ const (
 	// answers consentRequired and the surface offers the consent flow.
 	ConsentRequired Outcome = "consentRequired"
 	// Refused — nothing is written and nothing is asked: raw, a denied
-	// answer, no surface asked, or no artifact to offer. The zero-install
-	// refusal (OpenRemoteUnsupported) stands.
+	// answer, no surface asked, or no artifact to offer. The selection
+	// answers the §6 refusal states (unsupportedPlatform, execForbidden)
+	// or, for a machine with no earned state, the not-available error.
 	Refused Outcome = "refused"
 )
 

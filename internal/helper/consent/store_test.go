@@ -85,3 +85,65 @@ func TestStoreEmptyFingerprintNeverGrants(t *testing.T) {
 		t.Fatalf("an empty fingerprint must never read as granted, got %q", ans)
 	}
 }
+
+// failingDocStore is a DocumentStore whose Write always fails: the
+// write-failure half of the accept interval. A grant that cannot be
+// persisted must not be believed by the store that failed to persist it —
+// otherwise this process would answer granted while the next start answers
+// unanswered (consent design §6: an unwritable store never authorizes a
+// remote write it cannot show).
+type failingDocStore struct{ storage.DocumentStore }
+
+func (failingDocStore) Write(string, any) error { return os.ErrPermission }
+
+// TestGrantPersistsAcrossReopen is the accept-write half of
+// TestResolverGrantSurvivesStoreReopen: the grant the panel's RPC persisted
+// is still there for a store reconstructed over the same directory — the
+// write must be genuinely durable, not a memory-only answer.
+func TestGrantPersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if err := s.Grant("SHA256:abc"); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	again := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	ans, ok := again.Lookup("SHA256:abc")
+	if !ok || ans != Granted {
+		t.Fatalf("Lookup after reopen = %q/%v, want granted — the grant must survive", ans, ok)
+	}
+}
+
+// TestGrantEmptyFingerprintRefused is the write-side half of the empty-key
+// rule: Grant must refuse to persist an answer under "" — the same filter
+// loadLocked applies on the read side, at the one choke point every write
+// passes through. A write that accepted "" would let a session whose host
+// key was never captured grant every machine at once.
+func TestGrantEmptyFingerprintRefused(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if err := s.Grant(""); err == nil {
+		t.Fatal("Grant(\"\") = nil, want a refusal")
+	}
+	if ans, ok := s.Lookup(""); ok {
+		t.Fatalf("an empty fingerprint must never read as granted, got %q", ans)
+	}
+	// And nothing was written: a reopen must not find a phantom grant.
+	again := NewStore(log.NewSlogAdapter(nil), storage.NewDocumentStore(dir), "consent.json")
+	if _, ok := again.Lookup(""); ok {
+		t.Fatal("reopen found an answer under an empty fingerprint that Grant refused")
+	}
+}
+
+// TestGrantWriteFailureDoesNotGrant: when the document cannot be persisted,
+// Grant fails AND the in-memory answer is rolled back — a process that
+// could not write the grant must not behave as granted until the next
+// start reveals the lie.
+func TestGrantWriteFailureDoesNotGrant(t *testing.T) {
+	s := NewStore(log.NewSlogAdapter(nil), failingDocStore{storage.NewDocumentStore(t.TempDir())}, "consent.json")
+	if err := s.Grant("SHA256:abc"); err == nil {
+		t.Fatal("Grant with an unwritable store = nil, want the write error")
+	}
+	if ans, ok := s.Lookup("SHA256:abc"); ok {
+		t.Fatalf("a failed grant must not answer granted, got %q", ans)
+	}
+}

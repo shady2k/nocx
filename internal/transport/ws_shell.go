@@ -180,5 +180,14 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
 		}),
+		reg(s.lane, "shell.footprint.consent", func(w *wsConn, state *connState) handlerFunc {
+			h := footprintHandlers{
+				r:        w,
+				consent:  s.helperConsent,
+				registry: s.registry,
+				log:      s.log,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleConsent(ctx, state, req) }
+		}),
 	}
 }

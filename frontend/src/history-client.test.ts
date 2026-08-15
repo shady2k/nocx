@@ -7,8 +7,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { recordCommand, queryHistory } from './history-client'
 import type { CommandRecord } from './command-ledger'
 import type { HistoryQuery } from './generated/history.query'
-import type { LifecycleChanged } from './generated/lifecycle.changed'
-import type { ExecutionAttempt } from './lifecycle/state'
+import type { ExecutionAttempt, LifecycleFact } from './lifecycle/state'
 import { mintDomain, type IntegrationDomain } from './lifecycle/domains'
 import type { WSClient } from './ipc'
 function fakeClient(): { call: ReturnType<typeof vi.fn> } {
@@ -18,7 +17,7 @@ function fakeClient(): { call: ReturnType<typeof vi.fn> } {
 // The authority: an authenticated attempt. Its domain is branded (only the
 // kernel can mint one); its command is the SHELL's wire line, which may
 // carry vault-resolved values — and must never cross to the store.
-const FACT: LifecycleChanged = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 }
+const FACT: LifecycleFact = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 }
 const domain = mintDomain(FACT) as IntegrationDomain
 
 function completedAttempt(overrides: Partial<ExecutionAttempt> = {}): ExecutionAttempt {

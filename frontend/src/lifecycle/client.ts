@@ -11,19 +11,28 @@
 //
 // The wire shape is guarded at the boundary like files.changed and git.changed
 // (the same unsolicited-notification defect class): a payload without a string
-// lane is not a fact and is not delivered.
+// sessionId/lane pair is not a fact, and a session receives only its own facts.
 
 import type { Dispatcher } from '../dispatcher'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { LifecycleFact } from './state'
 import type { LifecycleRecoverAck } from '../generated/lifecycle.recoverAck'
 import type { LifecycleEstablishAck } from '../generated/lifecycle.establishAck'
 import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttempt'
 
-/** One lifecycle fact, delivered to a subscriber with its lane intact. The
- *  lane is what lets the projection attach the fact to the right tab's state
- *  machine; a fact is routed to the lane's own session, and the renderer
- *  filters nothing. */
-export type LifecycleFactHandler = (fact: LifecycleChanged) => void
+/** One lifecycle fact after routing by its server-authoritative session id.
+ *  The lane then lets that session's projection attach the fact to the right
+ *  state machine. */
+export type LifecycleFactHandler = (fact: LifecycleFact) => void
+/** A lifecycle subscription is installed before session.open starts, then
+ *  bound exactly once to the server-authoritative session id from its result.
+ *  Before that binding it delivers nothing: the backend installs the session's
+ *  subscriber only after the open result, so a fact for this session cannot
+ *  exist yet, and a fact for another session is not ours to deliver. */
+export interface LifecycleChangedSubscription {
+  bindSession: (sessionId: string) => void
+  unsubscribe: () => void
+}
 
 /** The payload of lifecycle.submitAttempt: the app-owned half of a command's
  *  execution, declared before the bytes that can cause the shell's own start
@@ -44,14 +53,40 @@ export interface LifecycleSubmitAttemptParams {
 export class LifecycleClient {
   constructor(private dispatcher: Dispatcher) {}
 
-  /** Subscribe to the server-initiated lifecycle.changed notification: the
-   *  per-lane authority axis (Native | PromptReady(domain) | Running(attempt)
-   *  | Desynchronized(domain) | Lost). Returns the unsubscribe. */
-  subscribeLifecycleChanged(handler: LifecycleFactHandler): () => void {
-    return this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
+  /** Subscribe before session.open so the open result and the replay that
+   *  immediately follows it cannot overtake registration, then bind the
+   *  server-authoritative id the result carries. Binding filters before any
+   *  surface can mutate or acknowledge state.
+   *
+   *  There is deliberately no pre-bind buffer. Catching up on a fact
+   *  published while open was still dialing has ONE owner and it is the
+   *  backend: handleOpen installs the session's subscriber only after the
+   *  open result, PublishLifecycle drops a fact that has no subscriber, and
+   *  replayLifecycleFacts re-emits the current projection the instant that
+   *  subscriber lands. A fact for this session therefore cannot arrive
+   *  before bindSession, and one for another session belongs to that
+   *  session's own subscription — so a buffer here could only ever hold
+   *  facts it must then discard. */
+  subscribeLifecycleChanged(handler: LifecycleFactHandler): LifecycleChangedSubscription {
+    let sessionId: string | null = null
+    let closed = false
+    const unsubscribe = this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
       const p = params as LifecycleChanged
-      if (p && typeof p.lane === 'string') handler(p)
+      if (!p || typeof p.sessionId !== 'string' || typeof p.lane !== 'string') return
+      if (p.sessionId === sessionId) handler(p)
     })
+    return {
+      bindSession: (authoritativeSessionId: string): void => {
+        if (closed) return
+        if (sessionId !== null) throw new Error('lifecycle subscription is already bound')
+        sessionId = authoritativeSessionId
+      },
+      unsubscribe: (): void => {
+        if (closed) return
+        closed = true
+        unsubscribe()
+      },
+    }
   }
 
   /** Open an app-originated attempt on the live domain — the ordering seam

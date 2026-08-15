@@ -8,7 +8,7 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
-    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs",
+    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs && node lint-fixtures/check-row-grammar.mjs",
     "lint:dead-exports": "node lint-fixtures/check-dead-exports.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -22,7 +22,9 @@
     "contracts": "node scripts/gen-contracts.mjs",
     "contracts:check": "node scripts/gen-contracts.mjs --check",
     "lint:two-owners": "node lint-fixtures/check-two-owners.mjs",
-    "baseline:two-owners-update": "node lint-fixtures/update-two-owners-baseline.mjs"
+    "baseline:two-owners-update": "node lint-fixtures/update-two-owners-baseline.mjs",
+    "lint:row-grammar": "node lint-fixtures/check-row-grammar.mjs",
+    "baseline:row-grammar-update": "node lint-fixtures/update-row-grammar-baseline.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",

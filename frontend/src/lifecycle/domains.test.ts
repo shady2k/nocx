@@ -3,10 +3,10 @@
 // when the lane lifecycle names one. Transitions are authenticated events —
 // a domain is opaque, and the only constructor consumes a published fact.
 import { describe, expect, it } from 'vitest'
-import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { LifecycleFact } from './state'
 import { activateDomain, emptyStack, mintDomain, type IntegrationDomain } from './domains'
 
-function fact(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
+function fact(over: Partial<LifecycleFact> = {}): LifecycleFact {
   return { lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1, ...over }
 }
 

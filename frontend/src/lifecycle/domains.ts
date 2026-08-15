@@ -13,6 +13,8 @@
 
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
 
+type DomainLifecycleFact = Omit<LifecycleChanged, 'sessionId'>
+
 const integrationDomainBrand = Symbol('integrationDomain')
 
 /** One authenticated shell or helper instance — logical, never an alias for
@@ -51,7 +53,7 @@ export function emptyStack(): DomainStack {
  *  this records what the kernel concluded, it creates no authority of its
  *  own. A fact that does not name a live domain (no id, no epoch) mints
  *  nothing. */
-export function mintDomain(fact: LifecycleChanged): IntegrationDomain | null {
+export function mintDomain(fact: DomainLifecycleFact): IntegrationDomain | null {
   if (
     fact.lifecycle !== 'prompt_ready' &&
     fact.lifecycle !== 'running' &&

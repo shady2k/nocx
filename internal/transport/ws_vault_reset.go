@@ -30,6 +30,7 @@ func WithVaultReset(s VaultResetService) WSServerOption {
 type vaultResetPreviewResponse struct {
 	SecretCount             int  `json:"secretCount"`
 	ProfileCount            int  `json:"profileCount"`
+	EndpointCount           int  `json:"endpointCount"`
 	SystemKeychainReachable bool `json:"systemKeychainReachable"`
 	VaultInitialized        bool `json:"vaultInitialized"`
 }
@@ -40,9 +41,10 @@ type vaultResetResidueEntry struct {
 }
 
 type vaultResetResponse struct {
-	SecretCount  int                      `json:"secretCount"`
-	ProfileCount int                      `json:"profileCount"`
-	Residue      []vaultResetResidueEntry `json:"residue"`
+	SecretCount   int                      `json:"secretCount"`
+	ProfileCount  int                      `json:"profileCount"`
+	EndpointCount int                      `json:"endpointCount"`
+	Residue       []vaultResetResidueEntry `json:"residue"`
 }
 
 // vaultResetHandlers answers vault.resetPreview and vault.reset. Reset is
@@ -70,13 +72,14 @@ func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcR
 		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetPreviewResponse{
 			SecretCount:             p.Impact.SecretCount,
 			ProfileCount:            p.Impact.ProfileCount,
+			EndpointCount:           p.Impact.EndpointCount,
 			SystemKeychainReachable: p.SystemKeychainReachable,
 			VaultInitialized:        p.VaultInitialized,
 		}))
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -103,13 +106,14 @@ func (h vaultResetHandlers) handleReset(ctx context.Context, req jsonrpcRequest)
 		h.machine.broadcastVaultChanged()
 
 		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
-			SecretCount:  result.Impact.SecretCount,
-			ProfileCount: result.Impact.ProfileCount,
-			Residue:      residue,
+			SecretCount:   result.Impact.SecretCount,
+			ProfileCount:  result.Impact.ProfileCount,
+			EndpointCount: result.Impact.EndpointCount,
+			Residue:       residue,
 		}))
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }

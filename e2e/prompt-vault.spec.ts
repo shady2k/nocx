@@ -104,7 +104,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
 
     await page.keyboard.press('Meta+,')
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
-    await page.locator('.ui-settings-section-nav-item[data-section="Secrets"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="secrets"]').click()
     await expect(page.getByRole('button', { name: 'Set up protection' })).toBeVisible({
       timeout: 10_000,
     })

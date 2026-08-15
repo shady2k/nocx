@@ -24,6 +24,10 @@ export interface ScrollbackControllerOpts {
   snapshotStore: CommandSnapshotStore
   /** Injectable clock. */
   now?: () => number
+  /** Fired after the scrollback is cleared (a `clear` command): the ask
+   *  chip's block went with the blocks, so the mode must close — a chip
+   *  whose block no longer exists would be an invisible mode. */
+  onClear?: () => void
 }
 
 export class ScrollbackController {
@@ -53,9 +57,14 @@ export class ScrollbackController {
   /** True while the end of the live output is visible. */
   private _following = true
   private _followObserver: IntersectionObserver | null = null
+  /** The ask mode's owner (nocx-x8s2.2): called when the scrollback is
+   *  cleared, so the chip — and with it the agent target — closes when its
+   *  block is gone. */
+  private _onClear?: () => void
 
   constructor(opts: ScrollbackControllerOpts) {
     this._renderer = opts.renderer
+    this._onClear = opts.onClear
     const now = opts.now ?? (() => performance.now())
 
     // ── Build the scrollback DOM ─────────────────────────────────────────
@@ -510,12 +519,14 @@ export class ScrollbackController {
     if (isClear) {
       this._blockManager.clearAll()
       this._updateSeparator()
+      // The ask chip's block went with the blocks: close the mode, or the
+      // chip's owner would hold a scope that no longer exists (nocx-x8s2.2).
+      this._onClear?.()
     }
   }
 
-  // ── Auto-scroll ───────────────────────────────────────────────────────
-
-  /** Scroll to the bottom, unless the user has scrolled away from the live end. */
+  /** Scroll to the bottom, unless the user has scrolled away from the live
+   *  end. */
   scrollToBottom(): void {
     if (!this._following) return
     this._scrollToBottom()

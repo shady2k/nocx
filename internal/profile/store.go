@@ -25,10 +25,24 @@ type GroupRepository interface {
 	DeleteGroup(id string) error
 }
 
-// JSONStore persists profiles and groups to a single JSON file on disk.
-// The file format is:
+// EndpointRepository is the persistence interface for AI endpoint CRUD.
+// DeleteEndpoint returns the removed endpoint's credential reference so
+// the caller can delete the material itself (ADR-0030).
+type EndpointRepository interface {
+	LoadEndpoints() ([]Endpoint, error)
+	CreateEndpoint(e Endpoint) error
+	UpdateEndpoint(e Endpoint) error
+	DeleteEndpoint(id string) (string, error)
+}
+
+// JSONStore persists profiles, groups and AI endpoints to a single JSON
+// file on disk. The file format is:
 //
-//	{ "profiles": [...], "groups": [...] }
+//	{ "profiles": [...], "groups": [...], "endpoints": [...] }
+//
+// Endpoints live in the same document as profiles on purpose (ADR-0030,
+// ADR-0031): the bulk secret-reference sweeps a vault reset performs must
+// be one atomic write, and a second document would split them.
 type JSONStore struct {
 	docStore storage.DocumentStore
 	fileName string
@@ -54,8 +68,9 @@ func NewJSONStoreWithDocStore(docStore storage.DocumentStore, fileName string) *
 }
 
 type storeData struct {
-	Profiles []SSHProfile   `json:"profiles,omitempty"`
-	Groups   []ProfileGroup `json:"groups,omitempty"`
+	Profiles  []SSHProfile   `json:"profiles,omitempty"`
+	Groups    []ProfileGroup `json:"groups,omitempty"`
+	Endpoints []Endpoint     `json:"endpoints,omitempty"`
 }
 
 func (s *JSONStore) load() (*storeData, error) {
@@ -381,6 +396,108 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 	}
 
 	return s.writeLocked(d)
+}
+
+// ErrEndpointIDRequired, ErrEndpointExists and ErrEndpointNotFound make
+// endpoint create and update distinguishable.
+var (
+	ErrEndpointIDRequired = errors.New("endpoint ID is required")
+	ErrEndpointExists     = errors.New("endpoint already exists")
+	ErrEndpointNotFound   = errors.New("endpoint not found")
+)
+
+func (s *JSONStore) LoadEndpoints() ([]Endpoint, error) {
+	d, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return d.Endpoints, nil
+}
+
+// CreateEndpoint stores a new endpoint. It refuses an empty ID, refuses to
+// overwrite an existing one, and validates the record (ValidateEndpoint) —
+// the same in-store validation CreateGroup performs.
+func (s *JSONStore) CreateEndpoint(e Endpoint) error {
+	if e.ID == "" {
+		return ErrEndpointIDRequired
+	}
+	if err := ValidateEndpoint(e); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for _, existing := range d.Endpoints {
+		if existing.ID == e.ID {
+			return fmt.Errorf("%s: %w", e.ID, ErrEndpointExists)
+		}
+	}
+	d.Endpoints = append(d.Endpoints, e)
+	return s.writeLocked(d)
+}
+
+// UpdateEndpoint replaces a stored endpoint. It fails if the endpoint does
+// not exist — the same create/update split profiles use — and validates
+// the record.
+func (s *JSONStore) UpdateEndpoint(e Endpoint) error {
+	if e.ID == "" {
+		return ErrEndpointIDRequired
+	}
+	if err := ValidateEndpoint(e); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i, existing := range d.Endpoints {
+		if existing.ID == e.ID {
+			d.Endpoints[i] = e
+			return s.writeLocked(d)
+		}
+	}
+	return fmt.Errorf("%s: %w", e.ID, ErrEndpointNotFound)
+}
+
+// DeleteEndpoint removes the endpoint record and, in the SAME write, clears
+// its credential reference from every remaining record — profile options,
+// group defaults and other endpoints (clearSecretRefLocked). It is the
+// metadata-first half of deleting an endpoint's key (ADR-0011 §4,
+// ADR-0030): nothing may keep pointing at material that is about to be
+// deleted, and separate per-record writes could fail halfway.
+//
+// It returns the removed endpoint's credential reference so the caller can
+// delete the material itself. Idempotent: deleting an absent id reports no
+// reference and succeeds, exactly like DeleteProfile.
+func (s *JSONStore) DeleteEndpoint(id string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return "", err
+	}
+	for i, existing := range d.Endpoints {
+		if existing.ID == id {
+			ref := existing.CredentialRef
+			d.Endpoints = append(d.Endpoints[:i], d.Endpoints[i+1:]...)
+			clearSecretRefLocked(d, ref)
+			if err := s.writeLocked(d); err != nil {
+				return "", err
+			}
+			return ref, nil
+		}
+	}
+	return "", nil
 }
 
 // LoadConnectionSnapshot returns one locked copy of profiles and groups.

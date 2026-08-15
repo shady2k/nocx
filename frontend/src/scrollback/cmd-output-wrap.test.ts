@@ -111,3 +111,68 @@ describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () =>
     expect(probe!.body).toMatch(/visibility\s*:\s*hidden/)
   })
 })
+
+describe('the ask kind body wraps prose but keeps frozen output frozen (nocx-ex636)', () => {
+  it('wraps prose: .cmd-output-ask resolves white-space pre-wrap, not the base pre', () => {
+    // The base .cmd-output rule is pre (frozen rows, nocx-juau); the ask
+    // modifier must come later in the cascade and override for the ask
+    // kind only.
+    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'white-space')).toBe('pre-wrap')
+  })
+
+  it('never runs off the right edge: .cmd-output-ask breaks unbroken runs and scrolls nowhere', () => {
+    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'overflow-wrap')).toBe('break-word')
+    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'overflow-x')).toBe('visible')
+  })
+
+  it('the frozen contract survives untouched: bare .cmd-output is still pre + auto', () => {
+    // The modifier must not leak onto command blocks.
+    expect(shippedValue(['cmd-output'], 'white-space')).toBe('pre')
+    expect(shippedValue(['cmd-output'], 'overflow-x')).toBe('auto')
+  })
+
+  it('terminal output inside an answer keeps the old grammar: .cmd-output-code is pre + auto', () => {
+    // A fenced block the model returns is the one case where the command
+    // rules are the right rules — reached through the kind, never by
+    // accident.
+    expect(shippedValue(['cmd-output-code'], 'white-space')).toBe('pre')
+    expect(shippedValue(['cmd-output-code'], 'overflow-x')).toBe('auto')
+  })
+})
+
+describe('the Ask token is a gutter, not text in the input (nocx-ex636)', () => {
+  it('the gutter clears CM6 chrome: no panel, no divider — a sigil, not a line-number rail', () => {
+    // The token moved out of `.cm-content` because a control inside the
+    // element carrying role="textbox" becomes part of the line's text. What
+    // it moved INTO is a gutter, and CM6's default gutter is dressed as a
+    // rail: a filled column with a divider down the side.
+    const gutters = RULES.find((r) => r.selectors.includes('.nocx-editor .cm-gutters'))
+    expect(gutters).toBeDefined()
+    expect(gutters!.body).toMatch(/background\s*:\s*transparent/)
+    expect(gutters!.body).toMatch(/border-right\s*:\s*none/)
+  })
+
+  it('the chip declares no trailing margin of its own, so the gap has one owner', () => {
+    // The gap between the token and the text belongs to the gutter cell.
+    const indicator = RULES.find((r) => r.selectors.includes('.nocx-editor-target-indicator'))
+    expect(indicator).toBeDefined()
+    expect(indicator!.body).not.toMatch(/margin-right/)
+    const cell = RULES.find((r) =>
+      r.selectors.includes('.nocx-editor .nocx-editor-target-gutter .cm-gutterElement'),
+    )
+    expect(cell).toBeDefined()
+    expect(cell!.body).toMatch(/padding\s*:\s*0 6px 0 0/)
+  })
+
+  it('no line carries a hanging indent any more: the gutter aligns every line by construction', () => {
+    // The widget needed `padding-left` + a negative `text-indent` computed
+    // from a measured token width. A gutter reserves the column on every
+    // line, so those rules are gone and must not creep back.
+    const line = RULES.find((r) => r.selectors.includes('.nocx-editor .cm-line'))
+    expect(line).toBeDefined()
+    expect(line!.body).not.toMatch(/nocx-target-token-width/)
+    expect(RULES.some((r) => r.selectors.some((sel) => sel.includes('cm-widgetBuffer')))).toBe(
+      false,
+    )
+  })
+})

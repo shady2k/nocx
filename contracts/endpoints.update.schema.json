@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/endpoints.update.schema.json",
+  "title": "EndpointsUpdateResult",
+  "description": "Result of the endpoints.update JSON-RPC method: the stored endpoint after the replace (design §4.5.4, ADR-0030). A key sent in the params rotates the material behind the endpoint's own secret — same reference, never orphaned — and the result carries the unchanged row handle. The shape is the single declaration in endpoints.list.schema.json, referenced cross-file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpoint"],
+  "properties": {
+    "endpoint": {
+      "$ref": "endpoints.list.schema.json#/$defs/endpoint"
+    }
+  }
+}

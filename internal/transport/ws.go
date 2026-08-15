@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
@@ -38,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
+	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -211,9 +214,10 @@ type WSServer struct {
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
 	localCompleter completion.Completer
-	// sshCompleter answers shell.complete for KindRemote sessions.
-	// When nil, the method returns a stated empty reason for SSH sessions.
-	sshCompleter completion.Completer
+	// sshCompleter answers shell.complete for KindRemote sessions with the
+	// exact SSH options captured from the live terminal session. When nil,
+	// the method returns a stated empty reason for SSH sessions.
+	sshCompleter RemoteCompleter
 
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
@@ -234,6 +238,29 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
+	// assistantClient is the eino-backed engine (nocx-edio) behind
+	// endpoints.probe and agent.status's last-probe fact. When nil, the
+	// endpoints.probe method answers -32601 "agent not available".
+	assistantClient assistant.Client
+	// assistantProbes records the last endpoints.probe outcome — the
+	// process-lifetime "last probe result" agent.status reports. When nil,
+	// probes still run and return their outcome, but agent.status reports
+	// lastProbe null.
+	assistantProbes *assistant.ProbeStore
+	// agentProbeSub admits and runs endpoints.probe probes off the read
+	// loop: a streaming probe can take tens of seconds and must never
+	// freeze the socket that feeds every other tab. Capacity one composed
+	// with the lane, exactly like probeSub: a second test is refused with
+	// the control-saturated error.
+	agentProbeSub control.Submission
+	// askSub admits and runs the ask STREAM tasks (nocx-x8s2.2) off the
+	// read loop: a model stream can take minutes, so it must not freeze
+	// the socket. Bounded at askStreamCapacity — several asks overlap (the
+	// acceptance criterion drives two at once) but a runaway renderer
+	// cannot spawn unbounded model calls. The task context derives from
+	// the connection, so a disconnect cancels the stream and the run
+	// terminalizes.
+	askSub control.Submission
 	// lane is the ordinary control lane: the shared bounded worker pool every
 	// admission-backed control method runs on (registration.go). Capacity
 	// laneCapacity; a full lane refuses new work with the control-saturated
@@ -540,7 +567,7 @@ type ProfileResolver interface {
 
 // resolverHolder is the mutable profile-resolver seam. The resolver is set
 // post-construction (SetProfileResolver) because it depends on the transport
-// (the UnlockRequester wiring) and must be created after the transport
+// (the connection-password ask) and must be created after the transport
 // exists. The operations and seam handlers that use it therefore hold the
 // holder and read the current value per call, never a captured nil. It
 // satisfies both transport.ProfileResolver and capability.ProfileResolver
@@ -581,8 +608,8 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 }
 
 // SetProfileResolver sets the profile resolver post-construction. Used when
-// the resolver depends on the transport (e.g. for UnlockRequester wiring)
-// and must be created after the transport exists.
+// the resolver depends on the transport (the connection-password ask) and
+// must be created after the transport exists.
 func (s *WSServer) SetProfileResolver(r ProfileResolver) {
 	s.resolver.set(r)
 }
@@ -617,15 +644,22 @@ func WithRemoteLifecycle(l ssh.RemoteLifecycle) WSServerOption {
 	return func(s *WSServer) { s.remoteLifecycle = l }
 }
 
+// RemoteCompleter runs one completion against the immutable SSH route copied
+// from the live session. The options are part of the contract: omitting them
+// silently replaces a jump-routed pooled connection with a direct dial.
+type RemoteCompleter interface {
+	Complete(context.Context, completion.Request, ...ssh.ConnectOption) (*completion.Response, error)
+}
+
 // WithCompleters attaches the completion sources for shell.complete
-// (nocx-w7h.15). local answers KindLocal sessions; ssh answers KindRemote
-// sessions through the DiscoveryConn lane. Either may be nil — the handler
-// then returns a stated empty reason for that session kind rather than
-// a JSON-RPC error.
-func WithCompleters(local, ssh completion.Completer) WSServerOption {
+// (nocx-w7h.15). local answers KindLocal sessions; remote answers
+// KindRemote sessions through a DiscoveryConn acquired with that session's
+// exact SSH options. Either may be nil — the handler then returns a stated
+// empty reason for that session kind rather than a JSON-RPC error.
+func WithCompleters(local completion.Completer, remote RemoteCompleter) WSServerOption {
 	return func(s *WSServer) {
 		s.localCompleter = local
-		s.sshCompleter = ssh
+		s.sshCompleter = remote
 	}
 }
 
@@ -634,6 +668,22 @@ func WithCompleters(local, ssh completion.Completer) WSServerOption {
 // the caller but not persisted in memory.
 func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
 	return func(ws *WSServer) { ws.probeResultStore = s }
+}
+
+// WithAssistantClient attaches the assistant engine (nocx-edio): the one
+// eino-backed client behind the endpoints.probe probe and the future ask
+// transaction. When nil, endpoints.probe answers -32601 "agent not
+// available".
+func WithAssistantClient(ac assistant.Client) WSServerOption {
+	return func(ws *WSServer) { ws.assistantClient = ac }
+}
+
+// WithAssistantProbeStore attaches the process-lifetime store of the last
+// endpoints.probe outcome — agent.status's "last probe result" fact. When
+// nil, probes still run and return their outcome, but agent.status reports
+// lastProbe null.
+func WithAssistantProbeStore(store *assistant.ProbeStore) WSServerOption {
+	return func(ws *WSServer) { ws.assistantProbes = store }
 }
 
 // WSServerOption configures a WSServer.
@@ -655,6 +705,25 @@ func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
 // secrets.* and vault.* secret operations.
 func WithCredentialStore(cs credential.SecretStore) WSServerOption {
 	return func(s *WSServer) { s.credentials = cs }
+}
+
+// credentialResolver is the STANCED read seam over the credential store
+// (nocx-k41yv): the form every handler that resolves material on a person's
+// behalf is wired with. Handlers hold this rather than the store, because
+// the store's Get takes no stance and a seam that can be bypassed is the
+// one that was — three times.
+//
+// The sealed predicate is injected here, at the composition root, because
+// internal/credential must not import the vault (the vault imports it) and
+// because which implementation's sealed error is in play is precisely a
+// composition decision.
+func (s *WSServer) credentialResolver() credential.Resolver {
+	if s.credentials == nil {
+		return nil
+	}
+	return credential.NewResolver(s.credentials, func(err error) bool {
+		return errors.Is(err, vault.ErrVaultSealed)
+	})
 }
 
 // WithCredentialStore attaches a credential store, enabling the
@@ -832,6 +901,14 @@ const DefaultDomainMaxQueue = 8
 // is refused at submit time.
 const DefaultDomainQueueDepth = 8
 
+// askStreamCapacity bounds concurrent model streams (agent.ask, nocx-
+// x8s2.2). Several asks must overlap — the acceptance criterion drives two
+// at once and they stream concurrently — but a runaway renderer cannot
+// spawn unbounded model calls. A stream beyond the capacity refuses at
+// submit time and the run terminalizes failed ("too many answers in
+// flight") rather than queueing behind an unbounded backlog.
+const askStreamCapacity = 4
+
 // WithDomainConflictWaitTimeout sets how long a request waits on a domain
 // conflict gate before the wait is refused. Tests use a short value to
 // exhaust the bound deterministically and a long one to hold a conflict
@@ -893,42 +970,46 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 }
 
 // buildControlPlane wires the scheduling contract after every option has
-// been applied: the ordinary lane (the bounded worker pool), the probe and
-// dialog resource admissions composed with it, the waiting domain gates,
-// and the validated method registrations. A validation failure (a duplicate
-// method, an ingress-critical method outside the closed set) is a
-// programming error and panics the server build rather than freezing a
-// socket at runtime.
-//
-// Domain-gated methods do not register on the lane submission: their
-// operation acquires the conflict gates (waiting, bounded) and THEN the
-// lane inside Run, on the task goroutine, so waiting conflict work never
-// occupies a worker permit and the read loop never blocks on a conflict.
-// The per-operation queue submissions bound in-flight tasks per operation.
+// been applied: the lane, the capacity-one resource admissions (probe,
+// agent probe, dialog), the domain gates and the validated registration
+// set. A registration that cannot be validated fails the server build
+// rather than freezing a socket at runtime.
 func (s *WSServer) buildControlPlane() {
 	lane := control.NewSemaphore("control", s.laneCapacity)
 	s.lane = control.NewBoundedSubmission(lane)
-	// Probe and dialog keep their own capacity-one resource admissions
-	// composed with the lane (canonical order: resource before execution
-	// permit): a second probe or dialog is refused even while the lane has
-	// free permits, and every task still occupies one lane permit.
+	// Probe, agent probe and dialog keep their own capacity-one resource
+	// admissions composed with the lane (canonical order: resource before
+	// execution permit): a second probe or dialog is refused even while the
+	// lane has free permits, and every task still occupies one lane permit.
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
+	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
+		control.NewSemaphore("agent-probe", 1), lane))}
+	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
+		control.NewSemaphore("agent-ask", askStreamCapacity), lane))}
 	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("dialog", 1), lane))}
-
+	// Domain-gated methods do not register on the lane submission: their
+	// operation acquires the conflict gates (waiting, bounded) and THEN the
+	// lane inside Run, on the task goroutine, so waiting conflict work never
+	// occupies a worker permit and the read loop never blocks on a conflict.
+	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
+	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
+	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
-	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.contentSpecs(lane, gates.content)...)
+	contentSub := s.operationQueue("content")
+	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
@@ -1135,11 +1216,14 @@ type Responder interface {
 }
 
 // RPCError is the payload of a JSON-RPC error response. Data is omitted
-// from the wire when nil (parity with jsonrpcErrorObj's omitempty).
+// from the wire when nil (parity with jsonrpcErrorObj's omitempty). Method is
+// internal-only metadata used by the sole response seam to diagnose an
+// in-handler saturation refusal; it is never serialized.
 type RPCError struct {
 	Code    int
 	Message string
 	Data    any
+	method  string
 }
 
 // wsConn wraps a connection's outbound side (outbound.Conn — the socket,
@@ -1153,6 +1237,7 @@ type RPCError struct {
 // and never reused.
 type wsConn struct {
 	out *outbound.Conn
+	log log.Logger
 	id  uint64
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
@@ -1173,7 +1258,8 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 				}
 			},
 		}),
-		id: id,
+		log: s.log,
+		id:  id,
 	}
 }
 
@@ -1182,6 +1268,11 @@ func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
+	if rpcErr.Code == SaturationErrorCode {
+		if data, ok := rpcErr.Data.(saturationData); ok {
+			logSaturationRefusal(w.log, rpcErr.method, "request", data)
+		}
+	}
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -1259,6 +1350,16 @@ func (c *connState) has(id session.ID) bool {
 	defer c.mu.Unlock()
 	_, ok := c.sessions[id]
 	return ok
+}
+
+// get returns the connection's session object for id, if the connection
+// owns it — what a handler needs to derive backend-authoritative facts
+// (the ledger environment) from the session.
+func (c *connState) get(id session.ID) (session.Session, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s, ok := c.sessions[id]
+	return s, ok
 }
 
 // Owns reports whether this connection has opened or reattached to the
@@ -1787,13 +1888,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if rej == nil {
 		return
 	}
+	sat := saturationErrorFor(rej)
 	// Refused. A request (has an id) answers with the saturation error; a
 	// notification (no id) has no response to carry it, so the server emits
 	// the rate-limited control.saturated notification instead.
 	if req.ID != nil {
-		_ = wconn.TryError(req.ID, saturationRPCError(rej))
+		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
 		return
 	}
+	logSaturationRefusal(s.log, req.Method, "notification", sat.Data)
 	s.emitSaturatedNotification(wconn, req.Method, rej)
 }
 

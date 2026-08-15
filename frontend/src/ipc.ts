@@ -230,6 +230,9 @@ export class WSClient {
   private sessions = new Map<string, SessionState>()
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
+  // Reattach-outcome subscribers (nocx-gbhwh): the notice consumes the
+  // aggregate of one reconnect's session reattach pass.
+  private reconnectResultHandlers = new Set<(r: { resumed: number; lost: number }) => void>()
 
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
@@ -264,8 +267,10 @@ export class WSClient {
 
       // Reattach every session the client still knows about. Each attach
       // carries the last received byte offset so the server can replay
-      // what the ring still holds.
-      for (const [sid, state] of this.sessions) {
+      // what the ring still holds. The outcomes are aggregated so a
+      // listener can state what became of the sessions on this reconnect
+      // (nocx-gbhwh): resumed, or gone — the backend no longer has them.
+      const reattached = [...this.sessions.entries()].map(([sid, state]) =>
         this._sendAttach(sid, state.offset)
           .then((result) => {
             if (result.reset) {
@@ -281,12 +286,24 @@ export class WSClient {
               state.decoder.reset()
               state.resetCallback?.()
             }
+            return 'resumed' as const
           })
           .catch(() => {
             state.exitCallback?.(sid)
             this.sessions.delete(sid)
-          })
-      }
+            return 'lost' as const
+          }),
+      )
+      // Report once every attach has settled — the socket is back before
+      // this fires, never the other way round. Zero sessions resolves
+      // immediately with { resumed: 0, lost: 0 }.
+      void Promise.all(reattached).then((outcomes) => {
+        const resumed = outcomes.filter((o) => o === 'resumed').length
+        const lost = outcomes.length - resumed
+        for (const h of this.reconnectResultHandlers) {
+          h({ resumed, lost })
+        }
+      })
     })
 
     // Handle server-initiated exit notifications.
@@ -527,6 +544,18 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.inputStalledCallback = cb
+    }
+  }
+
+  /** Report the aggregate outcome of one reconnect's session-reattach pass:
+   *  how many known sessions came back and how many are gone (the backend
+   *  no longer has them). Fires once per onConnect, after every attach
+   *  attempt has settled — never before the socket is back (nocx-gbhwh).
+   *  Returns an unsubscribe. */
+  onReconnectResult(cb: (r: { resumed: number; lost: number }) => void): () => void {
+    this.reconnectResultHandlers.add(cb)
+    return () => {
+      this.reconnectResultHandlers.delete(cb)
     }
   }
 

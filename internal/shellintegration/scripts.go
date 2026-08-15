@@ -202,7 +202,12 @@ var (
 // against a completion widget, against our own function (the launcher's
 // deliberate second source would chain to itself), and against an
 // implementation that is not a callable function.
-const version = "38"
+// 39: nested sudo is capability-gated before the authenticated parent is
+// suspended. sudo implementations without --preserve-fds now run the user's
+// original command conventionally instead of rejecting nocx's generated argv
+// and consuming the command. BASHOPTS is scrubbed at the privileged child
+// boundary so nocx's internal extdebug never makes the child attempt bashdb.
+const version = "39"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

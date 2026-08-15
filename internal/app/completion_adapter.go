@@ -31,14 +31,27 @@ func (a *discoveryConnAdapter) Close() error {
 	return a.inner.Close()
 }
 
-// sshExecConnProvider returns an ExecConnProvider backed by the SSH
-// client's DiscoveryConn. The host is the session's remote hostname;
-// the SSH client resolves it through ~/.ssh/config and acquires an
-// owned pooled lease that shares the session's connection when the
-// pool keys match.
-func sshExecConnProvider(client *ssh.RealClient) completion.ExecConnProvider {
+type discoveryLeaseProvider interface {
+	DiscoveryConn(context.Context, string, ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
+}
+
+// routedSSHCompleter binds the completion engine to the SSH client without
+// making internal/completion import internal/ssh. Every call receives the
+// exact options captured from the live session.
+type routedSSHCompleter struct {
+	client discoveryLeaseProvider
+}
+
+func (c *routedSSHCompleter) Complete(ctx context.Context, req completion.Request, opts ...ssh.ConnectOption) (*completion.Response, error) {
+	return completion.NewSSH(sshExecConnProvider(c.client, opts...)).Complete(ctx, req)
+}
+
+// sshExecConnProvider returns an ExecConnProvider backed by the SSH client's
+// DiscoveryConn. opts are the terminal session's original connect options;
+// forwarding them is what makes jump routes and the pool key identical.
+func sshExecConnProvider(client discoveryLeaseProvider, opts ...ssh.ConnectOption) completion.ExecConnProvider {
 	return func(ctx context.Context, host string) (completion.ExecConn, error) {
-		dc, err := client.DiscoveryConn(ctx, host)
+		dc, err := client.DiscoveryConn(ctx, host, opts...)
 		if err != nil {
 			return nil, err
 		}

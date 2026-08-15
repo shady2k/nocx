@@ -90,24 +90,18 @@ func (p *passwordAsker) bindPasswordSecret(ctx context.Context, id credential.Se
 	return nil
 }
 
-// createNamedWithUnlock creates the secret, retrying once through the vault
-// unlock requester when the vault is sealed — the same recovery the auth
-// chain applies to stored-secret reads. When the unlock is refused, the
-// sealed-vault outcome is a distinct error with its own message: the user
-// said remember, the product could not honor it, and a silent degrade to
-// use-once would make the next open prompt again with no explanation.
+// createNamedWithUnlock creates the secret. The unlock is NOT this
+// layer's: a sealed vault is a sealed-vault failure, normalized by the
+// transport's dispatcher seam into the canonical error the renderer turns
+// into the unlock prompt, and the whole call (the connection open) is
+// re-sent once the vault answers (ADR-0032). The error keeps the wrap so
+// errors.Is still finds ErrVaultSealed through the ssh auth chain.
 func (r *Resolver) createNamedWithUnlock(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error) {
 	id, name, err := r.creator.CreateNamedResolved(ctx, value, meta)
-	if err == nil {
-		return id, name, nil
-	}
-	if !errors.Is(err, vault.ErrVaultSealed) || r.unlockRequester == nil {
+	if err != nil {
 		return "", "", fmt.Errorf("the connection password was not saved: %w", err)
 	}
-	if uerr := r.unlockRequester(ctx, "save the connection password"); uerr != nil {
-		return "", "", fmt.Errorf("the vault is sealed and could not be unlocked; the connection password was not saved: %w", uerr)
-	}
-	return r.creator.CreateNamedResolved(ctx, value, meta)
+	return id, name, nil
 }
 
 // accountName is the per-account key a remembered password is stored under:

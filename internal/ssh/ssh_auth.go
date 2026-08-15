@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -250,25 +249,12 @@ func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, store credential.
 	return store.Get(ctx, id)
 }
 
-// getSecretWithUnlock wraps Secrets.Get with an unlock+retry when the vault
-// is sealed. The reason describes what needs the secret (e.g. "read the
-// stored password") so the unlock prompt can say why it is asking.
-// When cfg.UnlockRequester is nil or the unlock is refused, the original
-// error (typically ErrVaultSealed) propagates unchanged — the foreground
-// RPC path catches it via dispatcher.onVaultSealed.
+// getSecretWithUnlock reads the stored secret. The unlock is NOT this
+// layer's: a sealed vault is a sealed-vault failure that propagates to the
+// session.open handler, which emits the canonical sealed error the renderer
+// turns into the unlock prompt; the whole open is re-sent once the vault
+// answers (ADR-0032).
 func (rc *RealClient) getSecretWithUnlock(ctx context.Context, cfg *ConnectConfig, id credential.SecretID, reason string) (credential.Secret, error) {
-	sec, err := cfg.Secrets.Get(ctx, id)
-	if err == nil {
-		return sec, nil
-	}
-	// Only the sealed case is recoverable; every other error (not found,
-	// provider unavailable, corrupt material) propagates as-is.
-	if !errors.Is(err, vault.ErrVaultSealed) || cfg.UnlockRequester == nil {
-		return credential.Secret{}, err
-	}
-	if uerr := cfg.UnlockRequester(ctx, reason); uerr != nil {
-		return credential.Secret{}, fmt.Errorf("vault sealed and unlock refused: %w", uerr)
-	}
 	return cfg.Secrets.Get(ctx, id)
 }
 

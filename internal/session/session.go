@@ -409,10 +409,6 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.PasswordRequester != nil {
 		opts = append(opts, ssh.WithPasswordRequester(cfg.PasswordRequester))
 	}
-	if cfg.UnlockRequester != nil {
-		opts = append(opts, ssh.WithUnlockRequester(cfg.UnlockRequester))
-	}
-
 	if cfg.AuthorizedEndpoint != "" {
 		opts = append(opts, ssh.WithAuthorizedEndpoint(cfg.AuthorizedEndpoint))
 	}

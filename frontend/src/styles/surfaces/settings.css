@@ -76,39 +76,22 @@
   font-weight: 500;
 }
 
-/* ── Section navigation in rail ────────────────────────────────────── */
+/* ── Narrow breakpoint — the rail stacks above the content (nocx-dgsp) ─
+   The surface's half of the compact stacked rail: one (smaller) type size
+   for the whole column keeps search/filter/nav peers, and tighter gutters —
+   the GroupedRail component's own narrow rules and the rail's compact
+   chrome (base.css, where PageRail owns its breakpoint) do the rest. The
+   rail must not scroll at this breakpoint (scroll-ownership §6.2), so the
+   stacked layout shrinks instead of gaining a scroller. */
+@media (max-width: 640px) {
+  .ui-settings-rail {
+    font-size: var(--font-size-sm);
+  }
 
-.ui-settings-section-nav {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.ui-settings-section-nav-item {
-  margin-bottom: 2px;
-}
-
-/* Placement for the nav row, and only placement. The look — transparent, borderless,
-   inheriting the surrounding type, and its hover — belongs to Button's `ghost` variant
-   (T14, nocx-c2t6); the hit area went with it in T20 (nocx-zhjx), because a variant
-   with no padding of its own is incomplete rather than customised. `text-align: left`
-   went too: the row is a flex container, so it was inert, and the leftward run of the
-   label is the default in this writing mode rather than something to declare.
-
-   What is left is how the row sits in the rail: it fills the width, its children line
-   up on the cross axis, and the badge pushes to the end (below). */
-.ui-settings-section-nav-item > .ui-button {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-}
-
-/* The active row's fill, its hover and the badge's colours on it all moved into
-   button.css with T20 (nocx-etu2): they are the look of a selected Button, and the
-   rail was painting them from outside. What stays here is placement. */
-.ui-settings-section-nav-item > .ui-button .ui-badge {
-  margin-left: auto;
+  .ui-settings-search,
+  .ui-settings-filter {
+    margin-bottom: var(--space-2);
+  }
 }
 
 /* ── Content area ────────────────────────────────────────────────────────

@@ -274,13 +274,16 @@ func (h *inventoryHarness) callInventory() inventoryResponse {
 	return result.Result
 }
 
-func (h *inventoryHarness) callInventoryError() (int, string) {
+func (h *inventoryHarness) callInventoryError() (int, string, string) {
 	h.t.Helper()
 	resp := jsonrpcCall(h.t, h.conn, "vault.inventory", map[string]any{})
 	var errResult struct {
 		Error *struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
+			Data    *struct {
+				Reason string `json:"reason"`
+			} `json:"data"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(resp, &errResult); err != nil {
@@ -289,7 +292,11 @@ func (h *inventoryHarness) callInventoryError() (int, string) {
 	if errResult.Error == nil {
 		h.t.Fatal("expected error, got success")
 	}
-	return errResult.Error.Code, errResult.Error.Message
+	reason := ""
+	if errResult.Error.Data != nil {
+		reason = errResult.Error.Data.Reason
+	}
+	return errResult.Error.Code, errResult.Error.Message, reason
 }
 
 // (owner + count). This drives the real backend over the real socket — no
@@ -378,19 +385,28 @@ func TestVaultInventory_SealedVault(t *testing.T) {
 
 	h.v.Seal()
 
-	code, msg := h.callInventoryError()
-	if code != -32001 {
-		t.Errorf("error code = %d, want -32001 (ErrVaultSealed)", code)
+	// The sealed vault answers with the canonical sealed error — code
+	// -32001, reason vault-sealed — the shape the renderer's dispatcher
+	// turns into the unlock prompt (ADR-0032). The prompt itself is the
+	// renderer's, so nothing here blocks on an ask: the answer is
+	// immediate, and no prompt was raised.
+	code, msg, reason := h.callInventoryError()
+	if code != vaultSealedCode {
+		t.Errorf("error code = %d, want %d (ErrVaultSealed)", code, vaultSealedCode)
+	}
+	if reason != "vault-sealed" {
+		t.Errorf("reason = %q, want %q", reason, "vault-sealed")
 	}
 	if msg == "" {
 		t.Error("expected non-empty error message for sealed vault")
 	}
+	assertNoPendingAsk(t, h.ws)
 }
 
 func TestVaultInventory_UninitializedVault(t *testing.T) {
 	h := newInventoryHarness(t)
 
-	code, msg := h.callInventoryError()
+	code, msg, _ := h.callInventoryError()
 	if code != -32000 {
 		t.Errorf("error code = %d, want -32000 (ErrVaultUninitialized)", code)
 	}

@@ -113,7 +113,7 @@ func (h captureSaveHandlers) handleCaptureSave(ctx context.Context, req jsonrpcR
 				return nil
 			})
 			if runErr != nil {
-				answerOperationRefusal(h.r, req.ID, runErr)
+				answerOperationRefusal(h.r, req, runErr)
 			}
 			return
 		}
@@ -162,7 +162,7 @@ func (h captureSaveHandlers) handleCaptureSave(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

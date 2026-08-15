@@ -57,7 +57,8 @@ export interface BlockReceiptCallbacks {
 export class BlockReceipt {
   readonly root: HTMLElement
   private readonly callbacks: BlockReceiptCallbacks
-  private readonly rows: Map<string, { rowEl: HTMLElement; input: HTMLInputElement }> = new Map()
+  private readonly rows: Map<string, { rowEl: HTMLElement; input: HTMLInputElement | null }> =
+    new Map()
   private readonly primaryBtn: HTMLButtonElement
   private readonly actionsEl: HTMLElement
 
@@ -123,7 +124,7 @@ export class BlockReceipt {
   saveAll(): void {
     const rows: Array<{ captureId: string; name: string }> = []
     for (const [captureId, row] of this.rows) {
-      rows.push({ captureId, name: row.input.value.trim() })
+      rows.push({ captureId, name: row.input?.value.trim() ?? '' })
     }
     if (rows.length > 0) this.callbacks.onSaveAll(rows)
   }
@@ -162,14 +163,13 @@ export class BlockReceipt {
 
   /** ⇧⌘S: review mode — focus the first row's name field. */
   enterReview(): void {
-    const first = this.rows.values().next().value as { input: HTMLInputElement } | undefined
-    first?.input.focus()
+    const first = this.rows.values().next().value as { input: HTMLInputElement | null } | undefined
+    first?.input?.focus()
   }
 
   destroy(): void {
     this.root.remove()
   }
-
   private buildRow(capture: BlockReceiptCapture): HTMLElement {
     const rowEl = document.createElement('div')
     rowEl.className = 'ui-block-receipt__row'
@@ -184,7 +184,8 @@ export class BlockReceipt {
     value.className = 'ui-block-receipt__value'
     value.textContent = capture.maskedValue
 
-    const input = document.createElement('input')
+    let input: HTMLInputElement | null = null
+    input = document.createElement('input')
     input.className = 'ui-text-field__input'
     input.type = 'text'
     input.value = capture.suggestedName
@@ -202,7 +203,10 @@ export class BlockReceipt {
     drop.setAttribute('aria-label', `do not save this ${capture.kindLabel}`)
     drop.addEventListener('click', () => this.callbacks.onDismiss(capture.captureId))
 
-    rowEl.append(badge, value, input, drop)
+    const children: Array<Node | string> = [badge, value]
+    if (input) children.push(input)
+    children.push(drop)
+    rowEl.append(...children)
 
     // Hover emphasises this row's chip in the block's command line — and
     // only this one.

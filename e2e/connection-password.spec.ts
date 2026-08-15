@@ -158,7 +158,7 @@ function startSshd(password?: string): Promise<{
 async function setupVault(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
   await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-  await page.locator('.ui-settings-section-nav-item[data-section="Secrets"]').click()
+  await page.locator('.ui-grouped-nav__item[data-item="secrets"]').click()
   await page.getByRole('button', { name: 'Set up protection' }).click()
   const setupDialog = page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })
   await expect(setupDialog).toBeVisible({ timeout: 10_000 })
@@ -213,7 +213,7 @@ test.describe('connection password ask: first open prompts, remembered second op
     writeFileSync(join(home, '.ssh', 'known_hosts'), fixture.knownHosts + '\n')
 
     // ── Phase 3: FIRST open — the ask fires, names the connection ────────
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator(CONNECT_BTN)).toBeVisible({ timeout: 10_000 })
     await page.locator(CONNECT_BTN).click()
 
@@ -306,7 +306,7 @@ test.describe('open-time host key consent', () => {
     await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
 
     await setupVault(page)
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await page.locator(`[aria-label="Connect to ${HOST_KEY_PROFILE_NAME}"]`).click()
 
     const dialog = page.getByRole('dialog').filter({ hasText: 'Unknown host key' })

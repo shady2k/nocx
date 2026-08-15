@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.runState.schema.json",
+  "title": "AgentRunState",
+  "description": "Params of the agent.runState server-to-client notification (nocx-x8s2.2, design §7): the run's terminal state. A renderer that reconnects mid-answer reads the run's state and its appended chunks from the ledger; it never infers liveness from notifications having stopped. error is present ONLY for failed, and it is a sentence a person reads — never a Go error string.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "state"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id whose state changed.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "description": "The run's state, exactly as the renderer draws it (design §7). This notification carries a terminal state: completed | cancelled | failed | interrupted.",
+      "type": "string",
+      "enum": [
+        "prepared",
+        "streaming",
+        "awaiting_approval",
+        "completed",
+        "cancelled",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "error": {
+      "description": "The reason, present only for failed: a sentence a person reads ('the endpoint's credential is unavailable — unlock the vault'), never a Go error string.",
+      "type": "string"
+    }
+  }
+}

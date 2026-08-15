@@ -15,21 +15,20 @@
 // showing the parent's values there would name an identity that is not
 // taking the keystrokes.
 import { describe, expect, it, vi } from 'vitest'
-import type { LifecycleChanged } from '../generated/lifecycle.changed'
-import { LifecycleKernel } from './state'
+import { LifecycleKernel, type LifecycleFact } from './state'
 import { DomainEnvironmentProjection } from './domain-environment'
 
-function promptReady(domain: string, epoch: number): LifecycleChanged {
+function promptReady(domain: string, epoch: number): LifecycleFact {
   return { lane: 'lane-1', lifecycle: 'prompt_ready', domain, epoch }
 }
 
-function nativeFact(): LifecycleChanged {
+function nativeFact(): LifecycleFact {
   return { lane: 'lane-1', lifecycle: 'native' }
 }
 
 /** A completed-attempt fact: the shell's authenticated same-domain
  *  completion for `attemptId` in `domain`. */
-function completed(domain: string, epoch: number, attemptId: string): LifecycleChanged {
+function completed(domain: string, epoch: number, attemptId: string): LifecycleFact {
   return {
     lane: 'lane-1',
     lifecycle: 'running',

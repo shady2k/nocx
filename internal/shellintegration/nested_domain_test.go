@@ -321,20 +321,95 @@ func capBytes(t *testing.T, hexCap string) lifecycle.Capability {
 // preserved-fd launch, child establish, activate — is what this test
 // proves; the platform's sudo flag support is the container's job.
 func TestBashNestedChildDomain(t *testing.T) {
-	bash := requireShell(t, "bash")
 	k := newNestedKernel(t)
 	// The fake sudo: the launch line is
-	// `sudo --preserve-fds=3,4 -i env -u BASH_ENV bash --rcfile /dev/fd/4 -i`;
-	// a preserve-fds sudo would keep fds 3 and 4 and run that command. The
-	// fake ignores the sudo-specific prefix and execs the same child bash.
+	// `env -u BASHOPTS sudo --preserve-fds=3,4 -i env -u BASH_ENV
+	// -u BASHOPTS bash --rcfile /dev/fd/4 -i`; a preserve-fds sudo keeps
+	// fds 3 and 4 and runs that command. The fake strips sudo's own arguments
+	// and executes the generated child.
 	fakeSudo := "#!/bin/sh\n" +
+		"# Advertise the capability the production launcher probes before\n" +
+		"# consuming the user's sudo command.\n" +
+		"if [ \"$1\" = --help ]; then echo '  --preserve-fds=list'; exit 0; fi\n" +
 		"# Test stand-in for a preserve-fds-capable sudo: plain exec preserves\n" +
-		"# every fd, and the launch names the rcfile descriptor the parent\n" +
-		"# allocated ({var} may choose any free fd, never a fixed 4).\n" +
-		"for a in \"$@\"; do case \"$a\" in /dev/fd/[0-9]*) rc=\"$a\";; esac; done\n" +
-		"exec " + ShellQuote(bash) + " --rcfile \"${rc:-/dev/fd/4}\" -i\n"
+		"# every fd. Strip sudo's own prefix, then execute the REAL generated\n" +
+		"# child command so its environment boundary is covered too.\n" +
+		"shift\n" +
+		"[ \"$1\" = -i ] && shift\n" +
+		"exec \"$@\"\n"
 	s := startNestedBashParent(t, k, "sudo", fakeSudo)
+	exportBashOptsWithExtdebug(t, s, k)
 	driveNestedHappyInterval(t, s, k, "sudo -i", "")
+	assertNoInheritedBashDebugger(t, s)
+}
+
+// BASHOPTS is readonly but can retain the export attribute from user startup.
+// nocx then adds extdebug, and an unguarded nested Bash tries to start bashdb
+// before it can read the granted rcfile. Force that real parent state and wait
+// for its boundary before launching the child.
+func exportBashOptsWithExtdebug(t *testing.T, s *channelShell, k *nestedKernel) {
+	t.Helper()
+	before := k.count("complete")
+	_, _ = s.ptmx.Write([]byte("export LC_ALL=C BASHOPTS\n"))
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && k.count("complete") == before {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if k.count("complete") == before {
+		t.Fatalf("parent never completed BASHOPTS setup; output=%q", s.output())
+	}
+}
+
+func assertNoInheritedBashDebugger(t *testing.T, s *channelShell) {
+	t.Helper()
+	if strings.Contains(s.output(), "debugging mode disabled") {
+		t.Fatalf("nested child inherited debugger mode through BASHOPTS; output=%q", s.output())
+	}
+}
+
+// TestBashNestedSudoWithoutPreserveFDSRunsConventionally proves the honest
+// compatibility fallback: capability detection happens before the parent
+// requests or suspends a child domain, so an older sudo sees the user's exact
+// `-i` argument once and never sees nocx's internal descriptor launcher.
+func TestBashNestedSudoWithoutPreserveFDSRunsConventionally(t *testing.T) {
+	k := newNestedKernel(t)
+	s := startNestedBashParent(t, k, "sudo", fakeSudoWithoutPreserveFDS())
+	assertUnsupportedSudoRunsConventionally(t, s, k)
+}
+
+func fakeSudoWithoutPreserveFDS() string {
+	return "#!/bin/sh\n" +
+		"if [ \"$1\" = --help ]; then echo 'usage: sudo -i'; exit 0; fi\n" +
+		"printf 'CONVENTIONAL-SUDO:%s\\n' \"$*\"\n"
+}
+
+func assertUnsupportedSudoRunsConventionally(t *testing.T, s *channelShell, k *nestedKernel) {
+	t.Helper()
+	_, _ = s.ptmx.Write([]byte("sudo -i\n"))
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.output(), "CONVENTIONAL-SUDO:") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	out := s.output()
+	if !strings.Contains(out, "CONVENTIONAL-SUDO:-i") {
+		t.Fatalf("the user's sudo command did not run conventionally; output=%q", out)
+	}
+	if strings.Contains(out, "CONVENTIONAL-SUDO:--preserve-fds") {
+		t.Fatalf("unsupported sudo received nocx's internal launcher; output=%q", out)
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.parentSuspended || k.childHeard {
+		t.Fatalf("unsupported sudo opened a child interval; order=%v output=%q", k.order, out)
+	}
+	for _, step := range k.order {
+		if step == testDom+" domain_request" {
+			t.Fatalf("unsupported sudo requested a child domain; order=%v output=%q", k.order, out)
+		}
+	}
 }
 
 // startNestedBashParent boots a real interactive bash on a pty with the
@@ -617,14 +692,17 @@ func startNestedZshParent(t *testing.T, k *nestedKernel, binName, fakeBody strin
 // inherited socketpair, and the parent re-activates only after the child
 // closes — through its authenticated activation, never by a close alone.
 func TestZshNestedChildDomain(t *testing.T) {
-	bash := requireShell(t, "bash")
 	k := newNestedKernel(t)
 	fakeSudo := "#!/bin/sh\n" +
+		"# Advertise the capability the production launcher probes before\n" +
+		"# consuming the user's sudo command.\n" +
+		"if [ \"$1\" = --help ]; then echo '  --preserve-fds=list'; exit 0; fi\n" +
 		"# Test stand-in for a preserve-fds-capable sudo: plain exec preserves\n" +
-		"# every fd, and the launch names the rcfile descriptor the parent\n" +
-		"# allocated (zsh's {var} chooses any free fd >= 10, never a fixed 4).\n" +
-		"for a in \"$@\"; do case \"$a\" in /dev/fd/[0-9]*) rc=\"$a\";; esac; done\n" +
-		"exec " + ShellQuote(bash) + " --rcfile \"${rc:-/dev/fd/4}\" -i\n"
+		"# every fd. Strip sudo's own prefix, then execute the REAL generated\n" +
+		"# child command so its environment boundary is covered too.\n" +
+		"shift\n" +
+		"[ \"$1\" = -i ] && shift\n" +
+		"exec \"$@\"\n"
 	s := startNestedZshParent(t, k, "sudo", fakeSudo)
 	// The user enters sudo -i. The accept-line widget intercepts it (zsh's
 	// DEBUG trap cannot suppress a command), the parent requests the child,
@@ -632,6 +710,15 @@ func TestZshNestedChildDomain(t *testing.T) {
 	// preserved descriptor. The early echo is the zsh tier's race-handling:
 	// the child may read it the moment it reaches its prompt.
 	driveNestedHappyInterval(t, s, k, "sudo -i", "echo CHILD-SHELL-OK")
+}
+
+// TestZshNestedSudoWithoutPreserveFDSRunsConventionally is the zsh half of
+// the same compatibility contract. Returning "not nested" before preexec lets
+// the original accept-line chain execute the untouched command exactly once.
+func TestZshNestedSudoWithoutPreserveFDSRunsConventionally(t *testing.T) {
+	k := newNestedKernel(t)
+	s := startNestedZshParent(t, k, "sudo", fakeSudoWithoutPreserveFDS())
+	assertUnsupportedSudoRunsConventionally(t, s, k)
 }
 
 // TestZshNestedChildStillborn covers the §9 failure interval on the zsh
@@ -649,7 +736,9 @@ func TestZshNestedChildStillborn(t *testing.T) {
 	// The refused child never launches a shell: the fake sudo just reports
 	// and exits, so the parent's conventional run of `sudo -i` terminates
 	// immediately instead of opening a nested shell.
-	fakeSudo := "#!/bin/sh\necho STILLBORN-SUDO-RAN\nexit 0\n"
+	fakeSudo := "#!/bin/sh\n" +
+		"if [ \"$1\" = --help ]; then echo '  --preserve-fds=list'; exit 0; fi\n" +
+		"echo STILLBORN-SUDO-RAN\nexit 0\n"
 	s := startNestedZshParent(t, k, "sudo", fakeSudo)
 
 	// The user enters sudo -i. The parent requests the child, receives the
@@ -739,14 +828,16 @@ func injectLateChildFrame(t *testing.T, k *nestedKernel) {
 
 // TestBashNestedChildDomainSu is the su twin of TestBashNestedChildDomain:
 // the same §9 interval proven through a fake `su` on PATH. The launcher
-// line for su is `su -l -c 'env -u BASH_ENV bash --rcfile /dev/fd/N -i'` —
-// su has no --preserve-fds flag, so the whole proof rests on the rcfile
-// descriptor surviving su's own exec (see fakeSuBody for what is true of
-// the real implementations and what the stand-in does not model).
+// line for su is `env -u BASHOPTS su -l -c 'env -u BASH_ENV -u BASHOPTS
+// bash --rcfile /dev/fd/N -i'` — su has no --preserve-fds flag, so the proof
+// rests on the descriptor surviving su's own exec. fakeSuBody documents what
+// is true of the real implementations and what the stand-in does not model.
 func TestBashNestedChildDomainSu(t *testing.T) {
 	k := newNestedKernel(t)
 	s := startNestedBashParent(t, k, "su", fakeSuBody())
+	exportBashOptsWithExtdebug(t, s, k)
 	driveNestedHappyInterval(t, s, k, "su -l", "")
+	assertNoInheritedBashDebugger(t, s)
 }
 
 // TestZshNestedChildDomainSu is the zsh twin: a zsh parent entering su -l

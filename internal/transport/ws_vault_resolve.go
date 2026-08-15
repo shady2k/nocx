@@ -82,6 +82,6 @@ func (h vaultSecretHandlers) handleResolveLine(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }

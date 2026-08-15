@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
@@ -239,7 +240,7 @@ func (h vaultLifecycleHandlers) handleStatus(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -286,7 +287,7 @@ func (h vaultLifecycleHandlers) handleSetup(ctx context.Context, req jsonrpcRequ
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -336,7 +337,7 @@ func (h vaultLifecycleHandlers) handleUnseal(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -359,7 +360,7 @@ func (h vaultLifecycleHandlers) handleSeal(ctx context.Context, req jsonrpcReque
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -407,7 +408,7 @@ func (h vaultLifecycleHandlers) handleChangePassphrase(ctx context.Context, req 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -441,7 +442,7 @@ func (h vaultLifecycleHandlers) handleRegenerateRecovery(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -471,7 +472,7 @@ func (h vaultLifecycleHandlers) handleSetDefaultProvider(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -508,7 +509,7 @@ func (h vaultLifecycleHandlers) handleSetAutoSeal(ctx context.Context, req jsonr
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -523,7 +524,7 @@ func (h vaultLifecycleHandlers) handleActivity(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -545,7 +546,7 @@ func (h vaultSecretHandlers) handleInventory(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -625,7 +626,7 @@ func (h vaultSecretHandlers) handleCreateSecret(ctx context.Context, req jsonrpc
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -710,7 +711,7 @@ func (h vaultSecretHandlers) handleRenameSecret(ctx context.Context, req jsonrpc
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -769,7 +770,7 @@ func (h vaultSecretHandlers) handleReplaceSecret(ctx context.Context, req jsonrp
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -818,7 +819,7 @@ func (h vaultSecretHandlers) handleDeleteSecret(ctx context.Context, req jsonrpc
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -883,6 +884,367 @@ func (s *WSServer) vaultSecretUnavailable(method string) string {
 	}
 }
 
+// ── vault.* ingress bounds (design §7: "this domain validates params and
+//    bounds sizes") ─────────────────────────────────────────────────────
+
+const (
+	// maxSecretNameRunes bounds a vault display name (ADR-0016 metadata):
+	// it is user-visible text rendered in list rows and embedded verbatim
+	// in {{secret:NAME}} references. 200 mirrors the probe surface's
+	// display-name bound; a name longer than a list row can render is a
+	// row nobody can read.
+	maxSecretNameRunes = 200
+	// maxSecretMaterialRunes bounds secret material and passphrases — the
+	// value, password, key text and passphrase fields. A store's own size
+	// limits are the provider's business (the vault hands the bytes to the
+	// registered provider), so this is a wire-cost bound only, the same
+	// ceiling the generic floor applies. For passphrases it is deliberately
+	// no tighter: the vault derives the KEK from the passphrase via argon2,
+	// and a tighter number would be a product limit on passphrase length
+	// nobody has asked for.
+	maxSecretMaterialRunes = 64_000
+	// maxVaultLineRunes bounds the line vault.resolveLine scans and
+	// secrets.detect inspects. A line is linear-cost input (a reference
+	// scan / detector pass); the bound is the wire-cost ceiling, generous
+	// for any real command line.
+	maxVaultLineRunes = 64_000
+)
+
+// isRowHandle reports whether s has the renderer row-handle grammar minted
+// by vault.RowFor: "secrow:" plus exactly 32 lowercase hex characters. A row
+// handle is backend-minted; anything else in a row slot is a renderer bug or
+// a SecretID pasted where a handle belongs (nocx-jb20.1).
+func isRowHandle(s string) bool {
+	const prefix = "secrow:"
+	if !strings.HasPrefix(s, prefix) {
+		return false
+	}
+	return isLowerHex(s[len(prefix):], 32)
+}
+
+// isCaptureID reports whether s has the capture-id grammar minted by the
+// capture registry: "cap_" plus 32 lowercase hex characters.
+func isCaptureID(s string) bool {
+	const prefix = "cap_"
+	if !strings.HasPrefix(s, prefix) {
+		return false
+	}
+	return isLowerHex(s[len(prefix):], 32)
+}
+
+// secretNameProblem returns "" when name is usable as a vault display name,
+// and a reason otherwise. A name is embedded verbatim in {{secret:NAME}}
+// references, where '}' terminates the name and '{' is structural too — the
+// capture path strips both (sanitizeCaptureName); the create path has no
+// scrubber, so a name carrying one would mint a reference that can never
+// resolve. Control characters are never legitimate metadata (ADR-0016: the
+// name is user-visible text).
+func secretNameProblem(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "name is required and must not be blank"
+	}
+	if n := utf8.RuneCountInString(name); n > maxSecretNameRunes {
+		return fmt.Sprintf("name exceeds %d characters", maxSecretNameRunes)
+	}
+	if strings.ContainsAny(name, "{}") {
+		return "name must not contain braces"
+	}
+	if hasControlChars(name) {
+		return "name must not contain control characters"
+	}
+	return ""
+}
+
+// vaultKinds is the vault's closed kind vocabulary (internal/vault meta.go,
+// validateKind). Mirrored here so a kind nobody registered is refused as
+// -32602 before the vault's own guard answers -32603; the vault stays the
+// owner of the set.
+var vaultKinds = map[string]struct{}{
+	vault.KindPassword:      {},
+	vault.KindKeyPassphrase: {},
+	vault.KindPrivateKey:    {},
+	vault.KindPublicKey:     {},
+	vault.KindOTPSeed:       {},
+}
+
+// validAutoSealMinutes mirrors the vault's closed set (vault.go
+// validateAutoSealMinutes): 0 (off), 5, 15, 30, 60.
+func validAutoSealMinutes(minutes int) bool {
+	switch minutes {
+	case 0, 5, 15, 30, 60:
+		return true
+	}
+	return false
+}
+
+// validProviderTag mirrors the vault's provider-tag rule (internal/vault
+// id.go validProviderTag, unexported): tags are persisted protocol — lower
+// case, at most 32 bytes, never containing a colon. Membership in the
+// registered set is the vault's decision (SetDefaultProvider refuses unknown
+// providers); this is the parse-level shape a tag must have to be a tag at
+// all.
+func validProviderTag(p string) bool {
+	if p == "" || len(p) > 32 {
+		return false
+	}
+	if strings.ToLower(p) != p {
+		return false
+	}
+	if strings.ContainsAny(p, ":") {
+		return false
+	}
+	return true
+}
+
+// ── per-method validators ──────────────────────────────────────────────
+
+// validateVaultSetupRaw / validateVaultSetup: the passphrase is optional —
+// an empty one selects silent setup with an OS-held root key — and bounded
+// when present.
+func validateVaultSetupRaw(raw json.RawMessage) string {
+	var p vaultSetupParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "params must be a JSON object"
+		}
+	}
+	if n := utf8.RuneCountInString(p.Passphrase); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("passphrase exceeds %d characters", maxSecretMaterialRunes)
+	}
+	return ""
+}
+
+// validateVaultUnsealRaw / validateVaultUnseal: the means is a closed enum,
+// and the secret is the material that means consumes — required exactly when
+// the means is passphrase or recovery. A secretId is never legitimate: the
+// renderer does not name secret references (nocx-jb20.1).
+func validateVaultUnsealRaw(raw json.RawMessage) string {
+	var p vaultUnsealParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Means == "" {
+		return "means is required"
+	}
+	switch p.Means {
+	case "os":
+	case "passphrase", "recovery":
+		// EMPTINESS, not blankness. The handler has always tested `!= ""`,
+		// and a passphrase of spaces is a passphrase somebody may already
+		// have: trimming here would refuse it and lock its owner out of
+		// their own vault. A boundary check may complete an existing rule;
+		// it may not quietly narrow one.
+		if p.Secret == "" {
+			return "secret is required when means is " + p.Means
+		}
+	default:
+		return "means must be one of os, passphrase, recovery"
+	}
+	if p.SecretID != "" {
+		return "secretId is backend-owned and must not be sent"
+	}
+	if n := utf8.RuneCountInString(p.Secret); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("secret exceeds %d characters", maxSecretMaterialRunes)
+	}
+	return ""
+}
+
+// validateVaultChangePassphraseRaw / validateVaultChangePassphrase: the new
+// passphrase is required, and so is one factor to prove the current one —
+// the vault's own rule (a factor that only unlocks must not be able to
+// replace the factor that recovers).
+func validateVaultChangePassphraseRaw(raw json.RawMessage) string {
+	var p vaultChangePassphraseParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.NewPassphrase == "" {
+		return "newPassphrase is required"
+	}
+	if p.OldPassphrase == "" && p.RecoveryCode == "" {
+		return "oldPassphrase or recoveryCode is required"
+	}
+	for _, f := range []struct {
+		name string
+		v    string
+	}{
+		{name: "oldPassphrase", v: p.OldPassphrase},
+		{name: "recoveryCode", v: p.RecoveryCode},
+		{name: "newPassphrase", v: p.NewPassphrase},
+	} {
+		if n := utf8.RuneCountInString(f.v); n > maxSecretMaterialRunes {
+			return fmt.Sprintf("%s exceeds %d characters", f.name, maxSecretMaterialRunes)
+		}
+	}
+	return ""
+}
+
+// validateVaultRegenerateRecoveryRaw / validateVaultRegenerateRecovery: the
+// passphrase proves the caller may mint a new recovery code.
+func validateVaultRegenerateRecoveryRaw(raw json.RawMessage) string {
+	var p vaultRegenerateRecoveryParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Passphrase == "" {
+		return "passphrase is required"
+	}
+	if n := utf8.RuneCountInString(p.Passphrase); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("passphrase exceeds %d characters", maxSecretMaterialRunes)
+	}
+	return ""
+}
+
+// validateVaultSetDefaultProviderRaw / validateVaultSetDefaultProvider: the
+// provider must be a well-formed tag; whether it is registered and writable
+// is the vault's decision.
+func validateVaultSetDefaultProviderRaw(raw json.RawMessage) string {
+	var p vaultSetDefaultProviderParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Provider == "" {
+		return "provider is required"
+	}
+	if !validProviderTag(p.Provider) {
+		return "provider must be a lower-case tag without colons, at most 32 characters"
+	}
+	return ""
+}
+
+// validateVaultSetAutoSealRaw / validateVaultSetAutoSeal: minutes is a
+// closed set, not an interval — the vault documents exactly what it accepts.
+func validateVaultSetAutoSealRaw(raw json.RawMessage) string {
+	var p vaultSetAutoSealParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Minutes == nil {
+		return "minutes is required"
+	}
+	if !validAutoSealMinutes(*p.Minutes) {
+		return "minutes must be one of 0 (off), 5, 15, 30, 60"
+	}
+	return ""
+}
+
+// validateVaultCreateSecretRaw / validateVaultCreateSecret: the name and
+// kind were asked of the user, so both are required and the kind must be
+// vault vocabulary. The material may arrive by value or by path; each is
+// bounded when present. (Neither supplied stores an empty secret — the vault
+// accepts it; see the report.)
+func validateVaultCreateSecretRaw(raw json.RawMessage) string {
+	var p vaultCreateSecretParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if msg := secretNameProblem(p.Name); msg != "" {
+		return msg
+	}
+	if _, ok := vaultKinds[p.Kind]; !ok {
+		return "kind must be one of password, key-passphrase, private-key, public-key, otp-seed"
+	}
+	if n := utf8.RuneCountInString(p.Value); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("value exceeds %d characters", maxSecretMaterialRunes)
+	}
+	if n := utf8.RuneCountInString(p.Path); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("path exceeds %d characters", maxSecretMaterialRunes)
+	}
+	return ""
+}
+
+// validateVaultRenameSecretRaw / validateVaultRenameSecret: the row is a
+// renderer-addressable handle — a SecretID is never an identifier
+// (nocx-jb20.1) — and the new name is a vault name.
+func validateVaultRenameSecretRaw(raw json.RawMessage) string {
+	var p vaultRenameSecretParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isRowHandle(p.ID) {
+		return "id must be a secrow handle"
+	}
+	if msg := secretNameProblem(p.Name); msg != "" {
+		return msg
+	}
+	return ""
+}
+
+// validateVaultReplaceSecretRaw / validateVaultReplaceSecret: the row is a
+// handle; the material may arrive by value or by path, each bounded when
+// present.
+func validateVaultReplaceSecretRaw(raw json.RawMessage) string {
+	var p vaultReplaceSecretParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isRowHandle(p.ID) {
+		return "id must be a secrow handle"
+	}
+	if n := utf8.RuneCountInString(p.Value); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("value exceeds %d characters", maxSecretMaterialRunes)
+	}
+	if n := utf8.RuneCountInString(p.Path); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("path exceeds %d characters", maxSecretMaterialRunes)
+	}
+	return ""
+}
+
+// validateVaultDeleteSecretRaw / validateVaultDeleteSecret: the row is a
+// handle.
+func validateVaultDeleteSecretRaw(raw json.RawMessage) string {
+	var p vaultDeleteSecretParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isRowHandle(p.ID) {
+		return "id must be a secrow handle"
+	}
+	return ""
+}
+
+// validateVaultResolveLineRaw / validateVaultResolveLine: the line is
+// bounded; an empty line is a legitimate "no references" query.
+func validateVaultResolveLineRaw(raw json.RawMessage) string {
+	var p vaultResolveLineParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "params must be a JSON object"
+		}
+	}
+	if n := utf8.RuneCountInString(p.Line); n > maxVaultLineRunes {
+		return fmt.Sprintf("line exceeds %d characters", maxVaultLineRunes)
+	}
+	return ""
+}
+
 // vaultSpecs declares the vault.* control methods: the lifecycle family
 // under the VaultOperation (vault gate), the secret family under the shared
 // SecretOperation ([config, vault] gates — the inventory inputs are computed
@@ -910,73 +1272,73 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 	resetSub := s.operationQueue("vault-reset")
 
 	return []methodSpec{
-		regResponder(vaultSub, "vault.status", func(r Responder) handlerFunc {
+		whenAvailable(regResponder(vaultSub, "vault.status", noParams(), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.setup", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.setup", params(validateVaultSetupRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetup(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.unseal", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.unseal", params(validateVaultUnsealRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnseal(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.seal", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.seal", noParams(), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSeal(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.changePassphrase", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.changePassphrase", params(validateVaultChangePassphraseRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleChangePassphrase(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.regenerateRecovery", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.regenerateRecovery", params(validateVaultRegenerateRecoveryRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRegenerateRecovery(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.setDefaultProvider", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.setDefaultProvider", params(validateVaultSetDefaultProviderRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetDefaultProvider(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.setAutoSeal", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.setAutoSeal", params(validateVaultSetAutoSealRaw), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetAutoSeal(ctx, req) }
-		}),
-		regResponder(vaultSub, "vault.activity", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(vaultSub, "vault.activity", noParams(), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleActivity(ctx, req) }
-		}),
-		regResponder(secretSub, "vault.inventory", func(r Responder) handlerFunc {
+		}), func() bool { return vaultOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "vault.inventory", noParams(), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.inventory")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleInventory(ctx, req) }
-		}),
-		regResponder(secretSub, "vault.createSecret", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "vault.createSecret", params(validateVaultCreateSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.createSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCreateSecret(ctx, req) }
-		}),
-		regResponder(secretSub, "vault.renameSecret", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "vault.renameSecret", params(validateVaultRenameSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.renameSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRenameSecret(ctx, req) }
-		}),
-		regResponder(secretSub, "vault.replaceSecret", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "vault.replaceSecret", params(validateVaultReplaceSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.replaceSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReplaceSecret(ctx, req) }
-		}),
-		regResponder(secretSub, "vault.deleteSecret", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "vault.deleteSecret", params(validateVaultDeleteSecretRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDeleteSecret(ctx, req) }
-		}),
-		regResponder(secretSub, "vault.resolveLine", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "vault.resolveLine", params(validateVaultResolveLineRaw), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.resolveLine")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolveLine(ctx, req) }
-		}),
-		regResponder(resetSub, "vault.resetPreview", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(resetSub, "vault.resetPreview", noParams(), func(r Responder) handlerFunc {
 			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResetPreview(ctx, req) }
-		}),
-		regResponder(resetSub, "vault.reset", func(r Responder) handlerFunc {
+		}), func() bool { return resetOp != nil }, "vault not available"),
+		whenAvailable(regResponder(resetSub, "vault.reset", noParams(), func(r Responder) handlerFunc {
 			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReset(ctx, req) }
-		}),
+		}), func() bool { return resetOp != nil }, "vault not available"),
 	}
 }

@@ -124,7 +124,7 @@ test.describe('1. Focus matrix', () => {
     test('shows focus ring on keyboard focus', async ({ page }) => {
       await openSettings(page)
       // Navigate to Interface section to show the theme/UI settings rows
-      await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+      await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
       const themeRow = getSettingRow(page, 'ui.theme')
       await expect(themeRow).toBeVisible({ timeout: 5_000 })
       const select = themeRow.locator('select')
@@ -332,7 +332,7 @@ test.describe('3. Theme with dialog open', () => {
   test('dialog colours change with data-theme without remount', async ({ page }) => {
     await openSettings(page)
     // Navigate to Interface section to make the theme setting row visible
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
     // Open a confirm dialog and measure its colours.
     const { bgBefore, colorBefore } = await page.evaluate(async () => {
@@ -442,7 +442,7 @@ test.describe('4. Scroll ownership — measured', () => {
     await promptReady(page)
     await openSettings(page)
     // Navigate to Interface section to see more settings rows
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('.ui-page__body')).toBeAttached()
 
@@ -494,7 +494,7 @@ test.describe('4. Scroll ownership — measured', () => {
     await promptReady(page)
     await openSettings(page)
     // Navigate to Interface section to see more settings rows
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
     // Scroll the last setting row into view using the scroll container
     const lastRow = page.locator('.ui-settings-row').last()
@@ -799,9 +799,7 @@ test.describe('6. Page duties', () => {
       await openSettings(page)
 
       // Click on a section nav link (e.g., "Interface") in the rail
-      const terminalNav = page.locator(
-        '.ui-settings-section-nav-item[data-section="Interface"] button',
-      )
+      const terminalNav = page.locator('.ui-grouped-nav__item[data-item="Interface"] button')
       await expect(terminalNav).toBeVisible({ timeout: 5_000 })
       await terminalNav.click()
 
@@ -820,9 +818,7 @@ test.describe('6. Page duties', () => {
       await openSettings(page)
 
       // Click a nav link to switch page
-      const terminalNav = page.locator(
-        '.ui-settings-section-nav-item[data-section="Interface"] button',
-      )
+      const terminalNav = page.locator('.ui-grouped-nav__item[data-item="Interface"] button')
       await expect(terminalNav).toBeVisible({ timeout: 5_000 })
       await terminalNav.click()
 
@@ -889,7 +885,7 @@ test.describe('6. Page duties', () => {
       await promptReady(page)
       await openSettings(page)
       // Navigate to Interface section to see more settings rows
-      await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+      await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
       // The last row should be scrollable into view
       const lastRow = page.locator('.ui-settings-row').last()

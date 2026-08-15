@@ -1,0 +1,43 @@
+/* AI Endpoints surface — placement for the endpoint manager (nocx-kn9q).
+   Placed in styles/components/ per the form-pass brief; the surface owns
+   only layout of its own wrappers and their text, never kit paint. */
+
+.ep-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* The row itself is the kit's RecordRow (nocx-pp3y.3): the title / kind
+   badge / meta / status grammar the composite owns. The name/meta families
+   this surface used to declare (.ep-item-name / .ep-item-meta /
+   .ep-item-models) are gone — a surface declaring its own row-grammar
+   class now fails lint-fixtures/check-row-grammar.mjs. */
+
+/* One model row in the editor: the id and its optional picker label side
+   by side. The fields are the kit's; this wrapper only places them. */
+.ep-model-row {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.ep-model-row .ui-text-field,
+.ep-model-row .ui-suggestion-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The Test button row in the editor dialog: button + spinner + result
+   badge, placed side by side. The controls are the kit's. */
+.ep-test-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* Why the Test button is unavailable, beside it. A disabled control that
+   does not say why is the defect this line exists to close. */
+.ep-test-reason {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

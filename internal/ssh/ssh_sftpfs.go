@@ -10,6 +10,7 @@ package ssh
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	iofs "io/fs"
 	"os"
@@ -76,7 +77,28 @@ func (f *SFTPFS) Create(path string, mode os.FileMode) (File, error) {
 // assumed (design §4).
 func (f *SFTPFS) SyncDir(string) error { return nil }
 
-func (f *SFTPFS) Rename(src, dst string) error { return f.client.Rename(src, dst) }
+// Rename preserves the publisher's atomic-replacement contract on OpenSSH
+// servers. SFTP v3's SSH_FXP_RENAME is only portable when dst is absent; an
+// advertised posix-rename@openssh.com provides rename(2) replacement
+// semantics for manifest upgrades.
+//
+// There is deliberately no remove-then-rename fallback when the extension is
+// absent: that would create a window with no activation pointer, violating
+// Publisher's fail-open invariant. A server without the extension can receive
+// a first publish, but an existing destination is refused with the previous
+// manifest untouched. Checking here also avoids relying on non-portable
+// servers that happen to make SSH_FXP_RENAME replace.
+func (f *SFTPFS) Rename(src, dst string) error {
+	if _, ok := f.client.HasExtension("posix-rename@openssh.com"); ok {
+		return f.client.PosixRename(src, dst)
+	}
+	if _, err := f.client.Lstat(dst); err == nil {
+		return fmt.Errorf("atomic replacement unsupported: server does not advertise posix-rename@openssh.com")
+	} else if !errors.Is(err, iofs.ErrNotExist) {
+		return fmt.Errorf("check rename destination: %w", err)
+	}
+	return f.client.Rename(src, dst)
+}
 
 // Remove deletes a single file, retrying as a directory removal when
 // SSH_FXP_REMOVE refuses (the publisher removes the empty lock directory

@@ -41,6 +41,12 @@ let highlighter: HighlighterCore | null = null
 /** Callbacks that want to run once the tokenizer exists (frozen-header repaint). */
 const readyCallbacks = new Set<() => void>()
 
+const TOKEN_OPTIONS = {
+  lang: 'shellscript',
+  theme: 'nord',
+  includeExplanation: 'scopeName',
+} as const
+
 /**
  * Resolves when the tokenizer is ready to colour text. Tests await this
  * before asserting classes; the app never blocks on it (plain text until
@@ -53,6 +59,12 @@ export const shellHighlightReady: Promise<void> = (async () => {
     themes: [import('@shikijs/themes/nord')],
     engine: createJavaScriptRegexEngine(),
   })
+  // TextMate rule compilation is lazy inside Shiki. Complete one real parse
+  // before publishing readiness: otherwise the first editor to tokenize under
+  // a parallel startup can observe the grammar between construction and its
+  // first compiled rule set, rendering plain command words until the next
+  // document change (nocx-dze9).
+  hl.codeToTokens('true', TOKEN_OPTIONS)
   highlighter = hl
   for (const cb of readyCallbacks) cb()
   readyCallbacks.clear()
@@ -175,11 +187,7 @@ interface ShellToken {
 function tokenizeShell(text: string, store: CommandSnapshotStore): ShellToken[] {
   const hl = highlighter
   if (!hl || text.length === 0) return []
-  const { tokens } = hl.codeToTokens(text, {
-    lang: 'shellscript',
-    theme: 'nord',
-    includeExplanation: 'scopeName',
-  })
+  const { tokens } = hl.codeToTokens(text, TOKEN_OPTIONS)
   const out: ShellToken[] = []
   for (const lineTokens of tokens) {
     for (const t of lineTokens) {

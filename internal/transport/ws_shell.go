@@ -9,6 +9,8 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
@@ -68,17 +70,17 @@ func shellIntegrateResultFromPlan(plan shellintegration.InBandPlan) shellIntegra
 	}
 }
 
-// sessionShellHandlers answers shell.complete and shell.integrate. Both are
-// per-session operations (SessionOperation via ForSession) whose registry
-// liveness check runs inside the capability; the completion and integration
-// logic itself stays in the handler, on the completion / in-band seams. It
-// holds the operation factory, the Responder and its seams — never the
-// *WSServer.
+// sessionShellHandlers answers shell.complete and shell.integrate. Completion
+// uses a staged SessionTargetOperation: copy immutable route facts while the
+// session gate is held, then release it before remote I/O while retaining the
+// ordinary execution lane. Integration remains a regular SessionOperation.
+// The handler holds the operation factory, the Responder and its seams —
+// never the *WSServer.
 type sessionShellHandlers struct {
 	ops    *capability.SessionOperations // session gate; nil → session store not wired
 	r      Responder
 	local  completion.Completer // shell.complete for KindLocal sessions
-	remote completion.Completer // shell.complete for KindRemote sessions
+	remote RemoteCompleter      // shell.complete for KindRemote sessions
 	inBand InBandBootstrapper   // shell.integrate plan builder
 }
 
@@ -131,27 +133,26 @@ func (h sessionShellHandlers) handleIntegrate(ctx context.Context, req jsonrpcRe
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
 // shellSpecs declares the shell-plane control methods (migration map, "The
-// rest"): shell.complete and shell.integrate run under the per-session
-// SessionOperation (the session gate — the registry liveness check is the
-// capability's) and register on the operation queue; the launcher /
-// footprint methods are seam handlers on the ordinary lane under no
-// operation, holding only the seams the migration map names. The
-// SessionOperations factory is built here from the wired stores and shared
-// across the shell methods.
+// rest"): shell.complete snapshots its session target before remote work;
+// shell.integrate runs under the regular per-session SessionOperation. Both
+// register on the operation queue. The launcher / footprint methods are seam
+// handlers on the ordinary lane under no operation, holding only the seams
+// the migration map names. The SessionOperations factory is built here from
+// the wired stores and shared across the shell methods.
 func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	shellSub := s.operationQueue("shell")
 	return []methodSpec{
-		regResponder(shellSub, "shell.complete", func(r Responder) handlerFunc {
+		regResponder(shellSub, "shell.complete", params(validateShellCompleteRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleComplete(ctx, req) }
 		}),
-		regResponder(shellSub, "shell.integrate", func(r Responder) handlerFunc {
+		regResponder(shellSub, "shell.integrate", params(validateShellIntegrateRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, inBand: s.inBand}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleIntegrate(ctx, req) }
 		}),
@@ -160,7 +161,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// the marker latch ADR-0024 forbids, and the branch deleted their
 		// handler, contracts and generated types (nocx-292k). The footprint
 		// methods below outlive them — they read the fact store, which stays.
-		regResponder(s.lane, "shell.footprint.status", func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.status", noParams(), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:              r,
 				facts:          s.installedFacts,
@@ -171,7 +172,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),
-		regResponder(s.lane, "shell.footprint.uninstall", func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.uninstall", params(validateFootprintUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:           r,
 				uninstaller: s.remoteUninstaller,
@@ -180,16 +181,16 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
 		}),
-		reg(s.lane, "shell.footprint.consent", func(w *wsConn, state *connState) handlerFunc {
+		reg(s.lane, "shell.footprint.consent", params(validateFootprintConsentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := footprintHandlers{
-				r:        w,
+				r:        r,
 				consent:  s.helperConsent,
 				registry: s.registry,
 				log:      s.log,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConsent(ctx, state, req) }
 		}),
-		regResponder(s.lane, "shell.footprint.helperUninstall", func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.helperUninstall", params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:                 r,
 				helperInstalls:    s.helperInstalls,
@@ -201,4 +202,146 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintHelperUninstall(ctx, req) }
 		}),
 	}
+}
+
+// ── shell ingress bounds ───────────────────────────────────────────────────
+
+// validateShellCompleteRaw is the registered validator for shell.complete:
+// sessionId is server-minted (32-hex shape), cwd is a renderer-supplied
+// path held to the agent surface's path bound, and line is the line being
+// completed — bounded at the floor's wire-cost ceiling because the product
+// has no tighter one (a shell line is bounded by the session's own input,
+// not by this method). pos is the caret offset into line, and the completion
+// contract (internal/completion.Request) reads the word at pos and treats a
+// pos outside [0, len(line)] as completing nothing — the same byte
+// semantics as the contract, so it is refused here. limit is left to the
+// handler, which clamps it to 1..200.
+func validateShellCompleteRaw(raw json.RawMessage) string {
+	var p shellCompleteParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	if p.Cwd == "" {
+		return "cwd is required"
+	}
+	if msg := validateStringBound("cwd", p.Cwd, maxCwdRunes); msg != "" {
+		return msg
+	}
+	if p.Line == "" {
+		return "line is required"
+	}
+	if utf8.RuneCountInString(p.Line) > maxGenericStringRunes {
+		return fmt.Sprintf("line exceeds %d characters", maxGenericStringRunes)
+	}
+	if p.Pos < 0 || p.Pos > len(p.Line) {
+		return "pos must be an offset within line"
+	}
+	return ""
+}
+
+// validateShellIntegrateRaw is the registered validator for shell.integrate:
+// the sessionId must be a real server-minted id — the plan's payload anchors
+// NOCX_SESSION_ID in a shell, and the handler already refuses ids that are
+// not live in the registry (AD-7); the shape check refuses ones that cannot
+// be, before the capability is touched.
+func validateShellIntegrateRaw(raw json.RawMessage) string {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateFootprintUninstallRaw is the registered validator for
+// shell.footprint.uninstall: the profileId names the saved connection whose
+// credentials the dial will use — the same id shape every profile-taking
+// method checks.
+func validateFootprintUninstallRaw(raw json.RawMessage) string {
+	var p struct {
+		ProfileID string `json:"profileId"`
+	}
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	return validateProfileID(p.ProfileID)
+}
+
+// validateFootprintConsentRaw is the registered validator for
+// shell.footprint.consent: consent is granted against the host key of a
+// session this connection already owns, so the only field is the
+// backend-minted session id — the handler still checks ownership, which a
+// validator cannot see.
+func validateFootprintConsentRaw(raw json.RawMessage) string {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateFootprintHelperUninstallRaw is the registered validator for
+// shell.footprint.helperUninstall: the profileId names the connection the
+// removal dials, and the fingerprint plus path name the inventory row that
+// is forgotten once the remote directory is gone. All three are required —
+// the handler cannot prove the close-before-remove order (D25) without the
+// fingerprint, and cannot clear the observation without the path.
+func validateFootprintHelperUninstallRaw(raw json.RawMessage) string {
+	var p struct {
+		ProfileID   string `json:"profileId"`
+		Fingerprint string `json:"fingerprint"`
+		Path        string `json:"path"`
+	}
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateProfileID(p.ProfileID); msg != "" {
+		return msg
+	}
+	if p.Fingerprint == "" {
+		return "fingerprint is required"
+	}
+	if utf8.RuneCountInString(p.Fingerprint) > maxIDRunes {
+		return fmt.Sprintf("fingerprint exceeds %d characters", maxIDRunes)
+	}
+	if hasControlChars(p.Fingerprint) {
+		return "fingerprint must not contain control characters"
+	}
+	if p.Path == "" {
+		return "path is required"
+	}
+	if hasControlChars(p.Path) {
+		return "path must not contain control characters"
+	}
+	return ""
 }

@@ -60,8 +60,9 @@ async function openVaultSettings(page: Page): Promise<void> {
   await expect(page.getByRole('searchbox', { name: 'Search settings' })).toBeVisible({
     timeout: 5000,
   })
-  // Click "Vault" in the left rail using data-section attribute.
-  await page.locator('.ui-settings-section-nav-item[data-section="Vault"]').click()
+  // Click the vault page in the left rail by its page id — the id survives
+  // the display-title rename to "Protection".
+  await page.locator('.ui-grouped-nav__item[data-item="vault"]').click()
   // Wait for a section the Vault page always has, in every vault state.
   // This used to wait for a heading called "Status", which the page no longer
   // has: it now opens with the protection state itself ("Protection is not set
@@ -81,7 +82,7 @@ async function setupVaultAndSavePassword(
 ): Promise<string> {
   // ── Create a connection with password ────────────────────────────────
   // Click "Connections" in the left rail.
-  await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+  await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
   await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
   // Click "+ New connection".
@@ -257,7 +258,7 @@ test.describe('Vault settings — change passphrase', () => {
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
 
     // Go to Connections.
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
     // The saved profile should be in the list.
@@ -360,7 +361,7 @@ test.describe('Vault settings — reissue recovery code', () => {
       timeout: 5000,
     })
 
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
     await expect(

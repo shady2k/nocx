@@ -152,14 +152,28 @@ fi
 # this is one checker widened, not a second one added.
 host_gate "prettier --check" npm run format:check
 
+# The ROOT eslint, and always, for the same reason and with the same history as
+# the prettier line above. The frontend gate below is `cd frontend && npm run
+# lint`, so its territory is frontend/; the root config (eslint.config.mjs)
+# owns everything else — e2e/**, playwright.config.ts, .githooks/**/*.mjs — and
+# ignores frontend/ deliberately, because frontend has its own type-checked
+# config. Nothing here ran it. Root eslint used to run in this hook, died on
+# EACCES against the e2e container's root-owned .e2e/, and 19 errors piled up
+# behind the crash (nocx-z9s9.8); the repair added the ignore and gave CI its
+# own step, and widening the hook happened for prettier and not for eslint. So
+# `INPUT` sat unused in a spec from the commit that introduced it until
+# ci-frontend said so on a pull request. Two checkers, one widened, is how a
+# gate keeps half its ground.
+host_gate "eslint (root)" npm run lint
+
 # --- 5. frontend-only host gates --------------------------------------------
 if [ "$RUN_FE" = 1 ]; then
-    host_gate "eslint" sh -c 'cd frontend && npm run lint'
+    host_gate "eslint (frontend)" sh -c 'cd frontend && npm run lint'
     host_gate "solid negative fixture gate" sh -c 'cd frontend && npm run lint:fixture-check'
     host_gate "wire contracts current" sh -c 'cd frontend && npm run contracts:check'
     host_gate "tsc --noEmit" sh -c 'cd frontend && npm run typecheck'
 else
-    ok "eslint, fixture gate, tsc — skipped (no frontend/ changes staged)"
+    ok "eslint (frontend), fixture gate, tsc — skipped (no frontend/ changes staged)"
 fi
 
 # --- 5b. the e2e suite is TypeScript nobody was checking --------------------

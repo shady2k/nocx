@@ -67,7 +67,7 @@ func TestSecretUsageRPC_DirectAndGroupInheritance(t *testing.T) {
 
 	// The row for the DIRECT binding: one profile, sourced from the profile.
 	life.resolveRowID = credential.SecretID("sec:direct:1")
-	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:direct"})
+	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:dddddddddddddddddddddddddddddddd"})
 	var direct struct {
 		Result struct {
 			Profiles []profile.ProfileRef `json:"profiles"`
@@ -85,7 +85,7 @@ func TestSecretUsageRPC_DirectAndGroupInheritance(t *testing.T) {
 
 	// The row for the GROUP binding: inherited, sourced from the group.
 	life.resolveRowID = credential.SecretID("sec:group:1")
-	resp = jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:group"})
+	resp = jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"})
 	var inherited struct {
 		Result struct {
 			Profiles []profile.ProfileRef `json:"profiles"`
@@ -109,7 +109,7 @@ func TestSecretUsageRPC_UnknownRowReturnsEmpty(t *testing.T) {
 	_, life, conn, _ := seedSecretUsageStore(t)
 	life.resolveRowFound = false
 
-	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:nonexistent"})
+	resp := jsonrpcCall(t, conn, "secrets.usage", map[string]any{"row": "secrow:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	var result struct {
 		Result struct {
 			Profiles []profile.ProfileRef `json:"profiles"`

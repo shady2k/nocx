@@ -1,0 +1,93 @@
+/* SuggestionField — a free-text field with a suggestion list (combobox).
+   One identity family: `ui-suggestion-field` (the wrapper) +
+   `__control` (the positioning context) + `__input` (the element that
+   carries the appearance) + `__list`/`__option` (the suggestion popup).
+
+   The base input declarations are the same ones text-field.css carries,
+   because kit.css styled all input types from one selector list and T1
+   splits it per primitive. Repeating token references is not duplication
+   of values (search-field.css says the same).
+
+   The list is portalled out of the field's flow (no ancestor's overflow
+   can clip it — nocx-0plm6) and anchored to the input's viewport rect by
+   the component, which sets left/top/width inline and flips it above the
+   input when there is no room below. It scrolls inside its own box (a
+   long model list never grows the dialog), and it CLOSES rather than
+   follows when the page scrolls under it. */
+
+.ui-suggestion-field {
+  min-width: 0;
+}
+
+.ui-suggestion-field__control {
+  position: relative;
+  min-width: 0;
+}
+
+.ui-suggestion-field__input {
+  height: var(--control-height-md);
+  padding: 0 8px;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  outline: none;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ui-suggestion-field__input:focus {
+  border-color: var(--color-accent);
+}
+
+.ui-suggestion-field__input::placeholder {
+  color: var(--color-text-dim);
+}
+
+.ui-suggestion-field__input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* The popup: a raised surface with a hairline border and a soft shadow —
+   the same surface vocabulary as the context menu, so a list floating over
+   a form reads as chrome of the app, not of the page. Position is the
+   component's (inline left/top/width, flipped above when there is no room
+   below); this file owns the surface and the scroll. `--wails-draggable`
+   is the context menu's too: the list is portalled to the body or the
+   owning dialog, so without it a drag that starts on the list would move
+   the window. */
+.ui-suggestion-field__list {
+  position: fixed;
+  z-index: 30;
+  margin: 0;
+  padding: var(--space-1);
+  list-style: none;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  box-shadow: 0 12px 40px color-mix(in srgb, black, transparent 22%);
+  max-height: 240px;
+  overflow-y: auto;
+  --wails-draggable: no-drag;
+}
+
+/* One offer per row. The active option is the keyboard's position —
+   aria-selected drives the highlight, exactly like the collection row's
+   data-selected. */
+.ui-suggestion-field__option {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--control-radius-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.ui-suggestion-field__option[aria-selected='true'] {
+  background: var(--color-surface-hover);
+}

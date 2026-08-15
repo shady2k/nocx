@@ -6,6 +6,7 @@ import {
   hostname,
   port,
   nonNegativeInteger,
+  absoluteHttpUrl,
   combine,
 } from './validation'
 
@@ -75,6 +76,33 @@ describe('port', () => {
   it('rejects a non-integer', () => {
     expect(port()('22.5')).toBe('Port must be a whole number')
     expect(port()('-1')).toBe('Port must be a whole number')
+  })
+})
+
+describe('absoluteHttpUrl', () => {
+  it('passes an empty value — emptiness is `required`’s job, not this rule’s', () => {
+    expect(absoluteHttpUrl()('')).toBeUndefined()
+  })
+
+  it.each(['https://api.example.com/v1', 'http://127.0.0.1:11434/v1', 'https://x', 'http://host'])(
+    'accepts %s',
+    (url) => {
+      expect(absoluteHttpUrl()(url)).toBeUndefined()
+    },
+  )
+
+  // Parse-level only (design §4.5, decision 3): loopback and private
+  // addresses are legal here — the restriction is dial-time (nocx-edio).
+  it('accepts a loopback http URL — the address policy is not this rule’s', () => {
+    expect(absoluteHttpUrl()('http://127.0.0.1:11434/v1')).toBeUndefined()
+  })
+
+  it('rejects what cannot be a base URL at all', () => {
+    expect(absoluteHttpUrl()('not a url')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('api.example.com/v1')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('ftp://example.com')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('https://')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('file:///etc/passwd')).toBe('Must be an absolute http(s) URL')
   })
 })
 
@@ -197,6 +225,70 @@ describe('answer', () => {
       // …and a value of nothing but spaces is still no answer.
       v.answer('host', '   ')
       expect(v.error('host')).toBeUndefined()
+      dispose()
+    })
+  })
+})
+
+describe('firstErrorField', () => {
+  it('is the first failing field in declaration order — the one to focus', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({
+        host: () => required('Host')(''),
+        port: () => required('Port')(''),
+      })
+      expect(v.firstErrorField()).toBe('host')
+      dispose()
+    })
+  })
+
+  it('is undefined when every rule passes', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ host: () => required('Host')('box') })
+      expect(v.firstErrorField()).toBeUndefined()
+      dispose()
+    })
+  })
+})
+
+describe('errorCount', () => {
+  it('counts failing fields regardless of what is shown', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({
+        host: () => required('Host')(''),
+        port: () => required('Port')('8080'),
+      })
+      expect(v.error('host')).toBeUndefined()
+      expect(v.errorCount()).toBe(1)
+      dispose()
+    })
+  })
+})
+
+describe('controlId', () => {
+  it('defaults to the field key itself', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ host: () => undefined })
+      expect(v.controlId('host')).toBe('host')
+      dispose()
+    })
+  })
+
+  it('applies a mapper when one is given', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation(
+        { host: () => undefined },
+        { controlId: (field) => `profile-${field}` },
+      )
+      expect(v.controlId('host')).toBe('profile-host')
+      dispose()
+    })
+  })
+
+  it('lets a mapper return undefined for a field with no focusable control', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ forwards: () => undefined }, { controlId: () => undefined })
+      expect(v.controlId('forwards')).toBeUndefined()
       dispose()
     })
   })

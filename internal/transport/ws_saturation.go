@@ -13,12 +13,13 @@
 // free text. Scope passes through as the admission's resource name, which is
 // server vocabulary by construction: it is set at the composition root from
 // a closed set (control.go: Name identifies the resource), and a request can
-// never influence it. The mapper takes ONLY the *control.Rejection — there
-// is no request in the signature, so a request parameter (any control frame
-// may carry a secret) cannot reach the wire by construction.
+// never influence it. The mapper additionally takes the registered method
+// name so the response seam can diagnose an in-handler refusal. Both inputs
+// are server vocabulary; request params remain structurally unreachable.
 package transport
 
 import (
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -105,10 +106,22 @@ func saturatedNotificationParamsFor(methodClass, scope string) saturatedNotifica
 }
 
 // saturationRPCError maps a control.Rejection to the RPCError a refused
-// control handler answers with. Handlers that refuse (probe admission,
-// dialog admission) send this instead of a generic error: the renderer
-// matches the fixed reason and shows the saturation surface.
-func saturationRPCError(r *control.Rejection) RPCError {
+// control handler answers with. Method is internal diagnostic metadata: the
+// Responder does not serialize it, but uses it to name in-handler refusals
+// that bypass dispatch admission.
+func saturationRPCError(method string, r *control.Rejection) RPCError {
 	sat := saturationErrorFor(r)
-	return RPCError{Code: sat.Code, Message: sat.Message, Data: sat.Data}
+	return RPCError{Code: sat.Code, Message: sat.Message, Data: sat.Data, method: method}
+}
+
+// logSaturationRefusal emits only registered server vocabulary. Request
+// params, frame bytes, and the rejection's free-text reason are absent from
+// the signature, so this diagnostic cannot disclose them.
+func logSaturationRefusal(logger log.Logger, method, disposition string, data saturationData) {
+	logger.Debug("control action refused",
+		"method", method,
+		"methodClass", methodClassFor(method),
+		"scope", data.Scope,
+		"disposition", disposition,
+		"retryAfterMs", data.RetryAfterMs)
 }

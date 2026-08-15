@@ -118,30 +118,30 @@ type tunnelHandlers struct {
 // address and a permission error are synchronous, user-visible failures.
 // wconn is the *wsConn of the calling connection: it is the forward's owner
 // (the owner-map key, spec §7.3), passed per call by the build closure.
-func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
+func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, r Responder, req jsonrpcRequest) {
 	var params tunnelOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.ProfileID == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 		return
 	}
 	if params.Destination == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: destination required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: destination required"})
 		return
 	}
 	if params.Port < 0 {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: port must not be negative"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: port must not be negative"})
 		return
 	}
 	if h.connector == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
 		return
 	}
 	if _, ok := h.resolver.get(); !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no profile resolver wired)"})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no profile resolver wired)"})
 		return
 	}
 
@@ -149,7 +149,7 @@ func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, req
 	if err != nil {
 		// Resolving reads the stored secret, so a sealed vault surfaces
 		// here — the renderer needs the reason to offer the unlock prompt.
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Resolve failed: ", err))
+		_ = r.TryError(req.ID, rpcErrorFor(-32603, "Resolve failed: ", err))
 		return
 	}
 
@@ -161,7 +161,7 @@ func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, req
 		Provenance:  tunnel.ProvenanceManual,
 	}, h.connector)
 	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
@@ -174,12 +174,12 @@ func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, req
 	// connection.
 	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
 	if err := t.Start(ctx, host, opts...); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
 	h.ledger.track(wconn, t)
-	_ = wconn.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
+	_ = r.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
 }
 
 // handleTunnelStop stops one forward by its backend id and reports the

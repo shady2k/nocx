@@ -430,6 +430,27 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # ONE JOB PER BROWSER, and the split is about wall clock, not coverage:
+    # both projects still run, they run at the same time. The suite is 314
+    # tests on ONE worker (playwright.config.ts explains why one: the default
+    # must assume the process is not alone on the machine), which measured
+    # 21 minutes of test time inside a 23-minute job — and half of it is the
+    # second browser repeating the first browser's walk.
+    #
+    # Splitting by PROJECT rather than raising the worker count is the safe
+    # half of the same idea. The stand is one devharness plus one vite per
+    # run, and specs share it: two workers would put two browsers on one
+    # backend, one profile store and one settings document, which is a
+    # different bug hunt. Two runners each bring up their own stand and
+    # cannot see each other at all.
+    #
+    # `matrix.project` is the name playwright.config.ts resolves through
+    # PW_PROJECTS, so the local runner is unchanged: e2e/run-in-container.sh
+    # with no variable still runs both, exactly as this job did before.
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [chromium, webkit]
     steps:
       - uses: actions/checkout@v7
 
@@ -440,11 +461,15 @@ jobs:
       # answer.
       - name: e2e (container)
         run: e2e/run-in-container.sh
+        env:
+          PW_PROJECTS: ${{ matrix.project }}
 
+      # Named per project: two jobs uploading one name is a collision, and
+      # the trace you want is the one from the browser that failed.
       - name: Upload traces
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-traces
+          name: playwright-traces-${{ matrix.project }}
           path: test-results/
           retention-days: 7

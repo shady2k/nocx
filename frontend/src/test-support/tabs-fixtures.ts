@@ -308,6 +308,24 @@ export function integrationHandler(client: ClientFake): (params: unknown) => voi
   return notificationHandler(client, 'session.integrationChanged')
 }
 
+/** The lifecycle.changed handler with the wire's server-authoritative session
+ *  address. Tests describe the fact body; this helper supplies the exact
+ *  transport envelope that routes it to the mounted tab. */
+export function lifecycleHandler(
+  client: ClientFake,
+  sessionId = client._sessions[0]?.sessionId,
+): (params: unknown) => void {
+  if (!sessionId) throw new Error('no session available for lifecycle.changed')
+  const deliver = notificationHandler(client, 'lifecycle.changed')
+  return (params: unknown): void => {
+    if (!params || typeof params !== 'object') {
+      deliver(params)
+      return
+    }
+    deliver({ ...params, sessionId })
+  }
+}
+
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
  * on every call and records it in _sessions for test inspection.

@@ -5,10 +5,15 @@
   "description": "The lifecycle.changed JSON-RPC notification: the published fact of the authenticated lifecycle protocol (ADR-0024 decision 7, docs/lifecycle-protocol.md). Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape — which is exactly where an addressing or shape defect would hide, and why it gets the same three checks as a method. Authentication terminates in the backend: this is what the kernel concluded, projected from its read model by the publication layer (internal/lifecyclepub). It therefore never carries the per-epoch capability, a raw channel frame, or the channel's sequence counter — a future refactor that adds any of those fails the no-capability/no-raw-frame wire test, and this schema would reject them anyway. The destination is resolved at emit time — the lane's session's current subscriber — never stored, which is what survives an AD-9 reconnect.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["lane", "lifecycle"],
+  "required": ["sessionId", "lane", "lifecycle"],
   "properties": {
+    "sessionId": {
+      "description": "The server-authoritative session that owns this lane (AD-7). One WebSocket carries several terminal tabs, so the renderer must route this notification by session id before any tab may apply or acknowledge the fact.",
+      "type": "string",
+      "minLength": 1
+    },
     "lane": {
-      "description": "The input-routing lane the fact is about — one terminal tab. The renderer filters nothing: a fact is routed to the lane's own session, and the lane id is what lets the projection attach it to the right tab's state machine.",
+      "description": "The input-routing lane the fact is about. The backend resolves it to sessionId; the renderer then attaches it only to that session's state machine.",
       "type": "string"
     },
     "lifecycle": {

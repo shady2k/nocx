@@ -25,7 +25,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -33,15 +36,119 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
+// ── lifecycle.* ingress bounds and validators (the per-field sweep) ───────
+
+// maxDestinationRunes bounds a renderer-supplied DESTINATION identity: a DNS
+// name, or a
+// user@host:port destination. 512 runes covers the longest destination forms
+// and bounds a display/identity field.
+const maxDestinationRunes = 512
+
+// validateLifecycleSubmitAttemptRaw checks lifecycle.submitAttempt: the
+// domain, the app-owned command text, and the informational cwd/host. The
+// command is the same product class the kernel bounds (decision 5), so the
+// kernel's own ceiling applies here and the refusal moves before the kernel.
+func validateLifecycleSubmitAttemptRaw(raw json.RawMessage) string {
+	var p submitAttemptParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if strings.TrimSpace(p.Domain) == "" {
+		return "domain is required"
+	}
+	if utf8.RuneCountInString(p.Domain) > maxIDRunes {
+		return "domain exceeds the id length bound"
+	}
+	// An empty command is a bare newline, not an execution: it never opens
+	// an attempt (an unstarted attempt would hold the domain and poison the
+	// next attach) — the handler's own rule, moved earlier.
+	if strings.TrimSpace(p.Command) == "" {
+		return "command is required and must not be empty"
+	}
+	if len(p.Command) > lifecycle.MaxCommandBytes {
+		return fmt.Sprintf("command exceeds %d bytes", lifecycle.MaxCommandBytes)
+	}
+	if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
+		return "cwd exceeds the length bound"
+	}
+	if utf8.RuneCountInString(p.Host) > maxDestinationRunes {
+		return "host exceeds the length bound"
+	}
+	return ""
+}
+
+// validateLifecycleRecoverAckRaw checks lifecycle.recoverAck: the session
+// the ack is for, and the recovery generation — the hex form of the
+// backend-minted one-shot fence nonce (lifecycle.FenceNonce, 32 bytes →
+// 64 hex), the shape the handler's own contract documents ("<64 hex>").
+func validateLifecycleRecoverAckRaw(raw json.RawMessage) string {
+	var p lifecycleRecoverAckParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.SessionID, 32) {
+		return "sessionId is required and must be the 32-hex id the backend minted"
+	}
+	if !isLowerHex(p.Generation, 64) {
+		return "generation must be the 64-hex recovery generation the backend minted"
+	}
+	return ""
+}
+
+// validateLifecycleEstablishAckRaw checks lifecycle.establishAck: the
+// {session, lane, domain, epoch, generation} addressing tuple of decision 9.
+// The generation is compared for equality by the publisher, so its shape is
+// left to that check; presence and bound are enforced here.
+func validateLifecycleEstablishAckRaw(raw json.RawMessage) string {
+	var p lifecycleEstablishAckParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.SessionID, 32) {
+		return "sessionId is required and must be the 32-hex id the backend minted"
+	}
+	if strings.TrimSpace(p.Lane) == "" {
+		return "lane is required"
+	}
+	if utf8.RuneCountInString(p.Lane) > maxIDRunes {
+		return "lane exceeds the id length bound"
+	}
+	if strings.TrimSpace(p.Domain) == "" {
+		return "domain is required"
+	}
+	if utf8.RuneCountInString(p.Domain) > maxIDRunes {
+		return "domain exceeds the id length bound"
+	}
+	if p.Epoch == 0 {
+		return "epoch is required and must be non-zero"
+	}
+	if strings.TrimSpace(p.Generation) == "" {
+		return "generation is required"
+	}
+	if utf8.RuneCountInString(p.Generation) > maxIDRunes {
+		return "generation exceeds the id length bound"
+	}
+	return ""
+}
+
 // lifecycleChangedNotification is the server-initiated lifecycle.changed
 // frame — contracted like the files.changed and git.changed notifications
 // because an unsolicited notification is exactly where an addressing or shape
 // defect hides. Its schema covers the params object only; the params are the
 // lifecyclepub.Fact, declared once (AD-8: one owner per behaviour).
 type lifecycleChangedNotification struct {
-	JSONRPC string            `json:"jsonrpc"`
-	Method  string            `json:"method"`
-	Params  lifecyclepub.Fact `json:"params"`
+	JSONRPC string                 `json:"jsonrpc"`
+	Method  string                 `json:"method"`
+	Params  lifecycleChangedParams `json:"params"`
+}
+
+// lifecycleChangedParams is the renderer-facing addressing envelope. Fact
+// remains the lifecycle publisher's single projection; SessionID is added at
+// the transport seam because one WebSocket owns several terminal tabs and only
+// this layer knows which session the lane belongs to.
+type lifecycleChangedParams struct {
+	SessionID string `json:"sessionId"`
+	lifecyclepub.Fact
 }
 
 // WithLifecyclePublisher wires the lifecycle publication boundary into the
@@ -153,18 +260,21 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	}
 	// The envelope is the Responder's now (nocx-292k): every write goes
 	// through the outbound queue and its pump, which is the only writer on
-	// the socket, so the notification is built from its params alone.
-	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(f)); err != nil {
-		s.log.Debug("write lifecycle.changed", "lane", f.Lane, "error", err)
+	// the socket. SessionID is transport addressing, not a lifecycle fact:
+	// one WebSocket carries several tabs, and the renderer must route this
+	// notification before any tab mutates or acknowledges its state.
+	params := lifecycleChangedParams{SessionID: string(sid), Fact: f}
+	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
+		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
 	}
 }
 
 // replayLifecycleFacts re-emits the current lifecycle projection of every
-// lane bound to the session — the AD-9 reconnect resume (protocol §12). Runs
-// from handleAttach after the attach response so the reattached frontend
-// receives the current state of its domains, whether or not a transition
-// happened while it was away. Lanes of the session with no state yet derive
-// nothing and are skipped.
+// lane bound to the session. It runs after both open and attach results: the
+// renderer first learns or resumes the server-authoritative session id, then
+// receives the current state of its domains even when the transition happened
+// while it could not acknowledge it. Lanes with no state derive nothing and
+// are skipped.
 func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 	if s.lifecyclePub == nil {
 		return
@@ -225,9 +335,9 @@ type lifecycleSubmitAttemptResult struct {
 // lane must be registered to a session THIS connection opened or reattached
 // to. This is a mutating call, and it must not be addressable by a domain
 // id guessed from another session.
-func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleLifecycleSubmitAttempt(r Responder, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
+		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params submitAttemptParams
@@ -235,27 +345,27 @@ func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState,
 		// An empty command is a bare newline, not an execution: it never
 		// opens an attempt (an unstarted attempt would hold the domain
 		// and poison the next attach).
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
 		return
 	}
 	dom, ok := s.lifecyclePub.Domain(lifecycle.DomainID(params.Domain))
 	if !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
 	s.lifecycleMu.Lock()
 	sid, registered := s.lifecycleLanes[dom.Lane]
 	s.lifecycleMu.Unlock()
 	if !registered || !state.has(sid) {
-		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
 	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host)
 	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
+	_ = r.TryResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
 		ID:        string(att.ID),
 		Domain:    string(att.Domain),
 		State:     lifecyclepub.AttemptOpen,
@@ -319,14 +429,14 @@ func lifecycleSubmitErrorCode(err error) int {
 func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
 	return []methodSpec{
-		reg(sub, "lifecycle.submitAttempt", func(w *wsConn, state *connState) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(w, state, req) }
+		reg(sub, "lifecycle.submitAttempt", params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(r, state, req) }
 		}),
-		reg(sub, "lifecycle.recoverAck", func(w *wsConn, state *connState) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(w, state, req) }
+		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(r, state, req) }
 		}),
-		reg(sub, "lifecycle.establishAck", func(w *wsConn, state *connState) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, state, req) }
+		reg(sub, "lifecycle.establishAck", params(validateLifecycleEstablishAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, r, state, req) }
 		}),
 	}
 }

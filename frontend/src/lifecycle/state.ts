@@ -26,6 +26,11 @@
 // its own; invalid or stale facts mutate nothing.
 
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+
+/** The authenticated lifecycle projection after its transport address has
+ *  routed it to one session. sessionId belongs to the shared-WebSocket
+ *  envelope; the per-session state machine owns only the fact body. */
+export type LifecycleFact = Omit<LifecycleChanged, 'sessionId'>
 import {
   activateDomain,
   emptyStack,
@@ -91,9 +96,7 @@ export type LifecycleState =
       readonly [authorityBrand]: true
     }
 
-function isAttemptFact(
-  a: LifecycleChanged['attempt'],
-): a is NonNullable<LifecycleChanged['attempt']> {
+function isAttemptFact(a: LifecycleFact['attempt']): a is NonNullable<LifecycleFact['attempt']> {
   return (
     a !== undefined &&
     typeof a.id === 'string' &&
@@ -106,7 +109,7 @@ function isAttemptFact(
  *  completed attempt must carry its exit status and render fence, and an
  *  open or abandoned one must carry neither. Checked before any transition
  *  mutates, so an invalid fact changes nothing. */
-function attemptShapeValid(a: NonNullable<LifecycleChanged['attempt']>): boolean {
+function attemptShapeValid(a: NonNullable<LifecycleFact['attempt']>): boolean {
   if (a.state === 'completed') {
     return typeof a.exitCode === 'number' && typeof a.fence === 'string' && a.fence !== ''
   }
@@ -184,7 +187,7 @@ export class LifecycleKernel {
 
   /** Apply one published lifecycle fact. This is the ONLY input to the
    *  authority axis. Invalid or stale facts mutate nothing. */
-  applyFact(fact: LifecycleChanged): void {
+  applyFact(fact: LifecycleFact): void {
     if (this._lane === null) this._lane = fact.lane
     else if (fact.lane !== this._lane) return
 
@@ -247,7 +250,7 @@ export class LifecycleKernel {
   /** Returns the next state, `this._state` for an accepted no-op, or null
    *  when the fact is invalid. Every rejection check runs before any
    *  mutation, so an invalid fact changes nothing. */
-  private transition(fact: LifecycleChanged): LifecycleState | null {
+  private transition(fact: LifecycleFact): LifecycleState | null {
     switch (fact.lifecycle) {
       case 'native': {
         // The active domain suspended or closed (protocol §9): the lane has
@@ -319,9 +322,10 @@ export class LifecycleKernel {
         return { kind: 'desynchronized', domain, [authorityBrand]: true }
       }
     }
+    return null
   }
 
-  private applyRunning(fact: LifecycleChanged): LifecycleState | null {
+  private applyRunning(fact: LifecycleFact): LifecycleState | null {
     const a = fact.attempt!
     const existing = this._attempts.get(a.id)
     // An attempt belongs to exactly one domain: the fact may only carry an
@@ -403,7 +407,7 @@ export class LifecycleKernel {
    *  when `mint` — a new domain pushed onto the stack (root when empty,
    *  child otherwise; the parent below is suspended). Returns null when the
    *  fact names nothing valid. */
-  private resolveDomain(fact: LifecycleChanged, mint: boolean): IntegrationDomain | null {
+  private resolveDomain(fact: LifecycleFact, mint: boolean): IntegrationDomain | null {
     const id = fact.domain!
     const epoch = fact.epoch!
     if (this._closed.has(id)) return null // stale event for a closed domain
@@ -437,10 +441,7 @@ export class LifecycleKernel {
    *  A completed fact for an unknown attempt is the authenticated
    *  completion itself (its start was missed or replayed); the backend
    *  reported the status, so the record carries it. */
-  private attemptFromFact(
-    fact: LifecycleChanged,
-    domain: IntegrationDomain,
-  ): ExecutionAttempt | null {
+  private attemptFromFact(fact: LifecycleFact, domain: IntegrationDomain): ExecutionAttempt | null {
     const a = fact.attempt!
     if (a.state === 'completed') {
       if (typeof a.exitCode !== 'number' || typeof a.fence !== 'string' || a.fence === '')
@@ -470,7 +471,7 @@ export class LifecycleKernel {
 
   private completedRecord(
     attempt: ExecutionAttempt,
-    a: NonNullable<LifecycleChanged['attempt']>,
+    a: NonNullable<LifecycleFact['attempt']>,
   ): ExecutionAttempt | null {
     if (typeof a.exitCode !== 'number' || typeof a.fence !== 'string' || a.fence === '') return null
     return {

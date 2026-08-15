@@ -8,9 +8,85 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/transport/control"
 )
+
+// ── resolver ingress validators (the per-field sweep) ─────────────────────
+//
+// The two resolver RPCs are ingress-critical (they run on the read loop) and
+// their params are tiny by budget (budgetTiny, 1 KiB), so the validators
+// carry the per-field shape: the ask's request id and its closed outcome
+// enum. The ask broker mints request ids as 16 hex chars; the id is checked
+// for presence and bound, not shape — a stale id must still reach the
+// handler's consume, whose "unknown request id" answer is the honest one for
+// an ask that timed out or was dropped.
+
+// validateUnlockResolvedRaw checks vault.unlockResolved. The outcome is a
+// closed enum. The handler currently resolves an unknown outcome by ERRORING
+// the pending ask; refusing it here instead means the pending ask waits for
+// a corrected retry or its timeout — a broken renderer cannot turn a garbage
+// outcome into a silent ask failure.
+func validateUnlockResolvedRaw(raw json.RawMessage) string {
+	var p struct {
+		RequestID string `json:"requestId"`
+		Outcome   string `json:"outcome"`
+	}
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.RequestID == "" {
+		return "requestId is required"
+	}
+	if utf8.RuneCountInString(p.RequestID) > maxIDRunes {
+		return "requestId exceeds the id length bound"
+	}
+	switch p.Outcome {
+	case "unsealed", "cancelled":
+	default:
+		return "outcome must be one of unsealed, cancelled"
+	}
+	return ""
+}
+
+// validatePasswordResolvedRaw checks connections.passwordResolved: the ask's
+// request id, its closed outcome enum, and the submitted password. The
+// password becomes the SSH answer — a credential, so it gets the same two
+// rules the probe path applies to its key (ws_assistant.go): bounded, and no
+// control character (a newline in a password would corrupt the auth
+// exchange at the worst possible place). An empty submitted password stays
+// accepted: the handler forwards it as-is, and the ssh layer is the one that
+// decides what an empty answer means.
+func validatePasswordResolvedRaw(raw json.RawMessage) string {
+	var p struct {
+		RequestID string `json:"requestId"`
+		Outcome   string `json:"outcome"`
+		Password  string `json:"password,omitempty"`
+		Remember  bool   `json:"remember,omitempty"`
+	}
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.RequestID == "" {
+		return "requestId is required"
+	}
+	if utf8.RuneCountInString(p.RequestID) > maxIDRunes {
+		return "requestId exceeds the id length bound"
+	}
+	switch p.Outcome {
+	case "submitted", "cancelled":
+	default:
+		return "outcome must be one of submitted, cancelled"
+	}
+	if utf8.RuneCountInString(p.Password) > maxProbeKeyRunes {
+		return "password exceeds the length bound"
+	}
+	if hasControlChars(p.Password) {
+		return "password must not contain control characters"
+	}
+	return ""
+}
 
 // askBroker is the shared backend→renderer ask machinery: a pending
 // registry keyed by server-assigned request id, a broadcast to every
@@ -208,12 +284,12 @@ func (h askResolverHandlers) handleUnlockResolved(req jsonrpcRequest) {
 // (ImmediateSubmission): a resolution must never wait for a lane permit.
 func (s *WSServer) askResolverSpecs(immediate control.ImmediateSubmission) []methodSpec {
 	return []methodSpec{
-		reg(immediate, "vault.unlockResolved", func(w *wsConn, _ *connState) handlerFunc {
-			h := askResolverHandlers{asks: &s.asks, r: w}
+		reg(immediate, "vault.unlockResolved", params(validateUnlockResolvedRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			h := askResolverHandlers{asks: &s.asks, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnlockResolved(req) }
 		}),
-		reg(immediate, "connections.passwordResolved", func(w *wsConn, _ *connState) handlerFunc {
-			h := askResolverHandlers{asks: &s.asks, r: w}
+		reg(immediate, "connections.passwordResolved", params(validatePasswordResolvedRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			h := askResolverHandlers{asks: &s.asks, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePasswordResolved(req) }
 		}),
 	}

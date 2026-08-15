@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/endpoints.delete.schema.json",
+  "title": "EndpointsDeleteResult",
+  "description": "Result of the endpoints.delete JSON-RPC method: the empty object — there is nothing to return, the list is the state (the same shape vault.deleteSecret uses). The endpoint record and, metadata-first, the material behind its own secret are gone; a key that could not be removed is the vault journal's pending delete, retried at the next start (ADR-0030 §4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

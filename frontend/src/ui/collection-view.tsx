@@ -36,6 +36,12 @@ export function CollectionView(props: CollectionViewProps) {
 }
 
 export interface CollectionRowProps {
+  /** Free-form row body. Kept for the rows RecordRow does not describe —
+   *  Secrets' glyph + two-line body rows and the Git panel's dense commit
+   *  rows (subject over a meta line of hash, time and several ref badges) —
+   *  and only for those. A record that is a title, a kind, meta text and a
+   *  status belongs in RecordRow: that composite owns the name/meta grammar
+   *  so a surface cannot invent a second one (nocx-pp3y.3). */
   info: JSX.Element
   actions: JSX.Element
   /** Makes the row activatable: reachable (tabIndex 0), operable with

@@ -12,15 +12,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // openLocalSession opens a local session over the wire and returns its id.
@@ -78,8 +81,16 @@ func waitForEcho(t *testing.T, conn *websocket.Conn, sid string, needle string) 
 // prober until released, with the given lane capacity.
 func blockingProbeServer(t *testing.T, laneCapacity int) (*WSServer, *probeCallRecorder) {
 	t.Helper()
+	return blockingProbeServerWithLogger(t, laneCapacity, log.NewSlogAdapter(nil))
+}
+
+func blockingProbeServerWithLogger(
+	t *testing.T,
+	laneCapacity int,
+	logger log.Logger,
+) (*WSServer, *probeCallRecorder) {
+	t.Helper()
 	rec := &probeCallRecorder{started: make(chan struct{}), cancelled: make(chan struct{})}
-	logger := log.NewSlogAdapter(nil)
 	srv := NewWSServer(logger, newRegWithStub(logger),
 		WithControlLaneCapacity(laneCapacity),
 		WithProber(rec),
@@ -218,6 +229,106 @@ func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("vault.unlockResolved did not release the waiter under lane saturation")
 	}
+}
+
+func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
+	var buf syncBuffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := log.NewSlogAdapter(slog.New(handler))
+	srv, rec := blockingProbeServerWithLogger(t, 1, logger)
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	startBlockedProbe(t, conn, rec)
+
+	assertDiagnostic := func(secret, method, methodClass, scope, disposition string) {
+		t.Helper()
+		logged := buf.String()
+		for _, forbidden := range []string{secret, "capacity exhausted"} {
+			if strings.Contains(logged, forbidden) {
+				t.Fatalf("saturation diagnostic leaked %q:\n%s", forbidden, logged)
+			}
+		}
+		for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+			if line == "" {
+				continue
+			}
+			var record map[string]any
+			if err := json.Unmarshal([]byte(line), &record); err != nil {
+				t.Fatalf("bad log line %q: %v", line, err)
+			}
+			if record["msg"] != "control action refused" {
+				continue
+			}
+			if record["method"] != method ||
+				record["methodClass"] != methodClass ||
+				record["scope"] != scope ||
+				record["disposition"] != disposition ||
+				record["retryAfterMs"] != float64(0) {
+				t.Fatalf("incomplete saturation diagnostic: %v", record)
+			}
+			return
+		}
+		t.Fatalf("missing control action refusal diagnostic:\n%s", logged)
+	}
+
+	requestSecret := "request-secret-must-not-be-logged"
+	resp := jsonrpcCall(t, conn, "fs.complete", map[string]any{
+		"text":  requestSecret,
+		"cwd":   "/",
+		"limit": 5,
+	})
+	if !strings.Contains(string(resp), `"code":-32004`) {
+		t.Fatalf("expected saturation response, got %s", resp)
+	}
+	assertDiagnostic(requestSecret, "fs.complete", "fs", "control", "request")
+
+	buf.Reset()
+	notificationSecret := "notification-secret-must-not-be-logged"
+	frame := fmt.Sprintf(
+		`{"jsonrpc":"2.0","method":"fs.complete","params":{"text":%q,"cwd":"/","limit":5}}`,
+		notificationSecret,
+	)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		t.Fatalf("write notification: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read saturation notification: %v", err)
+	}
+	assertDiagnostic(notificationSecret, "fs.complete", "fs", "control", "notification")
+
+	buf.Reset()
+	innerRequestValue := "inner-refusal-sensitive-value"
+	srv.methods["test.innerRefusal"] = reg(
+		control.NewBoundedSubmission(control.NewSemaphore("test-dispatch", 1)),
+		"test.innerRefusal",
+		// The merge: every method now declares a params validator (a method
+		// without one stopped building, nocx-q27y) and writes through the
+		// Responder, which is what the sealed normalizer wraps (nocx-k41yv).
+		// This one accepts what the call sends — the payload IS the fixture
+		// here (the diagnostic must not echo it back), so validating it away
+		// would delete the thing under test.
+		params(func(json.RawMessage) string { return "" }),
+		func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			_ = w
+			return func(_ context.Context, req jsonrpcRequest) {
+				answerOperationRefusal(r, req, &capability.RefusedError{
+					Rejection: control.Rejection{
+						Reason: "inner capacity exhausted: " + innerRequestValue,
+						Scope:  "config",
+					},
+				})
+			}
+		},
+	)
+	innerConn := connectWS(t, srv)
+	defer innerConn.Close() //nolint:errcheck
+	innerResp := jsonrpcCall(t, innerConn, "test.innerRefusal", map[string]string{"sensitive": innerRequestValue})
+	if !strings.Contains(string(innerResp), `"code":-32004`) {
+		t.Fatalf("expected inner saturation response, got %s", innerResp)
+	}
+	assertDiagnostic(innerRequestValue, "test.innerRefusal", "test", "config", "request")
 }
 
 // ── Ordinary saturation returns the structured retryable error immediately

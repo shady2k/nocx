@@ -249,8 +249,10 @@ func TestLocalSession_ShellIntegrationReasonIsNone(t *testing.T) {
 // TestRemoteSession_JumpConfig_ReachesConnect pins the regression the whole
 // seam exists for (nocx-8b1v): a ConnectConfig.JumpConfig must ride
 // sshOptionsFromConfig into the Connect options, or the bastion's auth
-// material is dropped and the dial offers no methods. UnlockRequester must
-// ride the same path so a sealed vault prompts instead of failing.
+// material is dropped and the dial offers no methods. The vault unlock no
+// longer rides this path — a sealed vault is a sealed-vault failure the
+// transport's dispatcher seam normalizes into the canonical error, and the
+// renderer raises the prompt (ADR-0032).
 func TestRemoteSession_JumpConfig_ReachesConnect(t *testing.T) {
 	factory := &capturingSSHFactory{ch: &reasonChannel{reason: ssh.ReasonNone}}
 	reg := launcherReg().WithSSHFactory(factory)
@@ -261,15 +263,13 @@ func TestRemoteSession_JumpConfig_ReachesConnect(t *testing.T) {
 		AuthMode: "publicKey",
 		KeyFile:  "/home/user/.ssh/jump_key",
 	}
-	unlockFn := func(_ context.Context, _ string) error { return nil }
 
 	sess, err := reg.Open(context.Background(), Config{
 		Kind: KindRemote,
 		Host: "example.com",
 		Remote: &ssh.ConnectConfig{
-			JumpHost:        "bastion.example.com",
-			JumpConfig:      jumpCfg,
-			UnlockRequester: unlockFn,
+			JumpHost:   "bastion.example.com",
+			JumpConfig: jumpCfg,
 		},
 	})
 	if err != nil {
@@ -289,8 +289,5 @@ func TestRemoteSession_JumpConfig_ReachesConnect(t *testing.T) {
 	}
 	if cfg.JumpConfig.KeyFile != "/home/user/.ssh/jump_key" {
 		t.Errorf("JumpConfig.KeyFile = %q, want the jump key path", cfg.JumpConfig.KeyFile)
-	}
-	if cfg.UnlockRequester == nil {
-		t.Error("ConnectConfig.UnlockRequester is nil: the vault unlock callback was dropped at the session→ssh seam")
 	}
 }

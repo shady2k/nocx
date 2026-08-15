@@ -7,6 +7,14 @@ GO ?= go
 GOFUMPT ?= gofumpt
 GOLANGCI_LINT ?= golangci-lint
 WAILS ?= wails
+PKG_CONFIG ?= pkg-config
+
+# Wails owns the WebKitGTK API split through the webkit2_41 build tag. Prefer
+# the supported 4.1 surface when this Linux host provides it; otherwise retain
+# Wails' 4.0 default. This avoids linking an orphaned 4.0 package against a
+# libjxl SONAME that the current distribution no longer ships (nocx-v3yw).
+HOST_GOOS ?= $(shell $(GO) env GOOS)
+WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf webkit2_41; fi)
 
 # The remote helper's build matrix (D20): three targets, gzip-compressed
 # into the deploy package's artifacts directory and embedded by
@@ -40,16 +48,16 @@ all: lint test build
 # (internal/storage/appdir.go). Use build-release to produce the shipped
 # artefact; CI does that from a tag.
 build:
-	$(WAILS) build
+	$(WAILS) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)")
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
 # without it costs a developer an empty profile, never a user their data.
 build-release: helpers
-	$(WAILS) build -tags release
+	$(WAILS) build -tags "$(strip release $(WAILS_PLATFORM_TAGS))"
 
 dev:
-	$(WAILS) dev
+	$(WAILS) dev $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)")
 
 # The same app in an ordinary browser instead of the Wails webview: backend
 # (cmd/devharness, real PTY) plus vite with the Wails bindings shimmed. Needs no
@@ -380,7 +388,8 @@ ci-frontend:
 	./scripts/ci-frontend.sh
 
 ci-e2e: helpers
-	@echo "=== ci-e2e: ci.yml's e2e job, the same image and command ==="
+	@echo "=== ci-e2e: ci.yml's e2e jobs, the same image and command ==="
+	@echo "    (CI runs one job per browser in parallel; this runs both in sequence)"
 	./e2e/run-in-container.sh
 
 lint-ci:

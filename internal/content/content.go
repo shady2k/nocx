@@ -38,6 +38,12 @@ var ErrClosed = errors.New("content: store is closed")
 // the record and a later rewrite.
 var ErrNotFound = errors.New("content: no such history row")
 
+// ErrIDConflict is returned when a client-minted entry id is submitted a
+// second time with different content. The id is an idempotency key bound to
+// the client identity and a payload digest, so a replay that would alias a
+// different intent is refused rather than silently stored twice.
+var ErrIDConflict = errors.New("content: entry id already used by a different submission")
+
 // ContentDB is the capability for unbounded, query-oriented private content
 // (ADR-0011 §5). It owns a single SQLite database and exposes typed repository
 // interfaces for each entity class.
@@ -68,6 +74,13 @@ type ContentDB interface {
 	// drop. History rows keep their timestamps; row ids are assigned by
 	// the store.
 	RestorePrivate(ctx context.Context, conversations []Conversation, history []CommandRecord) error
+	// Ledger returns the schema-v1 ledger repository (ADR-0019, ADR-0020,
+	// design §5.2): entries, edges, executions, artifacts, environments
+	// with their versioned observations, sessions and workspaces. The
+	// ledger.* wire methods (nocx-rtg0.3) will drive this surface; until
+	// that cutover its only callers are tests, and command_history remains
+	// the live history path. Nothing may write both (ADR-0019 §4).
+	Ledger() LedgerRepository
 }
 
 // CommandStatus is the execution status of a command. It mirrors the closed

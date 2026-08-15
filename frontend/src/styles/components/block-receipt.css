@@ -45,3 +45,15 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* The ask chip (nocx-x8s2.2): the value names the block it is attached
+   to, and with no editable name field beside it the value takes the row's
+   width — ellipsis, never a clipped glyph or a push off the row. */
+.ui-block-receipt[data-variant='ask'] .ui-block-receipt__value {
+  flex: 1;
+  max-width: none;
+}
+
+.ui-block-receipt__status {
+  margin-top: 6px;
+}

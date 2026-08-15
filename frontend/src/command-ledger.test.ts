@@ -10,10 +10,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { CommandLedger } from './command-ledger'
 import { mintDomain, type IntegrationDomain } from './lifecycle/domains'
-import type { ExecutionAttempt } from './lifecycle/state'
-import type { LifecycleChanged } from './generated/lifecycle.changed'
+import type { ExecutionAttempt, LifecycleFact } from './lifecycle/state'
 
-const FACT: LifecycleChanged = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 }
+const FACT: LifecycleFact = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 }
 const domain = mintDomain(FACT) as IntegrationDomain
 const FENCE = 'a'.repeat(64)
 

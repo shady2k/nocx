@@ -54,7 +54,7 @@ test.describe('vertical tab placement', () => {
     // become visible without navigating times out on a control that is right
     // there — which reads like a broken selector and is not one.
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
       timeout: 5000,
     })
@@ -72,7 +72,7 @@ test.describe('vertical tab placement', () => {
     value: 'horizontal' | 'vertical',
   ) => {
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
       timeout: 5000,
     })
@@ -255,7 +255,7 @@ test.describe('vertical tab placement', () => {
   // the last line of defense — it runs even if the test body fails.
   test.afterEach(async ({ page }) => {
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
       timeout: 5000,
     })

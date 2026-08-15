@@ -183,10 +183,17 @@ func TestResolverMethods_RejectAboveTinyBudget(t *testing.T) {
 
 	bigRequestID := strings.Repeat("r", 2<<10) // frame well above budgetTiny
 
+	// Each resolver has its OWN outcome vocabulary — unsealed for the vault,
+	// submitted for a password — and sending one method the other's word is
+	// how this test used to pass a payload the product cannot send.
+	outcomes := map[string]string{
+		"vault.unlockResolved":         "unsealed",
+		"connections.passwordResolved": "submitted",
+	}
 	for _, method := range []string{"vault.unlockResolved", "connections.passwordResolved"} {
 		t.Run(method, func(t *testing.T) {
 			resp := jsonrpcCall(t, conn, method, map[string]any{
-				"requestId": bigRequestID, "outcome": "unsealed",
+				"requestId": bigRequestID, "outcome": outcomes[method],
 			})
 			var env struct {
 				Error *struct {
@@ -208,7 +215,7 @@ func TestResolverMethods_RejectAboveTinyBudget(t *testing.T) {
 			// the answer is the handler's "unknown request id", not the budget
 			// message — proving the tiny budget still admits real traffic.
 			normal := jsonrpcCall(t, conn, method, map[string]any{
-				"requestId": "no-such-ask", "outcome": "unsealed",
+				"requestId": "no-such-ask", "outcome": outcomes[method],
 			})
 			var nEnv struct {
 				Error *struct {

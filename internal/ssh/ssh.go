@@ -289,14 +289,6 @@ type ConnectConfig struct {
 	// from frontend code.
 	Secrets  credential.SecretStore
 	SecretID credential.SecretID
-	// UnlockRequester is called by auth callbacks when Secrets.Get returns
-	// ErrVaultSealed. It should show the unlock prompt and return nil on
-	// success, or an error if the unlock was refused / not possible.
-	// When nil, a sealed vault is reported as an auth failure (the
-	// existing dispatcher.onVaultSealed path catches it for foreground
-	// RPCs; this field covers background goroutines like forward replay).
-	UnlockRequester func(ctx context.Context, reason string) error
-
 	// ConnectionName is the saved profile's display name, carried so a
 	// password prompt can name which connection it is asking about
 	// (nocx-s8jn). Empty for direct-host opens, which never raise prompts.
@@ -562,19 +554,11 @@ func WithJumpAuthorizedEndpoint(endpoint string) ConnectOption {
 // resolver builds JumpConfig with the bastion's own Secrets, SecretID,
 // PassphraseSecretID, KeyFile, AuthMode and nested JumpConfig for the next
 // hop. Without this option the session→ssh seam drops it, and
-// acquireJumpHost falls back to flat fields that lack KeySecretID,
-// PasswordRequester and UnlockRequester — producing an empty auth chain
-// and "attempted methods [none]" (nocx-8b1v).
+// acquireJumpHost falls back to flat fields that lack KeySecretID and
+// PasswordRequester — producing an empty auth chain and "attempted methods
+// [none]" (nocx-8b1v).
 func WithJumpConfig(jump *ConnectConfig) ConnectOption {
 	return func(c *ConnectConfig) { c.JumpConfig = jump }
-}
-
-// WithUnlockRequester forwards the vault-unlock callback so auth callbacks
-// can prompt for unlock when Secrets.Get returns ErrVaultSealed. Without
-// this, a sealed vault during a jump-host dial is reported as an auth
-// failure rather than prompting (nocx-8b1v).
-func WithUnlockRequester(r func(ctx context.Context, reason string) error) ConnectOption {
-	return func(c *ConnectConfig) { c.UnlockRequester = r }
 }
 
 type Stub struct {

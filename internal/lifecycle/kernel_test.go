@@ -6,6 +6,22 @@ import (
 	"time"
 )
 
+func TestPendingDomainLaneStartsNative(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	if err := k.BindTransport("T", p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.RequestDomain("L", nil, "T"); err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+
+	st := mustState(t, k, "L")
+	if st.Lifecycle != LifecycleNative {
+		t.Fatalf("pending domain lane lifecycle = %v, want Native", st.Lifecycle)
+	}
+}
+
 // --- sequence and replay (decision 7) ---------------------------------------
 
 func TestSequenceDuplicateAndDecreasingRejected(t *testing.T) {

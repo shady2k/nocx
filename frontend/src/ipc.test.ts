@@ -1023,4 +1023,54 @@ describe('reconnect and reattach', () => {
     expect(offsets.get(SID)).toBe(4)
     expect(offsets.get(OTHER_SID)).toBe(2)
   })
+
+  it('reports the aggregate reattach outcome once every attach has settled', async () => {
+    const client = new WSClient(mockDispatcher())
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+
+    const openingA = client.openSession(80, 24)
+    const openIdA = socket()
+      .requests()
+      .find((r) => r.method === 'open')!.id!
+    socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
+    await openingA
+
+    const openingB = client.openSession(80, 24)
+    const reqsAfterB = socket().requests()
+    const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
+    socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })
+    await openingB
+
+    const reports: { resumed: number; lost: number }[] = []
+    client.onReconnectResult((r) => reports.push(r))
+
+    const firstWS = socket()
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(2)
+    const bySession = new Map(attaches.map((a) => [a.params?.sessionId, a.id]))
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: bySession.get(SID),
+      result: { reset: false },
+    })
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      id: bySession.get(OTHER_SID),
+      error: { code: -32602, message: 'unknown session' },
+    })
+    // The aggregate chain: attach rejection → catch → Promise.all → report.
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve()
+    }
+
+    expect(reports).toEqual([{ resumed: 1, lost: 1 }])
+  })
 })

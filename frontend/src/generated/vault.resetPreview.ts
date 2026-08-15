@@ -22,6 +22,10 @@ export interface VaultResetPreview {
    */
   profileCount: number
   /**
+   * AI endpoints holding at least one of those secrets (ADR-0030). Endpoints that store no credential are not counted, because they lose nothing. Counted separately from profileCount: the endpoint clause is a different sentence answering a different question (ADR-0031).
+   */
+  endpointCount: number
+  /**
    * False when the OS keychain is not answering, so secrets stored there cannot be removed and will remain readable. The user is told this BEFORE confirming, so proceeding is an informed choice rather than a surprise half-way through. True when there is no system keychain on this platform at all: an absent store is not a broken one.
    */
   systemKeychainReachable: boolean

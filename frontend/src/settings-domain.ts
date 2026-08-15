@@ -16,30 +16,15 @@
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+import type { Declaration } from './generated/settings.describe'
+
 /**
- * A setting's wire declaration — mirrors the backend's Declaration
- * (internal/settings). The screen is generated from these; Min/Max and the
- * unit live HERE, beside the key and label, so every write path sees the
- * same bounds. The screen never validates on its own.
+ * The settings wire vocabulary, generated from contracts/settings.describe.schema.json
+ * (npm run contracts) — never hand-edited. The domain re-exports it so
+ * callers keep importing from here; a hand-written type can want a field the
+ * wire does not carry, a generated one cannot (contracts/README.md).
  */
-export interface Declaration {
-  key: string
-  section: string
-  label: string
-  description: string
-  control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
-  dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
-  default?: unknown
-  options?: { value: string; label: string }[]
-  min?: number
-  max?: number
-  /** The unit a number setting is measured in ('days', 'MiB') — rendered as
-   *  a suffix beside the value, never buried in the description. */
-  unit?: string
-  /** What the value 0 MEANS when 0 is a sentinel rather than a quantity
-   *  ('Kept until the size limit is reached'). Declared, not inferred. */
-  zeroLabel?: string
-}
+export type { Declaration, SettingsGroup } from './generated/settings.describe'
 
 /**
  * The permanent caption under a number field, read from the declaration —

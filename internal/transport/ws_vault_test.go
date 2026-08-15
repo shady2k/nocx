@@ -398,8 +398,8 @@ func TestVaultRPC_Unseal_EmptyParams(t *testing.T) {
 	if resp.Error.Code != -32602 {
 		t.Errorf("error code = %d, want -32602", resp.Error.Code)
 	}
-	if !strings.Contains(resp.Error.Message, "invalid means") {
-		t.Errorf("error message = %q, want substring 'invalid means'", resp.Error.Message)
+	if !strings.Contains(resp.Error.Message, "means is required") {
+		t.Errorf("error message = %q, want substring 'means is required'", resp.Error.Message)
 	}
 }
 

@@ -57,6 +57,27 @@ for rule in unreachable escaped-dot undefined-var theme-scope bare-type-selector
   fi
 done
 
+# ── Row-grammar fixture check (nocx-pp3y.3, acceptance 4) ─────────────────
+# The kit owns the record-row grammar (RecordRow's title / one kind badge /
+# meta / status); a surface declaring its own *-item-name / *-item-meta
+# family is the second dialect the composite exists to make impossible.
+# The fixture's three intentional families must fire; the kit's own
+# composite part and an unrelated surface class must stay silent.
+row_grammar_check=$(node "${fixture_dir}/check-row-grammar.mjs" \
+  --dir="${fixture_dir}/row-grammar-fixture" 2>/dev/null || true)
+
+for family in foo-item-name bar-row__meta baz-item-name__inner; do
+  if ! echo "$row_grammar_check" | grep -q "$family"; then
+    echo "ROW-GRAMMAR GATE FAILED — family '${family}' did not fire on the fixture"
+    exit 1
+  fi
+done
+
+if echo "$row_grammar_check" | grep -q 'ui-record-row__title\|plain-widget'; then
+  echo "ROW-GRAMMAR GATE FAILED — reported the kit's own composite part or an unrelated class"
+  exit 1
+fi
+
 # The narrowed form must NOT be reported: `button.ui-fixture` addresses the component,
 # and a rule that forbade it would forbid the correct spelling along with the wrong one.
 if [ "$(echo "$integrity_check" | grep -c '"rule":"bare-type-selector"')" -ne 1 ]; then
@@ -267,5 +288,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity verified (11 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar verified (11 integrity rules)"
 exit 0

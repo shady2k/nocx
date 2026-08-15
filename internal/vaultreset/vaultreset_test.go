@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/profile"
@@ -265,5 +266,94 @@ func TestPreview_ReportsWhetherThereIsAVaultToReset(t *testing.T) {
 	}
 	if got.VaultInitialized {
 		t.Error("VaultInitialized = true for an uninitialized vault")
+	}
+}
+
+// --- endpoints (ADR-0030, ADR-0031) -------------------------------------
+
+// The preview surfaces the endpoint count beside the profile one: a second
+// record kind holding references is no longer invisible to the reset — the
+// whole of the brief's finding 2.
+func TestPreview_ReportsEndpointReferences(t *testing.T) {
+	v := &fakeVault{snap: sealedSnapshot(true)}
+	r := &fakeRefs{impact: profile.SecretReferenceImpact{SecretCount: 3, ProfileCount: 2, EndpointCount: 1}, order: &[]string{}}
+	s := newService(t, v, r)
+
+	p, err := s.Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if p.Impact.EndpointCount != 1 {
+		t.Errorf("EndpointCount = %d, want 1", p.Impact.EndpointCount)
+	}
+	if p.Impact.SecretCount != 3 || p.Impact.ProfileCount != 2 {
+		t.Errorf("Impact = %+v, want secrets 3 / profiles 2 intact", p.Impact)
+	}
+}
+
+// The execute reports what it actually cleared, endpoints included — the
+// numbers the brief says must be checked.
+func TestExecute_ReportsEndpointReferences(t *testing.T) {
+	v := &fakeVault{snap: sealedSnapshot(true), order: &[]string{}}
+	r := &fakeRefs{impact: profile.SecretReferenceImpact{SecretCount: 3, ProfileCount: 1, EndpointCount: 1}, order: &[]string{}}
+	s := newService(t, v, r)
+
+	res, err := s.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Impact.EndpointCount != 1 {
+		t.Errorf("EndpointCount = %d, want 1", res.Impact.EndpointCount)
+	}
+}
+
+// The real store, the real sweep: an endpoint holding a reference counts in
+// the preview and is cleared by the execute, with the record surviving —
+// the same shape as a profile losing its password.
+func TestService_WithRealStore_CountsAndClearsEndpointReferences(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	ref := "sec:v1:file:endpointref0000000000000000000001"
+	if err := ps.CreateProfile(profile.SSHProfile{
+		Base:    profile.Base{ID: "ssh:p:1", Type: "ssh", Name: "p"},
+		Options: profile.StoredSSHProfileOptions{Host: "h", PasswordSecret: ref},
+	}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	if err := ps.CreateEndpoint(profile.Endpoint{
+		ID:            "endpoint:custom:openai:1",
+		Name:          "OpenAI",
+		BaseURL:       "https://api.openai.com/v1",
+		Schema:        profile.EndpointSchemaOpenAICompatible,
+		CredentialRef: ref,
+		Models:        []profile.EndpointModel{{Name: "gpt-4o-mini"}},
+	}); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+
+	v := &fakeVault{snap: sealedSnapshot(true), order: &[]string{}}
+	s := vaultreset.New(v, ps, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	p, err := s.Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if p.Impact.SecretCount != 1 || p.Impact.ProfileCount != 1 || p.Impact.EndpointCount != 1 {
+		t.Fatalf("preview impact = %+v, want 1 secret, 1 profile, 1 endpoint", p.Impact)
+	}
+
+	res, err := s.Execute(context.Background())
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Impact.EndpointCount != 1 {
+		t.Fatalf("execute impact = %+v, want 1 endpoint", res.Impact)
+	}
+	eps, err := ps.LoadEndpoints()
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("endpoints = %+v, want the record to survive", eps)
+	}
+	if eps[0].CredentialRef != "" {
+		t.Errorf("CredentialRef = %q, want cleared", eps[0].CredentialRef)
 	}
 }

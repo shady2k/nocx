@@ -768,8 +768,11 @@ func TestConnectionsTrustHostKey_InvalidKeyEncoding(t *testing.T) {
 	if err := json.Unmarshal(resp, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if result.Error == nil || result.Error.Code != -32603 {
-		t.Fatalf("expected -32603 for undecodable key, got %+v", result.Error)
+	// Undecodable base64 from the renderer is INVALID PARAMS, not a server
+	// fault: the boundary now refuses it before the handler, which is the
+	// honest code for "you sent me something that cannot be a key".
+	if result.Error == nil || result.Error.Code != -32602 {
+		t.Fatalf("expected -32602 for undecodable key, got %+v", result.Error)
 	}
 	if truster.called {
 		t.Fatal("truster must not be called with an undecodable key")

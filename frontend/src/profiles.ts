@@ -6,6 +6,7 @@ import type { BackupCreateResult } from './generated/backup.create'
 import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
 import type { BackupRestoreResult as RestoreResult } from './generated/backup.restore'
 import type { BackupSaveFileResult as SaveFileResult } from './generated/backup.saveToFile'
+import type { SettingsDescribe } from './generated/settings.describe'
 
 interface TabbyImportResult {
   profilesImported: number
@@ -565,7 +566,7 @@ export class ProfileClient {
   }
   // Settings RPC (nocx-9m5 / STORE-5b).  No secret value ever appears in a
   // response — secrets go through secretSet/secretDelete/secretExists only.
-  describeSettings(): Promise<{ declarations: unknown[] }> {
+  describeSettings(): Promise<SettingsDescribe> {
     return this.call('settings.describe', {})
   }
   getSnapshot(): Promise<{

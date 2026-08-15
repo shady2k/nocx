@@ -339,14 +339,16 @@
    only cue being spent on it.
 
    An accent tint instead — but mixed with the ROW's own fill, not with
-   transparency. `color-mix(accent, transparent 88%)` is what
-   `.cm-item.cm-selected` uses and copying it here inverted the very problem it
-   was meant to fix: a translucent fill composites over whatever is behind the
-   element, and behind a tab row is the strip at `--color-chrome` (#0e0f15),
-   far darker than the row's own #24283b. The connections list gets away with it
-   because it sits on a light surface. Mixing against `--color-surface-sunken`
-   asks the question that was actually meant — take this row and push it toward
-   the accent — and cannot be changed by what happens to sit underneath.
+   transparency. `color-mix(accent, transparent 88%)` is the technique the
+   connections row's hover used to copy from (the row was CollectionRow's
+   `.ui-collection-row` even then); copying it here inverted the very problem
+   it was meant to fix: a translucent fill composites over whatever is behind
+   the element, and behind a tab row is the strip at `--color-chrome`
+   (#0e0f15), far darker than the row's own #24283b. The connections list
+   gets away with it because it sits on a light surface. Mixing against
+   `--color-surface-sunken` asks the question that was actually meant — take
+   this row and push it toward the accent — and cannot be changed by what
+   happens to sit underneath.
 
    Lighter, because that is what a raised thing is. The inset top highlight and
    the drop shadow are the rest of the same statement: the selected row sits

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/settings.describe.schema.json",
+  "title": "SettingsDescribe",
+  "description": "Result of the settings.describe JSON-RPC method. The single declaration of this shape: the renderer's TypeScript type is generated from it and the Go transport is validated against it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["declarations", "groups", "sectionGroups"],
+  "properties": {
+    "declarations": {
+      "description": "Every declared setting, in declaration order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/declaration"
+      }
+    },
+    "groups": {
+      "description": "The settings rail's group catalogue — id, title, order — in rail order. Component pages name these ids in their registry entries in settings.tsx; a page whose group id is absent here is a defect, never a silent top-level page.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/settingsGroup"
+      }
+    },
+    "sectionGroups": {
+      "description": "Which group each generated section belongs to. A section absent from this map is ungrouped and renders at top level beside the groups. Keyed by section, never by declaration: two declarations in one section cannot disagree about their group.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "section", "label", "description", "control", "dataClass"],
+      "properties": {
+        "key": {
+          "description": "Stable dotted id, e.g. \"terminal.fontSize\".",
+          "type": "string"
+        },
+        "section": {
+          "description": "Group heading in the UI. The section is what a rail group maps, never the individual declaration.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "control": {
+          "enum": ["toggle", "text", "number", "select", "secret"]
+        },
+        "dataClass": {
+          "enum": ["publicConfig", "privateMetadata", "privateContent", "secretAuthenticator"]
+        },
+        "default": {
+          "description": "The declared default. Absent for secret-class settings and for zero-value defaults (the Go wire omits them via omitempty).",
+          "type": ["boolean", "string", "number", "null"]
+        },
+        "options": {
+          "description": "The select control's choices; present only for control: select.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "label"],
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "zeroLabel": {
+          "type": "string"
+        }
+      }
+    },
+    "settingsGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "order"],
+      "properties": {
+        "id": {
+          "description": "Stable id a component page names in its registry entry.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "order": {
+          "description": "Rail position; the rail sorts groups by it. Distinct per group.",
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

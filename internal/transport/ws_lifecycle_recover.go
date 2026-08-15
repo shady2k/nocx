@@ -98,27 +98,27 @@ type lifecycleRecoverAckParams struct {
 //     Lost → Native;
 //   - (d) a duplicate ack for an already-resolved episode succeeds (the
 //     transition already landed; idempotent by design).
-func (s *WSServer) handleLifecycleRecoverAck(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleLifecycleRecoverAck(r Responder, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
+		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params lifecycleRecoverAckParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || params.Generation == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId and generation required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId and generation required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	// (b,d) alive: the session must be open, and owned by this connection.
 	if _, err := s.registry.Get(sid); err != nil || !state.has(sid) {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
 		return
 	}
 	rec := s.recoveryOf(sid)
 	if rec == nil || rec.generation != params.Generation {
 		// (b) no pending episode for this generation — never promised, or
 		// superseded by a fresh domain's episode.
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "no pending recovery for this generation"})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "no pending recovery for this generation"})
 		return
 	}
 	// The episode's own mutex serializes claim→recover→resolve (see
@@ -127,14 +127,14 @@ func (s *WSServer) handleLifecycleRecoverAck(wconn *wsConn, state *connState, re
 	defer rec.mu.Unlock()
 	if rec.resolved {
 		// (d) idempotent: the recovery already landed.
-		_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
+		_ = r.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 		return
 	}
 	// (c) the kernel permits only Lost → Native.
 	if err := s.lifecyclePub.RecoverLane(rec.lane); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	rec.resolved = true
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
+	_ = r.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }

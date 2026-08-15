@@ -50,7 +50,7 @@ test.describe('Connections inside Settings', () => {
   test.afterEach(async ({ page }) => {
     await page.goto('/')
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     // Wait for the list before reading it: count() is a one-shot read with no
     // retry, so asking a view that has not loaded answers "nothing here" and
     // the cleanup returns having done nothing.
@@ -74,7 +74,7 @@ test.describe('Connections inside Settings', () => {
     const tabsBeforeConnect = await page.locator('.nocx-tab-title').count()
 
     // Click "Connections" in the left rail.
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     // The view is identified by its own root and its toolbar action, not by a
     // heading: inside Settings no section draws a title of its own — the rail
     // names the section, and the standalone surface's .cm-header > h1 went with

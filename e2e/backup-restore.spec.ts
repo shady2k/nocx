@@ -17,7 +17,7 @@ test.describe('Backup & Restore', () => {
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
 
     // Change a reachable persisted setting so restore has an observable effect.
-    const placementNav = '.ui-settings-section-nav-item[data-section="Interface"] button'
+    const placementNav = '.ui-grouped-nav__item[data-item="Interface"] button'
     const placementSelect = '.ui-settings-row[data-key="tab.placement"] select'
     await page.locator(placementNav).click()
     await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
@@ -25,9 +25,7 @@ test.describe('Backup & Restore', () => {
     await expect(page.locator(placementSelect)).toHaveValue('vertical')
 
     // Navigate to Backup & Restore and create a backup.
-    await page
-      .locator('.ui-settings-section-nav-item[data-section="Backup & Restore"] button')
-      .click()
+    await page.locator('.ui-grouped-nav__item[data-item="backup"] button').click()
     await expect(page.getByRole('heading', { name: 'Create backup' })).toBeVisible()
 
     const downloadPromise = page.waitForEvent('download')
@@ -43,9 +41,7 @@ test.describe('Backup & Restore', () => {
     await expect(page.locator(placementSelect)).toHaveValue('horizontal')
 
     // Go back to Backup & Restore, load the backup file and preview.
-    await page
-      .locator('.ui-settings-section-nav-item[data-section="Backup & Restore"] button')
-      .click()
+    await page.locator('.ui-grouped-nav__item[data-item="backup"] button').click()
 
     await page.locator('.ui-file-input__native').setInputFiles(backupPath)
     await expect(page.getByRole('heading', { name: /Preview — merge/ })).toBeVisible({

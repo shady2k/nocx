@@ -47,10 +47,10 @@ type shellCompleteResponse struct {
 // handleComplete serves the shell.complete method.
 //
 // Routes by session kind: a KindLocal session delegates to the local
-// completer (the backend's own filesystem); a KindRemote session
-// delegates to the SSH completer, which runs a second shell on the
-// remote host through the DiscoveryConn lane. The session gate is the
-// SessionOperation's; the completion logic itself stays here.
+// completer (the backend's own filesystem); a KindRemote session delegates
+// to the SSH completer with the session's exact connect options. The
+// SessionTargetOperation copies those immutable facts under the session gate,
+// releases that gate, and retains the ordinary lane for the remote work.
 func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcRequest) {
 	params, errMsg := parseShellCompleteParams(req)
 	if errMsg != "" {
@@ -58,43 +58,39 @@ func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcReq
 		return
 	}
 
-	op, err := h.ops.ForSession(session.ID(params.SessionID))
+	op, err := h.ops.ForSessionTarget(session.ID(params.SessionID))
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
 		return
 	}
-	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
-		sess, getErr := svc.Get(session.ID(params.SessionID))
-		if getErr != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
-			return nil
+	err = op.Run(ctx, func(ctx context.Context, target capability.SessionTarget) error {
+		compReq := completion.Request{
+			Host:  target.Host,
+			Cwd:   params.Cwd,
+			Line:  params.Line,
+			Pos:   params.Pos,
+			Limit: params.limit(),
 		}
 
-		var comp completion.Completer
-		switch sess.Kind() {
+		var compResp *completion.Response
+		var compErr error
+		switch target.Kind {
 		case session.KindLocal:
-			comp = h.local
+			if h.local != nil {
+				compResp, compErr = h.local.Complete(ctx, compReq)
+			}
 		case session.KindRemote:
-			comp = h.remote
+			if h.remote != nil {
+				compResp, compErr = h.remote.Complete(ctx, compReq, target.SSHOptions...)
+			}
 		}
-		if comp == nil {
+		if compResp == nil && compErr == nil {
 			_ = h.r.TryResult(req.ID, mustMarshal(shellCompleteResponse{
 				Entries: []shellCompleteEntry{},
 				Reason:  "completion unavailable for this session kind",
 			}))
 			return nil
 		}
-
-		limit := params.limit()
-		compReq := completion.Request{
-			Host:  sess.Host(),
-			Cwd:   params.Cwd,
-			Line:  params.Line,
-			Pos:   params.Pos,
-			Limit: limit,
-		}
-
-		compResp, compErr := comp.Complete(ctx, compReq)
 		if compErr != nil {
 			_ = h.r.TryResult(req.ID, mustMarshal(shellCompleteResponse{
 				Entries: []shellCompleteEntry{},
@@ -103,12 +99,17 @@ func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcReq
 			return nil
 		}
 
-		resp := toWireResponse(compResp)
-		_ = h.r.TryResult(req.ID, mustMarshal(resp))
+		_ = h.r.TryResult(req.ID, mustMarshal(toWireResponse(compResp)))
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		if capability.IsRefused(err) {
+			answerOperationRefusal(h.r, req, err)
+			return
+		}
+		// The session closed after ForSessionTarget's construction-time
+		// check but before its gated snapshot.
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
 	}
 }
 

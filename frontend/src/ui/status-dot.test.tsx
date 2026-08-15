@@ -17,6 +17,21 @@ describe('StatusDot', () => {
     expect(dot!.getAttribute('data-tone')).toBe('error')
   })
 
+  // The muted state — the connections row's "Disconnected" and the
+  // endpoints row's "No key": the dot exists and marks the text, it just
+  // has nothing to say in colour (nocx-pp3y.3 folded cm-session-dot into
+  // this component, and the disconnected dot was always a faded
+  // currentColor, never a warning).
+  it('carries a neutral tone for a state that has no colour to say', () => {
+    render(() => (
+      <StatusDot tone="neutral" accessibleName="Disconnected">
+        Disconnected
+      </StatusDot>
+    ))
+    const dot = document.querySelector('.ui-status-dot')
+    expect(dot!.getAttribute('data-tone')).toBe('neutral')
+  })
+
   // The half that is easy to drop. A dot with no accessible name tells a
   // screen-reader user nothing at all about the thing it is marking.
   it('says what the colour means, and hides the colour from assistive technology', () => {

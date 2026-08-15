@@ -132,9 +132,14 @@ func TestVaultResolveLine_SealedVault(t *testing.T) {
 	h := newInventoryHarness(t)
 	h.setupAndUnseal()
 	h.v.Seal() // the vault is now sealed, not merely uninitialized
+
+	// The sealed vault answers with the canonical sealed error — code
+	// -32001, reason vault-sealed — the shape the renderer's dispatcher
+	// turns into the unlock prompt (ADR-0032). Nothing blocks on an ask:
+	// the answer is immediate, and no prompt was raised.
 	code, message, reason := h.callResolveLineError()
-	if code != -32001 {
-		t.Errorf("code = %d, want -32001 (vault-sealed)", code)
+	if code != vaultSealedCode {
+		t.Errorf("code = %d, want %d (vault-sealed)", code, vaultSealedCode)
 	}
 	if reason != "vault-sealed" {
 		t.Errorf("reason = %q, want vault-sealed", reason)
@@ -142,6 +147,7 @@ func TestVaultResolveLine_SealedVault(t *testing.T) {
 	if !strings.Contains(message, "sealed") {
 		t.Errorf("message = %q, want it to say the vault is sealed", message)
 	}
+	assertNoPendingAsk(t, h.ws)
 }
 
 // An uninitialized vault is its own actionable error, not a generic one.

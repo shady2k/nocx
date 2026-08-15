@@ -590,6 +590,103 @@ describe('saveSecretWithVault', () => {
     await expect(promise).rejects.toBeInstanceOf(VaultOperationCancelledError)
     expect(savePassword).toHaveBeenCalledTimes(1)
   })
+
+  // ── The dispatcher's sealed seam (dispatcher.ts intercepts a
+  // vault-sealed RPC response, keeps the caller's promise pending, raises
+  // this controller's unlock prompt, and re-sends the request verbatim
+  // after unseal). The wrapper tests above reject saveFn with the reason
+  // directly; the seam path never lets the rejection reach the wrapper, so
+  // it needs its own regression (nocx-4egm).
+
+  function makeSeamClient() {
+    const base = mockClient()
+    const dispatcher = {
+      onVaultSealed: undefined as (() => Promise<void>) | undefined,
+    }
+    // The controller wires its seam onto vaultClient.dispatcher when the
+    // client exposes one; a plain object is the whole seam surface.
+    const withDispatcher = base.client as unknown as { dispatcher?: unknown }
+    withDispatcher.dispatcher = dispatcher
+    return { ...base, dispatcher }
+  }
+
+  it('sealed seam: the unlock dialog close does not settle the save while the re-sent RPC is in flight', async () => {
+    const { client, status, dispatcher } = makeSeamClient()
+    status.mockResolvedValue(BASE_STATUS)
+    const ctrl = createVaultState(client)
+    await ctrl.refresh()
+
+    // The dispatcher-backed RPC: the seam holds its promise until the
+    // re-sent request settles. Executor form with a captured resolver —
+    // Promise.withResolvers needs an ES2024 lib and this project targets
+    // ES2021 (the codebase pattern, e.g. editor-vault.test.ts).
+    let rpcResolve!: () => void
+    const rpc = new Promise<void>((resolve) => {
+      rpcResolve = resolve
+    })
+    const saveFn = vi.fn(() => rpc)
+    const save = ctrl.saveSecretWithVault(saveFn)
+
+    // The backend answered vault-sealed; the dispatcher intercepted and
+    // raised the unlock prompt through the seam, keeping the RPC pending.
+    const gate = dispatcher.onVaultSealed!()
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
+
+    // The user unlocks — handleUnseal's exact ordering: onUnsealed (the
+    // seam resolves; the dispatcher re-sends the request, still in flight)
+    // and then onClose, synchronously in one stack.
+    ctrl.onUnsealDone()
+    ctrl.closeUnlock()
+    await gate
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(false))
+
+    // The save must STILL be pending — the re-sent request has not
+    // settled. Resolving here is the bug: the endpoints form closed and
+    // reported "Saved" while the create was still in flight, leaving no
+    // row and no error (nocx-4egm).
+    let outcome: unknown = 'pending'
+    void save.then(
+      () => {
+        outcome = 'resolved'
+      },
+      (e: unknown) => {
+        outcome = e
+      },
+    )
+    await Promise.resolve()
+    expect(outcome).toBe('pending')
+
+    // The re-sent request settles: the save completes exactly once.
+    rpcResolve()
+    await expect(save).resolves.toBeUndefined()
+    expect(saveFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('sealed seam: cancelling the unlock rejects the save, never resolves it', async () => {
+    const { client, status, dispatcher } = makeSeamClient()
+    status.mockResolvedValue(BASE_STATUS)
+    const ctrl = createVaultState(client)
+    // Executor form (ES2021 lib target; see the success test above).
+    let rpcReject!: (e: unknown) => void
+    const rpc = new Promise<void>((_, reject) => {
+      rpcReject = reject
+    })
+    const saveFn = vi.fn(() => rpc)
+    const save = ctrl.saveSecretWithVault(saveFn)
+
+    const gate = dispatcher.onVaultSealed!()
+    void gate.catch(() => {})
+    await vi.waitFor(() => expect(ctrl.showUnlock()).toBe(true))
+
+    // Cancel: the seam rejects, and the dispatcher rejects the held RPC it
+    // would have re-sent. The caller must see the cancellation — a save
+    // reported as done over a cancelled unlock is the same silent lie.
+    ctrl.closeUnlock()
+    rpcReject(new VaultOperationCancelledError())
+
+    await expect(save).rejects.toBeInstanceOf(VaultOperationCancelledError)
+    expect(saveFn).toHaveBeenCalledTimes(1)
+  })
 })
 
 // ── SetupDialog ────────────────────────────────────────────────────────

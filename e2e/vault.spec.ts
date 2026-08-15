@@ -106,7 +106,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
 
     // Click "Connections" in the left rail.
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
     await expect(
       page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }),
@@ -237,7 +237,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     // Re-open Settings and navigate back to Connections.
     await page.keyboard.press('Meta+,')
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
     // The saved profile should be in the list.
@@ -307,7 +307,7 @@ test.describe('Vault — recovery code unseal', () => {
     // Open Settings, Connections, create profile with password (same as case 1).
     await page.keyboard.press('Meta+,')
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
     await page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }).click()
     await expect(page.getByRole('dialog').filter({ hasText: 'New Connection' })).toBeVisible({
@@ -388,7 +388,7 @@ test.describe('Vault — recovery code unseal', () => {
     // Navigate back to Settings → Connections.
     await page.keyboard.press('Meta+,')
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
     // Verify the profile is in the list (persisted across restart).
@@ -476,7 +476,7 @@ test.describe('Vault — with keyring, silent setup', () => {
       // Open Settings → Connections → create connection with password.
       await page.keyboard.press('Meta+,')
       await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
-      await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+      await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
       await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
       await page
         .locator('[role="toolbar"]')

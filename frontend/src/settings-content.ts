@@ -14,6 +14,8 @@ import { type SettingsObserver } from './settings-observer'
 import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
+import type { AgentClient } from './agent'
+import type { EndpointClient } from './endpoints'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -35,6 +37,8 @@ export class SettingsContent extends SolidTabContent {
     private readonly vaultClient?: import('./vault-client').VaultClient,
     private readonly dialogClient?: import('./dialog-client').DialogClient,
     private readonly footprintClient?: import('./footprint-client').FootprintClient,
+    private readonly endpointsClient?: EndpointClient,
+    private readonly agentClient?: AgentClient,
   ) {
     super()
   }
@@ -48,6 +52,8 @@ export class SettingsContent extends SolidTabContent {
           vaultClient: this.vaultClient,
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
+          agentClient: this.agentClient,
+          endpointsClient: this.endpointsClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)
@@ -76,6 +82,10 @@ export class SettingsContent extends SolidTabContent {
       const name = this.pendingNewSecret
       this.pendingNewSecret = null
       this.handle.newSecret(name)
+    }
+    if (this.pendingNewEndpoint) {
+      this.pendingNewEndpoint = false
+      this.handle.newEndpoint()
     }
   }
 
@@ -124,8 +134,22 @@ export class SettingsContent extends SolidTabContent {
     this.pendingNewSecret = name
   }
 
+  /** Open the Endpoints page with the editor up on a blank endpoint — the
+   *  ask surface's repair for a question refused with "no endpoint
+   *  configured". Queued before mount for the same reason as
+   *  startNewConnection: opening Settings and asking for the editor is one
+   *  user action, and the mount is a promise the caller does not hold. */
+  startNewEndpoint(): void {
+    if (this.handle) {
+      this.handle.newEndpoint()
+      return
+    }
+    this.pendingNewEndpoint = true
+  }
+
   private pendingNewConnection = false
   /** The queued request's prefilled name, or null when nothing is queued.
    *  A string (including '') means "asked"; null means "nobody asked". */
   private pendingNewSecret: string | null = null
+  private pendingNewEndpoint = false
 }

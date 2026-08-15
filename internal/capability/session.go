@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -30,6 +31,31 @@ type SessionService interface {
 // is [session]. The operation is scoped by id through SessionOperations.
 type SessionOperation interface {
 	Run(context.Context, func(context.Context, SessionService) error) error
+}
+
+// SessionTarget is the immutable routing snapshot a long-lived auxiliary
+// operation may use after releasing the session gate. SSHOptions is copied
+// from the live session so auxiliary SSH channels resolve through the exact
+// route and pooled identity the terminal used (AD-4).
+type SessionTarget struct {
+	Kind       session.Kind
+	Host       string
+	SSHOptions []ssh.ConnectOption
+}
+
+// SessionTargetOperation snapshots one live session under the session gate,
+// then releases that gate before running its callback while retaining the
+// ordinary execution lane. Slow remote I/O therefore stays bounded without
+// blocking resize, close, or another session lookup.
+type SessionTargetOperation interface {
+	Run(context.Context, func(context.Context, SessionTarget) error) error
+}
+
+type sessionTargetOperation struct {
+	sessionGate control.Admission
+	lane        control.Admission
+	registry    session.Registry
+	id          session.ID
 }
 
 // SessionOperations builds per-session operations. The KIND of resource is
@@ -59,6 +85,51 @@ func (f *SessionOperations) ForSession(id session.ID) (SessionOperation, error) 
 	}
 	g := &guard{}
 	return newOperation[SessionService](control.NewComposite(f.sessionGate, f.lane), g, newSessionService(g, f.registry, f.usage)), nil
+}
+
+// ForSessionTarget returns a staged read operation for immutable connection
+// facts. It differs from ForSession deliberately: the callback receives no
+// registry service and runs after the session gate is released, so it cannot
+// mutate or re-read session state outside the protected interval.
+func (f *SessionOperations) ForSessionTarget(id session.ID) (SessionTargetOperation, error) {
+	if _, err := f.registry.Get(id); err != nil {
+		return nil, fmt.Errorf("capability: unknown session %q", id)
+	}
+	return &sessionTargetOperation{
+		sessionGate: f.sessionGate,
+		lane:        f.lane,
+		registry:    f.registry,
+		id:          id,
+	}, nil
+}
+
+func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Context, SessionTarget) error) error {
+	sessionPermit, rej := op.sessionGate.TryAcquire(ctx)
+	if rej != nil {
+		return &RefusedError{Rejection: *rej}
+	}
+	defer sessionPermit.Release()
+
+	// Preserve canonical order: conflict admission before the scarce lane.
+	// The lane remains held for the callback; only the session gate ends
+	// after the immutable facts have been copied.
+	lanePermit, rej := op.lane.TryAcquire(ctx)
+	if rej != nil {
+		return &RefusedError{Rejection: *rej}
+	}
+	defer lanePermit.Release()
+
+	sess, err := op.registry.Get(op.id)
+	if err != nil {
+		return err
+	}
+	target := SessionTarget{
+		Kind:       sess.Kind(),
+		Host:       sess.Host(),
+		SSHOptions: append([]ssh.ConnectOption(nil), sess.SSHOptions()...),
+	}
+	sessionPermit.Release()
+	return fn(ctx, target)
 }
 
 // NewSessionOperation builds a single SessionOperation — for handlers whose

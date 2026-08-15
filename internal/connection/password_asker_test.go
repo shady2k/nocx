@@ -164,18 +164,18 @@ func TestPasswordAsker_WireErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestPasswordAsker_SealedVaultDistinctOutcome pins the SECOND distinct
-// outcome: the user accepted remember, the vault is sealed and the unlock
-// was refused — the connection fails with a message that says the vault was
-// sealed, distinguishable from the cancelled prompt and the no-client
-// outcome.
-func TestPasswordAsker_SealedVaultDistinctOutcome(t *testing.T) {
+// TestPasswordAsker_SealedVaultPropagatesTheSealedError pins the remember
+// path's failure: the vault is sealed, the create fails, and the asker
+// reports the failure preserving the sealed error — errors.Is must still
+// find ErrVaultSealed through the wrap, because the session.open handler
+// and the dispatcher seam normalize exactly that error into the canonical
+// shape the renderer turns into the unlock prompt (ADR-0032). The unlock
+// is NOT this layer's.
+func TestPasswordAsker_SealedVaultPropagatesTheSealedError(t *testing.T) {
 	wire := &fakeWireAsker{ans: ssh.PasswordAnswer{Password: "pw", Remember: true}}
-	unlockRefused := errors.New("unlock cancelled by user")
 	r, _, _ := seededResolver(t,
 		WithPasswordAsker(wire.ask),
 		WithSecretCreator(&fakeSecretCreator{createErr: vault.ErrVaultSealed}),
-		WithUnlockRequester(func(context.Context, string) error { return unlockRefused }),
 	)
 	asker := r.askerFor("p1")
 	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
@@ -184,49 +184,34 @@ func TestPasswordAsker_SealedVaultDistinctOutcome(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a sealed-vault failure, got nil")
 	}
-	if !errors.Is(err, unlockRefused) {
-		t.Errorf("error does not unwrap to the unlock refusal: %v", err)
+	if !errors.Is(err, vault.ErrVaultSealed) {
+		t.Errorf("error does not unwrap to ErrVaultSealed: %v", err)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "sealed") {
-		t.Errorf("message does not name the sealed vault: %q", msg)
-	}
-	// Distinct from the OTHER two outcomes' messages: the sealed message
-	// must not read as the cancelled prompt or the no-client ask.
-	for _, other := range []string{"connection password prompt cancelled", "no client connected to ask for the connection password"} {
-		if strings.Contains(msg, other) {
-			t.Errorf("sealed-vault message collides with another outcome: %q", msg)
-		}
+	if !strings.Contains(err.Error(), "was not saved") {
+		t.Errorf("message does not say the password was not saved: %q", err.Error())
 	}
 }
 
-// TestPasswordAsker_SealedVaultUnlocksThenStores pins the recovery: the
-// first create hits the sealed vault, the unlock requester opens it, and
-// the retry lands — the same recovery the auth chain applies to reads.
-func TestPasswordAsker_SealedVaultUnlocksThenStores(t *testing.T) {
+// TestPasswordAsker_SealedVaultDoesNotRetry pins the boundary: the asker
+// fails once and propagates — the unlock+replay is the renderer's, and a
+// second create here would be a second owner of the same behaviour
+// (ADR-0032).
+func TestPasswordAsker_SealedVaultDoesNotRetry(t *testing.T) {
 	wire := &fakeWireAsker{ans: ssh.PasswordAnswer{Password: "pw", Remember: true}}
-	creator := &fakeSecretCreator{sealed: 1}
-	var unlocks int
-	r, ps, _ := seededResolver(t,
+	creator := &fakeSecretCreator{createErr: vault.ErrVaultSealed}
+	r, _, _ := seededResolver(t,
 		WithPasswordAsker(wire.ask),
 		WithSecretCreator(creator),
-		WithUnlockRequester(func(context.Context, string) error { unlocks++; return nil }),
 	)
-
 	asker := r.askerFor("p1")
-	if _, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
+	_, err := asker.RequestConnectionPassword(context.Background(), ssh.PasswordRequest{
 		Connection: "prod-web", User: "deploy", Host: "web.example.com",
-	}); err != nil {
-		t.Fatalf("RequestConnectionPassword: %v", err)
+	})
+	if err == nil {
+		t.Fatal("expected a sealed-vault failure, got nil")
 	}
-	if unlocks != 1 {
-		t.Errorf("unlock requester called %d times, want 1", unlocks)
-	}
-	if len(creator.calls) != 2 {
-		t.Errorf("creator called %d times, want sealed-fail then retry", len(creator.calls))
-	}
-	if bound := ps.profiles["p1"].Options.PasswordSecret; bound != "sec:v1:file:test-a" {
-		t.Errorf("profile passwordSecret = %q, want the retried secret", bound)
+	if len(creator.calls) != 1 {
+		t.Errorf("creator called %d times, want exactly 1 (no hidden retry)", len(creator.calls))
 	}
 }
 

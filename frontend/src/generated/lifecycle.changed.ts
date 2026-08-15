@@ -14,7 +14,11 @@
  */
 export interface LifecycleChanged {
   /**
-   * The input-routing lane the fact is about — one terminal tab. The renderer filters nothing: a fact is routed to the lane's own session, and the lane id is what lets the projection attach it to the right tab's state machine.
+   * The server-authoritative session that owns this lane (AD-7). One WebSocket carries several terminal tabs, so the renderer must route this notification by session id before any tab may apply or acknowledge the fact.
+   */
+  sessionId: string
+  /**
+   * The input-routing lane the fact is about. The backend resolves it to sessionId; the renderer then attaches it only to that session's state machine.
    */
   lane: string
   /**

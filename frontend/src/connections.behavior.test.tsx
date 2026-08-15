@@ -198,7 +198,7 @@ afterEach(() => {
 
 async function waitForProfiles(container: HTMLElement, count: number) {
   await vi.waitFor(() => {
-    expect(container.querySelectorAll('.cm-item-name').length).toBe(count)
+    expect(container.querySelectorAll('.ui-record-row__title').length).toBe(count)
   })
 }
 
@@ -222,7 +222,7 @@ describe('filter', () => {
     input!.dispatchEvent(new Event('input', { bubbles: true }))
 
     await vi.waitFor(() => {
-      const names = container.querySelectorAll('.cm-item-name')
+      const names = container.querySelectorAll('.ui-record-row__title')
       expect(names.length).toBe(1)
       expect(names[0].textContent).toBe('staging-web')
     })
@@ -240,7 +240,7 @@ describe('filter', () => {
     input!.dispatchEvent(new Event('input', { bubbles: true }))
 
     await vi.waitFor(() => {
-      const names = container.querySelectorAll('.cm-item-name')
+      const names = container.querySelectorAll('.ui-record-row__title')
       expect(names.length).toBe(1)
       expect(names[0].textContent).toBe('prod-db')
     })
@@ -258,7 +258,7 @@ describe('filter', () => {
     input!.dispatchEvent(new Event('input', { bubbles: true }))
 
     await vi.waitFor(() => {
-      const names = container.querySelectorAll('.cm-item-name')
+      const names = container.querySelectorAll('.ui-record-row__title')
       expect(names.length).toBe(2)
       expect(names[0].textContent).toBe('prod-web')
       expect(names[1].textContent).toBe('prod-db')
@@ -278,15 +278,17 @@ describe('session state', () => {
     await waitForProfiles(container, 2)
 
     const items = container.querySelectorAll('.ui-collection-row')
-    const liveState = items[0].querySelector('.cm-session-state')
+    // The session state is the kit's StatusDot + text (nocx-pp3y.3): the
+    // dot carries the tone, the text beside it the sentence.
+    const liveState = items[0].querySelector('.ui-record-row__status')
     expect(liveState).toBeTruthy()
     expect(liveState!.textContent).toContain('Connected')
-    expect(liveState!.classList.contains('cm-session-live')).toBe(true)
+    expect(items[0].querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('ok')
 
-    const offlineState = items[1].querySelector('.cm-session-state')
+    const offlineState = items[1].querySelector('.ui-record-row__status')
     expect(offlineState).toBeTruthy()
     expect(offlineState!.textContent).toContain('Disconnected')
-    expect(offlineState!.classList.contains('cm-session-live')).toBe(false)
+    expect(items[1].querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('neutral')
   })
 
   it('shows last-used date when present', async () => {
@@ -296,11 +298,8 @@ describe('session state', () => {
     })
 
     await vi.waitFor(() => {
-      expect(container.querySelector('.cm-session-last-used')).toBeTruthy()
+      expect(container.querySelector('.ui-record-row__status')?.textContent).toContain('last used')
     })
-
-    const lastUsed = container.querySelector('.cm-session-last-used')
-    expect(lastUsed!.textContent).toContain('last used')
   })
 })
 

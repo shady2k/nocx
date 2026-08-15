@@ -17,7 +17,7 @@ test.describe('theme switching', () => {
     // its FIRST section — so the row is in the DOM and hidden until the rail
     // navigates to it.
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(THEME_SELECT)).toBeVisible({ timeout: 5000 })
 
     // Switch to light theme and wait for the async round-trip:
@@ -38,7 +38,7 @@ test.describe('theme switching', () => {
 
     // Switch back to tokyo-night
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(THEME_SELECT)).toBeVisible({ timeout: 5000 })
     await page.selectOption(THEME_SELECT, 'tokyo-night')
     await page.waitForFunction(
@@ -81,7 +81,7 @@ test.describe('theme switching', () => {
     expect(await canvas()).toBe('#1a1b26')
 
     await page.keyboard.press('Meta+,')
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(THEME_SELECT)).toBeVisible({ timeout: 5000 })
     await page.selectOption(THEME_SELECT, 'dracula')
     await page.waitForFunction(

@@ -1,0 +1,34 @@
+/* Row-grammar fixture — negative fixtures for check-row-grammar.mjs
+   (nocx-pp3y.3, acceptance 4). Every class here is valid CSS that the
+   browser accepts silently, so a checker that quietly stopped firing would
+   look exactly like a clean codebase.
+
+   Intentional violations (the gate asserts these fire):
+     .foo-item-name      — the old connections dialect, re-invented
+     .bar-row__meta      — the git commit row's shape, re-invented
+     .baz-item-name__inner — a part under a dialect family
+
+   Must stay silent (the gate asserts these do NOT fire):
+     .ui-record-row__title  — the kit's own composite part (kit identity)
+     .plain-widget          — an unrelated surface class */
+
+.foo-item-name {
+  font-weight: 600;
+}
+
+.bar-row__meta {
+  display: flex;
+  gap: 8px;
+}
+
+.baz-item-name__inner {
+  color: var(--color-text-muted);
+}
+
+.ui-record-row__title {
+  font-weight: 500;
+}
+
+.plain-widget {
+  padding: 8px;
+}

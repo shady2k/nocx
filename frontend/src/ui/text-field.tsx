@@ -10,6 +10,7 @@
  */
 import { Show, Switch, Match, type JSX } from 'solid-js'
 import { Field } from './field'
+import { mirrorControlledValue } from './controlled-value'
 
 export interface TextFieldProps {
   id?: string
@@ -82,7 +83,6 @@ export function TextField(props: TextFieldProps) {
       class="ui-text-field__input"
       id={inputId() || undefined}
       type={props.type ?? 'text'}
-      value={props.value}
       placeholder={props.placeholder ?? ''}
       min={props.min !== undefined ? String(props.min) : undefined}
       max={props.max !== undefined ? String(props.max) : undefined}
@@ -93,6 +93,10 @@ export function TextField(props: TextFieldProps) {
       autofocus={props.autoFocus === true}
       ref={(element) => {
         if (props.autoFocus === true) queueMicrotask(() => element.focus())
+        // mirrorControlledValue reads the accessor inside its own createEffect
+        // (a tracked scope); the gate cannot see across that helper boundary.
+        // eslint-disable-next-line solid/reactivity -- helper-boundary contract
+        mirrorControlledValue(element, () => props.value)
       }}
       onInput={onInput}
       onBlur={onBlur}
@@ -103,7 +107,6 @@ export function TextField(props: TextFieldProps) {
     <textarea
       class="ui-text-field__input"
       id={inputId() || undefined}
-      value={props.value}
       placeholder={props.placeholder ?? ''}
       disabled={props.disabled === true}
       required={props.required === true}
@@ -113,6 +116,8 @@ export function TextField(props: TextFieldProps) {
       rows={4}
       ref={(element) => {
         if (props.autoFocus === true) queueMicrotask(() => element.focus())
+        // eslint-disable-next-line solid/reactivity -- same helper-boundary contract.
+        mirrorControlledValue(element, () => props.value)
       }}
       onInput={onInput}
       onBlur={onBlur}

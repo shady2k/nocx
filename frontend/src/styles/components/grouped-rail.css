@@ -1,0 +1,74 @@
+/* ── GroupedRail — the grouped navigation rail (nocx-dgsp) ─────────────
+   The kit's settings rail: group headings in catalogue order with their
+   items beneath, ungrouped items at top level beside the groups.
+   All colours are theme tokens. */
+
+.ui-grouped-nav__list,
+.ui-grouped-nav__sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* A group heading is the kit Caption (ui/caption.css owns the register —
+   uppercase, letter-spaced, semibold, small, muted, the register the app's
+   other captions speak). What stays here is placement: the heading wrapper
+   sits in the same 10px gutter as the row labels. */
+.ui-grouped-nav__group {
+  margin-top: var(--space-3);
+}
+
+.ui-grouped-nav__heading {
+  display: block;
+  padding: 0 10px var(--space-1);
+}
+
+/* Items are inset under their caption — one gutter step (10px, the button's
+   own horizontal padding), so the level step reads as the same unit the rail
+   already uses, and a group reads as a level rather than a flat run. */
+.ui-grouped-nav__sublist {
+  padding-left: 10px;
+}
+
+/* Item row placement, and only placement. The look — transparent, ghost,
+   hover and the selected fill — belongs to Button's ghost variant
+   (button.css, T20 nocx-etu2); the row is a flex container, its children
+   line up on the cross axis, and the count badge pushes to the end. The
+   sublist's padding-left puts the item labels one gutter step (10px, the
+   button's own horizontal padding) deeper than the caption above them. */
+.ui-grouped-nav__item {
+  margin-bottom: 2px;
+}
+
+.ui-grouped-nav__item > .ui-button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.ui-grouped-nav__item > .ui-button .ui-badge {
+  margin-left: auto;
+}
+
+/* ── Narrow breakpoint (640px) — the rail stacks above the content ──────
+   In the stacked layout the rail's intrinsic height competes with the
+   content for the pane's height (nocx-dgsp e2e: settings-scroll narrow
+   lost the last section to a rail that was structurally taller than the
+   flat list it replaced). The rail still must NOT scroll at the narrow
+   breakpoint (scroll-ownership §6.2), so the compact profile shrinks its
+   footprint instead: tighter group margins, tighter headings, no row gaps.
+   The wide (side-by-side) layout is untouched. */
+@media (max-width: 640px) {
+  .ui-grouped-nav__group {
+    margin-top: var(--space-1);
+  }
+
+  .ui-grouped-nav__heading {
+    padding: 0 10px 2px;
+  }
+
+  .ui-grouped-nav__item {
+    margin-bottom: 0;
+  }
+}

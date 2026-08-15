@@ -3877,7 +3877,7 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 			n := lifecycleChangedNotification{
 				JSONRPC: "2.0",
 				Method:  "lifecycle.changed",
-				Params:  params,
+				Params:  lifecycleChangedParams{SessionID: "sid-1", Fact: params},
 			}
 			raw, err := json.Marshal(n)
 			if err != nil {
@@ -3920,9 +3920,12 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
 	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
-	var params lifecyclepub.Fact
+	var params lifecycleChangedParams
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+	if params.SessionID != sid {
+		t.Errorf("sessionId = %q, want %q", params.SessionID, sid)
 	}
 	if params.Lifecycle != lifecyclepub.LifecyclePromptReady {
 		t.Errorf("lifecycle = %q, want prompt_ready", params.Lifecycle)
@@ -4415,4 +4418,137 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 	if timedOut.Shell != "/bin/bash" {
 		t.Errorf("shell = %q, want /bin/bash — a diagnosis that omits the shell is not actionable", timedOut.Shell)
 	}
+}
+
+// ── agent.captureFrame / agent.ask (nocx-f4s5, design §7) ────────────────
+
+// The DTOs' own conformance: field tags, omitempty behaviour, whether the
+// enum spells what the schema says.
+func TestAgentCaptureFrame_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.captureFrame.schema.json")
+	raw, err := json.Marshal(captureFrameResponse{FrameID: "0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.captureFrame DTO")
+}
+
+func TestAgentAsk_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.ask.schema.json")
+	raw, err := json.Marshal(agentAskResponse{
+		RunID: 7, QuestionID: "ask-1", AnswerEntryID: "answer-1",
+		State: string(content.RunPrepared), IngestSeq: 3, Replayed: false,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.ask DTO")
+}
+
+// The real methods through the real socket — the assertion that would have
+// caught a field nobody sends. Nothing here names a field, so nothing here
+// can omit one.
+func TestAgentCaptureFrame_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.captureFrame.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	resp := jsonrpcCallWithID(t, conn, "agent.captureFrame", frameParams(sid, "cap-contract"), 1)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("captureFrame error: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "agent.captureFrame result")
+}
+
+func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.ask.schema.json")
+	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hi"}})
+	h.createEndpoint()
+	conn := h.conn
+	sid := openLocalSession(t, conn)
+	frameID, errObj := captureFrameOverWire(t, conn, frameParams(sid, "cap-contract"), 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+
+	resp := jsonrpcCallWithID(t, conn, "agent.ask", map[string]any{
+		"askId": "ask-contract", "sessionId": sid, "question": "q", "cwd": "/repo",
+		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+	}, 2)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("ask error: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "agent.ask result")
+}
+
+// ── agent.runDelta / agent.runState notifications (nocx-x8s2.2, design §7) ─
+
+// The DTOs' conformance: field tags and enum spelling.
+func TestAgentRunNotifications_DTOsConformToContract(t *testing.T) {
+	deltaSchema := loadSchema(t, "agent.runDelta.schema.json")
+	raw, err := json.Marshal(agentRunDelta{RunID: 7, EntryID: "answer-1", Seq: 0, Text: "hello"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, deltaSchema, raw, "agent.runDelta DTO")
+
+	stateSchema := loadSchema(t, "agent.runState.schema.json")
+	raw, err = json.Marshal(agentRunState{RunID: 7, State: string(content.RunFailed), Error: "the model returned no text"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, stateSchema, raw, "agent.runState DTO (failed with error)")
+
+	raw, err = json.Marshal(agentRunState{RunID: 7, State: string(content.RunCompleted)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, stateSchema, raw, "agent.runState DTO (completed, no error)")
+}
+
+// The real notifications off the real socket satisfy their contracts — the
+// assertion that would catch a field nobody sends.
+func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
+	deltaSchema := loadSchema(t, "agent.runDelta.schema.json")
+	stateSchema := loadSchema(t, "agent.runState.schema.json")
+
+	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hello", "world"}})
+	h.createEndpoint()
+	conn := h.conn
+	sid := openLocalSession(t, conn)
+	frameID, errObj := captureFrameOverWire(t, conn, frozenWireFrame(sid, "frame-1"), 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+	_, errObj = askOverWire(t, conn, map[string]any{
+		"askId": "ask-1", "sessionId": sid, "question": "q", "cwd": "/repo",
+		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+
+	for range 2 {
+		raw := readNotification(t, conn, "agent.runDelta", 5*time.Second)
+		validateJSON(t, deltaSchema, raw, "agent.runDelta params (real socket)")
+	}
+	raw := readNotification(t, conn, "agent.runState", 5*time.Second)
+	validateJSON(t, stateSchema, raw, "agent.runState params (real socket)")
 }

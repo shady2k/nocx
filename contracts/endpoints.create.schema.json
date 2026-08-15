@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/endpoints.create.schema.json",
+  "title": "EndpointsCreateResult",
+  "description": "Result of the endpoints.create JSON-RPC method: the stored endpoint (design §4.5.4, ADR-0030). The API key sent in the params is minted into the vault and never appears here — the result carries the credential's row handle, or null when the endpoint was created without a key. The shape is the single declaration in endpoints.list.schema.json, referenced cross-file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpoint"],
+  "properties": {
+    "endpoint": {
+      "$ref": "endpoints.list.schema.json#/$defs/endpoint"
+    }
+  }
+}

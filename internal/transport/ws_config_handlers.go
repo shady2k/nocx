@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
@@ -55,6 +56,838 @@ type settingsSecretDeleteParams struct {
 // settingsSecretExistsParams carries the key to check.
 type settingsSecretExistsParams struct {
 	Key string `json:"key"`
+}
+
+// ── config-domain ingress bounds ─────────────────────────────────────────
+//
+// Every one of these params is renderer-supplied and reaches something real:
+// a profile host is dialled, a key path is read at connect time, a forward
+// is replayed, a group default is inherited, an endpoint URL is dialled, a
+// secret setting is stored, a Tabby config is parsed. The bound for each
+// field comes from what the field does, and where the repo already decides
+// a rule (profile.ValidForwards, profile.ValidateEndpoint,
+// profile.ValidateBaseURL, ProfileDefaults.Validate, validatePatch) the
+// validator calls it rather than keeping a second copy.
+
+const (
+	// maxConfigIDRunes bounds renderer-supplied profile, group and endpoint
+	// ids. Ids are backend-minted "typ:custom:slug:uuid"; a renderer-supplied
+	// id only replaces the mint, and the ask path bounds the same class of
+	// value at 128 (maxIDRunes).
+	maxConfigIDRunes = 128
+	// maxConfigNameRunes bounds display names (profile, group, endpoint,
+	// model). Names are echoed in lists and slugified into minted ids.
+	maxConfigNameRunes = 200
+	// maxJumpHostRunes bounds jumpHost, a profile name or id.
+	maxJumpHostRunes = 256
+	// maxIconRunes and maxColorRunes bound a group's icon (an emoji) and
+	// color (a hex literal), rendered verbatim in the sidebar.
+	maxIconRunes  = 64
+	maxColorRunes = 64
+	// maxSecretRowRunes bounds a renderer-supplied secret row handle
+	// ("secrow:" + 32 hex, vault.RowFor). The resolver is the authority on
+	// whether a handle resolves; this is the wire bound before resolution.
+	maxSecretRowRunes = 128
+	// maxEnumRunes bounds the closed-set option fields (auth, desiredMode,
+	// relayConsent, portDiscovery, behaviorOnSessionEnd) and the profile
+	// type. Their value sets are short literals. An unrecognised value is
+	// deliberately NOT refused here — resolution falls back to the default
+	// for a stored value (nocx-mlm7) — so this is a wire bound, not a
+	// closed-set check.
+	maxEnumRunes = 64
+	// maxSettingsKeyRunes bounds a settings key: registry-declared dotted
+	// names like "history.enabled". The registry is the store-side authority
+	// on which keys exist; this bounds the name before the lookup.
+	maxSettingsKeyRunes = 256
+	// maxSecretSettingRunes bounds a secret-class setting value and the
+	// Tabby vault passphrase. A wire-cost bound sized like the assistant
+	// key's ceiling (maxProbeKeyRunes — some providers issue long JWTs):
+	// the product defines no tighter ceiling for either value, so the
+	// validator's job is the generous bound plus the control-character
+	// refusal, not a naming rule.
+	maxSecretSettingRunes = 8_000
+	// maxEndpointURLRunes bounds an endpoint base URL, matching the probe
+	// path's maxProbeURLRunes — the same URL is dialled by the Test button
+	// and the ask path.
+	maxEndpointURLRunes = 2_000
+	// maxModelNameRunes bounds an endpoint model name and alias. Model ids
+	// ride request bodies verbatim (the probe validator bounds them at 200).
+	maxModelNameRunes = 200
+	// maxHeaderNameRunes bounds a custom header name (bead nocx-lyyk). A
+	// header name is short by HTTP nature; the bound is a wire-cost ceiling.
+	maxHeaderNameRunes = 256
+	// maxHeaderValueRunes bounds a literal custom header value. Values ride
+	// request headers verbatim; the bound is a wire-cost ceiling, not a
+	// product rule about how long a header may be.
+	maxHeaderValueRunes = 4_096
+)
+
+// decodeObject decodes params into dst, treating absent, null or an empty
+// payload as an empty object — a field-aware validator then answers "x is
+// required" rather than a parse error. Returns "" on success.
+func decodeObject(raw json.RawMessage, dst any) string {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return ""
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return "params must be a JSON object"
+	}
+	return ""
+}
+
+// boundedRunes returns "" when s is within bound, else a message naming the
+// field and the bound.
+func boundedRunes(field string, s string, bound int) string {
+	if utf8.RuneCountInString(s) > bound {
+		return fmt.Sprintf("%s exceeds %d characters", field, bound)
+	}
+	return ""
+}
+
+// boundedOptionalRunes bounds an optional string-typed field (the stored
+// options use typed pointers: *AuthMode, *DesiredMode, ...). A nil pointer
+// is an unset field and always passes.
+func boundedOptionalRunes[T ~string](field string, v *T, bound int) string {
+	if v == nil {
+		return ""
+	}
+	return boundedRunes(field, string(*v), bound)
+}
+
+// configIDRunes is the common id bound, applied everywhere an id is checked.
+func configIDRunes(field, id string) string {
+	return boundedRunes(field, id, maxConfigIDRunes)
+}
+
+// validateSecretRow bounds a renderer-supplied row handle. The vault's
+// resolver is the authority on whether a handle resolves; this is the wire
+// bound before resolution, and a control character never occurs in a minted
+// handle.
+func validateSecretRow(field, row string) string {
+	if msg := boundedRunes(field, row, maxSecretRowRunes); msg != "" {
+		return msg
+	}
+	if hasControlChars(row) {
+		return field + " must not contain control characters"
+	}
+	return ""
+}
+
+// validateForwardList asks the ONE authority on stored forward lists
+// (profile.ValidForwards) — the connection editor and any transport-side
+// gate ask the same question.
+func validateForwardList(field string, fs []profile.ForwardSpec) string {
+	if err := profile.ValidForwards(fs); err != nil {
+		return fmt.Sprintf("%s: %v", field, err)
+	}
+	return ""
+}
+
+// validateStoredOptions checks every reachable field of a profile's stored
+// options block — the fields the connection layer reads at connect time.
+func validateStoredOptions(o profile.StoredSSHProfileOptions) string {
+	if o.Host == "" {
+		return "options.host is required"
+	}
+	if msg := boundedRunes("options.host", o.Host, maxHostRunes); msg != "" {
+		return msg
+	}
+	if hasControlChars(o.Host) {
+		return "options.host must not contain control characters"
+	}
+	if o.Port != nil && (*o.Port < 0 || *o.Port > 65535) {
+		return "options.port must be between 0 and 65535"
+	}
+	if o.User != nil {
+		if msg := boundedRunes("options.user", *o.User, maxUserRunes); msg != "" {
+			return msg
+		}
+		if hasControlChars(*o.User) {
+			return "options.user must not contain control characters"
+		}
+	}
+	if o.KeyPath != nil {
+		if msg := boundedRunes("options.keyPath", *o.KeyPath, maxPathRunes); msg != "" {
+			return msg
+		}
+		if hasControlChars(*o.KeyPath) {
+			return "options.keyPath must not contain control characters"
+		}
+	}
+	if o.JumpHost != nil {
+		if msg := boundedRunes("options.jumpHost", *o.JumpHost, maxJumpHostRunes); msg != "" {
+			return msg
+		}
+	}
+	for _, f := range []struct {
+		field string
+		row   string
+	}{
+		{"options.passwordSecret", o.PasswordSecret},
+		{"options.keySecret", o.KeySecret},
+		{"options.keyPassphraseSecret", o.KeyPassphraseSecret},
+	} {
+		if msg := validateSecretRow(f.field, f.row); msg != "" {
+			return msg
+		}
+	}
+	for _, f := range []struct {
+		field string
+		v     *int
+	}{
+		{"options.keepaliveInterval", o.KeepaliveInterval},
+		{"options.keepaliveCountMax", o.KeepaliveCountMax},
+		{"options.readyTimeout", o.ReadyTimeout},
+	} {
+		if f.v != nil && *f.v < 0 {
+			return f.field + " must not be negative"
+		}
+	}
+	if msg := boundedOptionalRunes("options.auth", o.Auth, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("options.desiredMode", o.DesiredMode, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("options.relayConsent", o.RelayConsent, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("options.portDiscovery", o.PortDiscovery, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("options.behaviorOnSessionEnd", o.BehaviorOnSessionEnd, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if o.Forwards != nil {
+		if msg := validateForwardList("options.forwards", *o.Forwards); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateProfileBase bounds the identity fields shared by every profile
+// type. Nothing here is required: create mints an id, and the domain rule
+// for a usable profile is the host (validateStoredOptions), not these.
+func validateProfileBase(b profile.Base) string {
+	if msg := configIDRunes("id", b.ID); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("name", b.Name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("type", b.Type, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := configIDRunes("group", b.Group); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("icon", b.Icon, maxIconRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("color", b.Color, maxColorRunes); msg != "" {
+		return msg
+	}
+	return ""
+}
+
+// validateProfileParams is the shared create/update check; idRequired
+// separates the two methods (update must name the record, create mints).
+func validateProfileParams(p profile.SSHProfile, idRequired bool) string {
+	if idRequired && p.ID == "" {
+		return "id is required"
+	}
+	if msg := validateProfileBase(p.Base); msg != "" {
+		return msg
+	}
+	return validateStoredOptions(p.Options)
+}
+
+// validateProfileCreateRaw is the registered validator for profiles.create.
+func validateProfileCreateRaw(raw json.RawMessage) string {
+	var p profile.SSHProfile
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	return validateProfileParams(p, false)
+}
+
+// validateProfileUpdateRaw is the registered validator for profiles.update.
+func validateProfileUpdateRaw(raw json.RawMessage) string {
+	var p profile.SSHProfile
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	return validateProfileParams(p, true)
+}
+
+// validateProfileDeleteRaw is the registered validator for profiles.delete.
+// The handler needs the id to delete; today an empty id falls through to a
+// store "not found" -32603, which is a client error wearing the wrong code.
+func validateProfileDeleteRaw(raw json.RawMessage) string {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	return configIDRunes("id", p.ID)
+}
+
+// validateEffectiveRaw is the registered validator for profiles.effective.
+// An empty batch is a legitimate request (the handler answers an empty
+// result); every id in a batch is bounded.
+func validateEffectiveRaw(raw json.RawMessage) string {
+	var p effectiveParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	for _, id := range p.IDs {
+		if msg := configIDRunes("ids", id); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validatePatchSetForwards checks a profiles.patch set value for
+// options.forwards against the one authority on forward lists. The service
+// decodes strictly (toForwardSpecs) and would silently ignore a malformed
+// list (ApplyPatchSet's false return is dropped), so the boundary refuses
+// what the handler would silently swallow.
+func validatePatchSetForwards(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "options.forwards must be an array of forward specs"
+	}
+	var fs []profile.ForwardSpec
+	if err := json.Unmarshal(b, &fs); err != nil {
+		return "options.forwards must be an array of forward specs"
+	}
+	return validateForwardList("options.forwards", fs)
+}
+
+// validatePatchRaw is the registered validator for profiles.patch. It calls
+// the handler's own validatePatch (id required, allowlisted paths, disjoint
+// set/unset) and then bounds the values. The three secret paths must carry a
+// string — the service's own rule ("%s must be a string") — and a forwards
+// value must satisfy ValidForwards. The remaining set values are bounded as
+// strings by the floor's walk (64k runes, bounded nesting); the string
+// fields get their own ceilings when the value is a string. A wrong-typed
+// value for a non-secret path is the handler's silent-coercion defect
+// (ApplyPatchSet's toString/toInt/toBool), reported, not silently changed.
+func validatePatchRaw(raw json.RawMessage) string {
+	var p patchParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if err := validatePatch(p); err != nil {
+		return err.Error()
+	}
+	if msg := configIDRunes("id", p.ID); msg != "" {
+		return msg
+	}
+	for path, v := range p.Set {
+		switch path {
+		case "options.passwordSecret", "options.keySecret", "options.keyPassphraseSecret":
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Sprintf("%s must be a string", path)
+			}
+			if msg := validateSecretRow(path, s); msg != "" {
+				return msg
+			}
+		case "options.forwards":
+			if msg := validatePatchSetForwards(v); msg != "" {
+				return msg
+			}
+		case "options.user":
+			if s, ok := v.(string); ok {
+				if msg := boundedRunes(path, s, maxUserRunes); msg != "" {
+					return msg
+				}
+			}
+		case "options.jumpHost":
+			if s, ok := v.(string); ok {
+				if msg := boundedRunes(path, s, maxJumpHostRunes); msg != "" {
+					return msg
+				}
+			}
+		case "options.auth", "options.desiredMode", "options.relayConsent",
+			"options.portDiscovery", "options.behaviorOnSessionEnd":
+			if s, ok := v.(string); ok {
+				if msg := boundedRunes(path, s, maxEnumRunes); msg != "" {
+					return msg
+				}
+			}
+		}
+	}
+	return walkGeneric(p.Set, 0)
+}
+
+// validateSparseDefaults bounds every reachable field of a group's defaults
+// block — the values profiles inherit through the cascade.
+func validateSparseDefaults(d *profile.ProfileDefaults) string {
+	o := d.SparseSSHOptions
+	if o.Port != nil && (*o.Port < 0 || *o.Port > 65535) {
+		return "defaults.port must be between 0 and 65535"
+	}
+	if o.User != nil {
+		if msg := boundedRunes("defaults.user", *o.User, maxUserRunes); msg != "" {
+			return msg
+		}
+		if hasControlChars(*o.User) {
+			return "defaults.user must not contain control characters"
+		}
+	}
+	if o.KeyPath != nil {
+		if msg := boundedRunes("defaults.keyPath", *o.KeyPath, maxPathRunes); msg != "" {
+			return msg
+		}
+		if hasControlChars(*o.KeyPath) {
+			return "defaults.keyPath must not contain control characters"
+		}
+	}
+	if o.JumpHost != nil {
+		if msg := boundedRunes("defaults.jumpHost", *o.JumpHost, maxJumpHostRunes); msg != "" {
+			return msg
+		}
+	}
+	for _, f := range []struct {
+		field string
+		v     *string
+	}{
+		{"defaults.passwordSecret", o.PasswordSecret},
+		{"defaults.keySecret", o.KeySecret},
+		{"defaults.keyPassphraseSecret", o.KeyPassphraseSecret},
+	} {
+		if f.v != nil {
+			if msg := validateSecretRow(f.field, *f.v); msg != "" {
+				return msg
+			}
+		}
+	}
+	for _, f := range []struct {
+		field string
+		v     *int
+	}{
+		{"defaults.keepaliveInterval", o.KeepaliveInterval},
+		{"defaults.keepaliveCountMax", o.KeepaliveCountMax},
+		{"defaults.readyTimeout", o.ReadyTimeout},
+	} {
+		if f.v != nil && *f.v < 0 {
+			return f.field + " must not be negative"
+		}
+	}
+	if msg := boundedOptionalRunes("defaults.auth", o.Auth, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("defaults.desiredMode", o.DesiredMode, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("defaults.portDiscovery", o.PortDiscovery, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedOptionalRunes("defaults.behaviorOnSessionEnd", o.BehaviorOnSessionEnd, maxEnumRunes); msg != "" {
+		return msg
+	}
+	return ""
+}
+
+// validateGroupParams bounds every reachable field of a ProfileGroup.
+// idRequired separates create (mint) from update/apply (name the record);
+// the unknown-keys check is the defaults' own Validate.
+func validateGroupParams(g profile.ProfileGroup, idRequired bool) string {
+	if idRequired && g.ID == "" {
+		return "id is required"
+	}
+	if msg := configIDRunes("id", g.ID); msg != "" {
+		return msg
+	}
+	if msg := configIDRunes("parentGroupId", g.ParentGroupID); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("name", g.Name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("icon", g.Icon, maxIconRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("color", g.Color, maxColorRunes); msg != "" {
+		return msg
+	}
+	if g.Defaults != nil {
+		if msg := validateSparseDefaults(g.Defaults); msg != "" {
+			return msg
+		}
+		if err := g.Defaults.Validate(); err != nil {
+			return err.Error()
+		}
+	}
+	return ""
+}
+
+// validateGroupCreateRaw is the registered validator for groups.create.
+func validateGroupCreateRaw(raw json.RawMessage) string {
+	var g profile.ProfileGroup
+	if msg := decodeObject(raw, &g); msg != "" {
+		return msg
+	}
+	return validateGroupParams(g, false)
+}
+
+// validateGroupUpdateRaw is the registered validator for groups.update.
+func validateGroupUpdateRaw(raw json.RawMessage) string {
+	var g profile.ProfileGroup
+	if msg := decodeObject(raw, &g); msg != "" {
+		return msg
+	}
+	return validateGroupParams(g, true)
+}
+
+// validateGroupDeleteRaw is the registered validator for groups.delete.
+func validateGroupDeleteRaw(raw json.RawMessage) string {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	return configIDRunes("id", p.ID)
+}
+
+// validateGroupImpactRaw is the registered validator for groups.impact. It
+// calls the params' own validate (exactly one of group / deleteGroupId,
+// group.id present) and then bounds the embedded group or the id.
+func validateGroupImpactRaw(raw json.RawMessage) string {
+	var p groupImpactParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if err := p.validate(); err != nil {
+		return err.Error()
+	}
+	if p.Group != nil {
+		return validateGroupParams(*p.Group, false)
+	}
+	return configIDRunes("deleteGroupId", p.DeleteGroupID)
+}
+
+// validateProfileMoveImpactRaw is the registered validator for
+// profiles.moveImpact. It calls the params' own validate (non-empty
+// profileIds) and bounds every id; an empty targetGroupId is the deliberate
+// promotion-to-root request.
+func validateProfileMoveImpactRaw(raw json.RawMessage) string {
+	var p profileMoveImpactParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if err := p.validate(); err != nil {
+		return err.Error()
+	}
+	for _, id := range p.ProfileIDs {
+		if msg := configIDRunes("profileIds", id); msg != "" {
+			return msg
+		}
+	}
+	return configIDRunes("targetGroupId", p.TargetGroupID)
+}
+
+// validateGroupApplyRaw is the registered validator for groups.apply. The
+// params ARE the array (JSON-RPC positional form, which the floor already
+// admitted); the handler refuses an empty array, and the store requires
+// every member to name a group (ErrGroupIDRequired).
+func validateGroupApplyRaw(raw json.RawMessage) string {
+	var groups []profile.ProfileGroup
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return "groups required"
+	}
+	if err := json.Unmarshal(raw, &groups); err != nil {
+		return "params must be a JSON array of groups"
+	}
+	if len(groups) == 0 {
+		return "groups required"
+	}
+	for i, g := range groups {
+		if msg := validateGroupParams(g, true); msg != "" {
+			return fmt.Sprintf("groups[%d]: %s", i, msg)
+		}
+	}
+	return ""
+}
+
+// validateSettingsKey is the shared key check for the settings.* methods:
+// present, bounded, and free of control characters. The registry remains the
+// authority on whether a key EXISTS (the handler answers "Unknown setting").
+func validateSettingsKey(key string) string {
+	if key == "" {
+		return "key is required"
+	}
+	if msg := boundedRunes("key", key, maxSettingsKeyRunes); msg != "" {
+		return msg
+	}
+	if hasControlChars(key) {
+		return "key must not contain control characters"
+	}
+	return ""
+}
+
+// validateSettingsKeyRaw is the registered validator for settings.reset,
+// settings.secretDelete and settings.secretExists.
+func validateSettingsKeyRaw(raw json.RawMessage) string {
+	var p struct {
+		Key string `json:"key"`
+	}
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	return validateSettingsKey(p.Key)
+}
+
+// validateSettingsSetRaw is the registered validator for settings.set. The
+// value's meaning belongs to the descriptor (the handler type-checks it
+// against the control kind); the validator bounds the key, requires a
+// non-null value, and walks the value with the floor's own bounds.
+func validateSettingsSetRaw(raw json.RawMessage) string {
+	var p settingsSetParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateSettingsKey(p.Key); msg != "" {
+		return msg
+	}
+	if len(p.Value) == 0 {
+		return "value is required"
+	}
+	if strings.TrimSpace(string(p.Value)) == "null" {
+		return "value must not be null"
+	}
+	var v any
+	if err := json.Unmarshal(p.Value, &v); err != nil {
+		return "value must be valid JSON"
+	}
+	return walkGeneric(v, 0)
+}
+
+// validateSettingsSecretSetRaw is the registered validator for
+// settings.secretSet: a secret-class value is a credential, so it is
+// required, bounded and free of control characters.
+func validateSettingsSecretSetRaw(raw json.RawMessage) string {
+	var p struct {
+		Key   string  `json:"key"`
+		Value *string `json:"value"`
+	}
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateSettingsKey(p.Key); msg != "" {
+		return msg
+	}
+	if p.Value == nil {
+		return "value is required"
+	}
+	if msg := boundedRunes("value", *p.Value, maxSecretSettingRunes); msg != "" {
+		return msg
+	}
+	if hasControlChars(*p.Value) {
+		return "value must not contain control characters"
+	}
+	return ""
+}
+
+// validateEndpointParamsWith is the ONE validator for the endpoint write
+// params: the base fields plus the credential row (the "use an existing
+// secret" choice, nocx-rzjw) and the custom headers (nocx-lyyk). The record
+// level rules are profile.ValidateEndpoint — the same check the store runs
+// on save — and the key rides the params once to become an Authorization
+// header, so it gets the probe key's bound and the control-character
+// refusal.
+func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSchema, key, credentialRow string, models []endpointModelInput, headers []endpointHeaderInput) string {
+	if msg := boundedRunes("name", name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("baseUrl", baseURL, maxEndpointURLRunes); msg != "" {
+		return msg
+	}
+	if key != "" {
+		if msg := boundedRunes("key", key, maxProbeKeyRunes); msg != "" {
+			return msg
+		}
+		if hasControlChars(key) {
+			return "key must not contain control characters"
+		}
+	}
+	// The credential has ONE source: a typed key (minted or rotated) or a
+	// row handle (referenced). Both is a contradiction, and the renderer's
+	// source control makes both unreachable — this is the wire's own check,
+	// and the service holds the same rule as its backstop.
+	if key != "" && credentialRow != "" {
+		return "the endpoint credential has two sources: a typed key and an existing secret are mutually exclusive"
+	}
+	if credentialRow != "" {
+		if msg := boundedRunes("credential", credentialRow, maxSecretRowRunes); msg != "" {
+			return msg
+		}
+		if !isRowHandle(credentialRow) {
+			return "credential must be a secrow handle"
+		}
+	}
+	for i, m := range models {
+		if msg := boundedRunes(fmt.Sprintf("models[%d].name", i), m.Name, maxModelNameRunes); msg != "" {
+			return msg
+		}
+		if hasControlChars(m.Name) {
+			return fmt.Sprintf("models[%d].name must not contain control characters", i)
+		}
+		if m.Alias != nil {
+			if msg := boundedRunes(fmt.Sprintf("models[%d].alias", i), *m.Alias, maxModelNameRunes); msg != "" {
+				return msg
+			}
+		}
+	}
+	if msg := validateEndpointHeaderRows(headers); msg != "" {
+		return msg
+	}
+	e := profile.Endpoint{
+		Name:          name,
+		BaseURL:       baseURL,
+		Schema:        resolveEndpointSchema(schema),
+		CredentialRef: credentialRow,
+		Models:        wireModelsToStored(models),
+		Headers:       wireHeadersToStored(headers),
+	}
+	if err := profile.ValidateEndpoint(e); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// validateEndpointHeaderRows checks the wire-form header rows: per-row
+// bounds and the row-handle grammar, exactly-one-source, and then the
+// record-level rules (profile.ValidateEndpointHeaders — the ONE owner of the
+// refused-name set, the control characters and the duplicate rule), so a
+// header refused at save time is refused identically at probe time.
+func validateEndpointHeaderRows(headers []endpointHeaderInput) string {
+	for i, h := range headers {
+		if msg := boundedRunes(fmt.Sprintf("headers[%d].name", i), h.Name, maxHeaderNameRunes); msg != "" {
+			return msg
+		}
+		if (h.Value == nil) == (h.Secret == nil) {
+			return fmt.Sprintf("headers[%d]: a header value needs exactly one source — a literal or an existing secret", i)
+		}
+		if h.Value != nil {
+			if msg := boundedRunes(fmt.Sprintf("headers[%d].value", i), *h.Value, maxHeaderValueRunes); msg != "" {
+				return msg
+			}
+		}
+		if h.Secret != nil {
+			if msg := boundedRunes(fmt.Sprintf("headers[%d].secret", i), *h.Secret, maxSecretRowRunes); msg != "" {
+				return msg
+			}
+			if !isRowHandle(*h.Secret) {
+				return fmt.Sprintf("headers[%d].secret must be a secrow handle", i)
+			}
+		}
+	}
+	if err := profile.ValidateEndpointHeaders(wireHeadersToStored(headers)); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// validateEndpointCreateRaw is the registered validator for endpoints.create.
+func validateEndpointCreateRaw(raw json.RawMessage) string {
+	var p endpointCreateParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.Key, p.Credential, p.Models, p.Headers)
+}
+
+// validateEndpointUpdateRaw is the registered validator for endpoints.update.
+func validateEndpointUpdateRaw(raw json.RawMessage) string {
+	var p endpointUpdateParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	if msg := configIDRunes("id", p.ID); msg != "" {
+		return msg
+	}
+	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.Key, p.Credential, p.Models, p.Headers)
+}
+
+// validateEndpointDeleteRaw is the registered validator for endpoints.delete.
+func validateEndpointDeleteRaw(raw json.RawMessage) string {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	return configIDRunes("id", p.ID)
+}
+
+// validateTabbyImportRaw is the registered validator for profiles.importTabby
+// and profiles.tabbyPreview: config is required (the handler's own rule),
+// and the passphrase — when supplied — is a credential: bounded as a
+// wire-cost ceiling and free of control characters. The config's honest
+// ceiling is the params wire budget (maxParamsBytes): the importer defines
+// no tighter bound, and a tighter number needs product data on real Tabby
+// exports.
+func validateTabbyImportRaw(raw json.RawMessage) string {
+	var p struct {
+		Config     string `json:"config"`
+		Passphrase string `json:"passphrase,omitempty"`
+	}
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.Config == "" {
+		return "config is required"
+	}
+	if msg := boundedRunes("passphrase", p.Passphrase, maxSecretSettingRunes); msg != "" {
+		return msg
+	}
+	if hasControlChars(p.Passphrase) {
+		return "passphrase must not contain control characters"
+	}
+	return ""
+}
+
+// validateTabbyExecuteRaw is the registered validator for
+// profiles.tabbyExecute. The plan token is backend-minted by storePlan as
+// exactly 64 lowercase hex characters; anything else cannot name a plan, so
+// the shape is closed.
+func validateTabbyExecuteRaw(raw json.RawMessage) string {
+	var p tabbyExecuteParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.PlanToken == "" {
+		return "planToken is required"
+	}
+	if len(p.PlanToken) != 64 {
+		return "planToken must be the 64-character token the preview returned"
+	}
+	for _, r := range p.PlanToken {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return "planToken must be the 64-character token the preview returned"
+		}
+	}
+	return ""
 }
 
 // profileHandlers answers the profiles.* methods. wired is true when the
@@ -137,7 +970,7 @@ func (h profileHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -430,7 +1263,7 @@ func (h groupHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -482,7 +1315,7 @@ func (h groupHandlers) handleGroupImpact(ctx context.Context, req jsonrpcRequest
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -519,7 +1352,7 @@ func (h groupHandlers) handleProfileMoveImpact(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -556,7 +1389,7 @@ func (h groupHandlers) handleGroupApply(ctx context.Context, req jsonrpcRequest)
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -580,7 +1413,9 @@ func (h settingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 		switch req.Method {
 		case "settings.describe":
 			_ = h.r.TryResult(req.ID, mustMarshal(map[string]any{
-				"declarations": ss.Declarations(),
+				"declarations":  ss.Declarations(),
+				"groups":        ss.Groups(),
+				"sectionGroups": ss.SectionGroups(),
 			}))
 		case "settings.getSnapshot":
 			snap, err := ss.GetSnapshot()
@@ -607,7 +1442,7 @@ func (h settingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -857,7 +1692,7 @@ func (h tabbyHandlers) handleTabbyPreview(ctx context.Context, req jsonrpcReques
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -940,7 +1775,7 @@ func (h tabbyHandlers) handleTabbyExecute(ctx context.Context, req jsonrpcReques
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -965,7 +1800,7 @@ func (h tabbyHandlers) handleImportTabby(ctx context.Context, req jsonrpcRequest
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -1371,20 +2206,38 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 	return plan, preview, nil
 }
 
+// buildConfigOp constructs the ONE config-domain operation (AD-8: one owner
+// of endpoint resolution — agent.ask's refusal check shares it with the
+// config handlers; a second construction would be a second wiring). It
+// returns whether the endpoint repository is wired, the "endpoints not
+// available" gate the handlers check first.
+func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) (capability.ConfigOperation, bool) {
+	// Endpoints ride the profile store (ADR-0030): the same JSON document,
+	// so the profile store satisfies the endpoint repository. The nil guard
+	// is real: the type assertion panics on a nil interface, and profiles
+	// may simply not be wired.
+	var endpointsRepo profile.EndpointRepository
+	if s.profiles != nil {
+		if er, ok := s.profiles.(profile.EndpointRepository); ok {
+			endpointsRepo = er
+		}
+	}
+	return capability.NewConfigOperation(
+		configGate, vaultGate, lane,
+		s.profiles, s.groups, endpointsRepo, s.profileSvc, s.settings,
+		s.vaultRowResolver(), s.vaultEndpointSecrets(),
+	), endpointsRepo != nil
+}
+
 // configSpecs declares the config-domain control methods. The ConfigOperation
-// and TabbyImportOperation are built here from the wired stores; the handler
-// families share them.
-func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission) []methodSpec {
+// is built ONCE by buildConfigOp (in buildControlPlane) and shared with the
+// agent specs; the handler families receive it.
+func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool) []methodSpec {
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
-	configOp := capability.NewConfigOperation(
-		configGate, vaultGate, lane,
-		s.profiles, s.groups, s.profileSvc, s.settings,
-		s.vaultRowResolver(),
-	)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
@@ -1397,95 +2250,131 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	tabbySub := s.operationQueue("tabby")
 
 	specs := []methodSpec{
-		regResponder(configSub, "profiles.list", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.list", noParams(), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.create", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.create", params(validateProfileCreateRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.update", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.update", params(validateProfileUpdateRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.delete", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.delete", params(validateProfileDeleteRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.effective", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.effective", params(validateEffectiveRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.patch", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.patch", params(validatePatchRaw), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.list", func(r Responder) handlerFunc {
+		regResponder(configSub, "endpoints.list", noParams(), func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.create", params(validateEndpointCreateRaw), func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.update", params(validateEndpointUpdateRaw), func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.delete", params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		// The assistant's methods (nocx-edio): endpoints.probe is the Test
+		// button — a streaming probe that can take tens of seconds, so it
+		// owns a capacity-one admission off the read loop exactly like
+		// connections.test; agent.status is a fast config read under the
+		// config queue.
+		regResponder(s.agentProbeSub, "endpoints.probe", params(validateProbeParamsRaw), func(r Responder) handlerFunc {
+			// op + secrets are the credential resolution (nocx-reu5): the
+			// probe names a saved endpoint and the backend resolves the
+			// credential it owns — the same seams agent.status holds.
+			h := assistantProbeHandlers{
+				op: configOp, secrets: s.credentialResolver(),
+				client: s.assistantClient, probes: s.assistantProbes,
+				wired: s.assistantClient != nil, r: r,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
+		}),
+		regResponder(configSub, "agent.status", noParams(), func(r Responder) handlerFunc {
+			h := assistantStatusHandlers{op: configOp, secrets: s.credentialResolver(), probes: s.assistantProbes, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
+		}),
+		regResponder(configSub, "groups.list", noParams(), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.create", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.create", params(validateGroupCreateRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.update", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.update", params(validateGroupUpdateRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.delete", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.delete", params(validateGroupDeleteRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.impact", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.impact", params(validateGroupImpactRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGroupImpact(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.moveImpact", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.moveImpact", params(validateProfileMoveImpactRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileMoveImpact(ctx, req) }
 		}),
-		regResponder(configSub, "groups.apply", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.apply", params(validateGroupApplyRaw), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGroupApply(ctx, req) }
 		}),
-		regResponder(configSub, "settings.describe", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.describe", noParams(), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.getSnapshot", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.getSnapshot", noParams(), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.set", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.set", params(validateSettingsSetRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.reset", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.reset", params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretSet", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.secretSet", params(validateSettingsSecretSetRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretDelete", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.secretDelete", params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretExists", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.secretExists", params(validateSettingsKeyRaw), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.importTabby", func(r Responder) handlerFunc {
+		regResponder(tabbySub, "profiles.importTabby", params(validateTabbyImportRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleImportTabby(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.tabbyPreview", func(r Responder) handlerFunc {
+		regResponder(tabbySub, "profiles.tabbyPreview", params(validateTabbyImportRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyPreview(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.tabbyExecute", func(r Responder) handlerFunc {
+		regResponder(tabbySub, "profiles.tabbyExecute", params(validateTabbyExecuteRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyExecute(ctx, req) }
 		}),
@@ -1517,6 +2406,19 @@ func (s *WSServer) vaultSecretSeam() capability.SecretVault {
 	}
 	if sv, ok := s.vaultLifecycle.(capability.SecretVault); ok {
 		return sv
+	}
+	return nil
+}
+
+// vaultEndpointSecrets returns the EndpointSecrets seam for the endpoint
+// write paths, or nil when no vault is wired — key-bearing endpoint writes
+// and material deletes then fail loudly, the documented nil-seam contract.
+func (s *WSServer) vaultEndpointSecrets() capability.EndpointSecrets {
+	if s.vaultLifecycle == nil {
+		return nil
+	}
+	if es, ok := s.vaultLifecycle.(capability.EndpointSecrets); ok {
+		return es
 	}
 	return nil
 }

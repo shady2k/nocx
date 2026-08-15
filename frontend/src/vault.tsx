@@ -336,11 +336,24 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
    *  yet run), the caller's promise is rejected with VaultOperationCancelled
    *  so the caller can abandon the operation it started. Resolving there was
    *  how a cancelled unlock left the profile created with the secret never
-   *  stored: the caller continued as if the save had happened. */
+   *  stored: the caller continued as if the save had happened.
+   *
+   *  A caller's RPC held by the dispatcher's sealed seam (dispatcher.ts
+   *  intercepts a vault-sealed response and keeps the promise pending until
+   *  the re-sent request settles) is the same situation with a different
+   *  owner: while sealedUnlock is non-null, the RPC's own settlement — not
+   *  this dialog's close — owns the caller's promise. Settling here resolved
+   *  the endpoints save while its create was still in flight, closing the
+   *  form and reporting "Saved" with no row and no error (nocx-4egm). */
   function closeDialog(hide: () => void): void {
     const deferredSavePending = pendingSave !== null
     pendingSave = null
-    if (!retryInFlight) {
+    // sealedUnlock non-null: the dispatcher's seam holds a caller's RPC
+    // (see the comment above) — the RPC's own settlement owns the promise,
+    // so neither resolve/reject nor the nulling may run here. Nulling
+    // without settling would discard the callbacks and leave the caller's
+    // promise permanently pending when the retried request lands.
+    if (!retryInFlight && sealedUnlock === null) {
       if (deferredSavePending) {
         pendingReject?.(new VaultOperationCancelledError())
       } else {

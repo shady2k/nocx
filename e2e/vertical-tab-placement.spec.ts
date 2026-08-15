@@ -16,7 +16,7 @@ test.describe('vertical tab placement', () => {
     // Settings opens on its FIRST section, so a row in any other section is in
     // the DOM and hidden. Navigate before waiting, or this times out on a
     // control that is right there and reads like a broken selector.
-    await page.locator('.ui-settings-section-nav-item[data-section="Interface"] button').click()
+    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
     await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
     await page.selectOption(PLACEMENT_SELECT, value)
     await page.keyboard.press('Meta+w')

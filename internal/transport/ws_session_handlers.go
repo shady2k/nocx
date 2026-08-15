@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
@@ -64,6 +65,9 @@ type openMachine interface {
 	replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUp(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUpLocal()
+	// Replays any lifecycle fact that arrived while open was still dialing.
+	// Called only after the result has published the authoritative session id.
+	replayLifecycleFacts(sid session.ID)
 	// The session integration axis (nocx-dvql): the remote registration
 	// from the connect path's own decision, and the first emission — which
 	// must happen AFTER the open ack (AD-7).
@@ -96,11 +100,11 @@ type openHandlers struct {
 // request id serves as the correlation-id — we do NOT add a second
 // correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
-func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params openParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 
@@ -146,7 +150,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				// credentials and jump hosts through the profile resolver.
 				if _, ok := h.resolver.get(); !ok {
 					resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
-					_ = respond(wconn, resp)
+					_ = respond(r, resp)
 					return nil
 				}
 
@@ -156,7 +160,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 					h.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
 					// Resolving reads the stored password, so a sealed vault surfaces
 					// here — the renderer needs the reason to offer an unlock.
-					_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
+					_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
 					return nil
 				}
 
@@ -187,7 +191,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				// the config file — no stored profile involved.
 				if h.sshCfg == nil {
 					resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
-					_ = respond(wconn, resp)
+					_ = respond(r, resp)
 					return nil
 				}
 
@@ -232,7 +236,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				// does not record it.
 			} else {
 				resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
-				_ = respond(wconn, resp)
+				_ = respond(r, resp)
 				return nil
 			}
 			// Shell pin (nocx-pu4.1): the open may name the far shell the
@@ -266,7 +270,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		if capability.IsRefused(err) {
 			var rej *capability.RefusedError
 			errors.As(err, &rej)
-			_ = wconn.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			// Both sides of the merge: main's refusal now names the method
+			// it refused (nocx-rq9p), and this handler's writes go through
+			// the Responder rather than the raw connection, so the sealed
+			// normalizer sees them (nocx-k41yv).
+			_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 			return
 		}
 		h.log.Error("failed to open session", "error", err)
@@ -275,7 +283,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		// so the vault-owned unlock prompt appears instead of an error
 		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
 		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
-			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
+			_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
 			return
 		}
 		// Classify the SSH error through the same taxonomy the probe uses
@@ -295,7 +303,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		if hk := hostKeyInfoFromError(err); hk != nil {
 			resp.Error.Data = hk
 		}
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 	if !opened {
@@ -313,15 +321,18 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 			return svc.Close(sess.ID())
 		})
 		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
-	rx.setSubscriber(wconn, state)
 
-	// Port discovery (nocx-wzc4.2): only now, once the session is fully
-	// established (ring created, subscriber attached) is the target "up" —
-	// a session that failed its ring setup must not leave a discovery
-	// target behind with nobody to tear it down.
+	// Port discovery (nocx-wzc4.2): only now, once the session's ring
+	// exists, is the target "up" — a session that failed its ring setup
+	// must not leave a discovery target behind with nobody to tear it down.
+	// The subscriber is NOT attached yet; it lands after the open result
+	// below, because a session-scoped notification may not precede the id
+	// that addresses it (AD-7). This call only schedules — whatever the
+	// scheduler later publishes does its own subscriber lookup — so the
+	// ring alone is the condition the target's liveness waits on.
 	switch {
 	case cfg.ProfileID != "":
 		h.sess.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
@@ -354,14 +365,16 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
-	_ = respond(wconn, resp)
+	_ = respond(r, resp)
 
-	// The session's integration axis, AFTER the ack. AD-7: the ack must
-	// precede the session's own traffic in both directions, and the launch
-	// (which registered the axis) ran inside the dial above — a
-	// notification sent from there would reach a renderer whose sessionId
-	// is still null and be dropped.
-	//
+	// Every session-scoped notification must follow the open result (AD-7).
+	// Install the subscriber only now: lifecycle can authenticate during the
+	// dial above, and publishing it to this shared WebSocket before the
+	// renderer knows sessionId lets an existing tab claim the fact. The
+	// current projection is replayed immediately after installation, so a
+	// fact dropped during the pre-result window is not lost.
+	rx.setSubscriber(wconn, state)
+	h.sess.replayLifecycleFacts(sess.ID())
 	// A remote session's launch-time refusal is registered here rather than
 	// at the dial because ShellIntegrationReason is the ssh channel's own
 	// answer and this is where the session first exists as a session. A
@@ -473,7 +486,7 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -534,7 +547,7 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -554,11 +567,11 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 // Unknown sessionId → JSON-RPC error.
 // Offset ahead of written → JSON-RPC error (DEFECT 4).
 // Duplicate attach on the same connection → JSON-RPC error (DEFECT 3).
-func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params attachParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and offset required")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 
@@ -567,14 +580,14 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 	op, err := h.ops.ForSession(sid)
 	if err != nil {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
@@ -584,14 +597,14 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		// another ringToConn, doubling every output byte for that subscriber.
 		if state.has(sid) {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: already attached to this session")
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
 		rx := h.machine.getRx(sid)
 		if rx == nil {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
@@ -603,7 +616,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		w := rx.ring.writtenLocked()
 		if params.Offset > w {
 			resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: offset %d exceeds written %d", params.Offset, w))
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
@@ -615,11 +628,11 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		if needsReset {
 			respJSON, _ := json.Marshal(map[string]any{"reset": true, "from": from})
 			resp := newJSONRPCResult(req.ID, respJSON)
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 		} else {
 			respJSON, _ := json.Marshal(map[string]any{"resumed": true, "from": from})
 			resp := newJSONRPCResult(req.ID, respJSON)
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 		}
 
 		// Files (fm-w8): deliver the dirty paths the session's bindings
@@ -645,7 +658,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(wconn, req.ID, err)
+		answerOperationRefusal(wconn, req, err)
 	}
 }
 
@@ -686,13 +699,13 @@ func (h ackHandler) handleAck(req jsonrpcRequest) {
 // answerOperationRefusal answers a *capability.RefusedError (a gate refusal)
 // with the saturation error; any other error is unexpected and answered as an
 // internal error. A nil error is a no-op.
-func answerOperationRefusal(r Responder, id json.RawMessage, err error) {
+func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	var rej *capability.RefusedError
 	if errors.As(err, &rej) {
-		_ = r.TryError(id, saturationRPCError(&rej.Rejection))
+		_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 		return
 	}
-	_ = r.TryError(id, RPCError{Code: -32603, Message: err.Error()})
+	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 }
 
 // sessionSpecs declares the session-plane control methods. open and attach
@@ -718,25 +731,183 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// with the saturation contract like any admission-backed method.
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
-		reg(openSub, "open", func(w *wsConn, state *connState) handlerFunc {
+		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, state, req) }
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
-		reg(ordered, "resize", func(w *wsConn, state *connState) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
+		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		}),
-		reg(ordered, "close", func(w *wsConn, state *connState) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
+		reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(sessionSub, "attach", func(w *wsConn, state *connState) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, state, req) }
+		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		}),
-		reg(immediate, "ack", func(w *wsConn, state *connState) handlerFunc {
+		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
 		}),
 	}
+}
+
+// ── session-plane ingress bounds ───────────────────────────────────────────
+//
+// open, resize, close, attach and ack take session ids — server-minted, so
+// the 32-hex shape is the honest check (an id that is not one can never
+// resolve, and the shape's owner is session.IDToBytes) — terminal sizes
+// (uint16 by wire type, nonzero where a size of zero is meaningless) and
+// byte offsets (uint64 by wire type). A rejected request is answered
+// -32602 before the handler runs, so a bad session id never crosses into
+// the capability or the ring.
+
+// maxShellPinRunes bounds the open's shell pin. The product pins are
+// bash|zsh|unknown|auto — 7 characters at most — and anything else is
+// deliberately ignored with a warn (detection is the safe degrade, and the
+// launcher refuses unmapped kinds if one slips past), so the validator
+// bounds and does not refuse: refusing would turn the documented degrade
+// into a failed open.
+const maxShellPinRunes = 32
+
+// validateOpenRaw is the registered validator for "open": cols and rows are
+// required and nonzero (a zero-size terminal is meaningless), kind is the
+// two-value enum the handler actually branches on, and the ssh branch needs
+// a target. profileId and host are optional (a local open carries neither);
+// when present they are held to the same bounds the seam methods apply, and
+// host/user reach the ssh subprocess, so control characters are refused.
+func validateOpenRaw(raw json.RawMessage) string {
+	var p openParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Cols == 0 {
+		return "cols is required"
+	}
+	if p.Rows == 0 {
+		return "rows is required"
+	}
+	// kind is a closed set: absent or "local" opens a local PTY, "ssh" opens
+	// an SSH channel. The handler only branches on "ssh", so an unrecognised
+	// kind would silently open a local session — the wrong kind of session
+	// for a caller that believes it is connecting to a host. Refuse it
+	// rather than let a typo'd kind open the wrong one.
+	//
+	// "local" is in the set because callers SEND it: the closed set was
+	// first written as ssh-or-absent, which the container gate refused at
+	// session open for every local session in the product. A closed set has
+	// to be read off what the product sends, never off what the handler
+	// happens to branch on.
+	if p.Kind != "" && p.Kind != "ssh" && p.Kind != "local" {
+		return `kind must be "ssh", "local", or absent`
+	}
+	if p.Kind == "ssh" && p.ProfileID == "" && p.Host == "" {
+		return "profileId or host is required for an ssh session"
+	}
+	if p.ProfileID != "" {
+		if msg := validateStringBound("profileId", p.ProfileID, maxIDRunes); msg != "" {
+			return msg
+		}
+	}
+	if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
+		return msg
+	}
+	if msg := validateStringBound("user", p.User, maxUserRunes); msg != "" {
+		return msg
+	}
+	if utf8.RuneCountInString(p.Shell) > maxShellPinRunes {
+		return fmt.Sprintf("shell exceeds %d characters", maxShellPinRunes)
+	}
+	return ""
+}
+
+// validateResizeRaw is the registered validator for "resize": the sessionId
+// must be a real server-minted id, and cols/rows nonzero.
+func validateResizeRaw(raw json.RawMessage) string {
+	var p resizeParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	if p.Cols == 0 {
+		return "cols is required"
+	}
+	if p.Rows == 0 {
+		return "rows is required"
+	}
+	return ""
+}
+
+// validateCloseRaw is the registered validator for "close": the sessionId
+// must be a real server-minted id.
+func validateCloseRaw(raw json.RawMessage) string {
+	var p closeParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateAttachRaw is the registered validator for "attach": the sessionId
+// must be a real server-minted id. offset is uint64 by wire type and 0 (from
+// the start of the ring) is ordinary — the handler checks the offset against
+// what the ring actually wrote.
+func validateAttachRaw(raw json.RawMessage) string {
+	var p attachParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateAckRaw is the registered validator for the "ack" notification:
+// the sessionId must be a real server-minted id. ack is ingress-critical
+// (registration.go), so this runs inline on the read loop and is deliberately
+// trivial: decode and two string checks, no allocation beyond the struct.
+func validateAckRaw(raw json.RawMessage) string {
+	var p ackParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
 }

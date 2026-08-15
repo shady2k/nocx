@@ -23,6 +23,7 @@ import { SegmentedControl } from './ui/segmented-control'
 import { Select, type SelectOption } from './ui/select'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
+import { SecretSource, type SecretSourceMode } from './secret-source'
 
 const INHERIT_AUTH = '__inherit__'
 
@@ -125,7 +126,10 @@ export const SecretPicker: Component<{
 export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props) => {
   // The password method offers the same two-way choice the key method's
   // four segments do: type a new one, or use a secret the vault already
-  const [passwordMode, setPasswordMode] = createSignal<'new' | 'secret'>(
+  // holds. The choice is SecretSource — the SAME control the endpoint's key
+  // field and header value rows use, so "where does this secret come from"
+  // has one vocabulary everywhere (nocx-rzjw).
+  const [passwordMode, setPasswordMode] = createSignal<SecretSourceMode>(
     untrack(() => (props.passwordSecret ? 'secret' : 'new')),
   )
 
@@ -149,28 +153,20 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
         suffix={props.authSuffix}
       />
       <Show when={props.auth === 'password'}>
-        <Field for={`${props.id}-password-source`} label="Password">
-          <SegmentedControl
-            options={[
-              { value: 'new', label: 'Type a new one' },
-              { value: 'secret', label: 'Use existing secret' },
-            ]}
-            value={passwordMode()}
-            onChange={(value) => setPasswordMode(value as 'new' | 'secret')}
-            ariaLabel="Password source"
-          />
-        </Field>
-        <Show when={passwordMode() === 'new'}>{props.passwordAction}</Show>
-        <Show when={passwordMode() === 'secret'}>
-          <SecretPicker
-            id={props.id}
-            label="Existing secret"
-            secrets={props.passwordSecrets}
-            value={props.passwordSecret}
-            onChange={props.onPasswordSecretChange}
-            placeholder={props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 None \u2014'}
-          />
-        </Show>
+        <SecretSource
+          id={props.id}
+          label="Password"
+          mode={passwordMode()}
+          onModeChange={setPasswordMode}
+          newLabel="Type a new one"
+          secretLabel="Use existing secret"
+          ariaLabel="Password source"
+          newControl={props.passwordAction}
+          secrets={props.passwordSecrets}
+          value={props.passwordSecret}
+          onValueChange={props.onPasswordSecretChange}
+          placeholder={props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 None \u2014'}
+        />
       </Show>
     </Stack>
   )

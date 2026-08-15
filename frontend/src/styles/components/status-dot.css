@@ -11,6 +11,15 @@
   flex: 0 0 auto;
 }
 
+/* The muted state — a state that has nothing to say in colour
+   (Disconnected, no key). A faded currentColor, the same dot the
+   connections row always drew for a disconnected session; it moved into
+   the kit when RecordRow folded .cm-session-dot into this component
+   (nocx-pp3y.3). */
+.ui-status-dot[data-tone='neutral'] {
+  background: color-mix(in srgb, currentColor, transparent 70%);
+}
+
 .ui-status-dot[data-tone='ok'] {
   background: var(--color-success);
 }

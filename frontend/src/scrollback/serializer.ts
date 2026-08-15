@@ -12,6 +12,13 @@
 
 import type { IBufferLine, ITheme } from '@xterm/xterm'
 
+/** Version of the serializer's row-transform contract. Bump when the
+ *  transforms that shape a frozen block's text change: wrapped lines joined,
+ *  leading/trailing blanks dropped (serializeRange). A frame minted from a
+ *  frozen block records this version in its provenance so a later reader can
+ *  tell which transform set produced the text (nocx-3j9b). */
+export const SERIALIZER_VERSION = 1
+
 // ── Theme snapshot types ──────────────────────────────────────────────────
 
 /** 16-element ANSI palette tuple (indices 0–15). MUST match ITheme keys:

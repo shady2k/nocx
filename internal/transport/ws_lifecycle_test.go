@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -142,6 +144,104 @@ func ackEstablishmentFrom(t *testing.T, pub *lifecyclepub.Publisher, lane lifecy
 	}
 	if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); err != nil {
 		t.Fatalf("AcknowledgeEstablishment: %v", err)
+	}
+}
+
+// openLifecyclePTYFactory reproduces the production open race: the shell's
+// authenticated hello lands while session.Reg.Open is still inside the PTY
+// factory, before handleOpen has returned the server-authoritative session id
+// to the renderer. The current projection must be replayed after that result;
+// publishing it directly here cannot be the only delivery.
+type openLifecyclePTYFactory struct {
+	stub *pty.Stub
+	pub  *lifecyclepub.Publisher
+	lane lifecycle.LaneID
+	h    lifecycle.DomainHandle
+	ws   atomic.Pointer[WSServer]
+}
+
+func (f *openLifecyclePTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	ws := f.ws.Load()
+	if ws == nil || cfg.SessionID == "" {
+		return f.stub, nil
+	}
+	ws.RegisterLifecycleLane(f.lane, session.ID(cfg.SessionID))
+	if err := f.pub.Ingest("T", lifecycleEnv(f.lane, f.h, 1, lifecycleHelloEvt())); err != nil {
+		return nil, err
+	}
+	return f.stub, nil
+}
+
+// The regression from nocx-upqz: the hello can beat the open result. The
+// renderer cannot acknowledge before it knows the session id, and a shared
+// WebSocket is not a tab-addressing boundary. The open result therefore comes
+// first, followed by a replay explicitly scoped to that session; acknowledging
+// the replay must release the pending ACCEPT.
+func TestLifecycleChanged_OpenResultPrecedesSessionScopedReplay(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	port := &lifecycleRecordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	const lane = lifecycle.LaneID("lane-open-race")
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	factory := &openLifecyclePTYFactory{
+		stub: pty.NewStub(logger),
+		pub:  pub,
+		lane: lane,
+		h:    h,
+	}
+	e := newLifecycleTestEnvWithReg(t, session.New(logger, factory), WithLifecyclePublisher(pub))
+	factory.ws.Store(e.ws)
+	pub.SetEmitter(e.ws)
+
+	// jsonrpcCallWithID skips notifications before the response. If the
+	// lifecycle fact is sent too early, it is consumed here and the explicit
+	// read below fails: ordering is part of the observable contract.
+	sid := openSessionOnConn(t, e.ws, e.conn, 1)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
+	var ready struct {
+		SessionID  string `json:"sessionId"`
+		Lane       string `json:"lane"`
+		Lifecycle  string `json:"lifecycle"`
+		Domain     string `json:"domain"`
+		Epoch      uint64 `json:"epoch"`
+		Generation string `json:"generation"`
+	}
+	if err := json.Unmarshal(raw, &ready); err != nil {
+		t.Fatalf("decode lifecycle.changed: %v\nraw: %s", err, raw)
+	}
+	if ready.SessionID != sid {
+		t.Fatalf("notification sessionId = %q, want %q", ready.SessionID, sid)
+	}
+	if ready.Lane != string(lane) || ready.Lifecycle != string(lifecyclepub.LifecyclePromptReady) ||
+		ready.Domain != string(h.Domain) || ready.Epoch != h.Epoch || ready.Generation == "" {
+		t.Fatalf("prompt_ready replay = %+v, want lane/domain/epoch/generation for the opened session", ready)
+	}
+
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.establishAck", map[string]any{
+		"sessionId":  sid,
+		"lane":       ready.Lane,
+		"domain":     ready.Domain,
+		"epoch":      ready.Epoch,
+		"generation": ready.Generation,
+	}, 2)
+	var ack struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &ack); err != nil {
+		t.Fatalf("decode establishAck: %v\nraw: %s", err, resp)
+	}
+	if ack.Error != nil {
+		t.Fatalf("establishAck refused: %+v", ack.Error)
+	}
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("outbound after ack = %v, want exactly one ACCEPT", got)
 	}
 }
 

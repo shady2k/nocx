@@ -1,10 +1,12 @@
 /* Button — action affordance.
-   Base class: `.ui-button`. Variance: `data-variant` (default | primary | danger)
-   and `data-size` (sm | md).
+   Base class: `.ui-button`. Variance: `data-variant` (default | primary |
+   danger | ghost) and `data-size` (sm | md).
 
    Declarations moved from the old `.ui-btn-*` classes (T14, nocx-c2t6).
-   All variants share `font: inherit; cursor: pointer; font-size; border-radius;
-   white-space: nowrap` via the base rule.
+   All variants share `font: inherit; cursor: pointer; font-size;
+   white-space: nowrap` via the base rule; `border-radius` is the base's sm
+   except the ghost variant, which is the "row in a list" register and owns
+   the row radius (md) itself — never per consumer (nocx-dgsp).
 
    Before → after (property list for the verification gate):
      .ui-btn-secondary → .ui-button[data-variant="default"]
@@ -95,13 +97,21 @@
   cursor: not-allowed;
 }
 
-/* ── Ghost — a button that reads as text ─────────────────────────────────
-   The settings section-nav row is one: transparent, borderless, inheriting the
-   surrounding type, and it is a real third look rather than a variation on the
-   other two. It arrived here because T14 first replaced it with a RAW <button> —
-   which satisfies "no class passed to Button" by abandoning the kit altogether,
-   the exact defect this migration exists to end. A genuinely different look is a
-   variant, and this is what naming it looks like. */
+/* ── Ghost — a button that reads as a row in a list ─────────────────────
+   Every consumer is a row, a foot control, or a row-adjacent action: the
+   settings rail's nav rows, the vertical Tabs rows, the row-list's add
+   control, the connections row's Test/Connect actions, the vault page's
+   Download, the footprint empty state's Refresh. It arrived here because T14
+   first replaced it with a RAW <button> — which satisfies "no class passed
+   to Button" by abandoning the kit altogether, the exact defect this
+   migration exists to end. A genuinely different look is a variant, and this
+   is what naming it looks like.
+
+   The radius is the ROW register's (`--control-radius-md`, one step up from
+   the default control's sm): the settings rail's rows align with the search
+   field above them, and a row register reads the same everywhere — a
+   consumer-named selector in the component file would be the coupling this
+   variant exists to prevent. */
 
 .ui-button[data-variant='ghost'] {
   justify-content: flex-start;
@@ -109,12 +119,13 @@
   border: none;
   color: var(--color-text-muted);
   font: inherit;
+  border-radius: var(--control-radius-md);
 
   /* Ghost had no padding of its own, and the only consumer supplied one from
-     settings.css — so a ghost Button anywhere else would have had a hit area the size
-     of its text. The variant was incomplete rather than customised, which is what
-     rule 3 firing on it revealed (T20, nocx-zhjx). Moved verbatim from
-     `.ui-settings-section-nav-item > .ui-button`. */
+     settings.css — so a ghost Button anywhere else would have had a hit area
+     the size of its text. The variant was incomplete rather than customised,
+     which is what rule 3 firing on it revealed (T20, nocx-zhjx). Moved
+     verbatim from the settings nav rule. */
   padding: var(--space-2) 10px;
 }
 
@@ -124,28 +135,63 @@
 }
 
 /* ── Selected ────────────────────────────────────────────────────────────
-   A button representing a current choice. Filled rather than tinted: the active
-   row has to be findable at a glance down a list, and an 88%-transparent accent
-   wash is not.
+   Two registers, one per variant family:
 
-   Lived in settings.css until T20 (nocx-etu2), where the rail painted it onto
-   `.ui-button` from outside — the thing rule 3 forbids. The state was already in
-   the component; only the paint was elsewhere. */
+   Non-ghost (default/primary/danger): the accent fill that was always there
+   — `selected` on those variants keeps its exact old contract; today no
+   non-ghost Button uses it, but the prop's meaning must not silently change
+   for a variant this change does not touch.
 
-.ui-button[aria-selected='true'] {
+   Ghost — the current choice in a list: a neutral plate with normal text and
+   a weight bump, the register the tab strip (.nocx-tab: --color-tab-active,
+   text) and the row lists (.ui-collection-row: surface plate, no accent)
+   already speak. The accent stays, but in a narrow channel: a 2px marker on
+   the leading edge, the same idiom icon-button.css' data-rail-indicator
+   uses — never the fill that used to flood the row and invert its text.
+
+   The ghost plate token is deliberately the TAB'S, not the ghost hover
+   token: selected and hover sit adjacent in the rail, and a shared plate
+   would make the two states indistinguishable. The marker and the weight
+   are the second and third separations on top of the token (nocx-dgsp). */
+
+.ui-button:not([data-variant='ghost'])[aria-selected='true'] {
   background: var(--color-accent);
   color: var(--color-canvas);
   font-weight: 500;
 }
 
-.ui-button[aria-selected='true']:hover {
+.ui-button:not([data-variant='ghost'])[aria-selected='true']:hover {
   background: var(--color-accent-hover);
   color: var(--color-canvas);
 }
 
-/* A badge riding inside a selected button cannot keep its own palette — warning
-   orange on the accent fill was unreadable. It borrows the button's colours. */
-.ui-button[aria-selected='true'] .ui-badge {
+/* A badge riding inside a selected non-ghost button cannot keep its own
+   palette — warning orange on the accent fill was unreadable. */
+.ui-button:not([data-variant='ghost'])[aria-selected='true'] .ui-badge {
   background: color-mix(in srgb, var(--color-canvas), transparent 75%);
   color: var(--color-canvas);
+}
+
+.ui-button[data-variant='ghost'][aria-selected='true'] {
+  position: relative;
+  background: var(--color-tab-active);
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+/* A selected row stays selected under the pointer — the plate holds, like
+   the tab strip's (hover is for rows that are not current). */
+.ui-button[data-variant='ghost'][aria-selected='true']:hover {
+  background: var(--color-tab-active);
+  color: var(--color-text);
+}
+
+.ui-button[data-variant='ghost'][aria-selected='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-accent);
 }

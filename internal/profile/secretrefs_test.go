@@ -176,3 +176,146 @@ func TestClearAllSecretReferences_OnAnEmptyStore(t *testing.T) {
 		t.Errorf("impact = %+v, want zero", impact)
 	}
 }
+
+// --- endpoints (ADR-0030, ADR-0031) -------------------------------------
+
+// An endpoint holding a credential reference is a second kind of record the
+// reset must count: a preview that ignores it under-reports what the user
+// is about to lose.
+func TestCountSecretReferences_CountsEndpointReferences(t *testing.T) {
+	s := newTestStore(t)
+	e := validTestEndpoint()
+	e.CredentialRef = "sec:v1:file:endpointkey000000000000000000001"
+	if err := s.CreateEndpoint(e); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+
+	impact, err := s.CountSecretReferences()
+	if err != nil {
+		t.Fatalf("CountSecretReferences: %v", err)
+	}
+	if impact.SecretCount != 1 {
+		t.Errorf("SecretCount = %d, want 1", impact.SecretCount)
+	}
+	if impact.ProfileCount != 0 {
+		t.Errorf("ProfileCount = %d, want 0 — an endpoint is not a connection", impact.ProfileCount)
+	}
+	if impact.EndpointCount != 1 {
+		t.Errorf("EndpointCount = %d, want 1", impact.EndpointCount)
+	}
+}
+
+// An endpoint without a credential stores nothing and loses nothing: it is
+// not counted, exactly like a profile with no stored material.
+func TestCountSecretReferences_IgnoresEndpointsHoldingNothing(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateEndpoint(validTestEndpoint()); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+	impact, err := s.CountSecretReferences()
+	if err != nil {
+		t.Fatalf("CountSecretReferences: %v", err)
+	}
+	if impact.SecretCount != 0 || impact.EndpointCount != 0 {
+		t.Errorf("impact = %+v, want zero", impact)
+	}
+}
+
+// Distinct secrets, not distinct records: a secret shared between a profile
+// and an endpoint is one thing the user loses, not two — and the two kinds
+// are counted separately because they answer different questions.
+func TestCountSecretReferences_DistinctAcrossKinds(t *testing.T) {
+	s := newTestStore(t)
+	ref := "sec:v1:file:sharedacrosskinds000000000001"
+	if err := s.CreateProfile(SSHProfile{
+		Base:    Base{ID: "ssh:p:1", Type: "ssh", Name: "p"},
+		Options: StoredSSHProfileOptions{Host: "h", PasswordSecret: ref},
+	}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	e := validTestEndpoint()
+	e.CredentialRef = ref
+	if err := s.CreateEndpoint(e); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+
+	impact, err := s.CountSecretReferences()
+	if err != nil {
+		t.Fatalf("CountSecretReferences: %v", err)
+	}
+	if impact.SecretCount != 1 {
+		t.Errorf("SecretCount = %d, want 1", impact.SecretCount)
+	}
+	if impact.ProfileCount != 1 || impact.EndpointCount != 1 {
+		t.Errorf("impact = %+v, want one profile and one endpoint", impact)
+	}
+}
+
+// The reset clears endpoint references along with profile ones, in the same
+// one write: the endpoint record survives with an empty credential, exactly
+// as a profile survives without its password.
+func TestClearAllSecretReferences_ClearsEndpointReferencesAndKeepsTheRecord(t *testing.T) {
+	s := newTestStore(t)
+	e := validTestEndpoint()
+	e.CredentialRef = "sec:v1:file:endpointkey000000000000000000001"
+	if err := s.CreateEndpoint(e); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+
+	impact, err := s.ClearAllSecretReferences()
+	if err != nil {
+		t.Fatalf("ClearAllSecretReferences: %v", err)
+	}
+	if impact.SecretCount != 1 || impact.EndpointCount != 1 {
+		t.Errorf("impact = %+v, want 1 secret and 1 endpoint", impact)
+	}
+
+	got, err := s.LoadEndpoints()
+	if err != nil {
+		t.Fatalf("LoadEndpoints: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != e.ID {
+		t.Fatalf("endpoints = %+v, want the record to survive", got)
+	}
+	if got[0].CredentialRef != "" {
+		t.Errorf("CredentialRef = %q, want cleared", got[0].CredentialRef)
+	}
+}
+
+// The per-secret metadata-first path (a key deleted on the Secrets page)
+// clears the endpoint's reference in the same write that clears profile
+// bindings — the endpoint survives, credential-less.
+func TestClearSecretRefs_ClearsEndpointReference(t *testing.T) {
+	s := newTestStore(t)
+	ref := "sec:v1:file:deletedfromsecrets0000000000001"
+	if err := s.CreateProfile(SSHProfile{
+		Base:    Base{ID: "ssh:p:1", Type: "ssh", Name: "p"},
+		Options: StoredSSHProfileOptions{Host: "h", PasswordSecret: ref},
+	}); err != nil {
+		t.Fatalf("CreateProfile: %v", err)
+	}
+	e := validTestEndpoint()
+	e.CredentialRef = ref
+	if err := s.CreateEndpoint(e); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+
+	if err := s.ClearSecretRefs(ref); err != nil {
+		t.Fatalf("ClearSecretRefs: %v", err)
+	}
+
+	profs, err := s.LoadProfiles()
+	if err != nil {
+		t.Fatalf("LoadProfiles: %v", err)
+	}
+	if profs[0].Options.PasswordSecret != "" {
+		t.Errorf("profile binding = %q, want cleared", profs[0].Options.PasswordSecret)
+	}
+	eps, err := s.LoadEndpoints()
+	if err != nil {
+		t.Fatalf("LoadEndpoints: %v", err)
+	}
+	if eps[0].CredentialRef != "" {
+		t.Errorf("endpoint CredentialRef = %q, want cleared", eps[0].CredentialRef)
+	}
+}

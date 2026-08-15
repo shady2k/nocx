@@ -108,10 +108,18 @@ generation, so a screen can be reported as moved when it did not. **We prefer a 
 moved" to a false "unchanged"** — the first costs a re-ask, the second delivers advice about
 a screen that is gone.
 
-**`onWriteParsed` is also the capture fence.** `write()` queues parsing, so "the frame at that
-instant" is meaningless without one: a snapshot taken mid-queue can hold row 1 from before a
-write and row 20 from after it, and its generation would then describe no state that ever
-existed. The frame is taken after the parse settles.
+**There is also a capture fence, and `onWriteParsed` alone cannot be it.** `write()` queues
+parsing, so "the frame at that instant" is meaningless without one: a snapshot taken mid-queue
+can hold row 1 from before a write and row 20 from after it, and its generation would then
+describe no state that ever existed. The frame is taken after the parse settles.
+
+But **`onWriteParsed` fires at the end of every parse pass, and a pass can land between the
+chunks of one large write** — so waiting for one fire settles nothing, and this paragraph said
+otherwise until the implementation found it (`nocx-3j9b`). The exact signal is xterm's
+**per-write callback**, `write(data, cb)`, which fires when _that_ write's bytes have been
+parsed: the renderer keeps a count of unsettled writes from it, and the fence waits until the
+count is zero, re-checking after every `onWriteParsed` fire. `onWriteParsed` keeps the two jobs
+it can do — advancing the generation, and waking the waiter.
 
 A frozen block is the degenerate case: its identity is closed and its generation never
 advances again.
@@ -442,20 +450,148 @@ they like.
   password prompt or a token from a pager; sending it in clear text to a remote host is not a
   warning, it is a validation failure. Remote endpoints are `https` only.
 
-**And that rule is enforced on every connection, not in the form.** A form-time check is
-decoration: a hostname can resolve public while it is validated and private when it is
-dialled, a redirect can walk from `https` public to `http` private, and `localhost` is not the
-only spelling of loopback — IPv6 loopback, link-local, IPv4-mapped addresses and cloud
-metadata addresses are all reachable by name. So the address is re-checked at dial time,
-redirects are re-checked as if they were new endpoints, the credential is never forwarded
-across an origin change, and proxy environment variables do not silently reroute a request the
-user believes is local.
+  **And that rule is enforced on every connection, not in the form.** A form-time check is
+  decoration, for four reasons that are the whole of why the rule reads this way: a hostname
+  can resolve public while it is validated and private when it is dialled; a redirect can walk
+  from `https` public to `http` private; `localhost` is not the only spelling of loopback —
+  IPv6 loopback, link-local, IPv4-mapped and cloud metadata addresses are all reachable by
+  name; and proxy environment variables can reroute a request the user believes is local. So
+  the address is re-checked at dial time, redirects are re-checked as if they were new
+  endpoints, and the credential is never forwarded across an origin change.
 
-Plus a **Test** button — but it tests what will actually be used: not one cheap completion,
-which proves only that something answered, but the capabilities this endpoint must have
-(streaming now; tool calling before the agent rung claims to work there). One readiness bit
-over a protocol that is not uniform is how "compatible" endpoints fail in the middle of the
-first real question.
+  **Its enforcement lands with `nocx-edio`**, together with the **Test** button, because both
+  need the HTTP client to the model and there is none in this tree yet. Until then the record
+  accepts any absolute `http(s)` base URL with parse-level validation only, and nothing in
+  that pass implies an address restriction that does not exist. The rule above is not weakened
+  by the deferral — it is the acceptance criterion `nocx-edio` inherits, and the four reasons
+  are kept here because a rule whose reasoning is lost gets simplified away by the next reader.
+
+- **The Test button tests what will actually be used** — not one cheap completion, which
+  proves only that something answered, but the capabilities this endpoint must have (streaming
+  now; tool calling before the agent rung claims to work there). One readiness bit over a
+  protocol that is not uniform is how "compatible" endpoints fail in the middle of the first
+  real question. Also `nocx-edio`.
+
+### 4.5.1 The record
+
+One endpoint is exactly the four nouns above:
+
+| field           | meaning                                                                                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`            | `endpoint:custom:<slug>:<uuid>`, minted by the backend — an id is identity, and the display layer must not invent one (the rule `NewProfileID` exists for)               |
+| `name`          | the display name (required)                                                                                                                                              |
+| `baseUrl`       | an absolute http(s) URL (required; parse-level only this pass, see above)                                                                                                |
+| `schema`        | the wire schema — `openai-compatible` today, a closed enum in the contract (decision 2)                                                                                  |
+| `credentialRef` | the opaque vault reference, persisted (ADR-0030); empty when the key is gone. On the wire it becomes `credential` — a row handle or `null`, never the reference (§4.5.4) |
+| `models`        | one or more `{name, alias?}` — the model id and the optional picker label                                                                                                |
+
+### 4.5.2 Storage — a config record, not a setting
+
+An endpoint is shaped like a profile: a list of records that own vault
+secret references. It is stored in the same JSON document as profiles and
+groups (`internal/profile`, the profile store family) — not in
+`internal/settings`, which is scalar declarations, and not in a second
+store. The placement is load-bearing, not convenience: the bulk sweeps a
+vault reset performs must be one atomic write (`secretrefs.go`'s own
+invariant — "an interruption leaves half the store pointing at a vault
+that has gone"), and `ClearSecretRefs`, the metadata-first half of
+deleting a secret (ADR-0011 §4), must clear every reference in one write.
+Two stores would split both sweeps across two documents that could
+disagree; extending the one document keeps them one write. The decision
+and its reason are recorded in ADR-0031.
+
+### 4.5.3 The secret lifecycle
+
+The endpoint **owns** the secret it mints (ADR-0030). The form's key field
+is an input; what the record holds is the reference.
+
+- **Create with a key** — the backend mints the key into the vault
+  (`vault.CreateNamed`, auto-named `<endpoint name> API key` per
+  ADR-0016 — the name derives from what is already known, never from the
+  material), then writes the record holding only the reference. Mint
+  first: a crash between the two leaves an ownerless secret the vault's
+  journal reconciles at next start, which is the preferred end of the
+  ADR-0011 §4 trade; the reverse order would leave a record pointing at a
+  secret that cannot exist.
+- **Create without a key** — allowed; the record holds an empty
+  reference, `agent.status` (later) reports the credential unresolvable,
+  and a key is added by update.
+- **Update with a new key** — the backend **rotates** the material behind
+  the endpoint's own secret (`vault.ReplaceSecret`: same id, same name,
+  new material). This is ADR-0017 §2's rotate, and it is why the endpoint
+  never orphans a key on update: the reference never changes, so no
+  other record that happens to share the secret can be left dangling, and
+  the vault's journal makes the rotation crash-safe. An update on an
+  endpoint whose reference is empty mints instead.
+- **Delete** — one atomic write removes the record and clears its
+  reference from every remaining record — a shared secret loses its other
+  bindings exactly the way `ClearSecretRefs` does when the user deletes a
+  shared secret from the Secrets page: the connection stops claiming the
+  password is saved — then the material is deleted (`vault.Delete`,
+  metadata-first).
+  A provider failure leaves the journal's pending delete — the record is
+  gone and the catalogue row was dropped with the journal write, so
+  nothing points at the material while it awaits cleanup. `Reconcile`
+  retries the pending delete at the next start; that retry succeeds for
+  lock-independent providers (the OS keychain, the product's default),
+  and for the file store it is blocked while the vault is sealed — the
+  entry is retained and logged, and a later reset sweeps the residue
+  (ADR-0030 §4).
+- **The Secrets page deletes the key** — the extended `ClearSecretRefs`
+  clears the endpoint's reference in the same atomic write that clears
+  profile bindings; the endpoint survives, credential-less, and says so.
+
+The key itself never crosses back: it is sent once in the create/update
+params, minted by the backend, never persisted, never echoed in a result,
+and never logged (`credential.Secret` redacts in every fmt/slog path).
+
+### 4.5.4 The wire
+
+The form pass binds to this; the wire is the deliverable. Four methods
+under the `endpoints` domain, one JSON Schema each in `contracts/` with
+`additionalProperties: false` and an explicit `required`:
+
+| method             | params                                                       | result        |
+| ------------------ | ------------------------------------------------------------ | ------------- |
+| `endpoints.create` | `name`, `baseUrl`, `schema`, optional `key`, `models`        | `{endpoint}`  |
+| `endpoints.list`   | —                                                            | `{endpoints}` |
+| `endpoints.update` | `id` + `name`, `baseUrl`, `schema`, optional `key`, `models` | `{endpoint}`  |
+| `endpoints.delete` | `id`                                                         | `{}`          |
+
+- The credential — the wire field `credential`, which is the stored
+  `credentialRef` mapped to a **row handle** (`secrow:...`), exactly like
+  profile secret bindings (ADR-0017 §1): `null` when no key is set, the
+  handle otherwise, never the reference. `update`'s `key` is optional and
+  "absent or empty" means "keep the existing material" — a blank key cannot
+  erase a saved key, because erasing a secret is the Secrets page's job, not
+  a form field's.
+
+### 4.5.5 Vault reset
+
+Endpoints participate in the reset bookkeeping (ADR-0031): the preview
+counts endpoint references beside profile ones and the clear removes
+both, with the wire's `vault.resetPreview` gaining `endpointCount`. The
+counts stay per kind — "12 secrets, 9 connections, 2 endpoints" — because
+they answer different questions.
+
+### 4.5.6 Named gaps (this pass)
+
+- **The secrets inventory usage projection counts connections only.** An
+  endpoint-owned key shows on the Secrets page with its name and kind and
+  a `usedBy` of 0 — accurate about connections, silent about endpoints.
+  A per-kind usage projection lands with the surface that renders it (the
+  form pass), and this paragraph is the record that it was considered.
+- **The backup format carries profiles and groups; endpoints ride the
+  next format version.** No endpoint data exists yet, so nothing is lost
+  today; a restore taken after endpoints exist would drop them until the
+  format gains them. Named here so it is a gap, not a surprise.
+- **The reset sweep does not clear group-default references.** A secret
+  reference stored in a group default is invisible to the reset preview
+  and survives the clear today (pre-existing, predates endpoints);
+  `ClearSecretRefs` handles group defaults on the per-secret path. Fixing
+  the reset side means redefining `ProfileCount` as the effective
+  computation, which changes the wire meaning of `profileCount` — a
+  reset-semantics decision of its own, deferred (ADR-0031).
 
 This form will meet the open bead `nocx-74cn` ("the kit has no validation: forms accept
 anything and say nothing"). It is built from the kit per `frontend/src/ui/README.md`, and any

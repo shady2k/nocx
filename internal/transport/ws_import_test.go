@@ -495,9 +495,10 @@ func TestImportTabby_CreateFailsMidway(t *testing.T) {
 }
 
 func TestImportTabby_SealedVault(t *testing.T) {
-	// When the SecretStore returns a vault-sealed error, the RPC must surface
-	// the reason code so the renderer can show the unseal dialog instead of
-	// a generic toast.
+	// A sealed vault answers with the canonical sealed error — code
+	// -32001, reason vault-sealed — the shape the renderer's dispatcher
+	// turns into the unlock prompt (ADR-0032). The answer is immediate;
+	// nothing blocks on an ask.
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 	svc := profile.NewProfileService(ps)
@@ -545,6 +546,7 @@ func TestImportTabby_SealedVault(t *testing.T) {
 	if errResp.Error.Data == nil || errResp.Error.Data.Reason != "vault-sealed" {
 		t.Errorf("error data.reason = %v, want 'vault-sealed'", errResp.Error.Data)
 	}
+	assertNoPendingAsk(t, ws)
 }
 
 func TestImportTabby_VaultSecrets(t *testing.T) {

@@ -1,7 +1,9 @@
 export { Button, type ButtonProps } from './button'
+export { Caption, type CaptionProps } from './caption'
 export { Checkbox, type CheckboxProps } from './checkbox'
 export { IconButton, type IconButtonSize } from './icon-button'
 export { Select, type SelectProps, type SelectOption } from './select'
+export { SuggestionField, type SuggestionFieldProps } from './suggestion-field'
 export { TextField, type TextFieldProps } from './text-field'
 export {
   SearchField,
@@ -15,6 +17,12 @@ export { Page, type PageProps, type PageScrollerHandle } from './page'
 export { PageHeader, type PageHeaderProps } from './page-header'
 export { PageBody, type PageBodyProps } from './page-body'
 export { PageRail, type PageRailProps } from './page-rail'
+export {
+  GroupedRail,
+  type GroupedRailProps,
+  type GroupedRailGroup,
+  type GroupedRailItem,
+} from './grouped-rail'
 export { PageScroller, type PageScrollerProps } from './page-scroller'
 export { PageSection, type PageSectionProps } from './page-section'
 export { SidebarView, type SidebarViewProps } from './sidebar-view'
@@ -31,6 +39,7 @@ export {
   type CollectionRowProps,
 } from './collection-view'
 export { FileStatusRow, type FileStatusRowProps, type FileStatus } from './file-status-row'
+export { RecordRow, type RecordRowProps } from './record-row'
 export { Prompt, type PromptProps } from './prompt'
 export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'
@@ -44,7 +53,9 @@ export {
   combine,
   type Validator,
   type FormValidation,
+  type FormValidationOptions,
 } from './validation'
+export { createSubmitGate, type SubmitGateOptions } from './submit-gate'
 export {
   MarkerList,
   type MarkerListProps,

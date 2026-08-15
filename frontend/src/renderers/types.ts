@@ -79,6 +79,18 @@ export interface TerminalRenderer {
    */
   fitViewport(viewport: { width: number; height: number }): void
 
+  /**
+   * Write PTY output into the terminal. The write is QUEUED, not applied:
+   * parsing is async, so hasUnsettledWrite() stays true until the bytes
+   * have been parsed (the capture fence).
+   *
+   * MAY THROW when the underlying terminal refuses the write under flow
+   * control (xterm's pending-data watermark): nothing was queued, and the
+   * fence counter is repaired before the throw propagates. The refusal is
+   * surfaced rather than swallowed because the caller believes it
+   * delivered bytes that are gone — only the caller can decide the policy
+   * (nocx-x8s2.3).
+   */
   write(data: string): void
 
   // reset performs a full terminal reset: clears the display, scrollback,
@@ -236,6 +248,27 @@ export interface TerminalRenderer {
   /** Subscribe to render events. Fires whenever viewport content is painted. */
   onRender(cb: (range: { start: number; end: number }) => void): void
 
+  // ── Frame capture surface (nocx-3j9b) ───────────────────────────────
+
+  // onWriteParsed fires after a written chunk has been parsed into the
+  // buffer. It is the frame generation's advance signal AND the capture
+  // fence: write() queues parsing, so a snapshot taken mid-queue can hold
+  // row 1 from before a write and row 20 from after it. Note xterm fires it
+  // at the end of EVERY parse pass — BETWEEN chunks of a large write — so
+  // hasUnsettledWrite() distinguishes "settled" from "chunk done".
+  onWriteParsed(cb: () => void): void
+
+  // onClear/onReset fire AFTER the renderer executed a full clear
+  // (clearViewport) or a full reset — the explicit state-changing
+  // operations that advance the frame generation alongside onWriteParsed.
+  onClear(cb: () => void): void
+  onReset(cb: () => void): void
+
+  /** True while bytes queued via write() have not finished parsing — the
+   *  capture fence. The per-write settle is tracked via write()'s callback,
+   *  so this is exact even when onWriteParsed fires mid-write. */
+  hasUnsettledWrite(): boolean
+
   /** The DOM element the renderer mounted into — the gutter overlays it. */
   readonly paneElement: HTMLElement
 
@@ -247,6 +280,8 @@ export interface TerminalRenderer {
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined
   /** Absolute buffer line of the cursor — the line the next write lands on. */
   cursorLine(): number
+  /** Column of the cursor — the column the next write lands on. */
+  cursorCol(): number
 
   /**
    * Clear the visible xterm viewport. Used after freezing a block, so the

@@ -40,9 +40,11 @@ package app
 // carries, and the test asserts the home gains nothing else.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -218,6 +220,7 @@ ChallengeResponseAuthentication no
 PubkeyAuthentication yes
 PermitRootLogin no
 AllowTcpForwarding %s
+Subsystem sftp internal-sftp
 SetEnv HOME=%s
 LogLevel VERBOSE
 `, port, hostKeyPath, filepath.Join(dir, "sshd.pid"), authKeys, forward, home)
@@ -275,6 +278,67 @@ func (fx *liveSshd) knownHostsPath(t *testing.T) string {
 		t.Fatalf("write known_hosts: %v", err)
 	}
 	return path
+}
+
+// rawClient opens a production-compatible SSH client to the fixture. Tests
+// that exercise SFTP publication use this instead of reaching through
+// ssh.RealClient's connection pool.
+func (fx *liveSshd) rawClient(t *testing.T) *gossh.Client {
+	t.Helper()
+	client, err := gossh.Dial("tcp", fx.addr, &gossh.ClientConfig{
+		User: fx.user,
+		Auth: []gossh.AuthMethod{gossh.PublicKeys(fx.signer)},
+		HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
+			if !bytes.Equal(key.Marshal(), fx.hostKey.Marshal()) {
+				return fmt.Errorf("host key mismatch")
+			}
+			return nil
+		},
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("dial live sshd: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// forceInstalledVersion turns the current committed bundle into an older,
+// still-valid activation. The next EnsureInstalledRemote must therefore
+// stage a new generation and atomically replace the existing manifest.
+func forceInstalledVersion(t *testing.T, home, oldVersion string) {
+	t.Helper()
+	root := filepath.Join(home, ".nocx")
+	manifestPath := filepath.Join(root, "manifest.json")
+	data, readErr := os.ReadFile(manifestPath) // #nosec G304 — manifestPath is under the fixture-owned t.TempDir home.
+	if readErr != nil {
+		t.Fatalf("read installed manifest: %v", readErr)
+	}
+	var manifest map[string]any
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil {
+		t.Fatalf("decode installed manifest: %v", decodeErr)
+	}
+	generation, ok := manifest["generation"].(string)
+	if !ok || generation == "" {
+		t.Fatalf("installed manifest generation = %#v", manifest["generation"])
+	}
+	oldGeneration := "v" + oldVersion
+	if renameErr := os.Rename(
+		filepath.Join(root, "integration", generation),
+		filepath.Join(root, "integration", oldGeneration),
+	); renameErr != nil {
+		t.Fatalf("rename installed generation: %v", renameErr)
+	}
+	manifest["version"] = oldVersion
+	manifest["generation"] = oldGeneration
+	data, encodeErr := json.MarshalIndent(manifest, "", "  ")
+	if encodeErr != nil {
+		t.Fatalf("encode older manifest: %v", encodeErr)
+	}
+	data = append(data, '\n')
+	if writeErr := os.WriteFile(manifestPath, data, 0o600); writeErr != nil {
+		t.Fatalf("write older manifest: %v", writeErr)
+	}
 }
 
 // homeEntries lists the session home recursively, relative paths.
@@ -474,8 +538,9 @@ func (l *lockedBuffer) String() string {
 // connect opens a real SSH session to the fixture sshd through ssh.RealClient
 // with the app package's own lifecycle provider and launcher adapter — the
 // same composition root types app.go wires — and starts collecting the
-// terminal output.
-func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.ShellKind) (ssh.Channel, *outputBuffer) {
+// terminal output. An optional installer exercises the saved-profile
+// publication path inside RealClient.Connect.
+func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.ShellKind, installers ...ssh.RemoteInstaller) (ssh.Channel, *outputBuffer) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	client, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(fx.knownHostsPath(t)))
@@ -495,17 +560,21 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 	}
 	launcher := &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}
 
-	ch, err := client.Connect(context.Background(), fx.addr,
+	opts := []ssh.ConnectOption{
 		ssh.WithUser(fx.user),
 		ssh.WithAuthMethods([]gossh.AuthMethod{gossh.PublicKeys(fx.signer)}),
 		ssh.WithPTYSize(100, 30, 0, 0),
-		ssh.WithTimeout(20*time.Second),
+		ssh.WithTimeout(20 * time.Second),
 		ssh.WithSessionID("sid-live-sshd"),
 		ssh.WithEnhanced(),
 		ssh.WithShell(shell),
 		ssh.WithRemoteLifecycle(provider),
 		ssh.WithRemoteLauncher(launcher),
-	)
+	}
+	if len(installers) > 0 {
+		opts = append(opts, ssh.WithRemoteInstaller(installers[0]))
+	}
+	ch, err := client.Connect(context.Background(), fx.addr, opts...)
 	if err != nil {
 		t.Fatalf("connect to %s: %v", fx.addr, err)
 	}
@@ -643,6 +712,35 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	// Nothing installed: the session home holds only the fixture .bashrc and
 	// the launcher's own ~/.nocx bundle, and no file carries the capability.
 	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, kernel.capabilityHex())
+}
+
+// TestLiveSshd_RemoteBundleRepublishReplacesManifest proves nocx-340t
+// against OpenSSH itself: after a host has a committed older activation, a
+// second SFTP publish atomically replaces manifest.json instead of receiving
+// SSH_FX_FAILURE, and a subsequent enhanced session establishes its domain.
+func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
+	fx := startLiveSshd(t, true)
+	installer := shellintegration.New(log.NewSlogAdapter(nil))
+	client := fx.rawClient(t)
+	if err := installer.EnsureInstalledRemote(context.Background(), client, fx.home); err != nil {
+		t.Fatalf("first remote publish: %v", err)
+	}
+	forceInstalledVersion(t, fx.home, "0")
+
+	kernel := newRecordingKernel()
+	ch, _ := fx.connect(t, kernel, ssh.ShellBash, installer)
+	waitFor(t, "domain established after republish", 15*time.Second, func() bool {
+		kernel.mu.Lock()
+		defer kernel.mu.Unlock()
+		if kernel.minted != 1 {
+			return false
+		}
+		d, ok := kernel.Domain(kernel.domain)
+		return ok && d.State == lifecycle.DomainEstablished
+	})
+	if _, err := ch.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
 }
 
 // TestLiveSshd_ForwardingRefusedStaysConventional proves the refusal

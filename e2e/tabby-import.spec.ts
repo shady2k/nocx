@@ -131,7 +131,7 @@ test.describe('Tabby import preview + execute', () => {
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
 
     // Click "Connections" in the left rail.
-    await page.locator('.ui-settings-section-nav-item[data-section="Connections"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
     // Click "Import…" — scoped to the toolbar, because the empty-state offers
@@ -215,7 +215,7 @@ test.describe('Tabby import preview + execute', () => {
     // nothing about the secret it points at — and moving secrets is this
     // feature's entire job, so an import leaving rows that reference nothing
     // would pass every weaker check.
-    await page.locator('.ui-settings-section-nav-item[data-section="Secrets"]').click()
+    await page.locator('.ui-grouped-nav__item[data-item="secrets"]').click()
     const credRow = page.locator('.ui-collection-row').filter({ hasText: 'deploy@web.example.com' })
     await expect(credRow).toBeVisible({ timeout: 10_000 })
     await expect(credRow).not.toContainText('not used by anything')

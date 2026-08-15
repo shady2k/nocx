@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
+import { createSignal } from 'solid-js'
 import { EditableRowList, type EditableRowListProps } from './row-list'
 
 afterEach(() => cleanup())
@@ -10,7 +11,7 @@ const rows = ['alpha', 'beta']
 function subject(overrides?: Partial<EditableRowListProps<string>>) {
   const props: EditableRowListProps<string> = {
     rows,
-    renderRow: (row) => <span>{row}</span>,
+    renderRow: (row) => <span>{row()}</span>,
     onRemove: vi.fn(),
     onAdd: vi.fn(),
     addLabel: 'Add row',
@@ -20,6 +21,47 @@ function subject(overrides?: Partial<EditableRowListProps<string>>) {
   }
   return render(() => <EditableRowList {...props} />)
 }
+
+describe('EditableRowList row identity', () => {
+  // The rows are CONTROLLED and the caller replaces the row object on every
+  // edit (`updateModel` maps to a new object). The row's DOM must survive the
+  // keystroke: focus, IME composition, text selection and any open browser
+  // popup live on that DOM, and rebuilding it on every letter is the defect
+  // this test exists to hold closed (fix-kit-rowlist).
+  it('keeps a row input alive when the caller replaces the row object on edit', () => {
+    const onRemove = vi.fn()
+    const onAdd = vi.fn()
+    const Harness = () => {
+      const [rows, setRows] = createSignal([{ name: 'a' }])
+      return (
+        <EditableRowList
+          rows={rows()}
+          ariaLabel="Rows"
+          addLabel="Add row"
+          removeLabel={(i) => `Remove row ${i + 1}`}
+          onRemove={onRemove}
+          onAdd={onAdd}
+          renderRow={(row) => (
+            <input
+              id="row-0-name"
+              value={row().name}
+              onInput={(e) => {
+                const v = e.currentTarget.value
+                setRows((prev) => prev.map((r, i) => (i === 0 ? { ...r, name: v } : r)))
+              }}
+            />
+          )}
+        />
+      )
+    }
+    const { container } = render(() => <Harness />)
+    const before = container.querySelector('#row-0-name')
+    expect(before, 'row input exists').toBeTruthy()
+    fireEvent.input(before!, { target: { value: 'd' } })
+    expect(container.querySelector('#row-0-name') === before).toBe(true)
+    expect((before as HTMLInputElement).value).toBe('d')
+  })
+})
 
 describe('EditableRowList', () => {
   it('renders one row per entry with the caller field content', () => {
@@ -52,6 +94,23 @@ describe('EditableRowList', () => {
     expect(screen.getByText('Nothing here yet')).toBeTruthy()
     // The add control is still there — an empty list is how you start one.
     expect(screen.getByRole('button', { name: 'Add row' })).toBeTruthy()
+  })
+
+  it('renders a group error through the kit field-error identity, at the foot', () => {
+    subject({ error: 'Add at least one model' })
+    const list = screen.getByRole('list', { name: 'Rows' })
+    const err = list.querySelector('.ui-field-error')
+    expect(err).toBeTruthy()
+    expect(err?.textContent).toBe('Add at least one model')
+    expect(err?.getAttribute('role')).toBe('alert')
+    // Below the add control, never between the rows and their affordance.
+    const add = list.querySelector('.ui-row-list__add')
+    expect(add?.nextElementSibling).toBe(err)
+  })
+
+  it('renders no error element when there is none', () => {
+    subject()
+    expect(screen.getByRole('list', { name: 'Rows' }).querySelector('.ui-field-error')).toBeNull()
   })
 
   it('hides the empty message when rows exist', () => {

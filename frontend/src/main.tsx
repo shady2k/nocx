@@ -19,9 +19,12 @@ import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { FootprintClient } from './footprint-client'
+import { EndpointClient } from './endpoints'
+import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
+import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
 import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
@@ -55,6 +58,7 @@ import {
   createSidebarWidthController,
   persistSidebarWidth,
 } from './sidebar-width'
+import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -106,11 +110,19 @@ async function main() {
   }
   const dispatcher = new Dispatcher()
   const client = new WSClient(dispatcher)
+  // Connection notice — the transport's condition, stated where a person is
+  // already looking (the tab bar). A dropped connection is a persistent
+  // condition: not a toast that fades if it has not come back. This is the
+  // ONE subscriber to the dispatcher's disconnect lifecycle (nocx-gbhwh);
+  // the return value is for tests, the wiring here ignores it.
+  mountConnectionNotice(bar, dispatcher, client)
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(dispatcher)
   const vaultClient = new VaultClient(dispatcher)
   const dialogClient = new DialogClient(dispatcher)
   const footprintClient = new FootprintClient(dispatcher)
+  const endpointsClient = new EndpointClient(dispatcher)
+  const agentClient = new AgentClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -204,6 +216,10 @@ async function main() {
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
 
+  // The declared default, painted BEFORE the snapshot arrives: the first
+  // frame must not show the opposite of what the backend is about to say.
+  applyOutputWrap(OUTPUT_WRAP_DEFAULT)
+
   let placement: unknown = 'horizontal'
   // The sidebar width from the same snapshot: the value that survives a
   // restart. A fetch failure falls back to the declared default, which is
@@ -216,6 +232,9 @@ async function main() {
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
     // frame, but the persisted Go value wins on snapshot arrival.
     reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
+    // The default wrap for a command block's output — one attribute on the
+    // root, read by the CSS; the per-block ⋮ override is not touched by it.
+    applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
     const raw = snap.values[SIDEBAR_WIDTH_KEY]
     if (typeof raw === 'number' && Number.isFinite(raw)) {
       sidebarWidth = clampSidebarWidth(raw)
@@ -240,6 +259,10 @@ async function main() {
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
   tm.onCreateSecret = (name) => openSettingsTab().startNewSecret(name)
+  // A question refused for want of an endpoint: the toast names the
+  // problem, this opens where it is fixed — Settings → Endpoints with the
+  // editor already up on a blank one.
+  tm.onCreateEndpoint = () => openSettingsTab().startNewEndpoint()
   tm.onActivity = reportActivity
 
   const observer = new SettingsObserver(dispatcher)
@@ -258,6 +281,8 @@ async function main() {
         vaultClient,
         dialogClient,
         footprintClient,
+        endpointsClient,
+        agentClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -484,6 +509,10 @@ async function main() {
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
+        // The wrap default is live: flipping it repaints every block nobody
+        // has overridden, in place, with no restart and no reflow of the
+        // blocks that carry their own answer.
+        applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
         // Sidebar width changed — apply it unless the user is mid-drag: the
         // live pointer position is the truth until the release commits it
         // (nocx-qmcu).

@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -120,6 +121,79 @@ type Declaration struct {
 	Max         *float64       `json:"max,omitempty"`
 	Unit        string         `json:"unit,omitempty"`
 	ZeroLabel   string         `json:"zeroLabel,omitempty"`
+}
+
+// ── Group catalogue ────────────────────────────────────────────────────
+
+// SettingsGroup is one group in the settings rail's catalogue: a titled,
+// ordered bucket that rail pages are sorted into. The catalogue is declared
+// in Go and ships beside the declarations in settings.describe — the
+// settings rail renders from it and contains no lookup table of its own
+// (design spec 2026-07-26 "Bucket 2": nested categories arrive as
+// declaration schema, never as frontend exceptions).
+//
+// A group carries no settings. Membership is per SECTION (SectionGroups),
+// never per declaration: a per-declaration group field would let two
+// declarations in one section name different groups — a contradiction the
+// type would permit, so the type does not have the field.
+//
+// The wire type IS the declaration site — there is no separate GroupSpec.
+// The Bool/String/Number/Select specs exist because their spec shape differs
+// from the wire shape (bounds, data class, defaults are transformed in
+// toDeclaration); a group has none of that, so a tag-less twin would
+// duplicate (id, title, order) with only the json tags as the difference.
+//
+// Reading the catalogue and the mapping goes through the Registry methods
+// (Groups, SectionGroups) — the path capability/config.go takes to the wire.
+// There are no package-level read accessors: a second reader of one fact is
+// a second answer waiting to drift (the deadcode ratchet caught exactly
+// that). Registration is package-level, like MustRegister*; reading is not.
+type SettingsGroup struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Order int    `json:"order"`
+}
+
+// groupCatalogue is the declared rail group catalogue, in registration
+// order. Initialised non-nil so an empty catalogue marshals as [] rather
+// than null on the wire.
+var groupCatalogue = []SettingsGroup{}
+
+// groupIndex maps a group id to its position in groupCatalogue.
+var groupIndex = map[string]int{}
+
+// sectionGroups maps a section name to the group id it belongs to — the
+// "which group each section belongs to" half of the catalogue. One section,
+// one group: keyed by section, never by declaration.
+var sectionGroups = map[string]string{}
+
+// RegisterGroup declares a rail group and appends it to the catalogue.
+// Panics on an empty or duplicate id. Called at package init, beside the
+// setting declarations.
+func RegisterGroup(group SettingsGroup) {
+	if group.ID == "" {
+		panic("settings: group id must not be empty")
+	}
+	if _, dup := groupIndex[group.ID]; dup {
+		panic("settings: duplicate group id " + group.ID)
+	}
+	groupIndex[group.ID] = len(groupCatalogue)
+	groupCatalogue = append(groupCatalogue, group)
+}
+
+// RegisterSectionGroup places a section under a declared group. This is the
+// additive "adding a section to a group" change: one Go-side call, and the
+// settings.describe payload carries it with no frontend edit. Panics when
+// the group is not declared — a mapping must never name a group the
+// catalogue lacks — or when the section already belongs to a group.
+func RegisterSectionGroup(section, groupID string) {
+	if _, ok := groupIndex[groupID]; !ok {
+		panic("settings: section " + strconv.Quote(section) + " names undeclared group " + strconv.Quote(groupID))
+	}
+	if _, taken := sectionGroups[section]; taken {
+		panic("settings: section " + strconv.Quote(section) + " already belongs to a group")
+	}
+	sectionGroups[section] = groupID
 }
 
 // ── Typed setting spec types ───────────────────────────────────────────
@@ -585,6 +659,24 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// OutputWrap is the DEFAULT wrap for a command block's output. The per-block
+// ⋮ menu override (nocx-ex636) stays what it always was — the exception the
+// kind cannot know about — and a block somebody has overridden ignores this
+// value entirely; this decides what an untouched block does.
+//
+// It governs command output only, which is the one kind with a genuine
+// choice: an answer is prose and a horizontal scrollbar under prose is a
+// defect rather than a preference, and a fenced code block keeps its
+// alignment (nocx-juau) either way.
+var OutputWrap = MustRegisterBool(BoolSpec{
+	Key:         "terminal.wrapOutput",
+	Section:     "Interface",
+	Label:       "Wrap long output lines",
+	Description: "Wrap a command's output at the width of the block instead of scrolling it sideways. Any block can be switched the other way from its own ⋮ menu; this is what a block does until you do.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
 // UITheme controls which colour theme the UI and terminals use.
 // The frontend resolves it to a theme file matching the id; adding a new theme
 // requires a new theme CSS file and an option here.
@@ -630,6 +722,27 @@ var SidebarWidth = MustRegisterNumber(NumberSpec{
 	Max:         fp(640),
 	Unit:        "px",
 })
+
+// ── Declared groups ────────────────────────────────────────────────────
+// The settings rail's group catalogue (nocx-dgsp): declared here, shipped
+// beside the declarations in settings.describe, rendered by the frontend
+// without a lookup table of its own. Component pages (Endpoints, Protection,
+// Secrets, Backup & Restore, Connections) name these ids in their registry
+// entries in settings.tsx; generated sections arrive through the
+// RegisterSectionGroup calls below.
+func init() {
+	RegisterGroup(SettingsGroup{ID: "assistant", Title: "Assistant", Order: 0})
+	RegisterGroup(SettingsGroup{ID: "vault", Title: "Vault", Order: 1})
+	RegisterGroup(SettingsGroup{ID: "application", Title: "Application", Order: 2})
+	RegisterGroup(SettingsGroup{ID: "developer", Title: "Developer", Order: 3})
+	RegisterSectionGroup("Interface", "application")
+	RegisterSectionGroup("Clipboard", "application")
+	RegisterSectionGroup("History", "application")
+	// Test is the fixture section the test binaries declare settings in; it
+	// is grouped here so the rail shows it under Developer in every build
+	// that carries it (criterion 7).
+	RegisterSectionGroup("Test", "developer")
+}
 
 // ── Document shape ─────────────────────────────────────────────────────
 
@@ -764,6 +877,25 @@ func (r *Registry) Declarations() []Declaration {
 		decls[i] = descriptorToDeclaration(d)
 	}
 	return decls
+}
+
+// Groups returns the rail group catalogue for settings.describe: the
+// (id, title, order) catalogue declared by RegisterGroup, in registration
+// order.
+func (r *Registry) Groups() []SettingsGroup {
+	return groupCatalogue
+}
+
+// SectionGroups returns the section→group mapping for settings.describe:
+// the group a generated rail page belongs to. A section absent from the map
+// is ungrouped and renders at top level. The map is copied so a caller can
+// never mutate the catalogue through it.
+func (r *Registry) SectionGroups() map[string]string {
+	m := make(map[string]string, len(sectionGroups))
+	for section, gid := range sectionGroups {
+		m[section] = gid
+	}
+	return m
 }
 
 func descriptorToDeclaration(d Descriptor) Declaration {

@@ -1009,7 +1009,7 @@ func (k *Kernel) getLane(lane LaneID) *laneState {
 	if ls, ok := k.lanes[lane]; ok {
 		return ls
 	}
-	ls := &laneState{lane: lane}
+	ls := &laneState{lane: lane, lifecycle: LifecycleNative}
 	k.lanes[lane] = ls
 	return ls
 }

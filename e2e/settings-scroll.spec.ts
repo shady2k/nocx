@@ -13,7 +13,7 @@ import { test, expect, type Page } from './harness'
 // comes first on purpose: if that section ever shrinks, this test must fail
 // loudly rather than pass because there was nothing to scroll (nocx-pp3y.1).
 
-const BACKUP_SECTION = '.ui-settings-section-nav-item[data-section="Backup & Restore"]'
+const BACKUP_SECTION = '.ui-grouped-nav__item[data-item="backup"]'
 
 async function openOverflowingSection(page: Page): Promise<void> {
   await page.goto('/')
@@ -90,5 +90,16 @@ test.describe('settings scroll — narrow', () => {
     await expectOverflow(page)
 
     expect(await lastSectionReachable(page)).toBe(true)
+
+    // The stacked rail trims its own chrome (base.css owns the narrow
+    // breakpoint; the surface must not repaint the kit — rule 3). If the
+    // compact padding ever moves back into a surface override, this fails.
+    const railPad = await page.evaluate(() => {
+      const rail = document.querySelector<HTMLElement>('.ui-page__rail')
+      if (!rail) return null
+      const cs = getComputedStyle(rail)
+      return { top: cs.paddingTop, bottom: cs.paddingBottom }
+    })
+    expect(railPad).toEqual({ top: '8px', bottom: '8px' })
   })
 })

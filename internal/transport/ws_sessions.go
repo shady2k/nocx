@@ -96,6 +96,6 @@ func (h sessionsStatusHandlers) handleSessionsStatus(ctx context.Context, req js
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }

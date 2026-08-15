@@ -768,6 +768,25 @@ func (p *Publisher) commitManifest(bundle Bundle, nonce string) error {
 	if werr := p.writeFile(tmp, data, 0o600); werr != nil {
 		return werr
 	}
+	// From here every failure leaves this temp behind, and cleanupOrphans —
+	// the sweep that bounds tmp/ — runs only on the success path in Publish.
+	// The nonce is fresh per attempt, so a destination that refuses the
+	// rename on every connection (an SFTP server without
+	// posix-rename@openssh.com, whose refusal is deliberate: see
+	// install_remote.go) would accumulate one dead manifest per connect,
+	// forever. Sweeping the attempt's own temp is what makes a repeated
+	// failure converge instead of grow.
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if rerr := p.fs.Remove(tmp); rerr != nil {
+			p.log.Debug("shellintegration: could not remove manifest temp after a failed commit",
+				"path", tmp, "err", rerr)
+		}
+	}()
+
 	if serr := p.syncDir(p.join(tmpName)); serr != nil {
 		return serr
 	}
@@ -788,6 +807,10 @@ func (p *Publisher) commitManifest(bundle Bundle, nonce string) error {
 	if err := p.fs.Rename(tmp, manifestPath); err != nil {
 		return boundaryErr("rename", manifestPath, err)
 	}
+	// The temp no longer exists under its own name — the rename consumed it,
+	// and a Remove here would delete the manifest's predecessor path on a
+	// carrier where rename is not atomic.
+	committed = true
 	if err := p.syncDir(p.root); err != nil {
 		return boundaryErr("fsync", p.root, err)
 	}

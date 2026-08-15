@@ -234,3 +234,22 @@ describe('control-plane saturation visibility', () => {
     expect(toasts()).toHaveLength(1)
   })
 })
+
+describe('lifecycle event ordering', () => {
+  it('disconnect handlers observe reconnectPending when the drop is unexpected', async () => {
+    // The disconnect event fires AFTER the reconnect policy is decided, so a
+    // subscriber reading reconnectPending at event time sees the state that
+    // will hold — the sentence can say "reconnecting" instead of guessing
+    // (nocx-gbhwh).
+    const d = new Dispatcher()
+    await connected(d)
+
+    let seen: boolean | null = null
+    d.onDisconnect(() => {
+      seen = d.reconnectPending
+    })
+    socket().close()
+
+    expect(seen).toBe(true)
+  })
+})

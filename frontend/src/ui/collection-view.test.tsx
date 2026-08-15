@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CollectionRow, CollectionView } from './collection-view'
@@ -118,5 +120,41 @@ describe('CollectionRow', () => {
     const row = container.querySelector('.ui-collection-row')
     expect(row?.getAttribute('data-selected')).toBe('true')
     expect(row?.getAttribute('data-focused')).toBe('true')
+  })
+})
+
+describe('row gutter vs search field (nocx-pp3y.3)', () => {
+  // jsdom computes no layout, so the alignment is asserted where it is
+  // decided: the shipped stylesheet. The row's text gutter must equal the
+  // search field's left edge — the toolbar's padding-left, because the
+  // CollectionView search sits directly in the toolbar — and both must
+  // resolve from the SAME token, or a later retokenisation drifts them
+  // apart without failing here.
+  const cssFile = (p: string): string =>
+    readFileSync(resolve(process.cwd(), 'src/styles', p), 'utf8')
+
+  const paddingLeft = (css: string, selector: string): string | null => {
+    const block = css.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`, 's'))?.[1]
+    if (!block) return null
+    const explicit = block.match(/padding-left:\s*([^;]+)/)
+    if (explicit) return explicit[1].trim()
+    const shorthand = block.match(/padding:\s*([^;]+)/)
+    if (!shorthand) return null
+    const parts = shorthand[1].trim().split(/\s+/)
+    // 2-value shorthand is vertical horizontal; 4-value is top right bottom
+    // left. The LEFT edge is what the text gutter compares.
+    return parts.length === 4 ? parts[3] : parts[1]
+  }
+
+  it("the row's text gutter and the search field's left edge use the same token", () => {
+    const rowCss = cssFile('components/collection-view.css')
+    const toolbarCss = cssFile('components/toolbar.css')
+    const rowPadding = paddingLeft(rowCss, '\\.ui-collection-row')
+    const toolbarPadding = paddingLeft(toolbarCss, '\\.ui-toolbar')
+
+    expect(rowPadding).toBe('var(--space-6)')
+    expect(toolbarPadding).toBe('var(--space-6)')
+    // The point: one token, so the two edges cannot disagree.
+    expect(rowPadding).toBe(toolbarPadding)
   })
 })

@@ -35,6 +35,7 @@ func (f *fakeHistoryDB) Close() error                                     { retu
 func (f *fakeHistoryDB) RestorePrivate(_ context.Context, _ []content.Conversation, _ []content.CommandRecord) error {
 	return content.ErrNotImplemented
 }
+func (f *fakeHistoryDB) Ledger() content.LedgerRepository { return nil }
 
 func (f *fakeHistoryDB) Add(_ context.Context, _ content.CommandRecord) (int64, error) {
 	return 0, content.ErrNotImplemented

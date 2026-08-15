@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
 import { Button, type ButtonProps } from './button'
-
 afterEach(() => cleanup())
 
 function subject(overrides?: Partial<ButtonProps>) {
@@ -139,5 +139,71 @@ describe('Button — the class escape hatch is closed', () => {
     const el = screen.getByRole('button')
     expect(el.getAttribute('class')).toBe('ui-button')
     expect(el.classList.contains('sneaky')).toBe(false)
+  })
+})
+
+// ── Ghost selected — the neutral register (nocx-dgsp) ──────────────────
+// The selected ghost row is the "current choice in a list" state the two
+// list consumers use (the settings rail's GroupedRail rows and the vertical
+// Tabs rows). The DOM contract is `aria-selected`; the CSS keyed off it is
+// asserted below against the SHIPPED stylesheet, because jsdom cannot
+// resolve var() in computed styles — the deterministic in-jsdom assertion
+// of the visual contract is the token relationship in the real file.
+
+describe('Button — ghost selected', () => {
+  it('emits aria-selected for the list-consumer contract', () => {
+    const { unmount } = subject({ variant: 'ghost', selected: true })
+    const btn = screen.getByText('Click me')
+    expect(btn.getAttribute('aria-selected')).toBe('true')
+    unmount()
+    subject({ variant: 'ghost' })
+    expect(screen.getByText('Click me').hasAttribute('aria-selected')).toBe(false)
+  })
+
+  it('keeps the selected plate distinct from the hover plate (the separation)', () => {
+    const css = readFileSync('src/styles/components/button.css', 'utf8')
+    const backgroundToken = (selector: string): string => {
+      const block = css.match(
+        new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}'),
+      )
+      expect(block, `rule not found: ${selector}`).not.toBeNull()
+      const decl = block![1].match(/background:\s*var\((--[a-z0-9-]+)\)/)
+      expect(decl, `no background var in ${selector}`).not.toBeNull()
+      return decl![1]
+    }
+
+    const selected = backgroundToken(".ui-button[data-variant='ghost'][aria-selected='true']")
+    const hover = backgroundToken(".ui-button[data-variant='ghost']:hover")
+
+    // The whole difficulty: selected and hover sit adjacent in the rail, so
+    // a shared plate token would make them indistinguishable. The selected
+    // plate is the tab strip's token; hover keeps the ghost hover token.
+    expect(selected).toBe('--color-tab-active')
+    expect(hover).toBe('--color-surface-hover')
+    expect(selected).not.toBe(hover)
+  })
+
+  it('keeps the accent in the marker channel, not the plate', () => {
+    const css = readFileSync('src/styles/components/button.css', 'utf8')
+    const selectedBlock = css.match(
+      /\.ui-button\[data-variant='ghost'\]\[aria-selected='true'\]\s*\{([^}]*)\}/,
+    )![1]
+    // The plate holds no accent…
+    expect(selectedBlock).toContain('background: var(--color-tab-active)')
+    // …the accent is a 2px leading-edge marker on the same state.
+    const markerBlock = css.match(
+      /\.ui-button\[data-variant='ghost'\]\[aria-selected='true'\]::before\s*\{([^}]*)\}/,
+    )![1]
+    expect(markerBlock).toContain('width: 2px')
+    expect(markerBlock).toContain('background: var(--color-accent)')
+  })
+
+  it('owns the row radius at the VARIANT level, not per consumer', () => {
+    const css = readFileSync('src/styles/components/button.css', 'utf8')
+    const ghost = css.match(/\.ui-button\[data-variant='ghost'\]\s*\{([^}]*)\}/)![1]
+    expect(ghost).toContain('border-radius: var(--control-radius-md)')
+    // The component file may not name a consumer: the next rail-like list
+    // inherits the answer from the variant instead of copying a selector.
+    expect(css).not.toMatch(/ui-grouped-nav|ui-settings-section-nav/)
   })
 })

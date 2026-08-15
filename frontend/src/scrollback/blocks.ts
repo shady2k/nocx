@@ -68,7 +68,94 @@ type FenceTimer = ReturnType<typeof setTimeout>
  *  hands it to the VISUAL freeze, so serialization is typed to follow a
  *  terminalized record. */
 export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
+
+// ── Block kind ─────────────────────────────────────────────────────────────
+
+/** A block's content grammar (nocx-ex636). The FRAME — a header, a body,
+ *  selection, the overflow menu — is shared by every block; the grammar is
+ *  not. A question is prose and a command is a command line, and a fourth
+ *  kind must declare itself in the rules table instead of inheriting the
+ *  command's rules by accident. */
+export type BlockKind = 'command' | 'ask'
+
+/** The rules the owner named — highlighting, wrapping, the status
+ *  vocabulary — read from ONE table, keyed by the kind the block declared.
+ *  No call site checks "is this an answer", and no builder defaults to the
+ *  command rules. */
+export interface BlockKindRules {
+  /** The header's text is a command line: shell-highlight it. A question
+   *  is prose and never runs through the lexer. */
+  readonly highlightHeader: boolean
+  /** The class the body element carries — the CSS owner of the wrap
+   *  policy: `.cmd-output` freezes rows at the terminal grid width
+   *  (nocx-juau), `.cmd-output-ask` wraps prose at the block's width. */
+  readonly outputClass: string
+  /** The header's status vocabulary. The command kind has none — its
+   *  header states are the record's and render structurally (spinner,
+   *  duration, exit chips). The ask kind names its lifecycle with words:
+   *  in progress, then the terminal word from the close path. */
+  readonly statusChips: {
+    /** Shown while the work is in progress — the ask block says it is
+     *  thinking until the first delta lands. Kept SHORT: it sits beside
+     *  the live pulse, which is what carries "something is happening", so
+     *  the word only has to name what the pulse is about. */
+    readonly inProgress: string
+    readonly done: string
+    readonly failed: string
+  } | null
+}
+
+const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
+  command: {
+    highlightHeader: true,
+    outputClass: 'cmd-output',
+    statusChips: null,
+  },
+  ask: {
+    highlightHeader: false,
+    outputClass: 'cmd-output cmd-output-ask',
+    statusChips: {
+      inProgress: 'thinking',
+      done: 'completed',
+      failed: 'failed',
+    },
+  },
+}
+
+/** A kind's rules, or a loud failure: a kind that declares nothing must
+ *  never inherit the command rules by default (nocx-ex636). */
+export function blockKindRules(kind: BlockKind): BlockKindRules {
+  const rules = BLOCK_KIND_RULES[kind]
+  if (!rules) throw new Error(`unknown block kind: ${String(kind)}`)
+  return rules
+}
 // ── Block model ────────────────────────────────────────────────────────────
+
+/** The handle the ask surface drives one answer block with (nocx-x8s2.2).
+ *  The answer is NOT xterm output — it arrives as plain text over the
+ *  control plane — so the body is rendered as escaped term-lines (the
+ *  flow's one text vocabulary). The handle is the ONLY way the block's
+ *  body and status change; the ask surface never touches the block DOM
+ *  directly. */
+export interface AnswerBlockHandle {
+  readonly id: number
+  readonly el: HTMLElement
+  /** Append one streamed chunk (agent.runDelta text) to the answer body.
+   *  `this: void` — the target holds the handle and calls the method
+   *  detached from any receiver (unbound-method contract). */
+  append(this: void, text: string): void
+  /** Close the block: success, or failure with the renderable reason. */
+  close(this: void, status: 'success' | 'failure', error?: string): void
+}
+
+/** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
+ *  and its DOM element. Deliberately NOT a BlockRecord — no xterm lines,
+ *  no freeze lifecycle; the command paths must never see it. */
+interface AnswerBlockRecord {
+  id: number
+  question: string
+  el: HTMLElement
+}
 
 export interface BlockRecord {
   id: number
@@ -204,23 +291,24 @@ onShellHighlightReady(() => {
   tokenizerLoaded = true
   refreshPendingHeaderSpans()
 })
-
-// ── Block DOM factory ───────────────────────────────────────────────────────
-
 /**
- * Create the header row for a command block — flat, warp-style (P0-1).
+ * Create the header row for a block — flat, warp-style (P0-1).
  * No card background, no pill/chip styling. Plain muted small text.
+ * The grammar (highlighting, the status vocabulary) is the kind's
+ * (nocx-ex636).
  */
 function createHeader(
+  kind: BlockKind,
   command: string,
   cwd: string,
   location: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown',
+  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown' | 'waiting',
   store: CommandSnapshotStore,
 ): HTMLElement {
   const header = div('cmd-header')
+  const rules = blockKindRules(kind)
 
   // ── Chips row (above command text): cwd left, duration+exit right ──
   const chipsRow = div('cmd-header-chips')
@@ -280,39 +368,70 @@ function createHeader(
       exit.textContent = exitCode === 0 ? 'ok' : `exit ${exitCode}`
       right.appendChild(exit)
     }
+
+    // The kind's own in-progress vocabulary: the ask block says it is
+    // thinking until the first delta lands, and the answer
+    // lifecycle removes it at exactly that moment (nocx-ex636). The
+    // command kind has no in-progress WORD — its running state is the
+    // spinner above.
+    if (rules.statusChips && status === 'waiting') {
+      // The SAME pulse a running command's header carries, in the SAME
+      // place: a bare dot in the chip row, left of the chip (AD-8 — one
+      // owner for "this block is in progress", and one shape for it). A
+      // static word is a label; a word beside a live pulse is a report
+      // that something is happening right now. It sat INSIDE the chip for
+      // one round and read as a different control from the command's,
+      // which is two vocabularies for one concept.
+      const pulse = document.createElement('span')
+      // Its own identity class beside the shared appearance: the pulse is a
+      // SIBLING of the chip now, so whoever ends the wait has to be able to
+      // find it. Removing only the chip left a dot pulsing next to
+      // `completed` — the report half that nobody owned.
+      pulse.className = 'cmd-header-spinner cmd-answer-waiting-pulse'
+      right.appendChild(pulse)
+      const wait = document.createElement('span')
+      wait.className = 'nocx-chip nocx-chip-muted cmd-answer-waiting'
+      wait.textContent = rules.statusChips.inProgress
+      right.appendChild(wait)
+    }
   }
 
   chipsRow.appendChild(right)
   header.appendChild(chipsRow)
-
-  // ── Command text (below chips) ─────────────────────────────────────
-  // A frozen header carries the same syntactic highlight pass as the live
-  // editor (same lexer, same classes — see shell-highlight.ts). A running
-  // header stays plain: the command is still being executed, and the static
-  // pass is for reading a finished command back. The frozen branch is
-  // innerHTML by design, but the pass escapes every byte of the text, so
-  // command content can never inject markup.
+  // ── Header text (below chips) ──────────────────────────────────────
+  // The grammar is the kind's (nocx-ex636): a command header carries the
+  // same syntactic highlight pass as the live editor (same lexer, same
+  // classes — see shell-highlight.ts); a question is prose and renders
+  // plain, never through the lexer. A running header stays plain: the
+  // command is still being executed, and the static pass is for reading a
+  // finished command back. The frozen branch is innerHTML by design, but
+  // the pass escapes every byte of the text, so command content can never
+  // inject markup.
   const cmdSpan = document.createElement('span')
   cmdSpan.className = 'cmd-header-text'
-  const refs = command ? findReferences(command) : []
-  if (refs.length > 0) {
-    // A vault reference reads as a chip here, exactly as it does in the
-    // editor — it is the same fact about the same text, and showing
-    // `{{secret:openrouter.ai}}` raw in the block made the block look like
-    // a different thing from the line the user typed.
-    //
-    // Chips and shell highlighting do not compose: the highlighter emits
-    // one HTML string for the whole command, and cutting chips into it
-    // would mean tokenising the fragments between them, where a quote
-    // opened before a reference closes after it. A command carrying a
-    // reference therefore renders plain, the way a masked one already does
-    // (renderRecordedCommand) — the chip is the emphasis.
-    cmdSpan.replaceChildren(commandFragment(command))
-  } else if (status === 'running') {
+  if (!rules.highlightHeader) {
     cmdSpan.textContent = command || '(empty)'
   } else {
-    cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
-    if (!tokenizerLoaded) pendingHeaderSpans.set(cmdSpan, store)
+    const refs = command ? findReferences(command) : []
+    if (refs.length > 0) {
+      // A vault reference reads as a chip here, exactly as it does in the
+      // editor — it is the same fact about the same text, and showing
+      // `{{secret:openrouter.ai}}` raw in the block made the block look like
+      // a different thing from the line the user typed.
+      //
+      // Chips and shell highlighting do not compose: the highlighter emits
+      // one HTML string for the whole command, and cutting chips into it
+      // would mean tokenising the fragments between them, where a quote
+      // opened before a reference closes after it. A command carrying a
+      // reference therefore renders plain, the way a masked one already does
+      // (renderRecordedCommand) — the chip is the emphasis.
+      cmdSpan.replaceChildren(commandFragment(command))
+    } else if (status === 'running') {
+      cmdSpan.textContent = command || '(empty)'
+    } else {
+      cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
+      if (!tokenizerLoaded) pendingHeaderSpans.set(cmdSpan, store)
+    }
   }
   header.appendChild(cmdSpan)
 
@@ -330,22 +449,43 @@ function isOutputEmpty(html: string): boolean {
 /**
  * A block's output as text, with the line breaks put back.
  *
- * The serializer emits one `<span class="term-line">` per logical line and
- * nothing between them — the line breaks you see are `display: block` in CSS,
- * not characters in the DOM. So `outputEl.textContent` returned the whole block
- * as a single run, and "Copy output" pasted a hundred rows of `top` onto one
- * line (nocx-6w4z).
+ * Asked of the BLOCK, because which element holds the output is the
+ * block's own fact (nocx-ex636): a command block's output is the
+ * `.cmd-output` its builder created, while an answer block's body is
+ * appended after the frame — the overflow menu must resolve it from the
+ * block at READ time, never hold a builder-time reference that was empty
+ * or null. The extraction itself is kind-agnostic: every block's output
+ * is `.term-line` rows or plain text.
  *
- * Falls back to `textContent` when there are no line spans, which is what a
- * block with plain text content would give.
+ * The serializer emits one `<span class="term-line">` per logical line and
+ * nothing between them — the line breaks you see are `display: block` in
+ * CSS, not characters in the DOM. So `outputEl.textContent` returned the
+ * whole block as a single run, and "Copy output" pasted a hundred rows of
+ * `top` onto one line (nocx-6w4z).
+ *
+ * Falls back to `textContent` when there are no line spans, which is what
+ * a block with plain text content would give.
  */
-export function blockOutputText(outputEl: HTMLElement | null): string {
+export function blockOutputText(blockEl: HTMLElement | null): string {
+  if (!blockEl) return ''
+  const outputEl = blockEl.querySelector('.cmd-output')
   if (!outputEl) return ''
   const lines = outputEl.querySelectorAll('.term-line')
   if (lines.length === 0) return outputEl.textContent ?? ''
   return Array.from(lines)
     .map((line) => line.textContent ?? '')
     .join('\n')
+}
+
+/** The block's command as text, for a human label naming the block (the
+ *  ask chip's value — nocx-x8s2.2). After history.record acks, the header
+ *  renders the MASKED command and data-recorded-command holds the full
+ *  stored text: the label reads the same source the block shows (ADR-0021),
+ *  never a second derivation of the line. */
+export function blockCommandText(blockEl: HTMLElement): string {
+  const recorded = blockEl.getAttribute('data-recorded-command')
+  if (recorded) return recorded
+  return blockEl.querySelector('.cmd-header-text')?.textContent ?? ''
 }
 
 /**
@@ -355,7 +495,7 @@ export function blockOutputText(outputEl: HTMLElement | null): string {
  * calculated from the button's bounding rect. Closes on outside click
  * and Escape key.
  */
-function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLElement {
+function buildOverflowMenu(blockEl: HTMLElement, command: string): HTMLElement {
   const btn = document.createElement('button')
   btn.className = 'cmd-overflow-btn'
   btn.textContent = '\u22EE' // ⋮ vertical ellipsis
@@ -413,7 +553,11 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
     copyOut.textContent = 'Copy output'
     copyOut.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      const text = blockOutputText(outputEl)
+      // The copyable text is asked of the BLOCK at read time (nocx-ex636):
+      // an answer block's body is appended after the frame, so the
+      // builder-time output reference is null — the block knows where its
+      // output lives.
+      const text = blockOutputText(blockEl)
       clipboardFallback(text)
       closeMenu()
     })
@@ -422,13 +566,45 @@ function buildOverflowMenu(command: string, outputEl: HTMLElement | null): HTMLE
     copyAll.textContent = 'Copy all'
     copyAll.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      const outText = blockOutputText(outputEl)
+      const outText = blockOutputText(blockEl)
       const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
       clipboardFallback(`${recorded ?? command}\n${outText}`)
       closeMenu()
     })
 
-    menu.append(copyCmd, copyOut, copyAll)
+    // Wrap is a per-block override of the kind's default, and it lives here
+    // rather than as a control on the block because it is rare: the kind is
+    // right nearly always (a command's grid must not re-wrap — nocx-juau —
+    // and an answer's prose must). What it is for is the exception the kind
+    // cannot know about: one wide table in otherwise ordinary output, or one
+    // answer a person wants to read as it came. The override is the DOM
+    // state `data-wrap` on the block, so the CSS reads one attribute and the
+    // kind's own rule stays the default underneath it.
+    //
+    // The label names the EFFECTIVE state, not the attribute: with the
+    // `terminal.wrapOutput` setting deciding untouched blocks, a block that
+    // is already wrapping carries no attribute at all, and a menu offering
+    // to "Wrap lines" on a wrapped block is a control you have to try in
+    // order to understand. So the attribute answers when it is there, and
+    // the rendered style answers when it is not — one question, asked of
+    // whoever actually decided it.
+    const wrapOn = (): boolean => {
+      const attr = blockEl.getAttribute('data-wrap')
+      if (attr === 'on') return true
+      if (attr === 'off') return false
+      const out = blockEl.querySelector<HTMLElement>('.cmd-output')
+      return out ? getComputedStyle(out).whiteSpace.startsWith('pre-wrap') : false
+    }
+    const wrapItem = document.createElement('button')
+    wrapItem.className = 'cmd-overflow-menu-item'
+    wrapItem.textContent = wrapOn() ? 'Do not wrap' : 'Wrap lines'
+    wrapItem.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on')
+      closeMenu()
+    })
+
+    menu.append(copyCmd, copyOut, copyAll, wrapItem)
 
     // Render at body level so it floats above all scroll containers (P1-6).
     document.body.appendChild(menu)
@@ -532,8 +708,11 @@ function wireBlockSelection(
  * Create a frozen command block DOM element with header + serialized output.
  * `status` 'entered' (N6) is the block the ssh command froze into when the
  * remote session began: painted as neither success nor failure, no exit code.
+ * The block DECLARES its kind (nocx-ex636); the rendering rules —
+ * highlighting, wrapping, the status vocabulary — are read from it.
  */
 export function createCommandBlock(
+  kind: BlockKind,
   id: number,
   command: string,
   cwd: string,
@@ -541,13 +720,18 @@ export function createCommandBlock(
   outputHtml: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'success' | 'failure' | 'entered' | 'unknown',
+  status: 'success' | 'failure' | 'entered' | 'unknown' | 'waiting',
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
+  // The block declares its kind once, in the DOM a person's tools can see:
+  // the flow can tell a question from a command without reading the text
+  // (nocx-ex636).
+  wrapper.dataset.blockKind = kind
+  const rules = blockKindRules(kind)
   // The entered block's own visual state (N6): frozen on environment entry,
   // neither success nor failure. The hook a stylesheet styles; the header
   // itself already refuses to paint an exit code or a failure for it.
@@ -561,21 +745,21 @@ export function createCommandBlock(
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, location, durationMs, exitCode, status, store)
+  const header = createHeader(kind, command, cwd, location, durationMs, exitCode, status, store)
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
     outputEl = document.createElement('div')
-    outputEl.className = 'cmd-output'
+    outputEl.className = rules.outputClass
     outputEl.innerHTML = outputHtml
   }
 
   // Overflow menu (P2-9) — always the LAST element of the header-right
-  // group (owner directive: ⋮ never shifts position).
-  const overflow = buildOverflowMenu(command, outputEl)
+  // group (owner directive: ⋮ never shifts position). It reads the block's
+  // copyable text from the BLOCK, at click time (nocx-ex636).
+  const overflow = buildOverflowMenu(wrapper, command)
   const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
-
   wrapper.appendChild(header)
   if (outputEl) wrapper.appendChild(outputEl)
 
@@ -629,14 +813,17 @@ export function createRunningBlock(
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block cmd-block-running'
+  // A running block is a command in flight; it declares the command kind
+  // like the block it will freeze into (nocx-ex636).
+  wrapper.dataset.blockKind = 'command'
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(command, cwd, location, null, null, 'running', store)
+  const header = createHeader('command', command, cwd, location, null, null, 'running', store)
 
   // Overflow menu — minimal: copy command only while running.
   // Always the LAST element of header-right (owner directive).
-  const overflow = buildOverflowMenu(command, null)
+  const overflow = buildOverflowMenu(wrapper, command)
   const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
 
@@ -670,6 +857,7 @@ export function freezeBlock(
   status: 'success' | 'failure' | 'entered' | 'unknown',
 ): HTMLElement {
   const newEl = createCommandBlock(
+    'command',
     id,
     command,
     cwd,
@@ -751,6 +939,13 @@ export interface BlockManagerOpts {
 
 export class BlockManager {
   private _blocks: BlockRecord[] = []
+  /** Answer blocks (nocx-x8s2.2): the assistant's streamed replies, kept
+   *  OUT of _blocks because they have no xterm line range — the freeze,
+   *  serialize and reconstruction paths iterate _blocks and must never see
+   *  a record with sentinel lines. They share the id space and the DOM
+   *  selection API; the ask surface drives them through AnswerBlockHandle
+   *  only. */
+  private _answerBlocks: AnswerBlockRecord[] = []
   private _nextId = 1
   private _now: () => number
   private _scrollbackInner: HTMLElement
@@ -839,6 +1034,19 @@ export class BlockManager {
       if (el) el.classList.remove('cmd-block-selected')
       this._selectedBlockId = null
     }
+  }
+
+  /** Programmatic single-select, NON-toggle (the ask affordance's visual
+   *  anchor — nocx-x8s2.2). The mouse path owns toggling; activation
+   *  selects so the block the chip names reads as selected, but selection
+   *  NEVER activates (AD-8: selection is copy). The single-select
+   *  invariant (P1-8) holds: the id and the DOM class move together. */
+  selectBlock(blockEl: HTMLElement): void {
+    const prev = getSelectedBlock(this._scrollbackInner)
+    if (prev && prev !== blockEl) prev.classList.remove(SELECTED_CLASS)
+    if (!blockEl.classList.contains(SELECTED_CLASS)) blockEl.classList.add(SELECTED_CLASS)
+    const rec = this._blocks.find((b) => b.el === blockEl)
+    this._selectedBlockId = rec?.id ?? null
   }
 
   /**
@@ -1229,6 +1437,198 @@ export class BlockManager {
     return rec
   }
 
+  /**
+   * Append an assistant answer block to the flow (nocx-x8s2.2): the
+   * question as the header, the streamed answer text as the body. The
+   * answer is plain text, NOT xterm output — it is rendered as escaped
+   * term-lines at this boundary. The block declares the ask kind, so the
+   * prose grammar (no shell highlight, wrapping body, its own status
+   * words) follows from the kind's rules rather than from command rules
+   * borrowed by accident (nocx-ex636). Returns the handle the ask surface
+   * appends to and closes.
+   */
+  addAnswerBlock(question: string, cwd: string): AnswerBlockHandle {
+    const id = this._nextId++
+    const el = createCommandBlock(
+      'ask',
+      id,
+      question,
+      cwd,
+      this._location,
+      '',
+      null,
+      null,
+      // The question is out and no answer has arrived: the header paints
+      // the ask kind's in-progress word ("thinking") beside a live pulse,
+      // and the body shows the typing dots — both of which
+      // the first delta — or a terminal close — removes.
+      'waiting',
+      this._getContainer,
+      (bid, sel) => {
+        if (sel) this._onBlockSelected(bid)
+        else this._onBlockDeselected(bid)
+      },
+      this._snapshotStore,
+    )
+    const outputEl = document.createElement('div')
+    // The ask kind's body class comes from the kind's rules — the wrap
+    // policy is owned there, never a second copy (nocx-ex636).
+    outputEl.className = blockKindRules('ask').outputClass
+    outputEl.dataset.answerBody = ''
+    // The answer's body says it is being written, WHERE it will be written.
+    // The header chip is in the corner a person checks; the body is where
+    // they are already looking, and an empty body under a finished question
+    // is indistinguishable from a product that did nothing. Removed by the
+    // first delta, so the dots are replaced by the text they stood in for.
+    const typing = document.createElement('span')
+    typing.className = 'cmd-answer-typing'
+    typing.setAttribute('aria-label', blockKindRules('ask').statusChips!.inProgress)
+    for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
+    outputEl.appendChild(typing)
+    el.appendChild(outputEl)
+    this._scrollbackInner.insertBefore(el, this._xtermContainer)
+    this._answerBlocks.push({ id, question, el })
+
+    // The waiting chip says the model has not answered yet; it stops the
+    // moment the first delta lands, and a run that fails before any text
+    // must stop waiting too (the timeout sentence and the waiting state
+    // are two ends of one fact, nocx-ex636).
+    const stopWaiting = (): void => {
+      el.querySelector('.cmd-answer-waiting')?.remove()
+      el.querySelector('.cmd-answer-waiting-pulse')?.remove()
+      // Both ends of one fact: the corner stops reporting work and the body
+      // stops standing in for text. A run that fails before any delta
+      // clears both, or the dots would go on typing an answer that will
+      // never arrive.
+      el.querySelector('.cmd-answer-typing')?.remove()
+    }
+
+    // The streamed chunks split MID-LINE, so the body keeps one persistent
+    // partial row: a chunk's final segment stays on it and the next chunk
+    // continues it. Every '\n' completes a row — including a chunk ending
+    // in '\n', whose trailing empty segment starts a fresh (possibly
+    // empty) partial, so "a\n" + "b" renders as two rows, never "ab".
+    //
+    // A fenced block the model returns (```…```) is the one place in an
+    // answer where the command grammar is the right grammar: its rows land
+    // in a `.cmd-output-code` container that stays monospace and unwrapped
+    // (the nocx-juau rule, reachable through the kind, never by accident).
+    // The fence toggles on the COMPLETED line, so a marker split across
+    // chunks still works, and BOTH delimiters belong to the code region:
+    // the opener moves into the container it opens, the closer stays in
+    // the container it closes. A second fence after intervening prose gets
+    // a fresh container, so the order fence → prose → fence survives.
+    let partial: HTMLSpanElement | null = null
+    let inFence = false
+    let codeEl: HTMLElement | null = null
+    const fenceMarker = /^\s*```/
+
+    const codeContainer = (): HTMLElement => {
+      if (!codeEl) {
+        codeEl = document.createElement('div')
+        codeEl.className = 'cmd-output-code'
+        outputEl.appendChild(codeEl)
+      }
+      return codeEl
+    }
+
+    const makeRow = (): HTMLSpanElement => {
+      const span = document.createElement('span')
+      span.className = 'term-line'
+      ;(inFence ? codeContainer() : outputEl).appendChild(span)
+      return span
+    }
+
+    // Trim the trailing empty rows the serializer's contract leaves behind
+    // (a stream that ended with '\n' finishes with an empty partial row),
+    // whether they sit in the body or in a fence container.
+    const trimEmptyTail = (): void => {
+      for (;;) {
+        const last = outputEl.lastElementChild
+        if (!last) return
+        if (last.classList.contains('term-line') && last.textContent === '') {
+          last.remove()
+          continue
+        }
+        if (last.classList.contains('cmd-output-code')) {
+          const row = last.lastElementChild
+          if (row?.classList.contains('term-line') && row.textContent === '') {
+            row.remove()
+            continue
+          }
+          if (!last.hasChildNodes()) {
+            last.remove()
+            continue
+          }
+        }
+        return
+      }
+    }
+
+    return {
+      id,
+      el,
+      append(text: string): void {
+        if (text === '') return
+        stopWaiting()
+        const parts = text.split('\n')
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i]
+          if (i < parts.length - 1) {
+            // A complete line: finish the current partial (or open one) and
+            // close the row.
+            if (!partial) partial = makeRow()
+            partial.textContent += part
+            const row = partial
+            const line = partial.textContent
+            partial = null
+            if (fenceMarker.test(line)) {
+              const opening = !inFence
+              inFence = !inFence
+              if (opening) {
+                // The opener belongs to the code region it opens: a fresh
+                // container, with the marker as its first row.
+                codeEl = null
+                row.remove()
+                codeContainer().appendChild(row)
+              }
+              // The closer was created inside the code region and stays
+              // there; the rows after it go back to the prose body.
+            }
+          } else {
+            // The final segment stays partial — the next chunk continues it.
+            if (!partial) partial = makeRow()
+            partial.textContent += part
+          }
+        }
+      },
+      close(status: 'success' | 'failure', error?: string): void {
+        stopWaiting()
+        trimEmptyTail()
+        partial = null
+        // The header's status chip, in the flow's own chip vocabulary —
+        // the words come from the ask kind's rules (nocx-ex636).
+        const chips = blockKindRules('ask').statusChips
+        const right = el.querySelector('.cmd-header-right')
+        if (right && chips) {
+          const chip = document.createElement('span')
+          chip.className =
+            status === 'success'
+              ? 'nocx-chip nocx-chip-ok cmd-header-exit'
+              : 'nocx-chip nocx-chip-fail cmd-header-exit'
+          chip.textContent = status === 'success' ? chips.done : chips.failed
+          right.appendChild(chip)
+        }
+        if (error) {
+          const note = document.createElement('div')
+          note.className = 'cmd-answer-error'
+          note.textContent = error
+          outputEl.appendChild(note)
+        }
+      },
+    }
+  }
+
   clearAll(): void {
     this._stopTicker()
     this._cancelPendingFence()
@@ -1236,6 +1636,10 @@ export class BlockManager {
       b.el.remove()
     }
     this._blocks = []
+    for (const b of this._answerBlocks) {
+      b.el.remove()
+    }
+    this._answerBlocks = []
     this._runningBlock = null
     this._cmdStartTime = null
     this._selectedBlockId = null

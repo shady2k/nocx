@@ -12,7 +12,7 @@
 // decide exactly as they did on the textarea. Binding these keys as a CM6
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
-import { EditorState, Extension } from '@codemirror/state'
+import { Compartment, EditorState, Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { setSecretCandidate } from './secret-candidate'
@@ -123,12 +123,37 @@ export interface EditorActions {
    * inside the prompt.
    */
   onSave?: (shift: boolean) => boolean
+  /**
+   * Whether a commit performs the SHELL handoff (ADR-0004 §2 step 1: hide
+   * the DOM editor before anything is sent). The target declares what it
+   * is (routesToShell) and the composition root wires this accessor to
+   * InputTargetRegistry.active() — one authority reads it, never a mode
+   * boolean, never a per-call parameter. Absent (or true): the editor's
+   * original contract, every submit is a shell submit and hides. The
+   * agent target's question is not a handoff — nothing is pasted into a
+   * pty, the grid is not given the keys, and the editor stays on screen
+   * for the next question (nocx-wmy4).
+   */
+  handoffToShell?: () => boolean
+  /** ⌘Enter / Ctrl+Enter: the explicit target switch ADR-0004 §3 requires
+   *  — the indicator's keyboard twin, flipping Run ⇄ Ask. The host flips
+   *  the registry's active target; the editor stays passive, the draft is
+   *  untouched, and the next plain Enter goes wherever the person just
+   *  put it. */
+  onToggleTarget?: () => void
+  /** A reference chip's drop control: the host removes that chip (the
+   *  chip is data the host owns; this only reports the dismissal). */
+  onDismissChip?: (id: string) => void
 }
 
 export class CommandEditor {
   readonly root: HTMLElement
   private view: EditorView
   private chrome: HTMLElement
+  /** The reference chip strip (nocx-4wtlh): the chips a selection raises,
+   *  rendered between the chrome row and the input. The chips are DATA the
+   *  host owns; this container is their surface. Hidden while empty. */
+  private referencesEl: HTMLElement
   /** Left chip group: the location + cwd chips sit together, the clock
    *  keeps the right edge of the chrome row. */
   private chromeLeft: HTMLElement
@@ -238,6 +263,14 @@ export class CommandEditor {
     }
   })
 
+  /** The ACTIVE target's extensions, in a compartment so they can be
+   *  swapped when the person switches where Enter goes (ADR-0004 §3). The
+   *  shell's highlighting is the shell's — prose typed at Ask is not a
+   *  command and must not be painted as one. The editor still chooses
+   *  nothing: it only holds the slot, and the host reconfigures it from
+   *  the registry's active target (setTargetExtensions). */
+  private readonly targetCompartment = new Compartment()
+
   constructor(
     private readonly actions: EditorActions,
     extensions: Extension[] = [],
@@ -278,6 +311,16 @@ export class CommandEditor {
     this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
+
+    // ── Reference chip strip (nocx-4wtlh) ─────────────────────────────
+    // Between the chrome and the input: part of the input surface, never
+    // floating over it. Rendered by setReferenceChips; the host owns the
+    // chips' lifecycle (selection raises them, a question consumes them,
+    // a cleared scrollback takes their blocks).
+    this.referencesEl = document.createElement('div')
+    this.referencesEl.className = 'nocx-editor-references'
+    this.referencesEl.style.display = 'none'
+    this.root.appendChild(this.referencesEl)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -327,6 +370,10 @@ export class CommandEditor {
           }),
           CommandEditor.editorTheme,
           this.onViewUpdate,
+          // The active target's layer sits where the shell's used to: the
+          // caller's stable extensions (the target indicator) follow it,
+          // so a swap never disturbs them.
+          this.targetCompartment.of([]),
           ...extensions,
         ],
       }),
@@ -341,6 +388,14 @@ export class CommandEditor {
     // (verified empirically: a capture-phase listener on an ancestor
     // preempts the defaultKeymap's Enter binding).
     this.root.addEventListener('keydown', this.onKeydown, true)
+  }
+
+  /** Install the extensions of the target Enter currently goes to. Called
+   *  by the host on wire-up and on every switch — the editor never reads
+   *  the registry itself (it stays passive) and never keeps a mode of its
+   *  own: what is installed IS the mode. */
+  setTargetExtensions(extensions: Extension[]): void {
+    this.view.dispatch({ effects: this.targetCompartment.reconfigure(extensions) })
   }
 
   private startClock(): void {
@@ -475,9 +530,15 @@ export class CommandEditor {
     // answers with a fresh prompt exactly as it would in a plain terminal.
     // Neither the ledger nor the attempt path is entered, which is what
     // keeps the editor from being hidden by a handoff that then throws.
+    // And the bare newline goes to the pty only when the line was going to
+    // the SHELL. With Ask active there is nothing to ask and no reason to
+    // poke the shell — an empty Enter in a mode the person chose must not
+    // reach a program that is waiting on stdin. The seam is the same one
+    // authority the handoff reads (the registry's active target), never a
+    // second answer to "where does Enter go".
     if (doc.trim() === '') {
       this.clearDoc()
-      this.actions.submitEmpty?.()
+      if (this.actions.handoffToShell?.() ?? true) this.actions.submitEmpty?.()
       return
     }
     const hook = this.actions.beforeSubmit
@@ -525,10 +586,17 @@ export class CommandEditor {
    *  observed order from the textarea implementation — value → rows →
    *  hide() → submit() — is preserved. `plan` is present only after a
    *  beforeSubmit planner succeeded: the resolved sendLine goes to the PTY,
-   *  the reference-intact recordLine to the ledger. */
+   *  the reference-intact recordLine to the ledger.
+   *
+   *  The hide is the handoff's step 1 and belongs to it alone: a commit
+   *  whose destination is not the shell (the agent target — routesToShell
+   *  false, read through the handoffToShell seam) hides nothing, because
+   *  there is nothing to hand off — the question stays in the editor for
+   *  the next one (nocx-wmy4). The clear is unconditional: a submitted
+   *  question, like a submitted command, leaves the editor empty. */
   private commit(sendLine: string, plan?: SubmitPlan): void {
     this.clearDoc()
-    this.hide()
+    if (this.actions.handoffToShell?.() ?? true) this.hide()
     // The plan is present only after a beforeSubmit planner succeeded; the
     // plain path keeps the exact one-argument call (no resolution happened,
     // so there is nothing to resolve for the ledger either).
@@ -609,6 +677,24 @@ export class CommandEditor {
         e.stopPropagation()
         this.actions.onUpAtTop?.()
       }
+      return
+    }
+
+    // The ask entry gesture (nocx-4wtlh): ⌘/Ctrl+Enter is the explicit
+    // switch ADR-0004 §3 requires — it flips the ACTIVE target, exactly as
+    // clicking the caret indicator does, and sends nothing. The chord that
+    // asked ONCE without moving the target is gone (owner's correction):
+    // one chord that submits and one that submits somewhere else is two
+    // send keys on one line, and the person could not see, before pressing
+    // it, where the text was about to go. Now the chord only ever changes
+    // the indicator, plain Enter is the only send, and the indicator says
+    // where it goes. The draft is untouched by the flip. Unwired (no
+    // onToggleTarget), the chord falls through to CM6.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.altKey) {
+      if (!this.actions.onToggleTarget) return
+      e.preventDefault()
+      e.stopPropagation()
+      this.actions.onToggleTarget()
       return
     }
 
@@ -869,6 +955,42 @@ export class CommandEditor {
    *  the focus-bounce tests against holds unchanged. */
   rootContains(el: Node | null): boolean {
     return this.root.contains(el)
+  }
+
+  /** Render the reference chips the host owns (nocx-4wtlh). Each chip is
+   *  the kit's nocx-chip identity with a drop control; the strip hides
+   *  itself when empty. The host re-renders on every add/remove — the
+   *  chips are a short list and the strip is their only surface. */
+  setReferenceChips(chips: ReadonlyArray<{ id: string; label: string }>): void {
+    this.referencesEl.replaceChildren()
+    if (chips.length === 0) {
+      this.referencesEl.style.display = 'none'
+      return
+    }
+    this.referencesEl.style.display = ''
+    for (const chip of chips) {
+      const el = document.createElement('span')
+      el.className = 'nocx-chip nocx-editor-reference-chip'
+      el.dataset.chipId = chip.id
+      el.title = chip.label
+      const name = document.createElement('span')
+      name.className = 'nocx-editor-reference-chip__name'
+      name.textContent = chip.label
+      const drop = document.createElement('button')
+      drop.type = 'button'
+      drop.className = 'nocx-editor-reference-chip__drop'
+      drop.textContent = '×'
+      drop.setAttribute('aria-label', `remove reference ${chip.label}`)
+      drop.addEventListener('click', () => this.actions.onDismissChip?.(chip.id))
+      el.append(name, drop)
+      this.referencesEl.appendChild(el)
+    }
+  }
+
+  /** Drop every reference chip (the host consumed them — a question
+   *  carried them, or a cleared scrollback took their blocks). */
+  clearReferenceChips(): void {
+    this.setReferenceChips([])
   }
 
   dispose(): void {

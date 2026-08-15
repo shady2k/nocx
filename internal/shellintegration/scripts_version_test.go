@@ -148,6 +148,10 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// plugins installed, pressing Enter printed "No such widget" and the
 		// command did not run.
 		"38": "f6f2b6cf7509ee97806376d141edaae0c94dd5df69ef2734586ae521ecb0c37d",
+		// v39: unsupported sudo implementations fail open before the parent
+		// lifecycle is suspended, and nested Bash cannot inherit nocx's
+		// internal extdebug through an exported BASHOPTS (nocx-kf5w).
+		"39": "a4d1de89f1a3851ddb8f8c0fd050a52235cda23f3b3346678f0300a1455278b7",
 	}
 
 	h := sha256.New()

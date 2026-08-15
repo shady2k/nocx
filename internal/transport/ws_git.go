@@ -34,7 +34,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/git"
@@ -43,6 +47,212 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
+
+// ── git.* ingress bounds and validators (the per-field sweep) ─────────────
+//
+// Every git.* method carries a binding id or a path, and every path is a
+// REPOSITORY-RELATIVE pathspec (D8) — never an absolute filesystem path:
+// git.diff rides the path in argv behind `--`, git.stage/git.unstage feed
+// NUL-separated :(literal) pathspecs to stdin. So the pathspec rule here is
+// git's, not the filesystem provider's: non-empty, NUL-free, bounded. The
+// files.* side (ws_files.go) holds the absolute+clean rule its providers own.
+
+// decodeParams decodes one method's params object, answering the -32602
+// message for params that are absent or not a JSON object, and "" on
+// success. The decode shape of the exemplar (validateProbeParamsRaw),
+// shared by every validator in this sweep so none of them can forget the
+// object gate.
+func decodeParams(raw json.RawMessage, out any) string {
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return "params must be a JSON object"
+	}
+	return ""
+}
+
+// isLowerHex reports whether s is exactly n lowercase hexadecimal digits —
+// the shape every backend-minted id in this surface has: session ids and
+// binding ids are hex.EncodeToString of 16 random bytes (session.NewID, the
+// git/filesystem binding mints), recovery generations of a 32-byte nonce.
+func isLowerHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for i := range n {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+const (
+	// maxPathspecRunes bounds one git pathspec: a repo-relative path. A
+	// pathspec must resolve inside the worktree, whose components sit under
+	// the OS PATH_MAX (4096 bytes), so 4096 runes is the honest ceiling —
+	// the same number the ask path bounds a renderer cwd by (maxCwdRunes).
+	maxPathspecRunes = 4_096
+	// maxGitDiffBytes bounds git.diff's maxBytes — the ONLY bound on the
+	// diff byteSink (internal/git/local: the retained text is a prefix cut
+	// at this value), so an unbounded value is an unbounded memory hazard.
+	// The frontend's own surface names 1 MiB (git-diff-content.tsx
+	// DIFF_MAX_BYTES) and the wire conformance test exercises 1 MiB; 4 MiB
+	// is the backend's wire-cost ceiling, far above any real request.
+	maxGitDiffBytes = 4 << 20
+	// maxCommitMessageRunes bounds the git.commit message. The message rides
+	// stdin (-F -, D8), so this is a wire-cost ceiling rather than a git
+	// limit — but subject+body text a human types never approaches 16 KiB,
+	// and the bound is well below the frame budget.
+	maxCommitMessageRunes = 16_384
+	// maxStagePaths bounds the number of paths one git.stage / git.unstage
+	// call may carry. The panel can only offer the rows the status list
+	// reported, and that list is capped at git.MaxStatusEntries — the same
+	// ceiling, so a caller cannot exceed what the product can show.
+	maxStagePaths = git.MaxStatusEntries
+)
+
+// validatePathspec checks one repo-relative git pathspec. NUL is the one
+// character that breaks the framing: stage/unstage feed NUL-separated
+// records to --pathspec-from-file, and diff's argv cannot carry a NUL at
+// all. Control characters other than NUL are legitimate in a filename
+// (tab, newline) — git handles them verbatim under :(literal) — so only
+// NUL and the length are checked.
+func validatePathspec(path string) string {
+	if path == "" {
+		return "path is required"
+	}
+	if strings.ContainsRune(path, '\x00') {
+		return "path must not contain NUL"
+	}
+	if n := utf8.RuneCountInString(path); n > maxPathspecRunes {
+		return fmt.Sprintf("path exceeds %d characters", maxPathspecRunes)
+	}
+	return ""
+}
+
+// validateGitOpenRaw checks git.open: the session the requesting connection
+// must own, and the optional D2 cwd override that becomes the directory git
+// resolves.
+func validateGitOpenRaw(raw json.RawMessage) string {
+	var p gitOpenParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.SessionID, 32) {
+		return "sessionId is required and must be the 32-hex id the backend minted"
+	}
+	// cwd is the verified OSC 7 cwd (D2): a directory git rev-parses. It is
+	// optional — absent is the noCwd RESULT state — and when present it must
+	// be absolute: a relative cwd would make rev-parse run in the backend's
+	// process-relative directory, which could resolve the wrong repository.
+	if p.Cwd != "" {
+		if !filepath.IsAbs(p.Cwd) {
+			return "cwd must be an absolute path"
+		}
+		if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
+			return "cwd exceeds the length bound"
+		}
+	}
+	return ""
+}
+
+// validateGitBindingRaw checks the binding-only methods (status, headMessage,
+// log, remote, close, stageAll, unstageAll): the 32-hex binding id the
+// registry minted at git.open. Ownership of that binding is re-checked per
+// call by Acquire (D15); this is the shape and presence half.
+func validateGitBindingRaw(raw json.RawMessage) string {
+	var p gitBindingParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	return ""
+}
+
+// validateGitDiffRaw checks git.diff: the binding, the one pathspec, the
+// closed side enum, and the byte bound that is the only ceiling on the diff
+// sink.
+func validateGitDiffRaw(raw json.RawMessage) string {
+	var p gitDiffParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if msg := validatePathspec(p.Path); msg != "" {
+		return msg
+	}
+	switch p.Side {
+	case string(git.SideStaged), string(git.SideUnstaged), string(git.SideUntracked):
+	default:
+		return "side must be one of staged, unstaged, untracked"
+	}
+	// maxBytes is the sink's cut point: zero or negative cannot bound
+	// anything (the domain refuses them too, as an error), and the ceiling
+	// keeps a hostile value from making the sink accumulate without bound.
+	if p.MaxBytes <= 0 {
+		return "maxBytes must be a positive byte bound"
+	}
+	if p.MaxBytes > maxGitDiffBytes {
+		return fmt.Sprintf("maxBytes exceeds %d bytes", maxGitDiffBytes)
+	}
+	return ""
+}
+
+// validateGitStageRaw checks git.stage and git.unstage (one wire shape):
+// the binding and the pathspec set. An empty paths array is the deliberate
+// no-op that returns the current status (D19) — never "all" — so only a
+// non-empty set is bounded by count.
+func validateGitStageRaw(raw json.RawMessage) string {
+	var p gitStageParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if len(p.Paths) > maxStagePaths {
+		return fmt.Sprintf("paths exceeds %d entries", maxStagePaths)
+	}
+	for _, path := range p.Paths {
+		if msg := validatePathspec(path); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateGitCommitRaw checks git.commit: the binding, the message and the
+// amend flag. A message with no non-whitespace is refused here rather than
+// surfacing as a confusing failed RESULT state — git commit -F - aborts on
+// an empty stdin, and the panel's commit button is disabled until a subject
+// is typed, so an empty message is a broken caller, never a commit. Newlines
+// and quotes are the normal case (D8); only NUL is refused.
+func validateGitCommitRaw(raw json.RawMessage) string {
+	var p gitCommitParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if strings.TrimSpace(p.Message) == "" {
+		return "message is required and must not be empty"
+	}
+	if strings.ContainsRune(p.Message, '\x00') {
+		return "message must not contain NUL"
+	}
+	if utf8.RuneCountInString(p.Message) > maxCommitMessageRunes {
+		return fmt.Sprintf("message exceeds %d characters", maxCommitMessageRunes)
+	}
+	return ""
+}
 
 // gitBinding is the transport's bookkeeping for one binding it issued.
 // internal/git exposes neither a binding's session nor anything else the
@@ -468,7 +678,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -527,7 +737,7 @@ func (h gitBindingHandlers) handleStatus(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -570,7 +780,7 @@ func (h gitBindingHandlers) handleDiff(ctx context.Context, state *connState, re
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -609,7 +819,7 @@ func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -664,7 +874,7 @@ func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState,
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -699,7 +909,7 @@ func (h gitBindingHandlers) handleStageAll(ctx context.Context, state *connState
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -733,7 +943,7 @@ func (h gitBindingHandlers) handleUnstageAll(ctx context.Context, state *connSta
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -778,7 +988,7 @@ func (h gitBindingHandlers) handleCommit(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -815,7 +1025,7 @@ func (h gitBindingHandlers) handleHeadMessage(ctx context.Context, state *connSt
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -852,7 +1062,7 @@ func (h gitBindingHandlers) handleLog(ctx context.Context, state *connState, req
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -896,7 +1106,7 @@ func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -931,7 +1141,7 @@ func (h gitBindingHandlers) handleClose(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -1059,52 +1269,52 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 	bindingSub := s.operationQueue("git")
 
 	return []methodSpec{
-		reg(openSub, "git.open", func(w *wsConn, state *connState) handlerFunc {
-			h := gitOpenHandlers{op: openOp, helperFor: s.gitHelperFor, r: w, bindings: s, log: s.log, wired: gitWired}
+		reg(openSub, "git.open", params(validateGitOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitOpenHandlers{op: openOp, helperFor: s.gitHelperFor, r: r, bindings: s, log: s.log, wired: gitWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.status", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.status", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.diff", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.diff", params(validateGitDiffRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDiff(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.stage", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.stage", params(validateGitStageRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.unstage", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.unstage", params(validateGitStageRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.stageAll", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.stageAll", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStageAll(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.unstageAll", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.unstageAll", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstageAll(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.commit", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.commit", params(validateGitCommitRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCommit(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.headMessage", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.headMessage", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHeadMessage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.log", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.log", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleLog(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.remote", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.remote", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRemote(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.close", func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.close", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
 	}

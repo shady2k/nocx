@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,6 +259,108 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 	after := activationSnapshot(t, root)
 	if !bytes.Equal(before, after) {
 		t.Error("second publish changed the installed tree")
+	}
+}
+
+// TestSFTPFSRename_ReplacesCommittedManifest pins the carrier operation that
+// activates an upgrade. SSH_FXP_RENAME alone refuses manifest.json because
+// it already exists; an advertised posix-rename@openssh.com must replace it
+// atomically so the publisher can move from one valid generation to another.
+func TestSFTPFSRename_ReplacesCommittedManifest(t *testing.T) {
+	srv := startRemoteTestSSHServer(t)
+	defer srv.close()
+
+	client := dialRemoteTestSSHClient(t, srv)
+	defer func() { _ = client.Close() }()
+	sftpClient := mustSFTPClient(t, client)
+	if data, ok := sftpClient.HasExtension("posix-rename@openssh.com"); !ok || data != "1" {
+		t.Fatalf("test SFTP server posix-rename extension = %q, %v; want %q, true", data, ok, "1")
+	}
+
+	root := filepath.Join(t.TempDir(), dirName)
+	pub := NewPublisher(testLogger(), sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)}, root)
+	if _, err := pub.Publish(testBundle("1")); err != nil {
+		t.Fatalf("publish v1: %v", err)
+	}
+	if _, err := pub.Publish(testBundle("2")); err != nil {
+		t.Fatalf("publish v2 over committed manifest: %v", err)
+	}
+	verified, err := pub.Verify()
+	if err != nil {
+		t.Fatalf("verify v2: %v", err)
+	}
+	if !verified.Installed || verified.Version != "2" || verified.Generation != "v2" {
+		t.Fatalf("verified activation = %+v, want installed v2", verified)
+	}
+}
+
+// TestSFTPFSRename_WithoutPosixExtensionKeepsPriorActivation decides the
+// unsupported-server contract. A first publish uses standard SFTP rename and
+// succeeds because manifest.json is absent. An upgrade is refused instead of
+// remove-then-rename: the old manifest remains byte-identical and valid, so
+// readers never observe a missing activation pointer.
+func TestSFTPFSRename_WithoutPosixExtensionKeepsPriorActivation(t *testing.T) {
+	if err := sftp.SetSFTPExtensions("hardlink@openssh.com", "statvfs@openssh.com"); err != nil {
+		t.Fatalf("disable posix-rename extension: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sftp.SetSFTPExtensions(
+			"hardlink@openssh.com",
+			"posix-rename@openssh.com",
+			"statvfs@openssh.com",
+		); err != nil {
+			t.Errorf("restore SFTP extensions: %v", err)
+		}
+	})
+
+	srv := startRemoteTestSSHServer(t)
+	defer srv.close()
+	client := dialRemoteTestSSHClient(t, srv)
+	defer func() { _ = client.Close() }()
+	sftpClient := mustSFTPClient(t, client)
+	if data, ok := sftpClient.HasExtension("posix-rename@openssh.com"); ok {
+		t.Fatalf("test SFTP server unexpectedly advertised posix-rename data %q", data)
+	}
+
+	root := filepath.Join(t.TempDir(), dirName)
+	pub := NewPublisher(testLogger(), sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)}, root)
+	if _, err := pub.Publish(testBundle("1")); err != nil {
+		t.Fatalf("first publish without posix-rename: %v", err)
+	}
+	manifestBefore := readFileT(t, filepath.Join(root, manifestName))
+
+	if _, err := pub.Publish(testBundle("2")); err == nil {
+		t.Fatal("upgrade without atomic replacement support succeeded")
+	}
+	manifestAfter := readFileT(t, filepath.Join(root, manifestName))
+	if !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatal("failed upgrade changed the committed manifest")
+	}
+	verified, err := pub.Verify()
+	if err != nil {
+		t.Fatalf("verify prior activation: %v", err)
+	}
+	if !verified.Installed || verified.Version != "1" || verified.Generation != "v1" {
+		t.Fatalf("verified activation = %+v, want prior installed v1", verified)
+	}
+
+	// The refusal must CONVERGE, not merely preserve. cleanupOrphans — the
+	// sweep that bounds tmp/ — runs only on the success path, and the nonce
+	// is fresh per attempt, so an unsupported server that is reconnected to
+	// every day would otherwise gain one dead manifest per connect forever.
+	for i := 0; i < 3; i++ {
+		if _, perr := pub.Publish(testBundle("2")); perr == nil {
+			t.Fatalf("upgrade attempt %d unexpectedly succeeded", i)
+		}
+	}
+	leftovers, rerr := os.ReadDir(filepath.Join(root, tmpName))
+	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		t.Fatalf("read tmp dir: %v", rerr)
+	}
+	for _, e := range leftovers {
+		if strings.HasPrefix(e.Name(), "manifest-") {
+			t.Fatalf("a refused upgrade left %d tmp entries behind, first %q", len(leftovers), e.Name())
+		}
 	}
 }
 

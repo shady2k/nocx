@@ -20,7 +20,15 @@ import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
-import { ShellInputTarget } from './input-target'
+import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
+import { AgentInputTarget } from './agent-ask'
+import { AgentClient } from './agent'
+import {
+  TargetIndicator,
+  chipFromSelection,
+  chipFingerprint,
+  type ReferenceChip,
+} from './ask-entry'
 import {
   submitCommand,
   planSubmit,
@@ -214,6 +222,10 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+  /** A question was refused because no endpoint is configured: open the
+   *  endpoint editor so the refusal comes with its repair — wired by
+   *  main.tsx to the Settings tab's Endpoints page. */
+  onCreateEndpoint?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -261,6 +273,14 @@ export class TerminalContent extends BaseTabContent {
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
+  /** The input-target registry (ADR-0004 §3): a submitted document routes
+   *  through active().submit — never a branch on "which mode am I in".
+   *  Shell is the default; the person switches it explicitly through the
+   *  caret indicator — click, or the ⌘/Ctrl+Enter chord, which flips the
+   *  target and sends nothing (nocx-4wtlh). Registration and routing ARE
+   *  this slice. */
+  private inputTargets: InputTargetRegistry | null = null
+  private agentTarget: AgentInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -297,6 +317,23 @@ export class TerminalContent extends BaseTabContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
+  /** The reference chips in the input line (nocx-4wtlh): the frozen
+   *  regions a question carries. A selection raises one; a question sent
+   *  to Ask consumes them all; a cleared scrollback takes their blocks. The
+   *  chips ARE the ask's payload — never re-derived from DOM selection at
+   *  submit time (AD-8: selection is copy; the chip is the record). */
+  private referenceChips: ReferenceChip[] = []
+  /** Monotonic chip id source — ids are for dismissal and dedupe, never
+   *  for anything the backend sees. */
+  private _chipSeq = 0
+  /** The caret indicator (ADR-0004 §3's UI chip): renders the active
+   *  input target beside the caret and is the person's one explicit
+   *  switch. Its label is pushed from the registry's change
+   *  notification — nothing else may repaint it. */
+  private indicator: TargetIndicator | null = null
+  /** The document selectionchange listener: a selection inside a finished
+   *  block's output raises a reference chip. Removed on dispose. */
+  private readonly onSelectionChange = (): void => this.raiseChipFromSelection()
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
@@ -311,6 +348,22 @@ export class TerminalContent extends BaseTabContent {
    *  be sighted more than once before the await resolves, and only the
    *  first sighting may claim the episode. */
   private _recoveryAcking = false
+  /** The establishment generation whose acknowledgement is in flight, and the
+   *  one whose acknowledgement the backend accepted. Replays are intentionally
+   *  idempotent — the same projection may arrive from a live transition and
+   *  again from the post-open or post-reattach replay — so a generation is
+   *  claimed once while its ack is outstanding and permanently once it lands.
+   *
+   *  The two are kept apart because a FAILED ack must not count as one. An
+   *  ack in flight when the socket drops is rejected by the dispatcher
+   *  (rejectAllPending), and the backend never saw it: its pending ACCEPT is
+   *  still unflushed, and the reattach replay carries that same generation
+   *  because only a fresh shell hello mints a new one. Collapsing both states
+   *  into "acknowledged" made the renderer suppress the one retry that could
+   *  have completed the handshake, leaving the tab conventional until the
+   *  accept expired. */
+  private _establishmentAckInFlight: string | null = null
+  private _establishmentAcked: string | null = null
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -687,6 +740,11 @@ export class TerminalContent extends BaseTabContent {
         // The renderer owns this tab's OSC 636 store; the scrollback's frozen
         // headers and the editor below must judge against the same instance.
         snapshotStore: renderer.snapshotStore,
+        // A `clear` took every block: the reference chips die with their
+        // blocks — a chip whose block is gone would point at nothing
+        // (AGENTS.md: a soft degrade the UI contradicts is how a feature
+        // that does not exist survives a release).
+        onClear: () => this.clearReferenceChips(),
       })
 
       log.info('nocx: mounting renderer')
@@ -745,24 +803,118 @@ export class TerminalContent extends BaseTabContent {
         env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
         recallIsOpen: () => this.recall?.isOpen ?? false,
       })
+      // The DOCUMENT-level layer, shared by both targets: the
+      // vault-reference chip (a decoration, not a language), the quiet
+      // composition-time candidate mark, and the unresolved-redaction field
+      // a recalled masked row registers in. None of them is about shell
+      // syntax, so a question keeps them; and they are built ONCE, so
+      // switching targets reconfigures the editor with the same state
+      // fields rather than minting fresh ones under the same document.
+      const documentLayer = [
+        secretChipExtension(),
+        secretCandidateExtension(),
+        unresolvedRedactionField,
+      ]
       this.shellTarget = new ShellInputTarget(
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
         // The target carries the shell's editor extensions through the §8.8
-        // seam: the shell highlighter, the completion surface, the
-        // vault-reference chip (a document-level decoration, not a
-        // language), the quiet composition-time candidate mark, and the
-        // unresolved-redaction field a recalled masked row registers in.
+        // seam: the shell highlighter and the completion surface — the two
+        // that ARE about commands — on top of the shared document layer.
         [
           ...shellExtensions(renderer.snapshotStore),
           ...this.completion.extensions(),
-          secretChipExtension(),
-          secretCandidateExtension(),
-          unresolvedRedactionField,
+          ...documentLayer,
         ],
       )
       const vault = new VaultClient(this.client)
       this.vault = vault
+
+      // The input-target registry (ADR-0004 §3): both targets registered,
+      // shell active by default. The submit path below routes through
+      // active().submit — the editor stays passive and never branches on
+      // the mode. The agent target is constructed with this tab's seams:
+      // the session id is read per submit (a reconnect mints a new
+      // session — the target must never capture against a stale one).
+      this.inputTargets = createRegistry((target) => {
+        // The line-start indicator renders the registry's active target
+        // and nothing else repaints it: this notification IS its refresh
+        // signal (ask-entry.ts). The indicator derives its own WORD from
+        // the target id — the registry's label stays the registry's.
+        this.indicator?.set(target.id, target.label)
+        // And the editor wears the target's own layer: the shell's
+        // highlighting and completion surface belong to the shell, so a
+        // question typed at Ask is plain prose — never `Привет!` painted
+        // as a command with an operator in it. One authority decides
+        // both — the registry — and the editor stays passive.
+        this.editor?.setTargetExtensions(target.editorExtensions?.() ?? [])
+      })
+      this.inputTargets.register(this.shellTarget)
+      this.agentTarget = new AgentInputTarget({
+        dispatcher: this.client.dispatcher,
+        sessionId: () => this.session?.sessionId ?? '',
+        cwd: () => this._cwd,
+        // The ask's payload is the reference chips in the input line —
+        // never re-derived from DOM selection at submit time (AD-8:
+        // selection is copy; the chip is the record).
+        chips: () => this.referenceChips,
+        // A new answer block, kept at the bottom of the view — the same
+        // rule a command's output lives by, which the ask path never had:
+        // nothing scrolled when a block was ADDED, so a question landed
+        // below the fold whenever the transcript already filled the pane
+        // (and looked fine whenever it did not, which is why it read as
+        // intermittent). The controller's scrollToBottom is a no-op while
+        // the person has scrolled away to read, so this follows without
+        // ever yanking the view out from under them.
+        openAnswer: (question, cwd) => {
+          const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd)
+          this.scrollback?.scrollToBottom()
+          // The streamed answer grows the block, and growth is the same
+          // situation as arrival: stay at the bottom unless the reader has
+          // gone elsewhere.
+          return {
+            ...handle,
+            append: (text: string) => {
+              handle.append(text)
+              this.scrollback?.scrollToBottom()
+            },
+            close: (status: 'success' | 'failure', error?: string) => {
+              handle.close(status, error)
+              this.scrollback?.scrollToBottom()
+            },
+          }
+        },
+        // The no-endpoint refusal is visible in the product, never only in
+        // a log (AGENTS.md: a soft degrade the UI contradicts is how a
+        // feature that does not exist survives a release).
+        onRefusal: (message) => showToast({ level: 'warning', message }),
+        // The typed readiness fact behind a refusal (agent.status), so the
+        // target never has to read the reason out of the message text.
+        status: () => new AgentClient(this.client.dispatcher).status(),
+        // No endpoint: the toast says what is wrong and this opens where it
+        // is fixed. A refusal with nowhere to go is how a person concludes
+        // the feature is broken rather than unconfigured.
+        onNoEndpoint: () => this.hooks.onCreateEndpoint?.(),
+        // A question's editor layer: the DOCUMENT-level surfaces only. The
+        // shell highlighter and the completion surface stay with the shell
+        // — prose is not a command and must not be painted as one — while
+        // the vault chip, its candidate mark and the unresolved-redaction
+        // field are language-agnostic and keep working, so an inserted
+        // reference is still a chip and not raw text in a question.
+        editorExtensions: () => documentLayer,
+      })
+      this.inputTargets.register(this.agentTarget)
+      // The caret indicator + its toggle: the person's one explicit
+      // switch. Clicking the chip (or ⌘/Ctrl+Enter) flips the active target;
+      // the registry's notification repaints the label. Ordinary use
+      // never touches it — it is the confirmation that Enter goes to the
+      // shell (nocx-4wtlh).
+      this.indicator = new TargetIndicator(() => {
+        const current = this.inputTargets?.active().id
+        if (!this.inputTargets || !current) return
+        this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
+      })
+
       this.editor = new CommandEditor(
         {
           // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
@@ -799,6 +951,27 @@ export class TerminalContent extends BaseTabContent {
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => {
+            // Routing, ADR-0004 §3: the registry decides where the document
+            // goes. A QUESTION is not a command — the shell orchestration
+            // below (keyboard handoff, ledger record, running block,
+            // lifecycle attempt) belongs to the shell target only. The
+            // agent target owns its whole flow (frame mint, ask, answer
+            // block), so the handoff never runs for it: the grid keeps its
+            // keys, the flow gains no phantom running block, and no
+            // attempt is opened for prose (nocx-x8s2.2).
+            const active = this.inputTargets!.active()
+            if (!active.routesToShell) {
+              // The target surfaces its own refusal (onRefusal → the
+              // toast); the rethrow is for programmatic callers, so the
+              // fire-and-forget path swallows it.
+              void active.submit(doc, { targetId: active.id }).catch(() => {})
+              // The chips in the line are consumed: they rode this
+              // question. The target reads them SYNCHRONOUSLY at the top of
+              // submit (before its first await), so the clear after the
+              // call can never eat them.
+              this.clearReferenceChips()
+              return
+            }
             // The atomic handoff transfers input ownership to the grid at
             // the moment the editor gives it up — not when the running fact
             // lands (an RPC round trip later). The editor already hid itself
@@ -844,7 +1017,9 @@ export class TerminalContent extends BaseTabContent {
               try {
                 submitCommand(doc, {
                   focusGrid: () => this.takeKeyboardToGrid(),
-                  sendDoc: (d) => void this.shellTarget!.submit(d),
+                  sendDoc: (d) => {
+                    void active.submit(d, { targetId: active.id })
+                  },
                 })
               } finally {
                 // In a `finally`, and fail-open: a write that threw sent
@@ -970,16 +1145,44 @@ export class TerminalContent extends BaseTabContent {
             }
             return this.promptVault?.saveCandidate() ?? false
           },
+          /** Whether a commit performs the shell handoff (ADR-0004 §2
+           *  step 1: the editor hides itself before anything is sent). The
+           *  TARGET declares what it is (routesToShell); this reads the
+           *  registry — the one authority — so the agent target's question
+           *  keeps the editor on screen for the next one (nocx-wmy4). */
+          handoffToShell: () => this.inputTargets?.active().routesToShell ?? true,
+          // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
+          // clicking the caret indicator, and the only thing the chord
+          // does. Asking is plain Enter with Ask active.
+          onToggleTarget: () => {
+            const current = this.inputTargets?.active().id
+            if (!this.inputTargets || !current) return
+            this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
+          },
+          onDismissChip: (id) => {
+            this.referenceChips = this.referenceChips.filter((c) => c.id !== id)
+            this.editor?.setReferenceChips(this.referenceChips)
+          },
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
-        // will want prose with mentions on this same surface, and an editor
-        // that defaults to shell would have to be edited to gain one — exactly
-        // what ADR-0004 §3 exists to prevent. The seam (design §8.8) carries
-        // the shell layer: the target supplies its extensions, the editor
-        // never hard-codes them.
-        this.shellTarget.editorExtensions?.() ?? [],
+        // wants prose on this same surface, and an editor that defaults to
+        // shell would have to be edited to gain one — exactly what ADR-0004
+        // §3 exists to prevent. The seam (design §8.8) carries the layer: the
+        // target supplies its extensions, the editor never hard-codes them.
+        //
+        // Only the STABLE layer is passed here. The target's own layer goes
+        // through setTargetExtensions below, because it changes when the
+        // person switches targets.
+        [
+          // The caret indicator (nocx-4wtlh): composed at the root, outside
+          // the target's layer — it renders the registry's ACTIVE target, so
+          // it belongs to neither target alone and must survive every swap.
+          this.indicator.extension(),
+        ],
       )
+      // The layer of the target Enter goes to right now (shell at start).
+      this.editor.setTargetExtensions(this.inputTargets.active().editorExtensions?.() ?? [])
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -1187,75 +1390,6 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // ── The authenticated lifecycle (ADR-0024 §6, decision 7) ──────────
-      // The published fact is the ONLY input to the lifecycle kernel: no
-      // stream sequence reaches it, and the eslint Rule 9 boundary forbids
-      // the import that would create a path. The backend routes facts to
-      // this session's lane; the kernel adopts the first lane and rejects
-      // the rest.
-      this._lifecycleUnsub = new LifecycleClient(this.client.dispatcher).subscribeLifecycleChanged(
-        (fact) => {
-          // ADR-0024 decision 8: a lost fact carrying a recovery contract
-          // opens a restoration episode — the channel died while the shell
-          // was reachable, and the shell will restore its visible native
-          // prompt at the next prompt boundary, writing the one-shot fence.
-          // From this instant until the acknowledgement lands, the session
-          // is neither an authenticated terminal nor advertised as a usable
-          // conventional one (the capability rail is suppressed below; the
-          // editor holds no authority and offers none). A native fact ends
-          // the episode.
-          if (fact.lifecycle === 'lost' && fact.recovery) {
-            this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
-          } else if (fact.lifecycle === 'native') {
-            this._recovery = null
-          }
-          // The kernel applies the fact and notifies onChange on a real
-          // change; the ownership sync runs there, once.
-          this.lifecycle.applyFact(fact)
-          // ADR-0024 decision 9: the establishment is acknowledged only
-          // AFTER the presentation is committed — applyFact above is what
-          // makes the editor available (ownership syncs on its onChange).
-          // The backend flushes the pending accept, and the shell may
-          // suppress its native prompt, ONLY on this acknowledgement for
-          // this exact generation. Without it the handshake times out and
-          // the session stays conventional with a visible prompt, which is
-          // the fail-open direction: no window in which the prompt is
-          // suppressed and no editor exists.
-          if (fact.lifecycle === 'prompt_ready' && fact.generation && this.session) {
-            new LifecycleClient(this.client.dispatcher)
-              .establishAck(
-                this.session.sessionId,
-                fact.lane,
-                fact.domain ?? '',
-                fact.epoch ?? 0,
-                fact.generation,
-              )
-              .catch((e: unknown) => {
-                // A refusal is the backend's own bookkeeping (stale
-                // generation, superseded establishment, replaced
-                // subscriber). The accept stays unflushed and the session
-                // stays conventional — safe, and nothing to retry here.
-                //
-                // The MESSAGE, not just the error object: five distinct
-                // backend rules all refuse with -32603, and logging the
-                // error alone rendered as `{"code":-32603,"name":"RpcError"}`
-                // — identical for every one of them. A reader could see that
-                // the handshake had been refused and never which rule did it,
-                // which is how the cause of six failing specs stayed
-                // "unknown" across three triage rounds (nocx-cbtc). The
-                // backend names the rule in its own log; this is the half a
-                // trace carries.
-                log.warn('nocx: establishment acknowledgement refused', {
-                  reason: e instanceof Error ? e.message : String(e),
-                  generation: fact.generation,
-                  lane: fact.lane,
-                  domain: fact.domain ?? '',
-                  epoch: fact.epoch ?? 0,
-                })
-              })
-          }
-        },
-      )
       // Match the shell's one-shot recovery fence in the render stream — an
       // explicit rendezvous, never a grid inspection or a pattern-matched
       // prompt (decision 1 carve-out). Only after BOTH the fence matched
@@ -1579,6 +1713,102 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
+      // ── The authenticated lifecycle (ADR-0024 §6, decision 7) ──────────
+      // The published fact is the ONLY input to the lifecycle kernel: no
+      // stream sequence reaches it, and the eslint Rule 9 boundary forbids
+      // the import that would create a path. The backend routes facts to
+      // this session's lane; the kernel adopts the first lane and rejects
+      // the rest.
+      const lifecycleSubscription = new LifecycleClient(
+        this.client.dispatcher,
+      ).subscribeLifecycleChanged((fact) => {
+        // ADR-0024 decision 8: a lost fact carrying a recovery contract
+        // opens a restoration episode — the channel died while the shell
+        // was reachable, and the shell will restore its visible native
+        // prompt at the next prompt boundary, writing the one-shot fence.
+        // From this instant until the acknowledgement lands, the session
+        // is neither an authenticated terminal nor advertised as a usable
+        // conventional one (the capability rail is suppressed below; the
+        // editor holds no authority and offers none). A native fact ends
+        // the episode.
+        if (fact.lifecycle === 'lost' && fact.recovery) {
+          this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+        } else if (fact.lifecycle === 'native') {
+          this._recovery = null
+        }
+        // The kernel applies the fact and notifies onChange on a real
+        // change; the ownership sync runs there, once.
+        this.lifecycle.applyFact(fact)
+        // ADR-0024 decision 9: the establishment is acknowledged only
+        // AFTER the presentation is committed — applyFact above is what
+        // makes the editor available (ownership syncs on its onChange).
+        // The backend flushes the pending accept, and the shell may
+        // suppress its native prompt, ONLY on this acknowledgement for
+        // this exact generation. Without it the handshake times out and
+        // the session stays conventional with a visible prompt, which is
+        // the fail-open direction: no window in which the prompt is
+        // suppressed and no editor exists.
+        if (
+          fact.lifecycle === 'prompt_ready' &&
+          fact.generation &&
+          fact.generation !== this._establishmentAckInFlight &&
+          fact.generation !== this._establishmentAcked &&
+          this.session
+        ) {
+          const generation = fact.generation
+          this._establishmentAckInFlight = generation
+          new LifecycleClient(this.client.dispatcher)
+            .establishAck(
+              this.session.sessionId,
+              fact.lane,
+              fact.domain ?? '',
+              fact.epoch ?? 0,
+              generation,
+            )
+            .then(() => {
+              // Only a landed acknowledgement retires the generation. The
+              // backend has flushed the accept, so a later replay of the
+              // same projection needs no second ack.
+              this._establishmentAcked = generation
+              if (this._establishmentAckInFlight === generation) {
+                this._establishmentAckInFlight = null
+              }
+            })
+            .catch((e: unknown) => {
+              // Release the claim: this generation was NOT acknowledged, and
+              // a replay carrying it again — the reattach case, where only a
+              // fresh shell hello would have minted a new one — is the retry
+              // that can still complete the handshake.
+              //
+              // A refusal is usually the backend's own bookkeeping (stale
+              // generation, superseded establishment, replaced subscriber),
+              // and then the replay simply does not come. Retrying costs one
+              // refused call in that case and recovers the session in the
+              // case that matters, so releasing is the safe direction.
+              //
+              // The MESSAGE, not just the error object: five distinct
+              // backend rules all refuse with -32603, and logging the
+              // error alone rendered as `{"code":-32603,"name":"RpcError"}`
+              // — identical for every one of them. A reader could see that
+              // the handshake had been refused and never which rule did it,
+              // which is how the cause of six failing specs stayed
+              // "unknown" across three triage rounds (nocx-cbtc). The
+              // backend names the rule in its own log; this is the half a
+              // trace carries.
+              if (this._establishmentAckInFlight === generation) {
+                this._establishmentAckInFlight = null
+              }
+              log.warn('nocx: establishment acknowledgement refused', {
+                reason: e instanceof Error ? e.message : String(e),
+                generation,
+                lane: fact.lane,
+                domain: fact.domain ?? '',
+                epoch: fact.epoch ?? 0,
+              })
+            })
+        }
+      })
+      this._lifecycleUnsub = lifecycleSubscription.unsubscribe
       const session = await this.openSessionWithHostKeyRecovery(signal)
 
       if (signal.aborted) {
@@ -1591,6 +1821,7 @@ export class TerminalContent extends BaseTabContent {
       }
 
       this.session = session
+      lifecycleSubscription.bindSession(session.sessionId)
       log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
 
       // The open ack carries the resolved launch policy and the refusal
@@ -1802,6 +2033,11 @@ export class TerminalContent extends BaseTabContent {
       })
 
       this._mounted = true
+      // The reference-chip seam: a document selection inside a finished
+      // block's output raises a chip (nocx-4wtlh). Registered at the end
+      // of mount so the editor and the scrollback exist; removed on
+      // dispose.
+      document.addEventListener('selectionchange', this.onSelectionChange)
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
         renderer: 'xterm',
@@ -2375,6 +2611,61 @@ export class TerminalContent extends BaseTabContent {
     }
   }
 
+  /** A document selection landed (or moved): if it is a real selection
+   *  inside one FINISHED block's output, freeze it into a reference chip.
+   *  Nothing else happens — the active target does not move, the shell is
+   *  not armed, the selection itself is untouched (copy keeps working).
+   *  Reselecting the identical region (same block, same rows) is a no-op;
+   *  a selection inside the editor's own draft is never a reference.
+   *  selectionchange fires on every caret move, so the guard is the
+   *  fingerprint, not the event. */
+  private raiseChipFromSelection(): void {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed) return
+    const anchor = sel.anchorNode
+    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return
+    const chip = chipFromSelection(sel)
+    if (!chip) return
+    const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
+    if (existing) return
+    const label = this.referenceChipLabel(chip)
+    this.referenceChips = [
+      ...this.referenceChips,
+      {
+        id: `ref-${(this._chipSeq = (this._chipSeq ?? 0) + 1)}`,
+        label,
+        blockEl: chip.blockEl,
+        rowStart: chip.rowStart,
+        rowEnd: chip.rowEnd,
+      },
+    ]
+    this.editor?.setReferenceChips(this.referenceChips)
+  }
+
+  /** The chip's name: the block's command and the covered row range —
+   *  the block names itself, the rows say what part is frozen. */
+  private referenceChipLabel(chip: {
+    blockEl: HTMLElement
+    rowStart: number
+    rowEnd: number
+  }): string {
+    const header = chip.blockEl.querySelector<HTMLElement>('.cmd-header-text')
+    const name = header?.textContent?.trim() || 'block'
+    const rows =
+      chip.rowEnd - chip.rowStart === 1
+        ? `row ${chip.rowStart + 1}`
+        : `rows ${chip.rowStart + 1}–${chip.rowEnd}`
+    return `${name} · ${rows}`
+  }
+
+  /** Drop every reference chip: a question sent to Ask consumed them, or
+   *  a `clear` took their blocks. The editor's strip follows. */
+  private clearReferenceChips(): void {
+    if (this.referenceChips.length === 0) return
+    this.referenceChips = []
+    this.editor?.clearReferenceChips()
+  }
+
   dispose(): void {
     this._disposed = true
     this.mountAbortController?.abort()
@@ -2401,6 +2692,9 @@ export class TerminalContent extends BaseTabContent {
     this.recall = null
     this.scrollback?.dispose()
     this.destroyReceipt()
+    this.clearReferenceChips()
+    document.removeEventListener('selectionchange', this.onSelectionChange)
+    this.indicator = null
     this.promptVault?.destroy()
     this.promptVault = null
     this.completion?.destroy()

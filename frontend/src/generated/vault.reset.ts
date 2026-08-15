@@ -22,6 +22,10 @@ export interface VaultResetResult {
    */
   profileCount: number
   /**
+   * AI endpoints that held at least one of them and will need a new key (ADR-0030, ADR-0031).
+   */
+  endpointCount: number
+  /**
    * Stores whose material could not be removed — empty when everything was. The renderer must not say 'everything was deleted' while this is non-empty. Always an array, never null: a null where the renderer's type says list has cost this project a defect once already (nocx-25k9.14).
    */
   residue: ResidueEntry[]

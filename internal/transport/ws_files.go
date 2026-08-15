@@ -37,14 +37,174 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
+
+// ── files.* ingress bounds and validators (the per-field sweep) ───────────
+//
+// Every files.* path is a provider path, and the provider owns path syntax:
+// "paths absolute and cleaned by the provider's rules" (internal/filesystem,
+// spec §5.2), enforced per call by each provider's private checkPath
+// (ErrInvalidPath → -32602). The predicate below is the transport's copy of
+// that documented contract — absolute, clean, bounded — moving the refusal
+// before the handler while the provider stays the owner of the rule and
+// still enforces it on every call. This is deliberately NOT the git
+// pathspec rule (ws_git.go): a git.* path is repository-relative.
+const (
+	// maxWatchPaths bounds the watch set files.watch may carry. The set is
+	// the expanded tree — one directory per expand gesture — and the handler
+	// lists each path synchronously for the baseline (filesBaseline), so the
+	// count is both a product ceiling and a per-call work bound.
+	maxWatchPaths = 512
+	// maxFileNameRunes bounds the save dialog's suggested file name: an OS
+	// file name component is limited to 255 bytes, and the dialog owns the
+	// final path.
+	maxFileNameRunes = 255
+)
+
+// validateFSPath checks one files.* path against the provider path contract.
+func validateFSPath(path, what string) string {
+	if path == "" {
+		return what + " is required"
+	}
+	if !filepath.IsAbs(path) {
+		return what + " must be an absolute path"
+	}
+	if filepath.Clean(path) != path {
+		return what + " must be a clean path"
+	}
+	if utf8.RuneCountInString(path) > maxPathRunes {
+		return fmt.Sprintf("%s exceeds %d characters", what, maxPathRunes)
+	}
+	return ""
+}
+
+// validateFilesOpenRaw checks files.open: the session the requesting
+// connection must own, and the optional D2 rootPath override.
+func validateFilesOpenRaw(raw json.RawMessage) string {
+	var p filesOpenParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.SessionID, 32) {
+		return "sessionId is required and must be the 32-hex id the backend minted"
+	}
+	// rootPath is the optional D2 override (the verified OSC 7 cwd). The
+	// provider interprets it by its own rules and FALLS BACK to Root() when
+	// it is absent or unusable (spec §5.1), so only the wire-cost bound is
+	// checked here: an unusable root is a designed fallback, never an error.
+	if utf8.RuneCountInString(p.RootPath) > maxPathRunes {
+		return fmt.Sprintf("rootPath exceeds %d characters", maxPathRunes)
+	}
+	return ""
+}
+
+// validateFilesListRaw checks files.list: the binding, the directory, and
+// the page the provider itself rules on (ErrInvalidPage → -32602).
+func validateFilesListRaw(raw json.RawMessage) string {
+	var p filesListParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if msg := validateFSPath(p.Path, "path"); msg != "" {
+		return msg
+	}
+	// The provider's own page rule, moved earlier. A large limit is
+	// saturating-safe in the provider (it can only cut at total) and stays
+	// accepted — only an impossible page is refused.
+	if p.Offset < 0 {
+		return "offset must not be negative"
+	}
+	if p.Limit < 1 {
+		return "limit must be at least 1"
+	}
+	return ""
+}
+
+// validateFilesReadRaw checks files.read: the binding, the file, and the
+// byte bound. maxBytes <= 0 is the legitimate "server default": the
+// provider's documented rule clamps anything <= 0 or above its 2 MiB ceiling
+// to the ceiling ("the parameter can only lower the 2 MiB ceiling"), so a
+// negative value — which no read can mean — is the only shape refused.
+func validateFilesReadRaw(raw json.RawMessage) string {
+	var p filesReadParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if msg := validateFSPath(p.Path, "path"); msg != "" {
+		return msg
+	}
+	if p.MaxBytes < 0 {
+		return "maxBytes must not be negative"
+	}
+	return ""
+}
+
+// validateFilesWatchRaw checks files.watch: the binding and the watch set.
+// An empty set is the deliberate "no watches" (the loop stops) and stays
+// accepted; a non-empty set is bounded by count and per-path shape.
+func validateFilesWatchRaw(raw json.RawMessage) string {
+	var p filesWatchParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if len(p.Paths) > maxWatchPaths {
+		return fmt.Sprintf("paths exceeds %d entries", maxWatchPaths)
+	}
+	for _, path := range p.Paths {
+		if msg := validateFSPath(path, "a watch path"); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateFilesCloseRaw checks files.close: the binding id.
+func validateFilesCloseRaw(raw json.RawMessage) string {
+	var p filesCloseParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	return ""
+}
+
+// validateFilesRevealRaw checks files.reveal: the binding and the path the
+// revealer hands to the OS file manager — a provider path, so the same
+// absolute+clean contract applies.
+func validateFilesRevealRaw(raw json.RawMessage) string {
+	var p filesRevealParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if msg := validateFSPath(p.Path, "path"); msg != "" {
+		return msg
+	}
+	return ""
+}
 
 // FilesystemProviderFactory builds the provider files.open registers for a
 // resolved session. rootPath is the optional D2 override — the verified
@@ -356,7 +516,7 @@ func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -443,7 +603,7 @@ func (h filesBindingHandlers) handleList(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -486,7 +646,7 @@ func (h filesBindingHandlers) handleRead(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -614,7 +774,7 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -652,7 +812,7 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -700,7 +860,7 @@ func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -727,28 +887,28 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
 	return []methodSpec{
-		reg(openSub, "files.open", func(w *wsConn, state *connState) handlerFunc {
-			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: w}
+		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.list", func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.read", func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.read", params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.watch", func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.watch", params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.close", func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.close", params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.reveal", func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.reveal", params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),
 	}

@@ -25,7 +25,8 @@ import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
-import { CollectionRow, CollectionView } from './ui/collection-view'
+import { CollectionView } from './ui/collection-view'
+import { RecordRow } from './ui/record-row'
 import {
   DEFAULT_KEY_MODE,
   KeyMaterialInput,
@@ -43,6 +44,7 @@ import {
   nonNegativeInteger,
   combine,
 } from './ui/validation'
+import { createSubmitGate } from './ui/submit-gate'
 import type {
   SSHProfile,
   ProfileGroup,
@@ -445,8 +447,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * The name is required, and the message belongs under the field: it is field
    * validation, answered by editing the field, and it clears as you type.
    */
-  const groupValidation = createFormValidation({
-    name: () => required('Name')(groupDraft()?.name ?? ''),
+  const groupValidation = createFormValidation(
+    { name: () => required('Name')(groupDraft()?.name ?? '') },
+    { controlId: (field) => (field === 'name' ? 'group-name' : field) },
+  )
+
+  // The one kit-owned answer to "how a form refuses a submit". The group
+  // editor is a Tabs surface too: the offending field may be on a section the
+  // user is not looking at, so the reveal hook opens the General section
+  // before the gate tries to focus it — without this the dialog would report
+  const groupGate = createSubmitGate(groupValidation, {
+    reveal: () => {
+      setGroupSection('general')
+    },
   })
 
   // ── Data loading ────────────────────────────────────────────────────────
@@ -692,13 +705,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   async function saveGroup() {
     const draft = groupDraft()
     if (!draft) return
-    if (!groupValidation.valid()) {
-      groupValidation.revealAll()
-      // The offending field may be in a section the user is not looking at.
-      // Reveal it there and the dialog reports nothing at all.
-      setGroupSection('general')
-      return
-    }
+    // The gate refuses: every failing field is revealed, the first is focused
+    // (the reveal hook opened the section holding it first), and the count is
+    // announced through the toast region.
+    if (!(await groupGate())) return
     setGroupApplyBusy(true)
     try {
       // Key material save (publicKey paste mode in group defaults)
@@ -1522,57 +1532,97 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (typeof v === 'number') return String(v)
     return ''
   }
+  // Where each rule's control lives, and which Tabs section holds it. Rule
+  // keys are logical names (`host`, `port`); the control ids are `profile-*`.
+  // The forwards list has no single focusable control — its error is a
+  // row-level message under the list — so it maps to no id, and the gate says
+  // it could not focus rather than pretend it did. A control on an unopened
+  // panel is NOT in the DOM (inactive panels carry `hidden`), which is why
+  // the gate's reveal hook must open the section before focusing.
+  const PROFILE_CONTROL_ID: Record<string, string | undefined> = {
+    name: 'profile-name',
+    host: 'profile-host',
+    port: 'profile-port',
+    keepaliveInterval: 'profile-keepalive-interval',
+    keepaliveCountMax: 'profile-keepalive-count',
+    readyTimeout: 'profile-ready-timeout',
+    forwards: undefined,
+  }
+  const PROFILE_SECTION: Record<string, string> = {
+    name: 'general',
+    host: 'general',
+    port: 'general',
+    key: 'auth',
+    keepaliveInterval: 'advanced',
+    keepaliveCountMax: 'advanced',
+    readyTimeout: 'advanced',
+    forwards: 'forwards',
+  }
 
-  const profileValidation = createFormValidation({
-    name: () => required('Name')(formProfile()?.name ?? ''),
-    host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
-    port: () => combine(required('Port'), portRule())(fieldText('port')),
-    // A Public Key connection with no key is a dead end: nothing to offer
-    // at connect time. The key may come from a stored secret, a path, or
-    // material about to be minted on save — but it must come from somewhere.
-    key: () => {
-      const p = formProfile()
-      if (!p || p.options.auth !== 'publicKey') return undefined
-      if (p.options.keySecret || p.options.keyPath) return undefined
-      if (suppliesMaterial(profileKeyMode()) && profileKeyText()) return undefined
-      return 'Choose a private key: a file, a path, pasted material, or a stored secret'
+  const profileValidation = createFormValidation(
+    {
+      name: () => required('Name')(formProfile()?.name ?? ''),
+      host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
+      port: () => combine(required('Port'), portRule())(fieldText('port')),
+      // A Public Key connection with no key is a dead end: nothing to offer
+      // at connect time. The key may come from a stored secret, a path, or
+      // pasted material — whichever it is, a missing key blocks save.
+      key: () => {
+        const p = formProfile()
+        if (!p || p.options.auth !== 'publicKey') return undefined
+        if (p.options.keySecret || p.options.keyPath) return undefined
+        if (suppliesMaterial(profileKeyMode()) && profileKeyText()) return undefined
+        return 'Choose a private key: a file, a path, pasted material, or a stored secret'
+      },
+      keepaliveInterval: () =>
+        nonNegativeInteger('Keepalive interval')(
+          String(formProfile()?.options.keepaliveInterval ?? ''),
+        ),
+      keepaliveCountMax: () =>
+        nonNegativeInteger('Keepalive count max')(
+          String(formProfile()?.options.keepaliveCountMax ?? ''),
+        ),
+      readyTimeout: () =>
+        nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
+      // The stored forwards must be a list the connect-time replay accepts —
+      // the editor and the backend ask the same question (firstForwardError
+      // mirrors ValidForwards). An invalid row blocks save, never ships.
+      forwards: () => {
+        const rows = formProfile()?.options.forwards
+        if (!rows || rows.length === 0) return undefined
+        return firstForwardError(rows)
+      },
     },
-    keepaliveInterval: () =>
-      nonNegativeInteger('Keepalive interval')(
-        String(formProfile()?.options.keepaliveInterval ?? ''),
-      ),
-    keepaliveCountMax: () =>
-      nonNegativeInteger('Keepalive count max')(
-        String(formProfile()?.options.keepaliveCountMax ?? ''),
-      ),
-    readyTimeout: () =>
-      nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
-    // The stored forwards must be a list the connect-time replay accepts —
-    // the editor and the backend ask the same question (firstForwardError
-    // mirrors ValidForwards). An invalid row blocks save, never ships.
-    forwards: () => {
-      const rows = formProfile()?.options.forwards
-      if (!rows || rows.length === 0) return undefined
-      return firstForwardError(rows)
+    {
+      // The key material editor's focusable inputs carry the mode's suffix
+      // (`profile-key-path` / `profile-key-text`); in secret or file mode
+      // there is no text control to focus.
+      controlId: (field) => {
+        if (field === 'key') {
+          if (profileKeyMode() === 'path') return 'profile-key-path'
+          if (profileKeyMode() === 'material') return 'profile-key-text'
+          return undefined
+        }
+        return PROFILE_CONTROL_ID[field]
+      },
+    },
+  )
+
+  // The one kit-owned answer to "how a form refuses a submit": reveal every
+  // failing field, focus the first one, and announce how many need attention.
+  // A failing field may live on an unopened panel — keepalive fields and the
+  // forwards list are not in the DOM until their section is shown, so the
+  // reveal hook opens the panel holding the field before focus is attempted.
+  const profileGate = createSubmitGate(profileValidation, {
+    reveal: (field) => {
+      setProfileSection(PROFILE_SECTION[field])
     },
   })
-
-  function gate(validation: {
-    valid(): boolean
-    revealAll(): void
-    firstError(): string | undefined
-  }) {
-    if (validation.valid()) return true
-    validation.revealAll()
-    const message = validation.firstError()
-    if (message) showToast({ level: 'warning', message })
-    return false
-  }
 
   // ── Save / delete / connect ────────────────────────────────────────────
 
   async function saveProfile(profile: SSHProfile) {
-    if (!gate(profileValidation)) return
+    if (!(await profileGate())) return
 
     // A Save landing while a password mint is still resolving waits for the
     // mint's bind: the bind persists the binding AND updates the draft, so
@@ -1830,47 +1880,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   // ── Row render helpers ───────────────────────────────────────────────
-
   function renderRow(p: SSHProfile) {
     const status = () => sessionStatuses()[p.id]
     const isTesting = () => probeBusy().has(p.id)
+    // The row's status: the kit's dot + text, the connections idiom. A live
+    // session is the ok tone; a disconnected one is neutral — a state that
+    // has nothing to say in colour. The last-used date rides the same
+    // sentence, one row, one status.
+    const statusLine = () => {
+      const st = status()
+      if (!st) return undefined
+      const lastUsed = st.lastUsed
+        ? ` · last used ${new Date(st.lastUsed).toLocaleDateString()}`
+        : ''
+      return {
+        tone: st.live ? ('ok' as const) : ('neutral' as const),
+        text: `${st.live ? 'Connected' : 'Disconnected'}${lastUsed}`,
+      }
+    }
     return (
-      <CollectionRow
-        info={
-          <>
-            <div class="cm-item-name">{p.name}</div>
-            <div class="cm-item-meta">
-              <Badge tone="neutral">{p.type.toUpperCase()}</Badge>
-              <span class="cm-item-address">
-                {p.options.user ? `${p.options.user}@` : ''}
-                {p.options.host}:{p.options.port || 22}
-              </span>
-              {/* Session state — Show with keyed narrows the type */}
-              <Show when={status()} keyed>
-                {(st) => (
-                  <span
-                    class="cm-session-state"
-                    classList={{ 'cm-session-live': st.live }}
-                    role="status"
-                    aria-label={st.live ? 'Connected' : 'Disconnected'}
-                  >
-                    <span class="cm-session-dot" aria-hidden="true" />
-                    {st.live ? 'Connected' : 'Disconnected'}
-                    <Show when={st.lastUsed} keyed>
-                      {(lastUsed) => (
-                        <span class="cm-session-last-used">
-                          &middot; last used {new Date(lastUsed).toLocaleDateString()}
-                        </span>
-                      )}
-                    </Show>
-                  </span>
-                )}
-              </Show>
-            </div>
-            {/* Secret bindings are shown in the editor; the Secrets page is
-                where they are managed (ADR-0017). */}
-          </>
-        }
+      <RecordRow
+        title={p.name}
+        kind={{ label: p.type.toUpperCase() }}
+        meta={`${p.options.user ? `${p.options.user}@` : ''}${p.options.host}:${p.options.port || 22}`}
+        status={statusLine()}
         actions={
           <>
             <IconButton
@@ -2034,12 +2067,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       ])
     }
 
-    function renderForwardRow(row: ForwardSpec, index: number): JSX.Element {
+    function renderForwardRow(row: () => ForwardSpec, index: number): JSX.Element {
       return (
         <div class="cm-forward-row">
           <Field for={`forward-${index}-direction`} label="Direction">
             <Select
-              value={row.direction}
+              value={row().direction}
               onChange={(v) => updateForward(index, { direction: v as ForwardDirection })}
               options={FORWARD_DIRECTIONS.map((d) => ({ value: d, label: d }))}
             />
@@ -2047,7 +2080,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <TextField
             id={`forward-${index}-bindhost`}
             label="Bind host"
-            value={row.bindHost ?? ''}
+            value={row().bindHost ?? ''}
             placeholder="127.0.0.1"
             onInput={(v) => updateForward(index, { bindHost: v || undefined })}
           />
@@ -2056,17 +2089,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             label="Bind port"
             type="number"
             min={0}
-            value={row.bindPort != null ? String(row.bindPort) : '0'}
+            value={row().bindPort != null ? String(row().bindPort) : '0'}
             onInput={(v) => {
               const n = parseInt(v, 10)
               updateForward(index, { bindPort: isNaN(n) ? 0 : n })
             }}
           />
-          <Show when={row.direction !== 'dynamic'}>
+          <Show when={row().direction !== 'dynamic'}>
             <TextField
               id={`forward-${index}-destination`}
               label="Destination"
-              value={row.destination ?? ''}
+              value={row().destination ?? ''}
               placeholder="host:port"
               onInput={(v) => updateForward(index, { destination: v })}
             />
@@ -2254,7 +2287,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       </Field>
                     }
                     publicKeyAction={
-                      <Field for="profile-key" label="Private Key">
+                      <Field
+                        for="profile-key"
+                        label="Private Key"
+                        error={profileValidation.error('key')}
+                      >
                         <KeyMaterialInput
                           id="profile-key"
                           mode={profileKeyMode()}

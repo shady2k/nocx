@@ -1,0 +1,21 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:row-grammar-update`.",
+    "",
+    "Every entry is a surface CSS class naming a composite-owned concept",
+    "(name/meta) under an item/row row prefix — the dialect RecordRow owns",
+    "(nocx-pp3y.3). The baseline may only shrink; a violation it does not",
+    "list is new and fails the lint gate.",
+    "",
+    "Each entry carries the one-line reason that makes it acceptable to keep.",
+    "When the reason stops holding, delete the entry (or regenerate — the",
+    "updater copies reasons forward by key and refuses to grow)."
+  ],
+  "violations": [
+    {
+      "file": "src/styles/surfaces/git.css",
+      "selector": ".git-log-row__meta",
+      "reason": "The Git panel's dense commit row predates the composite and its meta line carries several ref badges — not the composite's single-meta shape — so it stays a documented free-form CollectionRow row (its own git-log-row family). The rule guards the next surface from inventing a NEW family."
+    }
+  ]
+}

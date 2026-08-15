@@ -519,6 +519,21 @@ __nocx_nested_detect() {
     return 1
 }
 
+# sudo's descriptor-preservation flag is not portable: older sudo builds and
+# compatible substitutes reject the long option. Probe the executable itself,
+# not a version table, and do it BEFORE preexec/start/domain_request: a
+# negative answer returns "not nested", so the original accept-line chain runs
+# the untouched command exactly once. `--help` needs no authentication; the
+# option spelling is stable even when the surrounding prose is localized.
+__nocx_sudo_supports_preserve_fds() {
+    local __help
+    __help="$(LC_ALL=C command env -u BASHOPTS sudo --help 2>&1)" || true
+    case "$__help" in
+        *--preserve-fds*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Request the child domain and launch it. Runs from the accept-line widget
 # (which returns without accepting the line only when this returns 0). The
 # launch BLOCKS here for the child's whole lifetime — the parent shell is
@@ -534,6 +549,9 @@ __nocx_nested_detect() {
 __nocx_nested_launch() {
     local __line="$1" __rid __extra
     __nocx_nested_detect "$__line" || return 1
+    if [[ "$__nocx_nested_env" == "sudo" ]] && ! __nocx_sudo_supports_preserve_fds; then
+        return 1
+    fi
     # The C marker and the start event are emitted HERE, mirroring the bash
     # tier's DEBUG-trap ordering (preexec before launch): the widget never
     # accepts the line, so zsh's preexec hook will not fire for it — this
@@ -608,9 +626,9 @@ __nocx_nested_launch() {
             # never establishes, and the parent stillborn-activates at its
             # next prompt — asserted by the fd-closed su test.
             if [[ "$__nocx_nested_env" == "sudo" ]]; then
-                sudo --preserve-fds=3,$__nocx_boot_fd -i env -u BASH_ENV bash --rcfile /dev/fd/$__nocx_boot_fd -i </dev/tty
+                env -u BASHOPTS sudo --preserve-fds=3,$__nocx_boot_fd -i env -u BASH_ENV -u BASHOPTS bash --rcfile /dev/fd/$__nocx_boot_fd -i </dev/tty
             else
-                su -l -c 'env -u BASH_ENV bash --rcfile /dev/fd/'"$__nocx_boot_fd"' -i' </dev/tty
+                env -u BASHOPTS su -l -c 'env -u BASH_ENV -u BASHOPTS bash --rcfile /dev/fd/'"$__nocx_boot_fd"' -i' </dev/tty
             fi
             __nocx_nested_rc=$?
             # The child closes its own copy after reading the rcfile (the

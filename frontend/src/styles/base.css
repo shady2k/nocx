@@ -277,6 +277,12 @@ select:focus-visible {
   .ui-page__rail {
     width: auto;
     overflow-y: visible;
+    /* The stacked rail trims its own chrome: at the narrow breakpoint the
+       rail's footprint competes with the content for the pane's height, and
+       a compact rail is a rail property — the surface that hosts it must
+       not repaint it (rule 3, nocx-dgsp). */
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
   }
 }
 

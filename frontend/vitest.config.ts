@@ -17,6 +17,12 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // Generated contract DTOs (src/generated/*.ts) are never tests, but a
+    // method whose last segment is a vitest keyword — endpoints.test,
+    // sessions.spec — would emit a file matching the include globs above.
+    // The method names are wire vocabulary; the exclude is what keeps a
+    // future `.test`/`.spec`/`.bench` method from breaking the suite.
+    exclude: ['src/generated/**'],
     setupFiles: ['./vitest.setup.ts'],
   },
 })

@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/settings"
@@ -885,6 +890,260 @@ func TestValidateSettingMatchesBulkRestoreValidation(t *testing.T) {
 			if err := reg.ValidateSetting(tc.key, tc.value); err == nil {
 				t.Fatal("invalid setting accepted")
 			}
+		})
+	}
+}
+
+// ── Group catalogue (nocx-dgsp) ────────────────────────────────────────
+// The rail's group catalogue is declared in Go and ships beside the
+// declarations in settings.describe; these tests pin the declared catalogue
+// and the registration API that grows it.
+
+// Test-only group + section mapping, registered through the same API
+// production uses — the "adding a section to a group is a Go-side change"
+// flow (nocx-dgsp criterion 2), exercised without touching the production
+// registrations.
+func init() {
+	settings.RegisterGroup(settings.SettingsGroup{ID: "testgroup", Title: "Test Group", Order: 99})
+	settings.RegisterSectionGroup("Experiments", "testgroup")
+}
+
+func TestGroups_DeclaredCatalogue(t *testing.T) {
+	// Read through a Registry — the same path capability/config.go takes to
+	// the wire — never through a package-level accessor that could drift
+	// from it (the deadcode ratchet is how the duplicate was caught).
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	groups := reg.Groups()
+	byID := make(map[string]settings.SettingsGroup, len(groups))
+	orders := make(map[int]string, len(groups))
+	for _, g := range groups {
+		byID[g.ID] = g
+		if other, dup := orders[g.Order]; dup {
+			t.Errorf("groups %q and %q share order %d — the rail cannot sort by it", other, g.ID, g.Order)
+		}
+		orders[g.Order] = g.ID
+	}
+	for _, want := range []struct {
+		id, title string
+		order     int
+	}{
+		{"assistant", "Assistant", 0},
+		{"vault", "Vault", 1},
+		{"application", "Application", 2},
+		{"developer", "Developer", 3},
+	} {
+		g, ok := byID[want.id]
+		if !ok {
+			t.Errorf("group %q missing from the catalogue", want.id)
+			continue
+		}
+		if g.Title != want.title {
+			t.Errorf("group %q title = %q, want %q", want.id, g.Title, want.title)
+		}
+		if g.Order != want.order {
+			t.Errorf("group %q order = %d, want %d", want.id, g.Order, want.order)
+		}
+	}
+}
+
+func TestSectionGroups_ProductionMappings(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	sg := reg.SectionGroups()
+	for section, want := range map[string]string{
+		"Interface": "application",
+		"Clipboard": "application",
+		"History":   "application",
+		"Test":      "developer",
+	} {
+		got, ok := sg[section]
+		if !ok {
+			t.Errorf("section %q belongs to no group", section)
+			continue
+		}
+		if got != want {
+			t.Errorf("section %q → group %q, want %q", section, got, want)
+		}
+	}
+	// A section nobody placed is ungrouped, not an error — it renders at top
+	// level (criterion 1's Connections is the component-page instance; this is
+	// the generated-section one).
+	if _, ok := sg["No.Such.Section"]; ok {
+		t.Error("an unplaced section resolved to a group")
+	}
+}
+
+func TestSectionGroup_AddedThroughRegistry(t *testing.T) {
+	// The init() registration above went through RegisterSectionGroup — the
+	// same one-line API a real Go-side change uses. The describe payload
+	// carries the result with no frontend edit (criterion 2, Go half); read
+	// it back through a Registry, the wire path.
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	got, ok := reg.SectionGroups()["Experiments"]
+	if !ok || got != "testgroup" {
+		t.Fatalf("Experiments → %q (ok=%v), want testgroup", got, ok)
+	}
+}
+
+func TestRegisterGroup_DuplicateIDPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("RegisterGroup with a duplicate id did not panic")
+		}
+	}()
+	settings.RegisterGroup(settings.SettingsGroup{ID: "assistant", Title: "Assistant Again", Order: 50})
+}
+
+func TestRegisterSectionGroup_UnknownGroupPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("RegisterSectionGroup with an undeclared group id did not panic")
+		}
+	}()
+	settings.RegisterSectionGroup("No.Such.Section", "no-such-group")
+}
+
+func TestRegisterSectionGroup_DuplicateSectionPanics(t *testing.T) {
+	// One section, one group — the same contradiction a per-declaration field
+	// would permit, refused at registration instead (criterion 3).
+	defer func() {
+		if recover() == nil {
+			t.Error("RegisterSectionGroup for an already-placed section did not panic")
+		}
+	}()
+	settings.RegisterSectionGroup("Test", "testgroup")
+}
+
+func TestDeclaration_HasNoPerDeclarationGroupField(t *testing.T) {
+	// Criterion 3, asserted by construction: the section→group mapping is the
+	// one owner, so a Declaration can never disagree with a sibling in its
+	// section. This test fails the moment a per-declaration group field is
+	// added to the wire type.
+	declType := reflect.TypeOf(settings.Declaration{})
+	for _, name := range []string{"Group", "GroupID", "GroupId", "GroupName"} {
+		if _, found := declType.FieldByName(name); found {
+			t.Errorf("Declaration gained per-declaration field %q — the section→group mapping must stay the one owner", name)
+		}
+	}
+}
+
+func TestSectionGroups_SameSectionSameGroup(t *testing.T) {
+	// Every declaration resolves through the same section-keyed mapping, so
+	// two declarations in one section cannot disagree.
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	sg := reg.SectionGroups()
+	bySection := make(map[string]string)
+	for _, d := range reg.Declarations() {
+		gid, ok := sg[d.Section]
+		if !ok {
+			continue
+		}
+		if prev, seen := bySection[d.Section]; seen && prev != gid {
+			t.Errorf("section %q resolved to both %q and %q", d.Section, prev, gid)
+		}
+		bySection[d.Section] = gid
+	}
+	for _, section := range []string{"Interface", "Clipboard", "History"} {
+		if _, ok := sg[section]; !ok {
+			t.Errorf("production section %q is not placed in any group", section)
+		}
+	}
+}
+
+func TestRegistry_GroupsAndSectionGroups(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	if len(reg.Groups()) == 0 {
+		t.Error("registry reports an empty group catalogue")
+	}
+	sg := reg.SectionGroups()
+	if sg["History"] != "application" {
+		t.Errorf("registry SectionGroups[History] = %q, want application", sg["History"])
+	}
+	// The registry hands out a copy: mutating it must not corrupt the
+	// catalogue the describe payload reads from.
+	sg["History"] = "mutated"
+	if reg.SectionGroups()["History"] != "application" {
+		t.Error("mutating the returned SectionGroups map corrupted the catalogue")
+	}
+}
+
+// ── Contract conformance (nocx-dgsp addendum 2) ────────────────────────
+// The settings.describe result shape is declared once, in
+// contracts/settings.describe.schema.json; the renderer's types are
+// generated from it and the Go side is validated against it. The DTO test
+// below pins the marshalled envelope (field tags, omitempty, nil-slice
+// behaviour); the over-the-wire test lives in internal/app where the real
+// composition root answers the real method over a real socket.
+
+// contractDir holds the wire schemas; from internal/settings the repo root
+// is two levels up. The loader mirrors the one in
+// internal/transport/ws_contract_test.go, which this package cannot import.
+const contractDir = "../../contracts"
+
+func loadSettingsContractSchema(t *testing.T, name string) *jsonschema.Schema {
+	t.Helper()
+	c := jsonschema.NewCompiler()
+	path := filepath.Join(contractDir, name)
+	f, openErr := os.Open(path) //nolint:gosec // test-only path under contracts/
+	if openErr != nil {
+		t.Fatalf("open %s: %v", path, openErr)
+	}
+	defer func() { _ = f.Close() }()
+	doc, parseErr := jsonschema.UnmarshalJSON(f)
+	if parseErr != nil {
+		t.Fatalf("parse %s: %v", path, parseErr)
+	}
+	if addErr := c.AddResource("https://nocx.local/contracts/"+name, doc); addErr != nil {
+		t.Fatalf("add %s: %v", name, addErr)
+	}
+	s, err := c.Compile("https://nocx.local/contracts/" + name)
+	if err != nil {
+		t.Fatalf("compile %s: %v", name, err)
+	}
+	return s
+}
+
+func validateSettingsContract(t *testing.T, s *jsonschema.Schema, raw []byte, what string) {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%s: unmarshal: %v", what, err)
+	}
+	if err := s.Validate(doc); err != nil {
+		t.Errorf("%s does not satisfy its contract:\n%v\n\npayload was:\n%s", what, err, raw)
+	}
+}
+
+func TestSettingsDescribe_DTOConformsToContract(t *testing.T) {
+	schema := loadSettingsContractSchema(t, "settings.describe.schema.json")
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	cases := map[string]map[string]any{
+		// Everything populated: the real registry's declarations and group
+		// catalogue, marshalled exactly as the transport builds the
+		// settings.describe envelope. Covers the fields omitempty hides —
+		// unit/zeroLabel on numbers, options on selects, absent default on
+		// secrets.
+		"populated": {
+			"declarations":  reg.Declarations(),
+			"groups":        reg.Groups(),
+			"sectionGroups": reg.SectionGroups(),
+		},
+		// Empty arrays must marshal as [] and an empty mapping as {} —
+		// never null, which the renderer's .map / Object.entries would
+		// throw on.
+		"empty": {
+			"declarations":  []settings.Declaration{},
+			"groups":        []settings.SettingsGroup{},
+			"sectionGroups": map[string]string{},
+		},
+	}
+	for name, envelope := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateSettingsContract(t, schema, raw, "settings.describe DTO ("+name+")")
 		})
 	}
 }

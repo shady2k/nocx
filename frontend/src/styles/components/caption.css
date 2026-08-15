@@ -1,0 +1,27 @@
+/* ── Caption — the kit's group-caption register (nocx-dgsp) ─────────────
+   One owner of the app's caption vocabulary: a label over a group of rows,
+   uppercase and letter-spaced, semibold, small, muted. Matches the captions
+   that already exist (sidebar.css `.sidebar-title`: 2xs/600/0.08em/uppercase/
+   text-dim; floating-panel.css `.ui-floating-panel__group`: xs/0.04em/
+   uppercase/text-muted; connections.css `.cm-group-header`: 600/0.05em/
+   uppercase). Surfaces place this element and never repaint it; the kit
+   names the register once. */
+
+.ui-caption {
+  font-family: inherit;
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+
+/* `size="context"` — the caption tracks its column: it takes the surrounding
+   type size (the same mechanism the ghost Button's rows use, `font:
+   inherit`), so a caption over a row group reads at the rows' size in every
+   layout of that column — the hierarchy stays in the case, weight, spacing
+   and colour, never in being smaller (floating-panel's answer). */
+.ui-caption[data-size='context'] {
+  font-size: inherit;
+}

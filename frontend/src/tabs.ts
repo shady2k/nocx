@@ -374,6 +374,10 @@ export class TabManager {
   /** The prompt picker's "Add a secret…" row — opens Settings → Secrets
    *  with the add dialog up. */
   onCreateSecret?: (name: string) => void
+  /** A question refused for want of an endpoint — opens Settings →
+   *  Endpoints with the editor up on a blank one, so the refusal carries
+   *  its repair. */
+  onCreateEndpoint?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -472,6 +476,7 @@ export class TabManager {
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
+        onCreateEndpoint: this.onCreateEndpoint,
       },
     )
     const descriptor: ContentDescriptor = {
@@ -522,6 +527,7 @@ export class TabManager {
         onHostKeyError: this.onHostKeyError,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
+        onCreateEndpoint: this.onCreateEndpoint,
       },
     )
     const descriptor: ContentDescriptor = {

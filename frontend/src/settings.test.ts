@@ -17,7 +17,7 @@ import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
-import type { Declaration } from './settings-domain'
+import type { Declaration, SettingsGroup } from './settings-domain'
 import type { TabHost } from './tab-content'
 import { VaultSection } from './vault'
 import type { VaultClient } from './vault-client'
@@ -80,6 +80,23 @@ const TEST_DECLARATIONS: Declaration[] = [
   },
 ]
 
+// The rail's group catalogue, mirroring what the Go side declares
+// (internal/settings) — the snapshot serves it, the frontend keeps no table
+// of its own (nocx-dgsp). The fixture's sections map to groups the way the
+// Go catalogue maps Interface/Clipboard/History to application.
+const TEST_GROUPS: SettingsGroup[] = [
+  { id: 'assistant', title: 'Assistant', order: 0 },
+  { id: 'vault', title: 'Vault', order: 1 },
+  { id: 'application', title: 'Application', order: 2 },
+  { id: 'developer', title: 'Developer', order: 3 },
+]
+const TEST_SECTION_GROUPS: Record<string, string> = {
+  Terminal: 'application',
+  Application: 'application',
+  AI: 'developer',
+  Test: 'developer',
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 // jsdom does not implement scrollIntoView. Define it once for all tests.
@@ -100,18 +117,23 @@ if (!('scrollTo' in HTMLElement.prototype)) {
   })
 }
 
-/** Shorthand for mocking client RPCs. */
 function mockReady(
   client: ProfileClient,
   overrides: {
     declarations?: Declaration[]
+    groups?: SettingsGroup[]
+    sectionGroups?: Record<string, string>
     values?: Record<string, unknown>
     overridden?: string[]
     secrets?: Record<string, boolean>
   } = {},
 ): void {
   const decls = overrides.declarations ?? TEST_DECLARATIONS
-  vi.spyOn(client, 'describeSettings').mockResolvedValue({ declarations: decls })
+  vi.spyOn(client, 'describeSettings').mockResolvedValue({
+    declarations: decls,
+    groups: overrides.groups ?? TEST_GROUPS,
+    sectionGroups: overrides.sectionGroups ?? TEST_SECTION_GROUPS,
+  })
   vi.spyOn(client, 'getSnapshot').mockResolvedValue({
     values: overrides.values ?? {},
     overridden: overrides.overridden ?? [],
@@ -221,26 +243,38 @@ describe('SettingsContent', () => {
     expect(countSpan!.textContent).toBe('1')
   })
 
-  it('section nav lists every generated section in declaration order, then component pages', async () => {
+  it('rail renders group headings, every page under exactly its declared group, ungrouped pages at top level (criterion 1)', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.ui-settings-section-nav-item > .ui-button')
-    const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const headings = Array.from(nav.querySelectorAll('.ui-grouped-nav__heading')).map(
+      (h) => h.textContent,
+    )
+    expect(headings).toEqual(['Assistant', 'Vault', 'Application', 'Developer'])
 
-    // Generated sections keep Go's declaration order and stay first — that is
-    // (nocx-imkb.3 put Connections here, and Backup & Restore is one too)
-    // follow them, so asserting the whole list rather than a prefix keeps a
-    // stray insertion visible.
+    const items = Array.from(nav.querySelectorAll<HTMLElement>('.ui-grouped-nav__item'))
+    const labels = items.map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
+    // Top level first (Connections — a working surface, not a setting), then
+    // groups in catalogue order with their members in registry order.
     expect(labels).toEqual([
+      'Connections',
+      'Endpoints',
+      'Protection',
+      'Secrets',
       'Terminal',
       'Application',
-      'AI',
       'Backup & Restore',
-      'Connections',
-      'Secrets',
-      'Vault',
+      'AI',
     ])
+
+    // Connections is top level: a direct child of the top list, not a group.
+    const topList = nav.querySelector('.ui-grouped-nav__list')!
+    const first = topList.querySelector(':scope > li') as HTMLElement
+    expect(first.getAttribute('data-item')).toBe('connections')
+    // And no page appears twice.
+    const ids = items.map((l) => l.getAttribute('data-item'))
+    expect(new Set(ids).size).toBe(ids.length)
   })
 
   it('section nav shows per-section modified counts', async () => {
@@ -249,7 +283,7 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.ui-settings-section-nav-item > .ui-button')
+    const links = target.querySelectorAll('.ui-grouped-nav__item > .ui-button')
     const terminalLink = Array.from(links).find((l) => l.textContent.includes('Terminal'))
     const appLink = Array.from(links).find((l) => l.textContent.includes('Application'))
     const aiLink = Array.from(links).find((l) => l.textContent.includes('AI'))
@@ -294,7 +328,7 @@ describe('SettingsContent', () => {
 
     // Find the section nav link for Application
     const appLink = Array.from(
-      target.querySelectorAll<HTMLButtonElement>('.ui-settings-section-nav-item > .ui-button'),
+      target.querySelectorAll<HTMLButtonElement>('.ui-grouped-nav__item > .ui-button'),
     ).find((l) => l.textContent.includes('Application'))
     expect(appLink).toBeTruthy()
 
@@ -302,15 +336,123 @@ describe('SettingsContent', () => {
     appLink!.click()
 
     await vi.waitFor(() => {
-      const appItem = appLink!.closest('.ui-settings-section-nav-item')
-      expect(appItem!.classList.contains('ui-settings-section-nav-active')).toBe(true)
+      const appItem = appLink!.closest('.ui-grouped-nav__item')
+      expect(appItem!.getAttribute('data-selected')).toBe('true')
     })
 
     // The previously-active nav highlight should have moved.
     const terminalItem = appLink!
       .closest('[aria-label="Settings sections"]')!
-      .querySelector('.ui-settings-section-nav-item[data-section="Terminal"]')
-    expect(terminalItem!.classList.contains('ui-settings-section-nav-active')).toBe(false)
+      .querySelector('.ui-grouped-nav__item[data-item="Terminal"]')
+    expect(terminalItem!.hasAttribute('data-selected')).toBe(false)
+  })
+
+  // ── Groups (nocx-dgsp) ─────────────────────────────────────────────
+
+  it('Test section renders under Developer (criterion 7)', async () => {
+    const testDecl: Declaration = {
+      key: 'test.fixture',
+      section: 'Test',
+      label: 'Fixture',
+      description: 'A fixture declaration in the fixture section.',
+      control: 'toggle',
+      dataClass: 'publicConfig',
+      default: true,
+    }
+    mockReady(client, { declarations: [...TEST_DECLARATIONS, testDecl] })
+    await content.mount(target, host, signal)
+
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const devGroup = nav.querySelector<HTMLElement>(
+      '.ui-grouped-nav__group[data-group="developer"]',
+    )!
+    expect(devGroup.textContent).toContain('Test')
+  })
+
+  it('the vault page is titled Protection and its registry id is still vault (criterion 8)', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const vaultItem = nav.querySelector<HTMLElement>('.ui-grouped-nav__item[data-item="vault"]')!
+    expect(vaultItem.textContent).toContain('Protection')
+    // The id is the address: still 'vault', still under the Vault group.
+    const vaultGroup = nav.querySelector<HTMLElement>('.ui-grouped-nav__group[data-group="vault"]')!
+    expect(vaultGroup.contains(vaultItem)).toBe(true)
+    expect(vaultGroup.textContent).toContain('Secrets')
+  })
+
+  it('deep links open their page by id with its group visible, no second address (criterion 5)', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    // newSecret addresses the Secrets page by id — the rail then shows it
+    // active under the Vault heading.
+    content.startNewSecret('my-secret')
+    await vi.waitFor(() => {
+      const secretsItem = target.querySelector<HTMLElement>(
+        '.ui-grouped-nav__item[data-item="secrets"]',
+      )!
+      expect(secretsItem.getAttribute('data-selected')).toBe('true')
+    })
+    const vaultGroup = target.querySelector<HTMLElement>(
+      '.ui-grouped-nav__group[data-group="vault"]',
+    )!
+    expect(vaultGroup.contains(target.querySelector('[data-item="secrets"]'))).toBe(true)
+
+    // newConnection addresses the Connections page by id — top level, no group.
+    content.startNewConnection()
+    await vi.waitFor(() => {
+      const connItem = target.querySelector<HTMLElement>(
+        '.ui-grouped-nav__item[data-item="connections"]',
+      )!
+      expect(connItem.getAttribute('data-selected')).toBe('true')
+    })
+    const topList = target.querySelector('.ui-grouped-nav__list')!
+    expect(topList.querySelector(':scope > [data-item="connections"]')).toBeTruthy()
+  })
+
+  it('search results still name their section and search is not scoped to a group (criterion 6)', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    const searchInput = target.querySelector<HTMLInputElement>('input[type="search"]')!
+    searchInput.value = 'font'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(visibleRows().length).toBe(2)
+    })
+
+    // The matching rows sit under their section's heading, still named.
+    const visibleSection = Array.from(
+      target.querySelectorAll<HTMLElement>('.ui-settings section'),
+    ).find((s) => !s.closest('.st-vis-hidden'))
+    expect(visibleSection!.querySelector('h2')!.textContent).toBe('Terminal')
+
+    // The rail still shows every group — search narrows rows, never groups.
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const headings = Array.from(nav.querySelectorAll('.ui-grouped-nav__heading')).map(
+      (h) => h.textContent,
+    )
+    expect(headings).toEqual(['Assistant', 'Vault', 'Application', 'Developer'])
+  })
+
+  it('a component page naming a group the catalogue lacks never renders silently at top level (criterion 4)', async () => {
+    mockReady(client, { groups: TEST_GROUPS.filter((g) => g.id !== 'vault') })
+    await content.mount(target, host, signal)
+    // The kit throws on the undeclared id (asserted in grouped-rail.test.tsx);
+    // at the surface that means the rail never renders — the malformed
+    // catalogue produces no silent top-level 'vault' row and no partial rail.
+    expect(target.querySelector('.ui-grouped-nav')).toBeNull()
+    expect(target.querySelector('[data-item="vault"]')).toBeNull()
+  })
+
+  it('settings.tsx keeps no bespoke rail markup — the kit component owns the nav (criterion 9)', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+    expect(target.querySelector('.ui-settings-section-nav')).toBeNull()
+    expect(target.querySelector('nav.ui-grouped-nav[aria-label="Settings sections"]')).toBeTruthy()
   })
 
   // ── Narrow viewport ────────────────────────────────────────────────
@@ -465,9 +607,11 @@ describe('SettingsContent', () => {
 
   // ── Registry: generated-screen invariant (Deliverable 2) ───────────
 
-  it('generated-screen invariant: adding a declaration section auto-creates a nav entry', async () => {
-    // A new declaration in a new section appears automatically in the
-    // section nav — no frontend code change needed for a Go-declared section.
+  it('a section added to a group is a Go-side change with no frontend edit — the snapshot drives the rail (criterion 2)', async () => {
+    // Simulate the Go-side change end to end: a new declaration section AND
+    // its RegisterSectionGroup call, both served by the describe snapshot.
+    // The rail reads the mapping from the snapshot; there is no lookup table
+    // in the frontend for a section to fall out of.
     const extraDecl: Declaration = {
       key: 'editor.tabSize',
       section: 'Editor',
@@ -479,12 +623,23 @@ describe('SettingsContent', () => {
       min: 1,
       max: 8,
     }
-    mockReady(client, { declarations: [...TEST_DECLARATIONS, extraDecl] })
+    mockReady(client, {
+      declarations: [...TEST_DECLARATIONS, extraDecl],
+      sectionGroups: { ...TEST_SECTION_GROUPS, Editor: 'application' },
+    })
     await content.mount(target, host, signal)
 
-    const links = target.querySelectorAll('.ui-settings-section-nav-item > .ui-button')
-    const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const labels = Array.from(nav.querySelectorAll<HTMLElement>('.ui-grouped-nav__item')).map((l) =>
+      l.textContent.replace(/\s*\d+\s*/, '').trim(),
+    )
     expect(labels).toContain('Editor')
+    // The new section renders under the Application heading — the mapping
+    // arrived from the snapshot, exactly as a Go change would ship it.
+    const appGroup = nav.querySelector<HTMLElement>(
+      '.ui-grouped-nav__group[data-group="application"]',
+    )!
+    expect(appGroup.textContent).toContain('Editor')
     // Original sections still present.
     expect(labels).toContain('Terminal')
     expect(labels).toContain('Application')

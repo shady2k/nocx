@@ -59,16 +59,16 @@ type lifecycleEstablishAckParams struct {
 //     slot is cleared on teardown, so a dead connection fails this too);
 //   - (e) no pending establishment for the tuple, or a generation mismatch,
 //     is refused at the publisher — stale or foreign acks release nothing.
-func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
+		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params lifecycleEstablishAckParams
 	if err := json.Unmarshal(req.Params, &params); err != nil ||
 		params.SessionID == "" || params.Lane == "" || params.Domain == "" ||
 		params.Epoch == 0 || params.Generation == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId, lane, domain, epoch and generation required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId, lane, domain, epoch and generation required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
@@ -85,7 +85,7 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 			"rule", rule, "reason", msg, "session", string(sid),
 			"lane", params.Lane, "domain", params.Domain,
 			"epoch", params.Epoch, "generation", params.Generation)
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
 	}
 	// (b) alive: the session must be open, and owned by this connection.
 	if _, err := s.registry.Get(sid); err != nil || !state.has(sid) {
@@ -138,5 +138,5 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	s.log.Debug("establishment acknowledged",
 		"session", string(sid), "lane", params.Lane, "domain", params.Domain,
 		"epoch", params.Epoch, "generation", params.Generation)
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
+	_ = r.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }

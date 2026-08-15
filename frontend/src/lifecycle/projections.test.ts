@@ -8,8 +8,7 @@
 // block model opens on an attempt and freezes on its completion. The
 import { describe, it, expect, vi } from 'vitest'
 import { LifecycleKernel } from './state'
-import type { ExecutionAttempt } from './state'
-import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { ExecutionAttempt, LifecycleFact } from './state'
 import { CommandLedger } from '../command-ledger'
 import type { CommandRecord } from '../command-ledger'
 import { LifecycleProjections, type BlockProjectionPort } from './projections'
@@ -17,15 +16,15 @@ import { LifecycleProjections, type BlockProjectionPort } from './projections'
 const LANE = 'lane-1'
 const FENCE = 'a'.repeat(64)
 
-function promptReady(domain = 'd1', epoch = 1): LifecycleChanged {
+function promptReady(domain = 'd1', epoch = 1): LifecycleFact {
   return { lane: LANE, lifecycle: 'prompt_ready', domain, epoch }
 }
 
 function running(
   domain = 'd1',
   epoch = 1,
-  attempt: Partial<NonNullable<LifecycleChanged['attempt']>> = {},
-): LifecycleChanged {
+  attempt: Partial<NonNullable<LifecycleFact['attempt']>> = {},
+): LifecycleFact {
   return {
     lane: LANE,
     lifecycle: 'running',
@@ -35,7 +34,7 @@ function running(
   }
 }
 
-function lostF(): LifecycleChanged {
+function lostF(): LifecycleFact {
   return { lane: LANE, lifecycle: 'lost' }
 }
 
@@ -343,6 +342,6 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
   })
 })
 
-function nativeFact(): LifecycleChanged {
+function nativeFact(): LifecycleFact {
   return { lane: LANE, lifecycle: 'native' }
 }

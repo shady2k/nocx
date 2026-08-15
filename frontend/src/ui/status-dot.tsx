@@ -25,7 +25,7 @@
 
 import type { JSX } from 'solid-js'
 
-export type StatusDotTone = 'ok' | 'warning' | 'error'
+export type StatusDotTone = 'ok' | 'warning' | 'error' | 'neutral'
 
 export interface StatusDotProps {
   tone: StatusDotTone

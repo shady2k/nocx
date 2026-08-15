@@ -146,10 +146,15 @@ export class Dispatcher {
           ws.removeEventListener('message', this._onSocketMessage)
           this.ws = null
           this.rejectAllPending('ws closed')
-          this.fireDisconnect()
+          // Decide the reconnect policy BEFORE the lifecycle event: a
+          // subscriber reading `reconnectPending` at event time must see
+          // the state that will hold after the event (nocx-gbhwh). It also
+          // means a throwing subscriber cannot prevent the reconnect from
+          // being scheduled.
           if (!this._closingDeliberately) {
             this._scheduleReconnect()
           }
+          this.fireDisconnect()
         },
         { once: true },
       )

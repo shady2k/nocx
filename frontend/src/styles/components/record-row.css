@@ -1,0 +1,60 @@
+/* RecordRow — the kit's record grammar (nocx-pp3y.3).
+   Composed on CollectionRow's info slot; this file owns only the name/meta/
+   status composite, never the row frame (padding, hover, selection, density
+   are CollectionRow's). A surface places the row and never declares a
+   row-grammar class of its own — see lint-fixtures/check-row-grammar.mjs. */
+
+/* The record's name — body text on its own line. One weight, one size:
+   the two surfaces used to disagree here (500 vs 600), which is the
+   divergence this composite exists to end. */
+.ui-record-row__title {
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The descriptive line: the kind badge, the meta text, and the status, on
+   one row. The gap is the meta line's own rhythm; the badge keeps its own
+   padding and the status its own dot. */
+.ui-record-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: 2px;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-record-row__meta-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The status: the kit's dot + text, one unit. The tone drives both the dot
+   and the sentence beside it — the connections idiom ("Connected" in
+   success, "Disconnected" in muted), where text and dot always agree. */
+.ui-record-row__status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.ui-record-row__status[data-tone='neutral'] {
+  color: var(--color-text-muted);
+}
+
+.ui-record-row__status[data-tone='ok'] {
+  color: var(--color-success);
+}
+
+.ui-record-row__status[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.ui-record-row__status[data-tone='error'] {
+  color: var(--color-danger);
+}

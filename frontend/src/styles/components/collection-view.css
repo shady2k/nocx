@@ -35,11 +35,17 @@
   padding: var(--space-2) 0;
 }
 
+/* The row's horizontal padding is the list's TEXT GUTTER, and it is the
+   same token the toolbar's padding uses — so a row's text lines up with
+   the search field above it (nocx-pp3y.3). It used to be var(--space-3),
+   and the toolbar sat at var(--space-6), so the rows stuck out left of
+   the filter. The body's own horizontal padding is zero; the row is the
+   gutter. Asserted by test (collection-view.test.tsx), not by eye. */
 .ui-collection-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-6);
   cursor: default;
   border-radius: var(--border-radius-sm, 4px);
 }

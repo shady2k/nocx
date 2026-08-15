@@ -292,7 +292,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		}
 		var rej *capability.RefusedError
 		if errors.As(runErr, &rej) {
-			_ = h.r.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			_ = h.r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 			return
 		}
 		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "history.record: ", runErr))

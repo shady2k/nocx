@@ -132,102 +132,11 @@
 }
 
 /* ── Connection row ─────────────────────────────────────────────────────── */
-
-.cm-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 8px 12px;
-  cursor: default;
-  border-radius: var(--border-radius-sm, 4px);
-}
-
-.cm-item:hover {
-  background: color-mix(in srgb, white, transparent 97%);
-}
-
-/* Name on the row — body text */
-.cm-item-name {
-  font-size: var(--font-size-md);
-  font-weight: 500;
-}
-
-/* Second line: protocol badge, address, session state — one row */
-.cm-item-meta {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-  margin-top: 2px;
-}
-
-.cm-item-address {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ── Row credential line ───────────────────────────────────────────────── */
-
-.cm-item-credential {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-size-sm);
-  margin-top: 2px;
-}
-
-.cm-credential-key {
-  color: var(--color-text-muted);
-}
-
-/* ── Session state indicator ────────────────────────────────────────────── */
-
-.cm-session-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-}
-
-.cm-session-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: color-mix(in srgb, currentColor, transparent 70%);
-}
-
-.cm-session-live .cm-session-dot {
-  background: var(--color-success);
-}
-
-.cm-session-live {
-  color: var(--color-success);
-}
-
-.cm-session-last-used {
-  color: var(--color-text-muted);
-}
-
-/* ── Row actions ─────────────────────────────────────────────────────────── */
-
-.cm-item-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-
-/* ── Row info block ────────────────────────────────────────────────────── */
-
-.cm-item-info {
-  flex: 1 1 auto;
-  min-width: 0;
-}
+/* The row itself is the kit's RecordRow (nocx-pp3y.3): the title / kind
+   badge / meta / status grammar the composite owns. The name/meta families
+   this surface used to declare (.cm-item-name / .cm-item-meta / the
+   .cm-session-* indicator) are gone — a surface declaring its own
+   row-grammar class now fails lint-fixtures/check-row-grammar.mjs. */
 
 /* ── Group headers ───────────────────────────────────────────────────────── */
 

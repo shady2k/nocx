@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/endpoints.list.schema.json",
+  "title": "EndpointsListResult",
+  "description": "Result of the endpoints.list JSON-RPC method — every configured AI endpoint (design §4.5.4, ADR-0030). This schema is the SINGLE declaration of the endpoint shape: endpoints.create and endpoints.update reference its $defs cross-file, exactly as the git.* results reference git.status's. The credential is the stored credentialRef mapped to a renderer row handle (secrow:...) — null when no key is set, NEVER the reference itself (ADR-0017 §1, nocx-jb20.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpoints"],
+  "properties": {
+    "endpoints": {
+      "description": "Every stored endpoint. Never null: an empty list is [] (nocx-25k9.14).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/endpoint" }
+    }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "baseUrl", "schema", "credential", "models", "headers"],
+      "properties": {
+        "id": {
+          "description": "Backend-minted identity: endpoint:custom:<slug>:<uuid>. The renderer may hold it but never mints it.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The display name the picker shows.",
+          "type": "string"
+        },
+        "baseUrl": {
+          "description": "Absolute http(s) URL. Parse-level validated only this pass; the loopback/private policy is nocx-edio (design §4.5).",
+          "type": "string"
+        },
+        "schema": {
+          "description": "The wire schema, a closed enum: 'openai-compatible' is the ONE value this pass knows (design §4.5, decision 2). A select in the UI appears when the second value does.",
+          "type": "string",
+          "enum": ["openai-compatible"]
+        },
+        "credential": {
+          "description": "Row handle (secrow:...) of the endpoint's own vault secret, or null when no key is set (created without one, or the key was deleted on the Secrets page). A reference never crosses the wire.",
+          "type": ["string", "null"]
+        },
+        "models": {
+          "description": "One or more models the endpoint offers. Never null: an endpoint without models is invalid.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "alias"],
+            "properties": {
+              "name": {
+                "description": "The model id the API understands.",
+                "type": "string"
+              },
+              "alias": {
+                "description": "The picker label, or null to show the model id.",
+                "type": ["string", "null"]
+              }
+            }
+          }
+        },
+        "headers": {
+          "description": "The endpoint's custom HTTP headers (nocx-lyyk), sent on every request it makes. Never null: an endpoint with no custom headers sends []. Each row names a header and carries EXACTLY ONE value source: a literal value, or the row handle (secrow:...) of a vault secret — never the material, and never the reference itself (ADR-0017 §1).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value", "secret"],
+            "properties": {
+              "name": {
+                "description": "The header name. Refused names (Authorization, Host, Content-Length, Content-Type, the hop-by-hop set) are rejected at write time with the reason.",
+                "type": "string"
+              },
+              "value": {
+                "description": "The literal header value, or null when the value is a vault secret. An empty literal is legal HTTP and stays \"\".",
+                "type": ["string", "null"]
+              },
+              "secret": {
+                "description": "Row handle of the vault secret the value resolves to at request time, or null for a literal value. A reference never crosses the wire.",
+                "type": ["string", "null"]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

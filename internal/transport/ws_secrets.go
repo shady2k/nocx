@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	gossh "golang.org/x/crypto/ssh"
 
@@ -122,15 +123,37 @@ type secretsHandlers struct {
 	storeWired  bool // credentials != nil at construction
 }
 
+// secretsUsageParams is the wire format for secrets.usage: one row handle.
+type secretsUsageParams struct {
+	Row string `json:"row"`
+}
+
+// secretsSavePasswordParams is the wire format for secrets.savePassword.
+type secretsSavePasswordParams struct {
+	Password string `json:"password"`
+	Name     string `json:"name,omitempty"`
+}
+
+// secretsSaveKeyMaterialParams is the wire format for secrets.saveKeyMaterial.
+type secretsSaveKeyMaterialParams struct {
+	KeyText string `json:"keyText"`
+	Name    string `json:"name,omitempty"`
+}
+
+// secretsSaveKeyPassphraseParams is the wire format for secrets.saveKeyPassphrase.
+type secretsSaveKeyPassphraseParams struct {
+	KeyRow     string `json:"keyRow"`
+	Passphrase string `json:"passphrase"`
+	Name       string `json:"name,omitempty"`
+}
+
 // handleUsage answers secrets.usage: for one vault row, the profiles that use
 // the secret behind it (ADR-0017: the count is the number of profiles whose
 // effective secret is this one). The renderer addresses the secret by its row
 // handle; the reference never leaves the backend. An unknown row or an unused
 // secret answers an empty profile list.
 func (h secretsHandlers) handleUsage(ctx context.Context, req jsonrpcRequest) {
-	var params struct {
-		Row string `json:"row"`
-	}
+	var params secretsUsageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Row == "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: row required"})
 		return
@@ -154,7 +177,7 @@ func (h secretsHandlers) handleUsage(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -171,10 +194,7 @@ type secretMintResult struct {
 func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 	switch req.Method {
 	case "secrets.savePassword":
-		var params struct {
-			Password string `json:"password"`
-			Name     string `json:"name,omitempty"`
-		}
+		var params secretsSavePasswordParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.Password == "" {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: password required"})
 			return
@@ -190,14 +210,11 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			return nil
 		})
 		if err != nil {
-			answerOperationRefusal(h.r, req.ID, err)
+			answerOperationRefusal(h.r, req, err)
 		}
 
 	case "secrets.saveKeyMaterial":
-		var params struct {
-			KeyText string `json:"keyText"`
-			Name    string `json:"name,omitempty"`
-		}
+		var params secretsSaveKeyMaterialParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.KeyText == "" {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: keyText required"})
 			return
@@ -235,15 +252,11 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			return nil
 		})
 		if runErr != nil {
-			answerOperationRefusal(h.r, req.ID, runErr)
+			answerOperationRefusal(h.r, req, runErr)
 		}
 
 	case "secrets.saveKeyPassphrase":
-		var params struct {
-			KeyRow     string `json:"keyRow"`
-			Passphrase string `json:"passphrase"`
-			Name       string `json:"name,omitempty"`
-		}
+		var params secretsSaveKeyPassphraseParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.KeyRow == "" {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: keyRow required"})
 			return
@@ -302,7 +315,7 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			return nil
 		})
 		if err != nil {
-			answerOperationRefusal(h.r, req.ID, err)
+			answerOperationRefusal(h.r, req, err)
 		}
 	}
 }
@@ -329,6 +342,152 @@ func verifyPassphraseSecret(secret credential.Secret, passphrase []byte) error {
 	return nil
 }
 
+// ── per-method validators ──────────────────────────────────────────────
+
+// validateSecretsUsageRaw: the row is a renderer-addressable handle — a
+// SecretID is never an identifier (nocx-jb20.1) — so it must have the
+// secrow: grammar, not merely be non-empty.
+func validateSecretsUsageRaw(raw json.RawMessage) string {
+	var p secretsUsageParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isRowHandle(p.Row) {
+		return "row must be a secrow handle"
+	}
+	return ""
+}
+
+// validateSecretsSavePasswordRaw: the password is required and bounded; the
+// name is optional (absent, the backend derives one per ADR-0016).
+func validateSecretsSavePasswordRaw(raw json.RawMessage) string {
+	var p secretsSavePasswordParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Password == "" {
+		return "password is required"
+	}
+	if n := utf8.RuneCountInString(p.Password); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("password exceeds %d characters", maxSecretMaterialRunes)
+	}
+	if p.Name != "" {
+		if msg := secretNameProblem(p.Name); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateSecretsSaveKeyMaterialRaw: the key text is required and bounded;
+// whether it parses as a private key is the handler's check (it shapes the
+// invalid-key error the renderer acts on).
+func validateSecretsSaveKeyMaterialRaw(raw json.RawMessage) string {
+	var p secretsSaveKeyMaterialParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.KeyText == "" {
+		return "keyText is required"
+	}
+	if n := utf8.RuneCountInString(p.KeyText); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("keyText exceeds %d characters", maxSecretMaterialRunes)
+	}
+	if p.Name != "" {
+		if msg := secretNameProblem(p.Name); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateSecretsSaveKeyPassphraseRaw: the key row is a handle; the
+// passphrase is bounded and MAY be empty — verifying the empty passphrase
+// against an unencrypted key is a legitimate check.
+func validateSecretsSaveKeyPassphraseRaw(raw json.RawMessage) string {
+	var p secretsSaveKeyPassphraseParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isRowHandle(p.KeyRow) {
+		return "keyRow must be a secrow handle"
+	}
+	if n := utf8.RuneCountInString(p.Passphrase); n > maxSecretMaterialRunes {
+		return fmt.Sprintf("passphrase exceeds %d characters", maxSecretMaterialRunes)
+	}
+	if p.Name != "" {
+		if msg := secretNameProblem(p.Name); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateSecretsDetectRaw: the line is bounded; an empty line is a
+// legitimate "nothing to detect" query.
+func validateSecretsDetectRaw(raw json.RawMessage) string {
+	var p secretsDetectParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "params must be a JSON object"
+		}
+	}
+	if n := utf8.RuneCountInString(p.Line); n > maxVaultLineRunes {
+		return fmt.Sprintf("line exceeds %d characters", maxVaultLineRunes)
+	}
+	return ""
+}
+
+// validateSecretsCaptureSaveRaw: the capture id is the idempotency key and a
+// capability token — minted by the registry, so it has the cap_ grammar. The
+// optional name is a vault name (it becomes the {{secret:NAME}} reference).
+func validateSecretsCaptureSaveRaw(raw json.RawMessage) string {
+	var p captureSaveParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isCaptureID(p.CaptureID) {
+		return "captureId must be a capture handle"
+	}
+	if p.Name != "" {
+		if msg := secretNameProblem(p.Name); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateSecretsCaptureDismissRaw: the capture id is a capability token with
+// the cap_ grammar.
+func validateSecretsCaptureDismissRaw(raw json.RawMessage) string {
+	var p captureDismissParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if !isCaptureID(p.CaptureID) {
+		return "captureId must be a capture handle"
+	}
+	return ""
+}
+
 // secretSpecs declares the secrets.* control methods: the vault-secret mint
 // and usage surface under one SecretOperation ([config, vault] gates), the
 // pure detector (no capability), and the capture settlement under the
@@ -347,31 +506,31 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 	secretSub := s.operationQueue("secrets")
 	captureSub := s.operationQueue("capture")
 	return []methodSpec{
-		regResponder(secretSub, "secrets.usage", func(r Responder) handlerFunc {
+		whenAvailable(regResponder(secretSub, "secrets.usage", params(validateSecretsUsageRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUsage(ctx, req) }
-		}),
-		regResponder(secretSub, "secrets.savePassword", func(r Responder) handlerFunc {
+		}), func() bool { return vaultWired && configWired }, "secrets.usage not available"),
+		whenAvailable(regResponder(secretSub, "secrets.savePassword", params(validateSecretsSavePasswordRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
-		}),
-		regResponder(secretSub, "secrets.saveKeyMaterial", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "secrets.saveKeyMaterial", params(validateSecretsSaveKeyMaterialRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
-		}),
-		regResponder(secretSub, "secrets.saveKeyPassphrase", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		whenAvailable(regResponder(secretSub, "secrets.saveKeyPassphrase", params(validateSecretsSaveKeyPassphraseRaw), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
-		}),
-		regResponder(s.lane, "secrets.detect", func(r Responder) handlerFunc {
+		}), func() bool { return secretOp != nil }, "vault not available"),
+		regResponder(s.lane, "secrets.detect", params(validateSecretsDetectRaw), func(r Responder) handlerFunc {
 			h := secretsDetectHandlers{log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetect(req) }
 		}),
-		regResponder(captureSub, "secrets.captureSave", func(r Responder) handlerFunc {
+		whenAvailable(regResponder(captureSub, "secrets.captureSave", params(validateSecretsCaptureSaveRaw), func(r Responder) handlerFunc {
 			h := captureSaveHandlers{op: captureOp, captures: s.captures, r: r, vaultWired: vaultWired, contentWired: contentWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureSave(ctx, req) }
-		}),
-		regResponder(s.lane, "secrets.captureDismiss", func(r Responder) handlerFunc {
+		}), func() bool { return captureOp != nil }, "vault not available"),
+		regResponder(s.lane, "secrets.captureDismiss", params(validateSecretsCaptureDismissRaw), func(r Responder) handlerFunc {
 			h := captureDismissHandlers{captures: s.captures, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureDismiss(ctx, req) }
 		}),

@@ -23,6 +23,7 @@ import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { SegmentedControl } from './ui/segmented-control'
 import { createFormValidation, required } from './ui/validation'
+import { createSubmitGate } from './ui/submit-gate'
 import { KeyIcon, LockIcon, PencilIcon, ResetIcon, TrashIcon } from './ui/icons'
 import {
   DEFAULT_KEY_MODE,
@@ -128,15 +129,30 @@ export function SecretsSection(props: SecretsSectionProps) {
   const [addKeyMaterial, setAddKeyMaterial] = createSignal('')
   const [addKeyPath, setAddKeyPath] = createSignal('')
   const [addBusy, setAddBusy] = createSignal(false)
-  const addValidation = createFormValidation({
-    name: () => required('Name')(addName()),
-    value: () =>
-      addKind() === 'private-key'
-        ? suppliesMaterial(addKeyMode())
-          ? required('Key')(addKeyMaterial())
-          : required('Path')(addKeyPath())
-        : required('Value')(addValue()),
-  })
+  const addValidation = createFormValidation(
+    {
+      name: () => required('Name')(addName()),
+      value: () =>
+        addKind() === 'private-key'
+          ? suppliesMaterial(addKeyMode())
+            ? required('Key')(addKeyMaterial())
+            : required('Path')(addKeyPath())
+          : required('Value')(addValue()),
+    },
+    // The key material editor's focusable inputs carry the mode's suffix
+    // (`sr-add-key-path` / `sr-add-key-text`); in file or secret mode there is
+    // no text control to focus, and the gate says so rather than pretend.
+    {
+      controlId: (field) => {
+        if (field === 'name') return 'sr-add-name'
+        if (addKind() !== 'private-key') return 'sr-add-value'
+        if (addKeyMode() === 'path') return 'sr-add-key-path'
+        if (addKeyMode() === 'material') return 'sr-add-key-text'
+        return undefined
+      },
+    },
+  )
+  const addGate = createSubmitGate(addValidation)
 
   // Replace-value dialog state — the row being replaced, addressed by its
   // opaque handle, never by a secret reference (nocx-jb20.1). The value
@@ -149,18 +165,31 @@ export function SecretsSection(props: SecretsSectionProps) {
   const [replaceKeyMaterial, setReplaceKeyMaterial] = createSignal('')
   const [replaceKeyPath, setReplaceKeyPath] = createSignal('')
   const [replaceBusy, setReplaceBusy] = createSignal(false)
-  const replaceValidation = createFormValidation({
-    value: () => {
-      const entry = replaceTarget()
-      if (!entry) return undefined
-      if (entry.kind === 'private-key') {
-        return suppliesMaterial(replaceKeyMode())
-          ? required('New key')(replaceKeyMaterial())
-          : required('Path')(replaceKeyPath())
-      }
-      return required('New value')(replaceValue())
+  const replaceValidation = createFormValidation(
+    {
+      value: () => {
+        const entry = replaceTarget()
+        if (!entry) return undefined
+        if (entry.kind === 'private-key') {
+          return suppliesMaterial(replaceKeyMode())
+            ? required('New key')(replaceKeyMaterial())
+            : required('Path')(replaceKeyPath())
+        }
+        return required('New value')(replaceValue())
+      },
     },
-  })
+    {
+      controlId: (field) => {
+        if (replaceTarget()?.kind === 'private-key') {
+          if (replaceKeyMode() === 'path') return 'sr-replace-key-path'
+          if (replaceKeyMode() === 'material') return 'sr-replace-key-text'
+          return undefined
+        }
+        return field === 'value' ? 'sr-replace-value' : field
+      },
+    },
+  )
+  const replaceGate = createSubmitGate(replaceValidation)
 
   // Rename dialog state — the row being renamed, addressed by its opaque
   // handle, never by a secret reference (nocx-jb20.1).
@@ -181,9 +210,11 @@ export function SecretsSection(props: SecretsSectionProps) {
   const [deleteNames, setDeleteNames] = createSignal<string[] | null>(null)
   const [deleteNamesError, setDeleteNamesError] = createSignal<string | null>(null)
   const [renameBusy, setRenameBusy] = createSignal(false)
-  const renameValidation = createFormValidation({
-    name: () => required('Name')(renameName()),
-  })
+  const renameValidation = createFormValidation(
+    { name: () => required('Name')(renameName()) },
+    { controlId: (field) => (field === 'name' ? 'sr-rename-name' : field) },
+  )
+  const renameGate = createSubmitGate(renameValidation)
 
   const [filter, setFilter] = createSignal('')
 
@@ -247,10 +278,9 @@ export function SecretsSection(props: SecretsSectionProps) {
   }
 
   async function submitAdd(): Promise<void> {
-    if (!addValidation.valid()) {
-      addValidation.revealAll()
-      return
-    }
+    // The gate refuses: every failing field is revealed, the first is
+    // focused, and the count is announced through the toast region.
+    if (!(await addGate())) return
     setAddBusy(true)
     try {
       // A private key in path mode is dereferenced by the BACKEND at save.
@@ -331,10 +361,7 @@ export function SecretsSection(props: SecretsSectionProps) {
   async function submitReplace(): Promise<void> {
     const entry = replaceTarget()
     if (!entry) return
-    if (!replaceValidation.valid()) {
-      replaceValidation.revealAll()
-      return
-    }
+    if (!(await replaceGate())) return
     setReplaceBusy(true)
     try {
       // The reference does not change: replaceSecret writes the new material
@@ -375,10 +402,7 @@ export function SecretsSection(props: SecretsSectionProps) {
   async function submitRename(): Promise<void> {
     const entry = renameTarget()
     if (!entry) return
-    if (!renameValidation.valid()) {
-      renameValidation.revealAll()
-      return
-    }
+    if (!(await renameGate())) return
     setRenameBusy(true)
     try {
       await props.vaultClient.renameSecret({ id: entry.id, name: renameName().trim() })

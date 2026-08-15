@@ -238,6 +238,32 @@ export class XtermRenderer implements TerminalRenderer {
   readonly snapshotStore = new CommandSnapshotStore()
   /** Unsubscribe from the module-level theme watcher. */
   private _themeUnsub: (() => void) | null = null
+  /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
+  private writeParsedSubs: Array<() => void> = []
+  private writeParsedDisposable?: { dispose(): void }
+  /** Subscribers to the explicit clear/reset operations. */
+  private clearSubs: Array<() => void> = []
+  private resetSubs: Array<() => void> = []
+  /** Writes queued via write() whose bytes have not finished parsing — the
+   *  capture fence's pending count. Settled via the per-write callback, so
+   *  it is exact even when onWriteParsed fires between chunks. */
+  private unsettledWrites = 0
+  /** Subscribers to grid resizes — the frame identity's geometry axis
+   *  (nocx-x8s2.4). Kept pre-mount and attached at mount, exactly like
+   *  onWriteParsed: a tracker built before mount must not lose the resize
+   *  signal (a resize reads `moved`/`same` instead of `notComparable`). */
+  private resizeSubs: Array<(cols: number, rows: number) => void> = []
+  private resizeDisposable?: { dispose(): void }
+  /** Subscribers to active-buffer changes — the frame identity's buffer
+   *  axis. Kept pre-mount and attached at mount: a tracker built before
+   *  mount must not lose the switch (a frame saved on the normal buffer
+   *  then compares as `same` after entering the alternate screen). */
+  private bufferChangeSubs: Array<(type: 'normal' | 'alternate') => void> = []
+  private bufferChangeDisposable?: { dispose(): void }
+  /** Disposal subscribers — the capture fence's closing event (see
+   *  onDispose). */
+  private disposeSubs: Array<() => void> = []
+  private _disposed = false
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -290,6 +316,16 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+
+    // Attach the frame-identity listeners now: a subscriber registered
+    // before mount (the frame tracker constructs with the renderer) must
+    // not lose the parse-settle, buffer-switch or resize signals — each
+    // keeps pre-mount subscribers and attaches here, when the terminal
+    // exists. The fence state (unsettledWrites) and the renderer-side
+    // clear/reset subscribers were never mount-dependent.
+    this._ensureWriteParsed()
+    this._ensureResize()
+    this._ensureBufferChange()
 
     // Shift+Enter as its own chord (nocx-nt70) — see SHIFT_ENTER_SEQUENCE.
     // xterm's blessed hook runs before any key processing; returning false
@@ -525,11 +561,41 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   write(data: string): void {
-    this.term?.write(data)
+    const t = this.term
+    if (!t) return
+    this.unsettledWrites++
+    try {
+      t.write(data, () => {
+        // The per-write callback fires exactly when THIS write's bytes have
+        // been parsed (WriteBuffer's per-chunk callback) — the capture
+        // fence's settle signal. onWriteParsed alone cannot be that signal:
+        // xterm fires it at the end of EVERY parse pass, which can be
+        // BETWEEN chunks of one large write.
+        this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+      })
+    } catch (err) {
+      // xterm refuses a write once its pending-data watermark is exceeded:
+      // it THROWS before queueing anything, so the caller's bytes never
+      // entered the terminal. The counter is repaired first — a stuck count
+      // would wedge the capture fence forever. Then the refusal is SURFACED
+      // to the caller, not logged (nocx-x8s2.3): the caller believes it
+      // delivered bytes that are gone, and only the caller can decide the
+      // policy (pause, resend, tell the person). A log inside the renderer
+      // would let the caller keep believing delivery — the old silent drop
+      // in a different shape. Pre-flow-control behaviour was to throw; this
+      // restores that while keeping the counter exact.
+      this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+      throw err
+    }
   }
 
   reset(): void {
-    this.term?.reset()
+    const t = this.term
+    if (!t) return
+    t.reset()
+    // Report the explicit reset AFTER it executed, so a subscriber reading
+    // state (e.g. the frame generation) observes the post-reset terminal.
+    for (const sub of this.resetSubs) sub()
   }
 
   onData(cb: DataCallback): void {
@@ -537,7 +603,19 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onResize(cb: ResizeCallback): void {
-    this.term?.onResize(({ cols, rows }) => cb(cols, rows))
+    this.resizeSubs.push(cb)
+    this._ensureResize()
+  }
+
+  /** Attach the resize fan-out when the terminal exists. Subscribers
+   *  registered before mount (the frame tracker constructs with the
+   *  renderer) must not be lost — the same shape onWriteParsed uses. */
+  private _ensureResize(): void {
+    const t = this.term
+    if (this.resizeDisposable || !t) return
+    this.resizeDisposable = t.onResize(({ cols, rows }) => {
+      for (const sub of this.resizeSubs) sub(cols, rows)
+    })
   }
 
   onTitle(cb: TitleCallback): void {
@@ -545,7 +623,18 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
-    this.term?.buffer.onBufferChange((buf) => cb(buf.type))
+    this.bufferChangeSubs.push(cb)
+    this._ensureBufferChange()
+  }
+
+  /** Attach the buffer-change fan-out when the terminal exists — pre-mount
+   *  subscribers (the frame tracker) must not be lost (nocx-x8s2.4). */
+  private _ensureBufferChange(): void {
+    const t = this.term
+    if (this.bufferChangeDisposable || !t) return
+    this.bufferChangeDisposable = t.buffer.onBufferChange((buf) => {
+      for (const sub of this.bufferChangeSubs) sub(buf.type)
+    })
   }
 
   onCwd(cb: CwdCallback): void {
@@ -669,7 +758,30 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.focus()
   }
 
+  /** Frame capture (nocx-x8s2.4): the dispose notification — the fence's
+   *  closing event. The CaptureIdentityTracker rejects its pending
+   *  awaitSettled() waiters on this, so a capture never hangs across
+   *  disposal. Fired exactly once, at the top of dispose(), before the
+   *  event subscriptions are torn down. */
+  onDispose(cb: () => void): void {
+    if (this._disposed) {
+      // Already disposed: fire immediately — a late subscriber must not
+      // wait forever on a source that is gone.
+      cb()
+      return
+    }
+    this.disposeSubs.push(cb)
+  }
   dispose(): void {
+    if (this._disposed) return
+    this._disposed = true
+    // Tell the frame tracker BEFORE the subscriptions go away: a capture
+    // parked on the parse fence must settle (reject) now, while its waiter
+    // is still registered — tearing the subscriptions down first would
+    // orphan it.
+    const disposeSubs = this.disposeSubs
+    this.disposeSubs = []
+    for (const sub of disposeSubs) sub()
     if (this.refreshTimer !== null) {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
@@ -691,6 +803,17 @@ export class XtermRenderer implements TerminalRenderer {
     this.renderDisposable?.dispose()
     this.renderDisposable = undefined
     this.renderSubs = []
+    this.resizeDisposable?.dispose()
+    this.resizeDisposable = undefined
+    this.resizeSubs = []
+    this.bufferChangeDisposable?.dispose()
+    this.bufferChangeDisposable = undefined
+    this.bufferChangeSubs = []
+    this.writeParsedDisposable?.dispose()
+    this.writeParsedDisposable = undefined
+    this.writeParsedSubs = []
+    this.clearSubs = []
+    this.resetSubs = []
     if (this._themeUnsub !== null) {
       this._themeUnsub()
       this._themeUnsub = null
@@ -803,6 +926,38 @@ export class XtermRenderer implements TerminalRenderer {
       for (const sub of this.renderSubs) sub(r)
     })
   }
+  /** Subscribe to parse-settles: fires after a written chunk has been
+   *  parsed into the buffer. The frame generation advances here, and the
+   *  capture fence waits on it. Subscribers registered before mount are
+   *  attached when mount creates the terminal. */
+  onWriteParsed(cb: () => void): void {
+    this.writeParsedSubs.push(cb)
+    this._ensureWriteParsed()
+  }
+
+  private _ensureWriteParsed(): void {
+    const t = this.term
+    if (this.writeParsedDisposable || !t) return
+    this.writeParsedDisposable = t.onWriteParsed(() => {
+      for (const sub of this.writeParsedSubs) sub()
+    })
+  }
+
+  /** Subscribe to explicit clears — fired after clearViewport() executed. */
+  onClear(cb: () => void): void {
+    this.clearSubs.push(cb)
+  }
+
+  /** Subscribe to explicit resets — fired after reset() executed. */
+  onReset(cb: () => void): void {
+    this.resetSubs.push(cb)
+  }
+
+  /** True while bytes queued via write() have not finished parsing — the
+   *  capture fence. */
+  hasUnsettledWrite(): boolean {
+    return this.unsettledWrites > 0
+  }
 
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined {
     return this.term?.buffer.active.getLine(line)
@@ -815,14 +970,23 @@ export class XtermRenderer implements TerminalRenderer {
     return buf.baseY + buf.cursorY
   }
 
+  /** Column of the cursor — the column the next write lands on. */
+  cursorCol(): number {
+    return this.term?.buffer.active.cursorX ?? 0
+  }
+
   /** Clear the whole buffer — "making the prompt line the new first
    *  line" (xterm's own contract). Called at a block freeze so the rows
    *  the DOM block now owns leave the grid; the grid only ever holds the
    *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
   clearViewport(): void {
-    this.term?.clear()
+    const t = this.term
+    if (!t) return
+    t.clear()
+    // Report the explicit clear AFTER it executed, so a subscriber reading
+    // state (e.g. the frame generation) observes the post-clear buffer.
+    for (const sub of this.clearSubs) sub()
   }
-
   get paneElement(): HTMLElement {
     return this.container ?? document.createElement('div')
   }

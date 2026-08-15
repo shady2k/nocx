@@ -617,6 +617,50 @@ func TestConnect_KeyAuth_Success(t *testing.T) {
 	}
 }
 
+// TestConnect_CapturesTheHostKeyFingerprint: the channel exposes the target
+// host's public-key fingerprint as observed at dial time — the consent key
+// (consent design §3.2). The same machine reached any way is one answer;
+// an empty capture would make every machine share one.
+func TestConnect_CapturesTheHostKeyFingerprint(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ch, err := client.Connect(
+		context.Background(), srv.addr,
+		WithUser("test"),
+		WithAuthMethods([]gossh.AuthMethod{
+			gossh.PublicKeys(srv.userSigner),
+		}),
+		WithPTYSize(80, 24, 640, 480),
+	)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	rc, ok := ch.(*RealChannel)
+	if !ok {
+		t.Fatalf("Connect returned %T, want *RealChannel", ch)
+	}
+	<-srv.shellReady
+
+	want := gossh.FingerprintSHA256(srv.hostSigner.PublicKey())
+	if got := rc.HostKeyFingerprint(); got != want {
+		t.Fatalf("HostKeyFingerprint = %q, want %q — the fingerprint observed at dial time", got, want)
+	}
+}
+
 func TestConnect_PTY_RequestedSize(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()

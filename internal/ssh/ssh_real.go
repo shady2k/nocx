@@ -190,7 +190,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		}
 	}
 
-	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc)
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
@@ -726,10 +726,11 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     command-line and remote command"), so the configured command runs
 //     as-is and no launcher or installer is consulted (spec §4.2).
 //  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
-//     nothing and opens a plain shell; relay behaves as raw in this epic;
-//     script (or empty — the direct-host default) publishes and
-//     integrates.
-//  3. In script mode a saved connection publishes the bundle over SFTP
+//     nothing and opens a plain shell; auto (the default), script and
+//     relay — or empty, the direct-host default — publish and integrate.
+//     The tiers are additive: relay allows the deployed binary and never
+//     withholds the scripts (§5.2).
+//  3. In any integrating mode a saved connection publishes the bundle over SFTP
 //     first, through the RemoteInstaller (P8's carrier): the publisher's
 //     fail-open contract means the session still starts — transient-
 //     integrated via the launcher, or raw — when the publish fails, and
@@ -825,7 +826,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 // write). lc is the established lifecycle channel, or nil (refused or not
 // wired); it is closed on every path that does not hand the shell a
 // channel-using start command, and otherwise transferred to the channel.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
 	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
 
 	session, err := gclient.NewSession()
@@ -905,6 +906,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		stdout:                 stdout,
 		done:                   make(chan struct{}),
 		shellIntegrationReason: reason,
+		hostKeyFingerprint:     hostKeyFingerprint,
 		closeCb: func() {
 			_ = session.Close()
 		},

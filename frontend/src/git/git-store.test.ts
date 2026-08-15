@@ -148,6 +148,7 @@ function makeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
       .mockResolvedValue({ state: 'ok', outputTruncated: false, status: statusFixture() }),
     headMessage: vi.fn().mockResolvedValue({ state: 'ok', message: 'subject\n\nbody' }),
     remote: vi.fn().mockResolvedValue({ state: 'none' }),
+    grantConsent: vi.fn().mockResolvedValue({ state: 'granted' }),
     openUrl: vi.fn().mockResolvedValue({}),
     close: vi.fn().mockResolvedValue({ closed: true }),
     subscribeGitChanged: vi.fn().mockReturnValue(() => {}),
@@ -205,14 +206,67 @@ describe('the eight states', () => {
     expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
   })
 
-  it('remote: an SSH tab is decided BEFORE any backend call (D3, D14)', async () => {
+  it('ssh: an SSH tab WITH a verified cwd reaches git.open, and the answer decides the state (remote-helper design §6)', async () => {
     const services = makeServices()
     const store = track(createGitStore(services))
     store.rescope(SSH_ORIGIN)
     await settle()
-    expect(store.state()).toBe('remote')
+    // The old remote guard that never asked is gone: git.open was called
+    // with the session and cwd, and the ok answer makes the panel ready —
+    // mutation controls present, because the helper serves the repository.
+    expect(mockHandle(services, 'open')).toHaveBeenCalledWith('s3', '/home/bob')
+    expect(store.state()).toBe('ready')
+    expect(store.binding()).toEqual({ bindingId: 'b1', toplevel: '/home/dev/repo' })
+  })
+
+  it('ssh: an SSH tab without a verified cwd is noCwd before any backend call (AD-5)', async () => {
+    const services = makeServices()
+    const store = track(createGitStore(services))
+    store.rescope({ ...SSH_ORIGIN, cwd: null, cwdVerified: false })
+    await settle()
+    expect(store.state()).toBe('noCwd')
     expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
-    // The panel on an SSH tab shows nothing rather than the local repo.
+  })
+
+  it('ssh: every §6 refusal state renders from the wire, with its message naming what to do', async () => {
+    const cases: { state: GitOpenResult['state']; message: string }[] = [
+      { state: 'consentRequired', message: '' },
+      { state: 'unsupportedPlatform', message: 'we build no helper for darwin/amd64' },
+      { state: 'deployFailed', message: 'installing the helper on srv failed: upload refused' },
+      { state: 'execForbidden', message: 'the host refused the probe that would run the helper' },
+      {
+        state: 'helperVersionMismatch',
+        message: 'the installed helper is a different version — reinstall it',
+      },
+    ]
+    for (const tc of cases) {
+      const services = makeServices({
+        open: vi.fn().mockResolvedValue({ state: tc.state, message: tc.message }),
+      })
+      const store = track(createGitStore(services))
+      store.rescope(SSH_ORIGIN)
+      await settle()
+      expect(store.state()).toBe(tc.state)
+      if (tc.message !== '') {
+        expect(store.refusalMessage()).toBe(tc.message)
+      }
+      expect(store.binding()).toBeNull()
+    }
+  })
+
+  it('ssh: a machine the selection refuses with no earned state is the failed phase, carrying the reason', async () => {
+    const services = makeServices({
+      open: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('this connection is set to Raw, which does not run the nocx helper'),
+        ),
+    })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.phase()).toBe('failed')
+    expect(store.openError()).toContain('Raw')
     expect(store.binding()).toBeNull()
   })
 
@@ -489,6 +543,118 @@ describe('git owns repository identity (D4)', () => {
     await settle()
     expect(store.binding()).toEqual({ bindingId: 'b2', toplevel: '/home/dev/other' })
     expect(mockHandle(services, 'close')).toHaveBeenCalledWith('b1')
+  })
+})
+
+// ── D23: polling is coalesced by repository identity, not by tab ─────────
+
+describe('polling is coalesced by repository identity (D23)', () => {
+  it('two tabs bound to the SAME remote repository keep ONE poll loop: one status read in flight, no re-open burst on the switch', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
+    const status = mockHandle(services, 'status')
+    const open = mockHandle(services, 'open')
+    status.mockClear()
+    open.mockClear()
+
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    store.setVisible(true)
+    await settle()
+    // The immediate status on becoming visible.
+    expect(status).toHaveBeenCalledTimes(1)
+
+    // A second tab bound to the same remote repository (same session,
+    // same verified cwd — the answer-decides binding of D4): the store
+    // keeps the live binding and its one poll loop; nothing re-opens and
+    // no second status is issued for the switch itself.
+    store.rescope({ ...SSH_ORIGIN, tabId: 4 })
+    await settle()
+    // Exactly the ONE open that established the repository's binding —
+    // the tab switch re-opens nothing, because the store polls by
+    // repository identity, not by tab.
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(status).toHaveBeenCalledTimes(1)
+
+    // Over two intervals the repository's ONE loop fires once per tick —
+    // not twice, and not an extra immediate read for the new tab. The
+    // advance is stepped so the in-flight flag from each tick's read can
+    // settle before the next tick (a tick that finds a read still in
+    // flight is D23's backoff, asserted separately below).
+    vi.advanceTimersByTime(5000)
+    await settle()
+    vi.advanceTimersByTime(5000)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(3)
+    expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('the interval backs off when a read is still in flight: a slow status suppresses every tick until it lands', async () => {
+    vi.useFakeTimers()
+    const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
+    const status = mockHandle(services, 'status')
+    const slow = deferred<GitStatusResult>()
+    status.mockClear()
+    ;(services.status as ReturnType<typeof vi.fn>).mockImplementationOnce(() => slow.promise)
+
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    store.setVisible(true)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(1)
+
+    // A read whose duration approaches (or exceeds) the interval: every
+    // tick while it is in flight is skipped — the repository's poll never
+    // stacks a second read on top of the first.
+    vi.advanceTimersByTime(15_000)
+    expect(status).toHaveBeenCalledTimes(1)
+    slow.resolve(statusResult())
+    await settle()
+    vi.advanceTimersByTime(5000)
+    await settle()
+    expect(status).toHaveBeenCalledTimes(2)
+  })
+})
+
+// ── The consent prompt (remote-helper design D8) ─────────────────────────
+
+describe('the consent prompt', () => {
+  it('Accept raises the machine to the relay tier and re-opens: the fresh git.open proceeds past consentRequired', async () => {
+    const open = vi
+      .fn()
+      .mockResolvedValueOnce({ state: 'consentRequired' })
+      .mockResolvedValueOnce(openOk())
+    const services = makeServices({ open })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.state()).toBe('consentRequired')
+
+    store.grantConsent()
+    await settle()
+    expect(mockHandle(services, 'grantConsent')).toHaveBeenCalledWith('s3')
+    // The accept re-opened the SAME scope, and the answer is now ok.
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(2)
+    expect(store.state()).toBe('ready')
+    expect(store.binding()).toEqual({ bindingId: 'b1', toplevel: '/home/dev/repo' })
+  })
+
+  it('a failed accept is shown inline — the offer stays and the error is visible', async () => {
+    const services = makeServices({
+      open: vi.fn().mockResolvedValue({ state: 'consentRequired' }),
+      grantConsent: vi.fn().mockRejectedValue(new Error('consent store unwritable')),
+    })
+    const store = track(createGitStore(services))
+    store.rescope(SSH_ORIGIN)
+    await settle()
+    expect(store.state()).toBe('consentRequired')
+
+    store.grantConsent()
+    await settle()
+    expect(store.consentError()).toContain('consent store unwritable')
+    expect(store.state()).toBe('consentRequired')
+    // The failed accept must not have re-opened — the offer stays put.
+    expect(mockHandle(services, 'open')).toHaveBeenCalledTimes(1)
   })
 })
 

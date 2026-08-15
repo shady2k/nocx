@@ -1,5 +1,5 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
-        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -16,6 +16,31 @@ PKG_CONFIG ?= pkg-config
 HOST_GOOS ?= $(shell $(GO) env GOOS)
 WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf webkit2_41; fi)
 
+# The remote helper's build matrix (D20): three targets, gzip-compressed
+# into the deploy package's artifacts directory and embedded by
+# //go:embed all:artifacts. darwin/amd64 is deliberately NOT built.
+# CGO_ENABLED=0 is load-bearing: a static binary is what a helper on an
+# unknown remote host must be — no remote glibc, no dynamic-loader
+# surprises. The artifacts are gitignored; a fresh checkout compiles with
+# only the committed .gitignore embedded, and Artifact answers
+# ErrArtifactsNotBuilt until this target has run. `helpers` is a
+# prerequisite of the RELEASE build and of the e2e acceptance job, and of
+# nothing else: ordinary `go build`, `make build` and `make dev` must work
+# with no artifacts present.
+HELPER_TARGETS := linux/amd64 linux/arm64 darwin/arm64
+HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts
+
+.PHONY: helpers
+helpers:
+	@mkdir -p $(HELPER_ARTIFACT_DIR)
+	@for t in $(HELPER_TARGETS); do \
+	  os=$${t%/*}; arch=$${t#*/}; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags="-s -w" \
+	    -o $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
+	  gzip -9 -f $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch || exit 1; \
+	done
+	@echo "helper artifacts: $(HELPER_ARTIFACT_DIR)/nocx-helper-{$(HELPER_TARGETS)}.gz"
+
 all: lint test build
 
 # A local build is a DEVELOPMENT build: it resolves the nocx-dev profile, so it
@@ -28,7 +53,7 @@ build:
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
 # without it costs a developer an empty profile, never a user their data.
-build-release:
+build-release: helpers
 	$(WAILS) build -tags "$(strip release $(WAILS_PLATFORM_TAGS))"
 
 dev:
@@ -362,7 +387,7 @@ ci-frontend:
 	@echo "=== ci-frontend: ci.yml's frontend job, on the runner's node 24 ==="
 	./scripts/ci-frontend.sh
 
-ci-e2e:
+ci-e2e: helpers
 	@echo "=== ci-e2e: ci.yml's e2e jobs, the same image and command ==="
 	@echo "    (CI runs one job per browser in parallel; this runs both in sequence)"
 	./e2e/run-in-container.sh

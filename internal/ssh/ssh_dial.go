@@ -172,7 +172,13 @@ func (rc *RealClient) jumpRouteKey(ctx context.Context, cfg *ConnectConfig) stri
 func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved *resolvedConfig, cfg *ConnectConfig) func(poolKey) (sshClientConn, error) {
 	return func(_ poolKey) (sshClientConn, error) {
 		addr := net.JoinHostPort(resolved.hostName, strconv.Itoa(resolved.port))
-		hostKeyCB, err := rc.hostKeyCallbackFor(knownHostsTargetAddr(addr, cfg))
+		// The capturing callback records the TARGET host's presented
+		// fingerprint — direct and jump routes alike, because the target's
+		// handshake always runs through this callback (a jump's bastion is
+		// dialed with its own, separate callback). The consent design keys
+		// consent by this fingerprint: the same machine reached any way is
+		// one answer.
+		hostKeyCB, fp, err := rc.probeHostKeyCallback(knownHostsTargetAddr(addr, cfg))
 		if err != nil {
 			return nil, fmt.Errorf("host key callback: %w", err)
 		}
@@ -207,18 +213,30 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 		}
 
 		d := &dialer{client: rc}
+		var conn sshClientConn
 		if cfg.JumpHost != "" || cfg.JumpConfig != nil {
-			return d.dialViaJumpHost(ctx, cfg, resolved, gcfg, addr)
+			conn, err = d.dialViaJumpHost(ctx, cfg, resolved, gcfg, addr)
+		} else {
+			gclient, derr := d.dialDirect(ctx, addr, gcfg, host, resolved.user)
+			if derr != nil {
+				return nil, derr
+			}
+			stopKA, _ := startKeepalive(gclient, cfg.KeepaliveInterval, cfg.KeepaliveCountMax)
+			conn = &pooledSSHConn{
+				client:        gclient,
+				stopKeepalive: stopKA,
+			}
 		}
-		gclient, err := d.dialDirect(ctx, addr, gcfg, host, resolved.user)
 		if err != nil {
 			return nil, err
 		}
-		stopKA, _ := startKeepalive(gclient, cfg.KeepaliveInterval, cfg.KeepaliveCountMax)
-		return &pooledSSHConn{
-			client:        gclient,
-			stopKeepalive: stopKA,
-		}, nil
+		// The capture is set before the handshake's callback returns, so
+		// it is stable the moment the dial returns. For a jump route it is
+		// the target's key, never the bastion's.
+		if pconn, ok := conn.(*pooledSSHConn); ok {
+			pconn.fingerprint = *fp
+		}
+		return conn, nil
 	}
 }
 

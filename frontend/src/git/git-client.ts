@@ -19,6 +19,7 @@ import type { GitLogResult } from '../generated/git.log'
 import type { GitRemoteResult } from '../generated/git.remote'
 import type { GitCloseResult } from '../generated/git.close'
 import type { GitChangedNotification } from '../generated/git.changed'
+import type { ShellFootprintConsentResult } from '../generated/shell.footprint.consent'
 import type { ShellOpenUrl } from '../generated/shell.openUrl'
 
 /** The sides of a diff are a closed set — the schema says so, and the panel
@@ -125,6 +126,17 @@ class GitClient {
   openUrl(url: string): Promise<ShellOpenUrl> {
     return this.dispatcher.call<ShellOpenUrl>('shell.openUrl', { url })
   }
+  /** The consent prompt's Accept: raise the session's machine to the
+   *  relay tier (remote-helper design D8). The machine is resolved from
+   *  the sessionId server-side — the renderer never sends a fingerprint.
+   *  After it resolves, the panel re-opens through git.open, which now
+   *  proceeds past consentRequired. */
+  grantConsent(sessionId: string): Promise<ShellFootprintConsentResult> {
+    return this.dispatcher.call<ShellFootprintConsentResult>('shell.footprint.consent', {
+      sessionId,
+    })
+  }
+
   /** Release a binding. Also the repair for a stale open: a successful open
    *  the store has already superseded has registered a live repository on the
    *  backend, so dropping the response without this leaks it. */
@@ -161,6 +173,7 @@ export interface GitPanelServices {
   remote(bindingId: string): Promise<GitRemoteResult>
   openUrl(url: string): Promise<ShellOpenUrl>
   close(bindingId: string): Promise<GitCloseResult>
+  grantConsent(sessionId: string): Promise<ShellFootprintConsentResult>
   subscribeGitChanged(handler: (params: GitChangedNotification) => void): () => void
 }
 
@@ -184,6 +197,7 @@ export function createGitPanelServices(dispatcher: Dispatcher): GitPanelServices
     remote: (bindingId) => client.remote(bindingId),
     openUrl: (url) => client.openUrl(url),
     close: (bindingId) => client.close(bindingId),
+    grantConsent: (sessionId) => client.grantConsent(sessionId),
     subscribeGitChanged: (handler) => client.subscribeGitChanged(handler),
   }
 }

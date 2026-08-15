@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -391,4 +394,286 @@ type failingProfileResolver struct{}
 
 func (f *failingProfileResolver) Resolve(string) (string, *ssh.ConnectConfig, error) {
 	return "", nil, errors.New("profile not found")
+}
+
+// ── shell.footprint.helperUninstall ───────────────────────────────────────
+
+// recordingHelperCloser is a transport-side double for the composition
+// root's helper registry: it records the fingerprints it was asked to
+// close, and appends to the shared events slice so a test can assert the
+// D25 order against the remover's events — an observable sequence, never a
+// sleep.
+type recordingHelperCloser struct {
+	mu          sync.Mutex
+	events      *[]string
+	fingerprint string
+}
+
+func (c *recordingHelperCloser) CloseHelpersFor(fp string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fingerprint = fp
+	if c.events != nil {
+		*c.events = append(*c.events, "close")
+	}
+}
+
+// recordingHelperUninstaller is a transport-side double for the internal/ssh
+// capability: it records the host and resolved config the handler passed,
+// answers the canned removed flag, and appends to the shared events slice.
+type recordingHelperUninstaller struct {
+	mu      sync.Mutex
+	events  *[]string
+	host    string
+	cfg     *ssh.ConnectConfig
+	removed bool
+	err     error
+}
+
+func (r *recordingHelperUninstaller) UninstallHelper(_ context.Context, host string, opts ...ssh.ConnectOption) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.host = host
+	cfg := &ssh.ConnectConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+	r.cfg = cfg
+	if r.events != nil {
+		*r.events = append(*r.events, "remove")
+	}
+	return r.removed, r.err
+}
+
+// footprintHelperUninstallHarness wires the helper-uninstall surface with
+// the store and both seams, and returns the WSServer plus the event log the
+// two recording fakes share.
+func footprintHelperUninstallHarness(t *testing.T, installs *consent.InstallStore, closer *recordingHelperCloser, remover *recordingHelperUninstaller) (*WSServer, *[]string) {
+	t.Helper()
+	events := &[]string{}
+	closer.events = events
+	remover.events = events
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithHelperInstallStore(installs),
+		WithHelperChannelCloser(closer),
+		WithRemoteHelperUninstaller(remover),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+	)
+	if err := ws.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(context.Background()) })
+	return ws, events
+}
+
+// TestFootprintHelperUninstall_ClosesBeforeRemoves is D25, asserted as an
+// order: the close event precedes the remove event — the exec channel is
+// closed before the install directory is removed — and the observed row is
+// forgotten only after the removal succeeded, so the never-connect surface
+// stops advertising a helper that is gone.
+func TestFootprintHelperUninstall_ClosesBeforeRemoves(t *testing.T) {
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	closer := &recordingHelperCloser{}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, events := footprintHelperUninstallHarness(t, installs, closer, remover)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId":   "p_01",
+		"fingerprint": "SHA256:deadbeef",
+		"path":        "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.helperUninstall: %+v", resp.Error)
+	}
+	var got shellFootprintHelperUninstallResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Removed {
+		t.Fatal("removed = false, want true (a tree existed)")
+	}
+	// D25's order, as an observable sequence: close, then remove.
+	want := []string{"close", "remove"}
+	if len(*events) != len(want) {
+		t.Fatalf("events = %v, want %v — the close must precede the removal", *events, want)
+	}
+	for i := range want {
+		if (*events)[i] != want[i] {
+			t.Fatalf("events = %v, want %v — the close must precede the removal", *events, want)
+		}
+	}
+	if closer.fingerprint != "SHA256:deadbeef" {
+		t.Errorf("closer fingerprint = %q, want the row's machine", closer.fingerprint)
+	}
+	if remover.host != "pi@192.168.0.93" || remover.cfg == nil || remover.cfg.User != "test" {
+		t.Errorf("remover = host %q cfg %+v, want the resolved profile's host and config", remover.host, remover.cfg)
+	}
+	// The inventory row is gone: the surface's next status call will not
+	// advertise a helper that was removed.
+	if got := installs.All(); len(got) != 0 {
+		t.Fatalf("install observations after a successful uninstall = %v, want none", got)
+	}
+}
+
+// TestFootprintHelperUninstall_NothingInstalledIsANoOp: a host with no
+// helper tree uninstalls cleanly — removed=false, no error — and the
+// observed row is still forgotten, because the row's whole purpose is to
+// describe an install that no longer exists.
+func TestFootprintHelperUninstall_NothingInstalledIsANoOp(t *testing.T) {
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	remover := &recordingHelperUninstaller{removed: false} // nothing was there
+	ws, _ := footprintHelperUninstallHarness(t, installs, &recordingHelperCloser{}, remover)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId":   "p_01",
+		"fingerprint": "SHA256:deadbeef",
+		"path":        "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("second uninstall of a bare host must succeed: %+v", resp.Error)
+	}
+	var got shellFootprintHelperUninstallResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Removed {
+		t.Fatal("removed = true on a bare host, want false")
+	}
+	if got := installs.All(); len(got) != 0 {
+		t.Fatalf("observations after the no-op uninstall = %v, want none", got)
+	}
+}
+
+// TestFootprintHelperUninstall_Refusals: missing params, an unwired
+// capability or closer, and an unresolvable profile all refuse loudly —
+// an uninstall that is offered must be valid from the state the user is in.
+func TestFootprintHelperUninstall_Refusals(t *testing.T) {
+	ctx := context.Background()
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	// No capability, no closer: -32603 — D25 cannot be proven, so nothing
+	// is removed.
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_01", "fingerprint": "SHA256:deadbeef", "path": "~/.nocx/helper/x/",
+	}, 1)
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("unwired seams: got %+v, want -32603", resp.Error)
+	}
+	// Missing params: -32602.
+	resp = vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{"profileId": "p_01"}, 2)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("missing params: got %+v, want -32602", resp.Error)
+	}
+}
+
+// TestFootprintHelperUninstall_UnresolvableProfileRefuses: the capability
+// never runs with a guessed configuration; the dial happens only after the
+// profile resolved.
+func TestFootprintHelperUninstall_UnresolvableProfileRefuses(t *testing.T) {
+	closer := &recordingHelperCloser{}
+	remover := &recordingHelperUninstaller{}
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithHelperChannelCloser(closer),
+		WithRemoteHelperUninstaller(remover),
+		WithProfileResolver(&failingProfileResolver{}),
+	)
+	if err := ws.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(context.Background()) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_99", "fingerprint": "SHA256:deadbeef", "path": "~/.nocx/helper/x/",
+	}, 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("unresolvable profile: got %+v, want -32602", resp.Error)
+	}
+	if remover.host != "" {
+		t.Errorf("capability was called (host=%q) although the profile did not resolve", remover.host)
+	}
+}
+
+// TestFootprintHelperUninstall_ForgetFailureIsSurfaced: the directory was
+// removed but the local observation could not be cleared — the RPC says so
+// rather than silently advertising an install that no longer exists; the
+// retry heals it (the remote half is then the idempotent no-op).
+func TestFootprintHelperUninstall_ForgetFailureIsSurfaced(t *testing.T) {
+	dir := t.TempDir()
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), &failOnSecondWrite{DocumentStore: storage.NewDocumentStore(dir)}, "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, _ := footprintHelperUninstallHarness(t, installs, &recordingHelperCloser{}, remover)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_01", "fingerprint": "SHA256:deadbeef", "path": "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("unclearable observation: got %+v, want -32603", resp.Error)
+	}
+	if !strings.Contains(resp.Error.Message, "removed") {
+		t.Errorf("error = %q, want it to say the helper WAS removed and only the listing failed", resp.Error.Message)
+	}
+}
+
+// failOnSecondWrite is a DocumentStore whose Write fails once, after a
+// successful Record — the shape of a Remove persist failure.
+type failOnSecondWrite struct {
+	storage.DocumentStore
+	writes int
+}
+
+func (f *failOnSecondWrite) Write(name string, doc any) error {
+	f.writes++
+	if f.writes == 2 {
+		return errors.New("disk full")
+	}
+	return f.DocumentStore.Write(name, doc)
 }

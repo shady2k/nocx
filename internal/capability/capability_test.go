@@ -13,7 +13,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -471,6 +471,7 @@ func (f *fakeSession) StartOutput(context.Context, session.OutputHandler) error 
 }
 func (f *fakeSession) ShellIntegrationReason() ssh.RefusalReason { return "" }
 func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return f.sshOpts }
+func (f *fakeSession) HostKeyFingerprint() string                { return "" }
 
 // fakeHistoryRepo is a minimal content.CommandHistoryRepository.
 type fakeHistoryRepo struct {
@@ -588,7 +589,7 @@ func testLane() control.Admission {
 }
 
 // newFakeGitRegistry builds an empty git registry for gate tests.
-func newFakeGitRegistry() *git.Registry { return git.New() }
+func newFakeGitRegistry() *registry.Registry { return registry.New() }
 
 // noCaller owns nothing — Acquire on any binding answers the ownership
 // error rather than a panic.

@@ -35,6 +35,7 @@ package transport
 import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -151,10 +152,15 @@ func (s *WSServer) registerRemoteIntegration(sess session.Session, cfg session.C
 		return
 	}
 	reason := sess.ShellIntegrationReason()
-	// script is the only mode that attempts integration (nocx-mlm7): raw
-	// publishes nothing, and relay is inert. A configured RemoteCommand is
-	// refused in every mode, so a reason outranks the mode.
-	requested := desiredModeForAck(cfg.Remote) == "script"
+	// Whether this mode attempts integration is the axis's own question,
+	// asked of the axis (AD-8) — not re-spelled here. This line used to
+	// read `== "script"`, a second copy of internal/ssh's open-time gate,
+	// and the two silently disagreed the moment the default moved: every
+	// unconfigured session integrated and then reported nothing, because
+	// the gate said yes and the reporter said no. A configured
+	// RemoteCommand is refused in every mode, so a reason outranks the
+	// mode.
+	requested := profile.DesiredMode(desiredModeForAck(cfg.Remote)).DeliversScripts()
 	if reason == ssh.ReasonNone && !requested {
 		return
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -39,13 +40,15 @@ type RemoteInstaller interface {
 }
 
 // modeAllowsIntegration reports whether the resolved destination mode
-// (nocx-mlm7) permits open-time integration. Script (or empty — the
-// pre-mode default and the direct-host default) publishes the bundle and
-// integrates; raw publishes nothing and opens a plain shell; relay behaves
-// as raw in this epic (its consent gating lands with the relay binary).
-// An unknown mode fails closed — it never integrates.
+// (nocx-mlm7) permits open-time integration. The rule lives on the axis
+// itself (profile.DesiredMode.DeliversScripts) because it had a second
+// reader in internal/transport that spelled it differently; this is the
+// same question, asked of the one thing that owns it (AD-8).
+//
+// The mode arrives here as a string because ConnectConfig carries it as
+// one, stamped by the profile resolver.
 func modeAllowsIntegration(mode string) bool {
-	return mode == "" || mode == "script"
+	return profile.DesiredMode(mode).DeliversScripts()
 }
 
 // ---------------------------------------------------------------------------
@@ -215,14 +218,15 @@ type ConnectConfig struct {
 	// prompt. Nil means no channel.
 	RemoteLifecycle RemoteLifecycle
 
-	// DesiredMode is the resolved destination mode (raw|script|relay,
-	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate:
-	// script (or empty — the direct-host default) publishes the bundle and
-	// integrates; raw publishes nothing and opens a plain shell; relay
-	// behaves as raw in this epic. The transport also carries it verbatim
-	// to the open ack so the renderer sees the AXIS value — relay must
-	// stay distinguishable from raw even though both gate integration off
-	// today.
+	// DesiredMode is the resolved destination mode (auto|raw|script|relay,
+	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate,
+	// read through profile.DesiredMode.DeliversScripts: auto (the default —
+	// ADR-0033), script, and empty (the direct-host default) publish the
+	// bundle and integrate; raw publishes nothing and opens a plain shell;
+	// relay does not integrate either, which is nocx-7k8ma. The transport
+	// also carries it verbatim to the open ack so the renderer sees the
+	// AXIS value — every mode must stay distinguishable from every other
+	// even where two of them gate integration the same way.
 	DesiredMode string
 
 	// SessionID is the backend-assigned session ID (AD-7) for the session

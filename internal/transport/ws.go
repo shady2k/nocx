@@ -1930,18 +1930,25 @@ func (s *WSServer) emitSaturatedNotification(wconn Responder, method string, rej
 // (nocx-mlm7). The resolver stamps the mode on the ConnectConfig it builds
 // from the profile's effective desiredMode; a direct-host open (alias or
 // ad-hoc — no profile to say otherwise) and a local session keep the
-// hardcoded default: script (N3 — wrap and install automatically). Unknown
-// values fall back to the same default so malformed profile data can never
-// violate the open schema over the real socket.
+// hardcoded default. Unknown values fall back to that same default so
+// malformed profile data can never violate the open schema over the real
+// socket.
+//
+// The default is auto, and it must stay the same value the cascade's
+// hardcoded default carries (ADR-0033) — not a literal that merely happens
+// to agree today. Two defaults for one absent mode is what let the ack call
+// a connection `script` while the consent resolver read the same absence as
+// `auto` and offered an upgrade, which is exactly what D8 forbids for a
+// machine at script.
 func desiredModeForAck(remote *ssh.ConnectConfig) string {
 	if remote == nil || remote.DesiredMode == "" {
-		return string(profile.DesiredScript)
+		return string(profile.DefaultDesiredMode())
 	}
 	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
 		return remote.DesiredMode
 	default:
-		return string(profile.DesiredScript)
+		return string(profile.DefaultDesiredMode())
 	}
 }
 

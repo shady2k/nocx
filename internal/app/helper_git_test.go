@@ -920,10 +920,17 @@ func TestHelperSelectionRecordsTheFootprintObservation(t *testing.T) {
 	}
 }
 
-// TestHelperSelectionExplicitScriptIsNeverSilentlyUpgraded: a machine at
-// explicit script is asked at the feature — never silently raised to relay
-// by the mere existence of a binary (D8).
-func TestHelperSelectionExplicitScriptIsNeverSilentlyUpgraded(t *testing.T) {
+// TestHelperSelectionExplicitScriptIsNotOfferedTheBinary: a machine at
+// explicit script has ANSWERED — "the shell tiers, and do not offer me the
+// binary" (D8: script is an answer, not a gap; ADR-0033). It is neither
+// silently upgraded nor asked, and nothing is written to the host. The
+// refusal names the modes that would offer it, so the user is told what to
+// change rather than left with a dead panel.
+//
+// This assertion was the other way round until ADR-0033, and could not have
+// been otherwise: while silence also resolved to script, refusing here would
+// have refused every user who never opened a connection's settings.
+func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	provider := &fakeLaneProvider{peer: realHelperPeer()}
 	stubArtifacts(t)
 	store := consent.NewStore(log.NewSlogAdapter(discardLogger()), storage.NewDocumentStore(t.TempDir()), "consent.json")
@@ -931,8 +938,19 @@ func TestHelperSelectionExplicitScriptIsNeverSilentlyUpgraded(t *testing.T) {
 	sel, _ := helperGitFactory(provider, store, installs, discardLogger())
 
 	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example", mode: profile.DesiredScript})
-	if !selection.ConsentRequired {
-		t.Fatalf("selection = %+v, want consentRequired for explicit script — the ask, never a silent upgrade", selection)
+	if selection.ConsentRequired {
+		t.Fatalf("selection = %+v, want no ask for an explicit script — it is an answer", selection)
+	}
+	if selection.Factory != nil {
+		t.Fatalf("selection = %+v, want no factory for an explicit script — it was never upgraded", selection)
+	}
+	if selection.Refusal == nil {
+		t.Fatal("an explicit script produced neither an ask nor a refusal — the panel would have nothing to say")
+	}
+	if !strings.Contains(selection.Refusal.Message, "Relay") {
+		t.Errorf("refusal = %q, want it to name a mode that DOES offer the helper — "+
+			"a refusal the user cannot act on is the dead end this bead exists to remove",
+			selection.Refusal.Message)
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
 		t.Fatalf("explicit script wrote %d uploads, want 0", provider.install.uploadCount())

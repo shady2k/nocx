@@ -22,7 +22,7 @@ export interface Open {
    */
   cwd: string
   /**
-   * The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. script (the default — N3) wraps and installs automatically, raw adds nothing, relay is consent-gated (inert until the relay lands). The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.
+   * The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. auto (the default — ADR-0033) means the user has not answered: it wraps and installs the scripts exactly as script does (N3), and additionally permits the relay to be OFFERED where a surface reaches for it (D8). script is that same answer given explicitly, and is never upgraded. raw adds nothing. relay is the explicit choice of the deployed binary. The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.
    */
-  desiredMode: 'raw' | 'script' | 'relay'
+  desiredMode: 'auto' | 'raw' | 'script' | 'relay'
 }

@@ -92,9 +92,23 @@ func TestResolverLadder(t *testing.T) {
 			want: DesiredRelay,
 		},
 		{
-			name: "explicit script, no stored answer: the ask, never a silent upgrade",
+			// D8's "script is an answer, not a gap", assertable only since
+			// ADR-0033 gave silence its own value: while script also carried
+			// every unconfigured connection, refusing here would have refused
+			// everyone. The refusal is not a dead end — refusedHelperReason
+			// names the modes that do offer the helper.
+			name: "explicit script: an answer, so neither the ask nor an upgrade",
 			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true)},
 			m:    explicitScript,
+			want: Refused,
+		},
+		{
+			// The same machine at explicit auto: auto IS the unanswered
+			// state, so it is askable exactly as silence is. This row and the
+			// one above are the whole difference between the two values.
+			name: "explicit auto: the same as silence — askable",
+			opts: []option{withHelperArtifactAvailable(true), withHelperRequested(true)},
+			m:    Machine{Fingerprint: "SHA256:auto", Mode: profile.DesiredAuto},
 			want: ConsentRequired,
 		},
 		{

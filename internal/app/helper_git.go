@@ -204,13 +204,22 @@ func unsupportedPlatformMessage(p deploy.Platform, artifactErr error) string {
 // mode or stored answer forbids the helper: the actionable reason the
 // not-available error carries, never a generic refusal.
 func refusedHelperReason(sess session.Session, store *consent.Store) string {
+	// Every message here names a mode the connection form actually offers.
+	// Before ADR-0033 this text told the user to pick "Auto", which was a
+	// value only this package knew — an instruction that could not be
+	// followed.
 	switch effectiveModeFor(sess) {
 	case profile.DesiredRaw:
-		return "this connection is set to Raw, which does not run the nocx helper — change the connection mode to Auto or Relay to open repositories here"
+		return "this connection is set to Raw, which does not run the nocx helper — change its Delivery mode to Auto or Relay to open repositories here"
+	case profile.DesiredScript:
+		// An answer, not a gap: script asked for the shell tiers and not
+		// the binary, so this is not a refusal to explain away but a
+		// choice to name back.
+		return "this connection is set to Script, which installs the shell integration but not the nocx helper — change its Delivery mode to Auto to be offered the helper, or Relay to allow it outright"
 	}
 	if store != nil {
 		if ans, ok := store.Lookup(sess.HostKeyFingerprint()); ok && ans == consent.Denied {
-			return "this machine has declined to run the nocx helper — set the connection mode to Relay, or change the answer in the footprint screen, to allow it"
+			return "this machine has declined to run the nocx helper — set the connection's Delivery mode to Relay, or change the answer in the footprint screen, to allow it"
 		}
 	}
 	return "no helper available for this SSH session"
@@ -272,8 +281,10 @@ func installHelperFor(sess session.Session, lanes helperInstallProvider, platfor
 
 // effectiveModeFor re-derives the session's resolved desired mode from the
 // connect options the session was opened with (session.Reg stamps the
-// resolved cascade answer as WithDesiredMode). An absent answer is the
-// hardcoded auto default — the resolver treats "" as auto.
+// resolved cascade answer as WithDesiredMode). An absent answer means no
+// profile spoke for this destination — a direct host or an ad-hoc open —
+// and resolves to profile.DesiredAuto, the same value the cascade's
+// hardcoded default carries (ADR-0033).
 func effectiveModeFor(sess session.Session) profile.DesiredMode {
 	cfg := &ssh.ConnectConfig{}
 	for _, o := range sess.SSHOptions() {

@@ -1732,11 +1732,14 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 		t.Errorf("shell = %q, want %q for an unpinned remote", status.Shell, ssh.ShellAuto)
 	}
 	// The resolver stamped no mode (openProfileResolver builds a bare
-	// config), so the ack must report the default: script (N3 — wrap and
-	// install automatically). A direct-host or profile-less open gets the
-	// hardcoded default, exactly like a profile that resolves to nothing.
-	if got.DesiredMode != "script" {
-		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, "script")
+	// config), so the ack must report the default. A direct-host or
+	// profile-less open is unanswered in exactly the sense a profile that
+	// resolves to nothing is, so it reports the SAME value — read from the
+	// cascade rather than spelled again here, which is what stops this
+	// assertion from drifting away from the resolver the way the ack's own
+	// literal did (ADR-0033).
+	if want := string(profile.DefaultDesiredMode()); got.DesiredMode != want {
+		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, want)
 	}
 
 	// The launcher the transport option attached must have reached the

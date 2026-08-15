@@ -15,12 +15,6 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 )
 
-// DesiredAuto is the hardcoded default of the delivery-mode axis (the
-// 2026-08-10 design §3.1). The value is not yet a stored DesiredMode — that
-// cascade change belongs to the footprint-consent epic — but resolution
-// treats an absent mode as auto, which is the same thing.
-const DesiredAuto profile.DesiredMode = "auto"
-
 // Outcome is the resolver's answer for one machine at one consultation.
 type Outcome string
 
@@ -90,7 +84,7 @@ type resolver struct {
 func (r *resolver) Resolve(m Machine) Outcome {
 	mode := m.Mode
 	if mode == "" {
-		mode = DesiredAuto
+		mode = profile.DesiredAuto
 	}
 	switch mode {
 	case profile.DesiredRaw:
@@ -99,9 +93,25 @@ func (r *resolver) Resolve(m Machine) Outcome {
 	case profile.DesiredRelay:
 		// An explicit relay choice is the consent for the binary (§4.3).
 		return DesiredRelay
+	case profile.DesiredScript:
+		// An explicit script is an ANSWER: "the shell tiers, and do not
+		// offer me the binary". D8 — script is an answer, not a gap.
+		//
+		// This arm is what ADR-0033 bought. Until auto existed as its own
+		// value, script also carried every user who had never opened the
+		// connection's settings, so refusing here would have refused
+		// everyone; the code therefore fell through and asked a script user
+		// on the reading that an ask is not a silent upgrade. That reading
+		// left auto and script behaving identically at every branch, which
+		// makes auto ceremony. With silence resolving to auto, the two can
+		// finally differ where the design always said they did.
+		//
+		// The user is not stranded: refusedHelperReason names the modes
+		// that do offer the helper, and both are one Select away.
+		return Refused
 	}
-	// script (explicit) and auto fall through: the relay arm of the ladder
-	// needs more than a binary (D8).
+	// auto falls through: the relay arm of the ladder needs more than a
+	// binary (D8).
 	if !r.requested {
 		// No surface on this connection asked for the helper: nothing
 		// happens — not even the ask. This is the second condition, and it
@@ -125,8 +135,7 @@ func (r *resolver) Resolve(m Machine) Outcome {
 		// offer, so no ask.
 		return Refused
 	}
-	// No relay-tier answer: the ask is raised at the feature (D8). An
-	// explicit script is never silently upgraded — the ask is the
-	// non-silent path.
+	// No relay-tier answer, on a machine that has not answered: the ask is
+	// raised at the feature (D8), before anything is written (§4 step 4).
 	return ConsentRequired
 }

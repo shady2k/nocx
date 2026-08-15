@@ -139,7 +139,7 @@ func TestDeliversScripts(t *testing.T) {
 		{DesiredScript, true, "the same delivery, chosen explicitly"},
 		{DesiredMode(""), true, "no profile spoke — a direct host or an ad-hoc open"},
 		{DesiredRaw, false, "the user's opt-out: nothing is written"},
-		{DesiredRelay, false, "the gate has never allowed it — nocx-7k8ma, not a property of this rule"},
+		{DesiredRelay, true, "additive, not alternative: allowing the helper never withholds the scripts (§5.2)"},
 		{DesiredMode("ask"), false, "not a mode; and an unknown value fails closed"},
 	}
 	for _, tc := range cases {

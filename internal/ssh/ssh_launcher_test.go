@@ -261,10 +261,18 @@ func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	}
 }
 
-// TestConnect_DesiredModeRelay_OpensPlainShell: relay behaves as raw in
-// this epic — no publish, no launcher, plain shell, reason none. Its
-// consent gating lands with the relay binary (design §3.4).
-func TestConnect_DesiredModeRelay_OpensPlainShell(t *testing.T) {
+// TestConnect_DesiredModeRelay_IntegratesLikeScript: relay publishes the
+// bundle and integrates, exactly as script and auto do. The tiers are
+// additive, not alternative (§5.2): allowing the deployed binary never
+// withholds the shell scripts, any more than declining it would.
+//
+// This test asserted the opposite until nocx-7k8ma, and was right when it
+// was written: `relay` then named the Tier-B carrier of §3.4, which would
+// have delivered integration itself. That carrier is still unbuilt (D15),
+// the mode meanwhile came to mean "allow the remote helper", and the helper
+// owns no PTY and emits no markers — so the old assertion had become a
+// guarantee that the most capable mode delivered the least.
+func TestConnect_DesiredModeRelay_IntegratesLikeScript(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
 
@@ -280,15 +288,17 @@ func TestConnect_DesiredModeRelay_OpensPlainShell(t *testing.T) {
 
 	assertUsable(t, srv, ch)
 
-	if n := launcher.callCount(); n != 0 {
-		t.Fatalf("launcher consulted %d times under relay, want 0 (plain shell at open)", n)
+	if n := launcher.callCount(); n == 0 {
+		t.Fatal("launcher never consulted under relay — the session opened a plain shell, " +
+			"so a user who allowed the helper silently lost their blocks")
 	}
-	if installer.homeCalls != 0 || installer.publishCalls != 0 {
-		t.Fatalf("installer consulted under relay (home=%d publish=%d), want 0 — relay behaves as raw this epic",
+	if installer.homeCalls == 0 || installer.publishCalls == 0 {
+		t.Fatalf("installer not consulted under relay (home=%d publish=%d), want both — "+
+			"the bundle must publish for relay exactly as it does for script",
 			installer.homeCalls, installer.publishCalls)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
-		t.Errorf("ShellIntegrationReason = %q, want %q (never attempted)", got, ReasonNone)
+		t.Errorf("ShellIntegrationReason = %q, want %q (integration was attempted and not refused)", got, ReasonNone)
 	}
 }
 

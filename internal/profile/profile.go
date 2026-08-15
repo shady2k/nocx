@@ -79,12 +79,28 @@ const (
 // notification never fired, because the axis had one meaning in the gate
 // and another in the reporter.
 //
-// relay is deliberately false here and is nocx-7k8ma, not a property of
-// this predicate: the gate has never allowed it, from when relay was
-// inert, and the binary landing did not change the gate.
+// raw is the ONLY answer that means "nothing", and an unrecognised value
+// joins it by failing closed. Every other mode integrates, relay included:
+// the tiers are additive, not alternative (§5.2 — "declining a deployed
+// binary must not also decline shell scripts — different risks", and the
+// inverse holds for the same reason).
+//
+// relay refused for an epic after it stopped being true (nocx-7k8ma). The
+// refusal was written when `relay` named the Tier-B carrier of §3.4 — a
+// binary that would own the PTY and deliver integration itself — so
+// refusing the script carrier for it was coherent. That carrier is still
+// designed-for-not-built (D15, nocx-if6 phase B), while the mode was put
+// to work meaning "allow the remote helper", which owns no PTY and
+// delivers no markers. Between those two facts a user who picked the most
+// capable mode on the axis got the least capable delivery: helper, no
+// blocks, and nothing in the product saying why.
+//
+// If the Tier-B carrier ever does deliver integration itself, this stays
+// true — the mode still integrates, by another carrier — and which carrier
+// ran is the observed-delivery axis's question, not this one's.
 func (m DesiredMode) DeliversScripts() bool {
 	switch m {
-	case "", DesiredAuto, DesiredScript:
+	case "", DesiredAuto, DesiredScript, DesiredRelay:
 		return true
 	default:
 		return false

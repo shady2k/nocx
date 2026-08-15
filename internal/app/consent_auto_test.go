@@ -86,3 +86,40 @@ func TestExplicitAutoIsAskableLikeSilence(t *testing.T) {
 		t.Errorf("an explicit auto resolved to %q, want %q", got, ConsentRequired)
 	}
 }
+
+// TestRelayIsAdditiveNotAlternative states §5.2 as an assertion instead of
+// prose: "declining a deployed binary must not also decline shell scripts —
+// different risks", and the inverse holds for the same reason. A user at
+// relay has allowed the helper; nothing about that answer says they gave up
+// the blocks.
+//
+// It failed in the direction nobody looks: picking the MOST capable mode on
+// the axis delivered the LEAST, because the open-time gate had refused relay
+// since the days the Tier-B carrier did not exist, and the helper landing
+// did not move it (nocx-7k8ma).
+//
+// Both halves are asserted here, in one test, because separately they are
+// each true of a broken product: the resolver alone cannot see that the
+// shell was left plain, and the gate alone cannot see that the helper was
+// allowed.
+func TestRelayIsAdditiveNotAlternative(t *testing.T) {
+	// The helper half: an explicit relay is the consent, with no surface
+	// having to ask (§4.3).
+	r := newResolver(withHelperArtifactAvailable(true), withHelperRequested(false))
+	if got := r.Resolve(explicitRelay); got != DesiredRelay {
+		t.Errorf("relay resolved to %q, want %q — the explicit choice is the consent", got, DesiredRelay)
+	}
+
+	// The scripts half: the same session still publishes the bundle and
+	// integrates, exactly as auto and script do.
+	if !profile.DesiredRelay.DeliversScripts() {
+		t.Error("a relay session does not integrate — allowing the binary " +
+			"silently declined the shell scripts, which §5.2 forbids in both directions")
+	}
+
+	// And the opt-out still opts out: raw is the only answer that means
+	// "nothing", so the fix above must not have widened into it.
+	if profile.DesiredRaw.DeliversScripts() {
+		t.Error("raw integrates — the user's opt-out stopped opting out")
+	}
+}

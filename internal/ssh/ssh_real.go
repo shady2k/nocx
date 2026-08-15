@@ -726,10 +726,11 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     command-line and remote command"), so the configured command runs
 //     as-is and no launcher or installer is consulted (spec §4.2).
 //  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
-//     nothing and opens a plain shell; relay behaves as raw in this epic;
-//     script (or empty — the direct-host default) publishes and
-//     integrates.
-//  3. In script mode a saved connection publishes the bundle over SFTP
+//     nothing and opens a plain shell; auto (the default), script and
+//     relay — or empty, the direct-host default — publish and integrate.
+//     The tiers are additive: relay allows the deployed binary and never
+//     withholds the scripts (§5.2).
+//  3. In any integrating mode a saved connection publishes the bundle over SFTP
 //     first, through the RemoteInstaller (P8's carrier): the publisher's
 //     fail-open contract means the session still starts — transient-
 //     integrated via the launcher, or raw — when the publish fails, and

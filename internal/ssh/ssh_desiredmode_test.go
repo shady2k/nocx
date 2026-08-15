@@ -34,6 +34,13 @@ func TestModeAllowsIntegration(t *testing.T) {
 			why: "the direct-host default — no profile said otherwise",
 		},
 		{
+			mode: "relay", want: true,
+			why: "the tiers are additive, not alternative (§5.2: declining a " +
+				"deployed binary must not also decline shell scripts — and the " +
+				"inverse holds for the same reason). Picking the MOST capable " +
+				"mode used to deliver the least: no markers, no blocks",
+		},
+		{
 			mode: "raw", want: false,
 			why: "the user's opt-out: nothing is written, a plain shell opens",
 		},

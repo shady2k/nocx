@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -309,6 +310,12 @@ type WSServer struct {
 	sweepExited chan struct{}
 
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
+
+	// sandboxSvc is the per-tab filesystem sandbox backend (ADR-0030),
+	// answering sandbox.status and preparing sandboxed open requests. The
+	// transport never renders policy — it validates the request and maps the
+	// backend's typed errors to reserved codes.
+	sandboxSvc sandbox.Service
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
 	// When nil, the handler returns a JSON-RPC error. The resolver
@@ -1118,6 +1125,26 @@ func WithSettingsRegistry(r *settings.Registry) WSServerOption {
 // WithBackupService attaches the structured Backup & Restore service.
 func WithBackupService(svc *backup.Service) WSServerOption {
 	return func(s *WSServer) { s.backupService = svc }
+}
+
+// WithSandboxService attaches the filesystem sandbox backend, enabling
+// sandbox.status and sandboxed open requests. Without it, sandbox.status
+// reports -32601 and a sandboxed open fails closed at -32010 (no service to
+// confirm the flag).
+func WithSandboxService(svc sandbox.Service) WSServerOption {
+	return func(s *WSServer) { s.sandboxSvc = svc }
+}
+
+// sandboxEnabled reports whether the opt-in feature flag is on. The flag is
+// the sole gate: a sandbox request while it is off is rejected (-32010), so
+// UI and wire behavior agree even if the renderer is stale (design spec
+// §3.1). A missing registry fails closed.
+func (s *WSServer) sandboxEnabled() bool {
+	if s.settings == nil {
+		return false
+	}
+	on, err := s.settings.GetBool(settings.SandboxEnabled)
+	return err == nil && on
 }
 
 // WithBackupFileSaver injects the native save-file capability. Tests can
@@ -2176,6 +2203,10 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// Sandbox is the opt-in filesystem sandbox request (ADR-0030). Presence
+	// is the sole wire opt-in; the renderer supplies only the workspace, the
+	// backend canonicalizes and owns policy and enforcement.
+	Sandbox *openSandboxParams `json:"sandbox,omitempty"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher
@@ -2222,6 +2253,11 @@ type openParentParams struct {
 	SessionID    string `json:"sessionId"`
 	InstanceID   string `json:"instanceId"`
 	SessionEpoch uint64 `json:"sessionEpoch"`
+}
+
+// openSandboxParams is the sandbox block of open (design spec §4.1).
+type openSandboxParams struct {
+	Workspace string `json:"workspace"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.

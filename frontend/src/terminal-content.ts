@@ -3428,6 +3428,17 @@ export class TerminalContent extends BasePaneContent {
           return
         }
       }
+      if (this.hooks.sandboxWorkspace) {
+        const message = err instanceof Error ? err.message : String(err)
+        showToast({
+          level: 'danger',
+          message: `Sandboxed shell failed to start: ${message}`,
+        })
+        this._readyResolve(false)
+        log.error('nocx: sandboxed terminal failed', { error: message })
+        host.requestClose()
+        return
+      }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Terminal failed to start:\n\n${err instanceof Error ? err.message : String(err)}`

@@ -10,6 +10,7 @@
 import type { Dispatcher } from './dispatcher'
 import type { DialogOpenDirectory } from './generated/dialog.openDirectory'
 import type { DialogOpenFile } from './generated/dialog.openFile'
+import type { DialogOpenDirectory } from './generated/dialog.openDirectory'
 
 export class DialogClient {
   constructor(private dispatcher: Dispatcher) {}

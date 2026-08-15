@@ -139,6 +139,18 @@
       "func": "Stub.Write"
     },
     {
+      "file": "internal/sandbox/probe.go",
+      "func": "seatbeltProbe.status"
+    },
+    {
+      "file": "internal/sandbox/profile.go",
+      "func": "escapeSBPL"
+    },
+    {
+      "file": "internal/sandbox/profile.go",
+      "func": "renderProfile"
+    },
+    {
       "file": "internal/secrets/secrets.go",
       "func": "Mask"
     },

@@ -17,6 +17,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -157,28 +158,9 @@ type Config struct {
 	// Used by revocation to find sessions running that credential.
 	// Empty for sessions with no linked credential (inline auth).
 	CredentialID string
-	// Parent claims the session that opened this one (nocx-9hu9d). The zero
-	// Ref means "no parent" — a root session, which is every session the
-	// product opens today. A non-zero Ref is a CLAIM, checked by
-	// validateParent before anything is spawned and recorded immutably on
-	// the session afterwards; see lineage.go for what is refused and why.
-	// It carries provenance and nothing else: no part of Open reads it to
-	// decide what the session may do.
-	Parent Ref
-	// PaneID names the pane this session is the pipe of (design §6.1 and
-	// §7). Frontend-minted UUIDv7, validated and resolved by the transport
-	// BEFORE anything is spawned, and empty when this session is attached to
-	// no recorded pane.
-	//
-	// It is recorded rather than derived, unlike the workspace beside it —
-	// see the note on Session.PaneID.
-	PaneID string
-}
-
-// clientSize is the geometry this config reports, as one value. One reader
-// of the four loose fields, so nowhere else has to know they are four.
-func (c Config) clientSize() Size {
-	return Size{Cols: c.Cols, Rows: c.Rows, XPixel: c.XPixel, YPixel: c.YPixel}
+	// Sandbox is the wire opt-in for a filesystem-isolated local tab (ADR-0030).
+	// nil for ordinary local and all SSH sessions.
+	Sandbox *sandbox.Request
 }
 
 type PTYFactory interface {
@@ -274,6 +256,9 @@ type Session interface {
 	// Empty for sessions with no linked credential (inline auth) and for
 	// local/ad-hoc sessions.
 	CredentialID() string
+	// SandboxInfo returns the immutable sandbox metadata for a sandboxed
+	// local tab, or nil for ordinary/SSH sessions (design spec §3.3).
+	SandboxInfo() *sandbox.SessionInfo
 	// Write sends p to the session's channel and returns the number of
 	// bytes written and any error. It blocks until the write completes
 	// (or the session dies); callers that must not block — the
@@ -509,6 +494,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	// there is no path from this point on where a session has no size.
 	eff := effectiveSize(cfg.clientSize())
 
+	var pt pty.Pty
 	var ch Channel
 	var err error
 	var opts []ssh.ConnectOption
@@ -544,7 +530,8 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
 	} else {
-		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
+		var perr error
+		pt, perr = r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:       cfg.Cwd,
 			Cols:      eff.Cols,
 			Rows:      eff.Rows,
@@ -552,6 +539,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			YPixel:    eff.YPixel,
 			Enhanced:  cfg.Enhanced,
 			SessionID: string(id),
+			Sandbox:   cfg.Sandbox,
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)
@@ -576,6 +564,14 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		log:          r.log.With("session_id", string(id)),
 		writeCh:      make(chan writeJob, writeQueueDepth),
 		writeDone:    make(chan struct{}),
+	}
+	// Sandbox metadata rides up from the PTY so the open result can carry
+	// {backend, workspace, writableRoots} without the transport owning any
+	// policy (design spec §4.5). Only local PTYs can be sandboxed.
+	if pt != nil {
+		if pi, ok := pt.(pty.SandboxInfoProvider); ok {
+			s.sandboxInfo = pi.SandboxInfo()
+		}
 	}
 	s.startWriteLoop()
 
@@ -836,27 +832,8 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
-
-	// size is what the session is RUNNING at: the backend's conclusion,
-	// written at construction (never after the channel exists at a
-	// different one) and again after each resize the channel accepted.
-	// Guarded by its own mutex because every reader of it — the open ack,
-	// the resize lane's follow-up, a later attaching client — asks while
-	// something else may be resizing, and none of them should contend with
-	// a handler swap or a write.
-	sizeMu sync.Mutex
-	size   Size
-
-	// The liveness projection (nocx-iarf9). livenessMu guards the record;
-	// livenessEpochs is this session's own monotonic source of observation
-	// epochs, so any two observations of THIS session are ordered without a
-	// shared clock (an observation of another incarnation is refused by
-	// identity, never by number). The zero record means "not observed yet",
-	// which livenessLocked resolves on the first read.
-	livenessMu     sync.Mutex
-	liveness       LivenessState
-	livenessEpochs atomic.Uint64
-
+	// sandboxInfo is immutable metadata for a sandboxed local tab; nil otherwise.
+	sandboxInfo *sandbox.SessionInfo
 	// writeCh feeds a single write goroutine that serialises every write in
 	// arrival order. The readLoop hands frames over without waiting, so
 	// ordering has to be the queue's job: two frames for one session —
@@ -906,6 +883,7 @@ func (s *realSession) Host() string                    { return s.host }
 func (s *realSession) Cwd() string                     { return s.cwd }
 func (s *realSession) ProfileID() string               { return s.profileID }
 func (s *realSession) CredentialID() string            { return s.credentialID }
+func (s *realSession) SandboxInfo() *sandbox.SessionInfo { return s.sandboxInfo }
 func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
 
 func (s *realSession) Write(p []byte) (int, error) {

@@ -451,7 +451,6 @@ describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
     }
   })
 })
-
 describe('SSH open host-key recovery', () => {
   const routeEvidence = {
     host: 'db.example.com:22',

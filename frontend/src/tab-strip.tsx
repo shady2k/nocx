@@ -100,6 +100,9 @@ export interface PaneView {
    *  tree stays in the vertical one (§4.3). */
   readonly depth?: number
   onDisplayChange: (() => void) | null
+  /** True once the session confirmed a sandboxed local tab (lock/shield
+   *  marker renders; ADR-0030 §3.3). */
+  readonly sandboxed?: boolean
 }
 
 /**

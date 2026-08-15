@@ -1,5 +1,7 @@
 .PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
+        sandbox-smoke-linux sandbox-smoke-linux-artifact \
+        sandbox-smoke-macos sandbox-smoke-macos-artifact
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -168,6 +170,44 @@ test:
 conformance:
 	NOCX_TEST_SSH_G=1 $(GO) test -v -count=1 -run Conformance ./internal/ssh/...
 
+
+# Real Landlock enforcement smoke (ADR-0030 §8). Proves the cage behaves, not
+# just that the source compiles. Requires a kernel with Landlock ABI >= 3 and
+# FAILS LOUDLY below it — it is a release gate, not an env-gated convenience.
+# The ABI probe is go-landlock's own cmd, resolved from the module cache.
+sandbox-smoke-linux:
+	@abi=$$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0); \
+	echo "=== Landlock enforcement smoke (detected ABI $$abi, floor 3) ==="; \
+	if [ "$$abi" -lt 3 ]; then echo "FAIL: Landlock ABI $$abi < 3 — enforcement smoke cannot run on this kernel"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestLandlockEnforcement' ./internal/sandbox/
+
+# The source-level smoke above can pass while the executable's early helper
+# dispatch is missing. This gate invokes the built nocx binary itself; on Linux
+# that binary then re-execs itself as the Landlock helper.
+sandbox-smoke-linux-artifact:
+	@echo "=== Landlock release-artifact smoke ==="
+	@if [ "$$(uname -s)" != "Linux" ]; then echo "FAIL: sandbox-smoke-linux-artifact requires Linux"; exit 1; fi
+	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name an executable nocx binary"; exit 1; fi
+	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
+
+# Real Seatbelt enforcement smoke (ADR-0030 §9.4). Runs the shared probe
+# inside a real sandbox-exec cage on macOS. Absence is a failed release gate:
+# a successful release must prove enforcement rather than skip the check.
+sandbox-smoke-macos:
+	@echo "=== Seatbelt enforcement smoke (macOS) ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — enforcement smoke cannot run"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService|TestNewLocal_SandboxedEndToEnd' ./internal/sandbox/
+
+# Seatbelt is applied by the built nocx executable, not by the test process.
+# This catches packaging/startup drift before a release can claim macOS support.
+sandbox-smoke-macos-artifact:
+	@echo "=== Seatbelt release-artifact smoke ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos-artifact requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — artifact smoke cannot run"; exit 1; fi
+	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name the executable inside the packaged .app"; exit 1; fi
+	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
+
 clean:
 	$(GO) clean -cache
 	rm -rf build/
@@ -305,9 +345,9 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/coordinator internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
-               internal/pty internal/reveal internal/ssh/mux \
+               internal/pty internal/reveal internal/sandbox internal/ssh/mux \
                internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/sandbox|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
@@ -395,8 +435,8 @@ ci-os-split:
 	if [ $$rc = 0 ]; then echo "ok"; fi; \
 	exit $$rc
 
-# ci-mac is the ONLY gate with no container, because macos-latest is the
-# target OS and Docker on a Mac runs Linux. It is therefore also the only one
+# ci-mac is the ONLY gate with no container, because macos-15 is the pinned
+# Seatbelt target and Docker on a Mac runs Linux. It is therefore also the only one
 # that runs against a real machine with a real login keychain, so it is NOT in
 # `make ci` — you run it by hand, when a Darwin-specific failure needs
 # reproducing.
@@ -465,6 +505,7 @@ ci-mac:
 	  GOMODCACHE="$$gomodcache" GOCACHE="$$gocache" \
 	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
 	         $(GO) test -race -count=1 $(OS_PKGS) && \
+	         $(MAKE) sandbox-smoke-macos && \
 	         echo "" && \
 	         echo "=== the shipped profile directory (-tags release) ===" && \
 	         $(GO) test -race -count=1 -tags release ./internal/storage/...'

@@ -607,6 +607,14 @@ jobs:
           [ "$cd_a" != "$cd_b" ] || { echo "::error::the two builds have the same cdhash ($cd_a) — the check proves nothing as written"; exit 1; }
           echo "requirement stable across a rebuild; cdhash moved from $cd_a to $cd_b"
 
+      # The source-level profile tests do not prove the packaged executable
+      # reaches its early smoke dispatch. Invoke the binary inside the .app;
+      # it constructs the real Seatbelt service and runs the probe in-cage.
+      - name: Sandbox enforcement smoke (packaged macOS app)
+        env:
+          NOCX_SANDBOX_ARTIFACT: build/bin/nocx.app/Contents/MacOS/nocx
+        run: make sandbox-smoke-macos-artifact
+
       - name: Package .dmg and .zip
         run: |
           set -euo pipefail
@@ -825,6 +833,12 @@ jobs:
       # can be run against a real build outside a tag push. Packaging that only
       # exists inside a workflow cannot be tested before it ships, and this step
       # is exactly where nocx-azxe.7 shipped from.
+      # Exercise the exact release-tagged Wails binary before it is copied into
+      # the AppDir. The binary re-execs itself as the Landlock helper.
+      - name: Sandbox enforcement smoke (release Linux binary)
+        env:
+          NOCX_SANDBOX_ARTIFACT: build/bin/nocx
+        run: make sandbox-smoke-linux-artifact
       - name: Package AppImage
         run: scripts/appimage/package-appimage.sh
 

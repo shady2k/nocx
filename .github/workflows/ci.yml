@@ -1,12 +1,14 @@
 # CI — quality gates for nocx.
 #
-# Runner decision: back-end job runs on macos-latest because:
+# Runner decision: back-end job runs on macos-15 because:
 #   - darwin is the target platform for this macOS-first MVP (see
 #     docs/architecture.md § "Operational / Environmental Envelope"), so CI
 #     should build and test what ships to users;
 #   - internal/pty exercises creack/pty, and PTY semantics differ between macOS
 #     and Linux — those tests are only meaningful on the target OS;
-#   - the repo is public, so macos-latest runner minutes are free.
+#   - ADR-0030's deprecated Seatbelt backend must be exercised before merge,
+#     while newer hosted images have made sandbox-exec abort before its child
+#     starts. The release workflow uses the same pinned image.
 # (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
 # on the target-OS argument alone, without measuring ubuntu.)
 # Every job here has a local target of the SAME NAME that is the job, and
@@ -68,9 +70,9 @@
 # green (2026-08-10, nocx-cn86). The claim is now a list, and each line of it is
 # a command somebody can run.
 #
-# `ci-mac` is the one job with no container, and deliberately: macos-latest is
-# the target OS. That makes it the one place where local and CI can still
-# disagree — and they do (nocx-58gq, nocx-65v6). See the Makefile's `ci` target.
+# `ci-mac` is the one job with no container, and deliberately: macos-15 is the
+# supported Seatbelt release-gate host. That makes it the one place where local
+# and CI can still disagree — see the Makefile's `ci` target.
 #
 # Trigger decision: CI runs on pull requests to main, on release branches
 # (release/**) and manual workflow_dispatch, and is *called* by release.yml via
@@ -103,7 +105,7 @@ permissions:
 jobs:
   ci-mac:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
 
@@ -158,7 +160,7 @@ jobs:
       #
       # This job used to run the whole suite here. Small is the point: a
       # portable package proves nothing extra by being compiled twice, and
-      # macos-latest is the scarcest runner in this matrix. What belongs here
+      # macos-15 is the scarcest runner in this matrix. What belongs here
       # is what only Darwin can answer — PTY semantics, the profile directory,
       # the keystore binding, the socketpair — and nothing else. The header
       # explains why internal/shellintegration is not on that list even though
@@ -174,6 +176,12 @@ jobs:
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: go test -race -tags gtk3 -count=1 $PKGS
+
+      # Seatbelt is deprecated and runtime-only; compiling the Darwin backend
+      # proves neither profile acceptance nor enforcement. macos-15 is pinned
+      # above specifically so this remains an executable pre-merge gate.
+      - name: Sandbox enforcement smoke (Seatbelt)
+        run: make sandbox-smoke-macos
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -267,6 +275,12 @@ jobs:
 
       - name: The OS split has not drifted
         run: make ci-os-split
+      # Real Landlock enforcement smoke (ADR-0030 §8). The release gate that
+      # proves the cage behaves on Linux; it fails loudly when the runner's
+      # kernel is below Landlock ABI 3 — a runner that cannot run it must be
+      # replaced, never silently skipped.
+      - name: Sandbox enforcement smoke (Landlock)
+        run: make sandbox-smoke-linux
 
       - name: Test (with Secret Service)
         if: matrix.keyring == 'with-secret-service'
@@ -478,7 +492,7 @@ jobs:
   # divergence rather than remove it.
   #
   # What this gives up, checked rather than assumed: Darwin PTY semantics and
-  # Darwin paths are covered by `backend` on macos-latest (internal/pty,
+  # Darwin paths are covered by `ci-mac` on macos-15 (internal/pty,
   # internal/storage, including the -tags release build), and both macOS shells
   # by its 31 bash and 14 zsh tests in internal/shellintegration. WKWebView was
   # never covered here on either runner — Playwright drives its own browser

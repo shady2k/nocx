@@ -58,6 +58,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/reveal"
+	"github.com/shady2k/nocx/internal/sandbox
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -102,6 +103,10 @@ type App struct {
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
 	skills           assistant.SkillLibrary
+	// Sandbox is the per-tab filesystem sandbox backend (ADR-0030), wired at the composition root.
+	Sandbox sandbox.Service
+	// UnlockRequester lets backend code request a vault unlock from the user.
+	UnlockRequester transport.UnlockRequester
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -637,6 +642,10 @@ func New(opts ...Option) (*App, error) {
 	installLogrusContainment(logger)
 
 	shint := shellintegration.New(logger)
+	// One platform sandbox service at the composition root (AD-8). It owns
+	// policy construction and the per-session runtime roots; callers only
+	// carry an optional workspace request.
+	sandboxSvc := sandbox.New(logger, paths.CacheDir())
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
 	// each lane's owning session before it can compose a child bootstrap.
@@ -656,11 +665,11 @@ func New(opts ...Option) (*App, error) {
 	// composition root is where the platform half gets wired in.
 	ptf := &localPTYFactory{
 		log: logger, shint: shint, transports: childTransports,
-		shells: loginshell.New(), procs: procs,
+		shells: loginshell.New(), procs: procs, sandbox: sandboxSvc,
 	}
 	sess := session.New(logger, ptf)
 
-	// SSH config resolver: shared by both the SSH client and the profile
+	// SSH config resolver
 	// resolver so the authorization comparison matches canonical hostnames.
 	// AD-4: nocx asks OpenSSH via ssh -G; the injected resolver is the sole
 	// path through which ~/.ssh/config is read.
@@ -1078,6 +1087,8 @@ func New(opts ...Option) (*App, error) {
 		// serves endpoint material and egress screening, so both operations
 		// share the vault's unlock semantics.
 		transport.WithVaultUnsealer(v),
+		transport.WithSettingsRegistry(settingsRegistry),
+		transport.WithSandboxService(sandboxSvc),
 		transport.WithVaultLifecycle(v),
 		// D9, and the whole of its plumbing: the transport counts attached
 		// clients, the vault decides what a count of zero means. Without
@@ -1765,6 +1776,7 @@ func New(opts ...Option) (*App, error) {
 		Profiles:         profileStore,
 		Credentials:      v,
 		skills:           skills,
+		Sandbox:          sandboxSvc,
 		vaultCloser:      v,
 		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,
@@ -2093,9 +2105,10 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 }
 
 type localPTYFactory struct {
-	log    log.Logger
-	shint  shellintegration.ShellIntegration
-	kernel lifecyclechannel.Kernel
+	log     log.Logger
+	shint   shellintegration.ShellIntegration
+	sandbox sandbox.Service
+	kernel  lifecyclechannel.Kernel
 	// shells answers which shell this user logs in with. Injected because the
 	// platform half is a subprocess against the OS account database, and
 	// because the answer decides the tier: it is the single call site of the
@@ -2271,7 +2284,7 @@ func (p *lifecyclePTY) Close() error {
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	env := f.shint.ActivationEnv(cfg.Enhanced)
 	if !cfg.Enhanced || f.kernel == nil {
-		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+		return f.newLocal(cfg, pty.WithExtraEnv(env))
 	}
 	// Which shell the user logs in with, and which local tier starts it. One
 	// resolution, one log line, one decision — everything below reads them
@@ -2291,7 +2304,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		// must not be told it is being integrated.
 		cfg.Command = shell.Path
 		cfg.Args = []string{"-l"}
-		p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
+		p, err := f.newLocal(cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
 		if err != nil {
 			return nil, err
 		}
@@ -2364,7 +2377,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		// be integrated must not be told it is being integrated.
 		cfg.Command = shell.Path
 		cfg.Args = []string{"-i"}
-		p, perr := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
+		p, perr := f.newLocal(cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
 		if perr != nil {
 			return nil, perr
 		}
@@ -2382,7 +2395,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// the bootstrap progress pipe, and the rcfile reads both numbers from the
 	// environment block LaunchOptions rendered above. Appending the progress
 	// end second is what makes bootstrapFD's answer true.
-	p, err := pty.NewLocal(f.log, cfg,
+	p, err := f.newLocal(cfg,
 		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(extraFiles(child, bpChild)...))
 	// The child ends are the shell's once the fork has happened; this process
 	// keeps no reference either way.
@@ -2417,6 +2430,14 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// A session already reported conventional has nothing an observation
 	// could bring forward, and watching it could only produce noise.
 	return &lifecyclePTY{Pty: p, ch: ch, bp: bp, stopWatch: f.watchForReplacement(cfg.SessionID, p)}, nil
+}
+
+// newLocal is the only local-PTY constructor path. Appending the sandbox
+// service here means every launch tier preserves the same fail-closed
+// behavior; a future branch cannot accidentally omit enforcement.
+func (f *localPTYFactory) newLocal(cfg pty.Config, opts ...pty.Option) (*pty.LocalPty, error) {
+	opts = append(opts, pty.WithSandboxService(f.sandbox))
+	return pty.NewLocal(f.log, cfg, opts...)
 }
 
 // watchForReplacement asks the observer to say when the shell this factory

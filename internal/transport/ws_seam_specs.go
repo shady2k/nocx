@@ -62,10 +62,12 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		// The dialog methods run under a bounded queue submission wrapped
 		// in the inflight set; the native-picker capability itself is
 		// dialogAdmit, a capacity-one WAITING gate the handler acquires on
-		// the task goroutine (ws.go says why it may not be a submission's).
-		// All three own the SAME gate: the native dialog is one capability,
-		// so no picker can open over an outstanding one, whichever method
-		// asked for it.
+		// the task goroutine. All three own the same gate: the native dialog
+		// is one capability, so no picker can open over an outstanding one.
+		regResponder(s.lane, "sandbox.status", noParams(), func(r Responder) handlerFunc {
+			h := sandboxHandlers{svc: s.sandboxSvc, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
+		}),
 		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }

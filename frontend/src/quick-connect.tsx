@@ -112,26 +112,14 @@ export interface QuickConnectItem {
   /** When present, activating this command drills into its steps inside the
    *  same surface instead of running (nocx-4t37). */
   readonly drill?: DrillCommand
-  /** A second thing this row can do, shown as an icon at its trailing edge.
-   *  OPTIONAL and rare: a row's meaning is its `run`, and an action beside it
-   *  is for a genuine SECOND destination rather than for a remedy after a
-   *  refusal — snippets offer "copy this instead of inserting it", which a
-   *  person wants before anything has gone wrong (nocx-8rtr.2).
-   *
-   *  It is a mouse affordance: the row is a listbox option, and a focusable
-   *  control inside one breaks the roving the field owns, so the button is
-   *  taken out of the tab order. A keyboard route is nocx-2jbxg, deliberately
-   *  not invented here — a chord on this surface is inherited by the server
-   *  list, the command palette and the secret picker at once. */
+  /** A second thing this row can do, shown as an icon at its trailing edge. */
   readonly action?: {
-    /** A THUNK, not an element: a provider builds its rows wherever it likes,
-     *  including a test with no DOM, and an eagerly-built icon would need one
-     *  there. It is called during render, where there is always a document. */
     readonly icon: () => JSX.Element
-    /** Required: an icon-only control with no accessible name is a defect. */
     readonly ariaLabel: string
     readonly run: () => void
   }
+  /** When true, the row renders disabled and run is a no-op. */
+  readonly disabled?: boolean
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -254,9 +242,15 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
     private drillCommand?: DrillCommand,
+    /** Sandbox action state (ADR-0030 §3.1-§3.2): live flag + backend status
+     *  read on every open, plus the picker→tab flow. Absent = feature off. */
+    private sandbox?: {
+      state: () => Promise<{ enabled: boolean; status: SandboxStatus | null }>
+      open: () => void
+    },
   ) {}
 
-  getItems(): QuickConnectItem[] {
+  async getItems(): Promise<QuickConnectItem[]> {
     const items: QuickConnectItem[] = [
       {
         id: '__local__',
@@ -285,6 +279,30 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     if (this.drillCommand) {
       items.push(drillItem(this.drillCommand))
     }
+    if (!this.sandbox) return items
+    // The flag gates VISIBILITY only; the backend also rejects a request
+    // while it is off, so UI and wire agree even if this read is stale.
+    let state: { enabled: boolean; status: SandboxStatus | null }
+    try {
+      state = await this.sandbox.state()
+    } catch {
+      return items
+    }
+    if (!state.enabled) return items
+
+    const backend = state.status?.backend ?? 'unknown'
+    const reason = state.status?.reason ?? ''
+    const unavailable = !state.status?.available
+    items.push({
+      id: '__sandboxed_local__',
+      kind: 'command',
+      label: 'Sandboxed shell…',
+      detail: unavailable
+        ? `Sandbox unavailable (${reason})`
+        : `Open a new local tab in a filesystem-isolated workspace (${backend})`,
+      disabled: unavailable,
+      run: () => this.sandbox!.open(),
+    })
     return items
   }
 }

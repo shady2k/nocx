@@ -607,7 +607,7 @@ func TestDialogOpenFile_DTOConformsToContract(t *testing.T) {
 func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "dialog.openFile.schema.json")
 	h := newInventoryHarness(t)
-	h.ws.SetDialogService(&fakeDialogService{path: "/home/dev/.ssh/id_ed25519"})
+	h.ws.SetDialogService(&fakeDialogService{filePath: "/home/dev/.ssh/id_ed25519"})
 
 	resp := jsonrpcCall(t, h.conn, "dialog.openFile", map[string]any{})
 	var envelope struct {

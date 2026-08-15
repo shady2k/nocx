@@ -23,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/uistate"
+	"github.com/shady2k/nocx/internal/sandbox
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/update/serverbin"
 	"github.com/shady2k/nocx/internal/version"
@@ -51,11 +52,16 @@ func main() {
 		return
 	}
 
-	// The window's own logger, on stderr. THE BACKEND'S LOG IS NOT THIS
-	// PROCESS'S ANY MORE: nocx-server owns the sessions, so it owns the log
-	// file that records what they did. What is left here is the handful of
-	// lines about finding a coordinator, which is exactly what a person
-	// needs when the window comes up blank.
+	// Sandboxed shells are launched by re-exec'ing this binary as the helper.
+	// The helper path must run before any backend or window exists.
+	if sandbox.MaybeHelper() {
+		return
+	}
+	if sandbox.MaybeArtifactSmoke() {
+		return
+	}
+
+	// The window's own logger, on stderr. The backend owns session logs.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	wailsApp := &WailsApp{logger: logger}
@@ -841,6 +847,13 @@ func (w *WailsApp) GetUpdateState() string {
 	return ""
 }
 
+// OpenDirectory opens the native folder picker for the sandboxed-shell
+// workspace (ADR-0030 §3.2). Directories have no filters.
+func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
+	return runtime.OpenDirectoryDialog(d.ctx, runtime.OpenDialogOptions{
+		Title: "Choose a workspace",
+	})
+}
 // upgradeInstallPath derives the path to the installed bundle from the
 // running executable's path. On macOS, the .app is 3 levels above the
 // binary; on Linux, it is the executable itself (the AppImage).

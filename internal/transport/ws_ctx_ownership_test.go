@@ -304,7 +304,6 @@ func (d *blockingDialog) OpenFile(_ context.Context) (string, error) {
 func (d *blockingDialog) OpenDirectory(_ context.Context) (string, error) {
 	return "/home/dev/collections", nil
 }
-
 // cancelAwareDialog is the cooperative adapter: it observes ctx.Done and
 // returns promptly, the behaviour the platform contract permits where the
 // native API allows it.
@@ -333,7 +332,6 @@ func (d *cancelAwareDialog) OpenFile(ctx context.Context) (string, error) {
 func (d *cancelAwareDialog) OpenDirectory(_ context.Context) (string, error) {
 	return "/home/dev/collections", nil
 }
-
 // waitDialogFree polls dialog.openFile until it succeeds, asserting the
 // capability is no longer busy.
 func waitDialogFree(t *testing.T, conn *websocket.Conn, wantPath string) {

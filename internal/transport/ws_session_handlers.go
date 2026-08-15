@@ -18,6 +18,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -122,50 +123,10 @@ type openHandlers struct {
 	// over a channel that is not the terminal. An explicit seam, not the
 	// whole server.
 	lifecycle ssh.RemoteLifecycle
-	// panes resolves pane → tab → workspace for the open ack's workspaceId
-	// (nocx-isoph.2). nil when the content store is not wired, which is the
-	// honest state and not a degrade to hide: with no layout store there is
-	// no chain to walk and every session is in the default workspace.
-	//
-	// It is the store's READ seam and not the gated LayoutOperation, and the
-	// reason is a deadlock rather than a convenience. This handler already
-	// runs inside the open operation, which holds [config, session] and then
-	// the execution lane; acquiring the content operation inside it would
-	// take a second lane permit while holding one, and with every lane permit
-	// held by an open the whole control plane would stop. The read itself
-	// needs no gate: layout reads go straight to the pool and never through
-	// the single writer goroutine.
+	// panes resolves pane → tab → workspace for the open ack's workspaceId.
 	panes paneWorkspaces
-	log   log.Logger
-}
-
-// paneWorkspaces answers "which workspace is this pane in" — the one
-// derivation §4.5 leaves in the backend, satisfied by
-// content.LayoutRepository. Declared here as the narrow seam this handler
-// needs rather than taken as the whole repository: an open may resolve a
-// workspace and may not write a layout row.
-type paneWorkspaces interface {
-	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
-}
-
-// workspaceForOpen derives the workspace this session's ack will carry.
-//
-// THE CHAIN IS THE ANSWER, never a value the renderer sent: the renderer
-// names a PANE — the durable identity it already owns — and the backend walks
-// pane → tab → workspace itself. A paneId naming no pane is refused rather
-// than defaulted, because "the pane you named does not exist" and "you named
-// no pane" are different facts and answering both with the default would hide
-// the first.
-//
-// No paneId is the second fact, and it is the ordinary one until the renderer
-// starts minting panes (nocx-isoph.4): the session is in the default
-// workspace, resolved through internal/workspace.Default, which is the single
-// owner of that decision (AD-7).
-func (h openHandlers) workspaceForOpen(ctx context.Context, paneID string) (string, error) {
-	if paneID == "" || h.panes == nil {
-		return string(workspace.Default), nil
-	}
-	return h.panes.WorkspaceForPane(ctx, paneID)
+	sandboxEnabled func() bool
+	log log.Logger
 }
 
 // openResult is the open ack payload, declared once (contracts/open.schema
@@ -332,15 +293,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+wsErr.Error()))
 		return
 	}
-
 	cfg := session.Config{
 		Kind: session.KindLocal,
 		// The client's REPORT of its own geometry, carried through as a
-		// measurement (nocx-eidfb.1). The registry decides the size the
-		// channel is created at and the ack reports what it decided, so
-		// nothing here may treat these four as the answer — including this
-		// handler, which reads the size back off the session below rather
-		// than echoing what it just sent.
+		// measurement. The registry decides the size and the ack reports it.
+		Sandbox: sandboxReq,
 		Cols:   params.Cols,
 		Rows:   params.Rows,
 		XPixel: params.XPixel,
@@ -540,7 +497,69 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		return nil
 	})
 	if err != nil {
-		h.answerOpenFailure(r, req, err)
+		// A gate refusal: another operation holds the config or session
+		// domain — the request is refused, never queued.
+		if capability.IsRefused(err) {
+			var rej *capability.RefusedError
+			errors.As(err, &rej)
+			// Both sides of the merge: main's refusal now names the method
+			// it refused (nocx-rq9p), and this handler's writes go through
+			// the Responder rather than the raw connection, so the sealed
+			// normalizer sees them (nocx-k41yv).
+			_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
+			return
+		}
+		// Sandbox errors are classified before logging: policy/setup errors may
+		// carry host paths for diagnosis inside the module, but AD-11/I12 forbids
+		// those paths from crossing into the backend log or wire response.
+		var statusErr *sandbox.StatusError
+		if errors.As(err, &statusErr) {
+			h.log.Warn("sandbox backend unavailable",
+				"backend", statusErr.Status.Backend,
+				"reason", statusErr.Status.Reason,
+				"abi", statusErr.Status.ABI,
+			)
+			_ = wconn.TryError(req.ID, RPCError{Code: -32011, Message: statusErr.Status.Reason, Data: map[string]any{"reason": statusErr.Status.Reason}})
+			return
+		}
+		var setupErr *sandbox.SetupError
+		if errors.As(err, &setupErr) {
+			h.log.Error("sandbox setup failed", "reason", "setup-failed")
+			_ = wconn.TryError(req.ID, RPCError{Code: -32012, Message: "sandbox setup failed", Data: map[string]any{"reason": "setup-failed"}})
+			return
+		}
+		if errors.Is(err, sandbox.ErrInvalidWorkspace) {
+			h.log.Warn("sandbox workspace became invalid before launch")
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sandbox workspace is unavailable"})
+			return
+		}
+		h.log.Error("failed to open session", "error", err)
+		// A sealed vault surfaces here for EVERY connection that needs it —
+		// this is still a vault access, and the renderer must get the reason
+		// so the vault-owned unlock prompt appears instead of an error
+		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
+		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
+			_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
+			return
+		}
+		// Classify the SSH error through the same taxonomy the probe uses
+		// so the user sees what actually failed, not "Internal error".
+		pr := classifyProbeError(err)
+		var msg string
+		if pr.err == nil {
+			msg = string(pr.outcome) + ": " + pr.detail
+		} else {
+			msg = err.Error() // unclassifiable — use the raw wrapped error
+		}
+		resp := newJSONRPCError(req.ID, -32603, msg)
+		// For host-key errors, attach the evidence so the renderer can
+		// offer the accept-on-first-use dialog (the same one the probe
+		// path raises). Without this, open shows "Terminal failed to
+		// start" and the user has no way to accept the key (nocx-shat).
+		if hk := hostKeyInfoFromError(err); hk != nil {
+			resp.Error.Data = hk
+		}
+		_ = respond(r, resp)
 		return
 	}
 	if !opened {
@@ -607,11 +626,10 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		WorkspaceID:  workspaceID,
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
-		// Read off the SESSION, never echoed from the params: the two agree
-		// only when the report was adopted, and reading the record is what
-		// makes the ack an answer instead of a repetition.
+		// Read off the SESSION, never echoed from the params.
 		EffectiveSize: sizeResultOf(sess.EffectiveSize()),
 		Parent:        parentResultFor(sess),
+		Sandbox:       sess.SandboxInfo(),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -1095,7 +1113,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), sandboxEnabled: s.sandboxEnabled, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

@@ -24,9 +24,35 @@
       "symbol": "AuthMethodEditor"
     },
     {
+      "kind": "types",
+      "file": "src/authentication-editor.tsx",
+      "symbol": "AuthMethodEditorProps"
+    },
+    {
+      "kind": "exports",
+      "file": "src/authentication-editor.tsx",
+      "symbol": "SecretPicker"
+    },
+    {
+      "kind": "types",
+      "file": "src/command-ledger.ts",
+      "symbol": "InterruptReason"
+    },
+    {
+      "kind": "types",
+      "file": "src/command-ledger.ts",
+      "symbol": "TransitionLifecycle"
+    },
+    {
       "kind": "exports",
       "file": "src/connections.tsx",
       "symbol": "sourceLabel"
+    },
+    {
+      "kind": "exports",
+
+      "file": "src/log.ts",
+      "symbol": "DECISION_PREFIX"
     },
     {
       "kind": "exports",
@@ -37,6 +63,81 @@
       "kind": "exports",
       "file": "src/ports-client.ts",
       "symbol": "PortsClient"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "Base"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "BehaviorOnSessionEnd"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "CollisionInfo"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "DeleteImpact"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "EffectiveSourceKind"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "FieldDiff"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "ProfileEntry"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "ProfileImpact"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "SecretEntry"
+    },
+    {
+      "kind": "types",
+      "file": "src/profiles.ts",
+      "symbol": "SkippedInfo"
+    },
+    {
+      "kind": "types",
+      "file": "src/quick-connect-assembly.ts",
+      "symbol": "HostAliasRow"
+    },
+    {
+      "kind": "types",
+      "file": "src/quick-connect.tsx",
+      "symbol": "DrillChoice"
+    },
+    {
+      "kind": "types",
+      "file": "src/quick-connect.tsx",
+      "symbol": "DrillStepSpec"
+    },
+    {
+      "kind": "types",
+      "file": "src/quick-connect.tsx",
+      "symbol": "QuickConnectItemKind"
+    },
+    {
+      "kind": "types",
+      "file": "src/recall.ts",
+      "symbol": "DraftSnapshot"
     },
     {
       "kind": "exports",
@@ -54,6 +155,11 @@
       "symbol": "nextScope"
     },
     {
+      "kind": "types",
+      "file": "src/renderers/theme-adapter.ts",
+      "symbol": "TerminalToken"
+    },
+    {
       "kind": "exports",
       "file": "src/recall.ts",
       "symbol": "SCOPE_LABELS"
@@ -69,9 +175,19 @@
       "symbol": "cacheThemeId"
     },
     {
+      "kind": "types",
+      "file": "src/renderers/types.ts",
+      "symbol": "CwdEvent"
+    },
+    {
       "kind": "exports",
       "file": "src/renderers/theme-bootstrap.ts",
       "symbol": "STORAGE_KEY"
+    },
+    {
+      "kind": "types",
+      "file": "src/scrollback/serializer.ts",
+      "symbol": "AnsiPalette"
     },
     {
       "kind": "exports",
@@ -84,14 +200,49 @@
       "symbol": "REFERENCE_RE"
     },
     {
+      "kind": "types",
+      "file": "src/settings-domain.ts",
+      "symbol": "ResetAllowed"
+    },
+    {
+      "kind": "types",
+      "file": "src/settings-domain.ts",
+      "symbol": "ResetDenied"
+    },
+    {
+      "kind": "types",
+      "file": "src/settings-domain.ts",
+      "symbol": "ResetReason"
+    },
+    {
+      "kind": "types",
+      "file": "src/settings-observer.ts",
+      "symbol": "SettingsChangeParams"
+    },
+    {
       "kind": "exports",
       "file": "src/settings.tsx",
       "symbol": "keyToDomId"
     },
     {
+      "kind": "types",
+      "file": "src/shell-highlight.ts",
+      "symbol": "CommandVerdict"
+    },
+    {
       "kind": "exports",
       "file": "src/shell-highlight.ts",
       "symbol": "verdictForCommand"
+    },
+    {
+      "kind": "types",
+      "file": "src/ssh-transition.ts",
+      "symbol": "SshOption"
+    },
+    {
+      "kind": "types",
+      "file": "src/ssh-transition.ts",
+      "symbol": "SshRefusal"
     },
     {
       "kind": "exports",
@@ -102,6 +253,76 @@
       "kind": "exports",
       "file": "src/state/index.ts",
       "symbol": "AcceptedSnapshot"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "BannerState"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "ProfileLists"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "ResetAllowed"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "ResetDecision"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "ResetDenied"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "ResetReason"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "RevisionPolicy"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "SaveOutcome"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "SettingsMirror"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "SettingsSnapshot"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "SidebarState"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "TabData"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "TabDescriptor"
+    },
+    {
+      "kind": "types",
+      "file": "src/state/index.ts",
+      "symbol": "TabModel"
     },
     {
       "kind": "exports",
@@ -690,6 +911,16 @@
     },
     {
       "kind": "types",
+      "file": "src/state/tab-model.ts",
+      "symbol": "TabData"
+    },
+    {
+      "kind": "exports",
+      "file": "src/submit.ts",
+      "symbol": "isSealedError"
+    },
+    {
+      "kind": "types",
       "file": "src/suggest/candidate.ts",
       "symbol": "CandidateScope"
     },
@@ -714,6 +945,11 @@
       "symbol": "CompletionEnv"
     },
     {
+      "kind": "exports",
+      "file": "src/suggest/providers.ts",
+      "symbol": "shellCompleteProvider"
+    },
+    {
       "kind": "types",
       "file": "src/ui/button.tsx",
       "symbol": "ButtonSize"
@@ -722,6 +958,36 @@
       "kind": "types",
       "file": "src/ui/button.tsx",
       "symbol": "ButtonVariant"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PauseIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PlayIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/index.ts",
+      "symbol": "PauseIcon"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/index.ts",
+      "symbol": "PlayIcon"
+    },
+    {
+      "kind": "files",
+      "file": "src/ui/overlay/index.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/ui/overlay/portal.ts",
+      "symbol": ""
     },
     {
       "kind": "types",
@@ -737,6 +1003,11 @@
       "kind": "types",
       "file": "src/ui/tabs.tsx",
       "symbol": "TabItem"
+    },
+    {
+      "kind": "exports",
+      "file": "src/unresolved-redactions.ts",
+      "symbol": "hasUnresolved"
     },
     {
       "kind": "types",

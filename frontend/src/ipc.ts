@@ -17,6 +17,16 @@ import type { SessionObservationChanged } from './generated/session.observationC
 import { isDriverState } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
+import type { TabClose } from './generated/tab.close'
+import type { SandboxStatus } from './generated/sandbox.status'
+
+// Sandbox wire types (ADR-0030 §3.3)
+export type { SandboxStatus }
+export interface SessionSandboxInfo {
+  readonly backend: 'landlock' | 'seatbelt'
+  readonly workspace: string
+  readonly writableRoots: string[]
+}
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -35,51 +45,7 @@ type OpenResult = {
   sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
-  /** The workspace the backend RESOLVED for this session (nocx-fraus). It is
-   *  derived, never sent: the renderer names a pane and the backend walks
-   *  pane -> tab -> workspace itself, so this ack is the only place the
-   *  renderer can learn where the session landed — the default workspace
-   *  never renders, so the renderer has no name of its own for it. */
-  workspaceId?: string
-  /** The opener the backend ADMITTED, or null for a root session
-   *  (nocx-9hu9d). Read rather than dropped because it is the only place the
-   *  renderer ever learns it: the edge is written once, at open, and the ack
-   *  is the one message that carries it. PROVENANCE ONLY — see
-   *  SessionHandle.parent. */
-  parent?: Open['parent']
-}
-
-/**
- * What an open carries beyond its geometry and its destination.
- *
- * NAMED rather than positional, for the reason TerminalContentHooks is named
- * (see terminal-content.ts): `user` and `paneId` are both optional strings in
- * adjacent slots on openSSHSessionByHost, so two bare positionals would let
- * every misalignment type-check — which is exactly the defect that put
- * onSetupVault into the onAdoptabilityChange slot.
- */
-export interface OpenAnchor {
-  /**
-   * The pane this session is the pipe of: the renderer-minted UUIDv7 the
-   * layout chain stores (design §7). The renderer is the only end that knows
-   * it — the backend walks pane -> tab -> workspace from here, and told
-   * nothing it can only answer "the default", which leaves every block this
-   * session records anchored on nothing (nocx-rtg0.29).
-   *
-   * ABSENT AND EMPTY ARE DIFFERENT ANSWERS on the wire. validateOpenRaw
-   * treats an absent paneId as legitimate — a session attached to no
-   * recorded pane — and refuses a malformed one with -32602. An empty string
-   * is the second, so the openers below drop the key rather than send it
-   * blank.
-   */
-  paneId?: string
-}
-
-/** The paneId as the wire wants it: the key, or no key at all. One helper for
- *  all three openers, because "how an absent pane is expressed" is one fact
- *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
-function paneParam(anchor: OpenAnchor): { paneId?: string } {
-  return anchor.paneId ? { paneId: anchor.paneId } : {}
+  sandbox?: Open['sandbox']
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -375,40 +341,8 @@ export class SessionHandle {
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
     readonly desiredMode: Open['desiredMode'] = 'script',
-    /** The session that opened this one, as the backend ADMITTED it, or null
-     *  for a root session (nocx-9hu9d). The full identity, never a bare id:
-     *  an id alone re-resolves to whatever holds it now.
-     *
-     *  PROVENANCE ONLY (nocx-wtv3p, ADR-0020 §5). It says "A created B" and
-     *  confers nothing: no surface may read it to decide that one tab may
-     *  observe, drive or close another, and the backend refuses such an
-     *  attempt whatever the renderer believes
-     *  (internal/transport/ws_lineage_prohibitions_test.go). The one thing it
-     *  is read for is the ASK in PaneManager.closePane — naming what a close
-     *  would leave running, which is the opposite of acting on them. */
-    readonly parent: Open['parent'] = null,
-    /** The workspace the backend resolved this session into (nocx-fraus).
-     *
-     *  IT CARRIES NO BEHAVIOUR, and the contract says so: nothing reads
-     *  authority, addressability or reachability from it, and §5.5 forbids
-     *  any surface before the fence epic from describing a workspace as
-     *  safe, isolated or contained. It is read as PROVENANCE — what the
-     *  backend resolved from the pane the renderer named — which is why it
-     *  is decoded here rather than dropped: this ack is the only message
-     *  that carries it. */
-    readonly workspaceId: string = '',
-    /** What a reclaim recovered from the backend's recording before it
-     *  attached (nocx-22k1c.2), or null for a handle that was never
-     *  reclaimed — an open starts an empty session and has nothing to
-     *  recover.
-     *
-     *  It is READ BY THE SURFACE THAT DRAWS THE PANE, which is the only
-     *  thing that can say what is missing where a person will see it. The
-     *  bytes are already queued for the terminal by the time this handle
-     *  exists; what this carries is the part the terminal cannot show —
-     *  the ranges nothing kept. A recovered scrollback with a silent hole
-     *  in it is the one outcome worse than a short one. */
-    readonly recovered: SessionRecovery | null = null,
+    /** Immutable sandbox metadata for a sandboxed session; undefined for ordinary/SSH sessions (ADR-0030 §3.3). */
+    readonly sandbox?: SessionSandboxInfo,
   ) {}
 
   send(data: string): void {
@@ -843,6 +777,35 @@ export class WSClient {
       .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
+  // openSandboxedSession opens a filesystem-isolated LOCAL session in the
+  // given workspace (ADR-0030). The backend canonicalizes the workspace,
+  // constructs the policy, and enforces it before the session is registered.
+  // Fails closed: any enforcement error rejects with the typed wire error.
+  openSandboxedSession(cols: number, rows: number, workspace: string): Promise<SessionHandle> {
+    return this.dispatcher
+      .call<OpenResult>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        enhanced: true,
+        sandbox: { workspace },
+      })
+      .then((result) => this._registerHandle(result))
+  }
+
+  // sandboxStatus queries the backend's sandbox availability (ADR-0030 §4.2).
+  // Returns {available, backend, reason} or null when no sandbox service is
+  // wired (dev-web harness without a native backend).
+  sandboxStatus(): Promise<SandboxStatus | null> {
+    return this.dispatcher.call<SandboxStatus | null>('sandbox.status', {})
+  }
+
+  // openDirectory opens the native folder picker and returns the chosen
+  // absolute path, or '' when cancelled (ADR-0030 §4.3).
+  openDirectory(): Promise<string> {
+    return this.dispatcher.call<string>('dialog.openDirectory', {})
+  }
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
@@ -943,6 +906,13 @@ export class WSClient {
       instanceId: identity.instanceId,
       sessionEpoch: identity.sessionEpoch,
     })
+    return new SessionHandle(
+      this,
+      sid,
+      result?.cwd ?? '',
+      result?.desiredMode ?? 'script',
+      result?.sandbox,
+    )
   }
 
   // --- reattach -----------------------------------------------------------

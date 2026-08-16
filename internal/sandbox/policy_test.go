@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -41,7 +42,7 @@ func TestBuildPolicy_Roots(t *testing.T) {
 		filepath.Join(runtimeRoot, "missing") + string(os.PathListSeparator) +
 		"relative/dir" + string(os.PathListSeparator) + workspace}
 
-	p, err := BuildPolicy(workspace, shell, runtimeRoot, env)
+	p, err := BuildPolicy(Request{Workspace: workspace}, shell, runtimeRoot, env)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestBuildPolicy_CanonicalizesWorkspace(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	p, err := BuildPolicy(link, "/bin/sh", runtimeRoot, nil)
+	p, err := BuildPolicy(Request{Workspace: link}, "/bin/sh", runtimeRoot, nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy via symlink: %v", err)
 	}
@@ -150,9 +151,9 @@ func TestBuildPolicy_RejectsInvalidWorkspace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := BuildPolicy(tc.workspace, shell, runtimeRoot, nil)
-			if !errors.Is(err, ErrInvalidWorkspace) {
-				t.Fatalf("err = %v, want ErrInvalidWorkspace", err)
+			_, err := BuildPolicy(Request{Workspace: tc.workspace}, shell, runtimeRoot, nil)
+			if !errors.Is(err, ErrInvalidPermissions) {
+				t.Fatalf("err = %v, want ErrInvalidPermissions", err)
 			}
 		})
 	}
@@ -166,13 +167,13 @@ func TestBuildPolicy_RuntimeRootErrorsAreSetupFailures(t *testing.T) {
 	if err := os.MkdirAll(empty, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	_, err := BuildPolicy(workspace, "/bin/sh", empty, nil)
+	_, err := BuildPolicy(Request{Workspace: workspace}, "/bin/sh", empty, nil)
 	if !errors.As(err, &se) {
 		t.Fatalf("err = %v, want SetupError", err)
 	}
 
 	// Shell path that cannot resolve.
-	_, err = BuildPolicy(workspace, filepath.Join(t.TempDir(), "no-shell"), runtimeRoot, nil)
+	_, err = BuildPolicy(Request{Workspace: workspace}, filepath.Join(t.TempDir(), "no-shell"), runtimeRoot, nil)
 	if !errors.As(err, &se) {
 		t.Fatalf("err = %v, want SetupError for bad shell", err)
 	}
@@ -328,7 +329,7 @@ func TestBuildPolicy_GitCommonDirAppearsInWritableRoots(t *testing.T) {
 		}
 	}
 	writeLinkedWorktreeFixture(t, workspace, common, "policy", false)
-	p, err := BuildPolicy(workspace, "/bin/sh", filepath.Join(base, "runtime"), nil)
+	p, err := BuildPolicy(Request{Workspace: workspace}, "/bin/sh", filepath.Join(base, "runtime"), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -380,7 +381,7 @@ func TestValidatePolicy_RejectsUnenforceableDocuments(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 	}
-	p, err := BuildPolicy(ws, "/bin/sh", rt, nil)
+	p, err := BuildPolicy(Request{Workspace: ws}, "/bin/sh", rt, nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -503,4 +504,291 @@ func TestSandboxEnv(t *testing.T) {
 			t.Errorf("key %s appears %d times in %v", key, count, got)
 		}
 	}
+}
+
+func TestBuildPolicy_ComposesRootsInSharedOrder(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "worktree")
+	common := filepath.Join(base, "repo", ".git")
+	runtimeRoot := filepath.Join(base, "runtime")
+	globalKeep := filepath.Join(base, "global-keep")
+	globalDrop := filepath.Join(base, "global-drop")
+	add := filepath.Join(base, "add")
+	for _, d := range []string{workspace, common, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp"), globalKeep, globalDrop, add} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	writeLinkedWorktreeFixture(t, workspace, common, "order", false)
+
+	p, err := BuildPolicy(Request{
+		Workspace: workspace,
+		Global:    []string{globalDrop, globalKeep},
+		Add:       []string{add},
+		Remove:    []string{globalDrop},
+	}, "/bin/sh", runtimeRoot, nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+
+	want := []string{
+		canonicalPath(t, workspace),
+		canonicalPath(t, common),
+		canonicalPath(t, globalKeep),
+		canonicalPath(t, add),
+		filepath.Join(runtimeRoot, "home"),
+		filepath.Join(runtimeRoot, "tmp"),
+	}
+	if len(p.WritableRoots) != len(want) {
+		t.Fatalf("WritableRoots = %v, want %v", p.WritableRoots, want)
+	}
+	for i := range want {
+		if p.WritableRoots[i] != want[i] {
+			t.Fatalf("WritableRoots[%d] = %q, want %q (full %v)", i, p.WritableRoots[i], want[i], p.WritableRoots)
+		}
+	}
+}
+
+func TestBuildPolicy_UnmatchedRemovalFails(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	other := filepath.Join(base, "other")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp"), other} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	_, err := BuildPolicy(Request{Workspace: workspace, Remove: []string{other}}, "/bin/sh", runtimeRoot, nil)
+	if !errors.Is(err, ErrInvalidPermissions) {
+		t.Fatalf("err = %v, want ErrInvalidPermissions for unmatched removal", err)
+	}
+}
+
+func TestBuildPolicy_AddRemoveConflictFails(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	dir := filepath.Join(base, "dir")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp"), dir} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	_, err := BuildPolicy(Request{Workspace: workspace, Add: []string{dir}, Remove: []string{dir}}, "/bin/sh", runtimeRoot, nil)
+	if !errors.Is(err, ErrInvalidPermissions) {
+		t.Fatalf("err = %v, want ErrInvalidPermissions for add/remove conflict", err)
+	}
+}
+
+func TestBuildPolicy_RemoveMandatoryRootFails(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	_, err := BuildPolicy(Request{Workspace: workspace, Remove: []string{workspace}}, "/bin/sh", runtimeRoot, nil)
+	if !errors.Is(err, ErrInvalidPermissions) {
+		t.Fatalf("err = %v, want ErrInvalidPermissions for removing workspace", err)
+	}
+}
+
+func TestBuildPolicy_CanonicalizesAddGlobalRemoveSymlinks(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	realGlobal := filepath.Join(base, "real-global")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp"), realGlobal} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	linkGlobal := filepath.Join(base, "link-global")
+	if err := os.Symlink(realGlobal, linkGlobal); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	// Global entered via symlink, removed via the canonical real path — an
+	// exact canonical match must remove it.
+	p, err := BuildPolicy(Request{
+		Workspace: workspace,
+		Global:    []string{linkGlobal},
+		Remove:    []string{realGlobal},
+	}, "/bin/sh", runtimeRoot, nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	for _, w := range p.WritableRoots {
+		if w == canonicalPath(t, realGlobal) {
+			t.Fatalf("removed global %q still writable", realGlobal)
+		}
+	}
+}
+
+func TestBuildPolicy_RejectsProtectedAdd(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	// "/" is an ancestor of every documented system root and always exists.
+	_, err := BuildPolicy(Request{Workspace: workspace, Add: []string{"/"}}, "/bin/sh", runtimeRoot, nil)
+	if !errors.Is(err, ErrInvalidPermissions) {
+		t.Fatalf("err = %v, want ErrInvalidPermissions for protected add", err)
+	}
+}
+
+func TestBuildPolicy_RejectsProtectedGlobal(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	_, err := BuildPolicy(Request{Workspace: workspace, Global: []string{"/"}}, "/bin/sh", runtimeRoot, nil)
+	var se *SetupError
+	if !errors.As(err, &se) {
+		t.Fatalf("err = %v, want SetupError for protected global", err)
+	}
+}
+
+func TestBuildPolicy_RejectsProtectedWorkspace(t *testing.T) {
+	runtimeRoot := filepath.Join(t.TempDir(), "runtime")
+	for _, d := range []string{filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	// "/" is an ancestor of every documented system root. Treating it as the
+	// workspace would turn the sandbox into an ordinary process with a marker.
+	_, err := BuildPolicy(Request{Workspace: "/"}, "/bin/sh", runtimeRoot, nil)
+	if !errors.Is(err, ErrInvalidPermissions) {
+		t.Fatalf("err = %v, want ErrInvalidPermissions for protected workspace", err)
+	}
+}
+
+func TestWritableRootIsProtected(t *testing.T) {
+	systemRoots := []string{"/usr", "/usr/local/lib"}
+	cases := []struct {
+		candidate string
+		want      bool
+	}{
+		{"/", true},
+		{"/usr", true},
+		{"/usr/local", true},
+		{"/usr/local/lib", true},
+		{"/usr/local/lib/pkg", false},
+		{"/usr/share", false},
+		{"/usrlocal", false},
+		{"/home/usr", false},
+	}
+	for _, tc := range cases {
+		if got := writableRootIsProtected(tc.candidate, systemRoots); got != tc.want {
+			t.Errorf("writableRootIsProtected(%q) = %v, want %v", tc.candidate, got, tc.want)
+		}
+	}
+}
+
+func TestBuildPolicy_WritableRootsAreCopies(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	global := filepath.Join(base, "global")
+	add := filepath.Join(base, "add")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp"), global, add} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	req := Request{Workspace: workspace, Global: []string{global}, Add: []string{add}}
+	p, err := BuildPolicy(req, "/bin/sh", runtimeRoot, nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	before := append([]string(nil), p.WritableRoots...)
+
+	// Mutating the caller's slices must never change the installed policy.
+	req.Global[0] = "/elsewhere"
+	req.Add[0] = "/nowhere"
+	req.Remove = append(req.Remove, "/x")
+
+	if len(before) != len(p.WritableRoots) {
+		t.Fatalf("policy changed length after input mutation")
+	}
+	for i := range before {
+		if before[i] != p.WritableRoots[i] {
+			t.Fatalf("policy WritableRoots[%d] changed from %q to %q after input mutation", i, before[i], p.WritableRoots[i])
+		}
+	}
+}
+
+func TestBuildPolicy_ComposedPolicyWithinBounds(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	global := filepath.Join(base, "global")
+	add := filepath.Join(base, "add")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp"), global, add} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	p, err := BuildPolicy(Request{Workspace: workspace, Global: []string{global}, Add: []string{add}}, "/bin/sh", runtimeRoot, nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	if validationErr := ValidatePolicy(p); validationErr != nil {
+		t.Fatalf("composed policy fails validation: %v", validationErr)
+	}
+	b, err := p.Bytes()
+	if err != nil {
+		t.Fatalf("composed policy serialization: %v", err)
+	}
+	if len(b) > maxPolicyBytes {
+		t.Fatalf("composed policy exceeds size bound: %d > %d", len(b), maxPolicyBytes)
+	}
+}
+
+func TestBuildPolicy_RejectsOversizedLists(t *testing.T) {
+	base := t.TempDir()
+	workspace := filepath.Join(base, "workspace")
+	runtimeRoot := filepath.Join(base, "runtime")
+	for _, d := range []string{workspace, filepath.Join(runtimeRoot, "home"), filepath.Join(runtimeRoot, "tmp")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	many := make([]string, 0, maxUserPaths+1)
+	for i := 0; i <= maxUserPaths; i++ {
+		many = append(many, filepath.Join(base, "p", strconv.Itoa(i)))
+	}
+
+	t.Run("global overflow is SetupError", func(t *testing.T) {
+		_, err := BuildPolicy(Request{Workspace: workspace, Global: many}, "/bin/sh", runtimeRoot, nil)
+		var se *SetupError
+		if !errors.As(err, &se) {
+			t.Fatalf("err = %v, want SetupError for oversized global list", err)
+		}
+	})
+
+	t.Run("add overflow is ValidationError", func(t *testing.T) {
+		_, err := BuildPolicy(Request{Workspace: workspace, Add: many}, "/bin/sh", runtimeRoot, nil)
+		if !errors.Is(err, ErrInvalidPermissions) {
+			t.Fatalf("err = %v, want ErrInvalidPermissions for oversized add list", err)
+		}
+	})
+
+	t.Run("remove overflow is ValidationError", func(t *testing.T) {
+		_, err := BuildPolicy(Request{Workspace: workspace, Remove: many}, "/bin/sh", runtimeRoot, nil)
+		if !errors.Is(err, ErrInvalidPermissions) {
+			t.Fatalf("err = %v, want ErrInvalidPermissions for oversized remove list", err)
+		}
+	})
 }

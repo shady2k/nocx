@@ -900,6 +900,30 @@ export function SettingsComponent(props: SettingsComponentProps) {
     }
   }
 
+  /** Append a picked directory to a `paths` setting and save the complete
+   *  array (ADR-0031 §4.1). A cancelled picker (empty path) is a no-op; an
+   *  unavailable native runtime surfaces in the row's existing error slot. */
+  async function addPath(decl: Declaration): Promise<void> {
+    if (!props.dialogClient) return
+    try {
+      const picked = await props.dialogClient.openDirectoryDialog()
+      if (!picked.path) return
+      const current = pathsValue(decl.key)
+      const next = current.includes(picked.path) ? current : [...current, picked.path]
+      await saveSetting(decl.key, next)
+    } catch (err) {
+      setErrors(decl.key, (err as Error).message)
+    }
+  }
+
+  /** Remove one entry from a `paths` setting and save the complete remaining
+   *  array. The row's remove control sends the whole array — no incremental
+   *  edit state exists (ADR-0031 §4.1). */
+  async function removePath(decl: Declaration, index: number): Promise<void> {
+    const next = pathsValue(decl.key).filter((_, i) => i !== index)
+    await saveSetting(decl.key, next)
+  }
+
   async function resetSetting(key: string): Promise<void> {
     setErrors(key, undefined as never)
     try {
@@ -1099,6 +1123,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
   function effectiveValue(key: string): unknown {
     if (key in draftValues) return draftValues[key]
     return values[key]
+  }
+
+  /** The current string array for a `paths` control, tolerant of a backend
+   *  value that is not (yet) an array — the screen never validates, so a
+   *  non-array reads as empty rather than throwing mid-render. */
+  function pathsValue(key: string): string[] {
+    const v = effectiveValue(key)
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   }
 
   /**
@@ -1349,18 +1381,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </Show>
           }
         >
-          {/* One line: the control and its reset affordance, side by side. The
-              wrapper is the surface's own, so the reset sits level with the
-              control without the surface reaching into Field's column. */}
-          <div class="ui-settings-control-line">
-            <Show when={decl.control === 'toggle'}>
-              <Checkbox
-                variant="switch"
-                checked={!!eff()}
-                ariaLabel={decl.label}
-                onChange={(c) => void saveSetting(decl.key, c)}
-              />
-            </Show>
+          <Show when={decl.control !== 'paths'}>
+            {/* One line: the control and its reset affordance, side by side. The
+                wrapper is the surface's own, so the reset sits level with the
+                control without the surface reaching into Field's column. */}
+            <div class="ui-settings-control-line">
+              <Show when={decl.control === 'toggle'}>
+                <Checkbox
+                  variant="switch"
+                  checked={!!eff()}
+                  ariaLabel={decl.label}
+                  onChange={(c) => void saveSetting(decl.key, c)}
+                />
+              </Show>
 
             <Show when={decl.control === 'text'}>
               {/* multiline is a VARIANT of the same kit component, declared
@@ -1385,51 +1418,22 @@ export function SettingsComponent(props: SettingsComponentProps) {
               />
             </Show>
 
-            <Show when={decl.control === 'number'}>
-              <TextField
-                type="number"
-                value={displayValue(eff(), decl)}
-                min={decl.min}
-                max={decl.max}
-                unit={decl.unit}
-                caption={numberRangeCaption(decl, numeric())}
-                captionAlign="end"
-                error={numberRangeError(decl, numeric())}
-                onInput={(v) => {
-                  const n = Number(v)
-                  void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
-                }}
-              />
-            </Show>
-
-            <Show when={decl.control === 'select'}>
-              <Select
-                value={displayValue(eff(), decl)}
-                onChange={(v) => void saveSetting(decl.key, v)}
-                options={decl.options ?? []}
-              />
-            </Show>
-
-            <Show when={decl.control === 'secret'}>
-              <div class="ui-settings-secret">
-                <span class="ui-settings-secret-status">
-                  {secretStates[decl.key] ? 'Configured' : 'Not configured'}
-                </span>
-                <Button
-                  variant="default"
-                  onClick={() => {
-                    const value = prompt('Enter new value for "' + decl.label + '":')
-                    if (value === null) return
-                    void saveSecret(decl.key, value)
+              <Show when={decl.control === 'number'}>
+                <TextField
+                  type="number"
+                  value={displayValue(eff(), decl)}
+                  min={decl.min}
+                  max={decl.max}
+                  unit={decl.unit}
+                  caption={numberRangeCaption(decl, numeric())}
+                  captionAlign="end"
+                  error={numberRangeError(decl, numeric())}
+                  onInput={(v) => {
+                    const n = Number(v)
+                    void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
                   }}
-                >
-                  Replace
-                </Button>
-                <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
-                  Clear
-                </Button>
-              </div>
-            </Show>
+                />
+              </Show>
 
             <ProvenanceBadge decl={decl} />
           </div>

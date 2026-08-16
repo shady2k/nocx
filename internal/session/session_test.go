@@ -4,15 +4,74 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
 
 func TestRealRegistry_ImplementsRegistry(t *testing.T) {
 	var _ Registry = New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
+}
+
+func TestRealSession_SandboxInfoReturnsDeepCopy(t *testing.T) {
+	s := &realSession{
+		sandboxInfo: &sandbox.SessionInfo{
+			Backend:       sandbox.BackendLandlock,
+			Workspace:     "/workspace",
+			WritableRoots: []string{"/workspace"},
+		},
+	}
+
+	first := s.SandboxInfo()
+	first.WritableRoots[0] = "/mutated"
+	second := s.SandboxInfo()
+	if got := second.WritableRoots[0]; got != "/workspace" {
+		t.Fatalf("second SandboxInfo root = %q, want immutable session metadata", got)
+	}
+}
+
+type sandboxPTYStub struct {
+	*pty.Stub
+	info *sandbox.SessionInfo
+}
+
+func (s *sandboxPTYStub) SandboxInfo() *sandbox.SessionInfo {
+	return s.info.Clone()
+}
+
+func TestRealRegistry_SandboxCwdRemainsCanonicalUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "workspace")
+	logger := log.NewSlogAdapter(nil)
+	pt := &sandboxPTYStub{
+		Stub: pty.NewStub(logger),
+		info: &sandbox.SessionInfo{
+			Backend:       sandbox.BackendLandlock,
+			Workspace:     workspace,
+			WritableRoots: []string{workspace},
+		},
+	}
+	reg := New(logger, &stubPTYFactory{stub: pt})
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:    KindLocal,
+		Cwd:     workspace,
+		Cols:    80,
+		Rows:    24,
+		Sandbox: &sandbox.Request{Workspace: workspace},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.Cwd(); got != workspace {
+		t.Fatalf("Cwd = %q, want canonical workspace %q", got, workspace)
+	}
 }
 
 func TestNewID_Is32HexChars(t *testing.T) {
@@ -308,7 +367,7 @@ func TestRealRegistry_WriteToClosedSession(t *testing.T) {
 	_, _ = sess.Write([]byte("echo test\n"))
 }
 
-type stubPTYFactory struct{ stub *pty.Stub }
+type stubPTYFactory struct{ stub pty.Pty }
 
 func (f *stubPTYFactory) NewPTY(_ context.Context, _ pty.Config) (pty.Pty, error) {
 	return f.stub, nil

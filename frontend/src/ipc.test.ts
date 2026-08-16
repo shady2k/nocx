@@ -369,6 +369,64 @@ describe('openSession', () => {
   })
 })
 
+describe('openSandboxedSession', () => {
+  it('sends only workspace, revision and non-empty deltas — no baseline, no enhanced', async () => {
+    const client = new WSClient(mockDispatcher())
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+
+    void client.openSandboxedSession(80, 24, {
+      workspace: '/workspace',
+      settingsRevision: 7,
+      add: ['/d'],
+      remove: ['/b'],
+    })
+    const [req] = socket().requests()
+
+    expect(req.method).toBe('open')
+    // The exact-shape assertion is the contract: `enhanced`, a baseline
+    // (`global`), and any effective root (`writableRoots`) are absent by
+    // construction, not merely unasserted.
+    expect(req.params).toEqual({
+      cols: 80,
+      rows: 24,
+      xpixel: 0,
+      ypixel: 0,
+      sandbox: {
+        workspace: '/workspace',
+        settingsRevision: 7,
+        add: ['/d'],
+        remove: ['/b'],
+      },
+    })
+    expect(req.params).not.toHaveProperty('enhanced')
+  })
+
+  it('omits empty deltas rather than sending empty arrays', async () => {
+    const client = new WSClient(mockDispatcher())
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+
+    void client.openSandboxedSession(80, 24, {
+      workspace: '/workspace',
+      settingsRevision: 0,
+      add: [],
+      remove: [],
+    })
+    const [req] = socket().requests()
+
+    expect(req.params).toEqual({
+      cols: 80,
+      rows: 24,
+      xpixel: 0,
+      ypixel: 0,
+      sandbox: { workspace: '/workspace', settingsRevision: 0 },
+    })
+  })
+})
+
 describe('send', () => {
   it('frames input for the open session', async () => {
     const { session, ws } = await connectedSession()

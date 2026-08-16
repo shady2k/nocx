@@ -56,8 +56,8 @@ func bootstrapHijackRC(t *testing.T, home, rcName, shell, noRCFlags string) {
 	}
 }
 
-// openLocalIntegration opens a local enhanced session over the real socket and
-// returns its id.
+// openLocalIntegration opens a local session over the real socket and returns
+// its id. Local integration is backend-owned rather than a renderer request.
 func openLocalIntegration(t *testing.T, conn *websocket.Conn) string {
 	t.Helper()
 	resp := reachJSONRPCCall(t, conn, "open", map[string]any{

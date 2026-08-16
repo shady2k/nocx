@@ -4,10 +4,14 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 
 	"github.com/shady2k/nocx/internal/log"
+	"golang.org/x/sys/unix"
 )
 
 // darwinService is the Seatbelt-backed Service (design spec §9).
@@ -22,9 +26,22 @@ func New(logger log.Logger, cacheDir string) Service {
 	return &darwinService{log: logger, cacheDir: cacheDir}
 }
 
-// MaybeHelper is a no-op on non-Linux platforms: the sandbox helper is a
-// Linux-only mechanism.
-func MaybeHelper() bool { return false }
+// MaybeHelper runs the macOS post-profile shim when this process was
+// re-executed by sandbox-exec with the helper marker as argv[1], and returns
+// true (the process has exited). It must be called before app startup
+// (design spec §7.2).
+func MaybeHelper() bool {
+	statusFD, shell, shellArgs, ok, errCode := parseSeatbeltShimArgv(os.Args)
+	if !ok {
+		return false
+	}
+	if errCode != 0 {
+		fmt.Fprintln(os.Stderr, "sandbox seatbelt shim: malformed invocation")
+		os.Exit(errCode)
+	}
+	os.Exit(seatbeltShimMain(statusFD, shell, shellArgs, unix.Exec))
+	return true
+}
 
 // Status probes /usr/bin/sandbox-exec; a successful probe is cached for the
 // app lifetime (probe.go).
@@ -33,11 +50,11 @@ func (s *darwinService) Status(ctx context.Context) Status {
 }
 
 // Prepare renders the common policy as a deterministic SBPL profile and
-// launches /usr/bin/sandbox-exec -p <profile> <shell> -i directly — no
-// intermediate shell. Fail-closed: any render/probe error removes the
-// runtime tree and yields a typed error. WaitReady is nil: launch success is
-// readiness — sandbox-exec either applies the profile and execs the shell,
-// or exits nonzero.
+// launches /usr/bin/sandbox-exec -p <profile> <nocx-exe>
+// __sandbox-seatbelt-exec <status-fd> <shell> <shell-args>. sandbox-exec
+// applies Seatbelt before execing the nocx shim; the shim acknowledges
+// readiness only after the profile applied, then unix.Execs the real shell.
+// Fail-closed: any error removes the runtime tree and yields a typed error.
 func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSpec) (*PreparedCommand, error) {
 	if spec.Path == "" {
 		return nil, NewSetupErrorf("empty command path")
@@ -56,7 +73,7 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 		return nil, err
 	}
 
-	pol, err := BuildPolicy(req.Workspace, spec.Path, runtimeRoot, spec.Env)
+	pol, err := BuildPolicy(req, spec.Path, runtimeRoot, spec.Env)
 	if err != nil {
 		return fail(err)
 	}
@@ -65,28 +82,57 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	// already consumed the base PATH above.
 	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
 
+	// The shim runs under the Seatbelt profile, so its own executable must be
+	// readable. Add the canonical shim path through the same read-only file
+	// mechanism the shell uses before rendering.
+	exe, err := os.Executable()
+	if err != nil {
+		return fail(NewSetupErrorf("executable path: %v", err))
+	}
+	shimCanon, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fail(NewSetupErrorf("shim executable: %v", err))
+	}
+	pol.ReadOnlyFiles = dedupeKeepOrder(append(pol.ReadOnlyFiles, shimCanon))
+
 	profile, err := renderProfile(pol)
 	if err != nil {
 		return fail(err)
 	}
 
-	args := append([]string{"-p", profile, spec.Path}, spec.Args...)
-	cmd := exec.Command(sandboxExecPath, args...) //nolint:gosec // pinned path; shell path is policy-canonicalized
+	statusR, statusW, err := os.Pipe()
+	if err != nil {
+		return fail(NewSetupErrorf("status pipe: %v", err))
+	}
+
+	// Preserve the ordinary command's inherited descriptors at their exact
+	// numbers; the shim's status descriptor follows them, and its number rides
+	// fixed internal argv so the shim finds it without shifting lifecycle
+	// descriptors.
+	statusChildFD := 3 + len(spec.ExtraFiles)
+	shimArgs := append([]string{seatbeltHelperArg, strconv.Itoa(statusChildFD), spec.Path}, spec.Args...)
+	args := append([]string{"-p", profile, exe}, shimArgs...)
+	cmd := exec.Command(sandboxExecPath, args...) //nolint:gosec // pinned path; shim and shell are policy-canonicalized
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
-	cmd.ExtraFiles = append([]*os.File(nil), spec.ExtraFiles...)
+	cmd.ExtraFiles = append(append([]*os.File(nil), spec.ExtraFiles...), statusW)
 
 	pc := &PreparedCommand{
 		Cmd:     cmd,
 		Backend: BackendSeatbelt,
 		Policy:  pol,
-		cleanup: func() {
-			if cmd.Process != nil && cmd.ProcessState == nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-			RemoveRuntimeRoot(runtimeRoot)
+		waitReady: func(ctx context.Context) error {
+			return readStatus(ctx, statusR, statusW)
 		},
+	}
+	pc.cleanup = func() {
+		_ = statusR.Close()
+		_ = statusW.Close()
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		RemoveRuntimeRoot(runtimeRoot)
 	}
 	return pc, nil
 }

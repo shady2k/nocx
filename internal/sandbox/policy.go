@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // Policy is the validated, canonical-path document both backends enforce.
@@ -28,22 +29,25 @@ type Policy struct {
 	Tmp           string   `json:"tmp"`
 }
 
-// Policy document bounds (design spec §5.6): reject policy above a fixed
-// root count or serialized size.
+// Policy and request bounds (design spec §5.6, §6.1): reject policy above a
+// fixed root count or serialized size, and each per-tab path list above the
+// fixed entry count.
 const (
 	maxRoots       = 256
 	maxPolicyBytes = 64 * 1024
+	maxUserPaths   = 32
 )
 
-// BuildPolicy constructs the common filesystem policy for a canonical
-// workspace. env supplies the inherited PATH; shellPath is the resolved
-// shell executable; runtimeRoot is the per-session mode-0700 tree containing
-// home/ and tmp/ (NewRuntimeRoot).
+// BuildPolicy constructs the common filesystem policy for one sandboxed tab
+// (design spec §6). env supplies the inherited PATH; shellPath is the
+// resolved shell executable; runtimeRoot is the per-session mode-0700 tree
+// containing home/ and tmp/ (NewRuntimeRoot).
 //
-// Errors wrapping ErrInvalidWorkspace mean the workspace is unusable
-// (-32602). Any other error is a setup failure (-32012).
-func BuildPolicy(workspace, shellPath, runtimeRoot string, env []string) (*Policy, error) {
-	canon, err := canonicalizeWorkspace(workspace)
+// Errors wrapping ErrInvalidPermissions mean a request parameter (workspace,
+// addition, or removal) is unusable (-32602). A malformed or vanished
+// persisted global, or any other failure, is a setup failure (-32012).
+func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Policy, error) {
+	canon, err := canonicalizeWorkspace(req.Workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -60,27 +64,105 @@ func BuildPolicy(workspace, shellPath, runtimeRoot string, env []string) (*Polic
 		}
 	}
 
-	// Writable roots, in the tooltip order the spec fixes (design spec §3.3):
-	// workspace, optional Git common dir, ephemeral home/tmp.
-	writable := []string{canon}
-	if git, ok := gitCommonDir(canon); ok {
-		writable = append(writable, git)
+	// Canonical system read-only roots seed both the read-only set and the
+	// protected-ancestor check. Missing roots are skipped; permission and
+	// canonicalization errors are fatal.
+	sysRoots, err := canonicalSystemRoots()
+	if err != nil {
+		return nil, err
 	}
+
+	// Bounded per-list (design spec §3.1 maxEntries, §5.1): overflow is a
+	// request error for add/remove and backend-state error for the global
+	// baseline. Checked before canonicalization so oversized lists never
+	// resolve a single path.
+	if len(req.Global) > maxUserPaths {
+		return nil, NewSetupErrorf("global path list exceeds %d entries", maxUserPaths)
+	}
+	if len(req.Add) > maxUserPaths {
+		return nil, NewValidationErrorf("addition list exceeds %d entries", maxUserPaths)
+	}
+	if len(req.Remove) > maxUserPaths {
+		return nil, NewValidationErrorf("removal list exceeds %d entries", maxUserPaths)
+	}
+
+	// Canonical persisted global baseline (setup failures) and per-tab
+	// additions/removals (request validation failures).
+	globals, err := canonicalPaths(req.Global, setupPathErr)
+	if err != nil {
+		return nil, err
+	}
+	adds, err := canonicalPaths(req.Add, requestPathErr)
+	if err != nil {
+		return nil, err
+	}
+	removes, err := canonicalPaths(req.Remove, requestPathErr)
+	if err != nil {
+		return nil, err
+	}
+
+	// A user writable root, including the mandatory workspace, equal to or an
+	// ancestor of a documented system read-only root would erase the
+	// read-only execution floor. Workspace/additions are request validation;
+	// persisted globals are backend state.
+	if writableRootIsProtected(canon, sysRoots) {
+		return nil, NewValidationErrorf("workspace conflicts with a read-only system root")
+	}
+	for _, g := range globals {
+		if writableRootIsProtected(g, sysRoots) {
+			return nil, NewSetupErrorf("global path conflicts with a read-only system root")
+		}
+	}
+	for _, a := range adds {
+		if writableRootIsProtected(a, sysRoots) {
+			return nil, NewValidationErrorf("addition conflicts with a read-only system root")
+		}
+	}
+
+	// Validate the removal set against the effective grant.
+	gitRoot, hasGit := gitCommonDir(canon)
+	globalSet := make(map[string]bool, len(globals))
+	for _, g := range globals {
+		globalSet[g] = true
+	}
+	addSet := make(map[string]bool, len(adds))
+	for _, a := range adds {
+		addSet[a] = true
+	}
+	removedSet := make(map[string]bool, len(removes))
+	for _, r := range removes {
+		if addSet[r] {
+			return nil, NewValidationErrorf("same path added and removed")
+		}
+		if r == canon || (hasGit && r == gitRoot) || r == home || r == tmp {
+			return nil, NewValidationErrorf("cannot remove a mandatory root")
+		}
+		if !globalSet[r] {
+			return nil, NewValidationErrorf("removal does not match an allowed path")
+		}
+		removedSet[r] = true
+	}
+
+	// Writable roots in the fixed order the spec fixes (design spec §6.2):
+	// workspace, optional Git common dir, global minus exact removals,
+	// additions, ephemeral home/tmp.
+	writable := []string{canon}
+	if hasGit {
+		writable = append(writable, gitRoot)
+	}
+	for _, g := range globals {
+		if !removedSet[g] {
+			writable = append(writable, g)
+		}
+	}
+	writable = append(writable, adds...)
 	writable = append(writable, home, tmp)
 
-	// Read-only roots: documented system set, canonical execution roots, and
-	// absolute directories from inherited PATH. Missing optional roots are
+	// Read-only roots: the canonical system set, canonical execution roots,
+	// and absolute directories from inherited PATH. Missing optional roots are
 	// skipped; permission and canonicalization errors are fatal.
-	readonly := make([]string, 0, len(systemReadOnlyRoots())+16)
-	for _, root := range systemReadOnlyRoots() {
-		c, ok, e := canonicalOptionalDir(root)
-		if e != nil {
-			return nil, NewSetupErrorf("system root %q: %v", root, e)
-		}
-		if ok {
-			readonly = append(readonly, c)
-		}
-	}
+	readonly := make([]string, 0, len(sysRoots)+16)
+	readonly = append(readonly, sysRoots...)
 
 	shellCanon, err := filepath.EvalSymlinks(shellPath)
 	if err != nil {
@@ -233,35 +315,110 @@ func validatePolicyPath(p string) error {
 	return nil
 }
 
-// canonicalizeWorkspace applies Abs → EvalSymlinks → Stat and requires an
-// existing absolute directory. Any failure is a workspace validation error
-// (-32602), never a setup failure.
+// canonicalizeWorkspace resolves the workspace through the single
+// existing-directory pipeline and classifies any failure as a request
+// validation error (-32602), never a setup failure.
 func canonicalizeWorkspace(workspace string) (string, error) {
-	if workspace == "" {
-		return "", NewValidationErrorf("workspace is empty")
-	}
-	if strings.ContainsRune(workspace, 0) {
-		return "", NewValidationErrorf("workspace contains a NUL byte")
-	}
-	if !filepath.IsAbs(workspace) {
-		return "", NewValidationErrorf("workspace must be absolute")
-	}
-	abs, err := filepath.Abs(workspace)
+	canon, err := canonicalExistingDir(workspace)
 	if err != nil {
-		return "", NewValidationErrorf("cannot resolve an absolute path")
+		return "", NewValidationErrorf("workspace: %v", err)
+	}
+	return canon, nil
+}
+
+// canonicalExistingDir implements the single existing-directory pipeline for
+// user-supplied paths (design spec §6.1): non-empty → no NUL/control →
+// absolute → Abs → EvalSymlinks → Stat(dir). It returns a path-free error;
+// the caller owns classifying it as request validation (-32602) or
+// persisted-global failure (-32012).
+func canonicalExistingDir(p string) (string, error) {
+	if p == "" {
+		return "", errors.New("path is empty")
+	}
+	for _, r := range p {
+		if r == 0 {
+			return "", errors.New("path contains a NUL byte")
+		}
+		if unicode.IsControl(r) {
+			return "", errors.New("path contains a control character")
+		}
+	}
+	if !filepath.IsAbs(p) {
+		return "", errors.New("path is not absolute")
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", errors.New("cannot resolve an absolute path")
 	}
 	canon, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", NewValidationErrorf("cannot resolve workspace symlinks")
+		return "", errors.New("cannot resolve to an existing directory")
 	}
 	fi, err := os.Stat(canon)
 	if err != nil {
-		return "", NewValidationErrorf("cannot stat workspace")
+		return "", errors.New("cannot resolve to an existing directory")
 	}
 	if !fi.IsDir() {
-		return "", NewValidationErrorf("workspace is not a directory")
+		return "", errors.New("path is not a directory")
 	}
 	return canon, nil
+}
+
+// canonicalPaths resolves each user-supplied path through the single
+// existing-directory pipeline and dedupes canonical first-wins. classify maps
+// a resolution failure to the right error class: request validation for
+// additions/removals, setup failure for the persisted global baseline.
+func canonicalPaths(paths []string, classify func(error) error) ([]string, error) {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		canon, err := canonicalExistingDir(p)
+		if err != nil {
+			return nil, classify(err)
+		}
+		out = append(out, canon)
+	}
+	return dedupeKeepOrder(out), nil
+}
+
+func requestPathErr(err error) error { return NewValidationErrorf("invalid path: %v", err) }
+func setupPathErr(err error) error   { return NewSetupErrorf("invalid global path: %v", err) }
+
+// canonicalSystemRoots resolves the documented read-only set to canonical
+// existing directories (missing roots skipped; permission/canonicalization
+// errors fatal). The same slice seeds the read-only roots and the
+// protected-ancestor check.
+func canonicalSystemRoots() ([]string, error) {
+	roots := make([]string, 0, len(systemReadOnlyRoots()))
+	for _, root := range systemReadOnlyRoots() {
+		c, ok, e := canonicalOptionalDir(root)
+		if e != nil {
+			return nil, NewSetupErrorf("system root %q: %v", root, e)
+		}
+		if ok {
+			roots = append(roots, c)
+		}
+	}
+	return roots, nil
+}
+
+// writableRootIsProtected reports whether a canonical writable candidate is
+// equal to or an ancestor of any canonical system read-only root. The check is
+// component-aware via filepath.Rel — never string-prefix comparison, so
+// /usrlocal is not mistaken for a descendant of /usr.
+func writableRootIsProtected(candidate string, systemRoots []string) bool {
+	for _, root := range systemRoots {
+		rel, err := filepath.Rel(candidate, root)
+		if err != nil {
+			continue
+		}
+		if rel == "." {
+			return true // candidate equals the read-only root
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return true // the read-only root lives under the candidate
+		}
+	}
+	return false
 }
 
 // canonicalOptionalDir resolves an optional root. Missing roots (ENOENT /

@@ -5,11 +5,9 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 
 	"github.com/shady2k/nocx/internal/log"
 	"golang.org/x/sys/unix"
@@ -55,7 +53,7 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 		return nil, err
 	}
 
-	pol, err := BuildPolicy(req.Workspace, spec.Path, runtimeRoot, spec.Env)
+	pol, err := BuildPolicy(req, spec.Path, runtimeRoot, spec.Env)
 	if err != nil {
 		return fail(err)
 	}
@@ -134,48 +132,4 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 		RemoveRuntimeRoot(runtimeRoot)
 	}
 	return pc, nil
-}
-
-// readStatus reads the readiness byte with a bounded deadline. A zero byte
-// means enforcement succeeded; anything else is a typed setup failure with
-// the helper's reason. The parent's own copy of the write end is closed
-// first — WaitReady is only called after the helper is started, so the child
-// already holds its duplicate, and a child that exits without reporting now
-// EOFs the read instead of blocking until the deadline. On timeout the
-// goroutine stays blocked until cleanup closes the read end.
-func readStatus(ctx context.Context, r, w *os.File) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	_ = w.Close()
-	done := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 1)
-		n, err := r.Read(buf)
-		if err != nil {
-			done <- NewSetupErrorf("readiness: %v", err)
-			return
-		}
-		if n != 1 {
-			done <- NewSetupErrorf("readiness: short read")
-			return
-		}
-		if buf[0] != 0 {
-			rest, _ := io.ReadAll(r)
-			detail := strings.TrimSpace(string(rest))
-			if detail == "" {
-				detail = "unknown helper failure"
-			}
-			done <- NewSetupErrorf("helper setup failed: %s", detail)
-			return
-		}
-		done <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		return NewSetupErrorf("readiness timeout: %v", ctx.Err())
-	case err := <-done:
-		return err
-	}
 }

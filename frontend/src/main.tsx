@@ -1440,8 +1440,9 @@ function main(): void {
       () => tm.newPane(),
       () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
-      // Sandboxed shell… action (ADR-0030 §3.2): live flag + backend status
-      // on every open; picker → new sandboxed tab. Cancellation is a no-op.
+      // Sandboxed shell… action (ADR-0031 §4.2): live flag + backend status
+      // on every open; then one fresh snapshot, the workspace picker, and the
+      // permission dialog before a new tab. Cancellation creates nothing.
       {
         state: async () => {
           const snap = await profileClient.getSnapshot()
@@ -1457,16 +1458,17 @@ function main(): void {
           return { enabled, status }
         },
         open: () => {
-          void (async () => {
-            const picked = await dialogClient.openDirectoryDialog()
-            if (!picked.path) return // cancelled: no-op
-            tm.newSandboxedTab(picked.path)
-          })().catch((err: unknown) => {
-            const message = err instanceof Error ? err.message : String(err)
-            showToast({
-              level: 'danger',
-              message: `Could not open the directory picker: ${message}`,
-            })
+          void openSandboxedShell({
+            getSnapshot: () => profileClient.getSnapshot(),
+            openDirectory: () => dialogClient.openDirectoryDialog(),
+            showPermissions: showSandboxPermissions,
+            newSandboxedTab: (workspace, launch) => tm.newSandboxedTab(workspace, launch),
+            reportError: (message) => {
+              showToast({
+                level: 'danger',
+                message: `Could not open a sandboxed tab: ${message}`,
+              })
+            },
           })
         },
       },

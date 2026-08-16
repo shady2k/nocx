@@ -5,18 +5,20 @@ import (
 	"fmt"
 )
 
-// ErrInvalidWorkspace wraps workspace validation failures. The transport
-// maps it to JSON-RPC -32602 "Invalid params".
-var ErrInvalidWorkspace = errors.New("sandbox: invalid workspace")
+// ErrInvalidPermissions identifies malformed sandbox request parameters: the
+// workspace or the per-tab add/remove deltas. The transport maps it to
+// JSON-RPC -32602 "Invalid params".
+var ErrInvalidPermissions = errors.New("sandbox: invalid permissions")
 
-// ValidationError is a workspace validation failure with a human detail.
-// The detail is safe for the wire: it never contains a filesystem path.
+// ValidationError is a request-parameter validation failure with a human
+// detail. The detail is safe for the wire: it never contains a filesystem
+// path.
 type ValidationError struct {
 	msg string
 }
 
-func (e *ValidationError) Error() string { return "sandbox: invalid workspace: " + e.msg }
-func (e *ValidationError) Unwrap() error { return ErrInvalidWorkspace }
+func (e *ValidationError) Error() string { return "sandbox: invalid permissions: " + e.msg }
+func (e *ValidationError) Unwrap() error { return ErrInvalidPermissions }
 
 // NewValidationErrorf builds a ValidationError.
 func NewValidationErrorf(format string, args ...any) error {

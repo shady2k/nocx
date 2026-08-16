@@ -100,8 +100,8 @@ func TestNewLocal_SandboxedFailClosed(t *testing.T) {
 		Rows:    24,
 		Sandbox: &sandbox.Request{Workspace: "relative/not-absolute"},
 	}, pty.WithSandboxService(svc))
-	if !errors.Is(err, sandbox.ErrInvalidWorkspace) {
-		t.Fatalf("err = %v, want ErrInvalidWorkspace", err)
+	if !errors.Is(err, sandbox.ErrInvalidPermissions) {
+		t.Fatalf("err = %v, want ErrInvalidPermissions", err)
 	}
 }
 

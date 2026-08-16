@@ -399,3 +399,64 @@ func TestDocumentStore_DeleteAbsentIsNotAnError(t *testing.T) {
 		t.Errorf("Delete of an absent document: %v, want nil", err)
 	}
 }
+
+// The store's documented 8 MiB ceiling is enforced on both read and write,
+// and oversized input is rejected before JSON decode or the atomic write.
+func TestDocumentStore_ReadTooLarge(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "docs")
+	store := newDocumentStore(t, dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.json"), make([]byte, maxDocumentBytes+1), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var got any
+	_, err := store.Read("big.json", &got)
+	if err == nil {
+		t.Fatal("Read on oversized document succeeded, want error")
+	}
+	if !errors.Is(err, ErrDocumentTooLarge) {
+		t.Errorf("error = %v, want ErrDocumentTooLarge", err)
+	}
+}
+
+func TestDocumentStore_WriteTooLarge(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "docs")
+	store := newDocumentStore(t, dir)
+
+	doc := map[string]string{"blob": strings.Repeat("x", maxDocumentBytes)}
+	err := store.Write("big.json", doc)
+	if err == nil {
+		t.Fatal("Write of oversized document succeeded, want error")
+	}
+	if !errors.Is(err, ErrDocumentTooLarge) {
+		t.Errorf("error = %v, want ErrDocumentTooLarge", err)
+	}
+	// Nothing must have been written (the bound fires before the temp file).
+	if _, statErr := os.Stat(filepath.Join(dir, "big.json")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("oversized document was written to disk (stat err = %v)", statErr)
+	}
+}
+
+// An empty document still reads as not-found, beside the new size bound.
+func TestDocumentStore_ReadEmptyStillNotFound(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "docs")
+	store := newDocumentStore(t, dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "empty.json"), nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var got testDoc
+	found, err := store.Read("empty.json", &got)
+	if err != nil {
+		t.Fatalf("Read on empty file: %v", err)
+	}
+	if found {
+		t.Error("empty document returned found=true")
+	}
+}

@@ -196,6 +196,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	if err != nil {
 		if prepared != nil {
 			prepared.Close()
+			return nil, sandbox.NewSetupErrorf("start sandboxed command: %v", err)
 		}
 		return nil, err
 	}
@@ -277,7 +278,7 @@ func (lp *LocalPty) SandboxInfo() *sandbox.SessionInfo {
 	return &sandbox.SessionInfo{
 		Backend:       lp.prepared.Backend,
 		Workspace:     lp.prepared.Policy.Workspace,
-		WritableRoots: lp.prepared.Policy.WritableRoots,
+		WritableRoots: append([]string(nil), lp.prepared.Policy.WritableRoots...),
 	}
 }
 

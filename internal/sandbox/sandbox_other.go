@@ -18,8 +18,8 @@ func New(logger log.Logger, _ string) Service {
 	return unsupportedService{}
 }
 
-// MaybeHelper is a no-op on unsupported platforms: the sandbox helper is a
-// Linux-only mechanism.
+// MaybeHelper is a no-op on unsupported platforms: the Linux Landlock helper
+// and the macOS Seatbelt shim are platform-specific mechanisms.
 func MaybeHelper() bool { return false }
 
 func (unsupportedService) Status(_ context.Context) Status {

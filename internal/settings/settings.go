@@ -25,10 +25,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -57,6 +60,7 @@ const (
 	ControlNumber ControlKind = "number"
 	ControlSelect ControlKind = "select"
 	ControlSecret ControlKind = "secret"
+	ControlPaths  ControlKind = "paths"
 )
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -292,6 +296,17 @@ type SecretSpec struct {
 	DataClass   DataClass
 }
 
+// PathListSpec is the declaration site for a path-list setting. The value is
+// always a canonical list of existing directories; there is no Default field
+// because the default is always the empty list.
+type PathListSpec struct {
+	Key         string
+	Section     string
+	Label       string
+	Description string
+	DataClass   DataClass
+}
+
 // ── Typed setting keys (unexported fields, exported via Descriptor) ─────
 
 // Bool is a typed key for a boolean toggle setting.
@@ -495,6 +510,39 @@ func (s *Secret) toDeclaration() Declaration {
 	}
 }
 
+// PathList is a typed key for a path-list setting. The stored and wire value
+// is a canonical []string of existing directories.
+type PathList struct {
+	key         string
+	section     string
+	label       string
+	description string
+	dataClass   DataClass
+}
+
+func (p *PathList) Key() string             { return p.key }
+func (p *PathList) Section() string         { return p.section }
+func (p *PathList) Label() string           { return p.label }
+func (p *PathList) Description() string     { return p.description }
+func (p *PathList) Control() ControlKind    { return ControlPaths }
+func (p *PathList) DataClass() DataClass    { return p.dataClass }
+func (p *PathList) Default() any            { return []string{} }
+func (p *PathList) Options() []SelectOption { return nil }
+func (p *PathList) Min() *float64           { return nil }
+func (p *PathList) Max() *float64           { return nil }
+
+func (p *PathList) toDeclaration() Declaration {
+	return Declaration{
+		Key:         p.key,
+		Section:     p.section,
+		Label:       p.label,
+		Description: p.description,
+		Control:     ControlPaths,
+		DataClass:   p.dataClass,
+		Default:     p.Default(),
+	}
+}
+
 // ── Declaration auto-registration ──────────────────────────────────────
 
 // allDecls holds every declared setting, populated at package init time
@@ -591,6 +639,20 @@ func MustRegisterSecret(spec SecretSpec) *Secret {
 	assertValidKey(s.key)
 	allDecls = append(allDecls, s)
 	return s
+}
+
+// MustRegisterPathList declares a path-list setting and registers it.
+func MustRegisterPathList(spec PathListSpec) *PathList {
+	p := &PathList{
+		key:         spec.Key,
+		section:     spec.Section,
+		label:       spec.Label,
+		description: spec.Description,
+		dataClass:   spec.DataClass,
+	}
+	assertValidKey(p.key)
+	allDecls = append(allDecls, p)
+	return p
 }
 
 func assertValidKey(key string) {
@@ -955,11 +1017,13 @@ func init() {
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")
 	RegisterSectionGroup("Skills", "application")
+	RegisterSectionGroup("Experimental", "developer")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).
 	RegisterSectionGroup("Test", "developer")
 }
+
 // SandboxEnabled gates the opt-in "Sandboxed shell…" action (ADR-0030 §3.1).
 // It is a capability/visibility gate, not "sandbox every tab": it only
 // exposes an opt-in action for NEW local tabs, never changes a running tab,
@@ -971,6 +1035,17 @@ var SandboxEnabled = MustRegisterBool(BoolSpec{
 	Description: "Expose an opt-in action that opens new local tabs inside a filesystem-isolated sandbox (experimental). Existing tabs are never affected, and the flag alone never sandboxes anything.",
 	DataClass:   PublicConfig,
 	Default:     false,
+})
+
+// SandboxAllowedWritablePaths is the persisted global baseline of additional
+// directories made read-write in every new sandboxed tab (ADR-0031 §3.1).
+// The workspace is always writable; changes affect new tabs only.
+var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
+	Key:         "sandbox.allowedWritablePaths",
+	Section:     "Experimental",
+	Label:       "Sandbox writable allowlist",
+	Description: "Additional folders available read/write in every new sandboxed tab. The workspace is always writable; changes affect new tabs only.",
+	DataClass:   PrivateMetadata,
 })
 
 // ── Document shape ─────────────────────────────────────────────────────
@@ -1056,9 +1131,20 @@ func New(doc storage.DocumentStore, secrets credential.SecretStore) *Registry {
 	}
 
 	for k, v := range stored.Values {
-		if descriptorByKey(k) != nil {
-			r.values[k] = v
+		d := descriptorByKey(k)
+		if d == nil {
+			continue
 		}
+		if d.Control() == ControlPaths {
+			// A recognized path list is preserved raw (no re-stat: a
+			// directory that disappeared after a valid save stays visible and
+			// makes a sandbox launch fail closed). A type-corrupted value is
+			// preserved unchanged so it stays observable as an invalid
+			// snapshot, never silently coerced to the default (ADR-0031 §3.2).
+			r.values[k] = normalizeLoadedPathList(v)
+			continue
+		}
+		r.values[k] = v
 	}
 	for k, id := range stored.SecretRefs {
 		if descriptorByKey(k) != nil {
@@ -1138,6 +1224,8 @@ func descriptorToDeclaration(d Descriptor) Declaration {
 	case *Select:
 		return t.toDeclaration()
 	case *Secret:
+		return t.toDeclaration()
+	case *PathList:
 		return t.toDeclaration()
 	default:
 		return Declaration{
@@ -1294,6 +1382,45 @@ func (r *Registry) SetSelect(s *Select, value string) error {
 	}
 }
 
+// GetPaths returns the current value of a path-list setting, or its default.
+// The returned slice is a fresh copy — mutating it never mutates registry
+// state. A stored value that is not a recognized string list is reported as a
+// corruption error, never silently coerced to the default (ADR-0031 §3.2).
+func (r *Registry) GetPaths(p *PathList) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v, ok := r.values[p.key]
+	if !ok {
+		return []string{}, nil
+	}
+	paths, ok := v.([]string)
+	if !ok {
+		return nil, &ValidationError{SettingKey: p.key, Message: "stored path list is corrupted"}
+	}
+	return copyStrings(paths), nil
+}
+
+// SetPaths validates, canonicalizes, and persists a path-list setting. The
+// entire candidate is validated before one commit: non-empty absolute paths
+// with no control runes that resolve to existing directories, at most
+// pathListMaxEntries entries, canonical duplicates collapsing first-wins.
+func (r *Registry) SetPaths(p *PathList, value []string) error {
+	r.mu.Lock()
+	canonical, err := canonicalPaths(p.key, value)
+	if err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	newValues := copyValues(r.values)
+	newValues[p.key] = canonical
+	ch, commitErr := r.commitLocked(newValues, r.refs, []string{p.key})
+	r.mu.Unlock()
+	if commitErr == nil {
+		r.finishCommit(ch)
+	}
+	return commitErr
+}
+
 // ── getSnapshot ─────────────────────────────────────────────────────────
 
 // GetSnapshot returns the current snapshot of all non-secret settings:
@@ -1309,7 +1436,11 @@ func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
 			continue
 		}
 		if v, ok := r.values[d.Key()]; ok {
-			values[d.Key()] = v
+			if d.Control() == ControlPaths {
+				values[d.Key()] = copyPathsValue(v)
+			} else {
+				values[d.Key()] = v
+			}
 			overridden = append(overridden, d.Key())
 		} else {
 			values[d.Key()] = d.Default()
@@ -1341,6 +1472,10 @@ func (r *Registry) NonSecretOverrides() map[string]any {
 		if d == nil || d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
 			continue
 		}
+		if d.Control() == ControlPaths {
+			out[key] = copyPathsValue(value)
+			continue
+		}
 		out[key] = value
 	}
 	return out
@@ -1353,7 +1488,7 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 	defer r.mu.Unlock()
 
 	newValues := copyValues(r.values)
-	var changedKeys []string
+	typed := make(map[string]any, len(values))
 	for key, value := range values {
 		d := descriptorByKey(key)
 		if d == nil {
@@ -1362,13 +1497,23 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 		if d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
 			return PendingNotification{}, &ValidationError{SettingKey: key, Message: "secret-class settings cannot be bulk-replaced"}
 		}
+		if d.Control() == ControlPaths {
+			canonical, err := canonicalPaths(key, value)
+			if err != nil {
+				return PendingNotification{}, err
+			}
+			typed[key] = canonical
+			continue
+		}
 		if err := validateValue(d, value); err != nil {
 			return PendingNotification{}, err
 		}
+		typed[key] = value
 	}
-	for key, value := range values {
+	var changedKeys []string
+	for key, value := range typed {
 		existing, had := newValues[key]
-		if !had || existing != value {
+		if !had || !reflect.DeepEqual(existing, value) {
 			changedKeys = append(changedKeys, key)
 		}
 		newValues[key] = value
@@ -1378,7 +1523,7 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 		if d == nil || d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
 			continue
 		}
-		if _, kept := values[key]; !kept {
+		if _, kept := typed[key]; !kept {
 			changedKeys = append(changedKeys, key)
 			delete(newValues, key)
 		}
@@ -1452,6 +1597,10 @@ func validateValue(d Descriptor, value any) error {
 			}
 		}
 		return &ValidationError{SettingKey: d.Key(), Message: fmt.Sprintf("invalid option %q", s)}
+	case ControlPaths:
+		if _, err := canonicalPaths(d.Key(), value); err != nil {
+			return err
+		}
 	default:
 		return &ValidationError{SettingKey: d.Key(), Message: "unsupported control kind"}
 	}
@@ -1601,6 +1750,12 @@ func coerceValue(d Descriptor, value any) (any, error) {
 			}
 		}
 		return f, nil
+	case ControlPaths:
+		paths, err := canonicalPaths(d.Key(), value)
+		if err != nil {
+			return nil, err
+		}
+		return paths, nil
 	}
 	return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "unsupported control kind"}
 }
@@ -1772,6 +1927,150 @@ func checkTextLength(s *String, value string) error {
 	return nil
 }
 
+// ── Path-list validation ───────────────────────────────────────────────
+
+// pathListMaxEntries bounds a path-list setting (design spec §3.1).
+const pathListMaxEntries = 32
+
+// canonicalPaths validates a path-list candidate and returns the canonical,
+// deduplicated slice. It accepts []string (the typed setter / in-memory
+// snapshot) and []any (JSON-decoded values). Every entry must be a non-empty
+// absolute path with no control runes that resolves (Abs → EvalSymlinks →
+// Stat) to an existing directory. Canonical duplicates collapse first-wins.
+// The returned slice is freshly allocated and never aliases the input.
+// Error messages deliberately name no path (AD-11: user paths never enter
+// wire errors or logs).
+func canonicalPaths(key string, value any) ([]string, error) {
+	strs, err := pathStrings(value)
+	if err != nil {
+		return nil, &ValidationError{SettingKey: key, Value: value, Message: err.Error()}
+	}
+	if len(strs) > pathListMaxEntries {
+		return nil, &ValidationError{SettingKey: key, Value: value, Message: fmt.Sprintf("at most %d paths allowed", pathListMaxEntries)}
+	}
+	out := make([]string, 0, len(strs))
+	seen := make(map[string]struct{}, len(strs))
+	for _, p := range strs {
+		if p == "" {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must be non-empty"}
+		}
+		if !filepath.IsAbs(p) {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must be absolute"}
+		}
+		if hasControlRune(p) {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must not contain control characters"}
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "invalid path"}
+		}
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "path does not resolve"}
+		}
+		fi, err := os.Stat(resolved)
+		if err != nil || !fi.IsDir() {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "path is not an existing directory"}
+		}
+		if _, dup := seen[resolved]; dup {
+			continue // canonical first-wins
+		}
+		seen[resolved] = struct{}{}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
+// pathStrings converts a path-list candidate to []string. It accepts []string
+// (the typed setter) and []any (a JSON-decoded array of strings); anything
+// else is rejected as "expected an array of strings".
+func pathStrings(value any) ([]string, error) {
+	switch v := value.(type) {
+	case []string:
+		return v, nil
+	case []any:
+		out := make([]string, len(v))
+		for i, e := range v {
+			s, ok := e.(string)
+			if !ok {
+				return nil, errors.New("expected an array of strings")
+			}
+			out[i] = s
+		}
+		return out, nil
+	default:
+		return nil, errors.New("expected an array of strings")
+	}
+}
+
+// hasControlRune reports whether p contains a Unicode control rune (which
+// includes NUL). Such bytes cannot appear in a path handed to a native
+// backend.
+func hasControlRune(p string) bool {
+	for _, r := range p {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyStrings returns a fresh copy of src; the result never aliases the input.
+func copyStrings(src []string) []string {
+	if src == nil {
+		return []string{}
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
+// copyPathsValue returns the snapshot/override representation of a stored
+// path-list value: a deep-copied []string for a recognized list, or the raw
+// stored value (deep-copied when it is a slice) so startup type corruption
+// stays observable for fail-closed handling instead of being coerced to [].
+func copyPathsValue(v any) any {
+	switch t := v.(type) {
+	case []string:
+		return copyStrings(t)
+	case []any:
+		out := make([]any, len(t))
+		copy(out, t)
+		return out
+	default:
+		return v
+	}
+}
+
+// normalizeLoadedPathList converts a persisted path-list value into registry
+// state. A recognized value — an array of strings with at most
+// pathListMaxEntries entries — becomes []string, preserved raw (no re-stat).
+// Any other value is type corruption and is returned unchanged so it remains
+// observable as an invalid snapshot.
+func normalizeLoadedPathList(v any) any {
+	switch t := v.(type) {
+	case []string:
+		if len(t) > pathListMaxEntries {
+			return v
+		}
+		return copyStrings(t)
+	case []any:
+		if len(t) > pathListMaxEntries {
+			return v
+		}
+		out := make([]string, len(t))
+		for i, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return v
+			}
+			out[i] = s
+		}
+		return out
+	default:
+		return v
+	}
+}
 func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:

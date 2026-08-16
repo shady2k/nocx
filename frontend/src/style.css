@@ -109,6 +109,7 @@
 @import './styles/surfaces/vault.css';
 @import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
+@import './styles/surfaces/sandbox-permissions.css';
 
 /* ── App body row: strip | panes | sidebar | activity bar ─────────────── */
 

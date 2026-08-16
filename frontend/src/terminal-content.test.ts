@@ -310,6 +310,35 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       expect(renderer.fitViewport).toHaveBeenLastCalledWith(
         expect.objectContaining({ width: 800, height: 400 }),
       )
+describe('sandboxed session launch failure', () => {
+  it('shows the typed failure and removes the unconfirmed tab', async () => {
+    const failure = new RpcError('sandbox setup failed', -32012, { reason: 'setup-failed' })
+    const client = makeClient({
+      openSandboxedSession: vi.fn().mockRejectedValue(failure),
+    })
+    const content = new TerminalContent(
+      client as unknown as WSClient,
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+      undefined,
+      { sandbox: { workspace: '/workspace', settingsRevision: 0, add: [], remove: [] } },
+    )
+    const tab = new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: null,
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      100,
+    )
+    const requestClose = vi.fn()
+    tab.onCloseRequested = requestClose
 
       // The live-region output path runs on every parsed frame; the usable
       // rectangle is unchanged, so it must not fit again — the existing grid
@@ -368,6 +397,20 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
     } finally {
       vi.useRealTimers()
     }
+    await expect(content.ready).resolves.toBe(false)
+    expect(client.openSandboxedSession).toHaveBeenCalledWith(80, 24, {
+      workspace: '/workspace',
+      settingsRevision: 0,
+      add: [],
+      remove: [],
+    })
+    expect(client.openSession).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith({
+      level: 'danger',
+      message: 'Sandboxed shell failed to start: sandbox setup failed',
+    })
+    expect(requestClose).toHaveBeenCalledOnce()
+    tab.close()
   })
 })
 

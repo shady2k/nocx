@@ -19,7 +19,7 @@ func fixturePolicy(t *testing.T) *Policy {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
-	p, err := BuildPolicy(ws, "/bin/sh", rt, nil)
+	p, err := BuildPolicy(Request{Workspace: ws}, "/bin/sh", rt, nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -66,15 +66,23 @@ func TestRenderProfile_Clauses(t *testing.T) {
 		}
 	}
 	for _, root := range p.WritableRoots {
-		want := `(allow file-write* (subpath "` + root + `"))`
-		if !strings.Contains(profile, want) {
-			t.Errorf("profile missing writable clause for %q", root)
+		read := `(allow file-read* (subpath "` + root + `"))`
+		write := `(allow file-write* (subpath "` + root + `"))`
+		if !strings.Contains(profile, read) || !strings.Contains(profile, write) {
+			t.Errorf("profile missing read-write clauses for %q", root)
 		}
 	}
 	for _, root := range p.ReadOnlyRoots {
 		want := `(allow file-read* (subpath "` + root + `"))`
 		if !strings.Contains(profile, want) {
 			t.Errorf("profile missing read-only clause for %q", root)
+		}
+	}
+	for _, dir := range p.WritableDirs {
+		read := `(allow file-read* (subpath "` + dir + `"))`
+		write := `(allow file-write* (subpath "` + dir + `"))`
+		if !strings.Contains(profile, read) || !strings.Contains(profile, write) {
+			t.Errorf("profile missing read-write directory clauses for %q", dir)
 		}
 	}
 	for _, file := range p.ReadOnlyFiles {
@@ -84,10 +92,11 @@ func TestRenderProfile_Clauses(t *testing.T) {
 		}
 	}
 	for _, file := range p.WritableFiles {
+		read := `(allow file-read* (literal "` + file + `"))`
 		write := `(allow file-write* (literal "` + file + `"))`
 		ioctl := `(allow file-ioctl (literal "` + file + `"))`
-		if !strings.Contains(profile, write) || !strings.Contains(profile, ioctl) {
-			t.Errorf("profile missing exact device clauses for %q", file)
+		if !strings.Contains(profile, read) || !strings.Contains(profile, write) || !strings.Contains(profile, ioctl) {
+			t.Errorf("profile missing exact read-write device clauses for %q", file)
 		}
 	}
 	if strings.Contains(profile, "vnode-type CHARACTER-DEVICE") {

@@ -67,6 +67,7 @@ func renderProfile(p *Policy) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		b.WriteString("(allow file-read* (subpath \"" + esc + "\"))\n")
 		b.WriteString("(allow file-write* (subpath \"" + esc + "\"))\n")
 	}
 	for _, dir := range p.WritableDirs {
@@ -74,6 +75,7 @@ func renderProfile(p *Policy) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		b.WriteString("(allow file-read* (subpath \"" + esc + "\"))\n")
 		b.WriteString("(allow file-write* (subpath \"" + esc + "\"))\n")
 	}
 	for _, file := range p.WritableFiles {
@@ -81,6 +83,7 @@ func renderProfile(p *Policy) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		b.WriteString("(allow file-read* (literal \"" + esc + "\"))\n")
 		b.WriteString("(allow file-write* (literal \"" + esc + "\"))\n")
 		b.WriteString("(allow file-ioctl (literal \"" + esc + "\"))\n")
 	}

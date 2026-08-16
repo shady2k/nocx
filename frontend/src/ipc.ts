@@ -28,6 +28,24 @@ export interface SessionSandboxInfo {
   readonly writableRoots: string[]
 }
 
+/**
+ * The per-launch sandbox permission deltas (ADR-0031 §5): the settings
+ * revision the permission dialog displayed, plus the user's ephemeral
+ * additions and exact baseline removals. It never carries the baseline
+ * itself, the effective roots, Git/runtime roots, or any native-backend
+ * clause — the backend is the sole policy author.
+ */
+export interface SandboxLaunch {
+  readonly settingsRevision: number
+  readonly add: string[]
+  readonly remove: string[]
+}
+
+/** The complete sandboxed open request: canonical workspace + deltas. */
+export interface SandboxRequest extends SandboxLaunch {
+  readonly workspace: string
+}
+
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
  *  same ack so the tab's capability control starts from the backend's own
@@ -777,19 +795,38 @@ export class WSClient {
       .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
-  // openSandboxedSession opens a filesystem-isolated LOCAL session in the
-  // given workspace (ADR-0030). The backend canonicalizes the workspace,
-  // constructs the policy, and enforces it before the session is registered.
-  // Fails closed: any enforcement error rejects with the typed wire error.
-  openSandboxedSession(cols: number, rows: number, workspace: string): Promise<SessionHandle> {
+  // openSandboxedSession opens a filesystem-isolated LOCAL session (ADR-0031).
+  // The renderer sends the canonical workspace plus the bounded permission
+  // deltas the launch dialog confirmed — never a baseline, effective roots,
+  // Git/runtime roots, or a native-backend clause. The backend reads the
+  // baseline from the same settings revision, canonicalizes everything, and
+  // enforces the policy before the session is registered. Fails closed: any
+  // enforcement error rejects with the typed wire error.
+  openSandboxedSession(
+    cols: number,
+    rows: number,
+    request: SandboxRequest,
+  ): Promise<SessionHandle> {
+    const sandbox: {
+      workspace: string
+      settingsRevision: number
+      add?: string[]
+      remove?: string[]
+    } = {
+      workspace: request.workspace,
+      settingsRevision: request.settingsRevision,
+    }
+    // Empty deltas are omitted, not sent as empty arrays: the DTO treats
+    // `add`/`remove` as optional, so only non-empty deltas ride the wire.
+    if (request.add.length > 0) sandbox.add = request.add
+    if (request.remove.length > 0) sandbox.remove = request.remove
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
         ypixel: 0,
-        enhanced: true,
-        sandbox: { workspace },
+        sandbox,
       })
       .then((result) => this._registerHandle(result))
   }

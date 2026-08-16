@@ -12,6 +12,12 @@
 This spec owns the complete V1 architecture. Where this spec and the implementation plan
 disagree, this spec wins and the plan is wrong.
 
+> **Amended 2026-08-16:** ADR-0031 and
+> `docs/superpowers/specs/2026-08-16-sandbox-per-tab-permissions-design.md` supersede this
+> document's workspace-only request, one-setting/no-extra-roots, and macOS start-as-readiness
+> clauses. This document remains authoritative for the unchanged V1 platform policy and
+> lifecycle.
+
 ---
 
 ## 1. What is actually true today

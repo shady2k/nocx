@@ -62,7 +62,7 @@ func TestSeatbeltEnforcement(t *testing.T) {
 		"NOCX_SB_TMP="+tmp,
 	)
 
-	pol, err := BuildPolicy(workspace, exe, filepath.Join(base, "runtime"), probeEnv)
+	pol, err := BuildPolicy(Request{Workspace: workspace}, exe, filepath.Join(base, "runtime"), probeEnv)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -87,9 +87,10 @@ func TestSeatbeltEnforcement(t *testing.T) {
 }
 
 // TestDarwinServicePrepare_ConstructsWrapper asserts the wrapper shape
-// (sandbox-exec -p <profile> <shell> <args>), the environment, the working
-// directory, the runtime tree lifecycle, and fail-closed behaviour — without
-// launching anything (construction-only, runnable in CI).
+// (sandbox-exec -p <profile> <nocx-exe> __sandbox-seatbelt-exec <status-fd>
+// <shell> <args>), the environment, the working directory, the shim's
+// readable executable, the runtime tree lifecycle, and fail-closed behaviour
+// — without launching anything (construction-only, runnable in CI).
 func TestDarwinServicePrepare_ConstructsWrapper(t *testing.T) {
 	origPath, origProbe := sandboxExecPath, sandboxExecProbe
 	defer func() {
@@ -113,21 +114,62 @@ func TestDarwinServicePrepare_ConstructsWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		t.Fatalf("executable: %v", exeErr)
+	}
 	cmd := pc.Cmd
 	if cmd.Path != "/usr/bin/true" {
 		t.Errorf("Cmd.Path = %q, want seam path", cmd.Path)
 	}
-	if len(cmd.Args) < 5 || cmd.Args[1] != "-p" || cmd.Args[3] != "/bin/sh" || cmd.Args[4] != "-i" {
-		t.Fatalf("Cmd.Args = %v, want [<path> -p <profile> /bin/sh -i]", cmd.Args)
+	// [<sandbox-exec> -p <profile> <exe> __sandbox-seatbelt-exec <fd> /bin/sh -i]
+	if len(cmd.Args) < 8 {
+		t.Fatalf("Cmd.Args = %v, want sandbox-exec wrapper shape", cmd.Args)
+	}
+	if cmd.Args[1] != "-p" {
+		t.Errorf("Args[1] = %q, want -p", cmd.Args[1])
 	}
 	if !strings.Contains(cmd.Args[2], "(deny default)") {
 		t.Error("rendered profile must start with deny default")
+	}
+	if cmd.Args[3] != exe {
+		t.Errorf("Args[3] = %q, want shim executable %q", cmd.Args[3], exe)
+	}
+	if cmd.Args[4] != seatbeltHelperArg {
+		t.Errorf("Args[4] = %q, want %q", cmd.Args[4], seatbeltHelperArg)
+	}
+	if cmd.Args[5] != "3" {
+		t.Errorf("Args[5] = %q, want status fd 3 (no inherited descriptors)", cmd.Args[5])
+	}
+	if cmd.Args[6] != "/bin/sh" || cmd.Args[7] != "-i" {
+		t.Errorf("Args[6:8] = %v, want [/bin/sh -i]", cmd.Args[6:8])
+	}
+	if len(cmd.ExtraFiles) != 1 {
+		t.Fatalf("ExtraFiles = %d, want exactly the status pipe write end", len(cmd.ExtraFiles))
+	}
+	if pc.waitReady == nil {
+		t.Fatal("macOS Prepare must expose a readiness handshake")
 	}
 	if cmd.Dir != ws {
 		t.Errorf("Cmd.Dir = %q, want %q", cmd.Dir, ws)
 	}
 	if !strings.Contains(strings.Join(cmd.Env, "\n"), "A=B") || !strings.Contains(strings.Join(cmd.Env, "\n"), "NOCX_SANDBOX=filesystem") {
 		t.Errorf("Cmd.Env missing expected vars: %v", cmd.Env)
+	}
+
+	// The shim runs under the profile, so its own executable must be readable.
+	shimCanon, shimErr := filepath.EvalSymlinks(exe)
+	if shimErr != nil {
+		t.Fatalf("EvalSymlinks(shim): %v", shimErr)
+	}
+	foundShim := false
+	for _, f := range pc.Policy.ReadOnlyFiles {
+		if f == shimCanon {
+			foundShim = true
+		}
+	}
+	if !foundShim {
+		t.Errorf("ReadOnlyFiles = %v, want shim %q", pc.Policy.ReadOnlyFiles, shimCanon)
 	}
 
 	// The per-session runtime tree exists under the cache dir until Close.
@@ -172,8 +214,8 @@ func TestDarwinServicePrepare_FailClosed(t *testing.T) {
 		sandboxExecProbe = func(_ context.Context, _ string) error { return nil }
 		svc := New(nil, base)
 		_, err := svc.Prepare(context.Background(), Request{Workspace: "relative/ws"}, spec)
-		if !errors.Is(err, ErrInvalidWorkspace) {
-			t.Fatalf("err = %v, want ErrInvalidWorkspace", err)
+		if !errors.Is(err, ErrInvalidPermissions) {
+			t.Fatalf("err = %v, want ErrInvalidPermissions", err)
 		}
 		if entries, rErr := os.ReadDir(filepath.Join(base, "sandbox-sessions")); rErr == nil && len(entries) != 0 {
 			t.Errorf("runtime tree leaked after validation failure: %v", entries)

@@ -29,6 +29,11 @@ Where this plan and the spec disagree, the spec wins and this plan is wrong. Evi
 `.internal/reports/2026-08-02-native-filesystem-sandbox-research.md`; decision:
 `docs/decisions/0030-native-per-tab-filesystem-sandbox.md`.
 
+> **Amended 2026-08-16:** this is the completed base implementation plan. The executable
+> change for global writable paths, per-launch deltas, strict revision-gated requests, and
+> macOS in-profile readiness is tracked by `nocx-y46q.14` and specified in
+> `docs/superpowers/specs/2026-08-16-sandbox-per-tab-permissions-design.md`.
+
 ## Global Constraints
 
 - **Wire tokens are frozen:** setting key `sandbox.enabled`; request field

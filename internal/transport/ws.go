@@ -1135,18 +1135,6 @@ func WithSandboxService(svc sandbox.Service) WSServerOption {
 	return func(s *WSServer) { s.sandboxSvc = svc }
 }
 
-// sandboxEnabled reports whether the opt-in feature flag is on. The flag is
-// the sole gate: a sandbox request while it is off is rejected (-32010), so
-// UI and wire behavior agree even if the renderer is stale (design spec
-// §3.1). A missing registry fails closed.
-func (s *WSServer) sandboxEnabled() bool {
-	if s.settings == nil {
-		return false
-	}
-	on, err := s.settings.GetBool(settings.SandboxEnabled)
-	return err == nil && on
-}
-
 // WithBackupFileSaver injects the native save-file capability. Tests can
 // provide a deterministic writer; production passes backup.SaveToFile.
 func WithBackupFileSaver(saver func(string, string) (*backup.SaveResult, error)) WSServerOption {
@@ -2179,11 +2167,11 @@ func isJSONObject(data []byte) bool {
 	return false
 }
 
-// openParams is the payload of the "open" RPC method.
-//
-// There is deliberately no `enhanced` field (nocx-tr2n): whether a session
-// tries to become integrated is the backend's decision, not the renderer's.
-// See handleOpen.
+// openParams is the strictly-decoded payload of the "open" RPC method
+// (decodeOpenParams). Unknown members — including the obsolete `enhanced`
+// renderer field — duplicate keys, wrong types, and trailing JSON are
+// rejected as invalid params, so a malformed frame can never silently
+// become an ordinary or SSH launch.
 type openParams struct {
 	Cols   uint16 `json:"cols"`
 	Rows   uint16 `json:"rows"`
@@ -2203,10 +2191,11 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
-	// Sandbox is the opt-in filesystem sandbox request (ADR-0030). Presence
-	// is the sole wire opt-in; the renderer supplies only the workspace, the
-	// backend canonicalizes and owns policy and enforcement.
-	Sandbox *openSandboxParams `json:"sandbox,omitempty"`
+	// Sandbox is the strict opt-in filesystem sandbox request (ADR-0031 §5).
+	// A present, valid object opts in; omitted means ordinary local; null is
+	// rejected at decode. The renderer supplies workspace, settingsRevision
+	// and bounded add/remove deltas — never policy roots.
+	Sandbox *openSandboxParams `json:"sandbox"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher
@@ -2255,9 +2244,15 @@ type openParentParams struct {
 	SessionEpoch uint64 `json:"sessionEpoch"`
 }
 
-// openSandboxParams is the sandbox block of open (design spec §4.1).
+// openSandboxParams is the strictly-decoded sandbox block of open
+// (ADR-0031 §5). workspace and settingsRevision are required; add and remove
+// are optional bounded deltas. Populated by decodeOpenSandbox, never by a
+// permissive Unmarshal.
 type openSandboxParams struct {
-	Workspace string `json:"workspace"`
+	Workspace        string
+	SettingsRevision int
+	Add              []string
+	Remove           []string
 }
 
 // resizeParams is the payload of the "resize" RPC method.

@@ -3428,7 +3428,7 @@ export class TerminalContent extends BasePaneContent {
           return
         }
       }
-      if (this.hooks.sandboxWorkspace) {
+      if (this.hooks.sandbox) {
         const message = err instanceof Error ? err.message : String(err)
         showToast({
           level: 'danger',

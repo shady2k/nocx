@@ -573,6 +573,11 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			s.sandboxInfo = pi.SandboxInfo()
 		}
 	}
+	if s.sandboxInfo != nil {
+		// Sandboxed CWD is policy metadata, not a display path. Preserve the
+		// canonical workspace verbatim even when it is below the user's home.
+		s.cwd = s.sandboxInfo.Workspace
+	}
 	s.startWriteLoop()
 
 	r.mu.Lock()
@@ -873,17 +878,19 @@ type writeResult struct {
 	err error
 }
 
-func (s *realSession) ID() ID                          { return s.id }
-func (s *realSession) Identity() Identity              { return s.identity }
-func (s *realSession) Parent() (Ref, bool)             { return s.parent, !s.parent.Zero() }
-func (s *realSession) Kind() Kind                      { return s.kind }
-func (s *realSession) PaneID() string                  { return s.paneID }
-func (s *realSession) OpenedAt() time.Time             { return s.openedAt }
-func (s *realSession) Host() string                    { return s.host }
-func (s *realSession) Cwd() string                     { return s.cwd }
-func (s *realSession) ProfileID() string               { return s.profileID }
-func (s *realSession) CredentialID() string            { return s.credentialID }
-func (s *realSession) SandboxInfo() *sandbox.SessionInfo { return s.sandboxInfo }
+func (s *realSession) ID() ID { return s.id }
+func (s *realSession) Identity() Identity { return s.identity }
+func (s *realSession) Parent() (Ref, bool) { return s.parent, !s.parent.Zero() }
+func (s *realSession) Kind() Kind { return s.kind }
+func (s *realSession) PaneID() string { return s.paneID }
+func (s *realSession) OpenedAt() time.Time { return s.openedAt }
+func (s *realSession) Host() string { return s.host }
+func (s *realSession) Cwd() string { return s.cwd }
+func (s *realSession) ProfileID() string { return s.profileID }
+func (s *realSession) CredentialID() string { return s.credentialID }
+func (s *realSession) SandboxInfo() *sandbox.SessionInfo {
+	return s.sandboxInfo.Clone()
+}
 func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
 
 func (s *realSession) Write(p []byte) (int, error) {

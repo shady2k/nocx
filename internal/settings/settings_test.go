@@ -17,6 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // fakeDoc is an in-memory DocumentStore for testing.
@@ -690,6 +691,19 @@ func findSecret(t *testing.T, reg *settings.Registry, key string) *settings.Secr
 	return nil
 }
 
+func findPathList(t *testing.T, reg *settings.Registry, key string) *settings.PathList {
+	t.Helper()
+	for _, d := range reg.Descriptors() {
+		if d.Key() == key {
+			if p, ok := d.(*settings.PathList); ok {
+				return p
+			}
+		}
+	}
+	t.Fatalf("path-list setting %q not found", key)
+	return nil
+}
+
 // ── History section (the user's decisions) ───────────────────────────────
 
 // The History section renders the decisions a user actually has: keep or
@@ -810,7 +824,7 @@ func TestApplyValues_RestoresSnapshot(t *testing.T) {
 		t.Fatalf("GetSnapshot: %v", err)
 	}
 	for key, want := range snap.Values {
-		if got.Values[key] != want {
+		if !reflect.DeepEqual(got.Values[key], want) {
 			t.Errorf("%s after restore = %v, want %v", key, got.Values[key], want)
 		}
 	}
@@ -971,10 +985,11 @@ func TestSectionGroups_ProductionMappings(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
 	sg := reg.SectionGroups()
 	for section, want := range map[string]string{
-		"Interface": "application",
-		"Clipboard": "application",
-		"History":   "application",
-		"Test":      "developer",
+		"Interface":    "application",
+		"Clipboard":    "application",
+		"History":      "application",
+		"Test":         "developer",
+		"Experimental": "developer",
 	} {
 		got, ok := sg[section]
 		if !ok {
@@ -1294,4 +1309,301 @@ func declarationFor(t *testing.T, key string) settings.Declaration {
 	}
 	t.Fatalf("no declaration for %q", key)
 	return settings.Declaration{}
+}
+
+// ── Path-list settings (ADR-0031 §3) ────────────────────────────────────
+
+// tmpDirs returns n fresh existing directories under one t.TempDir() base.
+func tmpDirs(t *testing.T, n int) []string {
+	t.Helper()
+	base := t.TempDir()
+	out := make([]string, 0, n)
+	for i := range n {
+		d := filepath.Join(base, fmt.Sprintf("d%02d", i))
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+func TestPathListDeclaration(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	byKey := map[string]settings.Declaration{}
+	for _, d := range reg.Declarations() {
+		byKey[d.Key] = d
+	}
+	decl, ok := byKey["sandbox.allowedWritablePaths"]
+	if !ok {
+		t.Fatal("sandbox.allowedWritablePaths not declared")
+	}
+	if decl.Section != "Experimental" {
+		t.Errorf("section = %q, want Experimental", decl.Section)
+	}
+	if decl.Control != settings.ControlPaths {
+		t.Errorf("control = %q, want paths", decl.Control)
+	}
+	if decl.DataClass != settings.PrivateMetadata {
+		t.Errorf("dataClass = %q, want privateMetadata", decl.DataClass)
+	}
+	if decl.Label == "" || decl.Description == "" {
+		t.Error("declaration missing label or description")
+	}
+	if _, ok := decl.Default.([]string); !ok {
+		t.Errorf("default is %T, want []string", decl.Default)
+	}
+}
+
+func TestSetPaths_CanonicalizesAndDedupes(t *testing.T) {
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+
+	target := tmpDirs(t, 1)[0]
+	link := filepath.Join(filepath.Dir(target), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// The symlink and the duplicate both collapse to the canonical target,
+	// first-wins.
+	if err := reg.SetPaths(p, []string{target, link, target}); err != nil {
+		t.Fatalf("SetPaths: %v", err)
+	}
+	got, err := reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if len(got) != 1 || got[0] != target {
+		t.Errorf("got %v, want [%s]", got, target)
+	}
+}
+
+func TestSetPaths_RejectsInvalid(t *testing.T) {
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+
+	dirs := tmpDirs(t, 2)
+	dir := dirs[0]
+	file := filepath.Join(dirs[1], "f")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cases := map[string][]string{
+		"relative":        {"relative/path"},
+		"non-existent":    {filepath.Join(dir, "missing")},
+		"not-a-directory": {file},
+		"empty":           {""},
+		"control":         {dir + "\x00"},
+	}
+	for name, paths := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := reg.SetPaths(p, paths); err == nil {
+				t.Fatalf("SetPaths(%q) succeeded, want error", paths)
+			} else if !errors.Is(err, settings.ErrValidation) {
+				t.Errorf("error = %v, want ErrValidation", err)
+			}
+			got, err := reg.GetPaths(p)
+			if err != nil {
+				t.Fatalf("GetPaths: %v", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("registry changed after failed set: %v", got)
+			}
+		})
+	}
+}
+
+func TestSetPaths_CountLimit(t *testing.T) {
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+
+	dirs := tmpDirs(t, 32)
+	if err := reg.SetPaths(p, dirs); err != nil {
+		t.Fatalf("SetPaths(32): %v", err)
+	}
+	got, err := reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if len(got) != 32 {
+		t.Fatalf("got %d paths, want 32", len(got))
+	}
+
+	dirs33 := append(append([]string{}, dirs...), tmpDirs(t, 1)[0])
+	if setErr := reg.SetPaths(p, dirs33); setErr == nil {
+		t.Fatal("SetPaths(33) succeeded, want error")
+	} else if !errors.Is(setErr, settings.ErrValidation) {
+		t.Errorf("error = %v, want ErrValidation", setErr)
+	}
+	got, err = reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if len(got) != 32 {
+		t.Errorf("registry changed after rejected 33-path set: %d paths", len(got))
+	}
+}
+
+func TestSetPaths_PersistenceReloadAndDisappearedDir(t *testing.T) {
+	doc := storage.NewDocumentStore(t.TempDir())
+	reg := settings.New(doc, &fakeSecretStore{})
+	p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+
+	dirs := tmpDirs(t, 2)
+	if err := reg.SetPaths(p, dirs); err != nil {
+		t.Fatalf("SetPaths: %v", err)
+	}
+
+	// Reload from the same store: the canonical list survives.
+	reg2 := settings.New(doc, &fakeSecretStore{})
+	got, err := reg2.GetPaths(findPathList(t, reg2, "sandbox.allowedWritablePaths"))
+	if err != nil {
+		t.Fatalf("GetPaths after reload: %v", err)
+	}
+	if !reflect.DeepEqual(got, dirs) {
+		t.Errorf("reloaded paths = %v, want %v", got, dirs)
+	}
+
+	// A directory that disappears after a valid save stays visible on reload
+	// (no re-stat), so a sandbox launch can fail closed on it instead of
+	// silently dropping the requested baseline.
+	if rmErr := os.Remove(dirs[1]); rmErr != nil {
+		t.Fatalf("Remove: %v", rmErr)
+	}
+	reg3 := settings.New(doc, &fakeSecretStore{})
+	got, err = reg3.GetPaths(findPathList(t, reg3, "sandbox.allowedWritablePaths"))
+	if err != nil {
+		t.Fatalf("GetPaths after dir removal: %v", err)
+	}
+	if !reflect.DeepEqual(got, dirs) {
+		t.Errorf("disappeared dir was dropped: %v, want it preserved", got)
+	}
+}
+
+func TestSetPaths_ResetRestoresDefault(t *testing.T) {
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+
+	if err := reg.SetPaths(p, tmpDirs(t, 1)); err != nil {
+		t.Fatalf("SetPaths: %v", err)
+	}
+	if err := reg.Reset(p); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	got, err := reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("after reset got %v, want empty", got)
+	}
+}
+
+func TestSetPaths_CopyIsolation(t *testing.T) {
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+	dirs := tmpDirs(t, 1)
+	if err := reg.SetPaths(p, dirs); err != nil {
+		t.Fatalf("SetPaths: %v", err)
+	}
+
+	// GetPaths returns a copy.
+	got, err := reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	got[0] = "/corrupted"
+	again, err := reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths again: %v", err)
+	}
+	if again[0] != dirs[0] {
+		t.Errorf("registry mutated through GetPaths copy: %v", again)
+	}
+
+	// The snapshot hands out a copy too.
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	if sv, ok := snap.Values[p.Key()].([]string); ok {
+		sv[0] = "/corrupted"
+	}
+	again, err = reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if again[0] != dirs[0] {
+		t.Errorf("registry mutated through snapshot copy: %v", again)
+	}
+
+	// NonSecretOverrides hands out a copy too.
+	overrides := reg.NonSecretOverrides()
+	if ov, ok := overrides[p.Key()].([]string); ok {
+		ov[0] = "/corrupted"
+	}
+	again, err = reg.GetPaths(p)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if again[0] != dirs[0] {
+		t.Errorf("registry mutated through NonSecretOverrides copy: %v", again)
+	}
+}
+
+func TestSetPaths_MalformedStoredTypeNeverEffective(t *testing.T) {
+	tooMany := `{"schemaVersion":1,"values":{"sandbox.allowedWritablePaths":[` +
+		strings.Repeat(`"/x",`, 32) + `"/x"]},"secretRefs":{}}`
+	cases := map[string]string{
+		"object":   `{"schemaVersion":1,"values":{"sandbox.allowedWritablePaths":{"a":"b"}},"secretRefs":{}}`,
+		"string":   `{"schemaVersion":1,"values":{"sandbox.allowedWritablePaths":"/tmp"},"secretRefs":{}}`,
+		"mixed":    `{"schemaVersion":1,"values":{"sandbox.allowedWritablePaths":["/a",123]},"secretRefs":{}}`,
+		"too-many": tooMany,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			reg := settings.New(&fakeDoc{data: map[string][]byte{"settings.json": []byte(raw)}}, &fakeSecretStore{})
+			p := findPathList(t, reg, "sandbox.allowedWritablePaths")
+			// The typed getter refuses to hand back a corrupted list.
+			if _, err := reg.GetPaths(p); err == nil {
+				t.Fatal("GetPaths on corrupted stored value returned no error")
+			}
+			// The snapshot keeps the corruption observable (never []), so the
+			// sandbox open path can fail closed rather than drop the baseline.
+			snap, err := reg.GetSnapshot()
+			if err != nil {
+				t.Fatalf("GetSnapshot: %v", err)
+			}
+			if _, ok := snap.Values[p.Key()].([]string); ok {
+				t.Error("corrupted value was coerced to []string in snapshot")
+			}
+		})
+	}
+}
+
+func TestApplyValues_RestoresPathList(t *testing.T) {
+	src := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	p := findPathList(t, src, "sandbox.allowedWritablePaths")
+	dirs := tmpDirs(t, 2)
+	if err := src.SetPaths(p, dirs); err != nil {
+		t.Fatalf("SetPaths: %v", err)
+	}
+	snap, err := src.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+
+	dst := settings.New(storage.NewDocumentStore(t.TempDir()), &fakeSecretStore{})
+	if applyErr := dst.ApplyValues(snap.Values); applyErr != nil {
+		t.Fatalf("ApplyValues: %v", applyErr)
+	}
+	got, err := dst.GetPaths(findPathList(t, dst, "sandbox.allowedWritablePaths"))
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if !reflect.DeepEqual(got, dirs) {
+		t.Errorf("restored paths = %v, want %v", got, dirs)
+	}
 }

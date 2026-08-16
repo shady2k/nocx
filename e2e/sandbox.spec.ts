@@ -97,6 +97,12 @@ test.describe('sandboxed shell action', () => {
     // Enable the experimental flag in Settings.
     await setSandboxFlag(page, true)
 
+    // The same real Settings surface exposes the canonical path-list control:
+    // native picker only, no free-form path editor.
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill('Sandbox writable')
+    await expect(page.getByText('Sandbox writable allowlist', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add folder' })).toBeVisible()
+
     // The command palette now shows exactly one sandbox row: the action when
     // the backend reports available, the typed-unavailable row otherwise.
     // Which one depends on the machine (Landlock/Seatbelt availability) — the

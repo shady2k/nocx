@@ -151,6 +151,14 @@
       "func": "renderProfile"
     },
     {
+      "file": "internal/sandbox/seatbelt_shim.go",
+      "func": "parseSeatbeltShimArgv"
+    },
+    {
+      "file": "internal/sandbox/seatbelt_shim.go",
+      "func": "seatbeltShimMain"
+    },
+    {
       "file": "internal/secrets/secrets.go",
       "func": "Mask"
     },

@@ -2908,3 +2908,39 @@ describe('a restored pane and the session the backend still holds', () => {
     expect(returning.openSession).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('newSandboxedTab (ADR-0031)', () => {
+  it('carries an immutable launch object and marks the tab sandboxed exactly once', async () => {
+    const openSandboxedSession = vi.fn(() =>
+      Promise.resolve(
+        makeSession({
+          sandbox: { backend: 'landlock', workspace: '/w', writableRoots: ['/w'] },
+        }),
+      ),
+    )
+    const client = makeClient({ openSandboxedSession })
+    const { manager } = await mountTabManager(client)
+    const launch = { settingsRevision: 1, add: ['/a'], remove: ['/b'] }
+
+    const tab = manager.newSandboxedTab('/w', launch)
+
+    // Mutating the caller's object after the tab is created must not reach the
+    // request — the launch arrays are copied at construction (ADR-0031 invariant 8).
+    launch.add.push('/mutated')
+    launch.remove.pop()
+
+    await vi.waitFor(() => expect(openSandboxedSession).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() =>
+      expect(openSandboxedSession).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), {
+        workspace: '/w',
+        settingsRevision: 1,
+        add: ['/a'],
+        remove: ['/b'],
+      }),
+    )
+    // The lock/shield marker flips once on sandbox confirmation and never toggles.
+    await vi.waitFor(() => expect(tab.sandboxed).toBe(true))
+    tab.setSandboxed()
+    expect(tab.sandboxed).toBe(true)
+  })
+})

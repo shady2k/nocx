@@ -161,19 +161,15 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	return resp
 }
 
-// TestOpenParamsIgnoresEnhanced pins the removal (nocx-tr2n, superseding
-// nocx-4ff.10): integration is requested by the backend for every session,
-// so a renderer that still sends `enhanced` — an old build, a script — is
-// neither obeyed nor rejected. The field simply no longer exists, and the
-// open still succeeds. What the backend does instead is asserted in
-// ws_open_enhanced_test.go, at the layer the flag actually reaches.
-func TestOpenParamsIgnoresEnhanced(t *testing.T) {
-	var p openParams
-	if err := json.Unmarshal([]byte(`{"cols":80,"rows":24,"enhanced":false}`), &p); err != nil {
-		t.Fatal(err)
-	}
-	if p.Cols != 80 || p.Rows != 24 {
-		t.Fatalf("openParams = %+v, want cols/rows preserved alongside the ignored field", p)
+// TestOpenParamsRejectsEnhanced pins the strict open decode (ADR-0031 §5,
+// superseding nocx-tr2n's "neither obeyed nor rejected"): integration is
+// still requested by the backend for every session, but a renderer that
+// still sends the obsolete `enhanced` member is now refused as an unknown
+// member rather than silently tolerated. What the backend does instead is
+// asserted in ws_open_enhanced_test.go, at the layer the flag reaches.
+func TestOpenParamsRejectsEnhanced(t *testing.T) {
+	if _, err := decodeOpenParams([]byte(`{"cols":80,"rows":24,"enhanced":false}`)); err == nil {
+		t.Fatal("decodeOpenParams tolerated the obsolete enhanced member, want rejection")
 	}
 }
 

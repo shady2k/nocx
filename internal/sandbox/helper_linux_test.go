@@ -106,7 +106,7 @@ func TestLandlockEnforcement(t *testing.T) {
 	)
 	spec := CommandSpec{Path: exe, Args: []string{"-test.run=TestSandboxChildProcess"}, Dir: workspace, Env: probeEnv}
 
-	pol, err := BuildPolicy(workspace, exe, filepath.Join(base, "runtime"), probeEnv)
+	pol, err := BuildPolicy(Request{Workspace: workspace}, exe, filepath.Join(base, "runtime"), probeEnv)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}

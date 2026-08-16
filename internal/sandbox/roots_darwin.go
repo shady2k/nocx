@@ -10,9 +10,11 @@ func systemReadOnlyRoots() []string {
 		"/bin",
 		"/sbin",
 		"/System/Library",
+		"/System/Volumes/Preboot/Cryptexes",
 		"/Library/Developer/CommandLineTools",
 		"/etc",
 		"/dev",
 		"/private/etc",
+		"/private/var/db",
 	}
 }

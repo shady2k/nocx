@@ -187,6 +187,14 @@ jobs:
       - name: Sandbox enforcement smoke (Seatbelt)
         run: make sandbox-smoke-macos
 
+      # Keep the next Seatbelt failure actionable. Reports contain only this
+      # disposable runner's process/path metadata; no user data or secrets.
+      - name: Seatbelt denial diagnostics
+        if: failure()
+        run: |
+          log show --last 2m --style compact --info --debug \
+            --predicate 'eventMessage CONTAINS[c] "Sandbox:"' || true
+
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
       # package, one assertion — but without it a typo there ships an app that

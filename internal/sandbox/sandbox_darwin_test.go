@@ -90,6 +90,18 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	}
 }
 
+func TestDarwinSystemRootsIncludeDynamicLoaderCaches(t *testing.T) {
+	got := make(map[string]bool)
+	for _, root := range systemReadOnlyRoots() {
+		got[root] = true
+	}
+	for _, root := range []string{"/System/Library", "/System/Volumes/Preboot/Cryptexes", "/private/var/db"} {
+		if !got[root] {
+			t.Errorf("system read-only roots omit dynamic-loader root %q", root)
+		}
+	}
+}
+
 func raceInstrumented() bool {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {

@@ -54,6 +54,9 @@ func TestRenderProfile_Clauses(t *testing.T) {
 	if !strings.Contains(profile, "(allow network*)") {
 		t.Error("profile must contain (allow network*) — network is out of scope")
 	}
+	if strings.Contains(profile, `(allow file-read* (subpath "/"))`) {
+		t.Error("profile must not expose the filesystem root as a subpath")
+	}
 	for _, clause := range []string{
 		"(allow user-preference-read)",
 		"(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))",
@@ -63,6 +66,7 @@ func TestRenderProfile_Clauses(t *testing.T) {
 		"(allow ipc-sysv-sem)",
 		"(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))",
 		"(allow pseudo-tty)",
+		`(allow file-read* (literal "/"))`,
 	} {
 		if !strings.Contains(profile, clause) {
 			t.Errorf("profile missing runtime clause %q", clause)

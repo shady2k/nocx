@@ -51,6 +51,11 @@ func renderProfile(p *Policy) (string, error) {
 	// unrestricted (design spec §2).
 	b.WriteString("(allow network*)\n")
 
+	// subpath clauses do not match the root directory node itself. dyld and
+	// libSystem stat/open that node during process startup; grant the node
+	// literally without exposing any descendant content.
+	b.WriteString("(allow file-read* (literal \"/\"))\n")
+
 	for _, root := range p.ReadOnlyRoots {
 		esc, err := escapeSBPL(root)
 		if err != nil {

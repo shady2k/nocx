@@ -40,7 +40,7 @@ func renderProfile(p *Policy) (string, error) {
 	b.WriteString("(allow user-preference-read)\n")
 	b.WriteString("(allow ipc-posix-shm)\n")
 	b.WriteString("(allow ipc-posix-sem)\n")
-	b.WriteString("(allow ipc-sysv-semaphore)\n")
+	b.WriteString("(allow ipc-sysv-sem)\n")
 	b.WriteString("(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n")
 	b.WriteString("(allow pseudo-tty)\n")
 	b.WriteString("(allow file-read-metadata)\n")

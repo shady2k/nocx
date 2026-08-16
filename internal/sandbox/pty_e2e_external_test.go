@@ -32,6 +32,7 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 	if err := os.MkdirAll(ws, 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	canonicalWS := canonicalExisting(t, ws)
 
 	svc := sandbox.New(log.NewSlogAdapter(nil), cacheDir)
 	if st := svc.Status(context.Background()); !st.Available {
@@ -60,14 +61,14 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 	if info.Backend != wantBackend {
 		t.Errorf("backend = %q, want %q", info.Backend, wantBackend)
 	}
-	if info.Workspace != ws {
-		t.Errorf("workspace = %q, want %q", info.Workspace, ws)
+	if info.Workspace != canonicalWS {
+		t.Errorf("workspace = %q, want %q", info.Workspace, canonicalWS)
 	}
 
 	// The selected workspace is also the shell's real process cwd, not only
 	// policy/result metadata. The command echo contains "$PWD" literally, so
 	// only the shell-expanded response can satisfy this assertion.
-	if err := writeAndAwait(lp, "printf 'sandbox-cwd=%s\\n' \"$PWD\"\n", "sandbox-cwd="+ws); err != nil {
+	if err := writeAndAwait(lp, "printf 'sandbox-cwd=%s\\n' \"$PWD\"\n", "sandbox-cwd="+canonicalWS); err != nil {
 		t.Fatalf("sandbox cwd: %v", err)
 	}
 
@@ -119,6 +120,7 @@ func TestNewLocal_TrustedAgentEndToEnd(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0o750); err != nil {
 		t.Fatalf("mkdir workspace: %v", err)
 	}
+	canonicalWorkspace := canonicalExisting(t, workspace)
 	agentDir := t.TempDir()
 	agent := filepath.Join(agentDir, "opencode")
 	outside := filepath.Join(agentDir, "outside")
@@ -156,7 +158,7 @@ fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "agent-cwd="+workspace) {
+	if !strings.Contains(out, "agent-cwd="+canonicalWorkspace) {
 		t.Errorf("agent cwd output = %q, want canonical workspace", out)
 	}
 	if !strings.Contains(out, "outside-denied") || strings.Contains(out, "outside-writable") {
@@ -236,6 +238,15 @@ func writeAndAwait(lp pty.Pty, payload, needle string) error {
 	case <-done:
 		return nil
 	}
+}
+
+func canonicalExisting(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("canonicalize %q: %v", path, err)
+	}
+	return canonical
 }
 
 func raceInstrumented() bool {

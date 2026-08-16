@@ -13,6 +13,13 @@ import (
 	"testing"
 )
 
+// The production binary dispatches MaybeHelper before app startup. The test
+// binary has no application main, so its init path must provide the same
+// dispatch when pty.NewLocal re-executes os.Executable as the Seatbelt shim.
+func init() {
+	_ = MaybeHelper()
+}
+
 // TestDarwinChildProcess is the child entry of the macOS enforcement suite:
 // with envProbe set the test binary runs the shared probe assertions INSIDE
 // the sandbox-exec cage.

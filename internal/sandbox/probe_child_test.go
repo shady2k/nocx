@@ -68,8 +68,8 @@ func runProbe() int {
 	}
 
 	// Read-only system root.
-	if _, err := os.ReadFile("/etc/hostname"); err != nil {
-		fail("read /etc/hostname: %v", err)
+	if _, err := os.ReadFile("/etc/hosts"); err != nil {
+		fail("read /etc/hosts: %v", err)
 	} else {
 		ok("read system root")
 	}

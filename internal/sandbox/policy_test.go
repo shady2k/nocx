@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -123,6 +124,27 @@ func TestBuildPolicy_CanonicalizesWorkspace(t *testing.T) {
 	}
 	if p.Workspace != canonicalPath(t, workspace) {
 		t.Fatalf("Workspace = %q, want canonical %q", p.Workspace, canonicalPath(t, workspace))
+	}
+}
+
+func TestBuildPolicy_CanonicalizesRuntimeDirectories(t *testing.T) {
+	workspace, runtimeRoot, _ := fixture(t)
+	link := filepath.Join(filepath.Dir(runtimeRoot), "runtime-link")
+	if err := os.Symlink(runtimeRoot, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	p, err := BuildPolicy(Request{Workspace: workspace}, "/bin/sh", link, nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy via runtime symlink: %v", err)
+	}
+	wantHome := canonicalPath(t, filepath.Join(runtimeRoot, "home"))
+	wantTmp := canonicalPath(t, filepath.Join(runtimeRoot, "tmp"))
+	if p.Home != wantHome || p.Tmp != wantTmp {
+		t.Fatalf("runtime dirs = (%q, %q), want (%q, %q)", p.Home, p.Tmp, wantHome, wantTmp)
+	}
+	if !slices.Contains(p.WritableRoots, wantHome) || !slices.Contains(p.WritableRoots, wantTmp) {
+		t.Fatalf("writable roots omit canonical runtime dirs: %v", p.WritableRoots)
 	}
 }
 

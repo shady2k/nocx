@@ -52,16 +52,13 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 		return nil, err
 	}
 
-	home := filepath.Join(runtimeRoot, "home")
-	tmp := filepath.Join(runtimeRoot, "tmp")
-	for _, d := range []string{home, tmp} {
-		fi, e := os.Stat(d)
-		if e != nil {
-			return nil, NewSetupErrorf("runtime root %q: %v", d, e)
-		}
-		if !fi.IsDir() {
-			return nil, NewSetupErrorf("runtime root %q is not a directory", d)
-		}
+	home, err := canonicalExistingDir(filepath.Join(runtimeRoot, "home"))
+	if err != nil {
+		return nil, NewSetupErrorf("runtime home: %v", err)
+	}
+	tmp, err := canonicalExistingDir(filepath.Join(runtimeRoot, "tmp"))
+	if err != nil {
+		return nil, NewSetupErrorf("runtime tmp: %v", err)
 	}
 
 	// Canonical system read-only roots seed both the read-only set and the

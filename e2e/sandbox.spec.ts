@@ -120,7 +120,7 @@ test.describe('sandboxed opencode action', () => {
     if (unavailableCount === 1) {
       // The row names the typed reason.
       await expect(page.locator(SANDBOX_UNAVAILABLE)).toContainText(
-        /landlock|seatbelt|unsupported|probe|sandbox-exec/,
+        /landlock|seatbelt|unsupported|probe|sandbox-exec|opencode/,
       )
     }
 

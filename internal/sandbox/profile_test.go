@@ -58,6 +58,7 @@ func TestRenderProfile_Clauses(t *testing.T) {
 		"(allow user-preference-read)",
 		"(allow ipc-posix-shm)",
 		"(allow ipc-posix-sem)",
+		"(allow ipc-sysv-semaphore)",
 		"(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))",
 		"(allow pseudo-tty)",
 	} {

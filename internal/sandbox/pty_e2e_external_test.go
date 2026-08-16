@@ -55,6 +55,13 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 		t.Errorf("workspace = %q, want %q", info.Workspace, ws)
 	}
 
+	// The selected workspace is also the shell's real process cwd, not only
+	// policy/result metadata. The command echo contains "$PWD" literally, so
+	// only the shell-expanded response can satisfy this assertion.
+	if err := writeAndAwait(lp, "printf 'sandbox-cwd=%s\\n' \"$PWD\"\n", "sandbox-cwd="+ws); err != nil {
+		t.Fatalf("sandbox cwd: %v", err)
+	}
+
 	// The shell runs inside the cage and answers on the PTY. The expected result
 	// is computed by the shell, so terminal echo cannot satisfy this assertion.
 	const shellReady = "34055"

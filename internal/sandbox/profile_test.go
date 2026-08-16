@@ -56,6 +56,8 @@ func TestRenderProfile_Clauses(t *testing.T) {
 	}
 	for _, clause := range []string{
 		"(allow user-preference-read)",
+		"(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))",
+		"(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))",
 		"(allow ipc-posix-shm)",
 		"(allow ipc-posix-sem)",
 		"(allow ipc-sysv-sem)",

@@ -34,6 +34,8 @@ func renderProfile(p *Policy) (string, error) {
 	b.WriteString("(allow mach-priv-task-port)\n")
 	b.WriteString("(allow mach-lookup)\n")
 	b.WriteString("(allow sysctl-read)\n")
+	b.WriteString("(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))\n")
+	b.WriteString("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n")
 	// A deny-default Seatbelt child still needs these kernel-mediated runtime
 	// services. They do not grant filesystem paths: filesystem access remains
 	// governed solely by the root/file clauses below.

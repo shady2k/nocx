@@ -57,7 +57,7 @@
    lost the last section to a rail that was structurally taller than the
    flat list it replaced). The rail still must NOT scroll at the narrow
    breakpoint (scroll-ownership §6.2), so the compact profile shrinks its
-   footprint instead: tighter group margins, tighter headings, no row gaps.
+   footprint instead: tighter group margins, headings, row padding, and no row gaps.
    The wide (side-by-side) layout is untouched. */
 @media (max-width: 640px) {
   .ui-grouped-nav__group {
@@ -70,5 +70,9 @@
 
   .ui-grouped-nav__item {
     margin-bottom: 0;
+  }
+
+  .ui-grouped-nav__item > .ui-button {
+    padding-block: var(--space-1);
   }
 }

@@ -28,6 +28,7 @@ const PALETTE_MOD = process.platform === 'darwin' ? 'Meta' : 'Control'
 const QUICK_CONNECT_ITEM = '.quick-connect__item'
 const SANDBOX_ACTION = '.quick-connect__item:has-text("Sandboxed shell")'
 const SANDBOX_UNAVAILABLE = '.quick-connect__item:has-text("Sandbox unavailable")'
+const SANDBOX_ROW = `${SANDBOX_ACTION}, ${SANDBOX_UNAVAILABLE}`
 
 async function openSettings(page: Page): Promise<void> {
   await page.keyboard.press(`${PALETTE_MOD}+,`)
@@ -52,10 +53,15 @@ async function setSandboxFlag(page: Page, on: boolean): Promise<void> {
       el.dispatchEvent(new Event('change', { bubbles: true }))
     }
   }, on)
-  // The persisted value is what the picker reads; give the settings.set RPC
-  // and the settings.changed broadcast a moment to settle before asserting
-  // the picker's live snapshot.
-  await page.waitForTimeout(500)
+  // Row provenance changes only after settings.set returns and the accepted
+  // value is applied. This is the persistence barrier the picker depends on;
+  // a duration here raced WebKit on loaded runners.
+  const row = page.locator('[id="st-setting-sandbox.enabled"]')
+  if (on) {
+    await expect(row).toHaveClass(/ui-settings-row--modified/)
+  } else {
+    await expect(row).not.toHaveClass(/ui-settings-row--modified/)
+  }
 }
 
 test.describe('sandboxed shell action', () => {
@@ -108,9 +114,8 @@ test.describe('sandboxed shell action', () => {
     // Which one depends on the machine (Landlock/Seatbelt availability) — the
     // contract is that exactly one exists and the ordinary actions stay.
     await openPalette(page)
-    const actionCount = await page.locator(SANDBOX_ACTION).count()
+    await expect(page.locator(SANDBOX_ROW)).toHaveCount(1)
     const unavailableCount = await page.locator(SANDBOX_UNAVAILABLE).count()
-    expect(actionCount + unavailableCount).toBe(1)
     if (unavailableCount === 1) {
       // The row names the typed reason.
       await expect(page.locator(SANDBOX_UNAVAILABLE)).toContainText(

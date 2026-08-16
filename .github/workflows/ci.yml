@@ -172,14 +172,18 @@ jobs:
       - name: The OS split has not drifted
         run: make ci-os-split
 
+      # The three Seatbelt process-boundary tests skip in this race-instrumented
+      # invocation: macOS TSan aborts before Go main once sandbox-exec applies a
+      # deny-default profile. The immediately following non-race smoke runs those
+      # exact process tests against the production-shaped runtime.
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: go test -race -tags gtk3 -count=1 $PKGS
 
       # Seatbelt is deprecated and runtime-only; compiling the Darwin backend
-      # proves neither profile acceptance nor enforcement. macos-15 is pinned
-      # above specifically so this remains an executable pre-merge gate.
+      # proves neither profile acceptance nor enforcement. This non-race gate is
+      # also the executable counterpart to the TSan skips above.
       - name: Sandbox enforcement smoke (Seatbelt)
         run: make sandbox-smoke-macos
 

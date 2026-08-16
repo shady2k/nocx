@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,9 @@ func TestDarwinChildProcess(t *testing.T) {
 // sandbox-smoke-macos target and the release gate run on macOS; it cannot
 // run on Linux and is skipped loudly, not silently.
 func TestSeatbeltEnforcement(t *testing.T) {
+	if raceInstrumented() {
+		t.Skip("Seatbelt process smoke runs without TSan in the dedicated macOS gate")
+	}
 	if _, err := os.Stat(sandboxExecPath); err != nil {
 		t.Skipf("seatbelt enforcement requires %s (skipped loudly: %v)", sandboxExecPath, err)
 	}
@@ -84,6 +88,19 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	if !strings.Contains(out.String(), "PROBE RESULT: ok") {
 		t.Fatalf("probe did not report success:\n%s", out.String())
 	}
+}
+
+func raceInstrumented() bool {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return false
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "-race" && setting.Value == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestDarwinServicePrepare_ConstructsWrapper asserts the wrapper shape

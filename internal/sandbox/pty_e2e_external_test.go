@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ import (
 // runs inside the cage. On Linux the internal test binary also registers the
 // helper argv dispatch; macOS launches sandbox-exec directly.
 func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
+	if runtime.GOOS == "darwin" && raceInstrumented() {
+		t.Skip("Seatbelt PTY smoke runs without TSan in the dedicated macOS gate")
+	}
 	cacheDir := t.TempDir()
 	ws := filepath.Join(t.TempDir(), "workspace")
 	if err := os.MkdirAll(ws, 0o750); err != nil {
@@ -107,6 +111,9 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 // workspace starts in the canonical workspace, can write there, and cannot
 // write beside its own read-only executable.
 func TestNewLocal_TrustedAgentEndToEnd(t *testing.T) {
+	if runtime.GOOS == "darwin" && raceInstrumented() {
+		t.Skip("Seatbelt agent smoke runs without TSan in the dedicated macOS gate")
+	}
 	cacheDir := t.TempDir()
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	if err := os.MkdirAll(workspace, 0o750); err != nil {
@@ -229,4 +236,17 @@ func writeAndAwait(lp pty.Pty, payload, needle string) error {
 	case <-done:
 		return nil
 	}
+}
+
+func raceInstrumented() bool {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return false
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "-race" && setting.Value == "true" {
+			return true
+		}
+	}
+	return false
 }

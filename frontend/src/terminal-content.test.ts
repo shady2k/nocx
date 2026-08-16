@@ -407,7 +407,7 @@ describe('sandboxed session launch failure', () => {
     expect(client.openSession).not.toHaveBeenCalled()
     expect(showToast).toHaveBeenCalledWith({
       level: 'danger',
-      message: 'Sandboxed shell failed to start: sandbox setup failed',
+      message: 'Sandboxed opencode failed to start: sandbox setup failed',
     })
     expect(requestClose).toHaveBeenCalledOnce()
     tab.close()

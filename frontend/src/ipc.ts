@@ -29,7 +29,7 @@ export interface SessionSandboxInfo {
 }
 
 /**
- * The per-launch sandbox permission deltas (ADR-0031 §5): the settings
+ * The per-launch sandbox permission deltas (ADR-0034 §5): the settings
  * revision the permission dialog displayed, plus the user's ephemeral
  * additions and exact baseline removals. It never carries the baseline
  * itself, the effective roots, Git/runtime roots, or any native-backend
@@ -795,7 +795,7 @@ export class WSClient {
       .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
-  // openSandboxedSession opens a filesystem-isolated LOCAL session (ADR-0031).
+  // openSandboxedSession opens a filesystem-isolated LOCAL session (ADR-0034).
   // The renderer sends the canonical workspace plus the bounded permission
   // deltas the launch dialog confirmed — never a baseline, effective roots,
   // Git/runtime roots, or a native-backend clause. The backend reads the

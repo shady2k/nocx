@@ -14,9 +14,10 @@ type sandboxHandlers struct {
 	r   Responder
 }
 
-// handleStatus answers {available, backend, reason?, detail?, abi?}. The
-// Quick Connect surface renders the non-activatable unavailable row from the
-// typed reason. An unwired service is a missing capability (-32601).
+// handleStatus answers native-backend availability plus the advisory fixed
+// opencode launch intent (ADR-0035). The Quick Connect surface renders either
+// unavailable reason as a non-activatable row. An unwired service is a missing
+// capability (-32601).
 func (h sandboxHandlers) handleStatus(ctx context.Context, req jsonrpcRequest) {
 	if h.svc == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "sandbox not available"})
@@ -29,14 +30,16 @@ func (h sandboxHandlers) handleStatus(ctx context.Context, req jsonrpcRequest) {
 		Reason:    st.Reason,
 		Detail:    st.Detail,
 		ABI:       st.ABI,
+		Intent:    sandbox.OpenCodeStatus(),
 	}))
 }
 
 // sandboxStatusResponse is the wire shape of sandbox.status.
 type sandboxStatusResponse struct {
-	Available bool   `json:"available"`
-	Backend   string `json:"backend"`
-	Reason    string `json:"reason,omitempty"`
-	Detail    string `json:"detail,omitempty"`
-	ABI       int    `json:"abi,omitempty"`
+	Available bool                 `json:"available"`
+	Backend   string               `json:"backend"`
+	Reason    string               `json:"reason,omitempty"`
+	Detail    string               `json:"detail,omitempty"`
+	ABI       int                  `json:"abi,omitempty"`
+	Intent    sandbox.IntentStatus `json:"intent"`
 }

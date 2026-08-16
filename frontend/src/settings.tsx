@@ -901,7 +901,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   }
 
   /** Append a picked directory to a `paths` setting and save the complete
-   *  array (ADR-0031 §4.1). A cancelled picker (empty path) is a no-op; an
+   *  array (ADR-0034 §4.1). A cancelled picker (empty path) is a no-op; an
    *  unavailable native runtime surfaces in the row's existing error slot. */
   async function addPath(decl: Declaration): Promise<void> {
     if (!props.dialogClient) return
@@ -918,7 +918,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   /** Remove one entry from a `paths` setting and save the complete remaining
    *  array. The row's remove control sends the whole array — no incremental
-   *  edit state exists (ADR-0031 §4.1). */
+   *  edit state exists (ADR-0034 §4.1). */
   async function removePath(decl: Declaration, index: number): Promise<void> {
     const next = pathsValue(decl.key).filter((_, i) => i !== index)
     await saveSetting(decl.key, next)

@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the sandbox.status JSON-RPC method. Availability and diagnostics for the opt-in native filesystem sandbox.
+ * Result of the sandbox.status JSON-RPC method. Native backend availability plus the advisory fixed opencode launch intent; open revalidates authoritatively.
  */
 export interface SandboxStatus {
   available: boolean
@@ -18,4 +18,9 @@ export interface SandboxStatus {
   reason?: string
   detail?: string
   abi?: number
+  intent: {
+    name: 'opencode'
+    available: boolean
+    reason?: 'opencode-not-found'
+  }
 }

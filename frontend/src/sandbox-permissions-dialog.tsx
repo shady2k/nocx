@@ -1,5 +1,5 @@
 /**
- * Sandbox permissions dialog — the one pre-launch modal (ADR-0031 §4.2).
+ * Sandbox permissions dialog — the one pre-launch modal (ADR-0034 §4.2).
  *
  * An imperative dialog, built on `Dialog` like every other modal in the app.
  * It shows the mandatory workspace and the persisted baseline of additional
@@ -79,7 +79,7 @@ const SandboxPermissionsDialog: Component<
       setAdditions((prev) => (prev.includes(picked.path) ? prev : [...prev, picked.path]))
     } catch (err) {
       // An unavailable native runtime is visible rather than silent: the
-      // surface cannot type a path by hand (ADR-0031 §4.2), so it says why.
+      // surface cannot type a path by hand (ADR-0034 §4.2), so it says why.
       showToast({
         level: 'danger',
         message: `Could not open the folder picker: ${

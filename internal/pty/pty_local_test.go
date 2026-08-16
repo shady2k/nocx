@@ -51,6 +51,10 @@ func (s startFailingSandboxService) Status(context.Context) sandbox.Status {
 	return sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}
 }
 
+func (s startFailingSandboxService) NewRuntimeRoot() (string, error) {
+	return sandbox.NewRuntimeRoot(s.dir)
+}
+
 func (s startFailingSandboxService) Prepare(_ context.Context, req sandbox.Request, spec sandbox.CommandSpec) (*sandbox.PreparedCommand, error) {
 	cmd := exec.Command(spec.Path, spec.Args...) //nolint:gosec // injected test seam must preserve the production command
 	cmd.Dir = s.dir

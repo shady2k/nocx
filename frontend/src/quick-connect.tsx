@@ -242,8 +242,8 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
     private drillCommand?: DrillCommand,
-    /** Sandbox action state (ADR-0030 §3.1-§3.2): live flag + backend status
-     *  read on every open, plus the picker→tab flow. Absent = feature off. */
+    /** Sandbox action state (ADR-0033 §3.1-§3.2, ADR-0035): live flag,
+     *  native backend + launch intent status, and picker→tab flow. */
     private sandbox?: {
       state: () => Promise<{ enabled: boolean; status: SandboxStatus | null }>
       open: () => void
@@ -292,15 +292,18 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
 
     const backend = state.status?.backend ?? 'unknown'
     const reason = state.status?.reason ?? ''
-    const unavailable = !state.status?.available
+    const backendUnavailable = !state.status?.available
+    const intentUnavailable = state.status?.intent.available === false
     items.push({
-      id: '__sandboxed_local__',
+      id: '__sandboxed_opencode__',
       kind: 'command',
-      label: 'Sandboxed shell…',
-      detail: unavailable
+      label: 'Sandboxed opencode…',
+      detail: backendUnavailable
         ? `Sandbox unavailable (${reason})`
-        : `Open a new local tab in a filesystem-isolated workspace (${backend})`,
-      disabled: unavailable,
+        : intentUnavailable
+          ? `opencode unavailable (${state.status?.intent.reason ?? 'opencode-not-found'})`
+          : `Start opencode in a filesystem-isolated workspace (${backend})`,
+      disabled: backendUnavailable || intentUnavailable,
       run: () => this.sandbox!.open(),
     })
     return items
@@ -918,18 +921,20 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   function activate(index: number) {
-    // Whatever this is — a row, a drill step, a walk-back — the person has
-    // moved past the refusal that was on screen.
-    props.onNoticeDone?.()
     if (drill()) {
       const choice = drillFiltered()[index]
       if (!choice) return
+      // The person has moved past the refusal that was on screen.
+      props.onNoticeDone?.()
       chooseStep(choice)
       return
     }
     const list = filteredItems()
     const item = list[index]
-    if (!item) return
+    // Disabled rows are status, not actions. The renderer enforces this
+    // contract instead of relying on a fail-closed backend rejection.
+    if (!item || item.disabled) return
+    props.onNoticeDone?.()
     if (item.drill) {
       // A command that needs a target drills in — no second dialog, no
       // dead end (nocx-4t37).
@@ -1073,9 +1078,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     classList={{
                       'quick-connect__item--selected': selectedIndex() === index(),
                       'quick-connect__item--system': item.system === true,
+                      'quick-connect__item--disabled': item.disabled === true,
                     }}
                     role="option"
                     aria-selected={selectedIndex() === index()}
+                    aria-disabled={item.disabled === true}
                     // The row is not a focus target: the field is. Without
                     // this the mouse silently moves the caret out of the
                     // one place this surface takes input, and the next

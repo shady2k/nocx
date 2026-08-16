@@ -44,7 +44,7 @@
       "enum": ["auto", "raw", "script", "relay"]
     },
     "sandbox": {
-      "description": "Immutable realized sandbox metadata for a sandboxed local session (ADR-0030, ADR-0031). Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.",
+      "description": "Immutable realized sandbox metadata for a sandboxed local session (ADR-0033, ADR-0034). Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["backend", "workspace", "writableRoots"],

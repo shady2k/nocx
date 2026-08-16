@@ -3,7 +3,7 @@ title: Sandbox writable allowlist and per-tab permission overrides
 status: approved
 created: 2026-08-16
 bead: nocx-y46q.14
-supersedes: ADR-0030 clauses named by ADR-0031
+supersedes: ADR-0033 clauses named by ADR-0034
 ---
 
 # Sandbox writable allowlist and per-tab permission overrides
@@ -83,14 +83,14 @@ Use `EditableRowList`:
 
 ### 4.2 Launch dialog
 
-Quick Connect → **Sandboxed shell…** performs:
+Quick Connect → **Sandboxed opencode…** performs:
 
-1. `settings.getSnapshot` and `sandbox.status`;
+1. `settings.getSnapshot` and `sandbox.status`, including fixed launch-intent availability;
 2. workspace `dialog.openDirectory`;
 3. a **Sandbox permissions** modal initialized from `sandbox.allowedWritablePaths`;
 4. baseline checkboxes (checked by default); unchecked entries become `remove`;
 5. **Add folder for this tab** adds ephemeral entries; removing those rows removes the addition;
-6. **Open sandboxed tab** sends the request; Cancel creates nothing.
+6. **Start sandboxed opencode** sends the request; Cancel creates nothing.
 
 The modal says “Additional writable folders” and separately names the mandatory workspace. It does not pretend to enumerate backend-derived Git/runtime roots. The post-launch shield tooltip remains authoritative and lists the returned canonical `writableRoots`.
 

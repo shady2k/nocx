@@ -36,7 +36,7 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 
-// WriteLocalRcfile writes the rendered rcfile to a transient file whose
+// writeLocalRcfileIn writes the rendered rcfile to a transient file whose
 // name matches the template's self-delete guard (`*/nocx-bash.??????` —
 // exactly six characters after the prefix, which is the mktemp shape the
 // guard was written for; a longer random suffix would never be removed and
@@ -45,13 +45,13 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 // window) with O_EXCL (no symlink pre-emption), so the capability it
 // carries is never world-readable. The shell removes it once bash has read
 // it; the caller removes it on spawn failure.
-func WriteLocalRcfile(rc string) (string, error) {
+func writeLocalRcfileIn(rc, dir string) (string, error) {
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("shellintegration: local rcfile name: %w", err)
 	}
-	path := filepath.Join(os.TempDir(), "nocx-bash."+hex.EncodeToString(b))
-	//nolint:gosec // path is os.TempDir() plus a random name minted here, and
+	path := filepath.Join(dir, "nocx-bash."+hex.EncodeToString(b))
+	//nolint:gosec // dir is a trusted private runtime directory or os.TempDir;
 	// O_EXCL with mode 0600 is precisely the defence: no pre-existing file is
 	// opened and no other user can read the capability it carries.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -154,12 +154,12 @@ func LocalZshRcfile(opts LaunchOptions) (string, error) {
 // carries is never readable by another user. The shell removes the whole
 // directory at the top of the .zshrc, before any user code runs; the caller
 // removes it on spawn failure.
-func WriteLocalZDOTDIR(rc string) (string, error) {
+func writeLocalZDOTDIRIn(rc, parent string) (string, error) {
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("shellintegration: local zdotdir name: %w", err)
 	}
-	dir := filepath.Join(os.TempDir(), "nocx-zsh."+hex.EncodeToString(b))
+	dir := filepath.Join(parent, "nocx-zsh."+hex.EncodeToString(b))
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", fmt.Errorf("shellintegration: local zdotdir: %w", err)
 	}
@@ -256,14 +256,46 @@ type LocalLaunch struct {
 // reads $ZDOTDIR/.zshrc ONLY when interactive — inferring it from "stdin is a
 // tty" would, on the one launch where it is not, skip our rcfile entirely and
 // leave the transient directory behind with the capability in it.
+// localAgentTail replaces the bootstrap shell with the fixed sandbox agent
+// only after the authenticated lifecycle bootstrap accepted. It is shared by
+// bash and zsh: both support [[ ]], exec, and the parameter expansion used
+// here. The executable is shell-quoted as data. A missing channel or a removed
+// executable fails closed; successful exec keeps the lifecycle descriptor open
+// in the agent process, and the PTY exits when the agent exits — there is never
+// an intervening shell prompt.
+func localAgentTail(executable string) string {
+	if executable == "" {
+		return ""
+	}
+	quoted := ShellQuote(executable)
+	return `
+if [[ "${__nocx_lc_active:-0}" != 1 ]]; then
+    printf '%s\n' 'nocx: sandboxed opencode requires authenticated shell integration' >&2
+    exit 125
+fi
+if [[ ! -x ` + quoted + ` ]]; then
+    printf '%s\n' 'nocx: opencode became unavailable before launch' >&2
+    exit 127
+fi
+exec ` + quoted + `
+printf '%s\n' 'nocx: could not execute opencode' >&2
+exit 126
+`
+}
+
 func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (LocalLaunch, error) {
+	artifactDir := opts.ArtifactDir
+	if artifactDir == "" {
+		artifactDir = os.TempDir()
+	}
 	switch kind {
 	case ShellBash:
 		rc, err := LocalBashRcfile(opts)
 		if err != nil {
 			return LocalLaunch{}, err
 		}
-		path, err := WriteLocalRcfile(rc)
+		rc += localAgentTail(opts.AgentExec)
+		path, err := writeLocalRcfileIn(rc, artifactDir)
 		if err != nil {
 			return LocalLaunch{}, err
 		}
@@ -277,7 +309,8 @@ func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (
 		if err != nil {
 			return LocalLaunch{}, err
 		}
-		dir, err := WriteLocalZDOTDIR(rc)
+		rc += localAgentTail(opts.AgentExec)
+		dir, err := writeLocalZDOTDIRIn(rc, artifactDir)
 		if err != nil {
 			return LocalLaunch{}, err
 		}

@@ -29,6 +29,14 @@ func (s *linuxService) Status(_ context.Context) Status {
 	return statusForABI(abi, err)
 }
 
+func (s *linuxService) NewRuntimeRoot() (string, error) {
+	root, err := NewRuntimeRoot(s.cacheDir)
+	if err != nil {
+		return "", NewSetupErrorf("runtime root creation failed")
+	}
+	return root, nil
+}
+
 // Prepare builds the common policy, re-execs os.Executable() as the
 // __sandbox-landlock-exec helper with the policy in an unlinked mode-0600
 // memfd plus a readiness pipe, and returns a PreparedCommand whose WaitReady
@@ -44,9 +52,13 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 		return nil, &StatusError{Status: status}
 	}
 
-	runtimeRoot, err := NewRuntimeRoot(s.cacheDir)
-	if err != nil {
-		return nil, err
+	runtimeRoot := req.RuntimeRoot
+	if runtimeRoot == "" {
+		var err error
+		runtimeRoot, err = s.NewRuntimeRoot()
+		if err != nil {
+			return nil, err
+		}
 	}
 	fail := func(err error) (*PreparedCommand, error) {
 		RemoveRuntimeRoot(runtimeRoot)
@@ -56,6 +68,9 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	pol, err := BuildPolicy(req, spec.Path, runtimeRoot, spec.Env)
 	if err != nil {
 		return fail(err)
+	}
+	if trustedErr := addTrustedExecutables(pol, spec.TrustedExecutables); trustedErr != nil {
+		return fail(trustedErr)
 	}
 	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
 	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder

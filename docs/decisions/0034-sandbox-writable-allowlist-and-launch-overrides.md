@@ -1,13 +1,13 @@
-# ADR-0031: Sandbox writable allowlist and launch-time overrides
+# ADR-0034: Sandbox writable allowlist and launch-time overrides
 
 - **Status:** Accepted
 - **Date:** 2026-08-16
-- **Related:** ADR-0030, ADR-0011, AD-11, `nocx-y46q.14`
+- **Related:** ADR-0033, ADR-0011, AD-11, `nocx-y46q.14`
 - **Design:** `docs/superpowers/specs/2026-08-16-sandbox-per-tab-permissions-design.md`
 
 ## Context
 
-ADR-0030 deliberately shipped the experimental filesystem sandbox with one writable workspace and no configurable roots. That proves the native Landlock/Seatbelt boundary but makes common agent workflows leave the cage whenever a tab needs a shared notes, data, archive, or sibling-repository directory.
+ADR-0033 deliberately shipped the experimental filesystem sandbox with one writable workspace and no configurable roots. That proves the native Landlock/Seatbelt boundary but makes common agent workflows leave the cage whenever a tab needs a shared notes, data, archive, or sibling-repository directory.
 
 The sandbox branch is not merged. Adding the permission model now avoids freezing a workspace-only wire contract and avoids compatibility aliases later.
 
@@ -34,9 +34,9 @@ The sandbox branch is not merged. Adding the permission model now avoids freezin
 10. Linux retains its post-Landlock readiness pipe. macOS adds a nocx re-exec shim under `sandbox-exec`; the shim acknowledges readiness only after Seatbelt applied the profile, then `exec`s the shell. A rejected profile never registers a session.
 11. Shared `DocumentStore` enforces its documented size bound; the settings loader admits only a bounded typed path list.
 
-## Amendments to ADR-0030
+## Amendments to ADR-0033
 
-This decision supersedes these ADR-0030 V1 clauses:
+This decision supersedes these ADR-0033 V1 clauses:
 
 - “one setting, `sandbox.enabled`; no allowed paths” becomes two settings: the default-off flag and the writable baseline;
 - “renderer requests only `{workspace}`” becomes workspace, settings revision, and per-launch deltas; the renderer still never authors policy;
@@ -47,7 +47,7 @@ Everything else remains: filesystem-only scope; local tabs only; default-off; no
 
 ## Threat-model boundary
 
-ADR-0030 protects against filesystem operations by the new shell and descendants after launch. A separate already-unrestricted same-user process racing a pathname replacement during setup is outside that model because it already owns the host access withheld from the new shell. The implementation revalidates immediately before policy construction but does not claim inode-stable authorization against that excluded actor. Linux O_PATH-fd binding remains an available hardening if the threat model expands.
+ADR-0033 protects against filesystem operations by the new sandboxed process and descendants after launch. A separate already-unrestricted same-user process racing a pathname replacement during setup is outside that model because it already owns the host access withheld from the sandboxed process. The implementation revalidates immediately before policy construction but does not claim inode-stable authorization against that excluded actor. Linux O_PATH-fd binding remains an available hardening if the threat model expands.
 
 ## Consequences
 

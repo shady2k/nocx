@@ -171,7 +171,7 @@ conformance:
 	NOCX_TEST_SSH_G=1 $(GO) test -v -count=1 -run Conformance ./internal/ssh/...
 
 
-# Real Landlock enforcement smoke (ADR-0030 §8). Proves the cage behaves, not
+# Real Landlock enforcement smoke (ADR-0033 §8, ADR-0035). Proves the cage behaves, not
 # just that the source compiles. Requires a kernel with Landlock ABI >= 3 and
 # FAILS LOUDLY below it — it is a release gate, not an env-gated convenience.
 # The ABI probe is go-landlock's own cmd, resolved from the module cache.
@@ -179,7 +179,7 @@ sandbox-smoke-linux:
 	@abi=$$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0); \
 	echo "=== Landlock enforcement smoke (detected ABI $$abi, floor 3) ==="; \
 	if [ "$$abi" -lt 3 ]; then echo "FAIL: Landlock ABI $$abi < 3 — enforcement smoke cannot run on this kernel"; exit 1; fi
-	$(GO) test -v -count=1 -run 'TestLandlockEnforcement' ./internal/sandbox/
+	$(GO) test -v -count=1 -run 'TestLandlockEnforcement|TestNewLocal_TrustedAgentEndToEnd' ./internal/sandbox/
 
 # The source-level smoke above can pass while the executable's early helper
 # dispatch is missing. This gate invokes the built nocx binary itself; on Linux
@@ -190,14 +190,14 @@ sandbox-smoke-linux-artifact:
 	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name an executable nocx binary"; exit 1; fi
 	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
 
-# Real Seatbelt enforcement smoke (ADR-0030 §9.4). Runs the shared probe
+# Real Seatbelt enforcement smoke (ADR-0033 §9.4, ADR-0035). Runs the shared probe
 # inside a real sandbox-exec cage on macOS. Absence is a failed release gate:
 # a successful release must prove enforcement rather than skip the check.
 sandbox-smoke-macos:
 	@echo "=== Seatbelt enforcement smoke (macOS) ==="
 	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
 	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — enforcement smoke cannot run"; exit 1; fi
-	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService|TestNewLocal_SandboxedEndToEnd' ./internal/sandbox/
+	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService|TestNewLocal_SandboxedEndToEnd|TestNewLocal_TrustedAgentEndToEnd' ./internal/sandbox/
 
 # Seatbelt is applied by the built nocx executable, not by the test process.
 # This catches packaging/startup drift before a release can claim macOS support.

@@ -174,11 +174,12 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 			return nil, sandbox.NewSetupErrorf("sandbox request without a sandbox service")
 		}
 		pc, perr := cfg.sandboxService.Prepare(context.Background(), *cfg.Sandbox, sandbox.CommandSpec{
-			Path:       cmd.Path,
-			Args:       append([]string(nil), cmd.Args[1:]...),
-			Dir:        cmd.Dir,
-			Env:        env,
-			ExtraFiles: append([]*os.File(nil), cmd.ExtraFiles...),
+			Path:               cmd.Path,
+			Args:               append([]string(nil), cmd.Args[1:]...),
+			Dir:                cmd.Dir,
+			Env:                env,
+			ExtraFiles:         append([]*os.File(nil), cmd.ExtraFiles...),
+			TrustedExecutables: append([]string(nil), cfg.trustedSandboxExecutables...),
 		})
 		if perr != nil {
 			return nil, perr

@@ -1,4 +1,4 @@
-# ADR-0030 — Native per-tab filesystem sandbox (opt-in, experimental)
+# ADR-0033 — Native per-tab filesystem sandbox (opt-in, experimental)
 
 - **Status:** Accepted
 - **Date:** 2026-08-02
@@ -25,7 +25,7 @@ Linux sandbox at all. termic is AGPL-3.0; nocx reuses behavior, never code.
 nocx is a different product: interactive user shells, typed settings (`internal/settings`),
 a JSON-RPC control plane with `data.reason` errors, and a strict no-fallback culture. Its
 threat model for this experiment is a mistake or malicious filesystem operation made by the
-sandboxed shell and its descendants after launch — nothing more.
+sandboxed process and its descendants after launch — nothing more.
 
 ## Decision
 
@@ -34,16 +34,15 @@ Ship an **opt-in, experimental, filesystem-only, native per-tab sandbox**:
 - **Native mechanisms only**: Linux Landlock (strict, unprivileged LSM) and macOS Seatbelt
   (`sandbox-exec -p`, deprecated but runtime-probed). One platform-neutral
   `internal/sandbox.Service` behind the existing composition-root pattern (AD-8).
-- **Per-tab, explicitly opted in**: exactly one setting, `sandbox.enabled`
-  (Experimental, default `false`, `PublicConfig`), gates a `Sandboxed shell…` Quick Connect
-  action that opens a **new** local tab after a native workspace picker. Ordinary tabs, SSH
-  tabs, the initial tab, `+`, and `Cmd/Ctrl+T` are untouched. An existing PTY is never
-  retrofitted.
+- **Per-tab, explicitly opted in**: the Experimental, default-off `sandbox.enabled`
+  setting gates a `Sandboxed opencode…` Quick Connect action that opens a **new** local agent
+  tab after a native workspace picker and permission confirmation. Ordinary tabs, SSH tabs,
+  the initial tab, `+`, and `Cmd/Ctrl+T` are untouched. An existing PTY is never retrofitted.
 - **Common filesystem contract**: both backends enforce the same writable/read-only root
   model — the canonical workspace, an optional Git common directory from a validated linked
   worktree, and one ephemeral mode-`0700` runtime tree under the app cache dir with isolated
-  `HOME`/`TMPDIR`; read-only system/runtime roots plus the canonical shell and inherited
-  `PATH` dirs. The worktree exception requires the canonical
+  `HOME`/`TMPDIR`; read-only system/runtime roots plus the canonical shell, fixed agent
+  executable, their runtime dependencies, and inherited `PATH` dirs. The worktree exception requires the canonical
   `<common>/.git/worktrees/<name>` shape and its regular `gitdir` backlink to resolve exactly
   to the selected workspace's regular `.git` file; the workspace pointer alone is never
   authority to widen the cage. Network, environment, credentials, IPC, devices, and
@@ -83,9 +82,10 @@ Ship an **opt-in, experimental, filesystem-only, native per-tab sandbox**:
 - New wire surface: `open` gains optional `sandbox: {workspace}`; `sandbox.status` and
   `dialog.openDirectory` are added; `-32010`/`-32011`/`-32012` are reserved with stable
   `data.reason` values. Ordinary and SSH `open` results are unchanged.
-- New UI surface: `Sandboxed shell…` action (visible only while the flag is on), unavailable
-  row with typed reason, and a lock/shield marker with backend + writable-roots tooltip on
-  every sandboxed tab. Sandboxed tabs have `restoreDescriptor: null` in V1.
+- New UI surface: `Sandboxed opencode…` action (visible only while the flag is on),
+  unavailable row with typed backend/intent reason, and a lock/shield marker with backend +
+  writable-roots tooltip on every sandboxed tab. Sandboxed tabs have
+  `restoreDescriptor: null` in V1.
 - `pty.NewLocal` is refactored to build the ordinary command first, then call
   `Service.Prepare` only when a request is present; ordinary behavior is preserved
   byte-for-byte.
@@ -107,6 +107,11 @@ Ship an **opt-in, experimental, filesystem-only, native per-tab sandbox**:
 - No AGPL code is copied; only behavior-level lessons (per-session policy generation,
   allow-list model, availability reporting, security-visible state) are borrowed, and
   fail-closed launch is recorded as an intentional divergence from termic.
+
+ADR-0034 amends the one-workspace policy with bounded writable grants and launch-time
+overrides. ADR-0035 amends the launch target to fixed backend-resolved `opencode`, moves
+private bootstrap artifacts into the sandbox runtime tree, and requires lifecycle
+authentication before the bootstrap shell replaces itself with the agent.
 
 ## Not decided here
 

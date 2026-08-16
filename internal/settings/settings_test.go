@@ -1312,6 +1312,7 @@ func declarationFor(t *testing.T, key string) settings.Declaration {
 }
 
 // ── Path-list settings (ADR-0031 §3) ────────────────────────────────────
+// ── Path-list settings (ADR-0034 §3) ────────────────────────────────────
 
 // tmpDirs returns n fresh existing directories under one t.TempDir() base.
 func tmpDirs(t *testing.T, n int) []string {

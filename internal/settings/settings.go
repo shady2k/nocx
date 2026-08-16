@@ -1024,7 +1024,7 @@ func init() {
 	RegisterSectionGroup("Test", "developer")
 }
 
-// SandboxEnabled gates the opt-in "Sandboxed shell…" action (ADR-0030 §3.1).
+// SandboxEnabled gates the opt-in "Sandboxed opencode…" action (ADR-0033 §3.1, ADR-0035).
 // It is a capability/visibility gate, not "sandbox every tab": it only
 // exposes an opt-in action for NEW local tabs, never changes a running tab,
 // and the backend rejects a sandbox request while the flag is off.
@@ -1038,7 +1038,7 @@ var SandboxEnabled = MustRegisterBool(BoolSpec{
 })
 
 // SandboxAllowedWritablePaths is the persisted global baseline of additional
-// directories made read-write in every new sandboxed tab (ADR-0031 §3.1).
+// directories made read-write in every new sandboxed tab (ADR-0034 §3.1).
 // The workspace is always writable; changes affect new tabs only.
 var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedWritablePaths",
@@ -1140,7 +1140,7 @@ func New(doc storage.DocumentStore, secrets credential.SecretStore) *Registry {
 			// directory that disappeared after a valid save stays visible and
 			// makes a sandbox launch fail closed). A type-corrupted value is
 			// preserved unchanged so it stays observable as an invalid
-			// snapshot, never silently coerced to the default (ADR-0031 §3.2).
+			// snapshot, never silently coerced to the default (ADR-0034 §3.2).
 			r.values[k] = normalizeLoadedPathList(v)
 			continue
 		}
@@ -1385,7 +1385,7 @@ func (r *Registry) SetSelect(s *Select, value string) error {
 // GetPaths returns the current value of a path-list setting, or its default.
 // The returned slice is a fresh copy — mutating it never mutates registry
 // state. A stored value that is not a recognized string list is reported as a
-// corruption error, never silently coerced to the default (ADR-0031 §3.2).
+// corruption error, never silently coerced to the default (ADR-0034 §3.2).
 func (r *Registry) GetPaths(p *PathList) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

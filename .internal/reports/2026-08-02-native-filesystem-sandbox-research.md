@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-02
 - **Status:** evidence ledger for `.internal/specs/2026-08-02-native-filesystem-sandbox-design.md`,
-  ADR-0030, and `.internal/plans/2026-08-02-native-filesystem-sandbox-v1.md`
+  ADR-0033, and `.internal/plans/2026-08-02-native-filesystem-sandbox-v1.md`
 - **Tree inspected:** nocx working tree at 2026-08-02 (`module github.com/shady2k/nocx`, `go 1.26`,
   no `go-landlock` dependency yet)
 - **Host measured:** Linux 7.1.4-1-MANJARO, x86_64, kernel with Landlock active (see §4.4)
@@ -428,7 +428,7 @@ command [arguments …]`. The man page directs: "Developers who wish to sandbox 
 | 8   | Typed settings / RPC boundaries                          | **Adapt**                         | termic's global/project + per-task JSON config model is rejected (design spec §3.1, §10 I1); nocx uses its typed settings registry (`MustRegisterBool`) and `data.reason` error convention                                                                               |
 | 9   | Network isolation (CONNECT proxy)                        | **Reject**                        | out of scope — V1 guarantees filesystem only; the contract explicitly leaves network unrestricted (design spec §2, §5.1)                                                                                                                                                 |
 | 10  | Global/project settings model, user-editable path lists  | **Reject**                        | conflicts with the single default-off flag + picker-driven workspace (design spec §3.1); user-supplied extra roots are not in V1 (§5.2)                                                                                                                                  |
-| 11  | Proposed Docker/OCI path                                 | **Reject**                        | `docs/plans/docker-sandbox/*` is proposal-only in termic and container runtime is not selected for nocx (ADR-0030 "Alternatives")                                                                                                                                        |
+| 11  | Proposed Docker/OCI path                                 | **Reject**                        | `docs/plans/docker-sandbox/*` is proposal-only in termic and container runtime is not selected for nocx (ADR-0033 "Alternatives")                                                                                                                                        |
 
 AGPL note: borrowed items are behavior-level only. The SBPL renderer/escaping, `wrap_command`
 argv construction, and proxy HTTP parsing are direct code candidates and are rejected for

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 
 	svc := sandbox.New(log.NewSlogAdapter(nil), cacheDir)
 	if st := svc.Status(context.Background()); !st.Available {
-		t.Skipf("landlock enforcement requires kernel ABI >= 3: %+v", st)
+		t.Skipf("native sandbox enforcement is unavailable: %+v", st)
 	}
 
 	lp, err := pty.NewLocal(log.NewSlogAdapter(nil), pty.Config{
@@ -48,8 +49,12 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 	if info == nil {
 		t.Fatal("SandboxInfo() = nil, want metadata")
 	}
-	if info.Backend != sandbox.BackendLandlock {
-		t.Errorf("backend = %q, want %q", info.Backend, sandbox.BackendLandlock)
+	wantBackend := sandbox.BackendLandlock
+	if runtime.GOOS == "darwin" {
+		wantBackend = sandbox.BackendSeatbelt
+	}
+	if info.Backend != wantBackend {
+		t.Errorf("backend = %q, want %q", info.Backend, wantBackend)
 	}
 	if info.Workspace != ws {
 		t.Errorf("workspace = %q, want %q", info.Workspace, ws)
@@ -97,6 +102,67 @@ func TestNewLocal_SandboxedEndToEnd(t *testing.T) {
 	}
 }
 
+// TestNewLocal_TrustedAgentEndToEnd proves the fixed-agent policy seam itself,
+// not only an interactive shell: a backend-owned executable outside the
+// workspace starts in the canonical workspace, can write there, and cannot
+// write beside its own read-only executable.
+func TestNewLocal_TrustedAgentEndToEnd(t *testing.T) {
+	cacheDir := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	agentDir := t.TempDir()
+	agent := filepath.Join(agentDir, "opencode")
+	outside := filepath.Join(agentDir, "outside")
+	script := `#!/bin/sh
+printf 'agent-cwd=%s\n' "$PWD"
+printf allowed >"$PWD/allowed"
+if printf denied >"$NOCX_AGENT_OUTSIDE"; then
+  printf 'outside-writable\n'
+else
+  printf 'outside-denied\n'
+fi
+`
+	if err := os.WriteFile(agent, []byte(script), 0o700); err != nil { //nolint:gosec // executable test fixture
+		t.Fatalf("write agent fixture: %v", err)
+	}
+
+	svc := sandbox.New(log.NewSlogAdapter(nil), cacheDir)
+	if st := svc.Status(context.Background()); !st.Available {
+		t.Skipf("native sandbox enforcement is unavailable: %+v", st)
+	}
+	lp, err := pty.NewLocal(log.NewSlogAdapter(nil), pty.Config{
+		Command: agent,
+		Cwd:     workspace,
+		Env:     []string{"NOCX_AGENT_OUTSIDE=" + outside},
+		Cols:    80,
+		Rows:    24,
+		Sandbox: &sandbox.Request{Workspace: workspace},
+	}, pty.WithSandboxService(svc), pty.WithTrustedSandboxExecutable(agent))
+	if err != nil {
+		t.Fatalf("NewLocal trusted agent: %v", err)
+	}
+	defer func() { _ = lp.Close() }()
+
+	out, err := readUntilDone(lp, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "agent-cwd="+workspace) {
+		t.Errorf("agent cwd output = %q, want canonical workspace", out)
+	}
+	if !strings.Contains(out, "outside-denied") || strings.Contains(out, "outside-writable") {
+		t.Errorf("agent escaped writable policy: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "allowed")); err != nil {
+		t.Errorf("agent could not write workspace: %v", err)
+	}
+	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("outside file exists or stat failed unexpectedly: %v", err)
+	}
+}
+
 // TestNewLocal_SandboxedFailClosed asserts that a sandbox request that cannot
 // be validated never yields a PTY.
 func TestNewLocal_SandboxedFailClosed(t *testing.T) {
@@ -109,6 +175,28 @@ func TestNewLocal_SandboxedFailClosed(t *testing.T) {
 	}, pty.WithSandboxService(svc))
 	if !errors.Is(err, sandbox.ErrInvalidPermissions) {
 		t.Fatalf("err = %v, want ErrInvalidPermissions", err)
+	}
+}
+
+func readUntilDone(lp pty.Pty, timeout time.Duration) (string, error) {
+	output := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		var out strings.Builder
+		for {
+			n, err := lp.Read(buf)
+			out.Write(buf[:n])
+			if err != nil {
+				output <- out.String()
+				return
+			}
+		}
+	}()
+	select {
+	case out := <-output:
+		return out, nil
+	case <-time.After(timeout):
+		return "", errors.New("timeout waiting for agent exit")
 	}
 }
 

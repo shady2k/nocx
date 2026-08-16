@@ -26,6 +26,10 @@ func (unsupportedService) Status(_ context.Context) Status {
 	return Status{Available: false, Backend: BackendUnsupported, Reason: ReasonUnsupportedPlatform}
 }
 
+func (unsupportedService) NewRuntimeRoot() (string, error) {
+	return "", NewSetupErrorf("filesystem sandbox is unsupported on this platform")
+}
+
 func (unsupportedService) Prepare(_ context.Context, _ Request, _ CommandSpec) (*PreparedCommand, error) {
 	return nil, NewSetupErrorf("filesystem sandbox is unsupported on this platform")
 }

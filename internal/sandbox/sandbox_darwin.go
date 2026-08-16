@@ -49,6 +49,14 @@ func (s *darwinService) Status(ctx context.Context) Status {
 	return s.probe.status(ctx)
 }
 
+func (s *darwinService) NewRuntimeRoot() (string, error) {
+	root, err := NewRuntimeRoot(s.cacheDir)
+	if err != nil {
+		return "", NewSetupErrorf("runtime root creation failed")
+	}
+	return root, nil
+}
+
 // Prepare renders the common policy as a deterministic SBPL profile and
 // launches /usr/bin/sandbox-exec -p <profile> <nocx-exe>
 // __sandbox-seatbelt-exec <status-fd> <shell> <shell-args>. sandbox-exec
@@ -64,9 +72,13 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 		return nil, &StatusError{Status: status}
 	}
 
-	runtimeRoot, err := NewRuntimeRoot(s.cacheDir)
-	if err != nil {
-		return nil, err
+	runtimeRoot := req.RuntimeRoot
+	if runtimeRoot == "" {
+		var err error
+		runtimeRoot, err = s.NewRuntimeRoot()
+		if err != nil {
+			return nil, err
+		}
 	}
 	fail := func(err error) (*PreparedCommand, error) {
 		RemoveRuntimeRoot(runtimeRoot)
@@ -76,6 +88,9 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	pol, err := BuildPolicy(req, spec.Path, runtimeRoot, spec.Env)
 	if err != nil {
 		return fail(err)
+	}
+	if trustedErr := addTrustedExecutables(pol, spec.TrustedExecutables); trustedErr != nil {
+		return fail(trustedErr)
 	}
 	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
 	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder

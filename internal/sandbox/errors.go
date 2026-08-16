@@ -39,6 +39,17 @@ func NewSetupErrorf(format string, args ...any) error {
 	return &SetupError{msg: fmt.Sprintf(format, args...)}
 }
 
+// LaunchError says the fixed backend-owned launch intent cannot be fulfilled.
+// Reason is a stable, path-free wire value; the transport maps it to -32012
+// before any underlying diagnostic can reach the log or renderer.
+type LaunchError struct {
+	Reason string
+}
+
+func (e *LaunchError) Error() string {
+	return "sandbox: launch unavailable: " + e.Reason
+}
+
 // StatusError carries the backend Status a launch could not proceed with.
 // The transport maps it to JSON-RPC -32011 with the status reason.
 type StatusError struct {

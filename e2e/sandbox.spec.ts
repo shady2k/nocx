@@ -1,5 +1,5 @@
 /**
- * e2e: sandboxed-shell action (ADR-0030 §3).
+ * e2e: sandboxed-opencode action (ADR-0033, ADR-0035).
  *
  * Walks the Quick Connect picker and the Settings toggle: the action is a
  * capability/visibility gate, so flipping the flag must only change what the
@@ -26,8 +26,9 @@ import { test, expect } from './harness'
 
 const PALETTE_MOD = process.platform === 'darwin' ? 'Meta' : 'Control'
 const QUICK_CONNECT_ITEM = '.quick-connect__item'
-const SANDBOX_ACTION = '.quick-connect__item:has-text("Sandboxed shell")'
-const SANDBOX_UNAVAILABLE = '.quick-connect__item:has-text("Sandbox unavailable")'
+const SANDBOX_ACTION = '.quick-connect__item:has-text("Sandboxed opencode")'
+const SANDBOX_UNAVAILABLE =
+  '.quick-connect__item:has-text("Sandbox unavailable"), .quick-connect__item:has-text("opencode unavailable")'
 const SANDBOX_ROW = `${SANDBOX_ACTION}, ${SANDBOX_UNAVAILABLE}`
 
 async function openSettings(page: Page): Promise<void> {
@@ -64,7 +65,7 @@ async function setSandboxFlag(page: Page, on: boolean): Promise<void> {
   }
 }
 
-test.describe('sandboxed shell action', () => {
+test.describe('sandboxed opencode action', () => {
   // The flag workflow walks Settings and the picker several times — heavier
   // than a single-surface spec, so it gets a generous budget on slow runners.
   test.setTimeout(120_000)

@@ -135,6 +135,64 @@ func addRoot(path string, roots *[]string, seen map[string]bool) {
 	*roots = append(*roots, canonical)
 }
 
+// addTrustedExecutables extends an already-built policy with backend-resolved
+// fixed launch executables and their runtime roots. Nothing from the renderer
+// reaches this seam. The executable itself and every discovered dependency
+// root must remain outside user-writable policy roots; otherwise the caged
+// process could replace code that the policy is about to trust.
+func addTrustedExecutables(p *Policy, executables []string) error {
+	if len(executables) == 0 {
+		return nil
+	}
+	roots := append([]string(nil), p.ReadOnlyRoots...)
+	seenRoots := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		seenRoots[root] = true
+	}
+	seenFiles := make(map[string]bool)
+	files := append([]string(nil), p.ReadOnlyFiles...)
+	for _, executable := range executables {
+		canonical, err := filepath.EvalSymlinks(executable)
+		if err != nil {
+			return NewSetupErrorf("trusted executable cannot be resolved")
+		}
+		if policyPathWritable(p, canonical) {
+			return NewSetupErrorf("trusted executable conflicts with a writable root")
+		}
+		before := len(roots)
+		if err := addExecutableRoots(canonical, &roots, seenFiles, seenRoots); err != nil {
+			return NewSetupErrorf("trusted executable runtime: %v", err)
+		}
+		for _, root := range roots[before:] {
+			if policyPathWritable(p, root) {
+				return NewSetupErrorf("trusted executable runtime conflicts with a writable root")
+			}
+		}
+		files = append(files, canonical)
+	}
+	p.ReadOnlyRoots = roots
+	p.ReadOnlyFiles = files
+	if err := p.normalize(); err != nil {
+		return NewSetupErrorf("trusted executable policy: %v", err)
+	}
+	return nil
+}
+
+func policyPathWritable(p *Policy, path string) bool {
+	for _, root := range append(append([]string(nil), p.WritableRoots...), p.WritableDirs...) {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))) {
+			return true
+		}
+	}
+	for _, file := range p.WritableFiles {
+		if file == path {
+			return true
+		}
+	}
+	return false
+}
+
 func elfSearchDirs(file *elf.File, path string) ([]string, error) {
 	origin := filepath.Dir(path)
 	paths := []string{origin}

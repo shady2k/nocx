@@ -80,6 +80,13 @@ type LaunchOptions struct {
 	// two. Zero means no progress reporting, which is what every remote
 	// tier gets — there is no second descriptor to hand a far shell.
 	BootstrapFD int
+	// ArtifactDir and AgentExec are local-only fixed launch inputs (ADR-0035).
+	// Empty preserves the ordinary local/remote launch byte-for-byte:
+	// os.TempDir owns the ordinary artifact and no agent tail is rendered.
+	// A sandboxed composition root supplies its private runtime tmp directory
+	// and a canonical backend-resolved executable.
+	ArtifactDir string
+	AgentExec   string
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's

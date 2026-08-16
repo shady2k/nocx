@@ -1,5 +1,5 @@
 // Package sandbox implements the opt-in, experimental, filesystem-only
-// per-tab sandbox (ADR-0030, design spec 2026-08-02-native-filesystem-sandbox).
+// per-tab sandbox (ADR-0033, design spec 2026-08-02-native-filesystem-sandbox).
 //
 // The renderer requests a workspace plus bounded add/remove deltas; the
 // backend canonicalizes them and owns policy construction and enforcement.
@@ -23,13 +23,14 @@ const (
 	BackendUnsupported = "unsupported"
 )
 
-// Stable status reasons (design spec §4.2).
+// Stable status and fixed-launch reasons (design spec §4.2, ADR-0035).
 const (
 	ReasonLandlockUnavailable    = "landlock-unavailable"
 	ReasonLandlockABITooOld      = "landlock-abi-too-old"
 	ReasonSandboxExecUnavailable = "sandbox-exec-unavailable"
 	ReasonProbeFailed            = "probe-failed"
 	ReasonUnsupportedPlatform    = "unsupported-platform"
+	ReasonOpenCodeNotFound       = "opencode-not-found"
 )
 
 // helperEnvPrefix marks variables the Linux helper strips before exec so
@@ -40,13 +41,17 @@ const helperEnvPrefix = "NOCX_SANDBOX_HELPER_"
 
 // Request carries the backend-owned policy inputs for one sandboxed tab
 // (design spec §6). Global is the persisted baseline of additional writable
-// directories; Add and Remove are the per-tab deltas. The backend
-// canonicalizes every path and never mutates the caller's slices.
+// directories; Add and Remove are the per-tab deltas. RuntimeRoot is minted
+// by the composition root for a sandboxed enhanced launch so its private
+// bootstrap artefact is born inside the tree the native backend will enforce;
+// it is never decoded from the renderer. The backend canonicalizes every
+// user path and never mutates the caller's slices.
 type Request struct {
-	Workspace string
-	Global    []string
-	Add       []string
-	Remove    []string
+	Workspace   string
+	Global      []string
+	Add         []string
+	Remove      []string
+	RuntimeRoot string `json:"-"`
 }
 
 // Status reports backend availability. It is the payload of sandbox.status
@@ -63,12 +68,16 @@ type Status struct {
 // shell detection, cmd.Dir, and the scrubbed/UTF-8-forced environment. The
 // backend wraps it (helper re-exec on Linux, sandbox-exec on macOS) or, for
 // an ordinary request, pty.NewLocal never touches this package at all.
+// TrustedExecutables are backend-resolved fixed launch intents, never wire
+// input. Policy construction grants them and their runtime dependencies
+// read-only and rejects any that live below a writable root.
 type CommandSpec struct {
-	Path       string
-	Args       []string
-	Dir        string
-	Env        []string
-	ExtraFiles []*os.File `json:"-"`
+	Path               string
+	Args               []string
+	Dir                string
+	Env                []string
+	ExtraFiles         []*os.File `json:"-"`
+	TrustedExecutables []string   `json:"-"`
 }
 
 // PreparedCommand owns the *exec.Cmd of the sandboxed process, the
@@ -118,10 +127,13 @@ func (p *PreparedCommand) Close() {
 }
 
 // Service is the platform-neutral sandbox boundary. Status answers
-// sandbox.status; Prepare turns an ordinary CommandSpec into a sandboxed
-// process that fails closed on any policy/launch/handshake error.
+// sandbox.status; NewRuntimeRoot reserves the private per-session tree before
+// local nocxify renders its bootstrap; Prepare adopts that root and turns an
+// ordinary CommandSpec into a sandboxed process that fails closed on any
+// policy/launch/handshake error.
 type Service interface {
 	Status(ctx context.Context) Status
+	NewRuntimeRoot() (string, error)
 	Prepare(ctx context.Context, req Request, spec CommandSpec) (*PreparedCommand, error)
 }
 

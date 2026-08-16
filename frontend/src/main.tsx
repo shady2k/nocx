@@ -1440,9 +1440,9 @@ function main(): void {
       () => tm.newPane(),
       () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
-      // Sandboxed shell… action (ADR-0031 §4.2): live flag + backend status
-      // on every open; then one fresh snapshot, the workspace picker, and the
-      // permission dialog before a new tab. Cancellation creates nothing.
+      // Sandboxed opencode… action (ADR-0034 §4.2, ADR-0035): live flag and
+      // backend/intent status on every open; then one fresh snapshot, the
+      // workspace picker, and permission confirmation. Cancellation creates nothing.
       {
         state: async () => {
           const snap = await profileClient.getSnapshot()
@@ -1458,7 +1458,7 @@ function main(): void {
           return { enabled, status }
         },
         open: () => {
-          void openSandboxedShell({
+          void openSandboxedOpenCode({
             getSnapshot: () => profileClient.getSnapshot(),
             openDirectory: () => dialogClient.openDirectoryDialog(),
             showPermissions: showSandboxPermissions,

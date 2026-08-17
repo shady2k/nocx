@@ -509,7 +509,7 @@ func TestInBandBootstrap_RealBashFailOpenMissingApplet(t *testing.T) {
 // under zsh: the wrapper is shell-agnostic, and the dispatcher must select
 // the zsh hooks.
 func TestInBandBootstrap_RealZshIntegratesAndRestores(t *testing.T) {
-	s := startSession(t, "zsh")
+	s := startSession(t, "zsh", "NOCX_SNAPSHOT_WAIT_MS=15000")
 	s.waitFor(inBandTestPrompt, 15*time.Second)
 	before := s.termios()
 

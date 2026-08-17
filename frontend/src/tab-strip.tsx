@@ -786,6 +786,16 @@ abstract class TabStripBase implements TabStrip {
                 <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
+                <Show when={sandboxEnabled()}>
+                  <IconButton
+                    ariaLabel="New sandboxed tab"
+                    title="New sandboxed tab"
+                    square
+                    onClick={() => this.onNewSandboxedTab?.()}
+                  >
+                    <ShieldIcon />
+                  </IconButton>
+                </Show>
                 <IconButton
                   ariaLabel="More"
                   title="More"
@@ -982,6 +992,15 @@ abstract class TabStripBase implements TabStrip {
               <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
+              <Show when={sandboxEnabled()}>
+                <IconButton
+                  ariaLabel="New sandboxed tab"
+                  title="New sandboxed tab"
+                  onClick={() => this.onNewSandboxedTab?.()}
+                >
+                  <ShieldIcon />
+                </IconButton>
+              </Show>
               <IconButton
                 ariaLabel="More"
                 title="More"

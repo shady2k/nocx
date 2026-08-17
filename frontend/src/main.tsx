@@ -405,6 +405,7 @@ function main(): void {
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
+  const SANDBOX_ENABLED_KEY = 'sandbox.enabled'
 
   // The declared default, painted BEFORE the snapshot arrives: the first
   // frame must not show the opposite of what the backend is about to say.
@@ -1028,11 +1029,15 @@ function main(): void {
         // same signal, so a settings batch cannot expose a partial hidden set.
         setHiddenKindIds(hiddenNotificationKinds(snap.values))
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+        sandboxEnabled = snap.values[SANDBOX_ENABLED_KEY] === true
         if (next !== placement) {
           placement = next
           const newStrip = next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
           wireQuickConnect(newStrip)
           tm.replaceStrip(newStrip)
+          currentStrip = newStrip
+        } else {
+          currentStrip.setSandboxEnabled(sandboxEnabled)
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
@@ -1435,6 +1440,61 @@ function main(): void {
     },
   }
 
+  const getSandboxState = async (): Promise<{
+    enabled: boolean
+    status: SandboxStatus | null
+  }> => {
+    const snap = await profileClient.getSnapshot()
+    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    let status: SandboxStatus | null = null
+    if (enabled) {
+      try {
+        status = await client.sandboxStatus()
+      } catch {
+        status = null
+      }
+    }
+    return { enabled, status }
+  }
+
+  const reportSandboxOpenError = (message: string) => {
+    showToast({
+      level: 'danger',
+      message: `Could not open a sandboxed tab: ${message}`,
+    })
+  }
+
+  const openSandboxedTab = async () => {
+    let state: Awaited<ReturnType<typeof getSandboxState>>
+    try {
+      state = await getSandboxState()
+    } catch (err) {
+      reportSandboxOpenError((err as Error).message || 'sandbox status unavailable')
+      return
+    }
+    if (!state.enabled) return
+    if (!state.status?.available) {
+      reportSandboxOpenError(
+        `Sandbox unavailable (${state.status?.reason || 'status-unavailable'})`,
+      )
+      return
+    }
+    if (state.status.intent.available === false) {
+      reportSandboxOpenError(
+        `opencode unavailable (${state.status.intent.reason || 'opencode-not-found'})`,
+      )
+      return
+    }
+
+    await openSandboxedOpenCode({
+      getSnapshot: () => profileClient.getSnapshot(),
+      openDirectory: () => dialogClient.openDirectoryDialog(),
+      showPermissions: showSandboxPermissions,
+      newSandboxedTab: (workspace, launch) => tm.newSandboxedTab(workspace, launch),
+      reportError: reportSandboxOpenError,
+    })
+  }
+
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(
       () => tm.newPane(),
@@ -1444,33 +1504,8 @@ function main(): void {
       // backend/intent status on every open; then one fresh snapshot, the
       // workspace picker, and permission confirmation. Cancellation creates nothing.
       {
-        state: async () => {
-          const snap = await profileClient.getSnapshot()
-          const enabled = snap.values['sandbox.enabled'] === true
-          let status: SandboxStatus | null = null
-          if (enabled) {
-            try {
-              status = await client.sandboxStatus()
-            } catch {
-              status = null
-            }
-          }
-          return { enabled, status }
-        },
-        open: () => {
-          void openSandboxedOpenCode({
-            getSnapshot: () => profileClient.getSnapshot(),
-            openDirectory: () => dialogClient.openDirectoryDialog(),
-            showPermissions: showSandboxPermissions,
-            newSandboxedTab: (workspace, launch) => tm.newSandboxedTab(workspace, launch),
-            reportError: (message) => {
-              showToast({
-                level: 'danger',
-                message: `Could not open a sandboxed tab: ${message}`,
-              })
-            },
-          })
-        },
+        state: getSandboxState,
+        open: () => void openSandboxedTab(),
       },
     ),
     sshProvider,
@@ -1574,6 +1609,8 @@ function main(): void {
   tm.onSnippetAccepted = (id) => fireSnippetById(id)
 
   function wireQuickConnect(strip: typeof tabStrip) {
+    strip.setSandboxEnabled(sandboxEnabled)
+    strip.onNewSandboxedTab = () => void openSandboxedTab()
     strip.onQuickConnect = () => qc.show()
     strip.onInsertSecret = () => qc.showSecrets()
     // The snippets action (design §10.3): the library without knowing the

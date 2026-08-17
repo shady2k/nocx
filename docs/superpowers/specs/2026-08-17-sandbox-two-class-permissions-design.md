@@ -86,6 +86,12 @@ Quick Connect → **Sandboxed opencode…** performs:
 4. **Sandbox permissions** modal;
 5. strict open request after confirmation.
 
+When `sandbox.enabled` is true, both tab-strip orientations place a shield action
+immediately beside **New tab** (`+`). The action enters this same five-step flow;
+it does not own a second launch path. The shield is absent while the setting is
+false, and settings changes update the current strip live, including after an
+orientation replacement.
+
 The modal shows:
 
 - **Workspace** — canonical picker result, “Read & write (required)”, no remove control;

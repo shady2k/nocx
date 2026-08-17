@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { cleanup } from '@solidjs/testing-library'
 import { showSandboxPermissions, type SandboxPermissionsResult } from './sandbox-permissions-dialog'
 
@@ -12,6 +14,10 @@ vi.mock('./ui/toast', () => ({
 
 const READ_ONLY_LIST = 'Read-only folders added for this tab'
 const WRITABLE_LIST = 'Read & write folders added for this tab'
+const SANDBOX_PERMISSIONS_CSS = resolve(
+  import.meta.dirname ?? '.',
+  'styles/surfaces/sandbox-permissions.css',
+)
 
 /** Find the baseline checkbox whose label is exactly `path`. */
 function checkboxFor(path: string): HTMLInputElement {
@@ -265,5 +271,15 @@ describe('showSandboxPermissions', () => {
     await vi.waitFor(() => {
       expect(document.querySelector('dialog.nocx-dialog')).toBeNull()
     })
+  })
+})
+
+describe('sandbox permissions layout', () => {
+  it('stacks baseline directory entries from top to bottom', () => {
+    const css = readFileSync(SANDBOX_PERMISSIONS_CSS, 'utf8')
+
+    expect(css).toMatch(
+      /\.sandbox-permissions-baseline\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s,
+    )
   })
 })

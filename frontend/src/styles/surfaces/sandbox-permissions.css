@@ -1,9 +1,9 @@
 /* ── Sandbox permissions dialog — placement only ───────────────────────
    The dialog is built from the kit (Dialog, Field, Section, Stack, Checkbox,
    EditableRowList, Button), so appearance lives there. This file only places
-   the two bits of caller-owned text: the mandatory workspace path and the
-   hint under the section heading. Long paths wrap instead of stretching the
-   panel past its width. */
+   caller-owned content: paths wrap instead of stretching the panel, and
+   baseline permission entries stack vertically so each directory owns one
+   row. */
 
 .sandbox-permissions-workspace {
   font-family: var(--font-family-mono);
@@ -18,6 +18,9 @@
 }
 
 .sandbox-permissions-baseline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
   overflow-wrap: anywhere;
 }

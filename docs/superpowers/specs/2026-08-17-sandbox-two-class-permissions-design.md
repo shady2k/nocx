@@ -94,7 +94,7 @@ The modal shows:
 - section hint: changes apply only to this new tab;
 - Cancel and **Open sandboxed tab** footer actions.
 
-Each section owns one `EditableRowList` and one picker action. Picking a path already active in the same class is a no-op. Picking a path active in the other class produces visible feedback and no contradictory delta; the user removes/unchecks the old-class row first. Baseline uncheck becomes removal for that class. Removing an ephemeral row removes only its addition.
+Each section owns one `EditableRowList` and one picker action. Persisted baseline entries occupy one visual row each and read top-to-bottom; paths never flow side-by-side. Picking a path already active in the same class is a no-op. Picking a path active in the other class produces visible feedback and no contradictory delta; the user removes/unchecks the old-class row first. Baseline uncheck becomes removal for that class. Removing an ephemeral row removes only its addition.
 
 The dialog keeps the kit's keyboard, Escape, focus restoration, disabled-while-picker-open, and accessible list/remove labels. It introduces no new CSS vocabulary.
 

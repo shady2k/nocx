@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,23 @@ func writeShell(t *testing.T, path string) {
 	if err := os.WriteFile(path, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
 		t.Fatalf("writeShell(%q): %v", path, err)
 	}
+}
+
+func openELFTestExecutable(t *testing.T) *elf.File {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := elf.Open(exe)
+	if err == nil {
+		return file
+	}
+	if runtime.GOOS != "linux" {
+		t.Skipf("ELF parser bound is Linux-specific: %v", err)
+	}
+	t.Fatal(err)
+	return nil
 }
 
 func TestRuntimePathEntryBudget(t *testing.T) {
@@ -208,14 +226,7 @@ func TestRuntimeRelativePATHEntrySkipped(t *testing.T) {
 }
 
 func TestRuntimeELFInterpreterBound(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	file, err := elf.Open(exe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	file := openELFTestExecutable(t)
 	defer func() { _ = file.Close() }()
 	section := file.Section(".interp")
 	if section == nil || section.Size == 0 {
@@ -240,14 +251,7 @@ func TestRuntimeELFInterpreterBound(t *testing.T) {
 }
 
 func TestRuntimeELFDynamicMetadataBounds(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	file, err := elf.Open(exe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	file := openELFTestExecutable(t)
 	defer func() { _ = file.Close() }()
 	dynamic := file.SectionByType(elf.SHT_DYNAMIC)
 	if dynamic == nil || dynamic.Size == 0 {

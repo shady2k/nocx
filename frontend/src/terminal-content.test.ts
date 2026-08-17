@@ -318,6 +318,7 @@ describe('sandboxed session launch failure', () => {
     })
     const content = new TerminalContent(
       client as unknown as WSClient,
+      'sandbox-failure',
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -345,6 +346,7 @@ describe('sandboxed session launch failure', () => {
         defaultTitle: '',
       },
       100,
+      'sandbox-failure-tab',
     )
     const requestClose = vi.fn()
     tab.onCloseRequested = requestClose

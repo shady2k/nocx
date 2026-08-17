@@ -19,6 +19,7 @@ func TestLocalPty_SandboxInfoReturnsDeepCopy(t *testing.T) {
 	policy := &sandbox.Policy{
 		Workspace:     "/workspace",
 		WritableRoots: []string{"/workspace", "/runtime/home"},
+		ReadOnlyRoots: []string{"/usr", "/runtime/ro"},
 	}
 	lp := &LocalPty{
 		prepared: &sandbox.PreparedCommand{
@@ -29,13 +30,20 @@ func TestLocalPty_SandboxInfoReturnsDeepCopy(t *testing.T) {
 
 	first := lp.SandboxInfo()
 	first.WritableRoots[0] = "/mutated"
+	first.ReadOnlyRoots[0] = "/mutated-ro"
 	second := lp.SandboxInfo()
 
 	if got := second.WritableRoots[0]; got != "/workspace" {
 		t.Fatalf("second SandboxInfo root = %q, want immutable policy root", got)
 	}
+	if got := second.ReadOnlyRoots[0]; got != "/usr" {
+		t.Fatalf("second SandboxInfo read-only root = %q, want immutable policy root", got)
+	}
 	if got := policy.WritableRoots[0]; got != "/workspace" {
 		t.Fatalf("policy root = %q after accessor mutation", got)
+	}
+	if got := policy.ReadOnlyRoots[0]; got != "/usr" {
+		t.Fatalf("policy read-only root = %q after accessor mutation", got)
 	}
 }
 

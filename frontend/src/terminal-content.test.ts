@@ -324,7 +324,16 @@ describe('sandboxed session launch failure', () => {
       null,
       () => {},
       undefined,
-      { sandbox: { workspace: '/workspace', settingsRevision: 0, add: [], remove: [] } },
+      {
+        sandbox: {
+          workspace: '/workspace',
+          settingsRevision: 0,
+          addWritable: [],
+          removeWritable: [],
+          addReadOnly: [],
+          removeReadOnly: [],
+        },
+      },
     )
     const tab = new Tab(
       content,
@@ -401,8 +410,10 @@ describe('sandboxed session launch failure', () => {
     expect(client.openSandboxedSession).toHaveBeenCalledWith(80, 24, {
       workspace: '/workspace',
       settingsRevision: 0,
-      add: [],
-      remove: [],
+      addWritable: [],
+      removeWritable: [],
+      addReadOnly: [],
+      removeReadOnly: [],
     })
     expect(client.openSession).not.toHaveBeenCalled()
     expect(showToast).toHaveBeenCalledWith({

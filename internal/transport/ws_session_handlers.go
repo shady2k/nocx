@@ -130,8 +130,8 @@ type openHandlers struct {
 	panes paneWorkspaces
 	sandboxEnabled func() bool
 	// settings is the atomic snapshot seam: handleOpen reads enabled,
-	// sandbox.allowedWritablePaths and the revision from one GetSnapshot
-	// call (ADR-0031 invariant 3). nil means no registry — a sandbox
+	// sandbox.allowedWritablePaths, sandbox.allowedReadOnlyPaths and the
+	// revision from one GetSnapshot call. nil means no registry — a sandbox
 	// request then fails closed as disabled.
 	settings capability.SettingsService
 	settings capability.SettingsService
@@ -306,7 +306,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	// Presence of a sandbox object is the sole wire opt-in; omitted means
-	// ordinary local and null is rejected at decode (ADR-0031 §5). The
+	// ordinary local and null is rejected at decode (ADR-0036 §5). The
 	// backend reads one settings snapshot, gates the experimental flag,
 	// validates the local-only boundary, and canonicalizes the workspace
 	// once for cmd.Dir, policy input, session CWD, and result metadata.
@@ -335,7 +335,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: settings revision mismatch"})
 			return
 		}
-		globals, globalsErr := sandboxGlobals(snap)
+		globalWritable, globalReadOnly, globalsErr := sandboxBaselines(snap)
 		if globalsErr != nil {
 			h.log.Error("sandbox setup failed", "reason", "setup-failed")
 			_ = wconn.TryError(req.ID, RPCError{Code: -32012, Message: "sandbox setup failed", Data: map[string]any{"reason": "setup-failed"}})
@@ -346,7 +346,15 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
-		sandboxReq = &sandbox.Request{Workspace: workspace, Global: globals, Add: params.Sandbox.Add, Remove: params.Sandbox.Remove}
+		sandboxReq = &sandbox.Request{
+			Workspace:      workspace,
+			GlobalWritable: globalWritable,
+			GlobalReadOnly: globalReadOnly,
+			AddWritable:    params.Sandbox.AddWritable,
+			RemoveWritable: params.Sandbox.RemoveWritable,
+			AddReadOnly:    params.Sandbox.AddReadOnly,
+			RemoveReadOnly: params.Sandbox.RemoveReadOnly,
+		}
 	}
 	cfg := session.Config{
 		Kind: session.KindLocal,
@@ -1414,11 +1422,11 @@ func validateAckRaw(raw json.RawMessage) string {
 	return ""
 }
 
-// maxSandboxPaths bounds each sandbox add/remove array and the persisted
-// allowedWritablePaths baseline (ADR-0034 §3.1 maxEntries).
+// maxSandboxPaths bounds each sandbox delta array and each persisted baseline
+// (allowedWritablePaths/allowedReadOnlyPaths) (ADR-0036 §3.1 maxEntries).
 const maxSandboxPaths = 32
 
-// --- strict open decoding (ADR-0034 §5) ------------------------------------
+// --- strict open decoding (ADR-0036 §5) ------------------------------------
 
 // decodeOpenParams strictly decodes the "open" params. The permissive
 // json.Unmarshal is gone: an unknown member (including the obsolete
@@ -1525,7 +1533,9 @@ func decodeOpenParams(data []byte) (openParams, error) {
 
 // decodeOpenSandbox decodes the nested sandbox block. null is not a valid
 // opt-in; unknown/duplicate members, wrong types, missing workspace or
-// settingsRevision, and malformed add/remove arrays are all refused.
+// settingsRevision, and malformed addWritable/removeWritable/addReadOnly/
+// removeReadOnly arrays are all refused. The obsolete writable-only
+// add/remove members are not recognised and are rejected as unknown.
 func decodeOpenSandbox(dec *json.Decoder) (*openSandboxParams, error) {
 	tok, tokenErr := dec.Token()
 	if tokenErr != nil {
@@ -1539,7 +1549,7 @@ func decodeOpenSandbox(dec *json.Decoder) (*openSandboxParams, error) {
 	}
 
 	var sb openSandboxParams
-	seen := make(map[string]bool, 4)
+	seen := make(map[string]bool, 6)
 	for dec.More() {
 		keyTok, keyErr := dec.Token()
 		if keyErr != nil {
@@ -1573,18 +1583,30 @@ func decodeOpenSandbox(dec *json.Decoder) (*openSandboxParams, error) {
 				return nil, errors.New("sandbox settingsRevision: must be >= 0")
 			}
 			sb.SettingsRevision = *n
-		case "add":
+		case "addWritable":
 			arr, err := decodeStringArray(dec)
 			if err != nil {
-				return nil, fmt.Errorf("sandbox add: %w", err)
+				return nil, fmt.Errorf("sandbox addWritable: %w", err)
 			}
-			sb.Add = arr
-		case "remove":
+			sb.AddWritable = arr
+		case "removeWritable":
 			arr, err := decodeStringArray(dec)
 			if err != nil {
-				return nil, fmt.Errorf("sandbox remove: %w", err)
+				return nil, fmt.Errorf("sandbox removeWritable: %w", err)
 			}
-			sb.Remove = arr
+			sb.RemoveWritable = arr
+		case "addReadOnly":
+			arr, err := decodeStringArray(dec)
+			if err != nil {
+				return nil, fmt.Errorf("sandbox addReadOnly: %w", err)
+			}
+			sb.AddReadOnly = arr
+		case "removeReadOnly":
+			arr, err := decodeStringArray(dec)
+			if err != nil {
+				return nil, fmt.Errorf("sandbox removeReadOnly: %w", err)
+			}
+			sb.RemoveReadOnly = arr
 		default:
 			return nil, fmt.Errorf("sandbox: unknown member %q", key)
 		}
@@ -1658,23 +1680,39 @@ func decodeStringField(dec *json.Decoder) (string, error) {
 	return *s, nil
 }
 
-// sandboxGlobals reads the writable baseline from one settings snapshot and
-// returns a deep copy. A missing key, a non-[]string value (a type-corrupted
-// or over-count persisted list), or more than maxSandboxPaths entries is
-// backend state failure: the caller answers -32012 setup-failed, never an
-// empty (silently narrowed) list. A disappeared directory stays in the list
-// and is revalidated by the backend (SetupError), not silently dropped.
-func sandboxGlobals(snap settings.SettingsSnapshot) ([]string, error) {
-	raw, ok := snap.Values[settings.SandboxAllowedWritablePaths.Key()]
+// sandboxBaselines reads both path-list baselines from one settings snapshot
+// and returns deep copies. A missing key, a non-[]string value (a
+// type-corrupted or over-count persisted list), or more than maxSandboxPaths
+// entries for either the writable or read-only key is backend state failure:
+// the caller answers -32012 setup-failed, never an empty (silently narrowed)
+// list. A disappeared directory stays in the list and is revalidated by the
+// backend (SetupError), not silently dropped.
+func sandboxBaselines(snap settings.SettingsSnapshot) (writable, readOnly []string, err error) {
+	writable, err = sandboxPathList(snap, settings.SandboxAllowedWritablePaths.Key())
+	if err != nil {
+		return nil, nil, err
+	}
+	readOnly, err = sandboxPathList(snap, settings.SandboxAllowedReadOnlyPaths.Key())
+	if err != nil {
+		return nil, nil, err
+	}
+	return writable, readOnly, nil
+}
+
+// sandboxPathList reads one persisted path-list baseline from a settings
+// snapshot and returns a deep copy. A missing key, a non-[]string value, or
+// an over-count list is backend state failure.
+func sandboxPathList(snap settings.SettingsSnapshot, key string) ([]string, error) {
+	raw, ok := snap.Values[key]
 	if !ok {
-		return nil, errors.New("sandbox.allowedWritablePaths missing from settings snapshot")
+		return nil, fmt.Errorf("%s missing from settings snapshot", key)
 	}
 	paths, ok := raw.([]string)
 	if !ok {
-		return nil, errors.New("sandbox.allowedWritablePaths is not a recognized path list")
+		return nil, fmt.Errorf("%s is not a recognized path list", key)
 	}
 	if len(paths) > maxSandboxPaths {
-		return nil, fmt.Errorf("sandbox.allowedWritablePaths has %d entries (max %d)", len(paths), maxSandboxPaths)
+		return nil, fmt.Errorf("%s has %d entries (max %d)", key, len(paths), maxSandboxPaths)
 	}
 	return append([]string(nil), paths...), nil
 }

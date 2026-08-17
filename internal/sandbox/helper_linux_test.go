@@ -74,13 +74,18 @@ func TestLandlockEnforcement(t *testing.T) {
 	home := filepath.Join(base, "runtime", "home")
 	tmp := filepath.Join(base, "runtime", "tmp")
 	sentinel := filepath.Join(base, "sentinel-secret.txt")
-	for _, d := range []string{workspace, home, tmp} {
+	roRoot := filepath.Join(base, "ro-root")
+	rwRoot := filepath.Join(base, "rw-root")
+	for _, d := range []string{workspace, home, tmp, roRoot, rwRoot} {
 		if mkErr := os.MkdirAll(d, 0o750); mkErr != nil {
 			t.Fatalf("mkdir %s: %v", d, mkErr)
 		}
 	}
 	if wErr := os.WriteFile(sentinel, []byte("top secret"), 0o600); wErr != nil {
 		t.Fatalf("write sentinel: %v", wErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(roRoot, "keep.txt"), []byte("read-only"), 0o600); wErr != nil {
+		t.Fatalf("write read-only fixture: %v", wErr)
 	}
 	// A hard link to the sentinel that already exists inside the writable
 	// root before launch: the documented hierarchy-not-inode limitation.
@@ -102,11 +107,17 @@ func TestLandlockEnforcement(t *testing.T) {
 		"NOCX_SB_PREHARD="+preHard,
 		"NOCX_SB_HOME="+home,
 		"NOCX_SB_TMP="+tmp,
+		"NOCX_SB_RO_ROOT="+roRoot,
+		"NOCX_SB_RW_ROOT="+rwRoot,
 		helperEnvPrefix+"LEAK=must-be-stripped",
 	)
 	spec := CommandSpec{Path: exe, Args: []string{"-test.run=TestSandboxChildProcess"}, Dir: workspace, Env: probeEnv}
 
-	pol, err := BuildPolicy(Request{Workspace: workspace}, exe, filepath.Join(base, "runtime"), probeEnv)
+	pol, err := BuildPolicy(Request{
+		Workspace:   workspace,
+		AddReadOnly: []string{roRoot},
+		AddWritable: []string{rwRoot},
+	}, exe, filepath.Join(base, "runtime"), probeEnv)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}

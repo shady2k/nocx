@@ -46,8 +46,8 @@ type Pty interface {
 
 // SandboxInfoProvider is implemented by local PTYs that were prepared as
 // sandboxed sessions. The session layer reads the immutable metadata from it
-// so the open result can carry {backend, workspace, writableRoots} (design
-// spec §3.3). Ordinary PTYs do not implement it.
+// so the open result can carry {backend, workspace, writableRoots,
+// readOnlyRoots} (design spec §8). Ordinary PTYs do not implement it.
 type SandboxInfoProvider interface {
 	SandboxInfo() *sandbox.SessionInfo
 }

@@ -280,6 +280,7 @@ func (lp *LocalPty) SandboxInfo() *sandbox.SessionInfo {
 		Backend:       lp.prepared.Backend,
 		Workspace:     lp.prepared.Policy.Workspace,
 		WritableRoots: append([]string(nil), lp.prepared.Policy.WritableRoots...),
+		ReadOnlyRoots: append([]string(nil), lp.prepared.Policy.ReadOnlyRoots...),
 	}
 }
 

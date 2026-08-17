@@ -566,8 +566,8 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		writeDone:    make(chan struct{}),
 	}
 	// Sandbox metadata rides up from the PTY so the open result can carry
-	// {backend, workspace, writableRoots} without the transport owning any
-	// policy (design spec §4.5). Only local PTYs can be sandboxed.
+	// {backend, workspace, writableRoots, readOnlyRoots} without the transport
+	// owning any policy (design spec §8). Only local PTYs can be sandboxed.
 	if pt != nil {
 		if pi, ok := pt.(pty.SandboxInfoProvider); ok {
 			s.sandboxInfo = pi.SandboxInfo()

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -89,26 +88,25 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	if err != nil {
 		return fail(err)
 	}
-	if trustedErr := addTrustedExecutables(pol, spec.TrustedExecutables); trustedErr != nil {
+
+	// The shim runs under the Seatbelt profile, so its own executable must be
+	// readable. Route it through addTrustedExecutables so writable conflicts,
+	// dependency roots, root-count, and serialized-size bounds are checked
+	// before render. No policy mutation after the final validation.
+	exe, err := os.Executable()
+	if err != nil {
+		return fail(NewSetupErrorf("executable path: %v", err))
+	}
+	trusted := make([]string, 0, len(spec.TrustedExecutables)+1)
+	trusted = append(trusted, exe)
+	trusted = append(trusted, spec.TrustedExecutables...)
+	if trustedErr := addTrustedExecutables(pol, trusted); trustedErr != nil {
 		return fail(trustedErr)
 	}
 	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
 	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
 	// already consumed the base PATH above.
 	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
-
-	// The shim runs under the Seatbelt profile, so its own executable must be
-	// readable. Add the canonical shim path through the same read-only file
-	// mechanism the shell uses before rendering.
-	exe, err := os.Executable()
-	if err != nil {
-		return fail(NewSetupErrorf("executable path: %v", err))
-	}
-	shimCanon, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		return fail(NewSetupErrorf("shim executable: %v", err))
-	}
-	pol.ReadOnlyFiles = dedupeKeepOrder(append(pol.ReadOnlyFiles, shimCanon))
 
 	profile, err := renderProfile(pol)
 	if err != nil {

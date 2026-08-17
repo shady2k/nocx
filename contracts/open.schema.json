@@ -44,14 +44,18 @@
       "enum": ["auto", "raw", "script", "relay"]
     },
     "sandbox": {
-      "description": "Immutable realized sandbox metadata for a sandboxed local session (ADR-0033, ADR-0034). Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.",
+      "description": "Immutable realized sandbox metadata for a sandboxed local session (ADR-0033, ADR-0036). Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["backend", "workspace", "writableRoots"],
+      "required": ["backend", "workspace", "writableRoots", "readOnlyRoots"],
       "properties": {
         "backend": { "type": "string", "enum": ["landlock", "seatbelt"] },
         "workspace": { "type": "string", "minLength": 1 },
         "writableRoots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "readOnlyRoots": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         }

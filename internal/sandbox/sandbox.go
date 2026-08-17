@@ -40,18 +40,22 @@ const (
 const helperEnvPrefix = "NOCX_SANDBOX_HELPER_"
 
 // Request carries the backend-owned policy inputs for one sandboxed tab
-// (design spec §6). Global is the persisted baseline of additional writable
-// directories; Add and Remove are the per-tab deltas. RuntimeRoot is minted
-// by the composition root for a sandboxed enhanced launch so its private
-// bootstrap artefact is born inside the tree the native backend will enforce;
-// it is never decoded from the renderer. The backend canonicalizes every
-// user path and never mutates the caller's slices.
+// (design spec §6). GlobalWritable and GlobalReadOnly are the persisted
+// baselines of additional writable and read-only directories; Add*/Remove*
+// are the class-scoped per-tab deltas. RuntimeRoot is minted by the
+// composition root for a sandboxed enhanced launch so its private bootstrap
+// artefact is born inside the tree the native backend will enforce; it is
+// never decoded from the renderer. The backend canonicalizes every user path
+// and never mutates the caller's slices.
 type Request struct {
-	Workspace   string
-	Global      []string
-	Add         []string
-	Remove      []string
-	RuntimeRoot string `json:"-"`
+	Workspace      string
+	GlobalWritable []string
+	GlobalReadOnly []string
+	AddWritable    []string
+	RemoveWritable []string
+	AddReadOnly    []string
+	RemoveReadOnly []string
+	RuntimeRoot    string `json:"-"`
 }
 
 // Status reports backend availability. It is the payload of sandbox.status
@@ -144,6 +148,7 @@ type SessionInfo struct {
 	Backend       string   `json:"backend"`
 	Workspace     string   `json:"workspace"`
 	WritableRoots []string `json:"writableRoots"`
+	ReadOnlyRoots []string `json:"readOnlyRoots"`
 }
 
 // Clone returns a deep copy so session metadata cannot be mutated through an
@@ -156,6 +161,7 @@ func (s *SessionInfo) Clone() *SessionInfo {
 		Backend:       s.Backend,
 		Workspace:     s.Workspace,
 		WritableRoots: append([]string(nil), s.WritableRoots...),
+		ReadOnlyRoots: append([]string(nil), s.ReadOnlyRoots...),
 	}
 }
 

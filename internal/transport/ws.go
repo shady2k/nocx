@@ -2191,10 +2191,10 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
-	// Sandbox is the strict opt-in filesystem sandbox request (ADR-0034 §5).
+	// Sandbox is the strict opt-in filesystem sandbox request (ADR-0036 §5).
 	// A present, valid object opts in; omitted means ordinary local; null is
 	// rejected at decode. The renderer supplies workspace, settingsRevision
-	// and bounded add/remove deltas — never policy roots.
+	// and bounded class-scoped add/remove deltas — never policy roots.
 	Sandbox *openSandboxParams `json:"sandbox"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
@@ -2245,14 +2245,16 @@ type openParentParams struct {
 }
 
 // openSandboxParams is the strictly-decoded sandbox block of open
-// (ADR-0034 §5). workspace and settingsRevision are required; add and remove
-// are optional bounded deltas. Populated by decodeOpenSandbox, never by a
-// permissive Unmarshal.
+// (ADR-0036 §5). workspace and settingsRevision are required; addWritable,
+// removeWritable, addReadOnly and removeReadOnly are optional bounded deltas.
+// Populated by decodeOpenSandbox, never by a permissive Unmarshal.
 type openSandboxParams struct {
 	Workspace        string
 	SettingsRevision int
-	Add              []string
-	Remove           []string
+	AddWritable      []string
+	RemoveWritable   []string
+	AddReadOnly      []string
+	RemoveReadOnly   []string
 }
 
 // resizeParams is the payload of the "resize" RPC method.

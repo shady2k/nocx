@@ -70,30 +70,51 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	}
 
 	// Bounded per-list (design spec §3.1 maxEntries, §5.1): overflow is a
-	// request error for add/remove and backend-state error for the global
-	// baseline. Checked before canonicalization so oversized lists never
-	// resolve a single path.
-	if len(req.Global) > maxUserPaths {
-		return nil, NewSetupErrorf("global path list exceeds %d entries", maxUserPaths)
+	// request error for deltas and backend-state error for the baselines.
+	// Checked before canonicalization so oversized lists never resolve a
+	// single path.
+	if len(req.GlobalWritable) > maxUserPaths {
+		return nil, NewSetupErrorf("global writable list exceeds %d entries", maxUserPaths)
 	}
-	if len(req.Add) > maxUserPaths {
-		return nil, NewValidationErrorf("addition list exceeds %d entries", maxUserPaths)
+	if len(req.GlobalReadOnly) > maxUserPaths {
+		return nil, NewSetupErrorf("global read-only list exceeds %d entries", maxUserPaths)
 	}
-	if len(req.Remove) > maxUserPaths {
-		return nil, NewValidationErrorf("removal list exceeds %d entries", maxUserPaths)
+	if len(req.AddWritable) > maxUserPaths {
+		return nil, NewValidationErrorf("writable addition list exceeds %d entries", maxUserPaths)
+	}
+	if len(req.RemoveWritable) > maxUserPaths {
+		return nil, NewValidationErrorf("writable removal list exceeds %d entries", maxUserPaths)
+	}
+	if len(req.AddReadOnly) > maxUserPaths {
+		return nil, NewValidationErrorf("read-only addition list exceeds %d entries", maxUserPaths)
+	}
+	if len(req.RemoveReadOnly) > maxUserPaths {
+		return nil, NewValidationErrorf("read-only removal list exceeds %d entries", maxUserPaths)
 	}
 
-	// Canonical persisted global baseline (setup failures) and per-tab
-	// additions/removals (request validation failures).
-	globals, err := canonicalPaths(req.Global, setupPathErr)
+	// Canonical persisted baselines (setup failures) and per-tab deltas
+	// (request validation failures).
+	globalWritable, err := canonicalPaths(req.GlobalWritable, setupPathErr)
 	if err != nil {
 		return nil, err
 	}
-	adds, err := canonicalPaths(req.Add, requestPathErr)
+	globalReadOnly, err := canonicalPaths(req.GlobalReadOnly, setupPathErr)
 	if err != nil {
 		return nil, err
 	}
-	removes, err := canonicalPaths(req.Remove, requestPathErr)
+	addWritable, err := canonicalPaths(req.AddWritable, requestPathErr)
+	if err != nil {
+		return nil, err
+	}
+	removeWritable, err := canonicalPaths(req.RemoveWritable, requestPathErr)
+	if err != nil {
+		return nil, err
+	}
+	addReadOnly, err := canonicalPaths(req.AddReadOnly, requestPathErr)
+	if err != nil {
+		return nil, err
+	}
+	removeReadOnly, err := canonicalPaths(req.RemoveReadOnly, requestPathErr)
 	if err != nil {
 		return nil, err
 	}
@@ -105,61 +126,107 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	if writableRootIsProtected(canon, sysRoots) {
 		return nil, NewValidationErrorf("workspace conflicts with a read-only system root")
 	}
-	for _, g := range globals {
+	for _, g := range globalWritable {
 		if writableRootIsProtected(g, sysRoots) {
-			return nil, NewSetupErrorf("global path conflicts with a read-only system root")
+			return nil, NewSetupErrorf("global writable path conflicts with a read-only system root")
 		}
 	}
-	for _, a := range adds {
+	for _, a := range addWritable {
 		if writableRootIsProtected(a, sysRoots) {
-			return nil, NewValidationErrorf("addition conflicts with a read-only system root")
+			return nil, NewValidationErrorf("writable addition conflicts with a read-only system root")
 		}
 	}
 
-	// Validate the removal set against the effective grant.
+	// Class-scoped removal validation against the effective grant. A removal
+	// must match the same class's baseline via filesystem identity (exact
+	// directory, not lexical string); a mandatory writable root or a
+	// same-class add/remove collision is invalid.
 	gitRoot, hasGit := gitCommonDir(canon)
-	globalSet := make(map[string]bool, len(globals))
-	for _, g := range globals {
-		globalSet[g] = true
+
+	// pathInSet reports whether path is filesystem-equivalent to any entry
+	// in set (all canonical).
+	pathInSet := func(path string, set []string) bool {
+		for _, s := range set {
+			if sameDir(path, s) {
+				return true
+			}
+		}
+		return false
 	}
-	addSet := make(map[string]bool, len(adds))
-	for _, a := range adds {
-		addSet[a] = true
-	}
-	removedSet := make(map[string]bool, len(removes))
-	for _, r := range removes {
-		if addSet[r] {
-			return nil, NewValidationErrorf("same path added and removed")
+
+	for _, r := range removeWritable {
+		if pathInSet(r, addWritable) {
+			return nil, NewValidationErrorf("same writable path added and removed")
 		}
 		if r == canon || (hasGit && r == gitRoot) || r == home || r == tmp {
 			return nil, NewValidationErrorf("cannot remove a mandatory root")
 		}
-		if !globalSet[r] {
-			return nil, NewValidationErrorf("removal does not match an allowed path")
+		if !pathInSet(r, globalWritable) {
+			return nil, NewValidationErrorf("writable removal does not match an allowed path")
 		}
-		removedSet[r] = true
+	}
+
+	for _, r := range removeReadOnly {
+		if pathInSet(r, addReadOnly) {
+			return nil, NewValidationErrorf("same read-only path added and removed")
+		}
+		if !pathInSet(r, globalReadOnly) {
+			return nil, NewValidationErrorf("read-only removal does not match an allowed path")
+		}
 	}
 
 	// Writable roots in the fixed order the spec fixes (design spec §6.2):
-	// workspace, optional Git common dir, global minus exact removals,
-	// additions, ephemeral home/tmp.
+	// workspace, optional Git common dir, global writable minus exact
+	// removals, writable additions, ephemeral home/tmp.
 	writable := []string{canon}
 	if hasGit {
 		writable = append(writable, gitRoot)
 	}
-	for _, g := range globals {
-		if !removedSet[g] {
+	for _, g := range globalWritable {
+		if !pathInSet(g, removeWritable) {
 			writable = append(writable, g)
 		}
 	}
-	writable = append(writable, adds...)
+	writable = append(writable, addWritable...)
 	writable = append(writable, home, tmp)
 
-	// Read-only roots: the canonical system set, canonical execution roots,
-	// and absolute directories from inherited PATH. Missing optional roots are
-	// skipped; permission and canonicalization errors are fatal.
-	readonly := make([]string, 0, len(sysRoots)+16)
+	// Cross-class containment (design spec §6, binding invariant 6): a
+	// requested read-only root must not equal or descend from an effective
+	// writable root — the native additive policy cannot honor the read-only
+	// grant there. A writable child under a read-only ancestor remains the
+	// one allowed exception. Provenance decides the failure class: a delta on
+	// either side is a request error (-32602); a baseline-only conflict is a
+	// setup failure (-32012). This runs before normalize so a requested
+	// conflict is never silently resolved writable-wins.
+	for _, g := range globalReadOnly {
+		if pathInSet(g, removeReadOnly) {
+			continue
+		}
+		if w, ok := conflictingWritable(g, writable); ok {
+			if pathInSet(w, addWritable) {
+				return nil, NewValidationErrorf("persisted read-only path conflicts with a requested writable path")
+			}
+			return nil, NewSetupErrorf("persisted read-only path conflicts with a writable path")
+		}
+	}
+	for _, a := range addReadOnly {
+		if _, ok := conflictingWritable(a, writable); ok {
+			return nil, NewValidationErrorf("read-only path conflicts with a writable path")
+		}
+	}
+
+	// Read-only roots: the canonical system set, user read-only baseline minus
+	// exact removals, read-only additions, absolute directories from inherited
+	// PATH, and execution roots. Missing optional roots are skipped;
+	// permission and canonicalization errors are fatal.
+	readonly := make([]string, 0, len(sysRoots)+len(globalReadOnly)+len(addReadOnly)+16)
 	readonly = append(readonly, sysRoots...)
+	for _, g := range globalReadOnly {
+		if !pathInSet(g, removeReadOnly) {
+			readonly = append(readonly, g)
+		}
+	}
+	readonly = append(readonly, addReadOnly...)
 
 	shellCanon, err := filepath.EvalSymlinks(shellPath)
 	if err != nil {
@@ -204,7 +271,7 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 		Tmp:           tmp,
 	}
 	if err := p.normalize(); err != nil {
-		return nil, err
+		return nil, NewSetupErrorf("policy: %v", err)
 	}
 	return p, nil
 }
@@ -215,13 +282,13 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 // root-count bounds. It is the first check the Linux helper applies to the
 // decoded FD payload.
 func ValidatePolicy(p *Policy) error {
-	seenRW := make(map[string]bool, len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs))
+	seenRW := make([]string, 0, len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs))
 	for _, roots := range [][]string{p.WritableRoots, p.WritableFiles, p.WritableDirs} {
 		for _, root := range roots {
 			if err := validatePolicyPath(root); err != nil {
 				return err
 			}
-			seenRW[root] = true
+			seenRW = append(seenRW, root)
 		}
 	}
 	for _, roots := range [][]string{p.ReadOnlyRoots, p.ReadOnlyFiles} {
@@ -229,9 +296,19 @@ func ValidatePolicy(p *Policy) error {
 			if err := validatePolicyPath(root); err != nil {
 				return err
 			}
-			if seenRW[root] {
-				return fmt.Errorf("sandbox: conflicting permissions for %q: read-write and read-only", root)
+			for _, rw := range seenRW {
+				if sameDir(root, rw) {
+					return fmt.Errorf("sandbox: conflicting permissions: read-write and read-only")
+				}
 			}
+		}
+	}
+	// A read-only root or file must not sit inside a writable directory root:
+	// the writable grant would subsume the read-only one (binding invariant 6).
+	writableDirs := append(append([]string(nil), p.WritableRoots...), p.WritableDirs...)
+	for _, root := range append(append([]string(nil), p.ReadOnlyRoots...), p.ReadOnlyFiles...) {
+		if _, ok := conflictingWritable(root, writableDirs); ok {
+			return fmt.Errorf("sandbox: read-only path conflicts with a writable root")
 		}
 	}
 	for _, field := range []string{p.Workspace, p.Shell, p.Home, p.Tmp} {
@@ -265,38 +342,106 @@ func (p *Policy) normalize() error {
 	p.WritableRoots = dedupeKeepOrder(p.WritableRoots)
 	p.WritableFiles = dedupeKeepOrder(p.WritableFiles)
 	p.WritableDirs = dedupeKeepOrder(p.WritableDirs)
-	writable := make(map[string]bool, len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs))
-	for _, roots := range [][]string{p.WritableRoots, p.WritableFiles, p.WritableDirs} {
-		for _, root := range roots {
-			writable[root] = true
-		}
-	}
-	p.ReadOnlyRoots = removeWritable(p.ReadOnlyRoots, writable)
-	p.ReadOnlyFiles = removeWritable(p.ReadOnlyFiles, writable)
+	writableDirs := append(append([]string(nil), p.WritableRoots...), p.WritableDirs...)
+	p.ReadOnlyRoots = removeUnderWritable(p.ReadOnlyRoots, writableDirs)
+	p.ReadOnlyFiles = removeUnderWritable(p.ReadOnlyFiles, writableDirs)
 	return ValidatePolicy(p)
 }
 
 func dedupeKeepOrder(in []string) []string {
-	seen := make(map[string]bool, len(in))
 	out := make([]string, 0, len(in))
 	for _, s := range in {
-		if seen[s] {
-			continue
+		dup := false
+		for _, seen := range out {
+			if sameDir(s, seen) {
+				dup = true
+				break
+			}
 		}
-		seen[s] = true
-		out = append(out, s)
+		if !dup {
+			out = append(out, s)
+		}
 	}
 	return out
 }
 
-func removeWritable(in []string, writable map[string]bool) []string {
+// removeUnderWritable drops read-only entries that an effective writable
+// directory root already subsumes (equal or descendant). Backend-derived
+// read-only roots (PATH directories, loader roots) resolve this way so the
+// writable grant stays authoritative; a user-requested read-only root never
+// reaches here — BuildPolicy rejects it before construction.
+func removeUnderWritable(in []string, writable []string) []string {
 	out := make([]string, 0, len(in))
 	for _, root := range in {
-		if !writable[root] {
-			out = append(out, root)
+		if _, ok := conflictingWritable(root, writable); ok {
+			continue
 		}
+		out = append(out, root)
 	}
 	return dedupeKeepOrder(out)
+}
+
+// conflictingWritable returns the first writable directory root that path
+// equals or descends from, or ok=false. Component-aware via pathWithin.
+func conflictingWritable(path string, writable []string) (string, bool) {
+	for _, w := range writable {
+		if pathWithin(w, path) {
+			return w, true
+		}
+	}
+	return "", false
+}
+
+// pathWithin reports whether path equals root or is a descendant of root,
+// component-aware. It uses a cheap lexical fast path (filepath.Rel) and falls
+// back to filesystem identity (os.SameFile) to catch case-insensitive and
+// normalization aliases that lexical comparison would miss.
+func pathWithin(root, path string) bool {
+	// Lexical fast path: exact string match or component-aware descendant.
+	rel, err := filepath.Rel(root, path)
+	if err == nil {
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+			return true
+		}
+	}
+	// Filesystem identity fallback: walk path parents; if any ancestor (or
+	// path itself) is the same file as root, it is within. Fail closed on
+	// stat errors — only the lexical fast path widens permissions.
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return false
+	}
+	for p := path; ; p = filepath.Dir(p) {
+		info, err := os.Stat(p)
+		if err != nil {
+			return false
+		}
+		if os.SameFile(rootInfo, info) {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+	}
+	return false
+}
+
+// sameDir reports whether two canonical paths refer to the same directory,
+// falling back to os.SameFile for case-insensitive/case-normalizing
+// filesystems where lexical comparison is not identity. Fails closed: a stat
+// failure that would let the caller widen permissions returns false, so the
+// caller conservatively treats the paths as distinct.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fiA, errA := os.Stat(a)
+	fiB, errB := os.Stat(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return os.SameFile(fiA, fiB)
 }
 
 func validatePolicyPath(p string) error {
@@ -307,7 +452,7 @@ func validatePolicyPath(p string) error {
 		return errors.New("sandbox: NUL byte in policy path")
 	}
 	if !filepath.IsAbs(p) {
-		return errors.New("sandbox: non-absolute path in policy: " + p)
+		return errors.New("sandbox: non-absolute path in policy")
 	}
 	return nil
 }
@@ -399,20 +544,11 @@ func canonicalSystemRoots() ([]string, error) {
 }
 
 // writableRootIsProtected reports whether a canonical writable candidate is
-// equal to or an ancestor of any canonical system read-only root. The check is
-// component-aware via filepath.Rel — never string-prefix comparison, so
-// /usrlocal is not mistaken for a descendant of /usr.
+// equal to or an ancestor of any canonical system read-only root.
 func writableRootIsProtected(candidate string, systemRoots []string) bool {
 	for _, root := range systemRoots {
-		rel, err := filepath.Rel(candidate, root)
-		if err != nil {
-			continue
-		}
-		if rel == "." {
-			return true // candidate equals the read-only root
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return true // the read-only root lives under the candidate
+		if pathWithin(candidate, root) {
+			return true
 		}
 	}
 	return false

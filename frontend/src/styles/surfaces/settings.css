@@ -325,7 +325,7 @@
 .ui-settings-modified-dot[data-modified='true'] {
   background: var(--color-warning);
 }
-/* ── Paths control (sandbox writable allowlist) ────────────────────────
+/* ── Paths control (sandbox read-only and read & write folders) ────────────
    Placement only: the list fills the control column (which otherwise flushes
    one-line controls right), and its reset affordance sits beside it in the
    same gutter every other row reserves. The row content is the kit's — a

@@ -902,12 +902,21 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   /** Append a picked directory to a `paths` setting and save the complete
    *  array (ADR-0034 §4.1). A cancelled picker (empty path) is a no-op; an
-   *  unavailable native runtime surfaces in the row's existing error slot. */
+   *  unavailable native runtime surfaces in the row's existing error slot.
+   *  An exact match in the peer sandbox path list is refused immediately with
+   *  visible feedback — the backend is authoritative for aliases/containment. */
   async function addPath(decl: Declaration): Promise<void> {
     if (!props.dialogClient) return
     try {
       const picked = await props.dialogClient.openDirectoryDialog()
       if (!picked.path) return
+      // Refuse an exact pick already active in the peer sandbox path list.
+      const peerKey = sandboxPeerKey(decl.key)
+      if (peerKey !== null && pathsValue(peerKey).includes(picked.path)) {
+        setErrors(decl.key, 'This path is already active in the peer sandbox list')
+        return
+      }
+      setErrors(decl.key, undefined as never)
       const current = pathsValue(decl.key)
       const next = current.includes(picked.path) ? current : [...current, picked.path]
       await saveSetting(decl.key, next)
@@ -1131,6 +1140,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
   function pathsValue(key: string): string[] {
     const v = effectiveValue(key)
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  }
+
+  /** The peer sandbox path-list key, or null when key is not a sandbox path class. */
+  function sandboxPeerKey(key: string): string | null {
+    if (key === 'sandbox.allowedWritablePaths') return 'sandbox.allowedReadOnlyPaths'
+    if (key === 'sandbox.allowedReadOnlyPaths') return 'sandbox.allowedWritablePaths'
+    return null
   }
 
   /**

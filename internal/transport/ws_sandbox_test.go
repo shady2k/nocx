@@ -343,6 +343,7 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 		policy: &sandbox.Policy{
 			Workspace:     canon,
 			WritableRoots: []string{canon, filepath.Join(base, "rt", "home"), filepath.Join(base, "rt", "tmp")},
+			ReadOnlyRoots: []string{filepath.Join(base, "usr"), filepath.Join(base, "rt", "ro")},
 		},
 	}
 	wsrv, reg := newSandboxHarness(t, svc)
@@ -361,6 +362,7 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 				Backend       string   `json:"backend"`
 				Workspace     string   `json:"workspace"`
 				WritableRoots []string `json:"writableRoots"`
+				ReadOnlyRoots []string `json:"readOnlyRoots"`
 			} `json:"sandbox"`
 		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error"`
@@ -382,6 +384,9 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 	}
 	if len(result.Result.Sandbox.WritableRoots) != 3 {
 		t.Errorf("writableRoots = %v, want 3 roots", result.Result.Sandbox.WritableRoots)
+	}
+	if len(result.Result.Sandbox.ReadOnlyRoots) != 2 {
+		t.Errorf("readOnlyRoots = %v, want 2 roots", result.Result.Sandbox.ReadOnlyRoots)
 	}
 	// The canonical workspace drives session CWD (ADR-0034 item 9): the same
 	// value reaches session.Config.Cwd and comes back as the open result's
@@ -524,14 +529,21 @@ func TestOpen_SandboxStrictShapes(t *testing.T) {
 		{"sandbox revision null", base(map[string]any{"workspace": wsPath, "settingsRevision": nil})},
 		{"sandbox revision negative", base(map[string]any{"workspace": wsPath, "settingsRevision": -1})},
 		{"sandbox revision wrong type", base(map[string]any{"workspace": wsPath, "settingsRevision": "1"})},
-		{"sandbox add null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": nil})},
-		{"sandbox add not array", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": "x"})},
-		{"sandbox add non-string element", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": []any{1}})},
-		{"sandbox add null element", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": []any{nil}})},
-		{"sandbox add duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": []string{"a", "a"}})},
-		{"sandbox add oversized", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": manyStrings(33)})},
-		{"sandbox remove null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "remove": nil})},
-		{"sandbox remove duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "remove": []string{"a", "a"}})},
+		{"sandbox obsolete add member", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": []string{"a"}})},
+		{"sandbox obsolete remove member", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "remove": []string{"a"}})},
+		{"sandbox addWritable null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": nil})},
+		{"sandbox addWritable not array", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": "x"})},
+		{"sandbox addWritable non-string element", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": []any{1}})},
+		{"sandbox addWritable null element", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": []any{nil}})},
+		{"sandbox addWritable duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": []string{"a", "a"}})},
+		{"sandbox addWritable oversized", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": manyStrings(33)})},
+		{"sandbox removeWritable null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeWritable": nil})},
+		{"sandbox removeWritable duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeWritable": []string{"a", "a"}})},
+		{"sandbox addReadOnly null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addReadOnly": nil})},
+		{"sandbox addReadOnly duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addReadOnly": []string{"a", "a"}})},
+		{"sandbox addReadOnly oversized", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addReadOnly": manyStrings(33)})},
+		{"sandbox removeReadOnly null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeReadOnly": nil})},
+		{"sandbox removeReadOnly duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeReadOnly": []string{"a", "a"}})},
 		{"outer unknown member enhanced", map[string]any{"cols": 80, "rows": 24, "enhanced": true, "sandbox": valid()}},
 		{"ssh with sandbox", map[string]any{"cols": 80, "rows": 24, "kind": "ssh", "host": "example.com", "sandbox": valid()}},
 	}
@@ -594,35 +606,47 @@ func TestDecodeOpenParams_TrailingData(t *testing.T) {
 	}
 }
 
-// TestSandboxGlobals_RejectsBadSnapshot pins the persisted-global failure
-// class: a missing key, a wrong snapshot type, or an over-count list is
-// backend state (mapped to -32012 setup-failed), never silently an empty list.
-func TestSandboxGlobals_RejectsBadSnapshot(t *testing.T) {
-	key := settings.SandboxAllowedWritablePaths.Key()
+// TestSandboxBaselines_RejectsBadSnapshot pins the persisted-baseline failure
+// class for both path-list keys: a missing key, a wrong snapshot type, or an
+// over-count list on either the writable or read-only side is backend state
+// (mapped to -32012 setup-failed), never silently an empty list.
+func TestSandboxBaselines_RejectsBadSnapshot(t *testing.T) {
+	writableKey := settings.SandboxAllowedWritablePaths.Key()
+	readOnlyKey := settings.SandboxAllowedReadOnlyPaths.Key()
+	valid := map[string]any{
+		writableKey: []string{"/w"},
+		readOnlyKey: []string{"/r"},
+	}
+
 	cases := []struct {
 		name   string
 		values map[string]any
 	}{
-		{"missing key", map[string]any{}},
-		{"wrong type", map[string]any{key: 42}},
-		{"over count", map[string]any{key: manyStrings(33)}},
+		{"writable missing", map[string]any{readOnlyKey: []string{"/r"}}},
+		{"writable wrong type", map[string]any{writableKey: 42, readOnlyKey: []string{"/r"}}},
+		{"writable over count", map[string]any{writableKey: manyStrings(33), readOnlyKey: []string{"/r"}}},
+		{"read-only missing", map[string]any{writableKey: []string{"/w"}}},
+		{"read-only wrong type", map[string]any{writableKey: []string{"/w"}, readOnlyKey: 42}},
+		{"read-only over count", map[string]any{writableKey: []string{"/w"}, readOnlyKey: manyStrings(33)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := settings.SettingsSnapshot{Values: tc.values}
-			if _, err := sandboxGlobals(snap); err == nil {
-				t.Fatalf("sandboxGlobals(%v) = nil error, want error", tc.values)
+			if _, _, err := sandboxBaselines(snap); err == nil {
+				t.Fatalf("sandboxBaselines(%v) = nil error, want error", tc.values)
 			}
 		})
 	}
 
-	snap := settings.SettingsSnapshot{Values: map[string]any{key: []string{"/a", "/b"}}}
-	got, err := sandboxGlobals(snap)
+	writable, readOnly, err := sandboxBaselines(settings.SettingsSnapshot{Values: valid})
 	if err != nil {
-		t.Fatalf("sandboxGlobals(valid) = %v", err)
+		t.Fatalf("sandboxBaselines(valid) = %v", err)
 	}
-	if !reflect.DeepEqual(got, []string{"/a", "/b"}) {
-		t.Errorf("sandboxGlobals(valid) = %v, want deep copy of [/a /b]", got)
+	if !reflect.DeepEqual(writable, []string{"/w"}) {
+		t.Errorf("writable = %v, want deep copy of [/w]", writable)
+	}
+	if !reflect.DeepEqual(readOnly, []string{"/r"}) {
+		t.Errorf("readOnly = %v, want deep copy of [/r]", readOnly)
 	}
 }
 
@@ -651,9 +675,9 @@ func TestOpen_SandboxStaleRevision(t *testing.T) {
 	}
 }
 
-// TestOpen_SandboxGlobalsAndDeltas: the snapshot baseline and the per-tab
-// add/remove deltas reach the backend as one Request (workspace canonical,
-// globals deep-copied from the snapshot, add/remove verbatim).
+// TestOpen_SandboxGlobalsAndDeltas: both snapshot baselines and the per-tab
+// class-scoped deltas reach the backend as one Request (workspace canonical,
+// globals deep-copied from the snapshot, deltas verbatim).
 func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 	base := t.TempDir()
 	canon := func(p string) string {
@@ -667,8 +691,13 @@ func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 	ws := filepath.Join(base, "workspace")
 	g1 := filepath.Join(base, "global1")
 	g2 := filepath.Join(base, "global2")
-	a1 := filepath.Join(base, "add1")
-	for _, d := range []string{ws, g1, g2, a1} {
+	r1 := filepath.Join(base, "ro-global1")
+	r2 := filepath.Join(base, "ro-global2")
+	aw := filepath.Join(base, "add-writable")
+	rw := g2
+	ar := filepath.Join(base, "add-readonly")
+	rr := r2
+	for _, d := range []string{ws, g1, g2, r1, r2, aw, ar} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
@@ -682,7 +711,10 @@ func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 		t.Fatalf("SetBool: %v", err)
 	}
 	if err := reg.SetPaths(settings.SandboxAllowedWritablePaths, []string{g1, g2}); err != nil {
-		t.Fatalf("SetPaths: %v", err)
+		t.Fatalf("SetPaths writable: %v", err)
+	}
+	if err := reg.SetPaths(settings.SandboxAllowedReadOnlyPaths, []string{r1, r2}); err != nil {
+		t.Fatalf("SetPaths read-only: %v", err)
 	}
 	conn := connectWS(t, wsrv)
 	defer func() { _ = conn.Close() }()
@@ -692,8 +724,10 @@ func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 	if !ok {
 		t.Fatalf("sandbox params is %T, want map[string]any", params["sandbox"])
 	}
-	sandbox["add"] = []string{a1}
-	sandbox["remove"] = []string{g2}
+	sandbox["addWritable"] = []string{aw}
+	sandbox["removeWritable"] = []string{rw}
+	sandbox["addReadOnly"] = []string{ar}
+	sandbox["removeReadOnly"] = []string{rr}
 	resp := jsonrpcCall(t, conn, "open", params)
 	var env struct {
 		Error *jsonrpcErrorObj `json:"error"`
@@ -709,13 +743,22 @@ func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 	if got.Workspace != canon(ws) {
 		t.Errorf("Workspace = %q, want canonical %q", got.Workspace, canon(ws))
 	}
-	if !reflect.DeepEqual(got.Global, []string{canon(g1), canon(g2)}) {
-		t.Errorf("Global = %v, want [%s %s]", got.Global, canon(g1), canon(g2))
+	if !reflect.DeepEqual(got.GlobalWritable, []string{canon(g1), canon(g2)}) {
+		t.Errorf("GlobalWritable = %v, want [%s %s]", got.GlobalWritable, canon(g1), canon(g2))
 	}
-	if !reflect.DeepEqual(got.Add, []string{a1}) {
-		t.Errorf("Add = %v, want [%s]", got.Add, a1)
+	if !reflect.DeepEqual(got.GlobalReadOnly, []string{canon(r1), canon(r2)}) {
+		t.Errorf("GlobalReadOnly = %v, want [%s %s]", got.GlobalReadOnly, canon(r1), canon(r2))
 	}
-	if !reflect.DeepEqual(got.Remove, []string{g2}) {
-		t.Errorf("Remove = %v, want [%s]", got.Remove, g2)
+	if !reflect.DeepEqual(got.AddWritable, []string{aw}) {
+		t.Errorf("AddWritable = %v, want [%s]", got.AddWritable, aw)
+	}
+	if !reflect.DeepEqual(got.RemoveWritable, []string{rw}) {
+		t.Errorf("RemoveWritable = %v, want [%s]", got.RemoveWritable, rw)
+	}
+	if !reflect.DeepEqual(got.AddReadOnly, []string{ar}) {
+		t.Errorf("AddReadOnly = %v, want [%s]", got.AddReadOnly, ar)
+	}
+	if !reflect.DeepEqual(got.RemoveReadOnly, []string{rr}) {
+		t.Errorf("RemoveReadOnly = %v, want [%s]", got.RemoveReadOnly, rr)
 	}
 }

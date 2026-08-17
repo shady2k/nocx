@@ -2909,33 +2909,48 @@ describe('a restored pane and the session the backend still holds', () => {
   })
 })
 
-describe('newSandboxedTab (ADR-0034)', () => {
+describe('newSandboxedTab (ADR-0036)', () => {
   it('carries an immutable launch object and marks the tab sandboxed exactly once', async () => {
     const openSandboxedSession = vi.fn(() =>
       Promise.resolve(
         makeSession({
-          sandbox: { backend: 'landlock', workspace: '/w', writableRoots: ['/w'] },
+          sandbox: {
+            backend: 'landlock',
+            workspace: '/w',
+            writableRoots: ['/w'],
+            readOnlyRoots: ['/usr', '/opt'],
+          },
         }),
       ),
     )
     const client = makeClient({ openSandboxedSession })
     const { manager } = await mountTabManager(client)
-    const launch = { settingsRevision: 1, add: ['/a'], remove: ['/b'] }
+    const launch = {
+      settingsRevision: 1,
+      addWritable: ['/a'],
+      removeWritable: ['/b'],
+      addReadOnly: ['/r1'],
+      removeReadOnly: ['/r2'],
+    }
 
     const tab = manager.newSandboxedTab('/w', launch)
 
     // Mutating the caller's object after the tab is created must not reach the
-    // request — the launch arrays are copied at construction (ADR-0034 invariant 8).
-    launch.add.push('/mutated')
-    launch.remove.pop()
+    // request — the launch arrays are copied at construction (ADR-0036 §2.9).
+    launch.addWritable.push('/mutated')
+    launch.removeWritable.pop()
+    launch.addReadOnly.push('/mutated-ro')
+    launch.removeReadOnly.pop()
 
     await vi.waitFor(() => expect(openSandboxedSession).toHaveBeenCalledTimes(1))
     await vi.waitFor(() =>
       expect(openSandboxedSession).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), {
         workspace: '/w',
         settingsRevision: 1,
-        add: ['/a'],
-        remove: ['/b'],
+        addWritable: ['/a'],
+        removeWritable: ['/b'],
+        addReadOnly: ['/r1'],
+        removeReadOnly: ['/r2'],
       }),
     )
     // The lock/shield marker flips once on sandbox confirmation and never toggles.

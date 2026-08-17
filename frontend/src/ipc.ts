@@ -22,23 +22,28 @@ import type { SandboxStatus } from './generated/sandbox.status'
 
 // Sandbox wire types (ADR-0030 §3.3)
 export type { SandboxStatus }
+/** Immutable sandbox metadata for a sandboxed session (ADR-0030 §3.3, ADR-0036 §8). */
 export interface SessionSandboxInfo {
   readonly backend: 'landlock' | 'seatbelt'
   readonly workspace: string
   readonly writableRoots: string[]
+  readonly readOnlyRoots: string[]
 }
 
 /**
- * The per-launch sandbox permission deltas (ADR-0034 §5): the settings
- * revision the permission dialog displayed, plus the user's ephemeral
- * additions and exact baseline removals. It never carries the baseline
- * itself, the effective roots, Git/runtime roots, or any native-backend
- * clause — the backend is the sole policy author.
+ * The per-launch sandbox permission deltas (ADR-0036 §5): the settings
+ * revision the permission dialog displayed, plus the user's four class-scoped
+ * deltas — ephemeral additions and exact baseline removals for read-only and
+ * read-write folders. It never carries either baseline, the effective roots,
+ * Git/runtime roots, or any native-backend clause — the backend is the sole
+ * policy author.
  */
 export interface SandboxLaunch {
   readonly settingsRevision: number
-  readonly add: string[]
-  readonly remove: string[]
+  readonly addWritable: string[]
+  readonly removeWritable: string[]
+  readonly addReadOnly: string[]
+  readonly removeReadOnly: string[]
 }
 
 /** The complete sandboxed open request: canonical workspace + deltas. */
@@ -795,13 +800,14 @@ export class WSClient {
       .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
-  // openSandboxedSession opens a filesystem-isolated LOCAL session (ADR-0034).
-  // The renderer sends the canonical workspace plus the bounded permission
-  // deltas the launch dialog confirmed — never a baseline, effective roots,
-  // Git/runtime roots, or a native-backend clause. The backend reads the
-  // baseline from the same settings revision, canonicalizes everything, and
-  // enforces the policy before the session is registered. Fails closed: any
-  // enforcement error rejects with the typed wire error.
+  // openSandboxedSession opens a filesystem-isolated LOCAL session (ADR-0036).
+  // The renderer sends the canonical workspace plus the four bounded
+  // class-scoped permission deltas the launch dialog confirmed — never a
+  // baseline, effective roots, Git/runtime roots, or a native-backend clause.
+  // The backend reads both baselines from the same settings revision,
+  // canonicalizes everything, and enforces the policy before the session is
+  // registered. Fails closed: any enforcement error rejects with the typed
+  // wire error.
   openSandboxedSession(
     cols: number,
     rows: number,
@@ -810,16 +816,20 @@ export class WSClient {
     const sandbox: {
       workspace: string
       settingsRevision: number
-      add?: string[]
-      remove?: string[]
+      addWritable?: string[]
+      removeWritable?: string[]
+      addReadOnly?: string[]
+      removeReadOnly?: string[]
     } = {
       workspace: request.workspace,
       settingsRevision: request.settingsRevision,
     }
-    // Empty deltas are omitted, not sent as empty arrays: the DTO treats
-    // `add`/`remove` as optional, so only non-empty deltas ride the wire.
-    if (request.add.length > 0) sandbox.add = request.add
-    if (request.remove.length > 0) sandbox.remove = request.remove
+    // Empty deltas are omitted, not sent as empty arrays: the DTO treats the
+    // four arrays as optional, so only non-empty deltas ride the wire.
+    if (request.addWritable.length > 0) sandbox.addWritable = request.addWritable
+    if (request.removeWritable.length > 0) sandbox.removeWritable = request.removeWritable
+    if (request.addReadOnly.length > 0) sandbox.addReadOnly = request.addReadOnly
+    if (request.removeReadOnly.length > 0) sandbox.removeReadOnly = request.removeReadOnly
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,

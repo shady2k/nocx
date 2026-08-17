@@ -47,13 +47,18 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	home := filepath.Join(base, "runtime", "home")
 	tmp := filepath.Join(base, "runtime", "tmp")
 	sentinel := filepath.Join(base, "sentinel-secret.txt")
-	for _, d := range []string{workspace, home, tmp} {
+	roRoot := filepath.Join(base, "ro-root")
+	rwRoot := filepath.Join(base, "rw-root")
+	for _, d := range []string{workspace, home, tmp, roRoot, rwRoot} {
 		if mkErr := os.MkdirAll(d, 0o750); mkErr != nil {
 			t.Fatalf("mkdir %s: %v", d, mkErr)
 		}
 	}
 	if wErr := os.WriteFile(sentinel, []byte("top secret"), 0o600); wErr != nil {
 		t.Fatalf("write sentinel: %v", wErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(roRoot, "keep.txt"), []byte("read-only"), 0o600); wErr != nil {
+		t.Fatalf("write read-only fixture: %v", wErr)
 	}
 	preHard := filepath.Join(workspace, "pre-hard-link")
 	if lErr := os.Link(sentinel, preHard); lErr != nil {
@@ -71,9 +76,15 @@ func TestSeatbeltEnforcement(t *testing.T) {
 		"NOCX_SB_PREHARD="+preHard,
 		"NOCX_SB_HOME="+home,
 		"NOCX_SB_TMP="+tmp,
+		"NOCX_SB_RO_ROOT="+roRoot,
+		"NOCX_SB_RW_ROOT="+rwRoot,
 	)
 
-	pol, err := BuildPolicy(Request{Workspace: workspace}, exe, filepath.Join(base, "runtime"), probeEnv)
+	pol, err := BuildPolicy(Request{
+		Workspace:   workspace,
+		AddReadOnly: []string{roRoot},
+		AddWritable: []string{rwRoot},
+	}, exe, filepath.Join(base, "runtime"), probeEnv)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -257,4 +268,104 @@ func TestDarwinServicePrepare_FailClosed(t *testing.T) {
 			t.Errorf("runtime tree leaked after validation failure: %v", entries)
 		}
 	})
+}
+
+// TestDarwinServicePrepare_ShimUnderWritableRejected verifies that when the
+// shim executable lives under a writable root, Prepare fails with a
+// SetupError before rendering. The shim is routed through
+// addTrustedExecutables which rejects any executable under a user-writable
+// root; no policy mutation occurs after the final validation.
+func TestDarwinServicePrepare_ShimUnderWritableRejected(t *testing.T) {
+	origPath, origProbe := sandboxExecPath, sandboxExecProbe
+	defer func() {
+		sandboxExecPath = origPath
+		sandboxExecProbe = origProbe
+	}()
+	sandboxExecPath = "/usr/bin/true"
+	sandboxExecProbe = func(_ context.Context, _ string) error { return nil }
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("executable: %v", err)
+	}
+	exeDir := filepath.Dir(exe)
+
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	if mkErr := os.MkdirAll(ws, 0o750); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+
+	svc := New(nil, base)
+	_, err = svc.Prepare(context.Background(), Request{
+		Workspace:   ws,
+		AddWritable: []string{exeDir},
+	}, CommandSpec{Path: "/bin/sh", Args: []string{"-i"}, Dir: ws})
+	if err == nil {
+		t.Fatal("expected SetupError when shim is under a writable root")
+	}
+	var se *SetupError
+	if !errors.As(err, &se) {
+		t.Fatalf("err = %v (%T), want *SetupError", err, err)
+	}
+	if !strings.Contains(err.Error(), "trusted executable conflicts with a writable root") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestDarwinServicePrepare_ShimInRenderedProfile verifies that the shim
+// executable appears as a literal file-read clause in the rendered Seatbelt
+// profile. The shim is added through addTrustedExecutables, which appends it
+// to ReadOnlyFiles; renderProfile emits a literal clause for each.
+func TestDarwinServicePrepare_ShimInRenderedProfile(t *testing.T) {
+	origPath, origProbe := sandboxExecPath, sandboxExecProbe
+	defer func() {
+		sandboxExecPath = origPath
+		sandboxExecProbe = origProbe
+	}()
+	sandboxExecPath = "/usr/bin/true"
+	sandboxExecProbe = func(_ context.Context, _ string) error { return nil }
+
+	base := t.TempDir()
+	ws := filepath.Join(base, "ws")
+	for _, d := range []string{ws, filepath.Join(base, "rt", "home"), filepath.Join(base, "rt", "tmp")} {
+		if mkErr := os.MkdirAll(d, 0o750); mkErr != nil {
+			t.Fatalf("mkdir %s: %v", d, mkErr)
+		}
+	}
+
+	svc := New(nil, base)
+	pc, err := svc.Prepare(context.Background(), Request{Workspace: ws},
+		CommandSpec{Path: "/bin/sh", Args: []string{"-i"}, Dir: ws})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	defer pc.Close()
+	// The profile must contain a literal file-read* clause for the shim.
+	profile := pc.Cmd.Args[2] // rendered SBPL profile
+
+	exe, exeErr := os.Executable()
+	if exeErr != nil {
+		t.Fatalf("executable: %v", exeErr)
+	}
+	shimCanon, shimErr := filepath.EvalSymlinks(exe)
+	if shimErr != nil {
+		t.Fatalf("EvalSymlinks(shim): %v", shimErr)
+	}
+
+	wantClause := "(allow file-read* (literal \"" + shimCanon + "\"))"
+	if !strings.Contains(profile, wantClause) {
+		t.Errorf("rendered profile missing shim literal clause:\nwant: %s\nprofile: %s", wantClause, profile)
+	}
+
+	// The shim must also be in the Policy metadata.
+	foundShim := false
+	for _, f := range pc.Policy.ReadOnlyFiles {
+		if f == shimCanon {
+			foundShim = true
+		}
+	}
+	if !foundShim {
+		t.Errorf("Policy.ReadOnlyFiles = %v, want shim %q", pc.Policy.ReadOnlyFiles, shimCanon)
+	}
 }

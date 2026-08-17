@@ -23,14 +23,19 @@ func TestRealSession_SandboxInfoReturnsDeepCopy(t *testing.T) {
 			Backend:       sandbox.BackendLandlock,
 			Workspace:     "/workspace",
 			WritableRoots: []string{"/workspace"},
+			ReadOnlyRoots: []string{"/usr"},
 		},
 	}
 
 	first := s.SandboxInfo()
 	first.WritableRoots[0] = "/mutated"
+	first.ReadOnlyRoots[0] = "/mutated-ro"
 	second := s.SandboxInfo()
 	if got := second.WritableRoots[0]; got != "/workspace" {
 		t.Fatalf("second SandboxInfo root = %q, want immutable session metadata", got)
+	}
+	if got := second.ReadOnlyRoots[0]; got != "/usr" {
+		t.Fatalf("second SandboxInfo read-only root = %q, want immutable session metadata", got)
 	}
 }
 

@@ -34,7 +34,9 @@ func runProbe() int {
 	preHard := os.Getenv("NOCX_SB_PREHARD")
 	home := os.Getenv("NOCX_SB_HOME")
 	tmp := os.Getenv("NOCX_SB_TMP")
-	if w == "" || sentinel == "" || preHard == "" || home == "" || tmp == "" {
+	roRoot := os.Getenv("NOCX_SB_RO_ROOT")
+	rwRoot := os.Getenv("NOCX_SB_RW_ROOT")
+	if w == "" || sentinel == "" || preHard == "" || home == "" || tmp == "" || roRoot == "" || rwRoot == "" {
 		fmt.Printf("FAIL: probe missing fixture env\n")
 		return 1
 	}
@@ -72,6 +74,48 @@ func runProbe() int {
 		fail("read /etc/hosts: %v", err)
 	} else {
 		ok("read system root")
+	}
+
+	// User read-only root: reading an existing file succeeds; creating,
+	// modifying, renaming, and removing there are all denied.
+	roFile := filepath.Join(roRoot, "keep.txt")
+	if data, err := os.ReadFile(roFile); err != nil || string(data) != "read-only" { //nolint:gosec // probe fixture path is supplied by the trusted parent test
+		fail("read in read-only root: err=%v data=%q", err, data)
+	} else {
+		ok("read in read-only root")
+	}
+	if err := os.WriteFile(filepath.Join(roRoot, "new.txt"), []byte("x"), 0o600); err == nil {
+		fail("create in read-only root succeeded")
+	} else {
+		ok("create in read-only root denied")
+	}
+	if err := os.WriteFile(roFile, []byte("mutated"), 0o600); err == nil {
+		fail("modify in read-only root succeeded")
+	} else {
+		ok("modify in read-only root denied")
+	}
+	if err := os.Rename(roFile, filepath.Join(roRoot, "renamed.txt")); err == nil {
+		fail("rename in read-only root succeeded")
+	} else {
+		ok("rename in read-only root denied")
+	}
+	if err := os.Remove(roFile); err == nil {
+		fail("remove in read-only root succeeded")
+	} else {
+		ok("remove in read-only root denied")
+	}
+
+	// User writable root: creating and reading back both succeed.
+	rwFile := filepath.Join(rwRoot, "f.txt")
+	if err := os.WriteFile(rwFile, []byte("writable"), 0o600); err != nil {
+		fail("create in writable root: %v", err)
+	} else {
+		ok("create in writable root")
+	}
+	if data, err := os.ReadFile(rwFile); err != nil || string(data) != "writable" { //nolint:gosec // probe fixture path is supplied by the trusted parent test
+		fail("read in writable root: err=%v data=%q", err, data)
+	} else {
+		ok("read in writable root")
 	}
 
 	// A usable shell is a positive requirement, not an inferred side effect of

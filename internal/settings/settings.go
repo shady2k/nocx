@@ -30,6 +30,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
@@ -1038,13 +1039,27 @@ var SandboxEnabled = MustRegisterBool(BoolSpec{
 })
 
 // SandboxAllowedWritablePaths is the persisted global baseline of additional
-// directories made read-write in every new sandboxed tab (ADR-0034 §3.1).
-// The workspace is always writable; changes affect new tabs only.
+// directories made read-write in every new sandboxed tab (ADR-0034 §3.1,
+// ADR-0036 §3.1). The workspace is always writable; changes affect new tabs
+// only.
 var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedWritablePaths",
 	Section:     "Experimental",
-	Label:       "Sandbox writable allowlist",
-	Description: "Additional folders available read/write in every new sandboxed tab. The workspace is always writable; changes affect new tabs only.",
+	Label:       "Sandbox read & write folders",
+	Description: "Additional folders available read/write in every new sandboxed tab. The workspace is always read/write; changes affect new tabs only.",
+	DataClass:   PrivateMetadata,
+})
+
+// SandboxAllowedReadOnlyPaths is the persisted global baseline of additional
+// directories made read-only in every new sandboxed tab (ADR-0036 §3.1):
+// their contents may be read and traversed, never created, removed, renamed,
+// or modified. The workspace is always read/write; changes affect new tabs
+// only.
+var SandboxAllowedReadOnlyPaths = MustRegisterPathList(PathListSpec{
+	Key:         "sandbox.allowedReadOnlyPaths",
+	Section:     "Experimental",
+	Label:       "Sandbox read-only folders",
+	Description: "Additional folders available read-only in every new sandboxed tab (their contents may be read, never created, removed, renamed, or modified). The workspace is always read/write; changes affect new tabs only.",
 	DataClass:   PrivateMetadata,
 })
 
@@ -1413,6 +1428,12 @@ func (r *Registry) SetPaths(p *PathList, value []string) error {
 	}
 	newValues := copyValues(r.values)
 	newValues[p.key] = canonical
+	if sandboxPathKeys[p.key] {
+		if err := checkSandboxPathConflict(p.key, newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
 	ch, commitErr := r.commitLocked(newValues, r.refs, []string{p.key})
 	r.mu.Unlock()
 	if commitErr == nil {
@@ -1529,6 +1550,19 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 		}
 	}
 	sort.Strings(changedKeys)
+	// Check sandbox cross-class conflicts on the final combined state.
+	// The error is keyed to the read-only setting — the one whose value is
+	// constrained by the writable setting.
+	if _, roChanged := typed[SandboxAllowedReadOnlyPaths.Key()]; roChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedReadOnlyPaths.Key(), newValues); err != nil {
+			return PendingNotification{}, err
+		}
+	}
+	if _, rwChanged := typed[SandboxAllowedWritablePaths.Key()]; rwChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedWritablePaths.Key(), newValues); err != nil {
+			return PendingNotification{}, err
+		}
+	}
 	ch, err := r.commitLocked(newValues, r.refs, changedKeys)
 	if err != nil {
 		return PendingNotification{}, err
@@ -1619,6 +1653,12 @@ func (r *Registry) Reset(d Descriptor) error {
 	}
 	newValues := copyValues(r.values)
 	delete(newValues, d.Key())
+	if sandboxPathKeys[d.Key()] {
+		if err := checkSandboxPathConflict(d.Key(), newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
 	ch, err := r.commitLocked(newValues, r.refs, []string{d.Key()})
 	r.mu.Unlock()
 	if err == nil {
@@ -1673,6 +1713,20 @@ func (r *Registry) ApplyValues(values map[string]any) error {
 	if len(changed) == 0 {
 		r.mu.Unlock()
 		return nil
+	}
+
+	// Check sandbox cross-class conflicts on the final combined state.
+	if _, roChanged := values[SandboxAllowedReadOnlyPaths.Key()]; roChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedReadOnlyPaths.Key(), newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	if _, rwChanged := values[SandboxAllowedWritablePaths.Key()]; rwChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedWritablePaths.Key(), newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
 	}
 
 	ch, err := r.commitLocked(newValues, r.refs, changed)
@@ -1949,7 +2003,6 @@ func canonicalPaths(key string, value any) ([]string, error) {
 		return nil, &ValidationError{SettingKey: key, Value: value, Message: fmt.Sprintf("at most %d paths allowed", pathListMaxEntries)}
 	}
 	out := make([]string, 0, len(strs))
-	seen := make(map[string]struct{}, len(strs))
 	for _, p := range strs {
 		if p == "" {
 			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must be non-empty"}
@@ -1972,10 +2025,16 @@ func canonicalPaths(key string, value any) ([]string, error) {
 		if err != nil || !fi.IsDir() {
 			return nil, &ValidationError{SettingKey: key, Value: value, Message: "path is not an existing directory"}
 		}
-		if _, dup := seen[resolved]; dup {
+		dup := false
+		for _, seen := range out {
+			if sameDir(resolved, seen) {
+				dup = true
+				break
+			}
+		}
+		if dup {
 			continue // canonical first-wins
 		}
-		seen[resolved] = struct{}{}
 		out = append(out, resolved)
 	}
 	return out, nil
@@ -2070,6 +2129,93 @@ func normalizeLoadedPathList(v any) any {
 	default:
 		return v
 	}
+}
+
+// ── Sandbox path-class conflict detection ────────────────────────────────
+
+// sameDir reports whether two canonical paths refer to the same directory,
+// falling back to os.SameFile for case-insensitive/case-normalizing
+// filesystems where lexical comparison is not identity. Fails closed: a stat
+// failure that would let the caller widen permissions returns false, so the
+// caller conservatively treats the paths as distinct.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fiA, errA := os.Stat(a)
+	fiB, errB := os.Stat(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return os.SameFile(fiA, fiB)
+}
+
+// pathWithinOrEqual reports whether path equals root or is a descendant of
+// root. The cheap lexical fast path (filepath.Rel) is followed by os.SameFile
+// while walking parents, so case/normalization aliases of the same directory
+// are recognised on case-insensitive filesystems. Fails closed: a stat
+// failure that would make a path appear "within" returns false.
+func pathWithinOrEqual(root, path string) bool {
+	if sameDir(root, path) {
+		return true
+	}
+	// Cheap lexical fast path.
+	rel, err := filepath.Rel(root, path)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return true
+	}
+	// Walk up from path, checking each ancestor with os.SameFile.
+	for p := path; p != "/" && p != "."; {
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		if sameDir(parent, root) {
+			return true
+		}
+		p = parent
+	}
+	return false
+}
+
+// checkSandboxPathConflict returns a ValidationError if any read-only path
+// equals or is a descendant of any writable path — a configuration that
+// would make the read-only classification meaningless because a writable
+// ancestor overrides it. RW child under RO parent is allowed: the child is
+// specifically writable inside a broader read-only tree.
+// The error is keyed to the setting being changed and carries no path.
+func checkSandboxPathConflict(key string, values map[string]any) error {
+	roAny, roOK := values[SandboxAllowedReadOnlyPaths.Key()]
+	rwAny, rwOK := values[SandboxAllowedWritablePaths.Key()]
+	if !roOK || !rwOK {
+		return nil
+	}
+	ro, ok := roAny.([]string)
+	if !ok || len(ro) == 0 {
+		return nil
+	}
+	rw, ok := rwAny.([]string)
+	if !ok || len(rw) == 0 {
+		return nil
+	}
+	for _, r := range ro {
+		for _, w := range rw {
+			if pathWithinOrEqual(w, r) {
+				return &ValidationError{
+					SettingKey: key,
+					Message:    "a read-only path cannot be equal to or below a writable path",
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// sandboxPathKeys is the set of keys whose values participate in the
+// cross-class conflict check — the two sandbox path-list settings.
+var sandboxPathKeys = map[string]bool{
+	"sandbox.allowedWritablePaths": true,
+	"sandbox.allowedReadOnlyPaths": true,
 }
 func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {

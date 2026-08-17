@@ -104,11 +104,12 @@ test.describe('sandboxed opencode action', () => {
     // Enable the experimental flag in Settings.
     await setSandboxFlag(page, true)
 
-    // The same real Settings surface exposes the canonical path-list control:
-    // native picker only, no free-form path editor.
-    await page.getByRole('searchbox', { name: 'Search settings' }).fill('Sandbox writable')
-    await expect(page.getByText('Sandbox writable allowlist', { exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Add folder' })).toBeVisible()
+    // The same real Settings surface exposes both canonical path-list controls
+    // (read-only and read & write), native picker only, no free-form editor.
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill('Sandbox read')
+    await expect(page.getByText('Sandbox read-only folders', { exact: true })).toBeVisible()
+    await expect(page.getByText('Sandbox read & write folders', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Add folder' }).first()).toBeVisible()
 
     // The command palette now shows exactly one sandbox row: the action when
     // the backend reports available, the typed-unavailable row otherwise.

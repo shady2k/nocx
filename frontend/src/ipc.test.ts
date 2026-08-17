@@ -379,15 +379,17 @@ describe('openSandboxedSession', () => {
     void client.openSandboxedSession(80, 24, {
       workspace: '/workspace',
       settingsRevision: 7,
-      add: ['/d'],
-      remove: ['/b'],
+      addWritable: ['/d'],
+      removeWritable: ['/b'],
+      addReadOnly: ['/r'],
+      removeReadOnly: ['/r0'],
     })
     const [req] = socket().requests()
 
     expect(req.method).toBe('open')
     // The exact-shape assertion is the contract: `enhanced`, a baseline
-    // (`global`), and any effective root (`writableRoots`) are absent by
-    // construction, not merely unasserted.
+    // (`global`), and any effective root (`writableRoots`/`readOnlyRoots`) are
+    // absent by construction, not merely unasserted.
     expect(req.params).toEqual({
       cols: 80,
       rows: 24,
@@ -396,8 +398,10 @@ describe('openSandboxedSession', () => {
       sandbox: {
         workspace: '/workspace',
         settingsRevision: 7,
-        add: ['/d'],
-        remove: ['/b'],
+        addWritable: ['/d'],
+        removeWritable: ['/b'],
+        addReadOnly: ['/r'],
+        removeReadOnly: ['/r0'],
       },
     })
     expect(req.params).not.toHaveProperty('enhanced')
@@ -412,8 +416,10 @@ describe('openSandboxedSession', () => {
     void client.openSandboxedSession(80, 24, {
       workspace: '/workspace',
       settingsRevision: 0,
-      add: [],
-      remove: [],
+      addWritable: [],
+      removeWritable: [],
+      addReadOnly: [],
+      removeReadOnly: [],
     })
     const [req] = socket().requests()
 

@@ -83,10 +83,6 @@ type Config struct {
 	// sandboxService is injected by the composition root via
 	// WithSandboxService; it is never part of the wire contract.
 	sandboxService sandbox.Service
-	// trustedSandboxExecutables are fixed backend-resolved launch intents.
-	// They never come from Config or the wire; only the composition root may
-	// add them through WithTrustedSandboxExecutable.
-	trustedSandboxExecutables []string
 }
 
 // Option configures a Config before PTY creation.
@@ -114,15 +110,6 @@ func WithExtraFiles(files ...*os.File) Option {
 func WithSandboxService(svc sandbox.Service) Option {
 	return func(cfg *Config) {
 		cfg.sandboxService = svc
-	}
-}
-
-// WithTrustedSandboxExecutable adds a canonical backend-owned executable to
-// the sandbox policy's read-only execution set. It has no effect on ordinary
-// launches because NewLocal only consumes it when Config.Sandbox is present.
-func WithTrustedSandboxExecutable(path string) Option {
-	return func(cfg *Config) {
-		cfg.trustedSandboxExecutables = append(cfg.trustedSandboxExecutables, path)
 	}
 }
 

@@ -23,14 +23,13 @@ const (
 	BackendUnsupported = "unsupported"
 )
 
-// Stable status and fixed-launch reasons (design spec §4.2, ADR-0035).
+// Stable backend status reasons (design spec §4.2).
 const (
 	ReasonLandlockUnavailable    = "landlock-unavailable"
 	ReasonLandlockABITooOld      = "landlock-abi-too-old"
 	ReasonSandboxExecUnavailable = "sandbox-exec-unavailable"
 	ReasonProbeFailed            = "probe-failed"
 	ReasonUnsupportedPlatform    = "unsupported-platform"
-	ReasonOpenCodeNotFound       = "opencode-not-found"
 )
 
 // helperEnvPrefix marks variables the Linux helper strips before exec so
@@ -72,16 +71,12 @@ type Status struct {
 // shell detection, cmd.Dir, and the scrubbed/UTF-8-forced environment. The
 // backend wraps it (helper re-exec on Linux, sandbox-exec on macOS) or, for
 // an ordinary request, pty.NewLocal never touches this package at all.
-// TrustedExecutables are backend-resolved fixed launch intents, never wire
-// input. Policy construction grants them and their runtime dependencies
-// read-only and rejects any that live below a writable root.
 type CommandSpec struct {
-	Path               string
-	Args               []string
-	Dir                string
-	Env                []string
-	ExtraFiles         []*os.File `json:"-"`
-	TrustedExecutables []string   `json:"-"`
+	Path       string
+	Args       []string
+	Dir        string
+	Env        []string
+	ExtraFiles []*os.File `json:"-"`
 }
 
 // PreparedCommand owns the *exec.Cmd of the sandboxed process, the

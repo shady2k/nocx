@@ -1,5 +1,5 @@
 /**
- * sandbox-open — the Quick Connect "Sandboxed opencode…" flow (ADR-0036 §4).
+ * sandbox-open — the Quick Connect "Sandboxed shell…" flow (ADR-0037).
  *
  * Extracted from the composition root so the one flow that turns a picker and
  * a permission dialog into a new tab is testable without booting `main()`. The
@@ -36,10 +36,10 @@ export const SANDBOX_WRITABLE_PATHS_KEY = 'sandbox.allowedWritablePaths'
 export const SANDBOX_READ_ONLY_PATHS_KEY = 'sandbox.allowedReadOnlyPaths'
 
 /**
- * Run the sandboxed-opencode open flow. Any picker or dialog cancellation
+ * Run the sandboxed-shell open flow. Any picker or dialog cancellation
  * creates no tab; a thrown failure is reported through `reportError`.
  */
-export async function openSandboxedOpenCode(deps: SandboxOpenFlowDeps): Promise<void> {
+export async function openSandboxedShell(deps: SandboxOpenFlowDeps): Promise<void> {
   try {
     const snap = await deps.getSnapshot()
     const rawWritable = snap.values[SANDBOX_WRITABLE_PATHS_KEY]

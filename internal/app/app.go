@@ -666,7 +666,6 @@ func New(opts ...Option) (*App, error) {
 	ptf := &localPTYFactory{
 		log: logger, shint: shint, transports: childTransports,
 		shells: loginshell.New(), procs: procs, sandbox: sandboxSvc,
-		agentExec: sandbox.ResolveOpenCode,
 	}
 	sess := session.New(logger, ptf)
 
@@ -2110,10 +2109,6 @@ type localPTYFactory struct {
 	shint   shellintegration.ShellIntegration
 	sandbox sandbox.Service
 	kernel  lifecyclechannel.Kernel
-	// agentExec resolves the fixed backend-owned sandbox launch intent. It is
-	// consulted only when Config.Sandbox is present and injected here so
-	// ordinary local/SSH launches never depend on opencode or a test PATH.
-	agentExec func() (string, error)
 	// shells answers which shell this user logs in with. Injected because the
 	// platform half is a subprocess against the OS account database, and
 	// because the answer decides the tier: it is the single call site of the
@@ -2290,7 +2285,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	env := f.shint.ActivationEnv(cfg.Enhanced)
 	sandboxed := cfg.Sandbox != nil
 	if sandboxed && (!cfg.Enhanced || f.kernel == nil) {
-		return nil, sandbox.NewSetupErrorf("sandboxed opencode requires local shell integration")
+		return nil, sandbox.NewSetupErrorf("sandboxed shell requires local shell integration")
 	}
 	if !cfg.Enhanced || f.kernel == nil {
 		return f.newLocal(cfg, pty.WithExtraEnv(env))
@@ -2307,7 +2302,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 
 	if kind == shellintegration.ShellUnknown {
 		if sandboxed {
-			return nil, sandbox.NewSetupErrorf("sandboxed opencode requires a supported login shell")
+			return nil, sandbox.NewSetupErrorf("sandboxed shell requires a supported login shell")
 		}
 		// fish, csh, tcsh, dash, anything: started as itself, integrated not
 		// at all, and SAID so. Substituting bash here is the defect this bead
@@ -2331,19 +2326,11 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		f.report(cfg.SessionID, shell.Path, transport.IntegrationConventional, ssh.ReasonUnsupportedShell)
 		return p, nil
 	}
-	agentExecutable := ""
 	runtimeRoot := ""
+	var err error
 	if sandboxed {
 		if f.sandbox == nil {
 			return nil, sandbox.NewSetupErrorf("sandbox request without a sandbox service")
-		}
-		if f.agentExec == nil {
-			return nil, &sandbox.LaunchError{Reason: sandbox.ReasonOpenCodeNotFound}
-		}
-		var err error
-		agentExecutable, err = f.agentExec()
-		if err != nil || agentExecutable == "" {
-			return nil, &sandbox.LaunchError{Reason: sandbox.ReasonOpenCodeNotFound}
 		}
 		runtimeRoot, err = f.sandbox.NewRuntimeRoot()
 		if err != nil {
@@ -2404,7 +2391,6 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
 		BootstrapFD: bootstrapFD(bpChild),
 		ArtifactDir: artifactDir,
-		AgentExec:   agentExecutable,
 	})
 	if rerr != nil {
 		_ = ch.Close()
@@ -2412,7 +2398,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		closeProgress(bp, bpChild)
 		if sandboxed {
 			sandbox.RemoveRuntimeRoot(runtimeRoot)
-			return nil, sandbox.NewSetupErrorf("sandboxed opencode bootstrap failed")
+			return nil, sandbox.NewSetupErrorf("sandboxed shell bootstrap failed")
 		}
 		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
 			"shell", shell.Path, "tier", string(kind), "error", rerr)
@@ -2445,9 +2431,6 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		pty.WithExtraEnv(local.Env),
 		pty.WithExtraFiles(extraFiles(child, bpChild)...),
 	}
-	if agentExecutable != "" {
-		localOpts = append(localOpts, pty.WithTrustedSandboxExecutable(agentExecutable))
-	}
 	p, err := f.newLocal(cfg, localOpts...)
 	// The child ends are the shell's once the fork has happened; this process
 	// keeps no reference either way.
@@ -2479,16 +2462,10 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// would have nowhere to land. Registering the axis afterwards is the
 	// safe order — the status is only emitted after the open ack anyway.
 	f.report(cfg.SessionID, shell.Path, transport.IntegrationStarting, ssh.ReasonNone)
-	// A sandboxed-opencode bootstrap intentionally execs the fixed agent only
-	// after lifecycle accept. The process observer exists to detect an
-	// unexpected rcfile takeover; treating this authenticated replacement as
-	// a takeover would immediately overwrite `integrated` with
-	// `shell-replaced`. The lifecycle channel remains the authority and closes
-	// with the agent process.
-	var stopWatch func()
-	if agentExecutable == "" {
-		stopWatch = f.watchForReplacement(cfg.SessionID, p)
-	}
+	// The sandboxed process remains the login shell after authenticated
+	// bootstrap. Keep the ordinary replacement observer active: an exec from
+	// user startup files is still an unexpected takeover inside the cage.
+	stopWatch := f.watchForReplacement(cfg.SessionID, p)
 	return &lifecyclePTY{Pty: p, ch: ch, bp: bp, stopWatch: stopWatch}, nil
 }
 

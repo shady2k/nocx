@@ -20,6 +20,40 @@ func init() {
 	_ = MaybeHelper()
 }
 
+func TestAddTrustedExecutablesGrantsCanonicalFileAndRuntimeRoots(t *testing.T) {
+	workspace, runtimeRoot, _ := fixture(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "agent-real")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // executable fixture
+		t.Fatalf("write executable: %v", err)
+	}
+	link := filepath.Join(dir, "agent")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	policy, err := BuildPolicy(Request{Workspace: workspace}, "/bin/sh", runtimeRoot, nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	if err := addTrustedExecutables(policy, []string{link, link}); err != nil {
+		t.Fatalf("addTrustedExecutables: %v", err)
+	}
+	canonical := canonicalPath(t, target)
+	count := 0
+	for _, file := range policy.ReadOnlyFiles {
+		if file == canonical {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("canonical executable count = %d in %v, want 1", count, policy.ReadOnlyFiles)
+	}
+	if err := ValidatePolicy(policy); err != nil {
+		t.Fatalf("ValidatePolicy: %v", err)
+	}
+}
+
 // TestDarwinChildProcess is the child entry of the macOS enforcement suite:
 // with envProbe set the test binary runs the shared probe assertions INSIDE
 // the sandbox-exec cage.

@@ -123,7 +123,6 @@ describe('ActionsQuickConnectProvider', () => {
           available: true,
           backend: 'landlock',
           abi: 9,
-          intent: { name: 'opencode', available: true },
         },
       }),
       open,
@@ -133,11 +132,11 @@ describe('ActionsQuickConnectProvider', () => {
     const item = items[items.length - 1]
 
     expect(item).toMatchObject({
-      id: '__sandboxed_opencode__',
-      label: 'Sandboxed opencode…',
+      id: '__sandboxed_local__',
+      label: 'Sandboxed shell…',
       disabled: false,
     })
-    expect(item?.detail).toContain('filesystem-isolated workspace (landlock)')
+    expect(item?.detail).toContain('filesystem-isolated local shell (landlock)')
     item?.run()
     expect(open).toHaveBeenCalledOnce()
   })
@@ -151,7 +150,6 @@ describe('ActionsQuickConnectProvider', () => {
           backend: 'landlock',
           reason: 'landlock-abi-too-old',
           abi: 2,
-          intent: { name: 'opencode', available: true },
         },
       }),
       open: vi.fn(),
@@ -161,31 +159,9 @@ describe('ActionsQuickConnectProvider', () => {
     const item = items[items.length - 1]
 
     expect(item).toMatchObject({
-      id: '__sandboxed_opencode__',
+      id: '__sandboxed_local__',
       disabled: true,
       detail: 'Sandbox unavailable (landlock-abi-too-old)',
-    })
-  })
-
-  it('surfaces a missing opencode executable as a disabled sandbox row', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
-      state: vi.fn().mockResolvedValue({
-        enabled: true,
-        status: {
-          available: true,
-          backend: 'seatbelt',
-          intent: { name: 'opencode', available: false, reason: 'opencode-not-found' },
-        },
-      }),
-      open: vi.fn(),
-    })
-
-    const items = await provider.getItems()
-    expect(items[items.length - 1]).toMatchObject({
-      id: '__sandboxed_opencode__',
-      label: 'Sandboxed opencode…',
-      disabled: true,
-      detail: 'opencode unavailable (opencode-not-found)',
     })
   })
 })
@@ -424,7 +400,7 @@ describe('QuickConnectController', () => {
           {
             id: 'disabled',
             kind: 'command' as const,
-            label: 'Sandboxed opencode…',
+            label: 'Sandboxed shell…',
             disabled: true,
             run,
           },

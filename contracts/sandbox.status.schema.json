@@ -2,25 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/sandbox.status.schema.json",
   "title": "SandboxStatus",
-  "description": "Result of the sandbox.status JSON-RPC method. Native backend availability plus the advisory fixed opencode launch intent; open revalidates authoritatively.",
+  "description": "Result of the sandbox.status JSON-RPC method. Reports native backend availability for an interactive sandboxed shell.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["available", "backend", "intent"],
+  "required": ["available", "backend"],
   "properties": {
     "available": { "type": "boolean" },
     "backend": { "type": "string", "enum": ["landlock", "seatbelt", "unsupported"] },
     "reason": { "type": "string" },
     "detail": { "type": "string" },
-    "abi": { "type": "integer", "minimum": 0 },
-    "intent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "available"],
-      "properties": {
-        "name": { "const": "opencode" },
-        "available": { "type": "boolean" },
-        "reason": { "type": "string", "enum": ["opencode-not-found"] }
-      }
-    }
+    "abi": { "type": "integer", "minimum": 0 }
   }
 }

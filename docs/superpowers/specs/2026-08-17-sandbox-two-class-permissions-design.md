@@ -7,6 +7,11 @@ decision: ADR-0036
 supersedes: 2026-08-16-sandbox-per-tab-permissions-design.md where ADR-0036 states
 ---
 
+> **Amended 2026-08-18:** ADR-0037 and
+> `2026-08-18-sandbox-shell-contract-restoration-design.md` supersede the
+> fixed-OpenCode action/status wording only. The two-class directory contract
+> and all policy, DTO, dialog, metadata, and validation decisions remain current.
+
 # Sandbox two-class directory permissions
 
 ## 1. Scope

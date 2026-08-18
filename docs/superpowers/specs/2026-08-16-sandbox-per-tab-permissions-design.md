@@ -6,6 +6,11 @@ bead: nocx-y46q.14
 supersedes: ADR-0033 clauses named by ADR-0034
 ---
 
+> **Amended 2026-08-18:** ADR-0037 and
+> `2026-08-18-sandbox-shell-contract-restoration-design.md` supersede this document's
+> fixed-OpenCode action copy, status-intent check, and confirmation label. The two-class
+> permission model, strict DTO, revision gate, dialog, and native policy rules remain current.
+
 # Sandbox writable allowlist and per-tab permission overrides
 
 ## 1. Scope

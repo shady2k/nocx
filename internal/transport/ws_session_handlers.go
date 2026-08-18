@@ -591,15 +591,6 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			_ = wconn.TryError(req.ID, RPCError{Code: -32011, Message: statusErr.Status.Reason, Data: map[string]any{"reason": statusErr.Status.Reason}})
 			return
 		}
-		var launchErr *sandbox.LaunchError
-		if errors.As(err, &launchErr) {
-			h.log.Warn("sandbox launch unavailable", "reason", launchErr.Reason)
-			_ = wconn.TryError(req.ID, RPCError{
-				Code: -32012, Message: "sandbox launch unavailable",
-				Data: map[string]any{"reason": launchErr.Reason},
-			})
-			return
-		}
 		var setupErr *sandbox.SetupError
 		if errors.As(err, &setupErr) {
 			h.log.Error("sandbox setup failed", "reason", "setup-failed")

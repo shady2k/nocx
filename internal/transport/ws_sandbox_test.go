@@ -136,16 +136,6 @@ func manyStrings(n int) []string {
 	return out
 }
 
-func putOpenCodeOnPath(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, sandbox.OpenCodeIntentName)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // executable fixture
-		t.Fatalf("write opencode fixture: %v", err)
-	}
-	t.Setenv("PATH", dir)
-}
-
 // jsonrpcCallRaw sends an "open" frame whose params are a raw JSON string, so
 // tests can express shapes a Go map cannot (duplicate members, trailing JSON).
 func jsonrpcCallRaw(t *testing.T, conn *websocket.Conn, method, params string) json.RawMessage {
@@ -195,7 +185,6 @@ func openError(t *testing.T, resp json.RawMessage) (code int, reason string) {
 }
 
 func TestSandboxStatus_ReportsBackend(t *testing.T) {
-	putOpenCodeOnPath(t)
 	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock, ABI: 9}}
 	ws, _ := newSandboxHarness(t, svc)
 	conn := connectWS(t, ws)
@@ -204,10 +193,10 @@ func TestSandboxStatus_ReportsBackend(t *testing.T) {
 	resp := jsonrpcCall(t, conn, "sandbox.status", map[string]any{})
 	var result struct {
 		Result struct {
-			Available bool                 `json:"available"`
-			Backend   string               `json:"backend"`
-			ABI       int                  `json:"abi"`
-			Intent    sandbox.IntentStatus `json:"intent"`
+			Available bool            `json:"available"`
+			Backend   string          `json:"backend"`
+			ABI       int             `json:"abi"`
+			Intent    json.RawMessage `json:"intent"`
 		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error"`
 	}
@@ -220,32 +209,8 @@ func TestSandboxStatus_ReportsBackend(t *testing.T) {
 	if !result.Result.Available || result.Result.Backend != sandbox.BackendLandlock || result.Result.ABI != 9 {
 		t.Errorf("sandbox.status = %+v, want available landlock ABI 9", result.Result)
 	}
-	if result.Result.Intent != (sandbox.IntentStatus{Name: sandbox.OpenCodeIntentName, Available: true}) {
-		t.Errorf("sandbox.status intent = %+v, want available opencode", result.Result.Intent)
-	}
-}
-
-func TestSandboxStatus_ReportsMissingOpenCode(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
-	ws, _ := newSandboxHarness(t, svc)
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	resp := jsonrpcCall(t, conn, "sandbox.status", map[string]any{})
-	var result struct {
-		Result struct {
-			Intent sandbox.IntentStatus `json:"intent"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	want := sandbox.IntentStatus{
-		Name: sandbox.OpenCodeIntentName, Available: false, Reason: sandbox.ReasonOpenCodeNotFound,
-	}
-	if result.Result.Intent != want {
-		t.Fatalf("intent = %+v, want %+v", result.Result.Intent, want)
+	if result.Result.Intent != nil {
+		t.Errorf("sandbox.status unexpectedly carries a launch intent: %s", result.Result.Intent)
 	}
 }
 
@@ -451,26 +416,6 @@ func TestOpen_SandboxSetupFailure(t *testing.T) {
 	}
 	if !strings.Contains(logged, "sandbox setup failed") {
 		t.Errorf("sanitized setup diagnostic missing from backend log: %s", logged)
-	}
-}
-
-func TestOpen_SandboxLaunchUnavailable(t *testing.T) {
-	workspace := t.TempDir()
-	svc := &sandboxTestService{
-		status:  sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
-		prepErr: &sandbox.LaunchError{Reason: sandbox.ReasonOpenCodeNotFound},
-	}
-	wsrv, reg := newSandboxHarness(t, svc)
-	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
-		t.Fatalf("SetBool: %v", err)
-	}
-	conn := connectWS(t, wsrv)
-	defer func() { _ = conn.Close() }()
-
-	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(workspace, snapshotRevision(t, reg)))
-	code, reason := openError(t, resp)
-	if code != -32012 || reason != sandbox.ReasonOpenCodeNotFound {
-		t.Fatalf("code=%d reason=%q, want -32012 %q", code, reason, sandbox.ReasonOpenCodeNotFound)
 	}
 }
 

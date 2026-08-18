@@ -11,18 +11,19 @@ import (
 
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/sandbox"
-	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
 // captureSandbox stops at the native-service seam after recording the command
-// the composition root would enforce. Shell execution and lifecycle acceptance
-// are exercised in shellintegration's real-PTY regression; this half pins the
-// app-owned private launch inputs without depending on a host kernel backend.
+// and private bootstrap artifact the composition root would enforce. The real
+// PTY smoke proves the child remains interactive; this half pins that sandbox
+// bootstrap stays inside the private runtime tree without adding another
+// foreground executable.
 type captureSandbox struct {
-	cacheDir string
-	spec     sandbox.CommandSpec
-	artifact []byte
+	cacheDir     string
+	spec         sandbox.CommandSpec
+	artifact     []byte
+	artifactPath string
 }
 
 func (s *captureSandbox) Status(context.Context) sandbox.Status {
@@ -48,11 +49,12 @@ func (s *captureSandbox) Prepare(_ context.Context, _ sandbox.Request, spec sand
 	}
 	if artifact != "" {
 		s.artifact, _ = os.ReadFile(artifact)
+		s.artifactPath = artifact
 	}
 	return nil, sandbox.NewSetupErrorf("capture stop")
 }
 
-func TestSandboxedAgentLaunchIsBackendOwnedAndBoundToTheBootstrap(t *testing.T) {
+func TestSandboxedShellLaunchKeepsPrivateAuthenticatedBootstrap(t *testing.T) {
 	for _, shellName := range []string{"bash", "zsh"} {
 		t.Run(shellName, func(t *testing.T) {
 			shellPath, err := exec.LookPath(shellName)
@@ -61,16 +63,11 @@ func TestSandboxedAgentLaunchIsBackendOwnedAndBoundToTheBootstrap(t *testing.T) 
 			}
 			storagetest.IsolateWithHome(t)
 			workspace := t.TempDir()
-			agent := filepath.Join(t.TempDir(), "opencode")
-			if writeErr := os.WriteFile(agent, []byte("fixture"), 0o700); writeErr != nil { //nolint:gosec // executable fixture path
-				t.Fatalf("write opencode fixture: %v", writeErr)
-			}
 
 			f := localFactory(t)
 			svc := &captureSandbox{cacheDir: t.TempDir()}
 			f.sandbox = svc
 			f.shells = fixedShell{path: shellPath}
-			f.agentExec = func() (string, error) { return agent, nil }
 
 			_, err = f.NewPTY(context.Background(), pty.Config{
 				SessionID: "0123456789abcdef0123456789abcdef",
@@ -87,19 +84,18 @@ func TestSandboxedAgentLaunchIsBackendOwnedAndBoundToTheBootstrap(t *testing.T) 
 			if svc.spec.Path != shellPath || svc.spec.Dir != workspace {
 				t.Fatalf("sandbox command = path %q dir %q, want shell %q in %q", svc.spec.Path, svc.spec.Dir, shellPath, workspace)
 			}
-			if len(svc.spec.TrustedExecutables) != 1 || svc.spec.TrustedExecutables[0] != agent {
-				t.Fatalf("trusted executables = %v, want fixed opencode %q", svc.spec.TrustedExecutables, agent)
+			runtimeSessions := filepath.Join(svc.cacheDir, "sandbox-sessions") + string(filepath.Separator)
+			artifact := filepath.Clean(svc.artifactPath)
+			if !strings.HasPrefix(artifact, runtimeSessions) ||
+				!strings.Contains(artifact, string(filepath.Separator)+"tmp"+string(filepath.Separator)) {
+				t.Fatalf("bootstrap artifact = %q, want private runtime tmp under %q", svc.artifactPath, runtimeSessions)
 			}
-			if !strings.Contains(string(svc.artifact), "exec "+shellintegration.ShellQuote(agent)) {
-				t.Fatalf("bootstrap does not exec backend-resolved opencode; tail=%q", artifactTail(svc.artifact, 300))
+			if !strings.Contains(string(svc.artifact), "__nocx_lc_active") {
+				t.Fatalf("bootstrap artifact does not contain authenticated nocxify lifecycle")
+			}
+			if strings.Contains(string(svc.artifact), "opencode") {
+				t.Fatalf("bootstrap artifact unexpectedly launches opencode")
 			}
 		})
 	}
-}
-
-func artifactTail(data []byte, n int) string {
-	if len(data) <= n {
-		return string(data)
-	}
-	return string(data[len(data)-n:])
 }

@@ -69,9 +69,6 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	if err != nil {
 		return fail(err)
 	}
-	if trustedErr := addTrustedExecutables(pol, spec.TrustedExecutables); trustedErr != nil {
-		return fail(trustedErr)
-	}
 	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
 	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
 	// already consumed the base PATH above.

@@ -1,7 +1,7 @@
 # Sandboxed opencode launch design
 
-**Date:** 2026-08-16 · **Status:** accepted for implementation · **Bead:** `nocx-y46q.17`
-**Related:** native per-tab filesystem sandbox; sandbox writable allowlist; authenticated shell-integration channel
+**Date:** 2026-08-16 · **Status:** superseded by ADR-0037 on 2026-08-18 · **Bead:** `nocx-y46q.17`
+**Replacement:** `2026-08-18-sandbox-shell-contract-restoration-design.md`
 
 ## 1. Problem
 

@@ -4,9 +4,11 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -56,6 +58,71 @@ func (s *darwinService) NewRuntimeRoot() (string, error) {
 	return root, nil
 }
 
+// addTrustedExecutables extends an already-built policy with backend-resolved
+// fixed launch executables and their runtime roots. Nothing from the renderer
+// reaches this seam. The executable itself and every discovered dependency
+// root must remain outside user-writable policy roots; otherwise the caged
+// process could replace code that the policy is about to trust.
+func addTrustedExecutables(p *Policy, executables []string) error {
+	if len(executables) == 0 {
+		return nil
+	}
+	roots := append([]string(nil), p.ReadOnlyRoots...)
+	seenRoots := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		seenRoots[root] = true
+	}
+	seenFiles := make(map[string]bool)
+	files := append([]string(nil), p.ReadOnlyFiles...)
+	var elfCount, resolveAttempts int
+	var elfBytes uint64
+	for _, executable := range executables {
+		canonical, err := filepath.EvalSymlinks(executable)
+		if err != nil {
+			return NewSetupErrorf("trusted executable cannot be resolved")
+		}
+		if policyPathWritable(p, canonical) {
+			return NewSetupErrorf("trusted executable conflicts with a writable root")
+		}
+		before := len(roots)
+		if err := addExecutableRoots(canonical, &roots, seenFiles, seenRoots, &elfCount, &elfBytes, &resolveAttempts); err != nil {
+			if errors.Is(err, errRuntimeELFInterp) || errors.Is(err, errRuntimeELFNeeded) ||
+				errors.Is(err, errRuntimeELFSearchDir) || errors.Is(err, errRuntimeELFDynString) ||
+				errors.Is(err, errRuntimeELFAggregate) || errors.Is(err, errRuntimeELFMetadataBudget) ||
+				errors.Is(err, errRuntimeELFWorkBudget) {
+				return NewSetupErrorf("trusted executable runtime metadata exceeds bound")
+			}
+			return NewSetupErrorf("trusted executable runtime: %v", err)
+		}
+		for _, root := range roots[before:] {
+			if policyPathWritable(p, root) {
+				return NewSetupErrorf("trusted executable runtime conflicts with a writable root")
+			}
+		}
+		files = append(files, canonical)
+	}
+	p.ReadOnlyRoots = roots
+	p.ReadOnlyFiles = files
+	if err := p.normalize(); err != nil {
+		return NewSetupErrorf("trusted executable policy: %v", err)
+	}
+	return nil
+}
+
+func policyPathWritable(p *Policy, path string) bool {
+	for _, root := range append(append([]string(nil), p.WritableRoots...), p.WritableDirs...) {
+		if pathWithin(root, path) {
+			return true
+		}
+	}
+	for _, file := range p.WritableFiles {
+		if pathWithin(file, path) {
+			return true
+		}
+	}
+	return false
+}
+
 // Prepare renders the common policy as a deterministic SBPL profile and
 // launches /usr/bin/sandbox-exec -p <profile> <nocx-exe>
 // __sandbox-seatbelt-exec <status-fd> <shell> <shell-args>. sandbox-exec
@@ -97,10 +164,7 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	if err != nil {
 		return fail(NewSetupErrorf("executable path: %v", err))
 	}
-	trusted := make([]string, 0, len(spec.TrustedExecutables)+1)
-	trusted = append(trusted, exe)
-	trusted = append(trusted, spec.TrustedExecutables...)
-	if trustedErr := addTrustedExecutables(pol, trusted); trustedErr != nil {
+	if trustedErr := addTrustedExecutables(pol, []string{exe}); trustedErr != nil {
 		return fail(trustedErr)
 	}
 	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime

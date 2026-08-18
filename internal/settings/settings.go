@@ -1025,7 +1025,7 @@ func init() {
 	RegisterSectionGroup("Test", "developer")
 }
 
-// SandboxEnabled gates the opt-in "Sandboxed opencode…" action (ADR-0033 §3.1, ADR-0035).
+// SandboxEnabled gates the opt-in "Sandboxed shell…" action (ADR-0033 §3.1, ADR-0037).
 // It is a capability/visibility gate, not "sandbox every tab": it only
 // exposes an opt-in action for NEW local tabs, never changes a running tab,
 // and the backend rejects a sandbox request while the flag is off.

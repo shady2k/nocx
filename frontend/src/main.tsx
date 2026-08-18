@@ -1479,14 +1479,8 @@ function main(): void {
       )
       return
     }
-    if (state.status.intent.available === false) {
-      reportSandboxOpenError(
-        `opencode unavailable (${state.status.intent.reason || 'opencode-not-found'})`,
-      )
-      return
-    }
 
-    await openSandboxedOpenCode({
+    await openSandboxedShell({
       getSnapshot: () => profileClient.getSnapshot(),
       openDirectory: () => dialogClient.openDirectoryDialog(),
       showPermissions: showSandboxPermissions,
@@ -1500,9 +1494,9 @@ function main(): void {
       () => tm.newPane(),
       () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
-      // Sandboxed opencode… action (ADR-0034 §4.2, ADR-0035): live flag and
-      // backend/intent status on every open; then one fresh snapshot, the
-      // workspace picker, and permission confirmation. Cancellation creates nothing.
+      // Sandboxed shell… action (ADR-0037): live flag and backend status on
+      // every open; then one fresh snapshot, the workspace picker, and
+      // permission confirmation. Cancellation creates nothing.
       {
         state: getSandboxState,
         open: () => void openSandboxedTab(),

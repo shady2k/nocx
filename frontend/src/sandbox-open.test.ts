@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  openSandboxedOpenCode,
+  openSandboxedShell,
   SANDBOX_WRITABLE_PATHS_KEY,
   SANDBOX_READ_ONLY_PATHS_KEY,
 } from './sandbox-open'
 
-function deps(overrides: Partial<Parameters<typeof openSandboxedOpenCode>[0]> = {}) {
+function deps(overrides: Partial<Parameters<typeof openSandboxedShell>[0]> = {}) {
   return {
     getSnapshot: vi.fn().mockResolvedValue({
       values: {
@@ -27,10 +27,10 @@ function deps(overrides: Partial<Parameters<typeof openSandboxedOpenCode>[0]> = 
   }
 }
 
-describe('openSandboxedOpenCode', () => {
+describe('openSandboxedShell', () => {
   it('reads one fresh snapshot, shows both baselines, and forwards only revision + deltas', async () => {
     const d = deps()
-    await openSandboxedOpenCode(d)
+    await openSandboxedShell(d)
 
     expect(d.getSnapshot).toHaveBeenCalledTimes(1)
     expect(d.openDirectory).toHaveBeenCalledTimes(1)
@@ -53,7 +53,7 @@ describe('openSandboxedOpenCode', () => {
 
   it('never sends either baseline or an effective root', async () => {
     const d = deps()
-    await openSandboxedOpenCode(d)
+    await openSandboxedShell(d)
 
     const launch = vi.mocked(d.newSandboxedTab).mock.calls[0][1] as Record<string, unknown>
     // The launch object carries only the revision and four deltas — no baseline.
@@ -68,7 +68,7 @@ describe('openSandboxedOpenCode', () => {
 
   it('a cancelled workspace picker creates no tab and no dialog', async () => {
     const d = deps({ openDirectory: vi.fn().mockResolvedValue({ path: '' }) })
-    await openSandboxedOpenCode(d)
+    await openSandboxedShell(d)
 
     expect(d.showPermissions).not.toHaveBeenCalled()
     expect(d.newSandboxedTab).not.toHaveBeenCalled()
@@ -76,7 +76,7 @@ describe('openSandboxedOpenCode', () => {
 
   it('a cancelled permission dialog creates no tab', async () => {
     const d = deps({ showPermissions: vi.fn().mockResolvedValue(null) })
-    await openSandboxedOpenCode(d)
+    await openSandboxedShell(d)
 
     expect(d.newSandboxedTab).not.toHaveBeenCalled()
   })
@@ -85,7 +85,7 @@ describe('openSandboxedOpenCode', () => {
     const d = deps({
       getSnapshot: vi.fn().mockRejectedValue(new Error('settings unavailable')),
     })
-    await openSandboxedOpenCode(d)
+    await openSandboxedShell(d)
 
     expect(d.reportError).toHaveBeenCalledWith('settings unavailable')
     expect(d.newSandboxedTab).not.toHaveBeenCalled()
@@ -101,7 +101,7 @@ describe('openSandboxedOpenCode', () => {
         revision: 3,
       }),
     })
-    await openSandboxedOpenCode(d)
+    await openSandboxedShell(d)
 
     expect(d.showPermissions).toHaveBeenCalledWith(
       expect.objectContaining({ baselineWritable: [], baselineReadOnly: [] }),

@@ -256,32 +256,6 @@ type LocalLaunch struct {
 // reads $ZDOTDIR/.zshrc ONLY when interactive — inferring it from "stdin is a
 // tty" would, on the one launch where it is not, skip our rcfile entirely and
 // leave the transient directory behind with the capability in it.
-// localAgentTail replaces the bootstrap shell with the fixed sandbox agent
-// only after the authenticated lifecycle bootstrap accepted. It is shared by
-// bash and zsh: both support [[ ]], exec, and the parameter expansion used
-// here. The executable is shell-quoted as data. A missing channel or a removed
-// executable fails closed; successful exec keeps the lifecycle descriptor open
-// in the agent process, and the PTY exits when the agent exits — there is never
-// an intervening shell prompt.
-func localAgentTail(executable string) string {
-	if executable == "" {
-		return ""
-	}
-	quoted := ShellQuote(executable)
-	return `
-if [[ "${__nocx_lc_active:-0}" != 1 ]]; then
-    printf '%s\n' 'nocx: sandboxed opencode requires authenticated shell integration' >&2
-    exit 125
-fi
-if [[ ! -x ` + quoted + ` ]]; then
-    printf '%s\n' 'nocx: opencode became unavailable before launch' >&2
-    exit 127
-fi
-exec ` + quoted + `
-printf '%s\n' 'nocx: could not execute opencode' >&2
-exit 126
-`
-}
 
 func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (LocalLaunch, error) {
 	artifactDir := opts.ArtifactDir
@@ -294,7 +268,6 @@ func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (
 		if err != nil {
 			return LocalLaunch{}, err
 		}
-		rc += localAgentTail(opts.AgentExec)
 		path, err := writeLocalRcfileIn(rc, artifactDir)
 		if err != nil {
 			return LocalLaunch{}, err
@@ -309,7 +282,6 @@ func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (
 		if err != nil {
 			return LocalLaunch{}, err
 		}
-		rc += localAgentTail(opts.AgentExec)
 		dir, err := writeLocalZDOTDIRIn(rc, artifactDir)
 		if err != nil {
 			return LocalLaunch{}, err

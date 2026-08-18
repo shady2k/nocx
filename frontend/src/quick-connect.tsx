@@ -282,6 +282,8 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     if (!this.sandbox) return items
     // The flag gates VISIBILITY only; the backend also rejects a request
     // while it is off, so UI and wire agree even if this read is stale.
+    // The action launches the user's configured interactive shell; sandboxing
+    // changes only its filesystem policy.
     let state: { enabled: boolean; status: SandboxStatus | null }
     try {
       state = await this.sandbox.state()
@@ -293,17 +295,14 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     const backend = state.status?.backend ?? 'unknown'
     const reason = state.status?.reason ?? ''
     const backendUnavailable = !state.status?.available
-    const intentUnavailable = state.status?.intent.available === false
     items.push({
-      id: '__sandboxed_opencode__',
+      id: '__sandboxed_local__',
       kind: 'command',
-      label: 'Sandboxed opencode…',
+      label: 'Sandboxed shell…',
       detail: backendUnavailable
         ? `Sandbox unavailable (${reason})`
-        : intentUnavailable
-          ? `opencode unavailable (${state.status?.intent.reason ?? 'opencode-not-found'})`
-          : `Start opencode in a filesystem-isolated workspace (${backend})`,
-      disabled: backendUnavailable || intentUnavailable,
+        : `Open a filesystem-isolated local shell (${backend})`,
+      disabled: backendUnavailable,
       run: () => this.sandbox!.open(),
     })
     return items

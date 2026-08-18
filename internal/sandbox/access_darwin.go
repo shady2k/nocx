@@ -62,8 +62,7 @@ func (m *darwinAccessMonitor) consume(cmd *exec.Cmd, stdout io.Reader, session *
 	scanner.Buffer(make([]byte, 4096), macOSLogLineMax)
 	for scanner.Scan() {
 		var row struct {
-			EventMessage     string `json:"eventMessage"`
-			ProcessImagePath string `json:"processImagePath"`
+			EventMessage string `json:"eventMessage"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &row) != nil {
 			if bytes.Contains(scanner.Bytes(), []byte(token)) {
@@ -79,12 +78,8 @@ func (m *darwinAccessMonitor) consume(cmd *exec.Cmd, stdout io.Reader, session *
 			session.noteLost()
 			continue
 		}
-		executable := row.ProcessImagePath
-		if executable == "" {
-			executable = program
-		}
 		session.Record(AccessObservation{
-			Shell: shell, Executable: executable, Path: path,
+			Shell: shell, Executable: program, Path: path,
 			Access: access, Operation: operation, Source: AccessSourceDarwinSeatbelt, At: time.Now().UTC(),
 		})
 	}

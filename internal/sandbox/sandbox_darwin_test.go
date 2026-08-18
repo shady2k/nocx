@@ -92,6 +92,7 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	if wErr := os.WriteFile(sentinel, []byte("top secret"), 0o600); wErr != nil {
 		t.Fatalf("write sentinel: %v", wErr)
 	}
+	canonicalSentinel := canonicalPath(t, sentinel)
 	if wErr := os.WriteFile(filepath.Join(roRoot, "keep.txt"), []byte("read-only"), 0o600); wErr != nil {
 		t.Fatalf("write read-only fixture: %v", wErr)
 	}
@@ -158,7 +159,7 @@ func TestSeatbeltEnforcement(t *testing.T) {
 		page := inbox.List(AccessListOptions{Limit: 200})
 		observed := false
 		for _, event := range page.Events {
-			if event.Path == sentinel && event.Access == AccessReadOnly && event.Source == AccessSourceDarwinSeatbelt {
+			if event.Path == canonicalSentinel && event.Access == AccessReadOnly && event.Source == AccessSourceDarwinSeatbelt && event.Executable == "cat" {
 				observed = true
 				break
 			}

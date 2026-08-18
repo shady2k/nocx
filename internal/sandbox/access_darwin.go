@@ -36,7 +36,7 @@ func startDarwinAccessMonitor(session *AccessSession, shell, token string, onFai
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	predicate := `eventMessage CONTAINS "` + token + `"`
-	cmd := exec.CommandContext(ctx, macOSLogPath, "stream", "--style", "json", "--predicate", predicate) //nolint:gosec // fixed binary and backend-minted token
+	cmd := exec.CommandContext(ctx, macOSLogPath, "stream", "--style", "ndjson", "--predicate", predicate) //nolint:gosec // fixed binary and backend-minted token
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()

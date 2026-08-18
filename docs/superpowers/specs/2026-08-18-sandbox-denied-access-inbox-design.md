@@ -72,7 +72,7 @@ The backend generates `nocx-sandbox-<128-bit-hex>` and renders:
 (deny default (with message "nocx-sandbox-…"))
 ```
 
-Before launch it starts the fixed binary `/usr/bin/log stream --style json` with an `eventMessage CONTAINS` predicate containing only that backend token. Startup is accepted only if the process remains alive through the readiness window. JSON lines are capped at 64 KiB; only token-matching absolute-path Seatbelt messages matching the closed `Sandbox: program(pid) deny ... file-* /path` grammar reach the per-session recorder. The monitor is cancelled before the recorder closes.
+Before launch it starts the fixed binary `/usr/bin/log stream --style ndjson` with an `eventMessage CONTAINS` predicate containing only that backend token. Startup is accepted only if the process remains alive through the readiness window. Each NDJSON record is capped at 64 KiB; only token-matching absolute-path Seatbelt messages matching the closed `Sandbox: program(pid) deny ... file-* /path` grammar reach the per-session recorder. The monitor is cancelled before the recorder closes.
 
 If unified-log access is unavailable, Seatbelt launch and enforcement remain unchanged and the Settings page reports observation unavailable.
 

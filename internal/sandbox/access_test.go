@@ -51,7 +51,7 @@ func TestAccessInboxCoalescesAndResolvesAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if resolved.State != AccessStateGranted || store.access != AccessReadOnly || store.path != filepath.Dir(path) || resolved.SettingsRevision != 1 {
+	if resolved.State != AccessStateGranted || store.access != AccessReadOnly || store.path != page.Events[0].Directory || resolved.SettingsRevision != 1 {
 		t.Fatalf("resolved = %#v, store = %#v", resolved, store)
 	}
 	if _, err := inbox.Resolve(AccessResolveRequest{EventID: page.Events[0].ID, Decision: AccessDecisionDismiss}); !errors.Is(err, ErrAccessEventResolved) {

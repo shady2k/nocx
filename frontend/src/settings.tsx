@@ -34,6 +34,7 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
 import type { PolicyClient } from './policy-client'
+import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -250,6 +251,7 @@ export interface SettingsComponentProps {
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
   policyClient?: PolicyClient
+  sandboxAccessClient?: SandboxAccessClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -686,6 +688,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
         />
       ),
     }
+    const sandboxAccessPage: SettingsPage = {
+      kind: 'component',
+      id: 'sandbox-access',
+      title: 'Sandbox access',
+      groupId: 'developer',
+      scrollMode: 'page',
+      renderContent: () => <SandboxAccessSettings client={props.sandboxAccessClient} />,
+    }
     return [
       connectionPage,
       ...generated,
@@ -698,6 +708,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       rolesPage,
       policyPage,
       aboutPage,
+      sandboxAccessPage,
     ]
   })
 

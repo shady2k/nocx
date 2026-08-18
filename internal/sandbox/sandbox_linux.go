@@ -17,11 +17,27 @@ import (
 type linuxService struct {
 	log      log.Logger
 	cacheDir string
+	access   *AccessInbox
 }
 
 // New returns the Landlock-backed Service for the current platform.
 func New(logger log.Logger, cacheDir string) Service {
 	return &linuxService{log: logger, cacheDir: cacheDir}
+}
+
+// NewWithAccess additionally enables the denied-access monitor for sandboxed
+// sessions. New remains the enforcement-only constructor used by isolated
+// package tests and embedders that do not expose the inbox.
+func NewWithAccess(logger log.Logger, cacheDir string, access *AccessInbox) Service {
+	if access != nil {
+		access.SetStatus(AccessMonitorStatus{
+			Available: true,
+			Platform:  "linux",
+			Backend:   string(AccessSourceLinuxSeccomp),
+			Detail:    "Best-effort syscall observation; Landlock remains the sole enforcement boundary.",
+		})
+	}
+	return &linuxService{log: logger, cacheDir: cacheDir, access: access}
 }
 
 func (s *linuxService) Status(_ context.Context) Status {
@@ -74,7 +90,16 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	// already consumed the base PATH above.
 	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
 
-	payload := helperPayload{Policy: pol, Command: spec}
+	monitorEnabled := s.access != nil && req.Identity.valid()
+	var accessSession *AccessSession
+	if monitorEnabled {
+		accessSession = s.access.BeginSession(req.Identity)
+	}
+	monitorChildFD := 0
+	if monitorEnabled {
+		monitorChildFD = 5 + len(spec.ExtraFiles)
+	}
+	payload := helperPayload{Policy: pol, Command: spec, AccessMonitorFD: monitorChildFD}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fail(NewSetupErrorf("serialize policy: %v", err))
@@ -103,11 +128,28 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 		return fail(NewSetupErrorf("status pipe: %v", err))
 	}
 
+	var monitorParent, monitorChild *os.File
+	if monitorEnabled {
+		pair, socketErr := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if socketErr != nil {
+			_ = policyFile.Close()
+			_ = statusR.Close()
+			_ = statusW.Close()
+			return fail(NewSetupErrorf("access monitor socket: %v", socketErr))
+		}
+		monitorParent = os.NewFile(uintptr(pair[0]), "access-monitor-parent")
+		monitorChild = os.NewFile(uintptr(pair[1]), "access-monitor-child")
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		_ = policyFile.Close()
 		_ = statusR.Close()
 		_ = statusW.Close()
+		if monitorParent != nil {
+			_ = monitorParent.Close()
+			_ = monitorChild.Close()
+		}
 		return fail(NewSetupErrorf("executable path: %v", err))
 	}
 
@@ -122,24 +164,75 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	cmd.Env = spec.Env
 	cmd.Dir = spec.Dir
 	cmd.ExtraFiles = append(append([]*os.File(nil), spec.ExtraFiles...), policyFile, statusW)
+	if monitorChild != nil {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, monitorChild)
+	}
 	// Stdout/Stderr/Stdin stay nil: the PTY path attaches them via
 	// pty.StartWithSize; the session must not exist before enforcement.
 
+	var accessMonitor *linuxAccessMonitor
 	pc := &PreparedCommand{
 		Cmd:        cmd,
 		Backend:    BackendLandlock,
 		Policy:     pol,
 		policyFile: policyFile,
 		waitReady: func(ctx context.Context) error {
-			return readStatus(ctx, statusR, statusW)
+			if monitorChild != nil {
+				_ = monitorChild.Close()
+			}
+			if err := readStatus(ctx, statusR, statusW); err != nil {
+				return err
+			}
+			if monitorParent == nil {
+				return nil
+			}
+			listenerFD, receiveErr := receiveAccessListener(monitorParent)
+			_ = monitorParent.Close()
+			if receiveErr != nil || listenerFD < 0 {
+				s.access.SetStatus(AccessMonitorStatus{
+					Available: false,
+					Platform:  "linux",
+					Backend:   string(AccessSourceLinuxSeccomp),
+					Reason:    "seccomp-user-notify-unavailable",
+					Detail:    "Sandbox enforcement is active; denied-access observation is unavailable.",
+				})
+				return nil
+			}
+			accessMonitor = newLinuxAccessMonitor(listenerFD, accessSession, spec.Path, pol, func(error) {
+				s.access.SetStatus(AccessMonitorStatus{
+					Available: false,
+					Platform:  "linux",
+					Backend:   string(AccessSourceLinuxSeccomp),
+					Reason:    "seccomp-listener-failed",
+					Detail:    "Denied-access observation stopped unexpectedly; the affected sandbox is terminated fail-closed.",
+				})
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			})
+			accessMonitor.Start()
+			accessSession.Activate()
+			return nil
 		},
 	}
 	pc.cleanup = func() {
 		_ = statusR.Close()
 		_ = statusW.Close()
+		if monitorParent != nil {
+			_ = monitorParent.Close()
+		}
+		if monitorChild != nil {
+			_ = monitorChild.Close()
+		}
 		if cmd.Process != nil && cmd.ProcessState == nil {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
+		}
+		if accessMonitor != nil {
+			accessMonitor.Close()
+		}
+		if accessSession != nil {
+			accessSession.Close()
 		}
 		RemoveRuntimeRoot(runtimeRoot)
 	}

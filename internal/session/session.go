@@ -530,6 +530,16 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
 	} else {
+		var sandboxReq *sandbox.Request
+		if cfg.Sandbox != nil {
+			copy := *cfg.Sandbox
+			copy.Identity = sandbox.SessionIdentity{
+				SessionID:  string(id),
+				InstanceID: string(r.instanceID),
+				Epoch:      epoch,
+			}
+			sandboxReq = &copy
+		}
 		var perr error
 		pt, perr = r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:       cfg.Cwd,
@@ -539,7 +549,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			YPixel:    eff.YPixel,
 			Enhanced:  cfg.Enhanced,
 			SessionID: string(id),
-			Sandbox:   cfg.Sandbox,
+			Sandbox:   sandboxReq,
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)

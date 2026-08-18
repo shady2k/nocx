@@ -1442,6 +1442,56 @@ func (r *Registry) SetPaths(p *PathList, value []string) error {
 	return commitErr
 }
 
+// AppendSandboxPath canonicalizes one directory and appends it to a sandbox
+// baseline in the same locked persistence transaction that observes the
+// current list. Concurrent Settings edits therefore cannot be lost. Existing
+// canonical entries are idempotent and do not advance the revision.
+func (r *Registry) AppendSandboxPath(p *PathList, path string) (int, error) {
+	if p != SandboxAllowedWritablePaths && p != SandboxAllowedReadOnlyPaths {
+		return 0, &ValidationError{SettingKey: p.key, Message: "not a sandbox path baseline"}
+	}
+	r.mu.Lock()
+	canonical, err := canonicalPaths(p.key, []string{path})
+	if err != nil {
+		r.mu.Unlock()
+		return 0, err
+	}
+	if len(canonical) != 1 {
+		r.mu.Unlock()
+		return 0, &ValidationError{SettingKey: p.key, Message: "path did not resolve to one directory"}
+	}
+	existing, ok := r.values[p.key].([]string)
+	if !ok && r.values[p.key] != nil {
+		r.mu.Unlock()
+		return 0, &ValidationError{SettingKey: p.key, Message: "stored path list is corrupted"}
+	}
+	for _, current := range existing {
+		if current == canonical[0] {
+			revision := r.revision
+			r.mu.Unlock()
+			return revision, nil
+		}
+	}
+	if len(existing) >= pathListMaxEntries {
+		r.mu.Unlock()
+		return 0, &ValidationError{SettingKey: p.key, Message: fmt.Sprintf("at most %d paths are allowed", pathListMaxEntries)}
+	}
+	newValues := copyValues(r.values)
+	newValues[p.key] = append(copyStrings(existing), canonical[0])
+	if err := checkSandboxPathConflict(p.key, newValues); err != nil {
+		r.mu.Unlock()
+		return 0, err
+	}
+	ch, commitErr := r.commitLocked(newValues, r.refs, []string{p.key})
+	revision := r.revision
+	r.mu.Unlock()
+	if commitErr != nil {
+		return 0, commitErr
+	}
+	r.finishCommit(ch)
+	return revision, nil
+}
+
 // ── getSnapshot ─────────────────────────────────────────────────────────
 
 // GetSnapshot returns the current snapshot of all non-secret settings:

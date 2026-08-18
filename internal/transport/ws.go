@@ -316,6 +316,9 @@ type WSServer struct {
 	// transport never renders policy — it validates the request and maps the
 	// backend's typed errors to reserved codes.
 	sandboxSvc sandbox.Service
+	// sandboxAccess is the bounded, in-memory denied-access inbox. It owns
+	// event state and promotion; the transport only validates and serializes.
+	sandboxAccess *sandbox.AccessInbox
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
 	// When nil, the handler returns a JSON-RPC error. The resolver
@@ -1133,6 +1136,19 @@ func WithBackupService(svc *backup.Service) WSServerOption {
 // confirm the flag).
 func WithSandboxService(svc sandbox.Service) WSServerOption {
 	return func(s *WSServer) { s.sandboxSvc = svc }
+}
+
+// WithSandboxAccessInbox enables sandbox.access.* and broadcasts revision-only
+// invalidations. The callback is process-lifetime, like settings.changed.
+func WithSandboxAccessInbox(inbox *sandbox.AccessInbox) WSServerOption {
+	return func(s *WSServer) {
+		s.sandboxAccess = inbox
+		if inbox != nil {
+			inbox.Subscribe(func(revision uint64) {
+				s.broadcastSandboxAccessChanged(revision)
+			})
+		}
+	}
 }
 
 // WithBackupFileSaver injects the native save-file capability. Tests can
@@ -3768,4 +3784,17 @@ func requestTag(wconn *wsConn, req jsonrpcRequest) string {
 		tag += "#" + string(req.ID)
 	}
 	return tag
+}
+
+func (s *WSServer) broadcastSandboxAccessChanged(revision uint64) {
+	s.connsMu.Lock()
+	conns := make([]*wsConn, 0, len(s.conns))
+	for wc := range s.conns {
+		conns = append(conns, wc)
+	}
+	s.connsMu.Unlock()
+	params := mustMarshal(map[string]uint64{"revision": revision})
+	for _, wc := range conns {
+		_ = wc.TryNotify("sandbox.access.changed", params)
+	}
 }

@@ -243,6 +243,28 @@ func TestOpenCarriesSessionIDToPTYFactory(t *testing.T) {
 	}
 }
 
+func TestOpenBindsSandboxRequestToSessionIncarnation(t *testing.T) {
+	f := &capturePTYFactory{}
+	reg := New(log.NewSlogAdapter(nil), f)
+	request := &sandbox.Request{Workspace: t.TempDir()}
+
+	sess, err := reg.Open(t.Context(), Config{Kind: KindLocal, Cols: 80, Rows: 24, Sandbox: request})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+	identity := sess.Identity()
+	if f.last.Sandbox == request {
+		t.Fatal("session mutated and forwarded the caller's sandbox request")
+	}
+	if got := f.last.Sandbox.Identity; got.SessionID != string(sess.ID()) || got.InstanceID != string(identity.InstanceID) || got.Epoch != identity.Epoch {
+		t.Fatalf("sandbox identity = %#v, want session %q instance %q epoch %d", got, sess.ID(), identity.InstanceID, identity.Epoch)
+	}
+	if request.Identity != (sandbox.SessionIdentity{}) {
+		t.Fatalf("caller request was mutated: %#v", request.Identity)
+	}
+}
+
 func TestRealRegistry_DoneChannel(t *testing.T) {
 	reg := New(log.NewSlogAdapter(nil), &realPTYFactory{log: log.NewSlogAdapter(nil)})
 

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.status.schema.json",
+  "title": "SandboxAccessStatus",
+  "description": "Availability and loss state of the diagnostic denied-access observer. Enforcement availability is reported separately by sandbox.status.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["available", "platform", "lost"],
+  "properties": {
+    "available": { "type": "boolean" },
+    "platform": { "type": "string", "enum": ["linux", "darwin", "unsupported"] },
+    "backend": { "type": "string" },
+    "reason": { "type": "string" },
+    "detail": { "type": "string" },
+    "lost": { "type": "integer", "minimum": 0 }
+  }
+}

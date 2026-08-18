@@ -19,9 +19,24 @@ import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 import type { TabClose } from './generated/tab.close'
 import type { SandboxStatus } from './generated/sandbox.status'
+import type { SandboxAccessChanged } from './generated/sandbox.access.changed'
+import type {
+  SandboxAccessList,
+  Event as SandboxAccessEvent,
+} from './generated/sandbox.access.list'
+import type { SandboxAccessResolve } from './generated/sandbox.access.resolve'
+import type { SandboxAccessStatus } from './generated/sandbox.access.status'
 
-// Sandbox wire types (ADR-0030 §3.3)
-export type { SandboxStatus }
+// ── Sandbox wire types (ADR-0030 §3.3, §4.2) ────────────────────────────
+
+export type {
+  SandboxStatus,
+  SandboxAccessChanged,
+  SandboxAccessEvent,
+  SandboxAccessList,
+  SandboxAccessResolve,
+  SandboxAccessStatus,
+}
 /** Immutable sandbox metadata for a sandboxed session (ADR-0030 §3.3, ADR-0036 §8). */
 export interface SessionSandboxInfo {
   readonly backend: 'landlock' | 'seatbelt'
@@ -846,6 +861,33 @@ export class WSClient {
   // wired (dev-web harness without a native backend).
   sandboxStatus(): Promise<SandboxStatus | null> {
     return this.dispatcher.call<SandboxStatus | null>('sandbox.status', {})
+  }
+
+  sandboxAccessStatus(): Promise<SandboxAccessStatus | null> {
+    return this.dispatcher.call<SandboxAccessStatus | null>('sandbox.access.status', {})
+  }
+
+  sandboxAccessList(limit = 200): Promise<SandboxAccessList> {
+    return this.dispatcher.call<SandboxAccessList>('sandbox.access.list', { limit })
+  }
+
+  sandboxAccessResolve(
+    eventId: string,
+    decision: 'dismiss' | 'globalReadOnly' | 'globalReadWrite',
+  ): Promise<SandboxAccessResolve> {
+    return this.dispatcher.call<SandboxAccessResolve>('sandbox.access.resolve', {
+      eventId,
+      decision,
+    })
+  }
+
+  onSandboxAccessChanged(callback: (change: SandboxAccessChanged) => void): () => void {
+    return this.dispatcher.subscribe('sandbox.access.changed', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const revision = (params as Record<string, unknown>).revision
+      if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return
+      callback({ revision })
+    })
   }
 
   // openDirectory opens the native folder picker and returns the chosen

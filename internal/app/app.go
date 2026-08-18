@@ -645,7 +645,8 @@ func New(opts ...Option) (*App, error) {
 	// One platform sandbox service at the composition root (AD-8). It owns
 	// policy construction and the per-session runtime roots; callers only
 	// carry an optional workspace request.
-	sandboxSvc := sandbox.New(logger, paths.CacheDir())
+	accessInbox := sandbox.NewAccessInbox(nil)
+	sandboxSvc := sandbox.NewWithAccess(logger, paths.CacheDir(), accessInbox)
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
 	// each lane's owning session before it can compose a child bootstrap.
@@ -855,6 +856,7 @@ func New(opts ...Option) (*App, error) {
 	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
+	accessInbox.SetGrantStore(sandboxGrantStore{registry: settingsRegistry})
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -1089,6 +1091,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithVaultUnsealer(v),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithSandboxService(sandboxSvc),
+		transport.WithSandboxAccessInbox(accessInbox),
 		transport.WithVaultLifecycle(v),
 		// D9, and the whole of its plumbing: the transport counts attached
 		// clients, the vault decides what a count of zero means. Without
@@ -3146,4 +3149,19 @@ func (m apiSecretMaterial) Material(ctx context.Context, id credential.SecretID)
 		return credential.Secret{}, vault.ErrVaultSealed
 	}
 	return m.resolver.Resolve(ctx, id, credential.Operation("send an API request"))
+}
+
+type sandboxGrantStore struct {
+	registry *settings.Registry
+}
+
+func (s sandboxGrantStore) AppendSandboxPath(access sandbox.AccessClass, path string) (int, error) {
+	switch access {
+	case sandbox.AccessReadOnly:
+		return s.registry.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, path)
+	case sandbox.AccessReadWrite:
+		return s.registry.AppendSandboxPath(settings.SandboxAllowedWritablePaths, path)
+	default:
+		return 0, sandbox.ErrInvalidAccessDecision
+	}
 }

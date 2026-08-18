@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -178,4 +179,119 @@ func TestLandlockEnforcement(t *testing.T) {
 	if !strings.Contains(out.String(), "PROBE RESULT: ok") {
 		t.Fatalf("probe did not report success:\n%s", out.String())
 	}
+}
+
+func TestLinuxAccessMonitorReportsDeniedOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		command  string
+		access   AccessClass
+		existing bool
+	}{
+		{name: "read", command: "/bin/cat", access: AccessReadOnly, existing: true},
+		{name: "write", command: "/usr/bin/touch", access: AccessReadWrite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			workspace := filepath.Join(base, "workspace")
+			outside := filepath.Join(base, "outside")
+			cache := filepath.Join(base, "cache")
+			for _, dir := range []string{workspace, outside, cache} {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			denied := filepath.Join(outside, "target.txt")
+			if tc.existing {
+				if err := os.WriteFile(denied, []byte("not-secret-test-data"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			inbox := NewAccessInbox(nil)
+			svc := NewWithAccess(log.NewSlogAdapter(nil), cache, inbox)
+			prepared, err := svc.Prepare(t.Context(), Request{
+				Workspace: workspace,
+				Identity:  SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 1},
+			}, CommandSpec{
+				Path: tc.command,
+				Args: []string{denied},
+				Dir:  workspace,
+				Env:  os.Environ(),
+			})
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			defer prepared.Close()
+			if err := prepared.Cmd.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if err := prepared.WaitReady(t.Context()); err != nil {
+				t.Fatalf("WaitReady: %v", err)
+			}
+			_ = prepared.Cmd.Wait()
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				page := inbox.List(AccessListOptions{Limit: 10})
+				if len(page.Events) > 0 {
+					event := page.Events[0]
+					if event.Path != denied || event.Access != tc.access || event.Source != AccessSourceLinuxSeccomp {
+						t.Fatalf("event = %#v", event)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("denied open did not reach access inbox")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestObservedPolicyPathDoesNotHideSymlinkEscapeDenial(t *testing.T) {
+	root := t.TempDir()
+	allowed := filepath.Join(root, "allowed")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{allowed, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(outside, "target.txt")
+	if err := os.WriteFile(target, []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(allowed, "escape")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Fatal(err)
+	}
+	attempted := filepath.Join(alias, "target.txt")
+	policy := &Policy{ReadOnlyRoots: []string{allowed}}
+	if !policyAllowsAccess(policy, attempted, AccessReadOnly) {
+		t.Fatal("test precondition: lexical attempted path must look allowed")
+	}
+	if resolved := observedPolicyPath(attempted); policyAllowsAccess(policy, resolved, AccessReadOnly) {
+		t.Fatalf("resolved symlink escape %q was treated as allowed", resolved)
+	}
+}
+
+func TestLinuxAccessMonitorReportsListenerFailure(t *testing.T) {
+	failed := make(chan error, 1)
+	monitor := newLinuxAccessMonitor(-1, NewAccessInbox(nil).BeginSession(SessionIdentity{
+		SessionID: "session", InstanceID: "instance", Epoch: 1,
+	}), "/bin/sh", &Policy{}, func(err error) {
+		failed <- err
+	})
+	monitor.Start()
+	select {
+	case err := <-failed:
+		if err == nil {
+			t.Fatal("listener failure callback received nil")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener failure was not reported")
+	}
+	monitor.Close()
 }

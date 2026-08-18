@@ -120,6 +120,19 @@ func TestRenderProfile_RejectsInjection(t *testing.T) {
 	}
 }
 
+func TestRenderProfileWithMessageTagsDenyDefault(t *testing.T) {
+	profile, err := renderProfile(fixturePolicy(t), "nocx-sandbox-0123456789abcdef")
+	if err != nil {
+		t.Fatalf("renderProfile with message: %v", err)
+	}
+	if !strings.Contains(profile, `(deny default (with message "nocx-sandbox-0123456789abcdef"))`) {
+		t.Fatalf("profile has no tagged deny-default: %s", profile)
+	}
+	if _, err := renderProfile(fixturePolicy(t), "tag\n(injection)"); err == nil {
+		t.Fatal("control-character monitor tag accepted")
+	}
+}
+
 func TestEscapeSBPL(t *testing.T) {
 	// Control characters, including newline and NUL, are rejected.
 	for _, bad := range []string{"a\nb", "a\x00b", "\x07", "\x1b[31m"} {

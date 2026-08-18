@@ -55,6 +55,10 @@ type Request struct {
 	AddReadOnly    []string
 	RemoveReadOnly []string
 	RuntimeRoot    string `json:"-"`
+	// Identity is minted by the session registry before native preparation.
+	// It never comes from the renderer and binds access observations to one
+	// exact backend/session incarnation.
+	Identity SessionIdentity `json:"-"`
 }
 
 // Status reports backend availability. It is the payload of sandbox.status

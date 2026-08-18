@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -15,13 +16,29 @@ import (
 // semantics; termic behavior was compared in the research report §1.4 but no
 // AGPL code was copied.
 
-// renderProfile renders a fresh SBPL profile for the common policy.
+// renderProfile renders a fresh SBPL profile for the common policy. A single
+// optional deny message correlates macOS diagnostics; more than one is invalid.
 // Escaping is centralized and rejects newline/NUL/control characters before
 // anything reaches the profile.
-func renderProfile(p *Policy) (string, error) {
+func renderProfile(p *Policy, messages ...string) (string, error) {
+	if len(messages) > 1 {
+		return "", errors.New("multiple Seatbelt deny messages")
+	}
+	message := ""
+	if len(messages) == 1 {
+		message = messages[0]
+	}
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
-	b.WriteString("(deny default)\n")
+	if message == "" {
+		b.WriteString("(deny default)\n")
+	} else {
+		escaped, err := escapeSBPL(message)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("(deny default (with message \"" + escaped + "\"))\n")
+	}
 	// Process essentials for an interactive shell: exec/fork for children,
 	// signals within the cage, Mach/IPC lookups, and process introspection
 	// of self. file-map-executable and file-read-metadata are global because

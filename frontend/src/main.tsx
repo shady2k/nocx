@@ -543,6 +543,7 @@ function main(): void {
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
         skillsStore,
+        client,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

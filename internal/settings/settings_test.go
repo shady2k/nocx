@@ -1962,3 +1962,39 @@ func TestCanonicalPaths_CaseInsensitiveAliasDedupe(t *testing.T) {
 		t.Fatalf("GetPaths: got %d entries, want 1 (first-wins dedupe): %v", len(got), got)
 	}
 }
+
+func TestAppendSandboxPathIsAtomicAndIdempotent(t *testing.T) {
+	doc := storage.NewDocumentStore(t.TempDir())
+	reg := settings.New(doc, &fakeSecretStore{})
+	dirs := tmpDirs(t, 2)
+	first, second := dirs[0], dirs[1]
+
+	rev1, err := reg.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, first)
+	if err != nil {
+		t.Fatalf("AppendSandboxPath(first): %v", err)
+	}
+	rev2, err := reg.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, second)
+	if err != nil {
+		t.Fatalf("AppendSandboxPath(second): %v", err)
+	}
+	rev3, err := reg.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, first)
+	if err != nil {
+		t.Fatalf("AppendSandboxPath(duplicate): %v", err)
+	}
+	got, err := reg.GetPaths(settings.SandboxAllowedReadOnlyPaths)
+	if err != nil {
+		t.Fatalf("GetPaths: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("paths = %v, want two unique entries", got)
+	}
+	if rev2 <= rev1 || rev3 != rev2 {
+		t.Fatalf("revisions = %d, %d, %d; duplicate must not bump", rev1, rev2, rev3)
+	}
+
+	reloaded := settings.New(doc, &fakeSecretStore{})
+	persisted, err := reloaded.GetPaths(settings.SandboxAllowedReadOnlyPaths)
+	if err != nil || !reflect.DeepEqual(got, persisted) {
+		t.Fatalf("persisted = %v, err = %v; want %v", persisted, err, got)
+	}
+}

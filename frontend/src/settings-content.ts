@@ -19,6 +19,7 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
+import type { SandboxAccessClient } from './sandbox-access-settings'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -60,6 +61,7 @@ export class SettingsContent extends SolidPaneContent {
      *  day one of them changed. */
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
     private readonly skillsStore?: SkillsStore,
+    private readonly sandboxAccessClient?: SandboxAccessClient,
   ) {
     super()
   }
@@ -82,6 +84,7 @@ export class SettingsContent extends SolidPaneContent {
           historyStatus: this.historyStatus,
           aboutClient: this.aboutClient,
           clipboard: this.clipboard,
+          sandboxAccessClient: this.sandboxAccessClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

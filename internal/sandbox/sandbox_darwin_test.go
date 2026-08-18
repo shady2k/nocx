@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The production binary dispatches MaybeHelper before app startup. The test
@@ -63,11 +64,11 @@ func TestDarwinChildProcess(t *testing.T) {
 	}
 }
 
-// TestSeatbeltEnforcement is the real enforcement smoke: it launches
-// /usr/bin/sandbox-exec -p <rendered profile> <test binary> with the probe
-// env and verifies the probe's verdict inside the cage. This is the test the
-// sandbox-smoke-macos target and the release gate run on macOS; it cannot
-// run on Linux and is skipped loudly, not silently.
+// TestSeatbeltEnforcement is the real enforcement and denied-access smoke: it
+// launches the shared probe inside a tagged sandbox-exec cage, verifies the
+// probe verdict, and requires the sentinel denial to reach the in-memory inbox
+// through macOS unified logging. This is the test the sandbox-smoke-macos
+// target and release gate run on macOS.
 func TestSeatbeltEnforcement(t *testing.T) {
 	if raceInstrumented() {
 		t.Skip("Seatbelt process smoke runs without TSan in the dedicated macOS gate")
@@ -122,10 +123,21 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
-	profile, err := renderProfile(pol)
+	token := "nocx-sandbox-0123456789abcdef0123456789abcdef"
+	profile, err := renderProfile(pol, token)
 	if err != nil {
 		t.Fatalf("renderProfile: %v", err)
 	}
+
+	inbox := NewAccessInbox(nil)
+	accessSession := inbox.BeginSession(SessionIdentity{SessionID: "seatbelt-smoke", InstanceID: "native", Epoch: 1})
+	monitor, err := startDarwinAccessMonitor(accessSession, exe, token, nil)
+	if err != nil {
+		t.Fatalf("start denied-access monitor: %v", err)
+	}
+	defer monitor.Close()
+	accessSession.Activate()
+	defer accessSession.Close()
 
 	cmd := exec.Command(sandboxExecPath, "-p", profile, exe, "-test.run=TestDarwinChildProcess") //nolint:gosec // test injects the sandbox-exec seam; arguments are asserted below
 	cmd.Env = probeEnv
@@ -139,6 +151,25 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "PROBE RESULT: ok") {
 		t.Fatalf("probe did not report success:\n%s", out.String())
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		page := inbox.List(AccessListOptions{Limit: 200})
+		observed := false
+		for _, event := range page.Events {
+			if event.Path == sentinel && event.Access == AccessReadOnly && event.Source == AccessSourceDarwinSeatbelt {
+				observed = true
+				break
+			}
+		}
+		if observed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Seatbelt denial for %q did not reach the access inbox: events=%#v status=%#v", sentinel, page.Events, inbox.Status())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

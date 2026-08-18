@@ -18,6 +18,14 @@ func New(logger log.Logger, _ string) Service {
 	return unsupportedService{}
 }
 
+// NewWithAccess reports the observer as unavailable on unsupported platforms.
+func NewWithAccess(logger log.Logger, cacheDir string, access *AccessInbox) Service {
+	if access != nil {
+		access.SetStatus(AccessMonitorStatus{Available: false, Platform: "unsupported", Reason: ReasonUnsupportedPlatform})
+	}
+	return New(logger, cacheDir)
+}
+
 // MaybeHelper is a no-op on unsupported platforms: the Linux Landlock helper
 // and the macOS Seatbelt shim are platform-specific mechanisms.
 func MaybeHelper() bool { return false }

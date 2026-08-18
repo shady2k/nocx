@@ -38,8 +38,9 @@ const (
 // ordinary shell command the helper must exec after enforcing. It is
 // internal to the helper handshake — it is not the common policy contract.
 type helperPayload struct {
-	Policy  *Policy     `json:"policy"`
-	Command CommandSpec `json:"command"`
+	Policy          *Policy     `json:"policy"`
+	Command         CommandSpec `json:"command"`
+	AccessMonitorFD int         `json:"accessMonitorFd,omitempty"`
 }
 
 // helperFDs parses the internal descriptor locations. Ordinary shell
@@ -100,6 +101,21 @@ func helperMain(policyFD, statusFD int) int {
 	rules := buildRules(payload.Policy)
 	if err := cfg.RestrictPaths(rules...); err != nil {
 		return helperReport(statusFD, "landlock: "+err.Error())
+	}
+
+	if payload.AccessMonitorFD >= 3 {
+		listenerFD, _ := installAccessNotifyFilter()
+		// An unavailable diagnostic observer never weakens or blocks the
+		// already-installed Landlock boundary. The parent receives an
+		// explicit no-listener marker and surfaces the monitor as unavailable.
+		sendErr := sendAccessListener(payload.AccessMonitorFD, listenerFD)
+		if listenerFD >= 0 {
+			_ = unix.Close(listenerFD)
+		}
+		_ = unix.Close(payload.AccessMonitorFD)
+		if sendErr != nil && listenerFD >= 0 {
+			return helperReport(statusFD, "access monitor handoff: "+sendErr.Error())
+		}
 	}
 
 	statusFile := os.NewFile(uintptr(statusFD), "status")

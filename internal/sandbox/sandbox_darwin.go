@@ -20,11 +20,24 @@ type darwinService struct {
 	log      log.Logger
 	cacheDir string
 	probe    seatbeltProbe
+	access   *AccessInbox
 }
 
 // New returns the Seatbelt-backed Service for the current platform.
 func New(logger log.Logger, cacheDir string) Service {
 	return &darwinService{log: logger, cacheDir: cacheDir}
+}
+
+func NewWithAccess(logger log.Logger, cacheDir string, access *AccessInbox) Service {
+	if access != nil {
+		access.SetStatus(AccessMonitorStatus{
+			Available: true,
+			Platform:  "darwin",
+			Backend:   string(AccessSourceDarwinSeatbelt),
+			Detail:    "Best-effort token-correlated Seatbelt unified-log observation.",
+		})
+	}
+	return &darwinService{log: logger, cacheDir: cacheDir, access: access}
 }
 
 // MaybeHelper runs the macOS post-profile shim when this process was
@@ -167,12 +180,15 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	if trustedErr := addTrustedExecutables(pol, []string{exe}); trustedErr != nil {
 		return fail(trustedErr)
 	}
-	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
-	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
-	// already consumed the base PATH above.
 	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
 
-	profile, err := renderProfile(pol)
+	var accessToken string
+	if s.access != nil && req.Identity.valid() {
+		if id, tokenErr := newAccessEventID(); tokenErr == nil {
+			accessToken = "nocx-sandbox-" + id
+		}
+	}
+	profile, err := renderProfile(pol, accessToken)
 	if err != nil {
 		return fail(err)
 	}
@@ -187,6 +203,33 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	// fixed internal argv so the shim finds it without shifting lifecycle
 	// descriptors.
 	statusChildFD := 3 + len(spec.ExtraFiles)
+
+	var accessMonitor *darwinAccessMonitor
+	var accessSession *AccessSession
+	if accessToken != "" {
+		accessSession = s.access.BeginSession(req.Identity)
+	}
+	if accessToken != "" {
+		accessMonitor, err = startDarwinAccessMonitor(accessSession, spec.Path, accessToken, func(error) {
+			s.access.SetStatus(AccessMonitorStatus{
+				Available: false,
+				Platform:  "darwin",
+				Backend:   string(AccessSourceDarwinSeatbelt),
+				Reason:    "unified-log-exited",
+				Detail:    "Sandbox enforcement remains active; denied-access observation stopped unexpectedly.",
+			})
+		})
+		if err != nil {
+			s.access.SetStatus(AccessMonitorStatus{
+				Available: false,
+				Platform:  "darwin",
+				Backend:   string(AccessSourceDarwinSeatbelt),
+				Reason:    "unified-log-unavailable",
+				Detail:    "Sandbox enforcement is active; denied-access observation is unavailable.",
+			})
+			accessMonitor = nil
+		}
+	}
 	shimArgs := append([]string{seatbeltHelperArg, strconv.Itoa(statusChildFD), spec.Path}, spec.Args...)
 	args := append([]string{"-p", profile, exe}, shimArgs...)
 	cmd := exec.Command(sandboxExecPath, args...) //nolint:gosec // pinned path; shim and shell are policy-canonicalized
@@ -199,11 +242,23 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 		Backend: BackendSeatbelt,
 		Policy:  pol,
 		waitReady: func(ctx context.Context) error {
-			return readStatus(ctx, statusR, statusW)
+			if readyErr := readStatus(ctx, statusR, statusW); readyErr != nil {
+				return readyErr
+			}
+			if accessSession != nil && accessMonitor != nil {
+				accessSession.Activate()
+			}
+			return nil
 		},
 	}
 	pc.cleanup = func() {
 		_ = statusR.Close()
+		if accessMonitor != nil {
+			accessMonitor.Close()
+		}
+		if accessSession != nil {
+			accessSession.Close()
+		}
 		_ = statusW.Close()
 		if cmd.Process != nil && cmd.ProcessState == nil {
 			_ = cmd.Process.Kill()

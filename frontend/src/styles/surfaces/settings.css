@@ -363,6 +363,17 @@
   color: var(--color-text-muted);
 }
 
+.sandbox-access-filters {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 2fr);
+  gap: var(--space-3);
+}
+
+.sandbox-access-filters > * {
+  min-width: 0;
+  width: 100%;
+}
+
 .sandbox-access-list {
   display: grid;
   gap: var(--space-3);
@@ -423,6 +434,10 @@
 }
 
 @media (max-width: 640px) {
+  .sandbox-access-filters {
+    grid-template-columns: 1fr;
+  }
+
   .sandbox-access-attribution {
     grid-template-columns: 1fr;
   }

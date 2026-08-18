@@ -18,6 +18,15 @@ Settings contains a separate **Developer → Sandbox access** page. It explains 
 
 Every pending row exposes **Add global read-only**, **Add global read-write**, and **Dismiss**. Unsafe grants keep both add buttons visible but disabled with a reason. A read-only action on a write row remains enabled and carries the warning that it will not satisfy the write. Promotion affects future sandbox launches only; the current tab is neither widened nor retried.
 
+The event list has two local filters. **Application** selects one exact untrusted
+`executable` identity from the loaded page, with a separate `Unknown program` option;
+full paths are never collapsed to basenames. **Keywords** lowercases and whitespace-splits
+the query, then requires every term to appear in at least one stable event field: attempted
+path, proposed directory, executable, shell, operation, source, state, or access label.
+The filters compose with AND, survive path-free inbox refreshes, and never call the
+backend. A non-empty inbox with zero matches shows a distinct no-match state whose
+**Clear filters** action changes local state only.
+
 ## Backend ownership
 
 `internal/sandbox.AccessInbox` is the sole event/state owner. It holds at most 500 rows and returns at most 200. Coalescing key:

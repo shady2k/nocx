@@ -25,6 +25,26 @@ const event: SandboxAccessList['events'][number] = {
   state: 'pending',
 }
 
+const alternateEvent: SandboxAccessList['events'][number] = {
+  ...event,
+  id: 'fedcba9876543210fedcba9876543210',
+  executable: '/opt/tools/python3',
+  path: '/shared/archive/NOTES.md',
+  directory: '/shared/archive',
+  access: 'readOnly',
+  operation: 'open',
+  source: 'darwin-seatbelt-log',
+}
+
+const unknownProgramEvent: SandboxAccessList['events'][number] = {
+  ...event,
+  id: '11111111111111111111111111111111',
+  executable: undefined,
+  path: '/tmp/unattributed.log',
+  directory: '/tmp',
+  access: 'readOnly',
+}
+
 function client(overrides: Partial<SandboxAccessClient> = {}): SandboxAccessClient {
   return {
     sandboxAccessStatus: vi.fn().mockResolvedValue({
@@ -44,7 +64,7 @@ describe('SandboxAccessSettings', () => {
   it('shows attribution and all three explicit decisions', async () => {
     render(() => <SandboxAccessSettings client={client()} />)
     expect(await screen.findByText('/private/data/report.txt')).toBeTruthy()
-    expect(screen.getByText('/usr/bin/python3')).toBeTruthy()
+    expect(screen.getByText('/usr/bin/python3', { selector: 'dd' })).toBeTruthy()
     expect(screen.getByText('/bin/zsh')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Add global read-only' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Add global read-write' })).toBeTruthy()
@@ -60,9 +80,14 @@ describe('SandboxAccessSettings', () => {
       .mockResolvedValueOnce({ events: [{ ...event, state: 'granted' }], revision: 2, lost: 0 })
     const api = client({ sandboxAccessResolve: resolve, sandboxAccessList: list })
     render(() => <SandboxAccessSettings client={api} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Add global read-write' }))
+    const keywords = await screen.findByRole<HTMLInputElement>('searchbox', {
+      name: 'Filter by keywords',
+    })
+    fireEvent.input(keywords, { target: { value: 'report' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add global read-write' }))
     await waitFor(() => expect(resolve).toHaveBeenCalledWith(event.id, 'globalReadWrite'))
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+    expect(keywords.value).toBe('report')
   })
 
   it('keeps actions visible but disables unsafe grants', async () => {
@@ -105,5 +130,119 @@ describe('SandboxAccessSettings', () => {
     ))
     expect(await screen.findByText(/denied-access observation is unavailable/i)).toBeTruthy()
     expect(screen.getByText(/3 events were dropped/i)).toBeTruthy()
+  })
+
+  it('filters by exact application identity including unattributed events', async () => {
+    const list = vi.fn().mockResolvedValue({
+      events: [event, alternateEvent, unknownProgramEvent],
+      revision: 1,
+      lost: 0,
+    })
+    render(() => <SandboxAccessSettings client={client({ sandboxAccessList: list })} />)
+
+    const application = await screen.findByRole<HTMLSelectElement>('combobox', {
+      name: 'Filter by application',
+    })
+    expect(screen.getByRole('option', { name: '/usr/bin/python3' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: '/opt/tools/python3' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'Unknown program' })).toBeTruthy()
+
+    fireEvent.change(application, { target: { value: JSON.stringify('/opt/tools/python3') } })
+    expect(screen.getByText('/shared/archive/NOTES.md')).toBeTruthy()
+    expect(screen.queryByText('/private/data/report.txt')).toBeNull()
+
+    fireEvent.change(application, { target: { value: JSON.stringify(null) } })
+    expect(screen.getByText('/tmp/unattributed.log')).toBeTruthy()
+    expect(screen.queryByText('/shared/archive/NOTES.md')).toBeNull()
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('AND-matches case-insensitive keyword terms across stable metadata', async () => {
+    const list = vi.fn().mockResolvedValue({
+      events: [event, alternateEvent],
+      revision: 1,
+      lost: 0,
+    })
+    render(() => <SandboxAccessSettings client={client({ sandboxAccessList: list })} />)
+
+    const keywords = await screen.findByRole<HTMLInputElement>('searchbox', {
+      name: 'Filter by keywords',
+    })
+    fireEvent.input(keywords, { target: { value: '  PYTHON3   report  ' } })
+    expect(screen.getByText('/private/data/report.txt')).toBeTruthy()
+    expect(screen.queryByText('/shared/archive/NOTES.md')).toBeNull()
+
+    fireEvent.input(keywords, { target: { value: 'seatbelt read only' } })
+    expect(screen.getByText('/shared/archive/NOTES.md')).toBeTruthy()
+    expect(screen.queryByText('/private/data/report.txt')).toBeNull()
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('composes filters and clears a no-match state without re-fetching', async () => {
+    const list = vi.fn().mockResolvedValue({
+      events: [event, alternateEvent],
+      revision: 1,
+      lost: 0,
+    })
+    render(() => <SandboxAccessSettings client={client({ sandboxAccessList: list })} />)
+
+    const application = await screen.findByRole<HTMLSelectElement>('combobox', {
+      name: 'Filter by application',
+    })
+    const keywords = screen.getByRole<HTMLInputElement>('searchbox', {
+      name: 'Filter by keywords',
+    })
+    fireEvent.change(application, { target: { value: JSON.stringify('/opt/tools/python3') } })
+    fireEvent.input(keywords, { target: { value: 'report' } })
+
+    expect(screen.getByText('No access attempts match these filters')).toBeTruthy()
+    expect(screen.queryByText('No denied access attempts')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(screen.getByText('/private/data/report.txt')).toBeTruthy()
+    expect(screen.getByText('/shared/archive/NOTES.md')).toBeTruthy()
+    expect(application.value).toBe('all')
+    expect(keywords.value).toBe('')
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps active filters across a path-free live reload', async () => {
+    let notify: ((change: { revision: number }) => void) | undefined
+    const subscribe = vi.fn((callback: (change: { revision: number }) => void) => {
+      notify = callback
+      return () => undefined
+    })
+    const refreshedEvent = { ...event, count: 3, lastSeen: '2026-08-18T10:00:02Z' }
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ events: [event, alternateEvent], revision: 1, lost: 0 })
+      .mockResolvedValueOnce({ events: [refreshedEvent, alternateEvent], revision: 2, lost: 0 })
+      .mockResolvedValueOnce({ events: [alternateEvent], revision: 3, lost: 0 })
+    render(() => (
+      <SandboxAccessSettings
+        client={client({ sandboxAccessList: list, onSandboxAccessChanged: subscribe })}
+      />
+    ))
+
+    const application = await screen.findByRole<HTMLSelectElement>('combobox', {
+      name: 'Filter by application',
+    })
+    fireEvent.change(application, { target: { value: JSON.stringify('/usr/bin/python3') } })
+    const keywords = await screen.findByRole<HTMLInputElement>('searchbox', {
+      name: 'Filter by keywords',
+    })
+    fireEvent.input(keywords, { target: { value: 'report' } })
+    expect(screen.queryByText('/shared/archive/NOTES.md')).toBeNull()
+
+    notify?.({ revision: 2 })
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+    expect(keywords.value).toBe('report')
+    expect(application.value).toBe(JSON.stringify('/usr/bin/python3'))
+    expect(screen.getByText('/private/data/report.txt')).toBeTruthy()
+    expect(screen.queryByText('/shared/archive/NOTES.md')).toBeNull()
+
+    notify?.({ revision: 3 })
+    expect(await screen.findByText('No access attempts match these filters')).toBeTruthy()
+    expect(list).toHaveBeenCalledTimes(3)
+    expect(application.value).toBe(JSON.stringify('/usr/bin/python3'))
   })
 })

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-var seatbeltDenialPattern = regexp.MustCompile(`Sandbox:\s+([^\s(]+)\([0-9]+\)\s+deny(?:\([0-9]+\))?\s+(file-[^\s]+)\s+(/.*)$`)
+var seatbeltDenialPattern = regexp.MustCompile(`(?m)Sandbox:\s+([^\s(]+)\([0-9]+\)\s+deny(?:\([0-9]+\))?\s+(file-[^\s]+)\s+(/.*)$`)
 
 func parseSeatbeltDenial(message string) (program, operation, path string, access AccessClass, ok bool) {
 	match := seatbeltDenialPattern.FindStringSubmatch(strings.TrimSpace(message))

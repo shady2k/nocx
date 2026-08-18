@@ -12,6 +12,7 @@ func TestParseSeatbeltDenial(t *testing.T) {
 	}{
 		{`nocx-sandbox-aabb: Sandbox: cat(123) deny(1) file-read-data /Users/me/private/file.txt`, AccessReadOnly, `/Users/me/private/file.txt`},
 		{`Sandbox: python3(44) deny file-write-create /Users/me/output data/result.txt`, AccessReadWrite, `/Users/me/output data/result.txt`},
+		{"Sandbox: cat(13283) deny(1) file-read-data /private/tmp/sentinel-secret.txt\nnocx-sandbox-aabb", AccessReadOnly, `/private/tmp/sentinel-secret.txt`},
 	} {
 		_, _, path, access, ok := parseSeatbeltDenial(tc.message)
 		if !ok || path != tc.path || access != tc.access {

@@ -144,10 +144,11 @@ type Service interface {
 // and returned in the open result (design spec §3.3, §4.5). Ordinary and SSH
 // sessions have none.
 type SessionInfo struct {
-	Backend       string   `json:"backend"`
-	Workspace     string   `json:"workspace"`
-	WritableRoots []string `json:"writableRoots"`
-	ReadOnlyRoots []string `json:"readOnlyRoots"`
+	Backend         string           `json:"backend"`
+	Workspace       string           `json:"workspace"`
+	WritableRoots   []string         `json:"writableRoots"`
+	ReadOnlyRoots   []string         `json:"readOnlyRoots"`
+	HomeProjections []HomeProjection `json:"homeProjections"`
 }
 
 // Clone returns a deep copy so session metadata cannot be mutated through an
@@ -157,10 +158,11 @@ func (s *SessionInfo) Clone() *SessionInfo {
 		return nil
 	}
 	return &SessionInfo{
-		Backend:       s.Backend,
-		Workspace:     s.Workspace,
-		WritableRoots: append([]string(nil), s.WritableRoots...),
-		ReadOnlyRoots: append([]string(nil), s.ReadOnlyRoots...),
+		Backend:         s.Backend,
+		Workspace:       s.Workspace,
+		WritableRoots:   append([]string(nil), s.WritableRoots...),
+		ReadOnlyRoots:   append([]string(nil), s.ReadOnlyRoots...),
+		HomeProjections: cloneHomeProjections(s.HomeProjections),
 	}
 }
 

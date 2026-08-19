@@ -38,11 +38,17 @@ export type {
   SandboxAccessStatus,
 }
 /** Immutable sandbox metadata for a sandboxed session (ADR-0030 §3.3, ADR-0036 §8). */
+interface HomeProjection {
+  readonly hostPath: string
+  readonly relativePath: string
+}
+
 export interface SessionSandboxInfo {
   readonly backend: 'landlock' | 'seatbelt'
   readonly workspace: string
   readonly writableRoots: string[]
   readonly readOnlyRoots: string[]
+  readonly homeProjections: HomeProjection[]
 }
 
 /**

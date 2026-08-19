@@ -22,6 +22,12 @@ const ArtifactSmokeArg = "__sandbox-artifact-smoke"
 // external artifact probe.
 const ArtifactSmokeCacheEnv = "NOCX_SANDBOX_SMOKE_CACHE"
 
+const (
+	ArtifactSmokeReadOnlyEnv       = "NOCX_SB_RO_ROOT"
+	ArtifactSmokeWritableEnv       = "NOCX_SB_RW_ROOT"
+	ArtifactSmokeNestedWritableEnv = "NOCX_SB_NESTED_RW_ROOT"
+)
+
 // MaybeArtifactSmoke runs the release-artifact enforcement probe when this
 // process was launched by cmd/sandboxprobe. Like MaybeHelper, it must run
 // before Wails or the backend starts. A true return is unreachable in normal
@@ -39,7 +45,10 @@ func runArtifactSmoke(probePath string) int {
 	logger := log.NewSlogAdapter(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	workspace := os.Getenv("NOCX_SB_WORKSPACE")
 	cacheDir := os.Getenv(ArtifactSmokeCacheEnv)
-	if workspace == "" || cacheDir == "" || !filepath.IsAbs(probePath) {
+	readOnlyRoot := os.Getenv(ArtifactSmokeReadOnlyEnv)
+	writableRoot := os.Getenv(ArtifactSmokeWritableEnv)
+	nestedWritable := os.Getenv(ArtifactSmokeNestedWritableEnv)
+	if workspace == "" || cacheDir == "" || readOnlyRoot == "" || writableRoot == "" || nestedWritable == "" || !filepath.IsAbs(probePath) {
 		logger.Error("invalid sandbox artifact smoke invocation")
 		return 2
 	}
@@ -57,7 +66,11 @@ func runArtifactSmoke(probePath string) int {
 		return 1
 	}
 
-	prepared, err := svc.Prepare(ctx, Request{Workspace: workspace}, CommandSpec{
+	prepared, err := svc.Prepare(ctx, Request{
+		Workspace:   workspace,
+		AddReadOnly: []string{readOnlyRoot},
+		AddWritable: []string{writableRoot, nestedWritable},
+	}, CommandSpec{
 		Path: probePath,
 		Args: []string{"--child"},
 		Dir:  workspace,

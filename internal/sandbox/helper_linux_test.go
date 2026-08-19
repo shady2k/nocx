@@ -70,58 +70,29 @@ func TestLandlockEnforcement(t *testing.T) {
 		t.Skipf("landlock enforcement requires kernel ABI >= %d (detected %v, err %v)", minLandlockABI, abi, err)
 	}
 
-	base := t.TempDir()
-	workspace := filepath.Join(base, "workspace")
-	home := filepath.Join(base, "runtime", "home")
-	tmp := filepath.Join(base, "runtime", "tmp")
-	sentinel := filepath.Join(base, "sentinel-secret.txt")
-	roRoot := filepath.Join(base, "ro-root")
-	rwRoot := filepath.Join(base, "rw-root")
-	for _, d := range []string{workspace, home, tmp, roRoot, rwRoot} {
-		if mkErr := os.MkdirAll(d, 0o750); mkErr != nil {
-			t.Fatalf("mkdir %s: %v", d, mkErr)
-		}
-	}
-	if wErr := os.WriteFile(sentinel, []byte("top secret"), 0o600); wErr != nil {
-		t.Fatalf("write sentinel: %v", wErr)
-	}
-	if wErr := os.WriteFile(filepath.Join(roRoot, "keep.txt"), []byte("read-only"), 0o600); wErr != nil {
-		t.Fatalf("write read-only fixture: %v", wErr)
-	}
-	// A hard link to the sentinel that already exists inside the writable
-	// root before launch: the documented hierarchy-not-inode limitation.
-	preHard := filepath.Join(workspace, "pre-hard-link")
-	if lErr := os.Link(sentinel, preHard); lErr != nil {
-		t.Fatalf("pre-link sentinel: %v", lErr)
-	}
+	fixture := newProjectionProbeFixture(t)
+	workspace := fixture.workspace
 
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("executable: %v", err)
 	}
 
-	probeEnv := append(os.Environ(),
-		envProbe+"=1",
-		"NOCX_SB_SHELL=/bin/sh",
-		"NOCX_SB_WORKSPACE="+workspace,
-		"NOCX_SB_SENTINEL="+sentinel,
-		"NOCX_SB_PREHARD="+preHard,
-		"NOCX_SB_HOME="+home,
-		"NOCX_SB_TMP="+tmp,
-		"NOCX_SB_RO_ROOT="+roRoot,
-		"NOCX_SB_RW_ROOT="+rwRoot,
-		helperEnvPrefix+"LEAK=must-be-stripped",
-	)
+	probeEnv := append(fixture.environment("/bin/sh"), helperEnvPrefix+"LEAK=must-be-stripped")
 	spec := CommandSpec{Path: exe, Args: []string{"-test.run=TestSandboxChildProcess"}, Dir: workspace, Env: probeEnv}
 
 	pol, err := BuildPolicy(Request{
 		Workspace:   workspace,
-		AddReadOnly: []string{roRoot},
-		AddWritable: []string{rwRoot},
-	}, exe, filepath.Join(base, "runtime"), probeEnv)
+		AddReadOnly: []string{fixture.readOnlyRoot},
+		AddWritable: []string{fixture.writableRoot, fixture.nestedWritable},
+	}, exe, fixture.runtimeRoot, probeEnv)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
+	if projectionErr := materializeHomeProjections(fixture.runtimeRoot, pol); projectionErr != nil {
+		t.Fatalf("materializeHomeProjections: %v", projectionErr)
+	}
+	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
 	payload := helperPayload{Policy: pol, Command: spec}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -161,23 +132,38 @@ func TestLandlockEnforcement(t *testing.T) {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start helper: %v", err)
+	if startErr := cmd.Start(); startErr != nil {
+		t.Fatalf("start helper: %v", startErr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := readStatus(ctx, statusR, statusW); err != nil {
+	if readyErr := readStatus(ctx, statusR, statusW); readyErr != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
-		t.Fatalf("readiness failed: %v\nhelper output:\n%s", err, out.String())
+		t.Fatalf("readiness failed: %v\nhelper output:\n%s", readyErr, out.String())
 	}
 
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("probe inside the cage failed: %v\noutput:\n%s", err, out.String())
+	if waitErr := cmd.Wait(); waitErr != nil {
+		t.Fatalf("probe inside the cage failed: %v\noutput:\n%s", waitErr, out.String())
 	}
 	if !strings.Contains(out.String(), "PROBE RESULT: ok") {
 		t.Fatalf("probe did not report success:\n%s", out.String())
+	}
+	// #nosec G304 -- paths belong to the trusted synthetic native-smoke fixture.
+	projectedData, err := os.ReadFile(filepath.Join(fixture.writableRoot, "projected.txt"))
+	if err != nil || string(projectedData) != "updated" {
+		t.Fatalf("projected writable state did not persist: data=%q err=%v", projectedData, err)
+	}
+	// #nosec G304 -- paths belong to the trusted synthetic native-smoke fixture.
+	nestedData, err := os.ReadFile(filepath.Join(fixture.nestedWritable, "nested.txt"))
+	if err != nil || string(nestedData) != "nested writable" {
+		t.Fatalf("nested projected writable state did not persist: data=%q err=%v", nestedData, err)
+	}
+	// #nosec G304 -- paths belong to the trusted synthetic native-smoke fixture.
+	readOnlyData, err := os.ReadFile(filepath.Join(fixture.readOnlyRoot, "keep.txt"))
+	if err != nil || string(readOnlyData) != "read-only" {
+		t.Fatalf("projected read-only state changed: data=%q err=%v", readOnlyData, err)
 	}
 }
 

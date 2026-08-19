@@ -230,6 +230,11 @@ const SandboxPermissionsDialog: Component<
           </span>
           <p class="sandbox-permissions-hint">{'Read & write (required)'}</p>
         </Field>
+        <p>
+          Folders strictly below host HOME also appear at their usual ~/… paths. HOME and ancestor
+          grants stay absolute-only. Projected folders can contain credentials; access remains
+          exactly the selected read-only or read & write class.
+        </p>
         <ClassSection
           title="Read-only folders"
           hint="Checked folders are read-only in this tab. Uncheck one to remove it from this tab only."

@@ -180,6 +180,9 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	if trustedErr := addTrustedExecutables(pol, []string{exe}); trustedErr != nil {
 		return fail(trustedErr)
 	}
+	if projectionErr := materializeHomeProjections(runtimeRoot, pol); projectionErr != nil {
+		return fail(projectionErr)
+	}
 	spec.Env = sandboxEnv(spec.Env, pol.Home, pol.Tmp)
 
 	var accessToken string

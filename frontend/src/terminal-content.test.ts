@@ -506,6 +506,34 @@ describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
       teardown()
     }
   })
+
+  it('states that HOME is isolated when no host folder projects', async () => {
+    const client = makeClient({
+      openSandboxedSession: vi.fn(() =>
+        Promise.resolve(
+          makeSession({
+            sandbox: {
+              backend: 'landlock',
+              workspace: '/w',
+              writableRoots: ['/w'],
+              readOnlyRoots: ['/usr'],
+              homeProjections: [],
+            },
+          }),
+        ),
+      ),
+    })
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { sandbox: sandboxRequest } },
+      client,
+    )
+    try {
+      expect(tab.tooltip).toContain('Home: isolated; no host folders projected')
+    } finally {
+      teardown()
+    }
+  })
 })
 describe('SSH open host-key recovery', () => {
   const routeEvidence = {

@@ -1046,7 +1046,7 @@ var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedWritablePaths",
 	Section:     "Experimental",
 	Label:       "Sandbox read & write folders",
-	Description: "Additional folders available read/write in every new sandboxed tab. The workspace is always read/write; changes affect new tabs only.",
+	Description: "Additional folders available read/write in every new sandboxed tab. A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and receive exactly this read/write authority. The workspace is always read/write; changes affect new tabs only.",
 	DataClass:   PrivateMetadata,
 })
 
@@ -1059,7 +1059,7 @@ var SandboxAllowedReadOnlyPaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedReadOnlyPaths",
 	Section:     "Experimental",
 	Label:       "Sandbox read-only folders",
-	Description: "Additional folders available read-only in every new sandboxed tab (their contents may be read, never created, removed, renamed, or modified). The workspace is always read/write; changes affect new tabs only.",
+	Description: "Additional folders available read-only in every new sandboxed tab (their contents may be read, never created, removed, renamed, or modified). A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and remain read-only. The workspace is always read/write; changes affect new tabs only.",
 	DataClass:   PrivateMetadata,
 })
 

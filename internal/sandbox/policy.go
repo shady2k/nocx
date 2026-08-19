@@ -18,15 +18,16 @@ import (
 // It is JSON-serializable for the Linux helper FD handshake. Every path is
 // absolute and symlink-resolved; the backend never re-resolves anything.
 type Policy struct {
-	Workspace     string   `json:"workspace"`
-	WritableRoots []string `json:"writableRoots"`
-	ReadOnlyRoots []string `json:"readOnlyRoots"`
-	WritableFiles []string `json:"writableFiles"`
-	WritableDirs  []string `json:"writableDirs"`
-	ReadOnlyFiles []string `json:"readOnlyFiles"`
-	Shell         string   `json:"shell"`
-	Home          string   `json:"home"`
-	Tmp           string   `json:"tmp"`
+	Workspace       string           `json:"workspace"`
+	WritableRoots   []string         `json:"writableRoots"`
+	ReadOnlyRoots   []string         `json:"readOnlyRoots"`
+	HomeProjections []HomeProjection `json:"homeProjections"`
+	WritableFiles   []string         `json:"writableFiles"`
+	WritableDirs    []string         `json:"writableDirs"`
+	ReadOnlyFiles   []string         `json:"readOnlyFiles"`
+	Shell           string           `json:"shell"`
+	Home            string           `json:"home"`
+	Tmp             string           `json:"tmp"`
 }
 
 // Policy and request bounds (design spec §5.6, §6.1): reject policy above a
@@ -59,6 +60,14 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	tmp, err := canonicalExistingDir(filepath.Join(runtimeRoot, "tmp"))
 	if err != nil {
 		return nil, NewSetupErrorf("runtime tmp: %v", err)
+	}
+	runtimeCanonical, err := canonicalExistingDir(runtimeRoot)
+	if err != nil {
+		return nil, NewSetupErrorf("runtime root is unavailable")
+	}
+	hostHome, err := resolveHostHome(env)
+	if err != nil {
+		return nil, err
 	}
 
 	// Canonical system read-only roots seed both the read-only set and the
@@ -178,6 +187,8 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	// Writable roots in the fixed order the spec fixes (design spec §6.2):
 	// workspace, optional Git common dir, global writable minus exact
 	// removals, writable additions, ephemeral home/tmp.
+	projectionCandidates := make([]string, 0, 1+len(globalWritable)+len(addWritable)+len(globalReadOnly)+len(addReadOnly))
+	projectionCandidates = append(projectionCandidates, canon)
 	writable := []string{canon}
 	if hasGit {
 		writable = append(writable, gitRoot)
@@ -185,9 +196,11 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	for _, g := range globalWritable {
 		if !pathInSet(g, removeWritable) {
 			writable = append(writable, g)
+			projectionCandidates = append(projectionCandidates, g)
 		}
 	}
 	writable = append(writable, addWritable...)
+	projectionCandidates = append(projectionCandidates, addWritable...)
 	writable = append(writable, home, tmp)
 
 	// Cross-class containment (design spec §6, binding invariant 6): a
@@ -224,9 +237,11 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	for _, g := range globalReadOnly {
 		if !pathInSet(g, removeReadOnly) {
 			readonly = append(readonly, g)
+			projectionCandidates = append(projectionCandidates, g)
 		}
 	}
 	readonly = append(readonly, addReadOnly...)
+	projectionCandidates = append(projectionCandidates, addReadOnly...)
 
 	shellCanon, err := filepath.EvalSymlinks(shellPath)
 	if err != nil {
@@ -260,15 +275,16 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 	}
 
 	p := &Policy{
-		Workspace:     canon,
-		WritableRoots: writable,
-		ReadOnlyRoots: readonly,
-		WritableFiles: deviceFiles,
-		WritableDirs:  deviceDirs,
-		ReadOnlyFiles: []string{shellCanon},
-		Shell:         shellCanon,
-		Home:          home,
-		Tmp:           tmp,
+		Workspace:       canon,
+		WritableRoots:   writable,
+		ReadOnlyRoots:   readonly,
+		WritableFiles:   deviceFiles,
+		WritableDirs:    deviceDirs,
+		ReadOnlyFiles:   []string{shellCanon},
+		Shell:           shellCanon,
+		Home:            home,
+		Tmp:             tmp,
+		HomeProjections: planHomeProjections(hostHome, runtimeCanonical, home, projectionCandidates),
 	}
 	if err := p.normalize(); err != nil {
 		return nil, NewSetupErrorf("policy: %v", err)
@@ -315,6 +331,9 @@ func ValidatePolicy(p *Policy) error {
 		if err := validatePolicyPath(field); err != nil {
 			return err
 		}
+	}
+	if err := validateHomeProjections(p); err != nil {
+		return err
 	}
 	if len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs)+len(p.ReadOnlyRoots)+len(p.ReadOnlyFiles) > maxRoots {
 		return fmt.Errorf("sandbox: policy exceeds %d roots", maxRoots)

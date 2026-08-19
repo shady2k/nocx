@@ -19,11 +19,14 @@ import (
 )
 
 const (
-	envWorkspace = "NOCX_SB_WORKSPACE"
-	envSentinel  = "NOCX_SB_SENTINEL"
-	envPreHard   = "NOCX_SB_PREHARD"
-	envShell     = "NOCX_SB_SHELL"
-	helperPrefix = "NOCX_SANDBOX_HELPER_"
+	envWorkspace              = "NOCX_SB_WORKSPACE"
+	envSentinel               = "NOCX_SB_SENTINEL"
+	envPreHard                = "NOCX_SB_PREHARD"
+	envShell                  = "NOCX_SB_SHELL"
+	helperPrefix              = "NOCX_SANDBOX_HELPER_"
+	projectedReadOnlyRelative = ".config"
+	projectedWritableRelative = ".local/state/tool"
+	projectedNestedRWRelative = ".config/tool/state"
 )
 
 func main() {
@@ -83,34 +86,59 @@ func runArtifactProbe(artifactPath string) error {
 
 	workspace := filepath.Join(base, "workspace")
 	cacheDir := filepath.Join(base, "cache")
-	for _, dir := range []string{workspace, cacheDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create fixture directory: %w", err)
+	hostHome := filepath.Join(base, "host-home")
+	readOnlyRoot := filepath.Join(hostHome, projectedReadOnlyRelative)
+	writableRoot := filepath.Join(hostHome, filepath.FromSlash(projectedWritableRelative))
+	nestedWritable := filepath.Join(hostHome, filepath.FromSlash(projectedNestedRWRelative))
+	for _, dir := range []string{workspace, cacheDir, hostHome, readOnlyRoot, writableRoot, nestedWritable} {
+		if mkdirErr := os.MkdirAll(dir, 0o700); mkdirErr != nil {
+			return fmt.Errorf("create fixture directory: %w", mkdirErr)
 		}
 	}
 	sentinel := filepath.Join(base, "sentinel")
-	if err := os.WriteFile(sentinel, []byte("top secret"), 0o600); err != nil {
-		return fmt.Errorf("create sentinel: %w", err)
+	if writeErr := os.WriteFile(sentinel, []byte("top secret"), 0o600); writeErr != nil {
+		return fmt.Errorf("create sentinel: %w", writeErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(readOnlyRoot, "keep.txt"), []byte("read-only"), 0o600); writeErr != nil {
+		return fmt.Errorf("create read-only projection fixture: %w", writeErr)
 	}
 	preHard := filepath.Join(workspace, "pre-hard-link")
-	if err := os.Link(sentinel, preHard); err != nil {
-		return fmt.Errorf("create documented hard-link fixture: %w", err)
+	if linkErr := os.Link(sentinel, preHard); linkErr != nil {
+		return fmt.Errorf("create documented hard-link fixture: %w", linkErr)
 	}
-
 	// #nosec G204 -- executable is canonicalized, regular, executable, and supplied explicitly by the release gate.
 	cmd := exec.Command(artifact, sandbox.ArtifactSmokeArg, probe) //nolint:gosec
 	cmd.Env = withEnv(os.Environ(), map[string]string{
-		envWorkspace:                  workspace,
-		envSentinel:                   sentinel,
-		envPreHard:                    preHard,
-		envShell:                      "/bin/sh",
-		sandbox.ArtifactSmokeCacheEnv: cacheDir,
-		helperPrefix + "LEAK":         "must-be-stripped",
+		envWorkspace:                           workspace,
+		envSentinel:                            sentinel,
+		envPreHard:                             preHard,
+		envShell:                               "/bin/sh",
+		sandbox.ArtifactSmokeCacheEnv:          cacheDir,
+		helperPrefix + "LEAK":                  "must-be-stripped",
+		"HOME":                                 hostHome,
+		sandbox.ArtifactSmokeReadOnlyEnv:       readOnlyRoot,
+		sandbox.ArtifactSmokeWritableEnv:       writableRoot,
+		sandbox.ArtifactSmokeNestedWritableEnv: nestedWritable,
 	})
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("artifact exited without a verified cage: %w", err)
+	if runErr := cmd.Run(); runErr != nil {
+		return fmt.Errorf("artifact exited without a verified cage: %w", runErr)
+	}
+	// #nosec G304 -- fixture roots are constructed below the validated private base.
+	projectedData, err := os.ReadFile(filepath.Join(writableRoot, "projected.txt"))
+	if err != nil || string(projectedData) != "updated" {
+		return fmt.Errorf("projected writable state did not persist: data=%q error=%v", projectedData, err)
+	}
+	// #nosec G304 -- fixture roots are constructed below the validated private base.
+	nestedData, err := os.ReadFile(filepath.Join(nestedWritable, "nested.txt"))
+	if err != nil || string(nestedData) != "nested writable" {
+		return fmt.Errorf("nested projected writable state did not persist: data=%q error=%v", nestedData, err)
+	}
+	// #nosec G304 -- fixture roots are constructed below the validated private base.
+	readOnlyData, err := os.ReadFile(filepath.Join(readOnlyRoot, "keep.txt"))
+	if err != nil || string(readOnlyData) != "read-only" {
+		return fmt.Errorf("projected read-only state changed: data=%q error=%v", readOnlyData, err)
 	}
 	return nil
 }
@@ -122,10 +150,13 @@ func runChildProbe() error {
 	shell := os.Getenv(envShell)
 	home, homeErr := os.UserHomeDir()
 	tmp := os.TempDir()
-	if workspace == "" || sentinel == "" || preHard == "" || shell == "" || homeErr != nil || home == "" || tmp == "" {
+	readOnlyRoot := os.Getenv(sandbox.ArtifactSmokeReadOnlyEnv)
+	writableRoot := os.Getenv(sandbox.ArtifactSmokeWritableEnv)
+	nestedWritable := os.Getenv(sandbox.ArtifactSmokeNestedWritableEnv)
+	if workspace == "" || sentinel == "" || preHard == "" || shell == "" || readOnlyRoot == "" || writableRoot == "" || nestedWritable == "" || homeErr != nil || home == "" || tmp == "" {
 		return errors.New("in-cage fixture environment is incomplete")
 	}
-	if err := validateChildFixture(workspace, sentinel, preHard, shell); err != nil {
+	if err := validateChildFixture(workspace, sentinel, preHard, shell, readOnlyRoot, writableRoot, nestedWritable); err != nil {
 		return err
 	}
 
@@ -150,6 +181,61 @@ func runChildProbe() error {
 	}
 	if _, err := os.ReadFile("/etc/hosts"); err != nil {
 		return fmt.Errorf("read system root: %w", err)
+	}
+	projectedReadOnly := filepath.Join(home, filepath.FromSlash(projectedReadOnlyRelative))
+	projectedWritable := filepath.Join(home, filepath.FromSlash(projectedWritableRelative))
+	projectedNestedRW := filepath.Join(home, filepath.FromSlash(projectedNestedRWRelative))
+	if os.Getenv("XDG_CONFIG_HOME") != projectedReadOnly || filepath.Join(os.Getenv("XDG_STATE_HOME"), "tool") != projectedWritable {
+		return errors.New("sandbox HOME/XDG environment does not name projection forest")
+	}
+	projectedROFile := filepath.Join(projectedReadOnly, "keep.txt")
+	// #nosec G304 -- projectedROFile is confined to the validated synthetic fixture.
+	if data, err := os.ReadFile(projectedROFile); err != nil || string(data) != "read-only" { //nolint:gosec // validated synthetic fixture
+		return fmt.Errorf("read through projected read-only root: data=%q error=%v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(projectedReadOnly, "projected-new.txt"), []byte("x"), 0o600); err == nil {
+		return errors.New("create through projected read-only root succeeded")
+	}
+	if err := os.WriteFile(projectedROFile, []byte("mutated"), 0o600); err == nil {
+		return errors.New("truncate through projected read-only root succeeded")
+	}
+	if err := os.Remove(projectedROFile); err == nil {
+		return errors.New("remove through projected read-only root succeeded")
+	}
+	projectedRWFile := filepath.Join(projectedWritable, "projected.txt")
+	if err := os.WriteFile(projectedRWFile, []byte("created"), 0o600); err != nil {
+		return fmt.Errorf("create through projected writable root: %w", err)
+	}
+	if err := os.WriteFile(projectedRWFile, []byte("updated"), 0o600); err != nil {
+		return fmt.Errorf("update through projected writable root: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectedNestedRW, "nested.txt"), []byte("nested writable"), 0o600); err != nil {
+		return fmt.Errorf("write through projected RW child below RO ancestor: %w", err)
+	}
+	replaceProjection := func(target string) error {
+		if err := os.Remove(projectedWritable); err != nil {
+			return err
+		}
+		return os.Symlink(target, projectedWritable)
+	}
+	if err := replaceProjection(sentinel); err != nil {
+		return fmt.Errorf("retarget projection outside grants: %w", err)
+	}
+	// #nosec G304 -- projectedWritable is confined to the validated synthetic fixture; denial is the assertion.
+	if _, err := os.ReadFile(projectedWritable); err == nil { //nolint:gosec // native denial is the assertion
+		return errors.New("retargeted projection read outside grants succeeded")
+	}
+	if err := replaceProjection(readOnlyRoot); err != nil {
+		return fmt.Errorf("retarget projection to read-only root: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectedWritable, "keep.txt"), []byte("mutated"), 0o600); err == nil {
+		return errors.New("retargeted projection widened read-only root")
+	}
+	if err := replaceProjection(writableRoot); err != nil {
+		return fmt.Errorf("retarget projection to writable root: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectedWritable, "retargeted.txt"), []byte("writable"), 0o600); err != nil {
+		return fmt.Errorf("retargeted projection lost writable class: %w", err)
 	}
 
 	// #nosec G204 G702 -- shell is fixed to /bin/sh and the command text is constant.
@@ -217,8 +303,8 @@ func runChildProbe() error {
 	return nil
 }
 
-func validateChildFixture(workspace, sentinel, preHard, shell string) error {
-	if shell != "/bin/sh" || !filepath.IsAbs(workspace) || !filepath.IsAbs(sentinel) || !filepath.IsAbs(preHard) {
+func validateChildFixture(workspace, sentinel, preHard, shell, readOnlyRoot, writableRoot, nestedWritable string) error {
+	if shell != "/bin/sh" || !filepath.IsAbs(workspace) || !filepath.IsAbs(sentinel) || !filepath.IsAbs(preHard) || !filepath.IsAbs(readOnlyRoot) || !filepath.IsAbs(writableRoot) || !filepath.IsAbs(nestedWritable) {
 		return errors.New("in-cage fixture environment is invalid")
 	}
 	workspace = filepath.Clean(workspace)
@@ -226,7 +312,10 @@ func validateChildFixture(workspace, sentinel, preHard, shell string) error {
 	if filepath.Base(workspace) != "workspace" ||
 		!strings.HasPrefix(filepath.Base(base), "nocx-sandbox-artifact-") ||
 		filepath.Clean(sentinel) != filepath.Join(base, "sentinel") ||
-		filepath.Clean(preHard) != filepath.Join(workspace, "pre-hard-link") {
+		filepath.Clean(preHard) != filepath.Join(workspace, "pre-hard-link") ||
+		filepath.Clean(readOnlyRoot) != filepath.Join(base, "host-home", projectedReadOnlyRelative) ||
+		filepath.Clean(writableRoot) != filepath.Join(base, "host-home", filepath.FromSlash(projectedWritableRelative)) ||
+		filepath.Clean(nestedWritable) != filepath.Join(base, "host-home", filepath.FromSlash(projectedNestedRWRelative)) {
 		return errors.New("in-cage fixture paths are outside the release fixture")
 	}
 	canonBase, err := filepath.EvalSymlinks(base)

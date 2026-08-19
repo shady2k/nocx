@@ -20,22 +20,27 @@ func TestRealRegistry_ImplementsRegistry(t *testing.T) {
 func TestRealSession_SandboxInfoReturnsDeepCopy(t *testing.T) {
 	s := &realSession{
 		sandboxInfo: &sandbox.SessionInfo{
-			Backend:       sandbox.BackendLandlock,
-			Workspace:     "/workspace",
-			WritableRoots: []string{"/workspace"},
-			ReadOnlyRoots: []string{"/usr"},
+			Backend:         sandbox.BackendLandlock,
+			Workspace:       "/workspace",
+			WritableRoots:   []string{"/workspace"},
+			ReadOnlyRoots:   []string{"/usr"},
+			HomeProjections: []sandbox.HomeProjection{{HostPath: "/workspace", RelativePath: "workspace"}},
 		},
 	}
 
 	first := s.SandboxInfo()
 	first.WritableRoots[0] = "/mutated"
 	first.ReadOnlyRoots[0] = "/mutated-ro"
+	first.HomeProjections[0].RelativePath = "mutated"
 	second := s.SandboxInfo()
 	if got := second.WritableRoots[0]; got != "/workspace" {
 		t.Fatalf("second SandboxInfo root = %q, want immutable session metadata", got)
 	}
 	if got := second.ReadOnlyRoots[0]; got != "/usr" {
 		t.Fatalf("second SandboxInfo read-only root = %q, want immutable session metadata", got)
+	}
+	if got := second.HomeProjections[0].RelativePath; got != "workspace" {
+		t.Fatalf("second SandboxInfo projection = %q, want immutable session metadata", got)
 	}
 }
 
@@ -56,9 +61,10 @@ func TestRealRegistry_SandboxCwdRemainsCanonicalUnderHome(t *testing.T) {
 	pt := &sandboxPTYStub{
 		Stub: pty.NewStub(logger),
 		info: &sandbox.SessionInfo{
-			Backend:       sandbox.BackendLandlock,
-			Workspace:     workspace,
-			WritableRoots: []string{workspace},
+			Backend:         sandbox.BackendLandlock,
+			Workspace:       workspace,
+			WritableRoots:   []string{workspace},
+			HomeProjections: []sandbox.HomeProjection{},
 		},
 	}
 	reg := New(logger, &stubPTYFactory{stub: pt})

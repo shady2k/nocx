@@ -58,6 +58,21 @@ export interface Open {
      */
     ypixel: number
   }
+  sandbox?: {
+    backend: 'landlock' | 'seatbelt'
+    workspace: string
+    writableRoots: string[]
+    readOnlyRoots: string[]
+    /**
+     * Disposable discoverability aliases from the isolated runtime HOME to exact canonical host roots. These objects carry no access class; writableRoots and readOnlyRoots remain authoritative.
+     *
+     * @maxItems 129
+     */
+    homeProjections: {
+      hostPath: string
+      relativePath: string
+    }[]
+  }
   /**
    * The session that opened this one (nocx-9hu9d), or null for a root session. Always present: null is the answer for a root, and a missing key would make "this session has no parent" indistinguishable from "this backend does not say". It is the edge the backend RECORDED — the renderer's claim in the open params is checked against the live registry and refused (-32602) if it cannot be true, so what comes back here is an admitted fact, not an echo. The full identity is carried, never a bare sessionId: an id alone re-resolves to whatever holds it now, which is the ambiguity instanceId + sessionEpoch exist to remove (nocx-3oupk), and this edge is written once and never revisited. PROVENANCE ONLY — it says "A created B" and confers nothing: the parent gains no right to observe or control the child by appearing here, and continuing authority is a separate, revocable object (ADR-0020 §5). The edge outlives its subject: a parent that exits leaves this value exactly as it was, because a parent's death never closes or rewrites its children (design D6).
    */

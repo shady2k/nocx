@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -1914,6 +1915,27 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		}
 		validateJSON(t, schema, raw, "open DTO ("+name+" mode)")
 	}
+	sandboxRaw, err := json.Marshal(openResult{
+		SessionID:    "0123456789abcdef0123456789abcdef",
+		InstanceID:   "fedcba9876543210fedcba9876543210",
+		SessionEpoch: 1,
+		Cwd:          "~/work",
+		DesiredMode:  "script",
+		Sandbox: &sandbox.SessionInfo{
+			Backend:       sandbox.BackendLandlock,
+			Workspace:     "/home/user/work",
+			WritableRoots: []string{"/home/user/work"},
+			ReadOnlyRoots: []string{"/usr"},
+			HomeProjections: []sandbox.HomeProjection{
+				{HostPath: "/home/user/work", RelativePath: "work"},
+				{HostPath: "/home/user/.config/opencode", RelativePath: ".config/opencode"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal sandbox open result: %v", err)
+	}
+	validateJSON(t, schema, sandboxRaw, "sandbox open DTO")
 
 	// The shape the ownership move exists for (nocx-eidfb.1): a session with
 	// no client attached still has a size to marshal — the named default —

@@ -276,10 +276,11 @@ func (lp *LocalPty) SandboxInfo() *sandbox.SessionInfo {
 		return nil
 	}
 	return &sandbox.SessionInfo{
-		Backend:       lp.prepared.Backend,
-		Workspace:     lp.prepared.Policy.Workspace,
-		WritableRoots: append([]string(nil), lp.prepared.Policy.WritableRoots...),
-		ReadOnlyRoots: append([]string(nil), lp.prepared.Policy.ReadOnlyRoots...),
+		Backend:         lp.prepared.Backend,
+		Workspace:       lp.prepared.Policy.Workspace,
+		WritableRoots:   append([]string(nil), lp.prepared.Policy.WritableRoots...),
+		ReadOnlyRoots:   append([]string(nil), lp.prepared.Policy.ReadOnlyRoots...),
+		HomeProjections: append([]sandbox.HomeProjection{}, lp.prepared.Policy.HomeProjections...),
 	}
 }
 

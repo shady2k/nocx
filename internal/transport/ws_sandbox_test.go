@@ -306,9 +306,10 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 	svc := &sandboxTestService{
 		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock, ABI: 9},
 		policy: &sandbox.Policy{
-			Workspace:     canon,
-			WritableRoots: []string{canon, filepath.Join(base, "rt", "home"), filepath.Join(base, "rt", "tmp")},
-			ReadOnlyRoots: []string{filepath.Join(base, "usr"), filepath.Join(base, "rt", "ro")},
+			Workspace:       canon,
+			WritableRoots:   []string{canon, filepath.Join(base, "rt", "home"), filepath.Join(base, "rt", "tmp")},
+			ReadOnlyRoots:   []string{filepath.Join(base, "usr"), filepath.Join(base, "rt", "ro")},
+			HomeProjections: []sandbox.HomeProjection{{HostPath: canon, RelativePath: "workspace"}},
 		},
 	}
 	wsrv, reg := newSandboxHarness(t, svc)
@@ -324,10 +325,11 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 			SessionID string `json:"sessionId"`
 			Cwd       string `json:"cwd"`
 			Sandbox   *struct {
-				Backend       string   `json:"backend"`
-				Workspace     string   `json:"workspace"`
-				WritableRoots []string `json:"writableRoots"`
-				ReadOnlyRoots []string `json:"readOnlyRoots"`
+				Backend         string                   `json:"backend"`
+				Workspace       string                   `json:"workspace"`
+				WritableRoots   []string                 `json:"writableRoots"`
+				ReadOnlyRoots   []string                 `json:"readOnlyRoots"`
+				HomeProjections []sandbox.HomeProjection `json:"homeProjections"`
 			} `json:"sandbox"`
 		} `json:"result"`
 		Error *jsonrpcErrorObj `json:"error"`
@@ -352,6 +354,9 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 	}
 	if len(result.Result.Sandbox.ReadOnlyRoots) != 2 {
 		t.Errorf("readOnlyRoots = %v, want 2 roots", result.Result.Sandbox.ReadOnlyRoots)
+	}
+	if len(result.Result.Sandbox.HomeProjections) != 1 || result.Result.Sandbox.HomeProjections[0].HostPath != canon {
+		t.Errorf("homeProjections = %v, want canonical workspace projection", result.Result.Sandbox.HomeProjections)
 	}
 	// The canonical workspace drives session CWD (ADR-0034 item 9): the same
 	// value reaches session.Config.Cwd and comes back as the open result's
@@ -649,7 +654,7 @@ func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 	}
 	svc := &sandboxTestService{
 		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
-		policy: &sandbox.Policy{Workspace: ws, WritableRoots: []string{ws}},
+		policy: &sandbox.Policy{Workspace: ws, WritableRoots: []string{ws}, HomeProjections: []sandbox.HomeProjection{}},
 	}
 	wsrv, reg := newSandboxHarness(t, svc)
 	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {

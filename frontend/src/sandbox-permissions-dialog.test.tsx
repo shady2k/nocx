@@ -85,6 +85,11 @@ describe('showSandboxPermissions', () => {
     expect(checkboxFor('/a').checked).toBe(true)
     expect(checkboxFor('/b').checked).toBe(true)
     expect(checkboxFor('/r1').checked).toBe(true)
+    expect(dialog().textContent).toContain(
+      'Folders strictly below host HOME also appear at their usual ~/… paths',
+    )
+    expect(dialog().textContent).toContain('HOME and ancestor grants stay absolute-only')
+    expect(dialog().textContent).toContain('Projected folders can contain credentials')
 
     footerButtons()[1].click()
     const result = await promise

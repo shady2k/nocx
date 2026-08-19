@@ -85,6 +85,9 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	if err != nil {
 		return fail(err)
 	}
+	if projectionErr := materializeHomeProjections(runtimeRoot, pol); projectionErr != nil {
+		return fail(projectionErr)
+	}
 	// The shell runs with HOME/XDG/TMPDIR pointed into the ephemeral runtime
 	// tree and NOCX_SANDBOX=filesystem (design spec §5.3); the policy builder
 	// already consumed the base PATH above.

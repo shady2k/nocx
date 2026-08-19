@@ -17,9 +17,10 @@ import (
 
 func TestLocalPty_SandboxInfoReturnsDeepCopy(t *testing.T) {
 	policy := &sandbox.Policy{
-		Workspace:     "/workspace",
-		WritableRoots: []string{"/workspace", "/runtime/home"},
-		ReadOnlyRoots: []string{"/usr", "/runtime/ro"},
+		Workspace:       "/workspace",
+		WritableRoots:   []string{"/workspace", "/runtime/home"},
+		ReadOnlyRoots:   []string{"/usr", "/runtime/ro"},
+		HomeProjections: []sandbox.HomeProjection{{HostPath: "/workspace", RelativePath: "workspace"}},
 	}
 	lp := &LocalPty{
 		prepared: &sandbox.PreparedCommand{
@@ -31,6 +32,7 @@ func TestLocalPty_SandboxInfoReturnsDeepCopy(t *testing.T) {
 	first := lp.SandboxInfo()
 	first.WritableRoots[0] = "/mutated"
 	first.ReadOnlyRoots[0] = "/mutated-ro"
+	first.HomeProjections[0].HostPath = "/mutated-home"
 	second := lp.SandboxInfo()
 
 	if got := second.WritableRoots[0]; got != "/workspace" {
@@ -39,11 +41,17 @@ func TestLocalPty_SandboxInfoReturnsDeepCopy(t *testing.T) {
 	if got := second.ReadOnlyRoots[0]; got != "/usr" {
 		t.Fatalf("second SandboxInfo read-only root = %q, want immutable policy root", got)
 	}
+	if got := second.HomeProjections[0].HostPath; got != "/workspace" {
+		t.Fatalf("second SandboxInfo projection = %q, want immutable policy projection", got)
+	}
 	if got := policy.WritableRoots[0]; got != "/workspace" {
 		t.Fatalf("policy root = %q after accessor mutation", got)
 	}
 	if got := policy.ReadOnlyRoots[0]; got != "/usr" {
 		t.Fatalf("policy read-only root = %q after accessor mutation", got)
+	}
+	if got := policy.HomeProjections[0].HostPath; got != "/workspace" {
+		t.Fatalf("policy projection = %q after accessor mutation", got)
 	}
 }
 
@@ -72,8 +80,9 @@ func (s startFailingSandboxService) Prepare(_ context.Context, req sandbox.Reque
 		Cmd:     cmd,
 		Backend: sandbox.BackendLandlock,
 		Policy: &sandbox.Policy{
-			Workspace:     req.Workspace,
-			WritableRoots: []string{req.Workspace},
+			Workspace:       req.Workspace,
+			WritableRoots:   []string{req.Workspace},
+			HomeProjections: []sandbox.HomeProjection{},
 		},
 	}, nil
 }

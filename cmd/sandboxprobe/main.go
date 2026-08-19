@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/sandbox"
@@ -114,18 +115,21 @@ func runArtifactProbe(artifactPath string) error {
 	}
 	// #nosec G204 -- executable is canonicalized, regular, executable, and supplied explicitly by the release gate.
 	cmd := exec.Command(artifact, sandbox.ArtifactSmokeArg, probe) //nolint:gosec
-	cmd.Env = withEnv(os.Environ(), map[string]string{
+	env := map[string]string{
 		envWorkspace:                           workspace,
 		envSentinel:                            sentinel,
 		envPreHard:                             preHard,
 		envShell:                               "/bin/sh",
 		sandbox.ArtifactSmokeCacheEnv:          cacheDir,
-		helperPrefix + "LEAK":                  "must-be-stripped",
 		"HOME":                                 hostHome,
 		sandbox.ArtifactSmokeReadOnlyEnv:       readOnlyRoot,
 		sandbox.ArtifactSmokeWritableEnv:       writableRoot,
 		sandbox.ArtifactSmokeNestedWritableEnv: nestedWritable,
-	})
+	}
+	if runtime.GOOS == "linux" {
+		env[helperPrefix+"LEAK"] = "must-be-stripped"
+	}
+	cmd.Env = withEnv(os.Environ(), env)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if runErr := cmd.Run(); runErr != nil {
@@ -301,9 +305,11 @@ func runChildProbe() error {
 	}
 	_ = conn.Close()
 
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, helperPrefix) {
-			return errors.New("helper-only environment reached the sandboxed command")
+	if runtime.GOOS == "linux" {
+		for _, entry := range os.Environ() {
+			if strings.HasPrefix(entry, helperPrefix) {
+				return errors.New("helper-only environment reached the sandboxed command")
+			}
 		}
 	}
 	return nil

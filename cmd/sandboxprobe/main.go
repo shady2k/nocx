@@ -82,6 +82,12 @@ func runArtifactProbe(artifactPath string) error {
 	if err != nil {
 		return fmt.Errorf("create fixture: %w", err)
 	}
+	rawBase := base
+	base, err = filepath.EvalSymlinks(base)
+	if err != nil {
+		_ = os.RemoveAll(rawBase)
+		return fmt.Errorf("canonicalize fixture: %w", err)
+	}
 	defer func() { _ = os.RemoveAll(base) }()
 
 	workspace := filepath.Join(base, "workspace")

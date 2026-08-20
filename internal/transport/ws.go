@@ -41,6 +41,7 @@ import (
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/version"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -156,6 +157,11 @@ type WSServer struct {
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
 	// -32601 and the shell keeps its declared defaults.
 	uiState *uistate.Store
+	// build is what app.about answers with: what this binary is. Zero-valued
+	// unless the composition root passes one, and the zero value is honest —
+	// every field then reads "unknown" rather than claiming a version this
+	// build does not have (see WithBuildInfo).
+	build version.BuildInfo
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -776,6 +782,20 @@ func WithUIState(store *uistate.Store) WSServerOption {
 	return func(s *WSServer) { s.uiState = store }
 }
 
+// WithBuildInfo attaches the running binary's description, which is what
+// app.about answers with. The transport is told rather than reading
+// internal/version itself: that package's vars are link-time state, and a
+// second reader of them inside the transport would be a second place the
+// answer lives — and would leave no way for a test to assert what this method
+// sends for a build nobody can produce on demand.
+//
+// Not attaching it is not a failure mode with a hole in it: the descriptor's
+// fields are then the zero value, and the DTO says "unknown" in each, which is
+// what the About page is built to render.
+func WithBuildInfo(b version.BuildInfo) WSServerOption {
+	return func(s *WSServer) { s.build = b }
+}
+
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
 // production constructs its own. The injected registry must not be shared
 // across servers.
@@ -981,6 +1001,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
+	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)

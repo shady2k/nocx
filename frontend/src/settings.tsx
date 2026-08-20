@@ -54,6 +54,9 @@ import {
   type SettingsSnapshot,
 } from './settings-domain'
 import { BackupRestoreSection } from './backup-restore-section'
+import { AboutSection } from './about-section'
+import type { AboutClient } from './about-client'
+import type { ClipboardAccess } from './clipboard'
 import { VaultSection } from './vault'
 import { log } from './log'
 import {
@@ -86,6 +89,15 @@ import {
  *  at all, and inventing one so that one section can carry one notice would
  *  make every future section-level fact a schema change. */
 const HISTORY_SECTION = 'History'
+
+/** The clipboard an embedding without one hands the About page. It refuses
+ *  rather than resolving: a Copy button that reports success while nothing was
+ *  written is the silent degrade AGENTS.md forbids, and the page already
+ *  surfaces a refusal. */
+const unavailableClipboard: ClipboardAccess = {
+  readText: () => Promise.reject(new Error('no clipboard in this window')),
+  writeText: () => Promise.reject(new Error('no clipboard in this window')),
+}
 
 export type SettingsPage =
   | { kind: 'generated'; id: string; title: string; groupId?: string }
@@ -175,6 +187,14 @@ export interface SettingsComponentProps {
    *  exist survives a release. Absent in an embedding with no backend; the
    *  section then makes no claim either way. */
   historyStatus?: HistoryStatusStore
+  /** Reads what build this is, for the About page (nocx-8bbp). Absent in an
+   *  embedding with no backend; the page then says it could not read the
+   *  build rather than drawing rows of nothing. */
+  aboutClient?: AboutClient
+  /** The clipboard the About page's Copy diagnostics writes through. Injected
+   *  rather than reached for, because the platform seam is what a test
+   *  substitutes and what refuses in a non-secure context. */
+  clipboard?: ClipboardAccess
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -518,6 +538,31 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    // LAST IN THE RAIL, and in the 'application' group with Backup and
+    // Snippets. It is the page nobody navigates to on purpose until something
+    // has gone wrong, which is exactly why it must be findable in the obvious
+    // place rather than clever about where it sits.
+    const aboutPage: SettingsPage = {
+      kind: 'component',
+      id: 'about',
+      title: 'About',
+      groupId: 'application',
+      scrollMode: 'page',
+      // Registered unconditionally, like the pages above it: a surface that
+      // appears only once some other state exists is how a feature ships
+      // unreachable. Without a client it says so, which is a state the page
+      // already has for an unreachable backend.
+      renderContent: () => (
+        <AboutSection
+          load={() =>
+            props.aboutClient
+              ? props.aboutClient.load()
+              : Promise.reject(new Error('the build description is not available in this window'))
+          }
+          clipboard={props.clipboard ?? unavailableClipboard}
+        />
+      ),
+    }
     return [
       connectionPage,
       ...generated,
@@ -526,6 +571,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      aboutPage,
     ]
   })
 

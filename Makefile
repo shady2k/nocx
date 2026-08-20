@@ -24,6 +24,33 @@ WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) 
 # requires a populated dist before the Go compiler runs.
 FRONTEND_BUILD := cd frontend && npm run build
 
+# BUILD METADATA, stamped at link time so the About page (nocx-8bbp) reads it
+# out of the binary rather than out of a constant somebody has to remember to
+# bump. The -X paths are documented in internal/version/version.go, which is the
+# source of truth for them; the release workflow builds the same three.
+#
+# VERSION IS NOT SET HERE, AND THAT IS THE POINT. `internal/version.Version`
+# defaults to "dev", and the updater treats that exact string as "this is a
+# development build, never check for updates". A local build that stamped a
+# version guessed from `git describe` would be a build that offers to replace
+# itself with a release. Commit and date are honest about any build, so they
+# are always stamped; pass VERSION explicitly to make a build that claims to be
+# a release:
+#
+#   make build-release VERSION=0.3.0
+#
+# `git describe` is not used even then. The release number is the tag the
+# workflow was triggered by, and deriving it locally would be a second answer to
+# a question the release pipeline already answers.
+VERSION ?=
+BUILD_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+VERSION_PKG := github.com/shady2k/nocx/internal/version
+LDFLAGS := -X $(VERSION_PKG).Commit=$(BUILD_COMMIT) -X $(VERSION_PKG).Date=$(BUILD_DATE)
+ifneq ($(VERSION),)
+LDFLAGS += -X $(VERSION_PKG).Version=$(VERSION)
+endif
+
 all: lint test build
 
 # A local build is a DEVELOPMENT build: it resolves the nocx-dev profile, so it
@@ -32,7 +59,7 @@ all: lint test build
 # artefact; CI does that from a tag.
 build:
 	$(FRONTEND_BUILD)
-	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -o build/bin/nocx .
+	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
@@ -40,7 +67,7 @@ build:
 # `production` is v3's tag for production build semantics (devtools off).
 build-release:
 	$(FRONTEND_BUILD)
-	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -o build/bin/nocx .
+	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 
 # A local dev loop: build the embedded frontend and run the app with the dev
 # profile. `wails dev` used to provide a hot-reloading asset server; v3 has

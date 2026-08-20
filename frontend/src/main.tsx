@@ -16,6 +16,7 @@ import { LayoutClient } from './layout/layout-client'
 import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
+import { AboutClient } from './about-client'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
@@ -137,6 +138,10 @@ async function main() {
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
   const dispatcher = new Dispatcher()
+  // What build this is, for the About page (nocx-8bbp). Constructed here with
+  // every other client: the page is registered unconditionally, so the client
+  // has to exist for it to have anything to read.
+  const aboutClient = new AboutClient(dispatcher)
   const client = new WSClient(dispatcher)
   // Connection notice — the transport's condition, stated where a person is
   // already looking (the tab bar). A dropped connection is a persistent
@@ -356,6 +361,8 @@ async function main() {
         agentClient,
         snippetsStore,
         historyStatusStore,
+        aboutClient,
+        clipboard,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

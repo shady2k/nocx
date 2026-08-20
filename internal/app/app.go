@@ -55,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/vault/system"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/version"
 )
 
 // noteBackupAdapter is the backup's view of the notes store. The store takes
@@ -822,6 +823,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
+		// What this binary is, for app.about (nocx-8bbp). Read here rather
+		// than inside the transport: internal/version's vars are link-time
+		// state, and the composition root is where state becomes a
+		// dependency.
+		transport.WithBuildInfo(version.Info()),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig

@@ -78,8 +78,16 @@ func TestBuildPolicy_Roots(t *testing.T) {
 		if rErr != nil {
 			t.Fatalf("EvalSymlinks(%s): %v", root, rErr)
 		}
-		if !roSet[canonRoot] {
-			t.Errorf("read-only roots missing system root %q (canonical %q); got %v", root, canonRoot, p.ReadOnlyRoots)
+		// COVERED, not present. On a merged-/usr distribution /bin, /sbin,
+		// /lib and /lib64 canonicalize under /usr, and normalize drops an
+		// entry an outer entry already contains — the access is identical and
+		// the rule count is not. Asserting membership asserted the shape of
+		// the list rather than what a process inside the cage can read, and it
+		// held only on a distribution where those four do not resolve inward
+		// (nocx-263da).
+		if !rootCovered(canonRoot, p.ReadOnlyRoots) {
+			t.Errorf("system root %q (canonical %q) is not readable: no read-only root covers it; got %v",
+				root, canonRoot, p.ReadOnlyRoots)
 		}
 	}
 	shellCanon, err := filepath.EvalSymlinks(shell)
@@ -1510,4 +1518,15 @@ func TestBuildPolicy_CrossClassAliasPreservesProvenance(t *testing.T) {
 	if !errors.Is(err, ErrInvalidPermissions) {
 		t.Fatalf("err = %v, want ErrInvalidPermissions for delta-side cross-class alias conflict", err)
 	}
+}
+
+// rootCovered reports whether some read-only root grants access to path —
+// the path itself, or an ancestor of it.
+func rootCovered(path string, roots []string) bool {
+	for _, root := range roots {
+		if pathWithin(root, path) {
+			return true
+		}
+	}
+	return false
 }

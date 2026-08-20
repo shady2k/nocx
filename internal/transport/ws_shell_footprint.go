@@ -9,10 +9,12 @@ package transport
 //
 //   - shell.footprint.status is READ-ONLY and never connects. The answer is
 //     P7's installed fact — the protocol version, script version and
-//     generation last OBSERVED via an accepted passport, keyed by the
-//     resolved destination identity — so the surface can show the footprint
-//     of a host nocx can no longer reach, and a host wiped since then is
-//     described as "last seen", never as installed now.
+//     generation last OBSERVED, keyed by the resolved destination identity —
+//     so the surface can show the footprint of a host nocx can no longer
+//     reach, and a host wiped since then is described as "last seen", never
+//     as installed now. The observation is the generation the far shell
+//     names on the authenticated channel, not an inferred passport
+//     (ADR-0024 §1); ws_installed_fact.go is the writer.
 //   - shell.footprint.uninstall CONNECTS. Removing files is inherently a
 //     dial: nocx owns credentials only for saved connections, so uninstall
 //     is offered exactly there. The dial-and-call is owned by an internal/ssh
@@ -49,13 +51,15 @@ type RemoteUninstaller interface {
 }
 
 // WithInstalledFactStore attaches the backend-owned, persisted installed
-// fact (P7, design §5.4): the memory that makes the second connection to a
-// host cheaper than the first. shell.footprint.status reads it to report
-// what nocx wrote and where; when not wired, the surface answers an empty
-// list. The observation RPC that used to WRITE the store was severed with
-// the P7 delivery surface (ADR-0024 §1 — a passport is tty bytes and cannot
-// activate a domain), so the transport only ever reads; the migration bead
-// reconnects the writers to authenticated facts.
+// fact (P7, design §5.4): the inventory of what nocx wrote and where.
+// shell.footprint.status reads it; when not wired, the surface answers an
+// empty list. It is the store's ONLY reader — the delivery planner that
+// once consulted it per destination is gone with the far-side guard, and
+// the per-identity lookup went with it (nocx-m8jwn.10). The writer is
+// ws_installed_fact.go, which records the generation the far shell names on
+// the authenticated channel; the P7 observation RPC that used to write it
+// was severed (ADR-0024 §1 — a passport is tty bytes and cannot activate a
+// domain) and replaced there (nocx-ak2d).
 func WithInstalledFactStore(store *ssh.InstalledFactStore) WSServerOption {
 	return func(s *WSServer) { s.installedFacts = store }
 }
@@ -93,8 +97,8 @@ type shellFootprintDestination struct {
 	// is stored under — the same key two typed lines that resolve to the
 	// same destination share (ADR-0015 narrowing).
 	Identity string `json:"identity"`
-	// Generation is the committed generation the last accepted passport
-	// named (e.g. "v10"), preserved verbatim.
+	// Generation is the committed generation the far shell last named on
+	// the authenticated channel (e.g. "v10"), preserved verbatim.
 	Generation string `json:"generation"`
 	// Path is the install directory on the remote host (~/.nocx).
 	Path string `json:"path"`

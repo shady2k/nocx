@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -729,41 +730,42 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     nothing and opens a plain shell; relay behaves as raw in this epic;
 //     script (or empty — the direct-host default) publishes and
 //     integrates.
-//  3. In script mode a saved connection publishes the bundle over SFTP
-//     first, through the RemoteInstaller (P8's carrier): the publisher's
-//     fail-open contract means the session still starts — transient-
-//     integrated via the launcher, or raw — when the publish fails, and
-//     the previous activation stays byte-identical.
-//  4. The launcher (nocx-xs1d) then builds the integrated start command. A
-//     profile pin (cfg.Shell) wins outright — a user who says "this host
-//     runs zsh" knows something the detector cannot (nocx-6rj0). Unpinned,
-//     the launcher receives ShellAuto and emits a strictly-POSIX
-//     dispatcher that detects the far login shell at runtime — the only
-//     layer that knows which shell is at the far end — and execs the
-//     matching tier: bash → bash, zsh → zsh, anything else (dash, ash, ksh,
-//     csh, …) → the minimal tier. The dispatcher never guesses bash: an
-//     undetectable shell degrades to the minimal tier, whose fail-open
-//     starts an ordinary plain login shell (ADR-0004:60). A decline (or a
+//  3. In script mode the bundle is published over SFTP through the
+//     RemoteInstaller. Its outcome is REPORTED AND NOT CONSULTED: the same
+//     carrier is emitted whether the publish succeeded, failed, or was
+//     never attempted. That is the carrier design's first decision, and it
+//     is what the old shape got wrong — the command used to begin with a
+//     far-side test of installation state, which on a first contact fails
+//     while the publish that would have satisfied it is still in flight.
+//     The far side stays the owner of "is this installation valid"; that
+//     verification now runs after the bootstrap settles, inside stage-1.
+//  4. The launcher builds the carrier: a bounded loader carrying no bundle
+//     bytes and neither secret (shellintegration/carrier.go). A profile pin
+//     (cfg.Shell) is still passed — a user who says "this host runs zsh"
+//     knows something the detector cannot (nocx-6rj0) — though the carrier
+//     is the same for every kind, because the far side dispatches after
+//     stage-1 rather than in the command. A decline (or a
 //     contract-violating result) falls back to a plain shell with the
 //     reason: an ordinary, usable terminal with a visible native prompt is
 //     absolute, no failure path may suppress it.
-//  5. No launcher wired: the installer's own start command (the §3.3
-//     far-side guard) when one is, else a plain shell, reason none.
-func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, lc *lifecycleHandle) (string, RefusalReason) {
+//  5. No launcher wired: a plain shell, reason none. There is deliberately
+//     no installer-supplied command any more — a session either runs the
+//     carrier or runs nothing at all.
+func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, lc *lifecycleHandle) (string, RefusalReason, BootstrapRun) {
 	if resolved.remoteCommand != "" {
-		return resolved.remoteCommand, ReasonRemoteCommand
+		return resolved.remoteCommand, ReasonRemoteCommand, nil
 	}
 
 	// raw and relay publish nothing and integrate nothing (N1, §3.1; relay
 	// is inert this epic). Unknown modes fail closed.
 	if !modeAllowsIntegration(cfg.DesiredMode) {
-		return "", ReasonNone
+		return "", ReasonNone, nil
 	}
 
-	// A saved connection publishes the bundle over SFTP before the session
-	// starts (design §4: the SFTP carrier hands the same descriptor to the
-	// same Publish). Best-effort: a publish failure is logged and the
-	// session still starts — fail-open (design §4.1).
+	// The publish is best-effort and its result is a LOG, never an input to
+	// the decision below: the fail-open contract says a failed publish
+	// leaves the previous activation byte-identical and the session still
+	// starts, and the carrier is what starts it either way.
 	if cfg.RemoteInstaller != nil {
 		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
 		if err != nil {
@@ -784,10 +786,13 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 			SessionID: cfg.SessionID,
 			Enhanced:  cfg.Enhanced,
 		}
-		// The lifecycle channel config rides the launch text: the port
-		// becomes NOCX_LIFECYCLE_PORT and the capability the rcfile's
-		// @CAP@. lc is nil when establishment was refused — the launch
-		// then carries no channel config and the shell stays conventional.
+		// The lifecycle channel config addresses the carrier: lane, domain,
+		// epoch and port are names and travel in the command. The
+		// capability and the recovery fence are carried too, so the
+		// launcher can prove it does not put them there — they reach the
+		// far shell as a frame on the channel, never as command text. lc is
+		// nil when establishment was refused; the launch then carries no
+		// channel config and the shell stays conventional.
 		if lc != nil {
 			opts.Lane = lc.launch.Lane
 			opts.Domain = lc.launch.Domain
@@ -796,9 +801,22 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 			opts.Capability = lc.launch.Capability
 			opts.Recovery = lc.launch.Recovery
 		}
+		// The bootstrap is prepared first: the carrier commits to the
+		// digest of the stage-1 frame, so the frame exists before the
+		// command that names it does. Without a bootstrapper there is
+		// nothing to feed the loader, and a loader with no sender blocks
+		// on a frame that never arrives — so the session runs a plain
+		// shell instead, with a named reason.
+		digest, run, prepared := cfg.RemoteLauncher.Prepare(shell, opts)
+		if !prepared {
+			rc.log.Warn("ssh: the shell bootstrap could not be prepared; the session runs a plain shell",
+				"host", resolved.hostName, "shell", shell)
+			return "", ReasonUnsupportedShell, nil
+		}
+		opts.StageDigest = digest
 		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, opts)
 		if ok && cmd != "" {
-			return cmd, ReasonNone
+			return cmd, ReasonNone, run
 		}
 		// Decline or degenerate result: fall back to a plain shell. Normalize
 		// a missing reason so the degrade stays visible in the product
@@ -807,13 +825,10 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		if reason == "" {
 			reason = ReasonUnsupportedShell
 		}
-		return "", reason
-	}
-	if cfg.RemoteInstaller != nil {
-		return cfg.RemoteInstaller.RemoteStartCommand(), ReasonNone
+		return "", reason, nil
 	}
 
-	return "", ReasonNone
+	return "", ReasonNone, nil
 }
 
 // openShell opens a session, requests a PTY, optionally requests agent
@@ -826,7 +841,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 // wired); it is closed on every path that does not hand the shell a
 // channel-using start command, and otherwise transferred to the channel.
 func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
-	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
+	startCmd, reason, bootstrap := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
 
 	session, err := gclient.NewSession()
 	if err != nil {
@@ -898,18 +913,68 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		}
 	}
 
+	// The input quarantine opens BEFORE the command is sent (design §5.3):
+	// the session is bootstrapping and the user's keystrokes are refused,
+	// not buffered — a buffered keystroke is a command the user did not
+	// knowingly run, executed later. It closes at exactly one terminal
+	// outcome, never at READY.
+	//
+	// The output side is a feed rather than the raw pipe for the same
+	// interval: the bootstrap reads the far side's tokens, and the same
+	// reader hands the remainder to the terminal afterwards, so no byte is
+	// consumed by a wait that gave up.
+	var out io.Reader = stdout
+	gate := newInputGate(true)
+	bootstrapDone := make(chan struct{})
+	var feed *sessionFeed
+	if bootstrap != nil {
+		feed = newSessionFeed(stdout)
+		out = feed
+		gate = newInputGate(false)
+	} else {
+		close(bootstrapDone)
+	}
+
 	ch := &RealChannel{
 		log:                    rc.log.With("remote", resolved.hostName),
 		session:                session,
 		stdin:                  stdin,
-		stdout:                 stdout,
+		stdout:                 out,
 		done:                   make(chan struct{}),
+		inputGate:              gate,
+		bootstrapDone:          bootstrapDone,
 		shellIntegrationReason: reason,
 		closeCb: func() {
 			_ = session.Close()
 		},
 		releasePoolRef: releaseRef,
 		lifecycleClose: lc.close,
+	}
+
+	if bootstrap != nil {
+		// The context is deliberately NOT the caller's: Connect returns
+		// as soon as the session is started, and a cancelled connect
+		// context must not abort a bootstrap that is already running on
+		// a live session. The session's own end is what stops it, which
+		// the stream reports as an error.
+		bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		go func() {
+			<-ch.done
+			cancel()
+		}()
+		go func() {
+			defer cancel()
+			// Whatever the outcome, the gate opens: the interval
+			// closes at the TERMINAL OUTCOME, and every one of them
+			// leaves the far side on its way to a usable prompt.
+			bootReason := bootstrap(bctx, bootstrapStream{sessionFeed: feed, w: stdin})
+			if bootReason != ReasonNone {
+				ch.log.Warn("ssh: shell bootstrap did not integrate the session",
+					"reason", bootReason)
+			}
+			gate.release()
+			close(bootstrapDone)
+		}()
 	}
 
 	// The watcher starts AFTER releasePoolRef is set (above), so a session

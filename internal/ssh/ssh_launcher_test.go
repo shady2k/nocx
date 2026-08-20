@@ -2,6 +2,8 @@ package ssh
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,13 +18,62 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeLauncher struct {
-	mu       sync.Mutex
-	calls    int
-	gotShell ShellKind
-	gotOpts  LaunchOptions
-	cmd      string
-	reason   RefusalReason
-	ok       bool
+	mu    sync.Mutex
+	calls int
+	// prepareFails makes Prepare decline; blockBootstrap holds the run
+	// until the test closes it.
+	prepareFails   bool
+	blockBootstrap chan struct{}
+	gotShell       ShellKind
+	gotOpts        LaunchOptions
+	cmd            string
+	reason         RefusalReason
+	ok             bool
+}
+
+// waitBootstrapped blocks until the input quarantine has closed. "Usable"
+// means the session is out of the bootstrap interval — before that, refusing
+// a keystroke is the CONTRACT (design §5.3), not a defect, so a test that
+// wrote without waiting would be asserting against the feature.
+func waitBootstrapped(t *testing.T, ch Channel) {
+	t.Helper()
+	rc, ok := ch.(*RealChannel)
+	if !ok || rc.bootstrapDone == nil {
+		return
+	}
+	select {
+	case <-rc.bootstrapDone:
+	case <-rc.done:
+	case <-time.After(30 * time.Second):
+		// A failsafe against a hang, never the thing being measured.
+		t.Fatal("the bootstrap interval never closed")
+	}
+}
+
+// Prepare is the launcher's other half: the bootstrap. The stub returns a
+// digest and a run that finishes at once — this file's subject is WHICH
+// COMMAND is sent and what the far side records, not the handshake, which
+// internal/shellintegration proves against a real loader on a real terminal.
+//
+// prepareFails and blockBootstrap are how a test states the two cases this
+// side owns: a bootstrap that cannot be prepared (no command may be emitted
+// at all) and one that is still running (the input quarantine is closed).
+func (f *fakeLauncher) Prepare(shell ShellKind, opts LaunchOptions) (string, BootstrapRun, bool) {
+	f.mu.Lock()
+	fails, block := f.prepareFails, f.blockBootstrap
+	f.mu.Unlock()
+	if fails {
+		return "", nil, false
+	}
+	return strings.Repeat("ab", 32), func(ctx context.Context, s BootstrapStream) RefusalReason {
+		if block != nil {
+			select {
+			case <-block:
+			case <-ctx.Done():
+			}
+		}
+		return ReasonNone
+	}, true
 }
 
 func (f *fakeLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool) {
@@ -48,15 +99,15 @@ func (f *fakeLauncher) lastCall() (ShellKind, LaunchOptions) {
 
 // recordInstaller is the RemoteInstaller double for the desired-mode
 // matrix (nocx-mlm7). It records every call so a test can assert the
-// publish happens under script and never under raw/relay, and returns a
-// canned home and start command.
+// publish happens under script and never under raw/relay, and can be told
+// to fail the publish so a test can prove the command does not depend on
+// the outcome.
 type recordInstaller struct {
 	mu           sync.Mutex
 	homeCalls    int
 	publishCalls int
-	cmdCalls     int
+	publishErr   error
 	home         string
-	cmd          string
 }
 
 func (f *recordInstaller) GetRemoteHome(_ *gossh.Client) (string, error) {
@@ -70,14 +121,7 @@ func (f *recordInstaller) EnsureInstalledRemote(_ context.Context, _ *gossh.Clie
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.publishCalls++
-	return nil
-}
-
-func (f *recordInstaller) RemoteStartCommand() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cmdCalls++
-	return f.cmd
+	return f.publishErr
 }
 
 func (f *recordInstaller) UninstallRemote(_ context.Context, _ *gossh.Client, _ string) ([]string, []string, error) {
@@ -168,6 +212,7 @@ func launcherConnect(t *testing.T, srv *testSSHServer, rcOpts []RealClientOption
 func assertUsable(t *testing.T, srv *testSSHServer, ch Channel) {
 	t.Helper()
 	<-srv.shellReady
+	waitBootstrapped(t, ch)
 	if _, err := ch.Write([]byte("hello")); err != nil {
 		t.Fatalf("Write after start: %v", err)
 	}
@@ -230,7 +275,7 @@ func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test", cmd: "exec bash -i"}
+	installer := &recordInstaller{home: "/home/test"}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
@@ -269,7 +314,7 @@ func TestConnect_DesiredModeRelay_OpensPlainShell(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test", cmd: "exec bash -i"}
+	installer := &recordInstaller{home: "/home/test"}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
@@ -380,7 +425,7 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 	defer srv.close()
 
 	launcher := &fakeLauncher{cmd: "must not run", reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test", cmd: "must not run"}
+	installer := &recordInstaller{home: "/home/test"}
 	stub := NewStubConfigResolver()
 	stub.AddEntry(hostPortOnly(srv.addr), HostConfig{User: "test", RemoteCommand: "tmux attach -t work"})
 
@@ -488,7 +533,7 @@ func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 
 	wantCmd := "exec bash -i"
 	launcher := &fakeLauncher{cmd: wantCmd, reason: ReasonNone, ok: true}
-	installer := &recordInstaller{home: "/home/test", cmd: "if [ -x \"$HOME/.nocx/launch\" ]; then exec \"$HOME/.nocx/launch\"; else exec \"${SHELL:-/bin/sh}\" -l; fi"}
+	installer := &recordInstaller{home: "/home/test"}
 
 	ch := launcherConnect(
 		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
@@ -514,32 +559,6 @@ func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 	}
 }
 
-// TestConnect_DesiredModeScript_NoLauncher_UsesInstallerCommand: script
-// mode with only the carrier wired publishes and then runs the carrier's
-// own start command — the §3.3 far-side guard.
-func TestConnect_DesiredModeScript_NoLauncher_UsesInstallerCommand(t *testing.T) {
-	srv := startTestSSHServer(t)
-	defer srv.close()
-
-	wantCmd := "if [ -x \"$HOME/.nocx/launch\" ]; then exec \"$HOME/.nocx/launch\"; else exec \"${SHELL:-/bin/sh}\" -l; fi"
-	installer := &recordInstaller{home: "/home/test", cmd: wantCmd}
-
-	ch := launcherConnect(
-		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
-		WithRemoteInstaller(installer),
-		WithDesiredMode("script"),
-	)
-
-	assertUsable(t, srv, ch)
-
-	if installer.publishCalls != 1 || installer.cmdCalls != 1 {
-		t.Errorf("carrier calls: publish=%d cmd=%d, want 1 each", installer.publishCalls, installer.cmdCalls)
-	}
-	if got := srv.waitExecCommand(t); got != wantCmd {
-		t.Errorf("session.Start received %q, want the carrier's guard %q", got, wantCmd)
-	}
-}
-
 func TestConnect_NoLauncherNoRemoteCommand_PlainShellNoReason(t *testing.T) {
 	srv := startTestSSHServer(t)
 	defer srv.close()
@@ -553,5 +572,113 @@ func TestConnect_NoLauncherNoRemoteCommand_PlainShellNoReason(t *testing.T) {
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
 		t.Errorf("ShellIntegrationReason = %q, want %q (no integration attempted)", got, ReasonNone)
+	}
+}
+
+// TestConnect_SameCarrierWhateverThePublishDid is design §11's assertion 5:
+// the publish result is reported and not consulted. One case each —
+// publish succeeded, publish failed, publish never attempted — and the exec
+// request the far side records must be byte-identical in all three, reached
+// through identical LaunchOptions.
+//
+// The defect this pins is not hypothetical arithmetic: the command used to
+// open with a far-side test of installation state, so on a host with nothing
+// committed the test ran while the publish was still in flight, failed, and
+// degraded the session that the publish was in the middle of enabling.
+func TestConnect_SameCarrierWhateverThePublishDid(t *testing.T) {
+	const wantCmd = "/usr/bin/env -u BASH_ENV /bin/sh -c 'loader' nocx-loader"
+
+	cases := []struct {
+		name      string
+		installer *recordInstaller
+	}{
+		{"publish succeeded", &recordInstaller{home: "/home/test"}},
+		{"publish failed", &recordInstaller{home: "/home/test", publishErr: errors.New("sftp refused")}},
+		{"publish not attempted", nil},
+	}
+
+	var commands []string
+	var seen []LaunchOptions
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := startTestSSHServer(t)
+			defer srv.close()
+
+			launcher := &fakeLauncher{cmd: wantCmd, reason: ReasonNone, ok: true}
+			opts := []ConnectOption{
+				WithRemoteLauncher(launcher),
+				WithDesiredMode("script"),
+				WithSessionID("sess-carrier-parity"),
+				WithEnhanced(),
+			}
+			if tc.installer != nil {
+				opts = append(opts, WithRemoteInstaller(tc.installer))
+			}
+			ch := launcherConnect(t, srv,
+				[]RealClientOption{WithConfigResolver(NewStubConfigResolver())}, opts...)
+
+			assertUsable(t, srv, ch)
+
+			if tc.installer != nil && tc.installer.publishCalls != 1 {
+				t.Errorf("publish calls = %d, want 1 — the publish still happens, it is "+
+					"only its OUTCOME that stops deciding anything", tc.installer.publishCalls)
+			}
+			if n := launcher.callCount(); n != 1 {
+				t.Fatalf("launcher consulted %d times, want 1", n)
+			}
+			got := srv.waitExecCommand(t)
+			if got != wantCmd {
+				t.Errorf("session.Start received %q, want the carrier %q", got, wantCmd)
+			}
+			if got := ch.ShellIntegrationReason(); got != ReasonNone {
+				t.Errorf("ShellIntegrationReason = %q, want %q", got, ReasonNone)
+			}
+			_, lopts := launcher.lastCall()
+			commands = append(commands, got)
+			seen = append(seen, lopts)
+		})
+	}
+
+	if len(commands) != len(cases) {
+		t.Fatalf("only %d of %d cases recorded a command", len(commands), len(cases))
+	}
+	for i := 1; i < len(commands); i++ {
+		if commands[i] != commands[0] {
+			t.Errorf("case %q emitted %q; case %q emitted %q — the publish result "+
+				"must not change the command", cases[i].name, commands[i], cases[0].name, commands[0])
+		}
+		if seen[i] != seen[0] {
+			t.Errorf("case %q built LaunchOptions %+v; case %q built %+v",
+				cases[i].name, seen[i], cases[0].name, seen[0])
+		}
+	}
+}
+
+// TestConnect_InstallerAloneRunsNoCommand: the installer no longer answers
+// "what should this session run". The §3.3 far-side guard it used to supply
+// is retired with the carrier design, and nothing replaced it on this arm —
+// so a connection with a publisher and no launcher publishes and then opens
+// an ordinary plain shell.
+func TestConnect_InstallerAloneRunsNoCommand(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	installer := &recordInstaller{home: "/home/test"}
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteInstaller(installer),
+		WithDesiredMode("script"),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if installer.publishCalls != 1 {
+		t.Errorf("publish calls = %d, want 1", installer.publishCalls)
+	}
+	if got := srv.execCommandCount(); got != 0 {
+		t.Errorf("%d exec request(s) sent; the installer supplies no command any more", got)
+	}
+	if got := srv.shellRequestCount(); got != 1 {
+		t.Errorf("shell requests = %d, want 1 (the plain shell)", got)
 	}
 }

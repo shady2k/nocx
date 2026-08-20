@@ -113,22 +113,20 @@ fi
 unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session \
       __nocx_arm_marker_only __nocx_preexec_done __nocx_in_prompt_command \
       __nocx_first_prompt
-# The per-epoch capability, substituted into this rcfile's TEXT by the
-# launcher (@CAP@) — never exported, never in the environment. The hook
-# drops any export attribute again at source time (a user rc under
-# 'set -a' would auto-export it); an empty value means no authenticated
-# channel and a conventional session.
-__nocx_cap='@CAP@'
-export -n __nocx_cap 2>/dev/null
-# The one-shot recovery fence (ADR-0024 decision 8): substituted into this
-# rcfile's TEXT like the capability, never exported, never in the
-# environment. If the lifecycle channel dies mid-session, the shell writes
-# this fence to the pty at the next prompt boundary; nocx matches it as the
-# restoration acknowledgement. A hostile program cannot forge what it never
-# saw, and the worst a forged fence can do is force a safe transition to
-# native mode — an availability loss the ADR already accepts.
-__nocx_lc_recovery='@RECOVERY@'
-export -n __nocx_lc_recovery 2>/dev/null
+# The per-epoch capability and the one-shot recovery fence (ADR-0024
+# decision 8) — never exported, never in the environment, never in a named
+# file. The block below is one of the two forms in capability_source.go: on
+# the remote path the shell READS an inherited, already-unlinked descriptor
+# once and closes it; on the local child path the values are in this file's own
+# text, which is itself delivered through a descriptor. An empty capability
+# means no authenticated channel and a conventional session.
+#
+# The position is load-bearing: this is AFTER the user's startup file has run
+# and returned, so nothing the user's rc executes can see either value. If
+# the lifecycle channel dies mid-session, the shell writes the fence to the
+# pty at the next prompt boundary and nocx matches it as the restoration
+# acknowledgement; a hostile program cannot forge what it never saw.
+@CAPSRC@
 @NOCX_BASH@
 case "${__nocx_old_opts}" in *e*) set -e;; esac
 case "${__nocx_old_opts}" in *x*) set -x;; esac
@@ -171,14 +169,14 @@ unset __nocx_old_opts
 // bashRcfile renders the bash rcfile from its template: @ENV@ is the session
 // environment block (launcherEnvBlock for the argv launchers, empty for the
 // launch carrier, which exports the stable variables itself before exec),
-// @CAP@ is the per-epoch capability and @RECOVERY@ the one-shot recovery
-// fence — both substituted into the script text, never the environment —
-// and @NOCX_BASH@ is the nocx.bash body (embedded for the argv launchers, a
-// source of the installed generation file for the carrier).
-func bashRcfile(envBlock, scriptSource, capability, recovery string) string {
+// @CAPSRC@ is where the capability and the fence come from
+// (capability_source.go — a descriptor read on the remote path, a literal on
+// the local child path), and @NOCX_BASH@ is the nocx.bash body (embedded for
+// the argv launchers, a source of the installed generation file for the
+// carrier).
+func bashRcfile(envBlock, scriptSource, capSource string) string {
 	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", envBlock)
-	rc = strings.ReplaceAll(rc, "@CAP@", capability)
-	rc = strings.ReplaceAll(rc, "@RECOVERY@", recovery)
+	rc = strings.ReplaceAll(rc, "@CAPSRC@", capSource)
 	rc = strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
 	// The rendered rcfile ships inside the bootstrap payload, so its
 	// template comments are stripped like the generation scripts'
@@ -251,7 +249,12 @@ func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {
 	// no file, and the session is a conventional terminal with a visible
 	// native prompt (ADR-0024 decision 4 — the transient-integrated middle
 	// tier is deleted, not degraded to).
-	return bashArgFor(bashRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.bash"), opts.Capability, opts.Recovery)), true
+	// The literal form, and it is the reason FullBootstrapCommand may not
+	// be emitted by a managed session: this rcfile travels inside the
+	// remote COMMAND, so both bearers reach the far host's argv. P4 retires
+	// the one caller that remains (design §12).
+	return bashArgFor(bashRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.bash"),
+		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery))), true
 }
 
 // bashCommand builds the bash remote command: the pinned single-tier form,

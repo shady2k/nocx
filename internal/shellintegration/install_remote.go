@@ -239,14 +239,3 @@ func (s *Impl) GetRemoteHome(sshClient *gossh.Client) (string, error) {
 	}
 	return home, nil
 }
-
-// RemoteStartCommand returns the installed-mode start command (design §3.3):
-// exec the compact carrier when a generation is committed, else a native
-// login shell. The guard travels to the far side because only that machine's
-// ~/.nocx is the one in question; the plain-shell arm covers the one case
-// the carrier cannot — its own absence. No passport is emitted from this
-// command; production sessions reach the carrier through the launcher, which
-// carries the environment id.
-func (s *Impl) RemoteStartCommand() string {
-	return `if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch"; else exec "${SHELL:-/bin/sh}" -l; fi`
-}

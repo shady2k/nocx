@@ -360,8 +360,8 @@ func TestExecRefusalProbe_InProcess_GosshSessionIsReusableAfterARefusedStart(t *
 		t.Fatalf("new session: %v", err)
 	}
 	defer func() { _ = session.Close() }()
-	if err := session.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
-		t.Fatalf("request pty: %v", err)
+	if ptyErr := session.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); ptyErr != nil {
+		t.Fatalf("request pty: %v", ptyErr)
 	}
 	stdin, err := session.StdinPipe()
 	if err != nil {

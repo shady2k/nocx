@@ -23,13 +23,19 @@ type Channel interface {
 	ShellIntegrationReason() RefusalReason
 }
 
-// RemoteInstaller installs shell integration scripts on a remote host via
-// SSH/SFTP and returns the start command for the shell. Defined here (not
-// in shellintegration) to avoid a cyclic import.
+// RemoteInstaller publishes the shell integration bundle on a remote host
+// over SSH/SFTP. Defined here (not in shellintegration) to avoid a cyclic
+// import.
+//
+// It no longer answers "what should the session run": that was
+// RemoteStartCommand, the far-side `[ -x "$HOME/.nocx/launch" ]` guard, and
+// the carrier design retired it — placed first, the guard loses a race
+// against the publish it runs concurrently with, so the session degraded
+// while the publish succeeded. The remote command now comes from the
+// launcher, unconditionally and whatever the publish did.
 type RemoteInstaller interface {
 	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
 	GetRemoteHome(sshClient *gossh.Client) (string, error)
-	RemoteStartCommand() string
 	// UninstallRemote removes the committed integration bundle on the host,
 	// over the SFTP carrier, and reports the two lists: root-relative paths
 	// removed and root-relative paths the user modified (left in place).
@@ -118,22 +124,33 @@ type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
-	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
-	// exported to the environment. Lane, Domain and Epoch are names, not
-	// secrets, and travel in the environment like the other NOCX_* fields.
+	// per-epoch bearer: it travels as a bounded FRAME on the session
+	// channel and reaches the far shell through an inherited, already
+	// unlinked descriptor — never the command, never argv, never the
+	// environment, never a named file. Lane, Domain and Epoch are names,
+	// not secrets, and travel in the environment like the other NOCX_*
+	// fields.
 	// The transport is a loopback TCP port (LifecyclePort, the remote
 	// path); zero means that side is absent. Empty Capability means no
 	// channel: the session is conventional. Mirrors
 	// shellintegration.LaunchOptions field for field; the composition
 	// root maps the two at wiring time.
 	Capability string
-	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
-	// substituted into the rcfile text like the capability.
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8). It
+	// travels in the same frame as the capability and by the same route.
 	Recovery      string
 	Lane          string
 	Domain        string
 	Epoch         uint64
 	LifecyclePort int
+	// StageDigest is the lowercase hex SHA-256 of the stage-1 frame the
+	// sender is about to write. It is an addressing value, not a secret,
+	// and the far-side loader refuses any frame that does not hash to it.
+	//
+	// It is set from RemoteLauncher.Prepare, which renders the frame and
+	// computes the digest, immediately before StartCommand is asked for the
+	// command that carries it.
+	StageDigest string
 }
 
 // RemoteLifecycleLaunch is what the launcher embeds: the addressing tuple
@@ -147,8 +164,8 @@ type RemoteLifecycleLaunch struct {
 	Epoch      uint64
 	Port       int
 	Capability string // 64 lowercase hex chars
-	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
-	// substituted into the rcfile text like the capability, never exported.
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8). It
+	// travels in the same frame as the capability, never exported.
 	Recovery string // 64 lowercase hex chars
 }
 
@@ -168,13 +185,27 @@ type RemoteLifecycle interface {
 	Establish(ctx context.Context, host string, opts ...ConnectOption) (RemoteLifecycleLaunch, io.Closer, error)
 }
 
-// RemoteLauncher builds the command string passed to an SSH session's Start()
-// to bring up an integrated interactive shell on the far host.
+// RemoteLauncher brings up an integrated interactive shell on the far host.
+// It owns BOTH halves of one delivery, which is why they are one interface
+// and not two wired seams: the command commits to the digest of the stage-1
+// frame, so the component that builds the command and the component that
+// writes the frame have to be the same one or they can disagree.
 type RemoteLauncher interface {
 	// StartCommand returns the remote command for the given far shell.
 	// ok is false when this shell cannot be integrated; reason then says
 	// why, and the caller falls back to a plain shell.
 	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
+
+	// Prepare renders this session's bootstrap and returns the stage-1
+	// digest the command must carry, together with the run that delivers
+	// the frames once the session has started.
+	//
+	// It is called BEFORE StartCommand, and the caller puts the digest into
+	// the LaunchOptions it passes there. ok=false means no bootstrap is
+	// possible, and the caller then emits NO command at all: a carrier
+	// whose loader has no sender blocks on a frame that never arrives,
+	// which is the one outcome worse than an un-integrated prompt.
+	Prepare(shell ShellKind, opts LaunchOptions) (digest string, run BootstrapRun, ok bool)
 }
 
 type SSH interface {
@@ -468,10 +499,10 @@ func WithShell(shell ShellKind) ConnectOption {
 	return func(c *ConnectConfig) { c.Shell = shell }
 }
 
-// WithRemoteInstaller injects a shell integration installer for the remote
-// session. It remains as an EXPLICIT opt-in for the later persistent-install
-// flow: openShell consults it only when no RemoteLauncher is wired, so the
-// default path never SFTP-mutates a remote home (nocx-r52q).
+// WithRemoteInstaller injects the bundle publisher for the remote session.
+// It remains an EXPLICIT opt-in, so a connection that does not ask for it
+// never SFTP-mutates a remote home (nocx-r52q). What it publishes no longer
+// decides what the session runs — the carrier is emitted either way.
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
 }

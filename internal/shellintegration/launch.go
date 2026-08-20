@@ -32,7 +32,23 @@ __nocx_root="${HOME}/.nocx"
 __nocx_manifest="$__nocx_root/manifest.json"
 __nocx_protocol_version="1"
 
-__nocx_native() { exec "${SHELL:-/bin/sh}" -l; }
+# The terminal outcome of the bootstrap (design §5.3), and the only place it
+# is decided: this script is the one that knows whether the generation it is
+# about to exec has just been re-proved. It closes the input quarantine, so
+# exactly one of these is emitted per bootstrap and nothing else emits one.
+#
+# It is gated on @BOOTENV@, which stage-1 exports and this function unsets, so
+# a launch that did NOT come from a bootstrap — anything that runs this
+# carrier directly — cannot put protocol tokens on a user's terminal. The
+# unset also keeps the marker out of the shell the user ends up with.
+__nocx_outcome() {
+    if [ -n "${@BOOTENV@:-}" ]; then
+        printf '@OUTPFX@%s\n' "$1"
+    fi
+    unset @BOOTENV@
+}
+
+__nocx_native() { __nocx_outcome @NOGEN@; exec "${SHELL:-/bin/sh}" -l; }
 
 # --- the manifest must exist and parse as ours -------------------------------
 [ -f "$__nocx_manifest" ] || __nocx_native
@@ -70,6 +86,20 @@ export NOCX_SESSION_ID="${1-}"
 export NOCX_GENERATION="$__nocx_generation"
 export NOCX_SHELL_INTEGRATION=1
 export NOCX_PROMPT_MODE=marker-only
+# The generation is proved and about to run: this is the accepted outcome, and
+# it is emitted BEFORE the exec because after it there is no longer a script
+# here to emit anything.
+__nocx_outcome @ACCEPTED@
+# $2 is the profile's pinned shell, carried by stage-1 (design §4.1 keeps a
+# shell name out of the command, and there is no room for one there). It wins
+# over $SHELL when it names a tier: a user who says "this host runs zsh" knows
+# something the far side's $SHELL does not. Empty is not a missing value — it
+# is ShellAuto, "the far host decides", which is exactly the $SHELL dispatch.
+case "${2-}" in
+    bash)    exec /usr/bin/env -u BASH_ENV bash -c '@BASH_ARG@' ;;
+    zsh)     exec /usr/bin/env -u BASH_ENV /bin/sh -c '@ZSH_ARG@' ;;
+    unknown) exec /usr/bin/env -u BASH_ENV /bin/sh -c '@POSIX_ARG@' ;;
+esac
 case "${SHELL:-/bin/sh}" in
     */bash) exec /usr/bin/env -u BASH_ENV bash -c '@BASH_ARG@' ;;
     */zsh)  exec /usr/bin/env -u BASH_ENV /bin/sh -c '@ZSH_ARG@' ;;
@@ -106,11 +136,22 @@ func launchSourceLine(name string) string {
 // working.
 func launchCarrier() string {
 	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
-		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"), "", "")))
+		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"),
+			capabilityFromDescriptor(bashUnsetExport))))
 	s = strings.ReplaceAll(s, "@ZSH_ARG@",
-		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"), "", "")))
+		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"),
+			capabilityFromDescriptor(zshUnsetExport))))
 	s = strings.ReplaceAll(s, "@POSIX_ARG@",
 		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
+	// The bootstrap vocabulary the far side speaks, from the constants that
+	// declare it: the marker stage-1 exports, the outcome prefix and the two
+	// outcomes this script can name.
+	s = strings.NewReplacer(
+		"@BOOTENV@", BootstrapEnv,
+		"@OUTPFX@", OutcomePrefix,
+		"@ACCEPTED@", OutcomeToken(OutcomeBootstrapAccepted),
+		"@NOGEN@", OutcomeToken(OutcomeGenerationUnavailable),
+	).Replace(s)
 	return stripShellComments(s)
 }
 

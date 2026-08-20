@@ -30,7 +30,7 @@ func TestPosixLauncher_EmitsMarkersFromPS1(t *testing.T) {
 		t.Fatalf("write fixture .profile: %v", err)
 	}
 
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{})
+	cmd, reason, ok := FullBootstrapCommand(ShellUnknown, LaunchOptions{})
 	if !ok {
 		t.Fatalf("ShellUnknown launcher refused: reason=%q", reason)
 	}
@@ -85,7 +85,7 @@ func TestPosixLauncher_EmitsMarkersFromPS1(t *testing.T) {
 // uniformly across tiers). This is the enforcement half; the acceptance half
 // is the pty test above with an empty LaunchOptions.
 func TestPosixLauncher_EnhancedRequiresSessionID(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{Enhanced: true})
+	cmd, reason, ok := FullBootstrapCommand(ShellUnknown, LaunchOptions{Enhanced: true})
 	if ok {
 		t.Fatalf("ShellUnknown enhanced with empty SessionID accepted; got %q", cmd)
 	}

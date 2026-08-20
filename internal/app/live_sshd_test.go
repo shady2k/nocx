@@ -648,7 +648,7 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash)
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -751,7 +751,7 @@ func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	fx := startLiveSshd(t, false)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash)
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	// The refusal is synchronous: no domain may ever be minted.
 	time.Sleep(500 * time.Millisecond)
@@ -797,7 +797,7 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash)
+	ch, _ := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -866,7 +866,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellZsh)
+	ch, out := fx.connect(t, kernel, ssh.ShellZsh, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()

@@ -124,9 +124,11 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 		home, root := publishForCarrier(t)
 		writeProfileMarker(t, home)
 		// The carrier itself is absent only when nothing was ever
-		// published — that case is the remote command's `[ -x … ]` guard,
-		// not the carrier's. Here the carrier exists and the manifest is
-		// gone: the activation pointer is missing, so the carrier refuses.
+		// published, and nothing in the remote command tests for that any
+		// more — the loader is unconditional and the far-side verification
+		// runs inside stage-1 (carrier.go). Here the carrier exists and the
+		// manifest is gone: the activation pointer is missing, so the
+		// carrier refuses.
 		if err := os.Remove(filepath.Join(root, manifestName)); err != nil { // #nosec G304 — test-owned.
 			t.Fatal(err)
 		}

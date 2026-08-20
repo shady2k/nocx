@@ -34,16 +34,20 @@ type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
-	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
-	// exported to the environment. Lane, Domain and Epoch are names, not
-	// secrets, and travel in the environment like the other NOCX_* fields.
+	// per-epoch bearer. On the carrier path it travels as FRAME 2 and
+	// reaches the shell through an inherited, already-unlinked descriptor
+	// (stage1.go) — never the command, never argv, never the environment,
+	// never a named file. On the local child path, and on the retired full
+	// launcher P4 still owns, it is substituted into the rcfile TEXT
+	// instead (capability_source.go names both forms and why each is
+	// safe). Lane, Domain and Epoch are names, not secrets.
 	// The transport is either an inherited descriptor (LifecycleFD, the
 	// local path) or a loopback TCP port (LifecyclePort, the remote path);
 	// zero means that side is absent. Empty Capability means no channel:
 	// the session is conventional.
 	Capability string
 	// Recovery is the per-domain one-shot recovery fence (ADR-0024 decision
-	// 8): substituted into the rcfile TEXT (@RECOVERY@) like the capability,
+	// 8). It travels exactly like the capability and by the same two forms,
 	// never exported to the environment. The shell writes it to the pty at
 	// the next prompt boundary if the lifecycle channel dies mid-session;
 	// nocx matches it as the restoration acknowledgement. Empty means no
@@ -54,6 +58,19 @@ type LaunchOptions struct {
 	Epoch         uint64
 	LifecycleFD   int
 	LifecyclePort int
+	// StageDigest is the lowercase hex SHA-256 of the stage-1 frame the
+	// sender is about to write (carrier.go). It is an ADDRESSING value, not
+	// a secret: it names public bytes, and knowing it yields nothing about
+	// either bearer. The carrier embeds it and the far-side loader refuses
+	// any frame that does not hash to it — so an unverified stage-1 is
+	// never executed.
+	//
+	// It is set by the sender: RemoteLauncher.Prepare renders stage-1,
+	// computes StageDigest over exactly those bytes, and the caller puts
+	// the value here before asking for the command. The two are minted
+	// together or not at all — a command whose digest names bytes nobody
+	// will send is a far side that blocks on a frame that never arrives.
+	StageDigest string
 	// BootstrapFD is the inherited descriptor the rcfile writes its two
 	// bootstrap progress facts to (internal/bootstrapprogress, nocx-yww2).
 	// It is deliberately independent of the lifecycle fields above: the
@@ -70,6 +87,11 @@ type RemoteLauncher interface {
 	// StartCommand returns the remote command for the given far shell.
 	// ok is false when this shell cannot be integrated; reason then says
 	// why, and the caller falls back to a plain shell.
+	//
+	// It is the bounded carrier (carrier.go): under 1 KiB, carrying no
+	// bundle bytes and neither secret. What it used to return — the full
+	// self-installing launcher — is FullBootstrapCommand below, which is
+	// no longer on this seam because no managed session may emit it.
 	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
 }
 
@@ -79,7 +101,25 @@ type remoteLauncher struct{}
 // NewRemoteLauncher returns the production RemoteLauncher.
 func NewRemoteLauncher() RemoteLauncher { return remoteLauncher{} }
 
-// StartCommand implements RemoteLauncher.
+// StartCommand implements RemoteLauncher: the bounded carrier, and nothing
+// else. See carrier.go for what it is and why the command it replaced could
+// not stay.
+func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
+	return carrierCommand(shell, opts)
+}
+
+// FullBootstrapCommand is the pre-carrier delivery: the self-installing
+// launcher that publishes the bundle from inside the remote command and
+// then execs the tier. It is ~90 KiB, it carries the capability and the
+// recovery fence in its text, and NO managed session may emit it — that is
+// the whole point of carrier.go.
+//
+// It is still here because it is still reachable, from exactly one live
+// caller: internal/app/childdomain.go, which composes the `ssh` line a
+// nested typed `ssh` runs (ADR-0022). That path has no frame sender yet, so
+// converting it now would break nested `ssh` with nothing to replace it;
+// design §12 gives it to P4, which retires this function and with it
+// fullBootstrapLauncher, maxFullLauncherLen and the publish prelude.
 //
 // Selection is deliberate per kind: bash and zsh get their launchers,
 // ShellUnknown gets the minimal tier — the posix launcher (spec §6: dash /
@@ -89,7 +129,7 @@ func NewRemoteLauncher() RemoteLauncher { return remoteLauncher{} }
 // only layer that knows which shell it is; nocx-6rj0). The default arm is
 // the tripwire for a future ShellKind with no launcher: refuse loudly
 // rather than guess.
-func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
+func FullBootstrapCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
 	switch shell {
 	case ShellBash:
 		return remoteLauncher{}.bashCommand(opts)
@@ -114,8 +154,8 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		b.WriteString("NOCX_SESSION_ID=" + ShellQuote(opts.SessionID) + "\n")
 	}
 	// Lifecycle channel addressing and transport (ADR-0024). The capability
-	// is deliberately NOT here: it rides the rcfile text (see @CAP@) and must
-	// never appear in /proc/<pid>/environ.
+	// is deliberately NOT here: it reaches the shell by one of the two forms
+	// in capability_source.go and must never appear in /proc/<pid>/environ.
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
 		b.WriteString("NOCX_LIFECYCLE_LANE=" + ShellQuote(opts.Lane) + "\n")
 		b.WriteString("NOCX_LIFECYCLE_DOMAIN=" + ShellQuote(opts.Domain) + "\n")
@@ -198,7 +238,20 @@ func printfBEscape(s string) string {
 	return b.String()
 }
 
-// maxFullLauncherLen caps the full bootstrap launcher: the publish prelude
+// maxFullLauncherLen caps the full bootstrap launcher.
+//
+// It is KEPT, deliberately, and the reasoning is worth a line because the
+// carrier design retires everything it guards. The cap and its erosion test
+// belong to FullBootstrapCommand, which is no longer on the managed path but
+// is still reachable from internal/app/childdomain.go — a live caller whose
+// replacement is design §12's P4. A cap deleted while the thing it bounds is
+// still emitted would be the worst of both: the code stays, the guard goes.
+// P4 removes the caller, this function, the prelude and this number together.
+//
+// The bound below is not the carrier's. The carrier states its own, two
+// orders smaller, in carrier.go (MaxCarrierLen).
+//
+// The original reasoning: it caps the publish prelude
 // (which carries the three generation scripts, the launch carrier and the
 // publish logic) plus the tier command. The whole remote command travels as
 // ONE argv word (the staged file is command-substituted into the ssh line),

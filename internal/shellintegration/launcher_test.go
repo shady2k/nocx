@@ -150,7 +150,7 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 // ignores ENV still gets a plain shell — the refusal outcome, minus the
 // refusal.
 func TestShellUnknownGetsPosixTier(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{})
+	cmd, reason, ok := FullBootstrapCommand(ShellUnknown, LaunchOptions{})
 	if !ok {
 		t.Fatalf("ShellUnknown refused: reason=%q", reason)
 	}
@@ -185,7 +185,7 @@ func TestShellUnknownGetsPosixTier(t *testing.T) {
 // has no launcher must refuse loudly rather than silently get the posix
 // tier — a new kind is a decision, not a fallback.
 func TestUnmappedShellKindRefused(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellKind("fish"), LaunchOptions{})
+	cmd, reason, ok := FullBootstrapCommand(ShellKind("fish"), LaunchOptions{})
 	if ok {
 		t.Fatalf("unmapped kind accepted; got command %q", cmd)
 	}
@@ -202,7 +202,7 @@ func TestUnmappedShellKindRefused(t *testing.T) {
 // session the ownership protocol cannot anchor.
 func TestEnhancedRequiresSessionID(t *testing.T) {
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, reason, ok := NewRemoteLauncher().StartCommand(kind, LaunchOptions{Enhanced: true})
+		cmd, reason, ok := FullBootstrapCommand(kind, LaunchOptions{Enhanced: true})
 		if ok {
 			t.Errorf("%s: enhanced with empty SessionID accepted; got %q", kind, cmd)
 		}
@@ -215,9 +215,8 @@ func TestEnhancedRequiresSessionID(t *testing.T) {
 // TestLauncherCommandsHaveNoNul: the payload must contain no NUL (spec §4.1)
 // — a NUL would corrupt the rcfile stream.
 func TestLauncherCommandsHaveNoNul(t *testing.T) {
-	l := NewRemoteLauncher()
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, _, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
+		cmd, _, ok := FullBootstrapCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
 		if !ok {
 			t.Fatalf("%s: refused", kind)
 		}
@@ -230,9 +229,8 @@ func TestLauncherCommandsHaveNoNul(t *testing.T) {
 // TestLauncherCommandsUnderCap: the full launchers sit well below the chosen
 // conservative ARG_MAX bound (see maxFullLauncherLen).
 func TestLauncherCommandsUnderCap(t *testing.T) {
-	l := NewRemoteLauncher()
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, _, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
+		cmd, _, ok := FullBootstrapCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
 		if !ok {
 			t.Fatalf("%s: refused", kind)
 		}
@@ -250,9 +248,8 @@ func TestLauncherRefusesOverCap(t *testing.T) {
 	maxFullLauncherLen = 256
 	t.Cleanup(func() { maxFullLauncherLen = old })
 
-	l := NewRemoteLauncher()
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, reason, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
+		cmd, reason, ok := FullBootstrapCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
 		if ok {
 			t.Errorf("%s: over-cap command accepted (%d bytes)", kind, len(cmd))
 		}
@@ -308,7 +305,7 @@ func TestBashLauncher_EmitsMarkersAndRunsUserRc(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-1"})
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-1"})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
@@ -346,7 +343,7 @@ func TestBashLauncher_BaselineKeepsVisiblePrompt(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{})
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
@@ -373,7 +370,7 @@ func TestBashLauncher_NoHomeWrites(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-2"})
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-2"})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
@@ -423,7 +420,7 @@ func TestBashLauncher_BashEnvNotExecuted(t *testing.T) {
 	if err := os.WriteFile(envScript, []byte("echo ran > \"$HOME/bashenv-ran\"\n"), 0o600); err != nil {
 		t.Fatalf("write BASH_ENV script: %v", err)
 	}
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-3"})
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-3"})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
@@ -447,7 +444,7 @@ func TestBashLauncher_UserRcExecPreventsInstall(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "exec bash --norc\n")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-4"})
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-4"})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
@@ -472,7 +469,7 @@ func TestBashLauncher_RunsUnderDash(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-5"})
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-5"})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
@@ -498,7 +495,7 @@ func TestZshLauncher_TransientDirFlow(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-6"})
+	cmd, _, ok := FullBootstrapCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-6"})
 	if !ok {
 		t.Fatal("zsh launcher refused")
 	}
@@ -538,7 +535,7 @@ func TestZshLauncher_CleanupAfterEarlyExit(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "exit 7\n")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-7"})
+	cmd, _, ok := FullBootstrapCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-7"})
 	if !ok {
 		t.Fatal("zsh launcher refused")
 	}
@@ -555,7 +552,7 @@ func TestZshLauncher_CleanupAfterSyntaxError(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "if [[\n")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-8"})
+	cmd, _, ok := FullBootstrapCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-8"})
 	if !ok {
 		t.Fatal("zsh launcher refused")
 	}
@@ -651,7 +648,8 @@ func TestZshLauncher_TransientDirRemovedDespiteAForeignFile(t *testing.T) {
 	if err := os.MkdirAll(bootstrap, 0o700); err != nil {
 		t.Fatalf("mkdir bootstrap: %v", err)
 	}
-	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript, "", "")
+	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript,
+		capabilityLiteral(zshUnsetExport, "", ""))
 	if err := os.WriteFile(filepath.Join(bootstrap, ".zshrc"), []byte(rc), 0o600); err != nil {
 		t.Fatalf("write bootstrap rc: %v", err)
 	}

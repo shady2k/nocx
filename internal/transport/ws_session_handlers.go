@@ -88,6 +88,10 @@ type openHandlers struct {
 	resolver *resolverHolder // profile resolver, readable post-construction
 	sshCfg   ssh.ConfigResolver
 	launcher ssh.RemoteLauncher
+	// installer publishes the bundle over SFTP on the direct-host path,
+	// which is the only thing that installs it now that the command
+	// carries no payload.
+	installer ssh.RemoteInstaller
 	// lifecycle is the authenticated-channel seam (ADR-0024): the dial
 	// hands it to the far side so the shell can hand its lifecycle back
 	// over a channel that is not the terminal. An explicit seam, not the
@@ -421,6 +425,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					Cols:            params.Cols,
 					Rows:            params.Rows,
 					RemoteLauncher:  h.launcher,
+					RemoteInstaller: h.installer,
 					RemoteLifecycle: h.lifecycle,
 				}
 
@@ -916,7 +921,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

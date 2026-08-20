@@ -175,6 +175,21 @@ type WSServer struct {
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
 
+	// remoteInstaller publishes the integration bundle over SFTP. It is
+	// stamped on the DIRECT-HOST ConnectConfig only: a saved profile gets
+	// its own from the connection resolver, which is where a profile's
+	// every other seam comes from too.
+	//
+	// It became load-bearing with the carrier (design §4.1). Before it, the
+	// remote command was the self-installing launcher and carried a publish
+	// prelude, so a direct-host session installed the bundle from inside the
+	// command it ran; the carrier carries no payload, so the SFTP publish is
+	// now the ONLY thing that installs it. Without this line a direct-host
+	// session finds no launch carrier on the far host, names
+	// generation-unavailable and stays conventional forever — a regression
+	// with no diagnosis, since every part of it works.
+	remoteInstaller ssh.RemoteInstaller
+
 	// remoteLifecycle establishes the authenticated lifecycle channel for
 	// remote sessions (ADR-0024 decision 2 "Over SSH"), stamped onto every
 	// ConnectConfig alongside the launcher. Wired through
@@ -621,6 +636,13 @@ func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSSer
 // transport default.
 func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
 	return func(s *WSServer) { s.remoteLauncher = l }
+}
+
+// WithRemoteInstaller attaches the SFTP publisher stamped onto direct-host
+// ConnectConfigs. See remoteInstaller for why the carrier made it the only
+// thing that installs the bundle on that path.
+func WithRemoteInstaller(i ssh.RemoteInstaller) WSServerOption {
+	return func(s *WSServer) { s.remoteInstaller = i }
 }
 
 // WithRemoteLifecycle attaches the lifecycle-channel establisher that

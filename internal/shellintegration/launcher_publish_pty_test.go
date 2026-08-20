@@ -18,7 +18,7 @@ func TestBashFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{
 		SessionID: "sess-bash", Enhanced: true,
 	})
 	if !ok {
@@ -52,7 +52,7 @@ func TestZshFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellZsh, LaunchOptions{
 		SessionID: "sess-zsh", Enhanced: true,
 	})
 	if !ok {
@@ -81,7 +81,7 @@ func TestPosixFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 		t.Fatalf("write fixture .profile: %v", err)
 	}
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellUnknown, LaunchOptions{
 		SessionID: "sess-posix", Enhanced: true,
 	})
 	if !ok {
@@ -111,7 +111,7 @@ func TestFullLauncher_ReadonlyHome_FallsBackToVisibleNativePrompt(t *testing.T) 
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{
 		SessionID: "sess-ro", Enhanced: true,
 	})
 	if !ok {
@@ -164,7 +164,7 @@ func TestFullLauncher_ForeignRoot_RefusedAndConventional(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{
 		SessionID: "sess-f", Enhanced: true,
 	})
 	if !ok {
@@ -211,7 +211,7 @@ func TestFullLauncher_SecondConnection_StillIntegrates(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellBash, LaunchOptions{
 		SessionID: "sess-bash", Enhanced: true,
 	})
 	if !ok {

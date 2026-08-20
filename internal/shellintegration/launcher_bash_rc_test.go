@@ -111,7 +111,7 @@ func TestBashLauncher_WholeRcfileExecutes(t *testing.T) {
 
 	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
 		SessionID: "sess-tail", Enhanced: true,
-	}), b.String(), "", ""))
+	}), b.String(), capabilityLiteral(bashUnsetExport, "", "")))
 
 	// The two bounds, asserted rather than assumed: a payload that drifted
 	// under the pipe capacity would stop testing anything, and one that drifted
@@ -225,7 +225,7 @@ func TestBashLauncher_UserRcAlreadySourcedAnInstall(t *testing.T) {
 
 	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
 		SessionID: "sess-dbl", Enhanced: true,
-	}), bashScript, "cap-double-source", "recovery-double-source"))
+	}), bashScript, capabilityLiteral(bashUnsetExport, "cap-double-source", "recovery-double-source")))
 
 	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+ShellQuote(arg),
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")

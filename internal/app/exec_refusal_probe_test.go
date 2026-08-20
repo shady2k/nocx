@@ -127,8 +127,8 @@ func startExecProbeSshd(t *testing.T, keyOptions, extraConfig string) *execProbe
 	if err != nil {
 		t.Fatalf("current user: %v", err)
 	}
-	if _, err := user.Lookup(u.Username); err != nil {
-		t.Skipf("no passwd entry for %q (%v): a non-root sshd can serve only the uid it runs as", u.Username, err)
+	if _, lookupErr := user.Lookup(u.Username); lookupErr != nil {
+		t.Skipf("no passwd entry for %q (%v): a non-root sshd can serve only the uid it runs as", u.Username, lookupErr)
 	}
 
 	dir := t.TempDir()

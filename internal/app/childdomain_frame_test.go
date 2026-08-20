@@ -21,7 +21,7 @@ import (
 
 func TestSSHChildBootstrap_FitsInALifecycleFrame(t *testing.T) {
 	cap64 := hex.EncodeToString(make([]byte, 32))
-	cmd, _, ok := shellintegration.NewRemoteLauncher().StartCommand(
+	cmd, _, ok := shellintegration.FullBootstrapCommand(
 		shellintegration.ShellAuto,
 		shellintegration.LaunchOptions{
 			SessionID: "aabbccddeeff00112233445566778899", Enhanced: true,

@@ -828,6 +828,13 @@ func New(opts ...Option) (*App, error) {
 		// the transport builds. Before this line the launcher was reachable
 		// from its own tests and nowhere else (AGENTS.md check 5).
 		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
+		// The SFTP publisher on the DIRECT-HOST path. A saved profile gets
+		// one from the connection resolver; a typed host had none, which
+		// did not matter while the remote command installed the bundle
+		// itself. The carrier carries no payload, so this is now the only
+		// thing that puts a launch carrier on the far host, and without it
+		// a direct-host session can never integrate (design §4.1).
+		transport.WithRemoteInstaller(shint),
 		// The installed fact (nocx-mlm7 P7, design §5.4): the persisted
 		// memory of which resolved destinations carry a committed
 		// integration. The footprint status surface reads it; the
@@ -1793,6 +1800,9 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 			Domain:        opts.Domain,
 			Epoch:         opts.Epoch,
 			LifecyclePort: opts.LifecyclePort,
+			// The stage-1 digest the carrier commits to. Empty until the
+			// frame sender exists (design §12, P2).
+			StageDigest: opts.StageDigest,
 		},
 	)
 	if !ok {
@@ -1833,6 +1843,70 @@ func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReaso
 			"reason", r)
 		return ssh.ReasonUnknown
 	}
+}
+
+// Prepare is remoteLauncherAdapter's other half: the frames the command's
+// loader reads (design §12, P2). It lives on the same adapter as StartCommand
+// because the two are one delivery — the command commits to the digest of the
+// stage-1 frame, so a second component building the frames could disagree with
+// the one building the command, and the far side would refuse a stage-1 that
+// was perfectly valid.
+//
+// It owns one decision beyond translation, and it is worth stating because it
+// is a limitation rather than a design: a bootstrap OUTCOME is more precise
+// than anything ssh.RefusalReason can carry. The refusal vocabulary is a
+// closed enum in contracts/session.integrationChanged.json, and adding a
+// member to it is a schema change, a regenerated renderer type and a product
+// string. So the precise outcome goes to the log, and the session reports
+// ssh.ReasonUnknown — "integration did not happen and the backend cannot say
+// why", which is visible and honest but coarser than what this side knows.
+// A `bootstrap-refused` member would close that gap; it is named in the P2
+// report as a decision for the coordinator.
+//
+// The secret is NOT built here. It is built inside the run, after frame 1 has
+// been verified and the receiver has announced itself, because design §6.1
+// forbids minting anything before it can be exercised — see
+// shellintegration.SecretSource for what P5 must still move behind that seam.
+func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.BootstrapRun, bool) {
+	sopts := shellintegration.LaunchOptions{
+		SessionID:     opts.SessionID,
+		Enhanced:      opts.Enhanced,
+		Capability:    opts.Capability,
+		Recovery:      opts.Recovery,
+		Lane:          opts.Lane,
+		Domain:        opts.Domain,
+		Epoch:         opts.Epoch,
+		LifecyclePort: opts.LifecyclePort,
+	}
+	stage, err := shellintegration.Stage1Frame(shellintegration.ShellKind(shell), sopts)
+	if err != nil {
+		// Fail closed and say so: no stage-1 means no carrier, and the
+		// session opens a plain shell rather than one that blocks on a
+		// frame nobody will send.
+		a.logger.Error("shellintegration: stage-1 could not be rendered; the session runs a plain shell",
+			"shell", shell, "session_id", opts.SessionID, "error", err)
+		return "", nil, false
+	}
+	plan := shellintegration.BootstrapPlan{Stage1: stage}
+	if opts.Capability != "" {
+		plan.Secret = shellintegration.SecretFunc(func() ([]byte, error) {
+			return shellintegration.SecretFrame(sopts)
+		})
+	}
+	run := func(ctx context.Context, stream ssh.BootstrapStream) ssh.RefusalReason {
+		// The two BootstrapStream declarations have identical method
+		// sets, so the ssh value satisfies the shellintegration
+		// interface directly — the translation is in the types, not in
+		// an object that copies bytes between them.
+		outcome := shellintegration.DeliverBootstrap(ctx, a.logger, stream, plan)
+		if outcome == shellintegration.OutcomeBootstrapAccepted {
+			return ssh.ReasonNone
+		}
+		a.logger.Warn("shell bootstrap refused",
+			"outcome", string(outcome), "session_id", opts.SessionID)
+		return ssh.ReasonUnknown
+	}
+	return shellintegration.StageDigest(stage), run, true
 }
 
 // remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle

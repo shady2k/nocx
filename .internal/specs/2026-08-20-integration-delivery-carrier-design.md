@@ -9,6 +9,18 @@
 - **Reads:** AD-5, AD-6, AD-8, [`ADR-0015`](../../docs/decisions/0015-ssh-g-as-the-ssh-config-oracle.md),
   [`ADR-0025`](../../docs/decisions/0025-domain-request-carries-the-destination-not-the-options.md),
   [the multiplex spike](../reports/nocx-mlm7-spike-multiplex.md)
+- **Superseding ADR:** [`ADR-0035`](../../docs/decisions/0035-the-channel-we-own-is-the-carrier.md)
+  (accepted 2026-08-20) — ADR-0022 is superseded there, ADR-0024 amended in its own file.
+- **Approved 2026-08-21:** two amendments proposed 2026-08-20 by `nocx-m8jwn.7`
+  from measurements taken since this document was approved — **A** in §6.4 (the
+  `exec`-refused row, now proven, plus a sixth row for the outcome a restricted real
+  server actually produces) and **B** in §7 (`N` = 90, its formula, the five bounds it
+  depends on, and the corrected bundle and `B` figures). Both are marked in place.
+- **Amended 2026-08-20** by `nocx-m8jwn` (the spine amendment): **§5.5 is new** — the
+  bootstrap window, the one interval in which the backend reads the PTY — with matching
+  amendments in the binding texts themselves, `AD-6` in `docs/architecture.md` and
+  ADR-0024 decisions 1 and 4. §4.1, §5.3, §6.1, §10 and §11 carry its consequences. §6.1
+  gains two rules it was missing; see the note there.
 
 ## 0. What a user can do that they could not before
 
@@ -152,7 +164,9 @@ So **stage-1 is itself a frame**, not part of the command:
    cleanup traps immediately, enters raw with echo off, and emits `LOADER_READY`. Stage-1
    never runs `stty -g` again — by then the state is the loader's, not the user's — and
    never emits `LOADER_READY`. If a handshake is wanted before the secret, it is a distinct
-   `STAGE_READY`, so the backend always knows which one it received.
+   `STAGE_READY`, so the backend always knows which one it received. **Who may read
+   those tokens, for how long and under what framing is §5.5** — a bounded exception to
+   `AD-6`, written into `AD-6` and ADR-0024 rather than assumed here.
 2. Frame 1 is stage-1, capped at **32 KiB**. The loader writes it to a bounded `0600`
    temp file, checks length and digest, then opens a descriptor, unlinks the name, and
    sources `/dev/fd/N`. A platform without a readable `/dev/fd/N` yields
@@ -288,7 +302,13 @@ restores the saved state, however many times it runs.
 
 **Input ownership.** Opens _before_ the command is sent: the session is `bootstrapping`
 and user keystrokes are **refused, not buffered** — a buffered keystroke is a command the
-user did not knowingly run, executed later. Paste, IME composition and synthetic input are
+user did not knowingly run, executed later. On the typed path nocx does not send the
+command — the user's own `ssh` does — so the interval opens at the event nocx does
+control, **mux ownership proven** (§6.1 step 1), which is after authentication: the
+host-key, password and 2FA prompts §4.3 promises to keep working are outside the
+quarantine, and are the user talking to their own client before nocx has interposed at
+all. A token written before the reader is attached is not recovered and must not be: the
+bootstrap fails on its deadline into a conventional session, which is the safe direction. Paste, IME composition and synthetic input are
 refused on the same footing; window resize and other PTY control events are not user bytes
 and keep working. A keystroke arriving simultaneously with the terminal outcome is
 linearised: either before the close and refused, or after it and delivered exactly once.
@@ -360,6 +380,84 @@ there, ADR-0024 says so, and this document does not pretend otherwise. Ambient d
 argv, the environment, named filesystem entries, history, product logs — is what we remove,
 and removing it is what the descendant case turns on.
 
+### 5.5 The bootstrap window: the one interval in which the backend reads the PTY
+
+Everything above has the backend acting on tokens the loader and stage-1 write to the
+PTY. It writes frame 1 when it sees `LOADER_READY`, it writes frame 2 when it sees
+`STAGE_READY`, and it re-enables the user's keyboard on `BOOTSTRAP_ACCEPTED` or
+`BOOTSTRAP_REFUSED(reason)`. Read plainly that is the backend reading the byte stream,
+which `AD-6` forbids in a sentence carrying no interval, and reading bootstrap progress
+off the terminal, which is the first of the three conditions ADR-0024 decision 4 attaches
+to an unauthenticated progress channel. This section is the exception, deliberately
+scoped; the amendments that make it binding are in the binding texts themselves, because
+an exception recorded only in a design is one a reviewer of the spine cannot find.
+
+**The read cannot be removed, and the reason is the outcome rather than the echo.** The
+loader must be in raw with echo off before frame 1 arrives, or the tty echoes the frame
+back and the line discipline mangles it — but that constraint alone does not need a
+token, and it is worth saying so rather than resting the whole carve-out on it. On a
+connection nocx dials, nocx composes the `pty-req` itself (`buildTerminalModes` asks for
+`ECHO 1` today) and could ask for a terminal created with echo off and canonical mode
+off, which would make `LOADER_READY` unnecessary on that path at two costs: the far side
+then has no original termios to restore, so §5.2's exact restore becomes an imposed
+default, and the shell inherits whatever we asked for. On the typed path we do not compose
+that request — the user's own `ssh` does, from its local tty, before it enters raw mode —
+so the only way to influence it is to change what the user's terminal is doing before they
+connect. What survives every variant is the terminal outcome: **the loader's verdict
+exists nowhere but the loader.** A refusal has no lifecycle channel to travel on (that
+channel is established later, and its establishment is what the bootstrap gates), a
+portable shell has no socket to open, and the only remaining candidate is a duration,
+which this document forbids in §11's opening sentence. If the outcome may not be read,
+the input quarantine of §5.3 has no closing event, and an interval with no named end is
+the failure this repo has already paid for once. Abandoning the quarantine instead is the
+honest alternative and it is a rewrite of §5.3, not a relaxation of it.
+
+**The window.** It opens where nocx commits to the bootstrap on that session — on a
+connection nocx dials, before the exec request is written; on the typed path, when mux
+ownership is proven (§6.1 step 1, and §5.3) — and it closes at **exactly one** terminal
+outcome, `BOOTSTRAP_ACCEPTED` or `BOOTSTRAP_REFUSED(reason)`, no later than the
+integration deadline of §7. The reader is closed with the window and never reads that
+session again. Both ends are events; neither is a duration.
+
+**The framing is ours, and it is not a grammar.** Each token is a fixed magic prefix, a
+name from a closed set, and a length. The backend matches literal framed bytes and parses
+no VT, no OSC and no DCS on this path; `AD-6`'s mechanism — xterm.js owns the grid and the
+OSC handlers, the backend derives nothing from render state — is untouched, and this
+amendment gives it up nowhere. Recognised tokens are consumed at the reader, ahead of the
+AD-9 replay ring, so the user does not see our handshake and offsets and replay stay
+consistent. Nothing else in the window is added, removed or reordered.
+
+**What the reader may never do.** Nothing on it creates, authenticates, completes,
+revokes or assigns status to a lifecycle attempt, mints or validates a capability, or
+gives the editor the keyboard. Its one effect on input is to end the quarantine the
+bootstrap opened, which returns the keyboard to the state a plain `ssh` would have left it
+in rather than granting anything: there is no shell, no attempt and no domain inside the
+window, and ADR-0024 decision 6's lifecycle axis is `Native` throughout it and still
+`Native` when it closes. Lifecycle authority stays where decision 2 put it, on a channel
+that is not the tty.
+
+**What a forger gets, stated.** Anyone who can write into that PTY can forge these
+tokens, and by §5.4 that party is already inside the session — and, being able to write
+that terminal, is able to read it. Forging `LOADER_READY` early makes us write frame 1
+into a terminal the loader has not taken yet, so the frame is echoed and mangled, the
+digest fails, and the session is conventional: a denial, not a disclosure. Forging a
+terminal outcome closes the window early, so the reader stops and integration fails.
+Forging `STAGE_READY` is the interesting one and §6.1 is where it is answered: the steps
+that gate minting are facts of the backend's own, but the step that says stage-1 verified
+its frame is exactly this token, so a forgery that outruns an honest refusal can produce a
+capability in a session that would have minted nothing. §6.1 carries the rules that shrink
+that to a race nobody can close by framing. Stage-1 itself is public bytes with a public
+digest, so an early delivery of it discloses nothing.
+
+**Why this is not a licence to parse the stream.** The prefix does no security work; the
+interval does all of it. Inside the window there is no shell, no user program and no user
+keystroke, so the only writer besides our loader is one already in the position above.
+Outside it there is no reader, so a captured token replays into nothing. Every property
+this section relies on is a property of that emptiness, which is why the next read that
+wants to be added here has to prove the same emptiness and cannot: a marker, a prompt, a
+filename or a program's output is by definition something a shell or a user put on the
+stream, which is the state this window is defined by not being in.
+
 ## 6. State machines
 
 ### 6.1 Ordering: nothing is minted before it can be used
@@ -388,6 +486,23 @@ If the lifecycle channel cannot be opened, stage-1 receives a **non-secret refus
 exits on its bounded timeout, and **nothing is ever minted**. The earlier draft had the
 secret delivered and then discarded when the lifecycle channel turned out to be refused,
 which hands a bearer across a boundary before establishing that it has any use.
+
+**Two rules this ordering needs against a forged readiness token, added 2026-08-20 with
+§5.5.** Steps 4 and 5 are facts of the backend's own and nothing written on the PTY can
+force them, so no forgery brings a mint forward past the lifecycle receiver or the publish
+outcome. Step 3 is different: "frame 1 received and verified" is known to us only because
+stage-1 says so, on the terminal, and that token is forgeable by anyone who can write it.
+Two rules follow and neither was written down. **Each token of the closed set is accepted
+at most once and only in its order**; a repeat or an out-of-order token is a named
+bootstrap failure, not a second trigger. **No frame is written after a terminal outcome has
+been observed** — without this the attack needs no race at all: the loader refuses on an
+absent hasher, a digest mismatch or an unreachable `/dev/fd/N`, and a `STAGE_READY` sent
+afterwards makes the backend mint and write a capability into a session that reached no
+stage-1. With both rules the remaining exposure is a genuine race — a forged `STAGE_READY`
+arriving before the honest refusal — and it cannot be closed by framing, because winning it
+requires writing the session's terminal, which is also enough to read the frame. What
+bounds it is §5.3's hard invalidation: a refusal or a timeout invalidates the capability,
+so what a winner holds is a bearer that dies with the outcome it forged past.
 
 ### 6.2 Master lifetime, and losing it
 
@@ -430,14 +545,68 @@ one exists.
 An intermediary or server may permit some channels and not others. The receiver is **not**
 an auxiliary channel — it is the main PTY session — so the matrix is by real channel type:
 
-| refused                                     | outcome                                                                                            |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| the primary `session`                       | no session at all; the user's line reports the server's refusal; nothing published, nothing minted |
-| `pty-req` after `session`                   | no interactive shell is possible on it; refuse before any frame; `pty-unavailable`                 |
-| `exec` after `pty-req`                      | see below — this row is the one that must be proven, not assumed                                   |
-| `subsystem` (SFTP)                          | nothing written; native shell; `publish-unavailable`                                               |
-| the lifecycle forward or channel            | nothing minted (§6.1); native shell; `channel-unavailable`                                         |
-| any already-open channel, severed mid-frame | frame discarded, descriptors closed, termios restored; native shell; `bootstrap-interrupted`       |
+| refused                                                      | outcome                                                                                                                                  |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| the primary `session`                                        | no session at all; the user's line reports the server's refusal; nothing published, nothing minted                                       |
+| `pty-req` after `session`                                    | no interactive shell is possible on it; refuse before any frame; `pty-unavailable`                                                       |
+| `exec` after `pty-req`, **request refused**                  | the channel and its pty survive: `shell` on the **same** channel reaches a working prompt — `conventional(exec-refused)` (amendment A)   |
+| `exec` after `pty-req`, **request accepted and substituted** | the channel is consumed and no native prompt exists on any channel of that connection — `session-failed(exec-substituted)` (amendment A) |
+| `subsystem` (SFTP)                                           | nothing written; native shell; `publish-unavailable`                                                                                     |
+| the lifecycle forward or channel                             | nothing minted (§6.1); native shell; `channel-unavailable`                                                                               |
+| any already-open channel, severed mid-frame                  | frame discarded, descriptors closed, termios restored; native shell; `bootstrap-interrupted`                                             |
+
+> **Amendment A (`nocx-m8jwn.7`, measured by `nocx-m8jwn.11`) — APPROVED 2026-08-21.**
+> The two `exec` rows above are part of it. Approved on one argument: a row describing
+> what a stock server actually does is not a judgement call, and without it the matrix
+> is silent on the only outcome a restricted real server can produce.
+>
+> **The proven row.** _The refusal does not take the channel or the pty already granted
+> on it: a `shell` request on that **same** channel succeeds and reaches a working
+> interactive prompt on the same connection, with no second authentication —
+> `conventional(exec-refused)`._
+>
+> It is **conditional, and the condition is observable at the moment it matters**, so an
+> implementer never has to guess: the client sees `(false, nil)` for refused-and-alive
+> and `(false, io.EOF)` for the server having torn the channel down as it refused. **The
+> request result, not the error text, is the discriminator** — the client-side error from
+> a refused start is an undistinguished "command failed", so branching on the text would
+> be branching on nothing. In the torn-down case a replacement session channel on the same
+> connection reaches a prompt at the cost of a second session but **no** second
+> authentication, so that branch is `session-failed` only if the replacement is refused
+> too.
+>
+> **The sixth row, which is the more important half.** A real OpenSSH server **cannot be
+> made to refuse `exec` at all.** Five ways of building a restricted account were tried —
+> an unrestricted account, a forced command in the server configuration, a command
+> restriction on the authorized key, a transfer-only account, and a conditional block for
+> the user — and every one **accepts** the request and substitutes what runs behind it. The
+> server's configuration language has no option that refuses `exec`; the session-shaped
+> controls it offers are substitution, `PermitTTY` (that is the `pty-req` row),
+> `MaxSessions` (that is the primary `session` row) and an inactivity teardown, which is
+> not a refusal.
+>
+> That produces an outcome this matrix has no row for, and it is strictly worse than a
+> refusal: the request is accepted, the substituted command runs and reports its status,
+> the channel is **consumed**, `shell` on it fails with `io.EOF`, and a fresh channel on
+> the same connection — granted with no second authentication — runs the substituted
+> command too. **No native prompt exists anywhere on that connection.** In D7's terms this
+> is a `session-failed(…)` shape and it needs its own named reason. It must not be
+> collapsed into the refused row: refused is recoverable to a native prompt on the same
+> channel; accepted-and-substituted is not recoverable on any channel of that connection.
+>
+> **What the corroboration is, and what it can never be.** The exec-refused row is
+> testable only in our own in-process fixture, because no stock OpenSSH will ever produce
+> the refusal — so that path exercises a server behaviour we cannot check against the
+> reference implementation, and it can never be corroborated against one. Saying so is
+> part of the row rather than a caveat on it. The corroboration available instead is that
+> the same channel-survives-refusal property was proven **on the real server**, through the
+> requests it does refuse on a not-yet-started session channel: the channel and the pty
+> granted before the refusal both survive, `shell` afterwards is accepted and interactive,
+> and one authentication covers the whole exchange. The property belongs to the refusal
+> path, not to `exec` in particular.
+>
+> The row is worth keeping even though a stock server cannot reach it. Real intermediaries
+> do refuse `exec`, and software that is not the server is this document's whole subject.
 
 **The `exec`-refused row may not simply promise a native shell.** Whether a `shell` request
 can still succeed on the same channel after a refused `exec` request is a property of the
@@ -451,17 +620,18 @@ Per attempt, statically: no remote sleep loops, and no remote work whose duratio
 decided by the remote host's state. The active generation is unchanged until the manifest
 is atomically replaced.
 
-|                                             | value                                    | why                                                                    |
-| ------------------------------------------- | ---------------------------------------- | ---------------------------------------------------------------------- |
-| `B` payload bytes per publish               | 256 KiB                                  | bundle is ~50 KiB; five times headroom                                 |
-| stage-1 frame                               | ≤ 32 KiB                                 | measured stage-1 with room to grow, three orders below the old command |
-| secret frame                                | ≤ 4 KiB                                  | a small delivery must not inherit a publish-sized ceiling              |
-| master cleanup after the last owned session | 5 s                                      | the socket and process have a closing event, not an idle hope          |
-| `T` publish wall-clock                      | 10 s                                     | past this the session is better served un-integrated                   |
-| `K` lock probes                             | 5, at 50/100/200/400/800 ms — max 1.55 s | replaces ~400 metadata operations per waiter, and leaves `T` intact    |
-| receiver READY                              | 3 s                                      |                                                                        |
-| frame completion after READY                | 3 s                                      |                                                                        |
-| integration deadline                        | 15 s                                     | `starting` can never be permanent                                      |
+|                                             | value                                    | why                                                                                                                         |
+| ------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `B` payload **written** bytes per publish   | 256 KiB                                  | stripped bundle is 64,130 B and the worst attempt writes 64,710 B — 3.95× headroom; reads have their own line (amendment B) |
+| `B` read bytes per publish                  | 256 KiB                                  | a `Verify` reads the whole active generation back, so verify-then-publish moves ~120 KiB in total (amendment B)             |
+| stage-1 frame                               | ≤ 32 KiB                                 | measured stage-1 with room to grow, three orders below the old command                                                      |
+| secret frame                                | ≤ 4 KiB                                  | a small delivery must not inherit a publish-sized ceiling                                                                   |
+| master cleanup after the last owned session | 5 s                                      | the socket and process have a closing event, not an idle hope                                                               |
+| `T` publish wall-clock                      | 10 s                                     | past this the session is better served un-integrated                                                                        |
+| `K` lock probes                             | 5, at 50/100/200/400/800 ms — max 1.55 s | replaces ~400 metadata operations per waiter, and leaves `T` intact                                                         |
+| receiver READY                              | 3 s                                      |                                                                                                                             |
+| frame completion after READY                | 3 s                                      |                                                                                                                             |
+| integration deadline                        | 15 s                                     | `starting` can never be permanent                                                                                           |
 
 **The deadline arithmetic must close.** 3 + 3 + 10 exceeds 15, so the publish and the
 receiver are **not** sequential: the publish runs on its auxiliary channel while stage-1
@@ -484,6 +654,112 @@ directory traversal, bounds inspected and removed entries separately, measures t
 trace of the happy path and of every failure path, and _then_ fixes `N` as a constant. The
 assertion is that the measured maximum equals the recorded constant — which fails the
 moment either moves, and is therefore a ratchet rather than a wish.
+
+> **Amendment B (`nocx-m8jwn.7`, measured by `nocx-m8jwn.3`) — APPROVED 2026-08-21,
+> with `N` recorded as the exact measured maximum rather than a round ceiling.** That
+> choice is the whole of what was decided: assertion 30 asks the source constant to
+> _equal_ the measurement, and a ceiling with slack in it is satisfied by any measurement
+> below it — the unfalsifiable criterion this repo has already been bitten by. Headroom
+> therefore lives in the formula, not in the number. The gate above has been satisfied:
+> `N` has been measured in this repository, against the publisher's `FS` seam, over every
+> path and every failure position. This amendment fills in the letter, corrects the bundle
+> size in the table, and gives reads their own line. The two corrected `B` rows above are
+> part of it.
+>
+> **`N` = 90 `FS`-seam calls per publish attempt, at the shipped bundle.** It is the sum
+> of measured terms, not a rounded ceiling:
+>
+> ```
+> 83   measured worst attempt inside the residue bounds below
+>       = 63 residue-free worst (replacement + sweep + launch carrier reinstall)
+>       +  9 removing one uncommitted generation at the target version
+>       +  9 removing one staging slot of three files
+>       +  2 removing that attempt's manifest temp
+> +  5 lock probes at K = 5
+> +  2 the stale break
+> = 90
+> ```
+>
+> **It is recorded as the exact measured maximum, with no slack, on purpose.** Assertion
+> 30 asks the constant in the source to **equal** the measured maximum. A ceiling with
+> headroom in it cannot hold that: it would be satisfied by any measurement below it,
+> which is the unfalsifiable acceptance criterion this repo has been bitten by. Headroom
+> belongs in the structure, not in the number.
+>
+> **So the formula is recorded beside the constant, and the constant is derived from it in
+> a test:**
+>
+> ```
+> N = 29 + b + m + l + 5·F + G + Σᵢ(3 + 2·kᵢ) + P
+>
+>   29        fixed skeleton: prepare root 2, acquire lock 7, staging 4,
+>             commit generation 3, commit manifest 9, cleanup readdirs 2, release 2
+>   b         base dirs: 6 when both are absent, else 2
+>   m         installed check: 1 with no manifest, 2 when one is read
+>   l         launch carrier: 1 when present, 6 when it must be written
+>   5·F       per generation file: lstat, create, write, sync, close
+>   G         removing uncommitted garbage at the target version: 3 + 2·k
+>   Σᵢ        one term per swept entry: a flat directory of k files costs 3 + 2·k
+>   P         lock polls: 1 per poll, +2 for a stale break
+> ```
+>
+> A fourth generation script then costs 11 more and `N` becomes 101 — which is correct,
+> because a fourth script **is** more remote work, and it should raise the number visibly
+> rather than being absorbed by slack that was never spent on anything.
+>
+> **Where `N` is defined matters, and it is defined at the `FS` seam.** 90 counts calls on
+> the `FS` interface. It is **not** a syscall count and **not** an SFTP packet count: one
+> `Mkdir` at the seam is mkdir+chmod, one `Create` is open+chmod, one `SyncDir` is
+> open+fsync+close, so the same attempt is ~101 local syscalls, and over SFTP the ratio
+> differs again through extension negotiation, a `SETSTAT` per mode and write splitting.
+> The seam is where P3 can enforce a bound; the carrier's packet count is a separate,
+> transport-specific quantity and must not be conflated with this one.
+>
+> **`N` = 90 holds only if P3 enforces five bounds.** Without them the number is not a
+> ceiling, it is the record of a lucky stand — and the measurement found the traversal it
+> would be lucky about: nothing in the code bounds the depth or the breadth of a tree
+> removal, so a directory planted under the staging or generation root is traversed to
+> whatever depth it has, on the publish path, under the lock. That is the unbounded
+> traversal this section already forbids, present today. The five:
+>
+> 1. **One staging slot per destination**, reused or removed before a new one is created,
+>    and a refusal to write when residue cannot be cleared (this section already says so).
+> 2. **At most one uncommitted generation removed per attempt** — the one at the target
+>    version. More than one means residue is accumulating, and the attempt should refuse
+>    rather than absorb it.
+> 3. **At most one stale generation swept per attempt.** The keep-two policy implies this
+>    and does not enforce it: a root with nine generations sweeps seven today.
+> 4. **A depth and a breadth bound on tree removal** — refuse a tree deeper or wider than
+>    the layout can legitimately produce, rather than traversing it.
+> 5. **`K` = 5 lock probes**, replacing the 200-to-400-poll loop.
+>
+> **Why the number is budgeted for the attempt that inherits residue, not the one that
+> creates it.** Every boundary of every path was failed in turn, 359 positions across
+> seven scenarios, and **no injected fault produced a trace longer than the fault-free
+> trace of the same path** — a fault either truncates the attempt or leaves it exactly as
+> long. The cost of a failure is paid by the **next** attempt: a failed lock release
+> leaves a lock to poll and break, a failed cleanup leaves residue to sweep, a failure
+> after the generation rename leaves an uncommitted generation to remove. That is why the
+> 83 above is the worst _inheriting_ attempt rather than the worst single trace.
+>
+> **The lock loop's cost is confirmed and corrected.** "Roughly 400 metadata operations
+> per waiter" is the worst case and holds: that is the waiter which breaks a stale lock,
+> is re-contended, and **publishes nothing**. The common case is one bound, ~200 probes,
+> not two. `K` = 5 replaces either.
+>
+> **And the bundle figure was 10% low, and stripped.** The bundle measured 56,916 bytes
+> after comment stripping, from **145,726 raw**. That the shipped bundle is stripped is
+> worth an assertion of its own: a change that disabled stripping would put it at 142 KiB
+> — still under `B`, but at a fraction of the margin, arriving silently.
+>
+> **The written figure then moved once, on 2026-08-21, and the move is the ratchet
+> working.** 56,916 was measured against a tree carrying the carrier but not stage-1;
+> merging the two grew the launch carrier by 7,214 bytes, because it now also emits the
+> terminal bootstrap outcome and reads the capability from the inherited descriptor. The
+> bundle is 64,130 and the worst attempt writes 64,710 — 57,496 + 7,214 exactly. Neither
+> number was observable on either branch alone, which is why only the merged gate reported
+> it. **The call counts did not move**: every path measured 57/17/49/58/58/63 as before,
+> so `N` = 90 stands. The bundle got larger; the work did not.
 
 **Aggregate residue.** Today a failure before commit can leave a staging directory until
 some future successful publish sweeps it; repeated failures leave several — each attempt
@@ -585,6 +861,15 @@ closed in the direction it preferred — no named file, and installed scripts st
 capability-free. Its threat model gains D8/§5.4 explicitly: the exec-request recorder is
 now out of scope for the bearer, the session-input recorder is in the trusted transport
 boundary, and same-user inspection remains named and undefeated.
+
+**`AD-6` is amended, in `docs/architecture.md`.** "The backend does not sniff the byte
+stream" was written without an interval, and this design has the backend reading the
+loader's tokens. The amendment names one window, one closed token vocabulary and one
+closing event, and says in the same breath what it does not touch: no VT, no OSC, no
+render state, no lifecycle authority. §5.5 is the mechanism; the same wording is
+ADR-0024's second carve-out under decision 1, and decision 4's first condition ("it is not
+the terminal") gains the sentence that tells the two apart instead of leaving one ADR
+contradicting itself.
 
 **The delivery-modes design §3.2–3.3** keeps its installed form and loses first contact as
 an argv event: publication happens on a channel in both paths.
@@ -719,6 +1004,24 @@ driven by an injected clock and an observable state change, never by wall-clock 
     allowlist checked by the same test — so a new deviation fails until it is declared.
 39. Every declared deviation is readable through the real wire result the product consumes
     — asserted at that seam, not by the existence of a component that could render it.
+
+**The bootstrap window** (added 2026-08-20, §5.5)
+
+40. The reader recognises only the closed token set, matched as literal framed bytes: a
+    window carrying VT, OSC and DCS sequences, and one carrying a token's text inside an
+    escape sequence or without its framing, produce no token — and no byte other than a
+    recognised token is added, removed or reordered on its way to the renderer.
+41. The reader closes at the terminal outcome and does not reopen: after the outcome every
+    token of the set, including a repeat of the one that closed the window, is ordinary
+    output that reaches the renderer and drives nothing.
+42. Each token is accepted at most once and only in its order, and no frame is written
+    after an observed outcome: with a forged `STAGE_READY` injected after an honest
+    `BOOTSTRAP_REFUSED`, nothing is minted and no frame is written; injected before it,
+    the capability the race produces is invalid the moment the honest refusal arrives.
+43. Across the whole window the lifecycle axis is `Native`, and it is `Native` when the
+    window closes: no path from any token reaches a domain, an attempt, an epoch, a
+    capability validation or editor ownership — asserted at those seams, not by the
+    absence of a call in today's source.
 
 ## 12. Work packages
 

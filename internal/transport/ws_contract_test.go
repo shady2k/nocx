@@ -1781,6 +1781,11 @@ func (fakeRemoteLauncher) StartCommand(ssh.ShellKind, ssh.LaunchOptions) (string
 	return "", ssh.ReasonNone, false
 }
 
+// A launcher that declines has no bootstrap to prepare either.
+func (fakeRemoteLauncher) Prepare(ssh.ShellKind, ssh.LaunchOptions) (string, ssh.BootstrapRun, bool) {
+	return "", nil, false
+}
+
 // ── tunnel.open / tunnel.stop ──────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, pointer-as-null for stopReason and

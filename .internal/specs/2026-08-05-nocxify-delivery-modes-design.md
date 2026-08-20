@@ -66,6 +66,37 @@ refused launcher, a read-only remote `$HOME`, an environment depth greater than 
 
 ### 3.2 script — first contact
 
+> **Amended 2026-08-20 by `nocx-a1615` (the integration-delivery-carrier design)
+> and [ADR-0035](../../docs/decisions/0035-the-channel-we-own-is-the-carrier.md),
+> which supersedes ADR-0022.** First contact stops being an argv event. The
+> launcher no longer travels in the command, nothing is staged in a local file,
+> and there is no separate first-contact line: **publication happens on a channel
+> in both paths**, and both paths emit the same bounded loader of at most 1 KiB.
+>
+> What replaces the paragraphs below. The remote command is a fixed loader that
+> carries no payload and no secret; the bundle is published over SFTP on a
+> connection nocx owns — the SSH session itself for a saved connection, and for a
+> typed `ssh` the user's own invocation made a multiplex master, after a handshake
+> has _proven_ that ownership. The publish and the loader run concurrently, so the
+> loader tests nothing about the far side before starting; the far side is still
+> the owner of "is this installation valid", and says so after the publish has
+> settled rather than before it has begun (carrier design §4.1, §6.1). Fail-open
+> is unchanged in kind and no longer expressed as a shell `if` over a local file:
+> every refusal leaves a working native prompt with a **named** reason.
+>
+> Three things in the paragraphs below go with the staged file. The 4096-byte tty
+> line cap and `ARG_MAX` stop governing anything we emit — the payload is not in
+> the line. The consume-once rule and the `rm -f` inside the substitution go with
+> the file they protected, and so does the reason `nocx-sxdd` bought them for.
+> **That reason has not gone away, and the carrier design does not answer it:** a
+> rewritten line recalled from the local shell's own history still names our
+> `ControlPath` and still carries the loader as its remote command, with no frame
+> sender behind it. Nothing here is a secret and nothing republishes, but the
+> replacement for consume-once is owed by whoever builds the typed-`ssh` wrapper
+> and is not written down yet.
+>
+> N2 is untouched: the line is still visible, and there is less of it to hide.
+
 The host has no committed bundle. The launcher travels in argv as `nocx-pu4.6` ships it
 today: staged in a local file because the canonical tty line is capped at 4096 bytes, read
 by the local shell at execution time, handed to `ssh` through argv (bounded by ARG_MAX).
@@ -87,6 +118,29 @@ if [ -s '<path>' ]; then ssh -t <flags> <dest> "$(cat '<path>'; rm -f '<path>')"
 ```
 
 ### 3.3 script — installed
+
+> **Amended 2026-08-20, same source as §3.2.** The installed form is **kept** —
+> `~/.nocx/launch` is still the 0700 POSIX `sh` script that reads
+> `manifest.json`, refuses an incomplete or protocol-incompatible generation,
+> `exec`s a native login shell in that case, and emits **no** passport, with all
+> that follows from a missing passport. What goes is its position: the guard no
+> longer travels at the head of the command and there is no separate installed
+> line. A guard placed first loses a race it cannot win — on a host with nothing
+> committed the publish is still in flight when the test runs, so the session
+> would degrade to raw _while the publish succeeded_. The guard and the full
+> generation verification therefore run inside the far side's own startup, after
+> the bootstrap and the publish have settled, immediately before `exec`ing the
+> launcher.
+>
+> The `else` arm's job — covering the file's own absence — is now the loader's,
+> which also names the outcome instead of merely surviving it. **"Why not a bare
+> `ssh pi@host`" below is unaffected and still binding:** the rc gate,
+> `SendEnv`/`SetEnv`, and `Match exec` + `RemoteCommand` are rejected for the
+> reasons given, and a byte-for-byte clean line still requires either
+> unconditional integration of the whole remote account or the relay. An `ssh` that fails with
+> `127` is still a bug in this design and never a user-visible outcome — the
+> fallback is written as `if`, never as `exec A || exec B`, which the multiplex
+> spike measured dead-exiting with exactly that status.
 
 The bundle is committed on that host. **The guard travels to the far side**, because that is
 the only machine whose `~/.nocx` is the one in question — a local `[ -x ~/.nocx/launch ]`

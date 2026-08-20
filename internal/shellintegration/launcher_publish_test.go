@@ -49,7 +49,7 @@ func TestFullLauncher_PreludeIsOneLineNoSingleQuotes(t *testing.T) {
 		t.Errorf("prelude contains a single quote or newline (csh would split it): %q", prelude)
 	}
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown, ShellAuto} {
-		cmd, _, ok := NewRemoteLauncher().StartCommand(kind, LaunchOptions{
+		cmd, _, ok := FullBootstrapCommand(kind, LaunchOptions{
 			SessionID: "s", Enhanced: true,
 		})
 		if !ok {

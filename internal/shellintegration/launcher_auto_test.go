@@ -72,7 +72,7 @@ func TestAutoDispatcher_SelectsTierPerLoginShell(t *testing.T) {
 			loginPath := requireShellLink(t, tc.login)
 			home := writeAutoFixtureHome(t)
 
-			cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
+			cmd, reason, ok := FullBootstrapCommand(ShellAuto, LaunchOptions{
 				Enhanced:  true,
 				SessionID: "auto-tier-test",
 			})
@@ -121,7 +121,7 @@ func TestAutoDispatcher_FailsOpenUnderNonPOSIXLoginShell(t *testing.T) {
 		t.Fatalf("glob transient dirs: %v", err)
 	}
 
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
+	cmd, reason, ok := FullBootstrapCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,
 		SessionID: "auto-csh-test",
 	})
@@ -160,7 +160,7 @@ func TestAutoDispatcher_FailsOpenUnderNonPOSIXLoginShell(t *testing.T) {
 // segment gained a quote and the dispatcher must switch to an escaping
 // vehicle.
 func TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords(t *testing.T) {
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,
 		SessionID: "auto-shape-test",
 	})
@@ -189,7 +189,7 @@ func TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords(t *testing.T) {
 // TestAutoCommand_UnderCap: the combined command sits below the full launcher
 // cap — the publish prelude plus the three payloads, no double escaping.
 func TestAutoCommand_UnderCap(t *testing.T) {
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
+	cmd, _, ok := FullBootstrapCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,
 		SessionID: "auto-cap-test",
 	})
@@ -252,7 +252,7 @@ func TestFullLauncherStaysUnderArgLimit(t *testing.T) {
 		Capability:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown, ShellAuto} {
-		cmd, _, ok := NewRemoteLauncher().StartCommand(kind, opts)
+		cmd, _, ok := FullBootstrapCommand(kind, opts)
 		if !ok {
 			t.Fatalf("%s launcher refused", kind)
 		}
@@ -280,7 +280,7 @@ func TestAutoCommand_RefusesOverCap(t *testing.T) {
 	maxFullLauncherLen = 256
 	t.Cleanup(func() { maxFullLauncherLen = old })
 
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
+	cmd, reason, ok := FullBootstrapCommand(ShellAuto, LaunchOptions{
 		Enhanced:  true,
 		SessionID: "auto-overcap-test",
 	})
@@ -296,7 +296,7 @@ func TestAutoCommand_RefusesOverCap(t *testing.T) {
 // uniformly across tiers — ShellAuto is the caller's build-time intent, so
 // the same fail-closed contract holds.
 func TestAutoCommand_EnhancedRequiresSessionID(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{Enhanced: true})
+	cmd, reason, ok := FullBootstrapCommand(ShellAuto, LaunchOptions{Enhanced: true})
 	if ok {
 		t.Fatalf("ShellAuto enhanced with empty SessionID accepted; got %q", cmd)
 	}

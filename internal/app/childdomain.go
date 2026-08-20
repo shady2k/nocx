@@ -260,7 +260,13 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	// host key or a second factor — it reads our wrapper as the answer. A
 	// key hides this completely, which is why every proof of this path
 	// (ssh_child_assembly_test.go, ADR-0025) authenticated with one.
-	cmd, reason, ok := shellintegration.NewRemoteLauncher().StartCommand(
+	// FullBootstrapCommand, not the launcher's StartCommand: the managed
+	// path now emits the bounded carrier (shellintegration/carrier.go), and
+	// the carrier is only half a delivery without the frame sender that
+	// feeds it — which this path does not have. Design §12 gives the typed
+	// `ssh` wrapper and its sender to P4; until then this line keeps the
+	// pre-carrier self-installing launcher, deliberately and by name.
+	cmd, reason, ok := shellintegration.FullBootstrapCommand(
 		shellintegration.ShellAuto,
 		shellintegration.LaunchOptions{
 			SessionID:     sid,

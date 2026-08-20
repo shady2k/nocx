@@ -120,3 +120,32 @@ authentication before the bootstrap shell replaces itself with the agent.
 - Whether sandboxed tabs get restore support (V1: `restoreDescriptor` is null by design).
 - Whether the ephemeral home/temp policy is replaced by user-configurable roots.
 - Windows strategy if a future sandbox need appears there.
+
+## Amendment — the package store is a system read-only root (2026-08-20, nocx-263da)
+
+The documented read-only set was FHS: `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`,
+`/etc`, `/dev`, `/proc`, `/sys`. On a content-addressed distribution that list
+authorizes nothing. `/etc/hosts` on NixOS resolves to a store path, and both
+Landlock and Seatbelt authorize the resolved target, so a read-only grant on
+`/etc` covers the symlink and not the file behind it. The measured effect was
+one failing check out of thirty-five in the Landlock enforcement smoke, and a
+policy that never got that far anyway: the loader roots derived from `PATH`
+came to 339 on that host against a 256-root bound, so every launch was refused
+with `-32007` and a message naming an internal constant.
+
+The store is added to the system read-only set on Linux when it exists. It is
+the same kind of object `/usr` is — system-owned, world-readable, immutable
+(mounted read-only), holding packages rather than user documents, which is why
+storing a secret in it is a known anti-pattern rather than a threat this
+boundary was ever meant to carry. Naming it collapses the derived roots at
+their source: on the host that found this, 347 roots become 12, because every
+one of the 339 is a descendant of the store.
+
+What is deliberately NOT done: no scan of the store, no per-package grant, no
+writable grant anywhere inside it (`writableRootIsProtected` covers it exactly
+as it covers `/usr`), and no second entry for Guix's `/gnu/store` until
+somebody runs the enforcement smoke on Guix. The root-count bound moves from
+256 to 1024 as well, because it was conflating what a REQUEST may contribute —
+which is bounded tightly and separately — with what a MACHINE contributes; the
+serialized-size bound remains the real ceiling, since the macOS profile travels
+in argv.

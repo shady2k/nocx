@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -30,11 +31,28 @@ type Policy struct {
 	Tmp             string           `json:"tmp"`
 }
 
-// Policy and request bounds (design spec §5.6, §6.1): reject policy above a
-// fixed root count or serialized size, and each per-tab path list above the
-// fixed entry count.
+// Policy and request bounds (design spec §5.6, §6.1). Two different things
+// are bounded here and they are not interchangeable.
+//
+// maxUserPaths bounds what a REQUEST may contribute — each per-tab list and
+// each persisted baseline. That is a permission bound and it stays tight.
+//
+// maxRoots bounds the whole composed document, which is dominated by roots
+// the backend DERIVES from the machine: the system set, every absolute PATH
+// directory, and every ELF loader directory those binaries name. Under FHS
+// those collapse into a handful. Under a package store — Nix, Guix, and a
+// Homebrew-heavy macOS, where each formula owns its own Cellar prefix — every
+// library has its own directory and the count scales with what is installed.
+// At 256 the dev host derived 339 and the feature was dead on the whole
+// distribution, refused with a message naming this constant (nocx-263da).
+//
+// So this is a pathology stop, not a permission bound, and it is set against
+// the one bound that IS a real ceiling: maxPolicyBytes, which the macOS
+// backend needs because the profile travels in argv. At roughly 64 bytes per
+// canonical path the two bounds now bite at about the same size, which is
+// what makes 1024 a number rather than a guess.
 const (
-	maxRoots       = 256
+	maxRoots       = 1024
 	maxPolicyBytes = 64 * 1024
 	maxUserPaths   = 32
 )
@@ -287,6 +305,9 @@ func BuildPolicy(req Request, shellPath, runtimeRoot string, env []string) (*Pol
 		HomeProjections: planHomeProjections(hostHome, runtimeCanonical, home, projectionCandidates),
 	}
 	if err := p.normalize(); err != nil {
+		if errors.Is(err, ErrPolicyTooLarge) {
+			return nil, NewSetupErrorReasonf(ReasonPolicyTooLarge, "policy: %v", err)
+		}
 		return nil, NewSetupErrorf("policy: %v", err)
 	}
 	return p, nil
@@ -336,7 +357,7 @@ func ValidatePolicy(p *Policy) error {
 		return err
 	}
 	if len(p.WritableRoots)+len(p.WritableFiles)+len(p.WritableDirs)+len(p.ReadOnlyRoots)+len(p.ReadOnlyFiles) > maxRoots {
-		return fmt.Errorf("sandbox: policy exceeds %d roots", maxRoots)
+		return fmt.Errorf("%w: %d roots", ErrPolicyTooLarge, maxRoots)
 	}
 	if _, err := p.Bytes(); err != nil {
 		return err
@@ -352,7 +373,7 @@ func (p *Policy) Bytes() ([]byte, error) {
 		return nil, fmt.Errorf("sandbox: serialize policy: %w", err)
 	}
 	if len(b) > maxPolicyBytes {
-		return nil, fmt.Errorf("sandbox: policy exceeds %d bytes", maxPolicyBytes)
+		return nil, fmt.Errorf("%w: %d bytes", ErrPolicyTooLarge, maxPolicyBytes)
 	}
 	return b, nil
 }
@@ -364,7 +385,65 @@ func (p *Policy) normalize() error {
 	writableDirs := append(append([]string(nil), p.WritableRoots...), p.WritableDirs...)
 	p.ReadOnlyRoots = removeUnderWritable(p.ReadOnlyRoots, writableDirs)
 	p.ReadOnlyFiles = removeUnderWritable(p.ReadOnlyFiles, writableDirs)
+	// Within the class, too: a read-only root that another read-only root
+	// already contains grants nothing the first one does not. Dropping it
+	// cannot widen access — the entry that subsumed it still covers every
+	// path the dropped one did — and it is what keeps a machine's derived set
+	// at a handful of rules instead of one per shared-library directory.
+	//
+	// ReadOnlyFiles is deliberately NOT folded into those roots. It holds the
+	// shell, which is named for a reader as much as for the kernel, and a
+	// one-element list is not what the bounds are about.
+	p.ReadOnlyRoots = coalesceUnderSelf(p.ReadOnlyRoots)
 	return ValidatePolicy(p)
+}
+
+// coalesceUnderSelf drops every entry another entry in the same slice
+// contains, keeping the outermost one and the caller's order.
+//
+// The comparison is LEXICAL and deliberately so. Every path here has already
+// been through EvalSymlinks, so two entries naming one directory are already
+// byte-equal and dedupeKeepOrder has removed the duplicate; what is left for
+// this pass is ancestry, which canonical paths express as a component prefix.
+// The alternative — pathWithin's os.SameFile fallback for every pair — is
+// O(n^2) filesystem calls, and n here is the machine's library-directory
+// count: it cost 16 seconds for a thousand roots when this was first written
+// that way. Sorting makes an ancestor immediately precede its descendants, so
+// one pass over the sorted copy answers it with no syscalls at all.
+func coalesceUnderSelf(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	sorted := append([]string(nil), in...)
+	sort.Strings(sorted)
+	covered := make(map[string]bool, len(sorted))
+	keep := ""
+	for _, path := range sorted {
+		if keep != "" && lexicalWithin(keep, path) {
+			covered[path] = true
+			continue
+		}
+		keep = path
+	}
+	out := make([]string, 0, len(in))
+	for _, path := range in {
+		if !covered[path] {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// lexicalWithin reports whether path is root itself or a component-wise
+// descendant of it. Both must be canonical and absolute.
+func lexicalWithin(root, path string) bool {
+	if root == path {
+		return true
+	}
+	if root == string(os.PathSeparator) {
+		return true
+	}
+	return strings.HasPrefix(path, root+string(os.PathSeparator))
 }
 
 func dedupeKeepOrder(in []string) []string {

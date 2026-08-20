@@ -250,6 +250,41 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
 		return
 	}
+	var statusErr *sandbox.StatusError
+	if errors.As(err, &statusErr) {
+		h.log.Warn("sandbox backend unavailable",
+			"backend", statusErr.Status.Backend,
+			"reason", statusErr.Status.Reason,
+			"abi", statusErr.Status.ABI,
+		)
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32006, Message: statusErr.Status.Reason,
+			Data: map[string]any{"reason": statusErr.Status.Reason},
+		})
+		return
+	}
+	var setupErr *sandbox.SetupError
+	if errors.As(err, &setupErr) {
+		// The reason is a fixed token the sandbox package chose, never the
+		// error text: the detail behind it names paths, and neither the wire
+		// nor the log may carry those. A setup failure with no typed reason
+		// stays generic.
+		reason := setupErr.Reason
+		if reason == "" {
+			reason = "setup-failed"
+		}
+		h.log.Error("sandbox setup failed", "reason", reason)
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32007, Message: "sandbox setup failed",
+			Data: map[string]any{"reason": reason},
+		})
+		return
+	}
+	if errors.Is(err, sandbox.ErrInvalidPermissions) {
+		h.log.Warn("sandbox request paths became invalid before launch")
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		return
+	}
 	h.log.Error("failed to open session", "error", err)
 	// A sealed vault surfaces here for EVERY connection that needs it —
 	// this is still a vault access, and the renderer must get the reason

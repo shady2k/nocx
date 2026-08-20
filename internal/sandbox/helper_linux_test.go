@@ -174,10 +174,18 @@ func TestLinuxAccessMonitorReportsDeniedOpen(t *testing.T) {
 		access   AccessClass
 		existing bool
 	}{
-		{name: "read", command: "/bin/cat", access: AccessReadOnly, existing: true},
-		{name: "write", command: "/usr/bin/touch", access: AccessReadWrite},
+		// Resolved on PATH rather than spelled as an FHS path: on a
+		// package-store distribution neither /bin/cat nor /usr/bin/touch
+		// exists, and the test failed on the shell lookup long before it
+		// reached anything about denied access (nocx-263da).
+		{name: "read", command: "cat", access: AccessReadOnly, existing: true},
+		{name: "write", command: "touch", access: AccessReadWrite},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			command, lookErr := exec.LookPath(tc.command)
+			if lookErr != nil {
+				t.Skipf("%s is not on PATH: %v", tc.command, lookErr)
+			}
 			base := t.TempDir()
 			workspace := filepath.Join(base, "workspace")
 			outside := filepath.Join(base, "outside")
@@ -200,7 +208,7 @@ func TestLinuxAccessMonitorReportsDeniedOpen(t *testing.T) {
 				Workspace: workspace,
 				Identity:  SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 1},
 			}, CommandSpec{
-				Path: tc.command,
+				Path: command,
 				Args: []string{denied},
 				Dir:  workspace,
 				Env:  os.Environ(),

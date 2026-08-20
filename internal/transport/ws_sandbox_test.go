@@ -712,3 +712,38 @@ func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
 		t.Errorf("RemoveReadOnly = %v, want [%s]", got.RemoveReadOnly, rr)
 	}
 }
+
+// A setup failure the user can act on has to reach them as itself. The
+// generic "setup-failed" is what a machine whose derived policy does not fit
+// the bounds reported before nocx-263da, and the renderer can only show the
+// reason it is given.
+func TestOpen_SandboxPolicyTooLargeKeepsItsReason(t *testing.T) {
+	ws := t.TempDir()
+	privatePath := filepath.Join(ws, "private-workspace")
+	svc := &sandboxTestService{
+		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
+		prepErr: sandbox.NewSetupErrorReasonf(sandbox.ReasonPolicyTooLarge,
+			"policy: too many roots under %s", privatePath),
+	}
+	var logs syncBuffer
+	logger := log.NewSlogAdapter(slog.New(slog.NewJSONHandler(&logs, nil)))
+	wsrv, reg := newSandboxHarness(t, svc, logger)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, wsrv)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(ws, snapshotRevision(t, reg)))
+	code, reason := openError(t, resp)
+	if code != -32007 || reason != sandbox.ReasonPolicyTooLarge {
+		t.Errorf("code=%d reason=%q, want -32007 %s", code, reason, sandbox.ReasonPolicyTooLarge)
+	}
+	// A typed reason is not a licence to leak the detail it was built from.
+	if strings.Contains(string(resp), privatePath) {
+		t.Errorf("private path leaked in wire response: %s", resp)
+	}
+	if strings.Contains(logs.String(), privatePath) {
+		t.Errorf("private path leaked in backend log: %s", logs.String())
+	}
+}

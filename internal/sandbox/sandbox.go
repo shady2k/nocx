@@ -30,6 +30,11 @@ const (
 	ReasonSandboxExecUnavailable = "sandbox-exec-unavailable"
 	ReasonProbeFailed            = "probe-failed"
 	ReasonUnsupportedPlatform    = "unsupported-platform"
+	// ReasonPolicyTooLarge is the one setup failure a user can act on: the
+	// policy this machine derives does not fit the enforceable bounds. It is
+	// reported instead of the generic "setup-failed" so the message can name
+	// the machine rather than an internal constant (nocx-263da).
+	ReasonPolicyTooLarge = "policy-too-large"
 )
 
 // helperEnvPrefix marks variables the Linux helper strips before exec so

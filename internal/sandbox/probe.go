@@ -1,3 +1,9 @@
+//go:build darwin
+
+// The Seatbelt availability probe is macOS-only, and tagged so rather than
+// baselined as dead on Linux — see profile.go for why that trade is the wrong
+// way round (nocx-ru6kq).
+
 package sandbox
 
 import (

@@ -1,3 +1,8 @@
+//go:build darwin
+
+// The in-profile readiness shim is macOS-only, and tagged so rather than
+// baselined as dead on Linux — see profile.go (nocx-ru6kq).
+
 package sandbox
 
 import (

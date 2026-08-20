@@ -1,3 +1,13 @@
+//go:build darwin
+
+// Seatbelt is the macOS backend and nothing else builds an SBPL profile, so
+// this file is darwin-only. It was once untagged so the renderer could be
+// unit-tested from Linux, and the price was five entries in the deadcode
+// baseline — which is a UNION across darwin and linux, so baselining them
+// here also blinded the ratchet on the one platform where these functions are
+// the enforcement path (nocx-ru6kq). The tests move with the file; ci-mac runs
+// internal/sandbox natively.
+
 package sandbox
 
 import (

@@ -10,7 +10,7 @@
     "can analyse both: ci.yml runs the ratchet per platform (ci-mac for darwin,",
     "ci-linux for linux) and each job sees a SUBSET of this file. That is why the",
     "updater prunes only entries whose file `go list` says the analysing platform",
-    "compiled — dropping the other platform's half here is what made the gate",
+    "compiled \u2014 dropping the other platform's half here is what made the gate",
     "unpassable on macOS while CI stayed silent (nocx-0odm, nocx-re6gk).",
     "",
     "Not a proof of no dead code: deadcode's RTA counts a method reached through",
@@ -137,26 +137,6 @@
     {
       "file": "internal/pty/pty.go",
       "func": "Stub.Write"
-    },
-    {
-      "file": "internal/sandbox/probe.go",
-      "func": "seatbeltProbe.status"
-    },
-    {
-      "file": "internal/sandbox/profile.go",
-      "func": "escapeSBPL"
-    },
-    {
-      "file": "internal/sandbox/profile.go",
-      "func": "renderProfile"
-    },
-    {
-      "file": "internal/sandbox/seatbelt_shim.go",
-      "func": "parseSeatbeltShimArgv"
-    },
-    {
-      "file": "internal/sandbox/seatbelt_shim.go",
-      "func": "seatbeltShimMain"
     },
     {
       "file": "internal/secrets/secrets.go",

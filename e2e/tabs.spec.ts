@@ -235,6 +235,53 @@ test.describe('vertical tab placement', () => {
     expect(titleBox!.x - paneBox!.x).toBeLessThan(60)
   })
 
+  /**
+   * …AND IT RUNS TO THE OTHER EDGE (nocx-lfsw4). The label used to stop 36px
+   * short of the row's right edge — a 26px margin plus the row's own 10px
+   * padding — held for a close button that is `position: absolute` and
+   * `opacity: 0` until the row is hovered. Out of flow and invisible, it takes
+   * width from every label in the strip and gives it back to none of them.
+   *
+   * The measurement is geometric rather than textual on purpose: a title short
+   * enough to fit satisfies any assertion about the rendered string, whatever
+   * the margin is, and the defect is exactly the one jsdom cannot see
+   * (nocx-4wbx). The tolerance is 12px: the row's own 10px padding, which the
+   * label may not eat into, plus a pixel of rounding.
+   */
+  test('the vertical label runs to the row edge, reserving nothing for the hidden close button (nocx-lfsw4)', async ({
+    page,
+  }) => {
+    await switchPlacement(page, 'vertical')
+
+    // The pointer must be over nothing — the claim is about the row NOBODY is
+    // hovering, which is every row in the strip nearly all of the time.
+    await page.mouse.move(2, 2)
+
+    const tab = page.locator(TAB).first()
+    const close = tab.locator('.ui-icon-button')
+    await expect(close).toHaveCSS('opacity', '0')
+
+    const rowBox = await tab.boundingBox()
+    const labelBox = await tab.locator('.nocx-tab-label').boundingBox()
+    expect(rowBox).not.toBeNull()
+    expect(labelBox).not.toBeNull()
+    const rightGap = rowBox!.x + rowBox!.width - (labelBox!.x + labelBox!.width)
+    console.log(`vertical label right gap = ${rightGap}`)
+    expect(rightGap, `the label stops ${rightGap}px short of the row's edge`).toBeLessThanOrEqual(
+      12,
+    )
+
+    // And the button the width was being held for is still reachable, and
+    // still closes the tab it belongs to.
+    await page.keyboard.press('Meta+t')
+    await expect(page.locator(TAB)).toHaveCount(2)
+    const second = page.locator(TAB).nth(1)
+    await second.hover()
+    await expect(second.locator('.ui-icon-button')).toHaveCSS('opacity', '1')
+    await second.locator('.ui-icon-button').click()
+    await expect(page.locator(TAB)).toHaveCount(1)
+  })
+
   test('horizontal labels all start in the same column, left of centre', async ({ page }) => {
     // beforeEach already reset to horizontal, but make sure.
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)

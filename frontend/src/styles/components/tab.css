@@ -181,13 +181,6 @@
   margin: 0 8px 0 20px;
 }
 
-/* The vertical strip already left-aligns and has no index digit to clear, and
-   its rows are a column where the title and its subtitle share the leading
-   edge. */
-.tabstrip-vertical .nocx-tab-label {
-  margin-left: 24px;
-}
-
 /* The title and the agent-status dot share one line, so the vertical row's label
    column holds exactly two children — the line and the subtitle — and centres
    the pair rather than a phantom three. */
@@ -422,13 +415,25 @@
   align-items: flex-start;
   justify-content: center;
   min-width: 0;
-  /* Derived from the pill's geometry, and the row's own padding is already in it:
-     `.nocx-tab` has `padding: 0 10px`, so the label's margin starts at the same x
-     the pill does. The pill is 22px wide, so 22 + 10 puts the text exactly 10px
-     clear of it — the same 10px that separates the pill from the row's edge.
+  /* LEFT: derived from the pill's geometry, and the row's own padding is already
+     in it: `.nocx-tab` has `padding: 0 10px`, so the label's margin starts at the
+     same x the pill does. The pill is 22px wide, so 22 + 10 puts the text exactly
+     10px clear of it — the same 10px that separates the pill from the row's edge.
      Counting the pill's `left: 10px` again here made the right-hand gap 20px
-     against the left's 10, which is what the owner saw. */
-  margin: 0 26px 0 calc(22px + 10px);
+     against the left's 10, which is what the owner saw.
+
+     RIGHT: nothing, which leaves the row's own 10px padding as the gap — the same
+     10px again. It held 26px for the close button, and the horizontal rule above
+     says why that is wrong: the button is `position: absolute; right: 4px;
+     opacity: 0` (`.nocx-tab > .ui-icon-button`), out of flow and invisible until
+     the row is hovered, so the reservation was 26px + 10px taken from EVERY label
+     in the strip, permanently, for something that is never in the flow. A title
+     ellipsed with 36px of empty row beside it (nocx-lfsw4). On hover the button
+     comes back over the text with `.nocx-tab::after`'s gradient behind it, which
+     is the same trade the horizontal strip has been making since it dropped its
+     own reservation — and the row keeps its native tooltip, so the full text is
+     one hover away either way. */
+  margin: 0 0 0 calc(22px + 10px);
   gap: 1px;
   padding: 4px 0;
 }

@@ -56,6 +56,19 @@
   color: var(--color-text-dim);
 }
 
+/* AND THE SLOT SIZES THE GLYPH, because the glyph has no size of its own.
+   The kit's icons are inline `<svg viewBox>` with no width or height
+   attribute — that is what lets one component serve a 12px row and a 24px
+   button — so every slot in this kit says how big its svg is, and this one
+   did not. The svg then fell back to its intrinsic size, which Chromium
+   resolves against the slot and WebKit resolves to zero: every menu in the
+   packaged macOS app showed a reserved, empty icon column, while the dev
+   stand showed the marks (nocx-8830c). */
+.ui-context-menu__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
 /* The label is one line that ellipsises — a path must never wrap the menu
    wider than its ceiling. */
 .ui-context-menu__label {

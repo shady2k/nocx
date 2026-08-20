@@ -1,6 +1,6 @@
 # AGENTS.md — Working rules for AI agents on `nocx`
 
-`nocx` is a local-first, Warp-style terminal (Go backend + xterm.js frontend + Wails v2
+`nocx` is a local-first, Warp-style terminal (Go backend + xterm.js frontend + Wails v3
 desktop). This file is the operating contract for **any** AI agent contributing to the
 repo. Read it before writing code.
 
@@ -610,7 +610,7 @@ changed.
   `settings`. One core, multiple build targets.
 - **Frontend:** xterm.js (WebGL) + TypeScript, CodeMirror 6 for the editor. Terminal render
   state lives here (AD-6) — [ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md).
-- **Desktop shell:** Wails v2 (macOS first).
+- **Desktop shell:** Wails v3 (macOS first).
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control
   plane (AD-1).
 

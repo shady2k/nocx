@@ -1,0 +1,598 @@
+/* nocx landing page.
+ *
+ * The page's graphics are terminal material and state, never a drawing of the
+ * product's interface. That line is load-bearing: a real transcript rendered
+ * as text is honest, a CSS reconstruction of nocx's tabs and sidebar is a
+ * screenshot we did not take. So there is no title bar, no traffic-light
+ * dots, no tab strip and no fake chrome anywhere below — every container here
+ * announces what kind of artefact it holds.
+ *
+ * Two voices: a grotesque for claims, monospace for anything a reader could
+ * go and verify — a command, its output, a version, a platform floor. Colour
+ * is semantic exactly as in a terminal, taken from tokyo-night, the app's own
+ * default theme, so page and product read as one thing.
+ *
+ * Spec: .internal/specs/2026-08-20-github-landing-design.md §5.
+ */
+
+:root {
+  /* Verbatim from frontend/src/styles/themes/tokyo-night.css. Changing a
+   * value here without changing it there breaks the one thing this palette is
+   * for. This is the subset the page uses, not the theme's whole ramp. */
+  --canvas: #1a1b26;
+  --surface: #1f2335;
+  --sunken: #16171f;
+  --divider: #2a2b3d;
+  --text: #c0caf5;
+  --text-muted: #a9b1d6;
+  --text-dim: #9098bd;
+  --border: #5f6590;
+  --accent: #7aa2f7;
+  --success: #9ece6a;
+  --warning: #e0af68;
+
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --measure: 58ch;
+  --gutter: clamp(1.25rem, 4vw, 4rem);
+  --rhythm: clamp(4rem, 8vw, 7.5rem);
+  --hair: 1px solid var(--divider);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 78rem;
+  margin: 0 auto;
+  /* Longhand on purpose. `.wrap` is combined with `.hero` and with `section`,
+   * which both set top spacing; a `padding` shorthand in either of those would
+   * silently reset these gutters and pull that block out of alignment with
+   * every other one. */
+  padding-left: var(--gutter);
+  padding-right: var(--gutter);
+}
+
+/* --- section scaffolding -------------------------------------------------- */
+
+section {
+  padding-top: var(--rhythm);
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 0 0 1.25rem;
+  max-width: none;
+}
+
+h2 {
+  font-size: clamp(1.55rem, 1.1rem + 1.6vw, 2.15rem);
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  font-weight: 620;
+  margin: 0 0 0.85rem;
+  max-width: 22ch;
+}
+
+h3 {
+  font-size: 0.9375rem;
+  font-weight: 620;
+  margin: 0 0 0.4rem;
+}
+
+p {
+  margin: 0 0 1rem;
+  max-width: var(--measure);
+}
+
+.lede {
+  color: var(--text-muted);
+  font-size: 1.0625rem;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 0.2em;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+/* --- hero ----------------------------------------------------------------- */
+
+.hero {
+  padding-top: clamp(2.5rem, 6vw, 4.5rem);
+}
+
+.hero__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: clamp(2.5rem, 5vw, 4rem);
+  align-items: start;
+}
+
+@media (min-width: 62rem) {
+  .hero__grid {
+    grid-template-columns: minmax(0, 29rem) minmax(0, 1fr);
+    gap: clamp(3rem, 5vw, 5rem);
+  }
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0 2rem;
+  max-width: none;
+}
+
+.mark img {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+}
+
+.mark span {
+  font-family: var(--mono);
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.hero h1 {
+  font-size: clamp(2.25rem, 1.4rem + 3.4vw, 3.4rem);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  font-weight: 650;
+  margin: 0 0 1.15rem;
+  max-width: 15ch;
+  text-wrap: balance;
+}
+
+.hero .lede {
+  /* Deliberately not `.hero p`: that also caught the note under the
+   * transcript in the other column, whose 0-1-1 specificity quietly beat the
+   * note's own rule and squeezed it to a third of the width it sits under. */
+  max-width: 42ch;
+}
+
+/* --- the transcript: real output, and nothing pretending to be a window --- */
+
+.transcript {
+  background: var(--sunken);
+  border: var(--hair);
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.66rem + 0.28vw, 0.875rem);
+  line-height: 1.75;
+}
+
+/* Not a title bar. It names the kind of artefact this is, which is the whole
+ * reason it is allowed to exist: a strip drawing window controls, or naming a
+ * machine, would be impersonating an interface we have not photographed. */
+.transcript__kind {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 1rem;
+  border-bottom: var(--hair);
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.transcript__body {
+  margin: 0;
+  padding: 1.1rem 1rem 1.35rem;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text-muted);
+}
+
+.transcript__body b {
+  font-weight: inherit;
+  color: var(--text);
+}
+
+.cwd {
+  color: var(--accent);
+}
+
+.ok {
+  color: var(--success);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1.15s steps(1, end) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.transcript__note {
+  margin: 0.8rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  max-width: none;
+}
+
+/* --- calls to action ------------------------------------------------------ */
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.85rem 1.25rem;
+  margin: 1.75rem 0 1.1rem;
+}
+
+.cta {
+  display: inline-block;
+  padding: 0.7rem 1.35rem;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #10121c;
+  font-weight: 650;
+  text-decoration: none;
+  transition: filter 120ms ease;
+}
+
+.cta:hover {
+  filter: brightness(1.1);
+}
+
+.cta--quiet {
+  background: none;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.cta--quiet:hover {
+  border-color: var(--accent);
+  color: var(--text);
+  filter: none;
+}
+
+/* --- spec rows: the small print that must not read as small print -------- */
+
+.spec {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.85;
+  color: var(--text-dim);
+  margin: 0;
+  max-width: none;
+}
+
+.spec b {
+  color: var(--success);
+  font-weight: inherit;
+}
+
+.warn {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+  color: var(--warning);
+  border-left: 2px solid var(--warning);
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  margin: 1.15rem 0 0;
+  max-width: 48ch;
+}
+
+.warn a {
+  color: inherit;
+}
+
+/* --- the state table: what comes back, and what does not ------------------ */
+
+.states {
+  border-top: var(--hair);
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.68rem + 0.2vw, 0.875rem);
+}
+
+.states__head,
+.states__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 1.5rem minmax(0, 1fr);
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  padding: 0.7rem 0;
+  border-bottom: var(--hair);
+}
+
+.states__head {
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.states__row span {
+  color: var(--text-dim);
+}
+
+.states__row .what {
+  color: var(--text);
+}
+
+.states__row .to {
+  color: var(--border);
+}
+
+.states__row .after {
+  color: var(--success);
+}
+
+.states__row--not .after,
+.states__row--not .what {
+  color: var(--warning);
+}
+
+@media (max-width: 40rem) {
+  .states__head {
+    display: none;
+  }
+
+  .states__row {
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+  }
+
+  .states__row .to {
+    display: none;
+  }
+}
+
+/* --- the panel matrix ----------------------------------------------------- */
+
+.matrix {
+  border-top: var(--hair);
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.68rem + 0.2vw, 0.875rem);
+}
+
+.matrix__row {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.25rem 1.25rem;
+  padding: 0.7rem 0;
+  border-bottom: var(--hair);
+}
+
+.matrix__row dt {
+  color: var(--accent);
+  letter-spacing: 0.06em;
+}
+
+.matrix__row dd {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+@media (max-width: 40rem) {
+  .matrix__row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- the flow: a transformation, shown rather than described -------------- */
+
+.flow {
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.68rem + 0.2vw, 0.875rem);
+  line-height: 1.9;
+  background: var(--sunken);
+  border: var(--hair);
+  border-radius: 6px;
+  padding: 1.15rem 1.25rem;
+  overflow-x: auto;
+}
+
+.flow__row {
+  display: grid;
+  grid-template-columns: 12rem minmax(0, 1fr);
+  gap: 1.25rem;
+}
+
+.flow__row dt {
+  color: var(--text-dim);
+}
+
+.flow__row dd {
+  margin: 0;
+  color: var(--text);
+}
+
+.flow__step {
+  color: var(--text-dim);
+  padding: 0.25rem 0 0.25rem 12rem;
+}
+
+@media (max-width: 40rem) {
+  .flow__row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .flow__step {
+    padding-left: 0;
+  }
+}
+
+/* --- columns: parallel things, read across rather than down -------------- */
+
+.cols {
+  display: grid;
+  gap: 1.75rem;
+  margin: 2rem 0 0;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 48rem) {
+  .cols {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem;
+  }
+
+  .cols--two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.cols h3 {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 500;
+  padding-bottom: 0.6rem;
+  border-bottom: var(--hair);
+  margin: 0 0 0.75rem;
+}
+
+.cols p {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--text-muted);
+  max-width: none;
+}
+
+.cols ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cols li {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin: 0 0 0.35rem;
+}
+
+/* --- the install zone: documentation, in a visibly different register ---- */
+
+.zone {
+  background: var(--sunken);
+  border-top: var(--hair);
+  border-bottom: var(--hair);
+  margin: var(--rhythm) 0 0;
+}
+
+.zone section {
+  padding-top: clamp(3rem, 6vw, 4.5rem);
+}
+
+.zone section:last-of-type {
+  padding-bottom: clamp(3rem, 6vw, 4.5rem);
+}
+
+pre.cmd {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  background: var(--canvas);
+  border: var(--hair);
+  border-radius: 5px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  margin: 0 0 1rem;
+  color: var(--text);
+}
+
+/* --- the passport --------------------------------------------------------- */
+
+.passport {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1.5rem 2rem;
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+}
+
+.passport dt {
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0 0 0.3rem;
+}
+
+.passport dd {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* --- footer --------------------------------------------------------------- */
+
+footer {
+  padding: 2.5rem 0 4rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+footer a {
+  color: var(--text-muted);
+}
+
+footer p {
+  max-width: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}

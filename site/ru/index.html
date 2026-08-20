@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nocx — локальный терминал, который помнит рабочий контекст</title>
+    <meta
+      name="description"
+      content="Локальный терминал, который помнит рабочий контекст: вкладки, их вывод, заметки и ссылки на секреты переживают перезапуск. macOS и Linux, без аккаунта, без собственного облака, без телеметрии."
+    />
+    <link rel="icon" href="../assets/icon-96.png" />
+    <link rel="apple-touch-icon" href="../assets/icon-256.png" />
+    <link rel="stylesheet" href="../style.css" />
+    <link rel="alternate" hreflang="en" href="https://shady2k.github.io/nocx/" />
+    <link rel="alternate" hreflang="ru" href="https://shady2k.github.io/nocx/ru/" />
+    <link rel="alternate" hreflang="x-default" href="https://shady2k.github.io/nocx/" />
+    <!-- Эта страница ничего не перенаправляет. Маршрутизация по локали живёт
+         только на английской: две страницы, каждая со своим редиректом, рано
+         или поздно перебрасывают посетителя между собой. -->
+  </head>
+
+  <body>
+    <main>
+      <div class="wrap hero">
+        <div class="hero__grid">
+          <div>
+            <p class="mark">
+              <img src="../assets/icon-96.png" alt="" />
+              <span>nocx</span>
+            </p>
+
+            <h1>Терминал, который помнит рабочий контекст</h1>
+
+            <p class="lede">
+              Вкладки, напечатанный ими вывод, заметки и ссылки на секреты — всё на месте после
+              перезапуска.
+            </p>
+
+            <div class="cta-row">
+              <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
+                ><span data-version>Скачать v0.2.0</span></a
+              >
+              <a class="cta cta--quiet" href="https://github.com/shady2k/nocx"
+                >Исходники на GitHub</a
+              >
+            </div>
+
+            <p class="spec">
+              macOS universal <span class="dim">·</span> Linux x86_64 AppImage, glibc 2.35+<br />
+              MIT <span class="dim">·</span> <b data-version>v0.2.0</b>, выпущен
+              <span data-released>2026-08-20</span> <span class="dim">·</span> ранний релиз, без
+              формальной поддержки
+            </p>
+
+            <p class="warn">
+              Сборка для macOS подписана ad-hoc и не нотаризована — Apple Developer ID у проекта
+              нет, — поэтому первый запуск требует одной команды в терминале. Она целиком в разделе
+              <a href="#install">Установка</a>, до того как вы что-либо скачаете.
+            </p>
+          </div>
+
+          <div>
+            <div class="transcript">
+              <div class="transcript__kind">
+                <span>Транскрипт оболочки</span>
+                <span>exit 0</span>
+              </div>
+              <pre
+                class="transcript__body"
+              ><span class="cwd">nocx</span> <span class="dim">main</span>
+<span class="cwd">❯</span> <b>git log --oneline -3</b>
+3f7f19c7 fix(readme): the header rule stops being cut by a floated icon
+b637e161 Merge pull request #99 from shady2k/feat/landing
+e750cc84 feat(site): the page has no frames waiting to be filled
+
+<span class="cwd">❯</span> <b>go test ./internal/session/ ./internal/settings/</b>
+<span class="ok">ok</span>    github.com/shady2k/nocx/internal/session   0.155s
+<span class="ok">ok</span>    github.com/shady2k/nocx/internal/settings  0.006s
+
+<span class="cwd">❯</span> <span class="caret"></span></pre>
+            </div>
+            <p class="transcript__note">
+              Настоящий вывод, снятый из этого репозитория, — текст на странице, а не скриншот
+              приложения. Он на английском, потому что таков настоящий вывод: перевести его значило
+              бы его подделать. Запустите обе команды сами и получите то же самое.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <section class="wrap" id="resume">
+        <p class="eyebrow">01 — Восстановление</p>
+        <h2>Закрыл. Открыл. Работаешь дальше.</h2>
+        <p class="lede">
+          Раньше перезапуск стоил всего, что было на экране. Вот что именно его переживает — и
+          единственное, что нет.
+        </p>
+
+        <div class="states">
+          <div class="states__head">
+            <span>Что</span><span>До закрытия</span><span></span><span>После открытия</span>
+          </div>
+          <div class="states__row">
+            <span class="what">Ваши вкладки</span><span>открыты</span><span class="to">→</span
+            ><span class="after">восстановлены</span>
+          </div>
+          <div class="states__row">
+            <span class="what">Напечатанный ими вывод</span><span>на экране</span
+            ><span class="to">→</span><span class="after">по-прежнему читается</span>
+          </div>
+          <div class="states__row">
+            <span class="what">Вкладка, на которой вы были</span><span>впереди</span
+            ><span class="to">→</span><span class="after">на неё и попадаете</span>
+          </div>
+          <div class="states__row">
+            <span class="what">Размер окна, ширина сайдбара, открытая панель</span
+            ><span>как оставили</span><span class="to">→</span
+            ><span class="after">как оставили</span>
+          </div>
+          <div class="states__row states__row--not">
+            <span class="what">Программа, работавшая в этот момент</span><span>выполняется</span
+            ><span class="to">→</span><span class="after">не возобновляется</span>
+          </div>
+        </div>
+
+        <p class="transcript__note">
+          Последняя строка — самая честная: возвращается то, что программа напечатала, а не сама
+          программа. Хотите начинать с чистого листа? Один переключатель в настройках выключает всё
+          это.
+        </p>
+      </section>
+
+      <section class="wrap" id="workspace">
+        <p class="eyebrow">02 — Рабочее пространство</p>
+        <h2>Четыре панели — о машине, на которой ваша вкладка</h2>
+        <p class="lede">
+          Вкладки группируются в именованные цветные воркспейсы. Сайдбар следует за активной
+          вкладкой, так что контекст слева — это тот же контекст, в который вы печатаете.
+        </p>
+
+        <dl class="matrix">
+          <div class="matrix__row">
+            <dt>FILES</dt>
+            <dd>
+              каталог, в котором вкладка, и он следует за ней — сделайте
+              <code>cd</code>, и дерево переедет само, без клика и без переключения вкладок
+            </dd>
+          </div>
+          <div class="matrix__row">
+            <dt>GIT</dt>
+            <dd>
+              изменённые файлы со счётчиками строк · stage · unstage · коммит · лог — и отказывает
+              там же, где отказывает git, не молча
+            </dd>
+          </div>
+          <div class="matrix__row">
+            <dt>PORTS</dt>
+            <dd>что во вкладке слушает порт, и какие туннели вы пробросили</dd>
+          </div>
+          <div class="matrix__row">
+            <dt>NOTES</dt>
+            <dd>
+              открывается вкладкой · сохраняется, пока вы думаете · находится потом по любому слову
+              внутри, а не только по заголовку
+            </dd>
+          </div>
+          <div class="matrix__row">
+            <dt>HISTORY</dt>
+            <dd>
+              зашифрована на диске · переживает перезапуск · ограничена сроком хранения, потолком по
+              диску и лимитом вывода на команду
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="wrap" id="secrets">
+        <p class="eyebrow">03 — Секреты</p>
+        <h2>Ссылка там, где был ключ</h2>
+        <p class="lede">
+          Запустите команду с ключом внутри, и блок предложит его сохранить. Меняется при этом
+          собственная запись nocx об этой команде:
+        </p>
+
+        <dl class="flow">
+          <div class="flow__row">
+            <dt>вы набрали</dt>
+            <dd>TOKEN=&lt;значение&gt; ./deploy.sh</dd>
+          </div>
+          <div class="flow__step">↓ &nbsp;сохранить в vault</div>
+          <div class="flow__row">
+            <dt>запись nocx</dt>
+            <dd>TOKEN=<span class="cwd">[ссылка на vault]</span> ./deploy.sh</dd>
+          </div>
+          <div class="flow__row">
+            <dt>vault</dt>
+            <dd><span class="dim">зашифрованное значение</span></dd>
+          </div>
+          <div class="flow__step">↓ &nbsp;вызвать команду, разблокировать</div>
+          <div class="flow__row">
+            <dt>при запуске</dt>
+            <dd><span class="ok">ссылка разрешена</span></dd>
+          </div>
+        </dl>
+
+        <p class="transcript__note">
+          Это утверждение о записи nocx об этой команде и ни о чём шире. Пароли подключений и
+          парольные фразы ключей живут в том же хранилище.
+        </p>
+      </section>
+
+      <section class="wrap" id="ask">
+        <p class="eyebrow">04 — Вопрос</p>
+        <h2>Спросить про вывод, не покидая скроллбэк</h2>
+        <p class="lede">
+          Выделите то, что напечатала завершённая команда, и в строке ввода появится чип с её
+          именем. Переключатель рядом с промптом отправляет строку ассистенту вместо оболочки, а
+          ответ приходит блоком в тот же скроллбэк — без чат-панели и без режима, из которого надо
+          выходить.
+        </p>
+
+        <div class="cols">
+          <div>
+            <h3>Вы прикладываете</h3>
+            <p>Текст выбранных вами фреймов — и ничего из того, что вы не выбрали.</p>
+          </div>
+          <div>
+            <h3>Вы спрашиваете</h3>
+            <p>Свой вопрос, в той же строке, которую видно до отправки.</p>
+          </div>
+          <div>
+            <h3>Ваш endpoint получает</h3>
+            <p>
+              Системное правило о том, что содержимое фрейма — данные, а не инструкции; ваш вопрос;
+              и этот приложенный текст, помеченный как данные.
+            </p>
+          </div>
+        </div>
+
+        <p class="warn">
+          nocx поставляет интеграцию, а не модель: endpoint настраиваете вы, и политика хранения —
+          вашего провайдера. Вопрос без приложенных фреймов несёт только вопрос. По обычному http
+          nocx ходит исключительно на loopback и приватные адреса, проверяя тот адрес, который
+          реально разрешил и с которым соединился, на каждом запросе и каждом редиректе; учётные
+          данные не переживают смену схемы, хоста или порта.
+        </p>
+      </section>
+
+      <section class="wrap" id="edit">
+        <p class="eyebrow">05 — Строка ввода</p>
+        <h2>Командная строка — это редактор</h2>
+        <p class="lede">
+          Построена на CodeMirror 6: подсветка синтаксиса оболочки по мере набора, дополнение команд
+          и путей по Tab, лучший кандидат — призрачным текстом.
+        </p>
+
+        <div class="cols cols--two">
+          <div>
+            <h3>Дополнение</h3>
+            <ul>
+              <li>Tab дополняет команды и пути</li>
+              <li>каталоги дополняются со слэшем на конце</li>
+              <li>ещё один Tab заходит внутрь</li>
+              <li>Right принимает призрачный текст</li>
+              <li>ничего не подошло → панель так и говорит</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Сниппеты</h3>
+            <ul>
+              <li>сохраните фразу один раз, отправляйте куда угодно</li>
+              <li>долетает до программы, читающей stdin прямо сейчас</li>
+              <li>
+                многострочное тело отвергается, если программа не включила bracketed paste, — вместо
+                построчной вставки в то, что этого не переживёт
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" id="boundaries">
+        <p class="eyebrow">06 — Границы</p>
+        <h2>Что он принимает — и чего никогда не строит вокруг вас</h2>
+
+        <div class="cols cols--two">
+          <div>
+            <h3>Импортирует ваши хосты</h3>
+            <ul>
+              <li>~/.ssh/config</li>
+              <li>экспорт из Tabby</li>
+              <li>пароли и парольные фразы ключей → в vault</li>
+            </ul>
+            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
+              Подключение ссылается на секрет, а не несёт его в себе.
+            </p>
+          </div>
+          <div>
+            <h3>Не является частью nocx</h3>
+            <ul>
+              <li>аккаунт — регистрироваться негде</li>
+              <li>собственный облачный сервис</li>
+              <li>продуктовая телеметрия</li>
+              <li>облачная синхронизация</li>
+            </ul>
+            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
+              Сеть, которой он касается, — это сеть, на которую вы его направили: ваши хосты,
+              настроенный вами endpoint ассистента и проверка собственных обновлений. Аналитики на
+              этой странице тоже нет — GitHub ведёт для неё и для загрузок обычные серверные логи, и
+              они его.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <div class="zone">
+        <section class="wrap" id="install">
+          <p class="eyebrow">Установка — ранний релиз</p>
+          <h2>Что произойдёт, когда вы его откроете</h2>
+
+          <div class="cols cols--two">
+            <div>
+              <h3>macOS · universal .dmg</h3>
+              <p style="margin-bottom: 1rem">
+                Откройте <code>.dmg</code>, перетащите nocx в Applications. Apple Developer ID у
+                проекта нет, поэтому сборка подписана ad-hoc, а не удостоверенной Apple личностью, и
+                не нотаризована — macOS ставит её в карантин при скачивании. Снимите его один раз:
+              </p>
+              <pre
+                class="cmd"
+              ><code>xattr -dr com.apple.quarantine /Applications/nocx.app</code></pre>
+              <p>
+                Дальше открывайте как обычно; последующие обновления из приложения карантин не
+                возвращают. Обоснование — в
+                <a
+                  href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
+                  >ADR-0003</a
+                >.
+              </p>
+            </div>
+            <div>
+              <h3>Linux · x86_64 AppImage</h3>
+              <pre class="cmd"><code>chmod +x nocx-*-linux-amd64.AppImage
+./nocx-*-linux-amd64.AppImage</code></pre>
+              <p>
+                Он несёт в себе GTK 3 и WebKitGTK и линкуется с glibc 2.35 — порог задан сборкой на
+                Ubuntu 22.04. Это покрывает Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+ и Arch.
+                Это не «работает везде»: если он не стартует, а <code>ldd --version</code>
+                показывает glibc ниже 2.35, ваш дистрибутив под порогом.
+              </p>
+            </div>
+          </div>
+
+          <p class="warn">
+            Обновления: nocx проверяет манифест обновления встроенным публичным ключом Ed25519. Это
+            защищает целостность собственного канала обновлений — но это не удостоверение Apple, и
+            сборка не подписана Developer ID и не нотаризована. Команды восстановления — в
+            <a href="https://github.com/shady2k/nocx#rollback-procedures">README</a>.
+          </p>
+        </section>
+
+        <section class="wrap" id="built">
+          <p class="eyebrow">Из чего собран</p>
+          <dl class="passport">
+            <div>
+              <dt>Бэкенд</dt>
+              <dd>Go — PTY, SSH, сессии, транспорт, настройки</dd>
+            </div>
+            <div>
+              <dt>Терминал</dt>
+              <dd>xterm.js на WebGL</dd>
+            </div>
+            <div>
+              <dt>Строка ввода</dt>
+              <dd>CodeMirror 6</dd>
+            </div>
+            <div>
+              <dt>Интерфейс</dt>
+              <dd>SolidJS</dd>
+            </div>
+            <div>
+              <dt>Оболочка</dt>
+              <dd>Wails v3</dd>
+            </div>
+            <div>
+              <dt>Транспорт</dt>
+              <dd>один WebSocket — бинарный канал данных, управляющий JSON-RPC 2.0</dd>
+            </div>
+          </dl>
+
+          <div class="cta-row" style="margin-top: 2.5rem">
+            <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
+              ><span data-version>Скачать v0.2.0</span></a
+            >
+            <a
+              class="cta cta--quiet"
+              href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
+              >Что изменилось</a
+            >
+          </div>
+        </section>
+      </div>
+
+      <footer class="wrap">
+        <p>
+          nocx под лицензией MIT ·
+          <a href="https://github.com/shady2k/nocx">Исходники</a> ·
+          <a href="https://github.com/shady2k/nocx/releases">Релизы</a> ·
+          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
+            >Заметки к v0.2.0</a
+          >
+        </p>
+        <p><a href="../?lang=en">English</a> · Русский</p>
+      </footer>
+    </main>
+  </body>
+</html>

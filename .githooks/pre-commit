@@ -246,6 +246,18 @@ else
     ok "vitest — skipped (no frontend/ changes staged)"
 fi
 
+# The landing page's structural gate. Cheap (no toolchain, no container), so
+# it runs whenever it could have anything to say. It is also run by the deploy
+# workflow: a page that fails it must not reach the public URL because someone
+# skipped a local hook.
+if printf '%s\n' "$CHANGED" | grep -qE '^(site/|scripts/check-site\.sh$|scripts/site-forbidden-phrases\.txt$)'; then
+    if ! ./scripts/check-site.sh; then
+        FE_RC=1
+    fi
+else
+    ok "check-site — skipped (no site/ changes staged)"
+fi
+
 if [ "$GO_RC" -ne 0 ] || [ "$FE_RC" -ne 0 ]; then
     printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
     exit 1

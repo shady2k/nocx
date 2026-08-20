@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>nocx — a local terminal that keeps your working context</title>
+    <meta
+      name="description"
+      content="A local terminal that keeps your working context: tabs, their output, notes and secret references survive a restart. macOS and Linux, no account, no cloud service of its own, no product telemetry."
+    />
+    <link rel="icon" href="./assets/icon-96.png" />
+    <link rel="apple-touch-icon" href="./assets/icon-256.png" />
+    <link rel="stylesheet" href="./style.css" />
+    <link rel="alternate" hreflang="en" href="https://shady2k.github.io/nocx/" />
+    <link rel="alternate" hreflang="ru" href="https://shady2k.github.io/nocx/ru/" />
+    <link rel="alternate" hreflang="x-default" href="https://shady2k.github.io/nocx/" />
+    <script>
+      /* Locale routing, and the only place it can live: GitHub Pages serves
+       * static files, so there is no server to read Accept-Language. It runs
+       * before paint, only on this page — the Russian page never redirects, so
+       * the two can never bounce a visitor between them.
+       *
+       * A person's explicit choice always wins over their browser's setting.
+       * The switcher links carry ?lang=, which is recorded and honoured on
+       * every later visit; without one, a Russian-preferring browser is sent
+       * to ./ru/ once. With JavaScript off, nobody is redirected and the
+       * switcher in the footer still works. */
+      ;(function () {
+        try {
+          var chosen = new URLSearchParams(location.search).get('lang')
+          if (chosen) localStorage.setItem('nocx-lang', chosen)
+          var pref = chosen || localStorage.getItem('nocx-lang')
+          if (pref) {
+            if (pref === 'ru') location.replace('./ru/')
+            return
+          }
+          var langs = navigator.languages || [navigator.language || '']
+          for (var i = 0; i < langs.length; i++) {
+            if (/^ru\b/i.test(langs[i])) {
+              location.replace('./ru/')
+              return
+            }
+          }
+        } catch (e) {
+          /* Private mode can refuse localStorage. English is the fallback. */
+        }
+      })()
+    </script>
+  </head>
+
+  <body>
+    <main>
+      <div class="wrap hero">
+        <div class="hero__grid">
+          <div>
+            <p class="mark">
+              <img src="./assets/icon-96.png" alt="" />
+              <span>nocx</span>
+            </p>
+
+            <h1>A terminal that keeps your working context</h1>
+
+            <p class="lede">
+              Tabs, the output they printed, your notes and your secret references are all still
+              there after a restart.
+            </p>
+
+            <div class="cta-row">
+              <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
+                ><span data-version>Download v0.2.0</span></a
+              >
+              <a class="cta cta--quiet" href="https://github.com/shady2k/nocx">Source on GitHub</a>
+            </div>
+
+            <p class="spec">
+              macOS universal <span class="dim">·</span> Linux x86_64 AppImage, glibc 2.35+<br />
+              MIT <span class="dim">·</span> <b data-version>v0.2.0</b>, released
+              <span data-released>2026-08-20</span> <span class="dim">·</span> early release, no
+              formal support
+            </p>
+
+            <p class="warn">
+              The macOS build is ad-hoc signed and not notarized — there is no Apple Developer ID —
+              so the first launch needs one Terminal command. It is in
+              <a href="#install">Install</a>, in full, before you download anything.
+            </p>
+          </div>
+
+          <div>
+            <div class="transcript">
+              <div class="transcript__kind">
+                <span>Shell transcript</span>
+                <span>exit 0</span>
+              </div>
+              <pre
+                class="transcript__body"
+              ><span class="cwd">nocx</span> <span class="dim">main</span>
+<span class="cwd">❯</span> <b>git log --oneline -3</b>
+3f7f19c7 fix(readme): the header rule stops being cut by a floated icon
+b637e161 Merge pull request #99 from shady2k/feat/landing
+e750cc84 feat(site): the page has no frames waiting to be filled
+
+<span class="cwd">❯</span> <b>go test ./internal/session/ ./internal/settings/</b>
+<span class="ok">ok</span>    github.com/shady2k/nocx/internal/session   0.155s
+<span class="ok">ok</span>    github.com/shady2k/nocx/internal/settings  0.006s
+
+<span class="cwd">❯</span> <span class="caret"></span></pre>
+            </div>
+            <p class="transcript__note">
+              Real output, captured from this repository — text on this page, not a screenshot of
+              the app. Run the two commands yourself and you get the same thing.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <section class="wrap" id="resume">
+        <p class="eyebrow">01 — Restore</p>
+        <h2>Close it. Open it. Keep working.</h2>
+        <p class="lede">
+          A restart used to cost you everything on screen. Here is exactly what survives one, and
+          the one thing that does not.
+        </p>
+
+        <div class="states">
+          <div class="states__head">
+            <span>What</span><span>Before you close</span><span></span><span>After you open</span>
+          </div>
+          <div class="states__row">
+            <span class="what">Your tabs</span><span>open</span><span class="to">→</span
+            ><span class="after">restored</span>
+          </div>
+          <div class="states__row">
+            <span class="what">The output they printed</span><span>on screen</span
+            ><span class="to">→</span><span class="after">still readable</span>
+          </div>
+          <div class="states__row">
+            <span class="what">The tab you were on</span><span>in front</span
+            ><span class="to">→</span><span class="after">where you land</span>
+          </div>
+          <div class="states__row">
+            <span class="what">Window size, sidebar width, open panel</span
+            ><span>as you left them</span><span class="to">→</span
+            ><span class="after">as you left them</span>
+          </div>
+          <div class="states__row states__row--not">
+            <span class="what">A program that was mid-run</span><span>running</span
+            ><span class="to">→</span><span class="after">not resumed</span>
+          </div>
+        </div>
+
+        <p class="transcript__note">
+          The last row is the honest one: what a program printed comes back, the program itself does
+          not. Prefer a clean start? One switch in Settings turns the whole thing off.
+        </p>
+      </section>
+
+      <section class="wrap" id="workspace">
+        <p class="eyebrow">02 — Workspace</p>
+        <h2>Four panels, about the machine your tab is on</h2>
+        <p class="lede">
+          Tabs group into named, coloured workspaces. The sidebar follows whichever tab is in front,
+          so the context on the left is the context you are typing into.
+        </p>
+
+        <dl class="matrix">
+          <div class="matrix__row">
+            <dt>FILES</dt>
+            <dd>
+              the directory the tab is in, and it follows — <code>cd</code>
+              somewhere and the tree moves, with no click and no tab switch
+            </dd>
+          </div>
+          <div class="matrix__row">
+            <dt>GIT</dt>
+            <dd>
+              changed files with line counts · stage · unstage · commit · log — and it refuses what
+              git refuses, visibly
+            </dd>
+          </div>
+          <div class="matrix__row">
+            <dt>PORTS</dt>
+            <dd>what something in the tab is listening on, and the tunnels you forwarded</dd>
+          </div>
+          <div class="matrix__row">
+            <dt>NOTES</dt>
+            <dd>
+              opens as a tab · saves as you pause · found later by any word inside it, not only its
+              title
+            </dd>
+          </div>
+          <div class="matrix__row">
+            <dt>HISTORY</dt>
+            <dd>
+              encrypted on disk · survives a restart · bounded by retention in days, a disk ceiling
+              and a per-command output cap
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="wrap" id="secrets">
+        <p class="eyebrow">03 — Secrets</p>
+        <h2>A reference where the key used to be</h2>
+        <p class="lede">
+          Run a command with a key in it and the block offers to store it. What changes is nocx's
+          own record of that command:
+        </p>
+
+        <dl class="flow">
+          <div class="flow__row">
+            <dt>you type</dt>
+            <dd>TOKEN=&lt;value&gt; ./deploy.sh</dd>
+          </div>
+          <div class="flow__step">↓ &nbsp;save to vault</div>
+          <div class="flow__row">
+            <dt>nocx's record</dt>
+            <dd>TOKEN=<span class="cwd">[vault reference]</span> ./deploy.sh</dd>
+          </div>
+          <div class="flow__row">
+            <dt>the vault</dt>
+            <dd><span class="dim">encrypted value</span></dd>
+          </div>
+          <div class="flow__step">↓ &nbsp;recall the command, unlock</div>
+          <div class="flow__row">
+            <dt>on run</dt>
+            <dd><span class="ok">reference resolved</span></dd>
+          </div>
+        </dl>
+
+        <p class="transcript__note">
+          That is a claim about nocx's record of the command, and nothing wider. Connection
+          passwords and key passphrases live in the same vault.
+        </p>
+      </section>
+
+      <section class="wrap" id="ask">
+        <p class="eyebrow">04 — Ask</p>
+        <h2>Ask about the output, without leaving the scrollback</h2>
+        <p class="lede">
+          Select what a finished command printed, and a chip naming that command appears in your
+          input line. A switch beside the prompt sends the line to the assistant instead of the
+          shell, and the answer arrives as a block in the same scrollback — no chat pane, no mode to
+          leave.
+        </p>
+
+        <div class="cols">
+          <div>
+            <h3>You attach</h3>
+            <p>The text of the frames you picked, and nothing you did not pick.</p>
+          </div>
+          <div>
+            <h3>You ask</h3>
+            <p>Your question, on the same line you can read before sending it.</p>
+          </div>
+          <div>
+            <h3>Your endpoint receives</h3>
+            <p>
+              A system rule marking frame content as data rather than instructions, your question,
+              and that attached text, labelled.
+            </p>
+          </div>
+        </div>
+
+        <p class="warn">
+          nocx ships an integration, not a model — you configure the endpoint, and retention is your
+          provider's. A question with no attached frames carries only the question. Over plain http
+          nocx reaches loopback and private addresses only, checking the address it actually
+          resolved and connected to on every request and every redirect; credentials are dropped on
+          any change of scheme, host or port.
+        </p>
+      </section>
+
+      <section class="wrap" id="edit">
+        <p class="eyebrow">05 — The prompt</p>
+        <h2>The command line is an editor</h2>
+        <p class="lede">
+          Built on CodeMirror 6: shell syntax highlighted as you type, commands and paths completed
+          on Tab, the top candidate offered as ghost text.
+        </p>
+
+        <div class="cols cols--two">
+          <div>
+            <h3>Completion</h3>
+            <ul>
+              <li>Tab completes commands and paths</li>
+              <li>directories complete with a trailing slash</li>
+              <li>Tab again walks into them</li>
+              <li>Right accepts the ghost text</li>
+              <li>nothing matches → the panel says so</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Snippets</h3>
+            <ul>
+              <li>save a phrase once, fire it anywhere</li>
+              <li>reaches a program mid-read on stdin</li>
+              <li>
+                multi-line refused without bracketed paste, rather than pasted line by line into
+                something that cannot take it
+              </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" id="boundaries">
+        <p class="eyebrow">06 — Boundaries</p>
+        <h2>What it takes in, and what it never builds around you</h2>
+
+        <div class="cols cols--two">
+          <div>
+            <h3>Imports your hosts</h3>
+            <ul>
+              <li>~/.ssh/config</li>
+              <li>a Tabby export</li>
+              <li>passwords and key passphrases → the vault</li>
+            </ul>
+            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
+              A connection references a secret rather than carrying one.
+            </p>
+          </div>
+          <div>
+            <h3>Not part of nocx</h3>
+            <ul>
+              <li>an account — nothing to sign up for</li>
+              <li>a cloud service of its own</li>
+              <li>product telemetry</li>
+              <li>cloud sync</li>
+            </ul>
+            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
+              The network it touches is the network you point it at: your hosts, the assistant
+              endpoint you configured, and a check for its own updates. There is no analytics on
+              this page either — GitHub keeps ordinary server logs for it and for downloads, which
+              is theirs.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <div class="zone">
+        <section class="wrap" id="install">
+          <p class="eyebrow">Install — early release</p>
+          <h2>What will happen when you open it</h2>
+
+          <div class="cols cols--two">
+            <div>
+              <h3>macOS · universal .dmg</h3>
+              <p style="margin-bottom: 1rem">
+                Open the <code>.dmg</code>, drag nocx into Applications. There is no Apple Developer
+                ID, so the build is ad-hoc signed rather than signed by an identity Apple can
+                attest, and it is not notarized — macOS quarantines it on download. Clear that once:
+              </p>
+              <pre
+                class="cmd"
+              ><code>xattr -dr com.apple.quarantine /Applications/nocx.app</code></pre>
+              <p>
+                Then open it normally; later in-app updates do not re-quarantine it. The reasoning
+                is in
+                <a
+                  href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
+                  >ADR-0003</a
+                >.
+              </p>
+            </div>
+            <div>
+              <h3>Linux · x86_64 AppImage</h3>
+              <pre class="cmd"><code>chmod +x nocx-*-linux-amd64.AppImage
+./nocx-*-linux-amd64.AppImage</code></pre>
+              <p>
+                It bundles its own GTK 3 and WebKitGTK, and links against glibc 2.35 — the floor set
+                by building on Ubuntu 22.04. That covers Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL
+                9+ and Arch. It is not "runs everywhere": if it will not start and
+                <code>ldd --version</code> reports a glibc below 2.35, your distribution is under
+                the floor.
+              </p>
+            </div>
+          </div>
+
+          <p class="warn">
+            Updates: nocx verifies its update manifest with an embedded Ed25519 public key. That
+            protects the integrity of its own update channel — it is not an Apple attestation, and
+            the app is neither Developer ID signed nor notarized. Recovery commands are in the
+            <a href="https://github.com/shady2k/nocx#rollback-procedures">README</a>.
+          </p>
+        </section>
+
+        <section class="wrap" id="built">
+          <p class="eyebrow">Built with</p>
+          <dl class="passport">
+            <div>
+              <dt>Backend</dt>
+              <dd>Go — PTY, SSH, session, transport, settings</dd>
+            </div>
+            <div>
+              <dt>Terminal</dt>
+              <dd>xterm.js on WebGL</dd>
+            </div>
+            <div>
+              <dt>Prompt</dt>
+              <dd>CodeMirror 6</dd>
+            </div>
+            <div>
+              <dt>UI</dt>
+              <dd>SolidJS</dd>
+            </div>
+            <div>
+              <dt>Shell</dt>
+              <dd>Wails v3</dd>
+            </div>
+            <div>
+              <dt>Transport</dt>
+              <dd>one WebSocket — binary data plane, JSON-RPC 2.0 control plane</dd>
+            </div>
+          </dl>
+
+          <div class="cta-row" style="margin-top: 2.5rem">
+            <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
+              ><span data-version>Download v0.2.0</span></a
+            >
+            <a
+              class="cta cta--quiet"
+              href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
+              >Read what changed</a
+            >
+          </div>
+        </section>
+      </div>
+
+      <footer class="wrap">
+        <p>
+          nocx is MIT licensed ·
+          <a href="https://github.com/shady2k/nocx">Source</a> ·
+          <a href="https://github.com/shady2k/nocx/releases">Releases</a> ·
+          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
+            >v0.2.0 notes</a
+          >
+        </p>
+        <p>English · <a href="./ru/?lang=ru">Русский</a></p>
+      </footer>
+    </main>
+  </body>
+</html>

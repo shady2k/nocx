@@ -1,0 +1,73 @@
+# The landing page. No build step by design: site/ is hand-written static
+# files, and keeping npm out of this job keeps it clear of the containerized
+# runners that already serialize on one Docker daemon (nocx-x6z3).
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'scripts/check-site.sh'
+      - 'scripts/site-forbidden-phrases.txt'
+      - '.github/workflows/pages.yml'
+  # A release alone must be able to refresh the page: the version and date are
+  # written into the HTML, so without this trigger the site keeps advertising
+  # the previous release until somebody happens to touch site/.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. Queue rather than cancel: a superseded run has
+# already been merged to main, so its content is not stale, it is early.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, for the version stamp below
+
+      # The page states a version and a release date. They are committed so a
+      # local preview is truthful, and rewritten here so a release that never
+      # touched site/ still updates the live page. Both pages carry them in
+      # data-version and data-released; check-site.sh compares the committed
+      # text with the same tag this step reads, so the two cannot disagree.
+      - name: stamp the released version
+        run: |
+          set -euo pipefail
+          tag="$(git describe --tags --abbrev=0)"
+          date="$(git log -1 --format=%cs "$tag")"
+          echo "stamping $tag ($date)"
+          for f in site/index.html site/ru/index.html; do
+            perl -0pi -e "s{(<b data-version>)[^<]*(</b>)}{\${1}$tag\${2}}g" "$f"
+            perl -0pi -e "s{(<span data-released>)[^<]*(</span>)}{\${1}$date\${2}}g" "$f"
+            perl -0pi -e "s{(<span data-version>)([^v<]*)v[0-9]+\.[0-9]+\.[0-9]+(</span>)}{\${1}\${2}$tag\${3}}g" "$f"
+          done
+          grep -o 'data-version>[^<]*' site/index.html
+
+      # The same gate the pre-commit hook runs. A page that fails it must not
+      # reach the public URL just because someone bypassed a local hook.
+      - name: check-site
+        run: ./scripts/check-site.sh
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

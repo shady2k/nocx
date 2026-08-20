@@ -1,0 +1,48 @@
+# Phrasings the landing page may never contain. See spec §7 (the honesty
+# ledger) in .internal/specs/2026-08-20-github-landing-design.md — each line
+# below is a row of that table. Matching is literal and case-insensitive.
+#
+# This file cannot check that a claim is true. It refuses the specific
+# wordings already known to be false, which is the failure that actually
+# recurs: a later author reaches for a familiar marketing phrase without
+# knowing what it costs here.
+#
+# Blank lines and lines starting with # are ignored.
+
+# The build is ad-hoc signed (release.yml:211), not unsigned.
+unsigned
+
+# Reads as Apple attestation, which no part of this is.
+secure updates
+
+# An integration with a user-configured endpoint ships; a model does not.
+built-in AI
+works with any model
+private AI
+
+# False the moment the assistant reaches a remote endpoint.
+your data never leaves
+never leaves your machine
+never leave your machine
+
+# The vault rewrites our own record of a command. It makes no claim about
+# PTY output, shell history, the remote host's logs, the clipboard or swap.
+zero-knowledge
+end-to-end encrypted
+military-grade
+bank-level
+leak-proof
+secrets never
+
+# Not demonstrated, and the page says early release instead.
+production-ready
+enterprise-ready
+battle-tested
+
+# It is diff, stage, commit and log.
+full git client
+complete git
+
+# The AppImage bundles GTK and WebKitGTK and still needs a kernel and glibc.
+no dependencies
+zero dependencies

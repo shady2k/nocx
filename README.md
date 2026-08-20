@@ -1,27 +1,45 @@
+<img src="site/assets/icon-256.png" alt="" width="80">
+
 # nocx
 
 A local-first terminal with GPU-accelerated rendering and a built-in SSH
-manager — no cloud, no login, no telemetry.
+manager. No account, no cloud service of its own, no product telemetry — the
+network it touches is the network you point it at.
+
+**[shady2k.github.io/nocx](https://shady2k.github.io/nocx/)** — what it does, and how to install it.
+
 **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
-Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
+Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
-**Status:** MVP in progress. Local PTY over WebSocket works; SSH client, tabs,
-and cwd features are under active development. macOS + Linux (AppImage).
+**Status:** `v0.2.0`, early release, no formal support. macOS (universal) and
+Linux (x86_64 AppImage). Tabs and workspaces, session restore, the sidebar
+(Files, Git, Ports, Notes), encrypted command history, the vault, snippets and
+the assistant all ship — see
+[the v0.2.0 notes](docs/release-notes/v0.2.0.md) for what each one does.
+
+> An earlier version of this line said SSH, tabs and cwd were "under active
+> development" long after they shipped. It is named rather than quietly
+> replaced because a status line is the one part of a README a reader trusts
+> without checking, and this one was wrong for two releases.
 
 ## What makes it different
 
 Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stakes;
-the wedge is the _combination_, all local in one app: Ghostty-grade rendering +
-an integrated SSH manager + (later) a secrets vault + (later) shell-integration
-blocks, completions, and input-editor in nested shells — with no cloud
-dependency.
+the wedge is the _combination_, all local in one app: Ghostty-grade rendering,
+an integrated SSH manager, a secrets vault that leaves a reference in the
+command instead of the value, command blocks with completions and a real
+editor at the prompt, and an assistant that answers into the same scrollback —
+without an account or a cloud service of ours.
+
+Everything in that list ships as of `v0.2.0`; the vault, the blocks and the
+completions carried a "(later)" here for two releases after they landed.
 
 ## Install (macOS)
 
 Released builds are on the [Releases page](https://github.com/shady2k/nocx/releases). Download the `.dmg`, open it, and drag **nocx** into Applications.
 
-There is no Apple Developer ID, so the build is unsigned and macOS quarantines it on download. Clear that once, on first install:
+There is no Apple Developer ID, so the build is ad-hoc signed rather than signed by an identity Apple can attest, and it is not notarized — macOS quarantines it on download. Clear that once, on first install:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/nocx.app

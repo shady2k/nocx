@@ -359,6 +359,25 @@
   font-family: var(--font-family-mono);
   line-height: 1.2;
   overflow-y: auto;
+  /* THE COMPOSER WRAPS, SO IT NEVER SCROLLS SIDEWAYS — and saying so is what
+     keeps it one height. CM6 ships `.cm-scroller { overflow-x: auto }` for the
+     editors that do scroll horizontally; this one runs `EditorView.lineWrapping`
+     with `word-break: break-word`, so a horizontal scrollbar here is a bar that
+     can never appear.
+
+     It still cost 10px. base.css styles `::-webkit-scrollbar` at 10px, which
+     makes every scrollbar in this app a CLASSIC one: it takes layout space
+     instead of floating over the content. WebKit reserved that gutter for the
+     EMPTY document and did not revisit the decision until the document changed,
+     so the card stood 10px taller until the first keystroke and then snapped
+     down — chip row, Run token and the scrollback hanging above it with it
+     (nocx-6c546). Chromium never reserved it, which is why this only ever
+     showed on macOS, where the app is WKWebView.
+
+     `overflow-x: hidden` rather than a `::-webkit-scrollbar` override on this
+     box: hiding the bar would leave a real overflow unreachable, whereas this
+     states the contract the wrapping already enforces. */
+  overflow-x: hidden;
 }
 
 .nocx-editor .cm-content {

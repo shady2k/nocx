@@ -25,6 +25,7 @@ import { Section } from './ui/section'
 import { Stack } from './ui/stack'
 import { EditableRowList } from './ui/row-list'
 import { showToast } from './ui/toast'
+import { classConflict } from './sandbox-path-classes'
 
 /** The confirmed permission deltas: four class-scoped arrays (possibly empty). */
 export interface SandboxPermissionsResult {
@@ -101,14 +102,14 @@ const SandboxPermissionsDialog: Component<
   // While a native picker is open, the list affordances are inert.
   const [picking, setPicking] = createSignal(false)
 
-  // A path is ACTIVE in a class when it is a checked baseline entry or an
-  // ephemeral addition — exactly what that class grants for this tab.
-  const activeWritable = (path: string) =>
-    (props.baselineWritable.includes(path) && !removedWritable().includes(path)) ||
-    addWritable().includes(path)
-  const activeReadOnly = (path: string) =>
-    (props.baselineReadOnly.includes(path) && !removedReadOnly().includes(path)) ||
-    addReadOnly().includes(path)
+  // What a class ACTUALLY grants for this tab: the baseline entries still
+  // checked, plus the ephemeral additions. The conflict rule needs the whole
+  // list rather than a membership test, because containment is not membership.
+  const activeList = (
+    baseline: readonly string[],
+    removed: () => readonly string[],
+    additions: () => readonly string[],
+  ): string[] => [...baseline.filter((path) => !removed().includes(path)), ...additions()]
 
   // Shared picker machinery for one class: refuse a cross-class duplicate,
   // re-enable an unchecked baseline entry, otherwise append up to the bound.
@@ -118,14 +119,18 @@ const SandboxPermissionsDialog: Component<
       const picked = await props.openDirectory()
       // Empty path = cancelled: a no-op.
       if (!picked.path) return
-      // A path already granted by the other class cannot be granted again
-      // here: the pick is refused with visible feedback, never a
-      // contradictory delta.
-      if (args.otherActive(picked.path)) {
-        showToast({
-          level: 'danger',
-          message: `"${picked.path}" is already in the other folders list. Remove it there first to change its access.`,
-        })
+      // What the other class already grants may contradict this pick. The
+      // rule is stated once, in sandbox-path-classes, so this surface cannot
+      // refuse something the backend permits — a read & write folder inside a
+      // read-only one is the two-class exception, not a conflict (nocx-61alt).
+      const conflict = classConflict(
+        args.target,
+        picked.path,
+        activeList(props.baselineReadOnly, removedReadOnly, addReadOnly),
+        activeList(props.baselineWritable, removedWritable, addWritable),
+      )
+      if (conflict !== null) {
+        showToast({ level: 'danger', message: conflict })
         return
       }
       // Re-picking an unchecked baseline entry means re-enable that grant. Do
@@ -166,10 +171,10 @@ const SandboxPermissionsDialog: Component<
 
   const addWritableDirectory = () => {
     void pickDirectory({
+      target: 'readWrite',
       baseline: props.baselineWritable,
       additions: addWritable,
       removed: removedWritable,
-      otherActive: activeReadOnly,
       setAdditions: setAddWritable,
       setRemoved: setRemovedWritable,
     })
@@ -185,10 +190,10 @@ const SandboxPermissionsDialog: Component<
 
   const addReadOnlyDirectory = () => {
     void pickDirectory({
+      target: 'readOnly',
       baseline: props.baselineReadOnly,
       additions: addReadOnly,
       removed: removedReadOnly,
-      otherActive: activeWritable,
       setAdditions: setAddReadOnly,
       setRemoved: setRemovedReadOnly,
     })
@@ -267,10 +272,11 @@ const SandboxPermissionsDialog: Component<
 /** Shared picker machinery for one class: refuse a cross-class duplicate,
  *  re-enable an unchecked baseline entry, otherwise append up to the bound. */
 interface PickDirectoryArgs {
+  /** Which class this pick would join — the conflict rule is asymmetric. */
+  readonly target: 'readOnly' | 'readWrite'
   readonly baseline: readonly string[]
   readonly additions: () => readonly string[]
   readonly removed: () => readonly string[]
-  readonly otherActive: (path: string) => boolean
   readonly setAdditions: (fn: (prev: readonly string[]) => readonly string[]) => void
   readonly setRemoved: (fn: (prev: readonly string[]) => readonly string[]) => void
 }

@@ -1160,6 +1160,18 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return null
   }
 
+  /** What this surface may say about a pick, before the backend decides. */
+  function sandboxClassConflictFor(key: string, path: string): string | null {
+    const target = sandboxPathClass(key)
+    if (target === null) return null
+    return classConflict(
+      target,
+      path,
+      pathsValue(SANDBOX_READ_ONLY_PATHS_KEY),
+      pathsValue(SANDBOX_WRITABLE_PATHS_KEY),
+    )
+  }
+
   /**
    * Has the user actually changed this setting away from its default?
    *

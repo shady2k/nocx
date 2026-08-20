@@ -198,7 +198,7 @@ describe('settings paths control (sandbox read-only and read & write folders)', 
     expect(setSetting).not.toHaveBeenCalled()
   })
 
-  it('exact peer conflict is refused with visible error and no RPC', async () => {
+  it('the same folder in both classes is refused with a visible error and no RPC', async () => {
     await mount(['/shared'], ['/ro-only'])
     openDirectory.mockResolvedValue({ path: '/shared' })
 
@@ -206,13 +206,13 @@ describe('settings paths control (sandbox read-only and read & write folders)', 
 
     await vi.waitFor(() => {
       const error = pathsList(READ_ONLY_PATHS_KEY).querySelector<HTMLElement>('.ui-field-error')
-      expect(error?.textContent).toContain('peer sandbox list')
+      expect(error?.textContent).toContain('already a read & write folder')
     })
     // No RPC was sent.
     expect(setSetting).not.toHaveBeenCalled()
   })
 
-  it('exact peer conflict on writable side is refused with visible error', async () => {
+  it('the same folder in both classes is refused from the writable side too', async () => {
     await mount([], ['/shared'])
     openDirectory.mockResolvedValue({ path: '/shared' })
 
@@ -220,20 +220,38 @@ describe('settings paths control (sandbox read-only and read & write folders)', 
 
     await vi.waitFor(() => {
       const error = pathsList(WRITABLE_PATHS_KEY).querySelector<HTMLElement>('.ui-field-error')
-      expect(error?.textContent).toContain('peer sandbox list')
+      expect(error?.textContent).toContain('already a read-only folder')
     })
     expect(setSetting).not.toHaveBeenCalled()
   })
 
-  it('non-exact peer path is allowed through to the backend', async () => {
-    // /shared vs /shared/sub — different strings, backend handles containment.
+  // The backend refuses a read-only path below a writable one, so letting the
+  // pick through only moves the refusal somewhere the user cannot read it.
+  // This surface used to compare exact strings, so it did exactly that.
+  it('a read-only folder inside a read & write folder is refused, naming the folder', async () => {
     await mount(['/shared'], [])
     openDirectory.mockResolvedValue({ path: '/shared/sub' })
 
     addButton(READ_ONLY_PATHS_KEY).click()
 
     await vi.waitFor(() => {
-      expect(setSetting).toHaveBeenCalledWith(READ_ONLY_PATHS_KEY, ['/shared/sub'])
+      const error = pathsList(READ_ONLY_PATHS_KEY).querySelector<HTMLElement>('.ui-field-error')
+      expect(error?.textContent).toContain('/shared')
+    })
+    expect(setSetting).not.toHaveBeenCalled()
+  })
+
+  // The reverse nesting is the point of having two classes (ADR-0039): a
+  // writable island inside a broader read-only tree. The surface must not
+  // invent a conflict the backend does not have.
+  it('a read & write folder inside a read-only folder reaches the backend', async () => {
+    await mount([], ['/shared'])
+    openDirectory.mockResolvedValue({ path: '/shared/sub' })
+
+    addButton(WRITABLE_PATHS_KEY).click()
+
+    await vi.waitFor(() => {
+      expect(setSetting).toHaveBeenCalledWith(WRITABLE_PATHS_KEY, ['/shared/sub'])
     })
   })
 })

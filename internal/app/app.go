@@ -670,7 +670,7 @@ func New(opts ...Option) (*App, error) {
 	}
 	sess := session.New(logger, ptf)
 
-	// SSH config resolver
+	// SSH config resolver: shared by both the SSH client and the profile
 	// resolver so the authorization comparison matches canonical hostnames.
 	// AD-4: nocx asks OpenSSH via ssh -G; the injected resolver is the sole
 	// path through which ~/.ssh/config is read.
@@ -2464,7 +2464,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// lane to its session, so a handshake that expired between the two
 	// would have nowhere to land. Registering the axis afterwards is the
 	// safe order — the status is only emitted after the open ack anyway.
-	f.report(cfg.SessionID, shell.Path, transport.IntegrationStarting, ssh.ReasonNone)
+	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
 	// The sandboxed process remains the login shell after authenticated
 	// bootstrap. Keep the ordinary replacement observer active: an exec from
 	// user startup files is still an unexpected takeover inside the cage.

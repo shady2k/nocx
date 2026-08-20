@@ -361,7 +361,15 @@ ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
 
-ci-linux:
+# The job gained a Landlock enforcement smoke, so the target does too — the
+# header of ci.yml says every job here has a local target of the same name that
+# IS the job, and a target that runs a subset is how a green local gate stops
+# meaning anything (nocx-70rqe). It runs OUTSIDE the container deliberately:
+# Landlock is a per-process LSM answered by the host kernel, so a container on a
+# Linux box reproduces it and a Docker Desktop VM on a Mac does not. Where it
+# cannot run it FAILS rather than skips, which is the true statement about that
+# environment — see sandbox-smoke-linux.
+ci-linux: sandbox-smoke-linux
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $(OS_PKGS)
 

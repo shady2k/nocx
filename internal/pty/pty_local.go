@@ -250,6 +250,14 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 // starts bash with an rcfile whatever $SHELL says, and saying otherwise
 // would send the user to fix a file the session never read.
 func (lp *LocalPty) Shell() string {
+	// A sandboxed session's cmd.Path is the enforcement wrapper — the Linux
+	// helper re-exec or sandbox-exec — and naming that would answer a
+	// different question from the one every caller is asking. The policy
+	// records the shell the wrapper goes on to exec, and that is the launched
+	// process the sentence above is about.
+	if lp.prepared != nil && lp.prepared.Policy != nil && lp.prepared.Policy.Shell != "" {
+		return lp.prepared.Policy.Shell
+	}
 	return lp.cmd.Path
 }
 

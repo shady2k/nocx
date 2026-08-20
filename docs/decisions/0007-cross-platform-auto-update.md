@@ -96,6 +96,13 @@ an unimplemented seam.**
   "runs on distributions at or above this baseline", **not** "runs everywhere" —
   the honest scope AppImage can deliver.
 
+  > Revised by [ADR-0035](0035-appimage-carries-webkits-helper-processes.md).
+  > "The GTK plugin bundles WebKitGTK" was true of the library and false of its
+  > helper processes, which the plugin never copied — so until v0.2.0 the
+  > envelope was in fact "Debian-shaped filesystems only", and elsewhere the app
+  > could not start at all. "Tested on the maintainer's distribution" is what
+  > let that ship; the gate now runs the artefact on a foreign distribution.
+
 ## Consequences
 
 - **D1 is reversed and `nocx-mbu` reopens.** `docs/architecture.md:179` ("MVP is

@@ -80,3 +80,7 @@ playwright-report/
 
 # Disposable home for e2e runs (playwright.config.ts home boundary, nocx-ti8w)
 .e2e/
+
+# Python bytecode from the AppImage packaging scripts
+__pycache__/
+*.pyc

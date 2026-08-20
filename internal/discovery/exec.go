@@ -45,6 +45,14 @@ const (
 	// ExecErrLeaseClosed: the exec surface was closed while the command was
 	// in flight — the caller discarded the sample, never a host fact.
 	ExecErrLeaseClosed
+	// ExecErrCommandTooLong: NOCX refused the command, before sending it,
+	// because it is at or above the bound internal/ssh declares for a remote
+	// command (nocx-e4ir3). It is the one kind here that is not a fact about
+	// the host at all, and it is terminal for the reason the others are not:
+	// the command is exactly as long on every retry, so a transient
+	// classification would schedule a backoff for a probe that can never
+	// succeed.
+	ExecErrCommandTooLong
 )
 
 func (k ExecErrorKind) String() string {
@@ -57,6 +65,8 @@ func (k ExecErrorKind) String() string {
 		return "connection lost"
 	case ExecErrLeaseClosed:
 		return "lease closed"
+	case ExecErrCommandTooLong:
+		return "command refused by nocx: longer than the bound"
 	default:
 		return "exec failed"
 	}

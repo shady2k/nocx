@@ -444,6 +444,12 @@ func (d *Detector) runStep(ctx context.Context, st *step) probeResult {
 			return probeResult{kind: outcomeRefused, class: "additional sessions refused"}
 		case errors.As(err, &ee) && ee.Kind == ExecErrExecProhibited:
 			return probeResult{kind: outcomeRefused, class: "exec request refused"}
+		case errors.As(err, &ee) && ee.Kind == ExecErrCommandTooLong:
+			// Refused by us, not by the host, and refused identically on
+			// every retry — so it is terminal, and the class says who did
+			// it. The ladder never guesses about a host, and this is the
+			// one outcome where there is nothing to guess (nocx-e4ir3).
+			return probeResult{kind: outcomeRefused, class: "probe refused by nocx: longer than the remote-command bound"}
 		case errors.As(err, &ee) && ee.Kind == ExecErrConnectionLost:
 			return probeResult{kind: outcomeTransient, class: "connection lost"}
 		case errors.As(err, &ee) && ee.Kind == ExecErrLeaseClosed:

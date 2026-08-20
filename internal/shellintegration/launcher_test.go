@@ -142,123 +142,47 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 	return string(out)
 }
 
-// TestShellUnknownGetsPosixTier pins the deliberate decision (nocx-518d):
-// ShellUnknown is the minimal tier, not a refusal — spec §6 names dash /
-// busybox ash / POSIX sh as a real, verified tier, and refusing them
-// forever would contradict D4. The posix command is POSIX-only (parsed by
-// an explicit /bin/sh, execs ${SHELL:-/bin/sh}), so an unknown shell that
-// ignores ENV still gets a plain shell — the refusal outcome, minus the
-// refusal.
-func TestShellUnknownGetsPosixTier(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{})
-	if !ok {
-		t.Fatalf("ShellUnknown refused: reason=%q", reason)
-	}
-	if reason != ReasonNone {
-		t.Errorf("reason = %q, want none", reason)
-	}
-	if !strings.Contains(cmd, "/bin/sh -c ") {
-		t.Errorf("posix command does not run through an explicit /bin/sh: %q", cmd)
-	}
-	if !strings.Contains(cmd, "nocx-posix") {
-		t.Errorf("posix command missing transient dir marker: %q", cmd)
-	}
-	// The exec target is ${SHELL:-/bin/sh} inside a POSIX-only payload,
-	// never a named bash/zsh binary — the far shell is unknown by
-	// definition. The check is structural: the command's exec tail is the
-	// /bin/sh form, and the bash/zsh exec tails appear nowhere. A raw
-	// "exec bash" substring would be noise — the escaped bundle bytes in
-	// the publish prelude legitimately contain the bash and zsh tiers'
-	// text (including the launch carrier's bash dispatch arm).
-	if !strings.Contains(cmd, shExecTail) {
-		t.Errorf("posix command does not exec through /bin/sh: %q", cmd)
-	}
-	if strings.Contains(cmd, bashExecTail) || strings.Contains(cmd, autoExecTail) {
-		t.Errorf("posix command must never exec a named bash binary: %q", cmd)
-	}
-	if !strings.Contains(cmd, `exec "${SHELL:-/bin/sh}" -l`) {
-		t.Errorf("posix command does not exec the login shell via ${SHELL:-/bin/sh}: %q", cmd)
-	}
-}
+// The dispatch and the argv cap that used to be asserted here went with the
+// command they belonged to. FullBootstrapCommand chose a tier per ShellKind,
+// refused an unmapped kind, and refused anything past maxFullLauncherLen —
+// all three are now the bounded carrier's, and carrier_test.go asserts them
+// against a bound two orders smaller. What stays here is the far side's own
+// behaviour: the tiers themselves, driven on a real pty from an installed
+// generation, which is how they actually start now.
 
-// TestUnmappedShellKindRefused is the default-arm tripwire: a ShellKind that
-// has no launcher must refuse loudly rather than silently get the posix
-// tier — a new kind is a decision, not a fallback.
-func TestUnmappedShellKindRefused(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellKind("fish"), LaunchOptions{})
-	if ok {
-		t.Fatalf("unmapped kind accepted; got command %q", cmd)
+// tierCommand builds the command that brings up one tier, the way the far
+// side brings it up now: the bundle is PUBLISHED into home by the product's
+// own publisher, and the tier's rcfile sources the installed generation
+// file. That is the launch carrier's shape, and it replaced a command that
+// carried the whole bundle and both bearers in its own text.
+//
+// The returned env additions are what the carrier exports before it execs —
+// without NOCX_GENERATION the source line names no file and the session is a
+// conventional terminal, which is the fail-open direction and not what these
+// tests are about.
+func tierCommand(t *testing.T, kind ShellKind, home string, opts LaunchOptions) (string, []string) {
+	t.Helper()
+	root := filepath.Join(home, dirName)
+	res, err := NewPublisher(testLogger(), NewOSFS(), root).Publish(launchBundle())
+	if err != nil {
+		t.Fatalf("publish the bundle into the fixture home: %v", err)
 	}
-	if reason != ReasonUnsupportedShell {
-		t.Errorf("reason = %q, want %q", reason, ReasonUnsupportedShell)
-	}
-	if cmd != "" {
-		t.Errorf("command = %q, want empty", cmd)
-	}
-}
-
-// TestEnhancedRequiresSessionID pins the pinned precondition "never empty
-// when Enhanced": the launcher fails closed rather than emit a marker-only
-// session the ownership protocol cannot anchor.
-func TestEnhancedRequiresSessionID(t *testing.T) {
-	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, reason, ok := NewRemoteLauncher().StartCommand(kind, LaunchOptions{Enhanced: true})
-		if ok {
-			t.Errorf("%s: enhanced with empty SessionID accepted; got %q", kind, cmd)
-		}
-		if reason != ReasonUnsupportedShell {
-			t.Errorf("%s: reason = %q, want unsupported-shell", kind, reason)
-		}
-	}
-}
-
-// TestLauncherCommandsHaveNoNul: the payload must contain no NUL (spec §4.1)
-// — a NUL would corrupt the rcfile stream.
-func TestLauncherCommandsHaveNoNul(t *testing.T) {
-	l := NewRemoteLauncher()
-	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, _, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
-		if !ok {
-			t.Fatalf("%s: refused", kind)
-		}
-		if strings.ContainsRune(cmd, 0) {
-			t.Errorf("%s: command contains a NUL byte", kind)
-		}
-	}
-}
-
-// TestLauncherCommandsUnderCap: the full launchers sit well below the chosen
-// conservative ARG_MAX bound (see maxFullLauncherLen).
-func TestLauncherCommandsUnderCap(t *testing.T) {
-	l := NewRemoteLauncher()
-	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, _, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
-		if !ok {
-			t.Fatalf("%s: refused", kind)
-		}
-		if len(cmd) > maxFullLauncherLen {
-			t.Errorf("%s: command is %d bytes, cap is %d", kind, len(cmd), maxFullLauncherLen)
-		}
-	}
-}
-
-// TestLauncherRefusesOverCap lowers the cap to prove the refusal path: a
-// launcher that would outgrow the remote ARG_MAX must refuse, not emit a
-// command the far host cannot exec.
-func TestLauncherRefusesOverCap(t *testing.T) {
-	old := maxFullLauncherLen
-	maxFullLauncherLen = 256
-	t.Cleanup(func() { maxFullLauncherLen = old })
-
-	l := NewRemoteLauncher()
-	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown} {
-		cmd, reason, ok := l.StartCommand(kind, LaunchOptions{Enhanced: true, SessionID: "abcdef0123456789"})
-		if ok {
-			t.Errorf("%s: over-cap command accepted (%d bytes)", kind, len(cmd))
-		}
-		if reason != ReasonUnsupportedShell || cmd != "" {
-			t.Errorf("%s: reason=%q cmd=%q, want unsupported-shell and empty", kind, reason, cmd)
-		}
+	env := []string{"NOCX_GENERATION=" + res.Generation}
+	switch kind {
+	case ShellBash:
+		arg := bashArgFor(bashRcfile(remoteLogin, launcherEnvBlock(opts), launchSourceLine("nocx.bash"),
+			capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery)))
+		return "exec /usr/bin/env -u BASH_ENV bash -c " + ShellQuote(arg), env
+	case ShellZsh:
+		arg := zshArgFor(zshRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.zsh"),
+			capabilityLiteral(zshUnsetExport, opts.Capability, opts.Recovery)))
+		return "exec /usr/bin/env -u BASH_ENV zsh -c " + ShellQuote(arg), env
+	case ShellUnknown:
+		arg := posixArgFor(posixEnvFile(launcherEnvBlock(opts), launchSourceLine("nocx.posix")))
+		return "exec /usr/bin/env -u BASH_ENV /bin/sh -c " + ShellQuote(arg), env
+	default:
+		t.Fatalf("no tier command for shell kind %q", kind)
+		return "", nil
 	}
 }
 
@@ -308,13 +232,10 @@ func TestBashLauncher_EmitsMarkersAndRunsUserRc(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-1"})
-	if !ok {
-		t.Fatal("bash launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellBash, home, LaunchOptions{Enhanced: true, SessionID: "test-session-1"})
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"},
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...),
 		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"; echo "ZERO=$0"`, "exit")
 
 	ms := extractOscMarkers(out)
@@ -346,13 +267,10 @@ func TestBashLauncher_BaselineKeepsVisiblePrompt(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{})
-	if !ok {
-		t.Fatal("bash launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellBash, home, LaunchOptions{})
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...), "exit")
 
 	ms := extractOscMarkers(out)
 	if countMarkers(ms, "A") == 0 || countMarkers(ms, "B") == 0 {
@@ -373,14 +291,11 @@ func TestBashLauncher_NoHomeWrites(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-2"})
-	if !ok {
-		t.Fatal("bash launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellBash, home, LaunchOptions{Enhanced: true, SessionID: "test-session-2"})
 
 	before := snapshotTree(t, home)
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo hello", "exit")
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...), "echo hello", "exit")
 	after := snapshotTree(t, home)
 
 	// The launcher now publishes the bundle under ~/.nocx by design
@@ -423,13 +338,10 @@ func TestBashLauncher_BashEnvNotExecuted(t *testing.T) {
 	if err := os.WriteFile(envScript, []byte("echo ran > \"$HOME/bashenv-ran\"\n"), 0o600); err != nil {
 		t.Fatalf("write BASH_ENV script: %v", err)
 	}
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-3"})
-	if !ok {
-		t.Fatal("bash launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellBash, home, LaunchOptions{Enhanced: true, SessionID: "test-session-3"})
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm", "BASH_ENV=" + envScript}, "exit")
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm", "BASH_ENV=" + envScript}, tierEnv...), "exit")
 
 	if _, err := os.Stat(filepath.Join(home, "bashenv-ran")); !os.IsNotExist(err) {
 		t.Errorf("BASH_ENV code executed in the outer bash -c (marker file exists): %v", err)
@@ -447,13 +359,10 @@ func TestBashLauncher_UserRcExecPreventsInstall(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "exec bash --norc\n")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-4"})
-	if !ok {
-		t.Fatal("bash launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellBash, home, LaunchOptions{Enhanced: true, SessionID: "test-session-4"})
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo alive", "exit")
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...), "echo alive", "exit")
 
 	ms := extractOscMarkers(out)
 	if countMarkers(ms, "A") != 0 {
@@ -472,13 +381,10 @@ func TestBashLauncher_RunsUnderDash(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{Enhanced: true, SessionID: "test-session-5"})
-	if !ok {
-		t.Fatal("bash launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellBash, home, LaunchOptions{Enhanced: true, SessionID: "test-session-5"})
 
 	out := runLauncherOnPTY(t, dash, cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"},
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...),
 		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"`, "exit")
 
 	ms := extractOscMarkers(out)
@@ -498,13 +404,10 @@ func TestZshLauncher_TransientDirFlow(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-6"})
-	if !ok {
-		t.Fatal("zsh launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellZsh, home, LaunchOptions{Enhanced: true, SessionID: "test-session-6"})
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"},
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...),
 		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"; echo "ZERO=$0"`, "exit")
 
 	ms := extractOscMarkers(out)
@@ -538,13 +441,10 @@ func TestZshLauncher_CleanupAfterEarlyExit(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "exit 7\n")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-7"})
-	if !ok {
-		t.Fatal("zsh launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellZsh, home, LaunchOptions{Enhanced: true, SessionID: "test-session-7"})
 
 	runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"})
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...))
 	assertNoTransientDir(t, tmp)
 }
 
@@ -555,15 +455,12 @@ func TestZshLauncher_CleanupAfterSyntaxError(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "if [[\n")
 	tmp := t.TempDir()
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{Enhanced: true, SessionID: "test-session-8"})
-	if !ok {
-		t.Fatal("zsh launcher refused")
-	}
+	cmd, tierEnv := tierCommand(t, ShellZsh, home, LaunchOptions{Enhanced: true, SessionID: "test-session-8"})
 
 	// The parse error may end the session immediately or leave the shell
 	// at a prompt; send exit in either case (benign if already gone).
 	runLauncherOnPTY(t, "/bin/sh", cmd,
-		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
+		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...), "exit")
 	assertNoTransientDir(t, tmp)
 }
 
@@ -651,7 +548,8 @@ func TestZshLauncher_TransientDirRemovedDespiteAForeignFile(t *testing.T) {
 	if err := os.MkdirAll(bootstrap, 0o700); err != nil {
 		t.Fatalf("mkdir bootstrap: %v", err)
 	}
-	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript, "", "")
+	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript,
+		capabilityLiteral(zshUnsetExport, "", ""))
 	if err := os.WriteFile(filepath.Join(bootstrap, ".zshrc"), []byte(rc), 0o600); err != nil {
 		t.Fatalf("write bootstrap rc: %v", err)
 	}

@@ -34,73 +34,152 @@ const cdInto = async (page: Page, dir: string) => {
 }
 
 /**
- * Wait until this tab actually HAS the command-existence snapshot.
+ * Wait until this tab actually HAS command names — BOTH halves of them.
  *
- * A spec that asserts something about command completion has the snapshot as
- * its premise, and the premise is not free. `nocx.bash` starts `compgen -c |
- * sort -u` in the background at source time and can only EMIT it from a
- * prompt — a shell idle in readline runs no traps, which `nocx.bash` and
- * suggest/controller.ts both state in as many words (nocx-z9s9.16). The first
- * prompt grants it 250 ms of grace and then gives up for good: the
- * `__nocx_snapshot_waiting` latch is set once, so every later delivery
- * depends on there being a LATER PROMPT.
+ * A spec that asserts something about command completion has that as its
+ * premise, and the premise is not free. Since the carrier design's §8 split
+ * there are two halves and they arrive by two different routes:
  *
- * So on a machine where compgen outruns 250 ms the snapshot is simply absent
- * until the user runs something, and the product says exactly that in the
- * panel — "they arrive after your next command". Pressing Tab cannot advance
- * it. A spec that polls Tab waiting for the snapshot is therefore waiting for
+ *   - the SESSION-LOCAL half — aliases, builtins, keywords and functions —
+ *     which `nocx.bash` enumerates in the background at source time and can
+ *     only EMIT from a prompt, because a shell idle in readline runs no traps
+ *     (nocx.bash and suggest/controller.ts both say so in as many words,
+ *     nocx-z9s9.16). The first prompt grants it 250 ms of grace and then
+ *     gives up for good: `__nocx_snapshot_waiting` is latched once, so every
+ *     later delivery depends on there being a LATER PROMPT;
+ *   - the SHARED half — the executables on this target's PATH — which the
+ *     backend enumerates once per host and the renderer fetches over
+ *     shell.commandNames when the session opens. It needs no prompt, but it
+ *     is a network-shaped request and this is a poll, not a sleep.
+ *
+ * So a spec that polls Tab waiting for the session-local half is waiting for
  * an event its own polling has excluded, and will burn its entire budget.
- *
  * That is not hypothetical: it is why `no candidates` failed on both engines
  * in CI while passing locally. 250 ms is a claim about machine speed, and
  * `ubuntu-latest` is 4 vCPU where a developer's Mac is not — the same shape as
  * the tab-title races in multi-tab-input.spec.ts.
  *
- * This produces prompts, which is the one thing that does deliver it, and
- * checks the feature rather than a clock: `printf` is a bash builtin, so it is
- * in `compgen -c` on every machine, and offering it is proof the snapshot
- * landed. `true` is the no-op whose prompt carries it — a builtin, so it
- * cannot fail for want of a PATH entry.
+ * This produces prompts, which is the one thing that delivers the first half,
+ * and checks the FEATURE rather than a clock. It probes for one name from
+ * each half, and the two probes are chosen so neither can be satisfied by the
+ * other: `printf` is a bash BUILTIN, so it can only come from the shell's own
+ * tables, and `uname` is a PATH executable and no builtin, so it can only
+ * come from the backend's shared scan. `true` is the no-op whose prompt
+ * carries the local half — a builtin, so it cannot fail for want of a PATH
+ * entry.
  */
-const PROBE = 'prin'
+const LOCAL_HALF_PROBE = { prefix: 'prin', name: 'printf' }
+const SHARED_HALF_PROBE = { prefix: 'unam', name: 'uname' }
 
-const commandSnapshotReady = async (page: Page) => {
-  // A row for `printf` whose SOURCE BADGE says `command` — not merely a row
-  // containing the text. Every spec in a run shares one home and one history
-  // (nocx-8rda), and this file runs `printf` commands, so `prin` matches a
-  // HISTORY row long before any snapshot exists. Matching on text alone made
-  // the probe report "snapshot ready" against a history hit, and the caller
-  // then failed on the real assertion with "still loading" — the probe
-  // answering a different question from the one it was asked.
-  const offered = page
-    .locator(`${DROPDOWN} .ui-floating-panel__row`)
-    .filter({ hasText: 'printf' })
-    .filter({ has: page.locator('.ui-floating-panel__source', { hasText: 'command' }) })
-    .first()
+/**
+ * What the person has typed, with the completion's inline ghost taken out.
+ *
+ * The ghost is a `span.nocx-editor-ghost` INSIDE the content DOM, so the
+ * element's own text is the draft plus whatever the top candidate would
+ * complete it to — `unam` reads as `uname`. Every reader below is asking
+ * about the draft.
+ */
+const draft = (page: Page) =>
+  page.evaluate(() => {
+    const content = document.querySelector<HTMLElement>('.pane.active .nocx-editor-input')
+    if (content === null) return ''
+    const copy = content.cloneNode(true) as HTMLElement
+    for (const ghost of copy.querySelectorAll('.nocx-editor-ghost')) ghost.remove()
+    return copy.textContent ?? ''
+  })
+
+/**
+ * Backspace until the draft is OBSERVED empty, rather than as many times as
+ * characters were typed.
+ *
+ * A counted erase assumes Tab left the document exactly as the typing did,
+ * and Tab does not: with one way to complete the token it applies it
+ * (controller.applyUniqueCompletion), so four keystrokes of `unam` become the
+ * five characters of `uname` and the fourth Backspace leaves a `u` behind.
+ * That single character then rides into everything after it — `prin` becomes
+ * `uprin`, which matches no command, so the readiness poll below can never
+ * succeed and burns its whole budget; and when it escapes the poll it lands
+ * in the test's own assertion, where the suite reported
+ * `uzzznocxe2enope…` for a line it had just typed as `zzznocxe2enope…`.
+ *
+ * Bounded, and waiting on the document rather than on a duration.
+ */
+const clearDraft = async (page: Page) => {
   await expect
     .poll(
       async () => {
-        await page.keyboard.type(PROBE)
-        await page.keyboard.press('Tab')
-        // A BOUNDED WAIT, not isVisible(). isVisible() answers about this
-        // instant, and the instant after Tab is before the panel has
-        // rendered — so it reports "no snapshot" on a tab that has one, every
-        // time, and the poll can never succeed.
-        const ready = await offered
-          .waitFor({ state: 'visible', timeout: 2_000 })
-          .then(() => true)
-          .catch(() => false)
-        // Esc closes exactly the panel and keeps the draft; the draft is then
-        // removed by as many Backspaces as were typed. Deliberately counted
-        // rather than a clear-line binding: what this editor binds to Ctrl-U
-        // is a question about the keymap, and getting it wrong leaves `prin`
-        // in front of whatever the caller types next — a failure that would
-        // read as a product defect.
-        await page.keyboard.press('Escape')
-        for (let i = 0; i < PROBE.length; i++) await page.keyboard.press('Backspace')
-        if (ready) return 'ready'
-        // The delivery point, and the only one. Run a no-op so the next
-        // prompt carries the payload, exactly as the panel tells the user to.
+        const text = await draft(page)
+        if (text !== '') await page.keyboard.press('Backspace')
+        return text
+      },
+      { timeout: 5_000, intervals: [50] },
+    )
+    .toBe('')
+}
+
+/**
+ * Type a prefix, press Tab, and report whether `name` was offered as a
+ * COMMAND — by either of the two things the product does with a completion.
+ *
+ * 1. A row in the panel carrying the `command` SOURCE BADGE. The badge is
+ *    what makes it an answer to the question asked: every spec in a run
+ *    shares one home and one history (nocx-8rda), and this file runs `printf`
+ *    commands, so `prin` matches a HISTORY row long before any command names
+ *    exist. Matching on text alone made the probe report "ready" against a
+ *    history hit, and the caller then failed on the real assertion.
+ *
+ * 2. The draft becoming exactly `name`, which is Tab's unique-completion
+ *    path. When the finished candidate list holds exactly ONE way to complete
+ *    the token, Tab completes it and opens no panel at all — the shell's own
+ *    rule, and the owner's. History and snippet rows are excluded from that
+ *    count by `applyUniqueCompletion` itself, so a draft that became `name`
+ *    proves precisely what the badge proves: a non-history candidate that
+ *    completes the word exists.
+ *
+ * Reading only the panel is what broke here. `unam` has exactly one
+ * completion on this host, so Tab applied it and the row never appeared;
+ * whether the panel then re-opened around the completed token was a race
+ * between the providers, which is why the same probe passed on one engine and
+ * spent thirty seconds failing on the other in the same run.
+ */
+const offeredAsCommand = async (page: Page, probe: { prefix: string; name: string }) => {
+  const row = page
+    .locator(`${DROPDOWN} .ui-floating-panel__row`)
+    .filter({ hasText: probe.name })
+    .filter({ has: page.locator('.ui-floating-panel__source', { hasText: 'command' }) })
+    .first()
+  await page.keyboard.type(probe.prefix)
+  await page.keyboard.press('Tab')
+  // A BOUNDED WAIT, not isVisible(). isVisible() answers about this instant,
+  // and the instant after Tab is before the panel has rendered — so it
+  // reports "not offered" on a tab that offers it, every time, and the poll
+  // can never succeed.
+  const inPanel = await row
+    .waitFor({ state: 'visible', timeout: 2_000 })
+    .then(() => true)
+    .catch(() => false)
+  const applied = (await draft(page)) === probe.name
+  // Esc closes exactly the panel and keeps the draft; the draft is then
+  // erased to an observed empty. Deliberately not a clear-line binding: what
+  // this editor binds to Ctrl-U is a question about the keymap, and getting
+  // it wrong leaves the prefix in front of whatever the caller types next —
+  // a failure that would read as a product defect.
+  await page.keyboard.press('Escape')
+  await clearDraft(page)
+  return inPanel || applied
+}
+
+const commandSnapshotReady = async (page: Page) => {
+  await expect
+    .poll(
+      async () => {
+        const local = await offeredAsCommand(page, LOCAL_HALF_PROBE)
+        const shared = await offeredAsCommand(page, SHARED_HALF_PROBE)
+        if (local && shared) return 'ready'
+        // The delivery point for the session-local half, and the only one.
+        // Run a no-op so the next prompt carries the payload, exactly as the
+        // panel tells the user to. The shared half needs no prompt; the poll
+        // interval is what waits for it.
         await page.keyboard.type('true')
         await page.keyboard.press('Enter')
         await promptReady(page)
@@ -124,9 +203,9 @@ test.describe('tab completion', () => {
     // only a later prompt delivers it (see commandSnapshotReady).
     await commandSnapshotReady(page)
 
-    // `pri` is a prefix of `printf` — a bash BUILTIN, so the OSC 636
-    // snapshot (compgen -c) always contains it on this shell. History may
-    // add rows; whatever the ranking, `printf` is in the list.
+    // `pri` is a prefix of `printf` — a bash BUILTIN, so the session-local
+    // half of the OSC 636 snapshot always contains it on this shell. History
+    // may add rows; whatever the ranking, `printf` is in the list.
     await page.keyboard.type('pri')
     await page.keyboard.press('Tab')
 
@@ -276,10 +355,12 @@ test.describe('tab completion', () => {
     const dropdown = page.locator(DROPDOWN).first()
     await page.keyboard.press('Tab')
     await expect(dropdown).toBeVisible({ timeout: 5_000 })
-    // Now that the snapshot is known to be present, "still loading" is a
-    // defect rather than a slow machine, and this asserts the real property
-    // directly instead of tolerating it in a retry loop.
-    await expect(dropdown).toContainText('No matches', { timeout: 5_000 })
+    // Now that BOTH halves are known to be present, anything about loading,
+    // staleness or a failed scan is a defect rather than a slow machine —
+    // and the row says which of the five discovery states it is in. `ready`
+    // with nothing matching is its own sentence, distinct from the generic
+    // "No matches" a provider with no specific reason produces.
+    await expect(dropdown).toContainText('No command names match', { timeout: 5_000 })
 
     // One non-selectable row: never the selected variance, no hint footer.
     const rows = dropdown.locator('.ui-floating-panel__row')

@@ -1804,6 +1804,11 @@ func (fakeRemoteLauncher) StartCommand(ssh.ShellKind, ssh.LaunchOptions) (string
 	return "", ssh.ReasonNone, false
 }
 
+// A launcher that declines has no bootstrap to prepare either.
+func (fakeRemoteLauncher) Prepare(ssh.ShellKind, ssh.LaunchOptions) (string, ssh.BootstrapRun, ssh.BootstrapGate, bool) {
+	return "", nil, nil, false
+}
+
 // ── tunnel.open / tunnel.stop ──────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, pointer-as-null for stopReason and
@@ -5048,5 +5053,139 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 				t.Fatalf("the contract accepted %s: %s", name, raw)
 			}
 		})
+	}
+}
+
+// ── the bootstrap's outcome, off the real socket ──────────────────────────
+
+// Assertion 23, and the third of AGENTS.md rule 5's three checks, which is the
+// one that matters: THE REAL RESULT OFF THE REAL SOCKET. A payload the test
+// itself built would prove the struct is well-formed, not that the server
+// sends it.
+//
+// What is red without P5: every one of these reasons reached the product as
+// `unknown`. The bootstrap concluded before any domain existed, so no lifecycle
+// fact carried it and no transport-loss cause described it — the precise
+// outcome went to a log, and the session either sat in `starting` until some
+// other detector concluded it with a vaguer word, or (on the remote path,
+// which has no loss reporter at all) sat there for the life of the tab.
+//
+// The table is the §6.4 matrix plus the bootstrap's own set, one case each. It
+// asserts the value the RENDERER will key on, after the schema has accepted
+// the frame — a reason outside the closed enum fails validateJSON here rather
+// than arriving as a card with no words in it.
+func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason ssh.RefusalReason
+	}{
+		// §6.4, by real channel type.
+		{"the primary session refused", ssh.ReasonSessionUnavailable},
+		{"pty-req refused after the session", ssh.ReasonPTYUnavailable},
+		{"exec refused, the channel alive", ssh.ReasonExecRefused},
+		{"exec accepted and substituted", ssh.ReasonExecSubstituted},
+		{"the SFTP subsystem refused", ssh.ReasonPublishUnavailable},
+		{"the lifecycle channel refused", ssh.ReasonChannelUnavailable},
+		{"an open channel severed mid-frame", ssh.ReasonBootstrapInterrupted},
+		// The bootstrap's own closed set. The first is the one the brief
+		// names: the backend knew `generation-unavailable` and the product
+		// said "conventional, unknown".
+		{"no generation installed on the far host", ssh.ReasonGenerationUnavailable},
+		{"no hasher on the far host", ssh.ReasonStageDigestUnavailable},
+		{"the stage-1 digest did not match", ssh.ReasonStageDigestMismatch},
+		{"the far side never announced itself", ssh.ReasonReceiverUnready},
+		{"the far side went quiet after announcing", ssh.ReasonBootstrapTimeout},
+		{"a token arrived twice or out of order", ssh.ReasonBootstrapOutOfOrder},
+		{"the capability could not be stored privately", ssh.ReasonCapabilityWriteFailed},
+		{"the far side refused a key addressed elsewhere", ssh.ReasonSecretNotForThisSession},
+	}
+	schema := loadSchema(t, "session.integrationChanged.schema.json")
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newLifecycleTestEnv(t)
+			sid := e.openSession(t, 1)
+			lane := lifecycle.LaneID(fmt.Sprintf("lane-bootstrap-%d", i))
+			e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+			e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+			e.ws.emitIntegration(session.ID(sid))
+
+			// The honest interval first: nothing has failed yet, and a
+			// product that named an outcome here would be guessing.
+			raw := readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+			validateJSON(t, schema, raw, "session.integrationChanged params (real socket, starting)")
+			var starting integrationChangedParams
+			if err := json.Unmarshal(raw, &starting); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if starting.Status != IntegrationStarting || starting.Reason != "" {
+				t.Fatalf("first fact = %+v, want status=starting with no reason", starting)
+			}
+
+			// The bootstrap reaches its terminal outcome.
+			e.ws.NoteBootstrapOutcome(lane, tc.reason)
+
+			raw = readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+			validateJSON(t, schema, raw, "session.integrationChanged params (real socket, "+tc.name+")")
+			var got integrationChangedParams
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.Status != IntegrationConventional {
+				t.Errorf("status = %q, want %q", got.Status, IntegrationConventional)
+			}
+			if got.Reason != string(tc.reason) {
+				t.Errorf("reason off the wire = %q, want %q — the backend knew which it was",
+					got.Reason, tc.reason)
+			}
+			if got.Reason == string(ssh.ReasonUnknown) {
+				t.Error("the product was told the backend cannot say why, and it can")
+			}
+		})
+	}
+}
+
+// An accepted bootstrap says nothing at all on this axis, and must not: "a
+// domain is live" is the kernel's word, and an accepted bootstrap means the
+// shell is on its way to proving itself rather than that it has. Reporting
+// `integrated` here would be the transport re-deriving the kernel's
+// conclusion, which is the two-owners defect AD-8 names.
+func TestSessionIntegrationChanged_AnAcceptedBootstrapClaimsNothing(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	sid := e.openSession(t, 1)
+	lane := lifecycle.LaneID("lane-bootstrap-accepted")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.emitIntegration(session.ID(sid))
+	readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+
+	e.ws.NoteBootstrapOutcome(lane, ssh.ReasonNone)
+
+	e.ws.integrationMu.Lock()
+	st := *e.ws.integrations[session.ID(sid)]
+	e.ws.integrationMu.Unlock()
+	if st.status != IntegrationStarting || st.reason != ssh.ReasonNone {
+		t.Errorf("axis = %q/%q after an accepted bootstrap, want it untouched at %q",
+			st.status, st.reason, IntegrationStarting)
+	}
+}
+
+// The first answer wins, and this is the third detector to meet that rule.
+// A session already concluded — by the launch itself, by the process observer,
+// or by a transport loss — is not re-explained by a bootstrap report arriving
+// afterwards.
+func TestSessionIntegrationChanged_ABootstrapOutcomeNeverOverwritesAnAnswer(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	sid := e.openSession(t, 1)
+	lane := lifecycle.LaneID("lane-bootstrap-answered")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonRemoteCommand)
+
+	e.ws.NoteBootstrapOutcome(lane, ssh.ReasonGenerationUnavailable)
+
+	e.ws.integrationMu.Lock()
+	st := *e.ws.integrations[session.ID(sid)]
+	e.ws.integrationMu.Unlock()
+	if st.reason != ssh.ReasonRemoteCommand {
+		t.Errorf("reason = %q, want the first answer %q", st.reason, ssh.ReasonRemoteCommand)
 	}
 }

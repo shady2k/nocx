@@ -9,6 +9,7 @@ import {
   historyProvider,
   fsProvider,
   createShellProviders,
+  shellCompleteProvider,
   MAX_HISTORY_IN_ARGUMENT_POSITION,
   MAX_PROVIDER_CANDIDATES,
   type SuggestContext,
@@ -16,6 +17,7 @@ import {
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
+import type { ShellComplete } from '../generated/shell.complete'
 import type { Candidate } from './candidate'
 import { ProfileClient } from '../profiles'
 import type { SSHProfile } from '../profiles'
@@ -32,11 +34,30 @@ const ctx = (over: Partial<SuggestContext> = {}): SuggestContext => ({
   ...over,
 })
 
+/** A store holding the SESSION-LOCAL half only (the shell's own tables). */
 const snapshotted = (names: string[]): CommandSnapshotStore => {
   const store = new CommandSnapshotStore()
   const nonce = 'a'.repeat(32)
   store.ingest(`H;${nonce}`)
   store.ingest(`S;${nonce};${names.join(';')}`)
+  return store
+}
+
+/** A store holding both halves, with the shared one in a chosen state. */
+const discovered = (
+  local: string[],
+  shared: string[],
+  state: 'ready' | 'stale' | 'timed-out' | 'failed' = 'ready',
+  extra: { ageMs?: number; reason?: string } = {},
+): CommandSnapshotStore => {
+  const store = snapshotted(local)
+  store.applySharedNames({
+    state,
+    names: shared,
+    ageMs: extra.ageMs ?? 0,
+    reason: extra.reason ?? '',
+    truncated: false,
+  })
   return store
 }
 describe('commandProvider', () => {
@@ -70,17 +91,31 @@ describe('commandProvider', () => {
     expect(got.candidates[0].eligibleForGhostText).toBe(true)
   })
 
-  it('an empty snapshot payload cannot apply — the store stays pending, named honestly', async () => {
+  it('offers the union of both halves — the shell tables and the shared PATH set', async () => {
+    const provider = commandProvider(discovered(['gitalias'], ['git', 'gitk']))
+    const got = await provider.suggest(
+      ctx({ position: 'command', token: { text: 'git', from: 0, to: 3 }, doc: 'git' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates.map((c) => c.insertText)).toEqual(['git', 'gitalias', 'gitk'])
+  })
+
+  it('an empty snapshot payload cannot apply — the state is named, never "no matches"', async () => {
     // The store rejects an empty name list ("every command is unknown" is a
-    // lie), so the snapshot never applies and the provider must say the
-    // snapshot is still pending rather than "no matches".
+    // lie), so the snapshot never applies. Nothing has answered the shared
+    // half either, so the honest state is the one the request is in.
     const empty = commandProvider(snapshotted([]))
     const got = await empty.suggest(
       ctx({ position: 'command', token: { text: 'git', from: 0, to: 3 }, doc: 'git' }),
       new AbortController().signal,
     )
     expect(got.candidates).toEqual([])
-    expect(got.emptyReason).toEqual({ kind: 'snapshot-pending' })
+    expect(got.emptyReason).toEqual({
+      kind: 'command-names',
+      state: 'running',
+      ageMs: 0,
+      reason: '',
+    })
   })
 
   it('a snapshot that has not arrived yet is named, not hidden', async () => {
@@ -91,7 +126,47 @@ describe('commandProvider', () => {
       new AbortController().signal,
     )
     expect(got.candidates).toEqual([])
-    expect(got.emptyReason).toEqual({ kind: 'snapshot-pending' })
+    expect(got.emptyReason).toEqual({
+      kind: 'command-names',
+      state: 'running',
+      ageMs: 0,
+      reason: '',
+    })
+  })
+
+  // The defect this replaces: every one of these used to render as "command
+  // names are still loading". Four of the five are not loading, and three of
+  // them never will be.
+  it("reports the shared half's own state when nothing matches", async () => {
+    const cases = [
+      { state: 'ready' as const, extra: {} },
+      { state: 'stale' as const, extra: { ageMs: 90_000 } },
+      { state: 'timed-out' as const, extra: { reason: 'the scan did not finish in time' } },
+      { state: 'failed' as const, extra: { reason: 'remote host refused the exec' } },
+    ]
+    for (const c of cases) {
+      const provider = commandProvider(discovered(['zzz'], ['aaa'], c.state, c.extra))
+      const got = await provider.suggest(
+        ctx({ position: 'command', token: { text: 'nomatch', from: 0, to: 7 }, doc: 'nomatch' }),
+        new AbortController().signal,
+      )
+      expect(got.candidates).toEqual([])
+      expect(got.emptyReason).toEqual({
+        kind: 'command-names',
+        state: c.state,
+        ageMs: c.extra.ageMs ?? 0,
+        reason: c.extra.reason ?? '',
+      })
+    }
+  })
+
+  it('a stale shared half still OFFERS its names — only the row says it may be old', async () => {
+    const provider = commandProvider(discovered([], ['git'], 'stale', { ageMs: 60_000 }))
+    const got = await provider.suggest(
+      ctx({ position: 'command', token: { text: 'gi', from: 0, to: 2 }, doc: 'gi' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates.map((c) => c.insertText)).toEqual(['git'])
   })
 
   it('an empty token asks for nothing — no reason, the line has no intent yet', async () => {
@@ -887,5 +962,84 @@ describe('createShellProviders and the snippet library (nocx-nlhe)', () => {
     )
     const ranked = rankCandidates(candidates, { query: 'git', now: 1_750_000_000_000 })
     expect(ranked.map((r) => r.source)).toEqual(['command', 'snippet'])
+  })
+})
+
+// ── the remote shell adapter: what a pick actually inserts ────────────────
+//
+// The adapter had no test of its own, and that is how `cd repos/t` shipped
+// completing to `cd repos/repos/tabby/` (nocx-yqoy5): the row's insert text is
+// the token's prefix PLUS the candidate name, so a backend that answers with
+// the whole word rather than the last segment doubles the prefix. Asserting
+// the rendered row was never going to catch it — only assembling the line the
+// user ends up with does.
+describe('shellCompleteProvider — the line a pick produces', () => {
+  const answering = (entries: ShellComplete['entries']) =>
+    shellCompleteProvider({
+      complete: () => Promise.resolve({ entries, truncated: false }),
+      sessionId: () => 'sess-1',
+    })
+
+  /** The document after accepting the candidate, exactly as the controller
+   *  applies it (replacement range + insertText). */
+  const accepted = (doc: string, c: Candidate): string =>
+    doc.slice(0, c.replacement.from) + c.insertText + doc.slice(c.replacement.to)
+
+  const remote = (doc: string, text: string) =>
+    ctx({
+      isLocal: false,
+      doc,
+      token: { text, from: doc.length - text.length, to: doc.length },
+      position: 'argument',
+      cwd: '/home/dev',
+      host: 'dev@192.168.0.25',
+    })
+
+  it('keeps the typed directory once when the token is nested', async () => {
+    const provider = answering([
+      { name: 'tabby', path: '/home/dev/repos/tabby', source: 'path', isDir: true },
+    ])
+    const c = remote('cd repos/t', 'repos/t')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cd repos/tabby/')
+    // The row shows the segment, not the parent the line already carries.
+    expect(candidates[0].displayText).toBe('tabby/')
+  })
+
+  it('steps into a directory when the token ends in a slash', async () => {
+    const provider = answering([
+      { name: 'tabby', path: '/home/dev/repos/tabby', source: 'path', isDir: true },
+    ])
+    const c = remote('cd repos/', 'repos/')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cd repos/tabby/')
+  })
+
+  it('completes a bare token with no prefix to re-add', async () => {
+    const provider = answering([
+      { name: 'repos', path: '/home/dev/repos', source: 'path', isDir: true },
+    ])
+    const c = remote('cd re', 're')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cd repos/')
+  })
+
+  it('inserts a file without a trailing slash', async () => {
+    const provider = answering([
+      { name: 'notes.md', path: '/home/dev/repos/notes.md', source: 'path', isDir: false },
+    ])
+    const c = remote('cat repos/n', 'repos/n')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cat repos/notes.md')
+  })
+
+  it('inserts a completion-function word whole — it is already the replacement', async () => {
+    // `function` answers come from the remote shell's own completion function
+    // (a git branch, say). They are the whole word by construction, so the
+    // token prefix must NOT be prepended to them.
+    const provider = answering([{ name: 'main', source: 'function' }])
+    const c = remote('git checkout ma', 'ma')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('git checkout main')
   })
 })

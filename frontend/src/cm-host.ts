@@ -44,7 +44,28 @@ import { EditorView, keymap } from '@codemirror/view'
  *  editor's own module learned the same lesson about history() — the
  *  package was a dependency and the extension was installed nowhere, so
  *  Ctrl+Z did nothing in a field that looked like every other one. */
-const editingExtensions: Extension[] = [history(), keymap.of([...defaultKeymap, ...historyKeymap])]
+/*  Wrapping belongs here and not to a caller, because it follows from the
+ *  mode. What a person types into these hosts is PROSE — a snippet body, a
+ *  note — and CM6 does not wrap unless it is told to, so a pasted paragraph
+ *  came out as one line running off the right edge of the dialog, clipped at
+ *  the frame with a horizontal scrollbar under it (nocx-dn33v).
+ *
+ *  The read-only modes deliberately do not take it. Their surfaces are the file
+ *  viewer and the git diff, where a line is a line: wrapping one puts what the
+ *  reader sees out of step with what the file says, and a diff whose rows stop
+ *  aligning row-for-row has stopped being a diff. That is the same rule the
+ *  terminal's frozen output is held to (nocx-juau) — long content is reached by
+ *  scrolling sideways.
+ *
+ *  The command editor (src/editor.ts) states this for itself. It builds its own
+ *  EditorView rather than going through this host, so there is nothing here for
+ *  it to inherit; it is named so the next reader knows the two are not one
+ *  setting with two spellings. */
+const editingExtensions: Extension[] = [
+  history(),
+  keymap.of([...defaultKeymap, ...historyKeymap]),
+  EditorView.lineWrapping,
+]
 
 /** CM6 look: colours only, resolved through the app's --color-* tokens so a
  *  theme switch recolours every host surface (ADR-0013). Layout lives in

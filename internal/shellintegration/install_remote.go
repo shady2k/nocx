@@ -209,6 +209,40 @@ func (s *Impl) UninstallRemote(ctx context.Context, sshClient *gossh.Client, rem
 	return res.Removed, res.Conflicts, nil
 }
 
+// EnsureInstalledOverPipe publishes the bundle over an SFTP subsystem that is
+// already speaking on rw, through the same Publisher every other carrier
+// uses. It is the typed path's publish (ADR-0035): there the connection is
+// the user's own `ssh` process and nocx holds no SSH transport for it — what
+// it holds is an AUXILIARY CHANNEL on that connection, opened over the
+// multiplex master after ownership was proven, which is a pair of pipes and
+// not a *gossh.Client.
+//
+// The seam is a pipe rather than a client for exactly that reason, and it is
+// the same publish either way: one owner of the behaviour, and the transport
+// is the variation (AD-8). The fail-open contract is unchanged — any failure
+// leaves the previous activation untouched and the session still starts.
+func (s *Impl) EnsureInstalledOverPipe(_ context.Context, rw io.ReadWriteCloser, remoteHome string) error {
+	if remoteHome == "" {
+		return fmt.Errorf("shellintegration: remote home directory is empty")
+	}
+	sftpClient, err := sftp.NewClientPipe(rw, rw)
+	if err != nil {
+		return fmt.Errorf("shellintegration: sftp over the auxiliary channel: %w", err)
+	}
+	defer func() { _ = sftpClient.Close() }()
+
+	root := path.Join(remoteHome, dirName)
+	res, err := NewPublisher(s.log, sftpFS{client: sftpClient}, root).Publish(launchBundle())
+	if err != nil {
+		s.log.Info("remote bundle publish refused", "root", root, "error", err)
+		return fmt.Errorf("shellintegration: remote publish: %w", err)
+	}
+	s.log.Info("shellintegration: remote bundle published over the multiplex master",
+		"root", root, "version", res.Version, "generation", res.Generation,
+		"published", res.Published, "reason", res.Reason)
+	return nil
+}
+
 // GetRemoteHome queries the remote host for the user's home directory.
 func (s *Impl) GetRemoteHome(sshClient *gossh.Client) (string, error) {
 	sess, err := sshClient.NewSession()
@@ -238,15 +272,4 @@ func (s *Impl) GetRemoteHome(sshClient *gossh.Client) (string, error) {
 		return "", fmt.Errorf("shellintegration: could not determine remote home")
 	}
 	return home, nil
-}
-
-// RemoteStartCommand returns the installed-mode start command (design §3.3):
-// exec the compact carrier when a generation is committed, else a native
-// login shell. The guard travels to the far side because only that machine's
-// ~/.nocx is the one in question; the plain-shell arm covers the one case
-// the carrier cannot — its own absence. No passport is emitted from this
-// command; production sessions reach the carrier through the launcher, which
-// carries the environment id.
-func (s *Impl) RemoteStartCommand() string {
-	return `if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch"; else exec "${SHELL:-/bin/sh}" -l; fi`
 }

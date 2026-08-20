@@ -1,6 +1,13 @@
 # ADR-0022: the ssh command line is the carrier, not a second channel
 
-- **Status:** accepted (2026-08-05)
+- **Status:** Superseded by
+  [ADR-0035](0035-the-channel-we-own-is-the-carrier.md) (accepted 2026-08-20).
+  Accepted 2026-08-05; kept for the record, and its measurements are still the
+  ones anybody reasoning about this transport should read. What reversed the
+  decision was not an error in them but two premises that have since gone —
+  ADR-0035 names both. The three wiring rules in the Rationale below are carried
+  forward there verbatim in substance, because they now govern a transport we
+  build rather than one we declined.
 - **Owner decision**, taken on measurements from `nocx-qtnp`
 - **Related:** `nocx-mlm7`, [`ADR-0004`](0004-input-ownership-and-editor-abstraction.md),
   the delivery-modes design

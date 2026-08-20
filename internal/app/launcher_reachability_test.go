@@ -430,13 +430,32 @@ func reachWriteAndReadEcho(t *testing.T, conn *websocket.Conn, sid string) {
 	frame := []byte{0x01, 0x01} // FrameVersion, MsgTypeData
 	frame = append(frame, idBytes[:]...)
 	frame = append(frame, []byte("hello")...)
-	if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
-		t.Fatalf("write data frame: %v", err)
-	}
+	// The write is RETRIED from a goroutine, and that is a statement about
+	// the product rather than about flakiness: a session that has just been
+	// opened is bootstrapping, and design §5.3 says a keystroke in that
+	// interval is REFUSED, not buffered. This fixture server never speaks
+	// the bootstrap protocol, so the interval closes on the writer's own
+	// deadline; until then the frame is dropped exactly as a user's
+	// keystroke would be, and the user types again. The read keeps ONE
+	// deadline for the whole wait — a websocket connection does not survive
+	// a read timeout, so the retry cannot live in the read loop.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read echo: %v", err)
@@ -448,7 +467,6 @@ func reachWriteAndReadEcho(t *testing.T, conn *websocket.Conn, sid string) {
 			return
 		}
 	}
-	t.Fatal("session not usable: no echo:hello came back over the data plane")
 }
 
 // ---------------------------------------------------------------------------
@@ -458,9 +476,16 @@ func reachWriteAndReadEcho(t *testing.T, conn *websocket.Conn, sid string) {
 
 // The production launcher through the adapter through the real transport:
 // the open ack reports integration succeeded and the test server receives the
-// launcher's bash start command (with the session id embedded), not a plain
-// shell request. This is the exact chain that was dead before the wiring —
-// grep RemoteLauncher in internal/app and internal/transport returned nothing.
+// CARRIER — the bounded loader, under 1 KiB, addressed with the session id —
+// not a plain shell request. This is the exact chain that was dead before the
+// wiring — grep RemoteLauncher in internal/app and internal/transport returned
+// nothing.
+//
+// What it used to assert was the shape the carrier design retires: an
+// `env … bash -c` wrapper around an rcfile, with NOCX_SHELL_INTEGRATION and
+// NOCX_SESSION_ID as environment assignments IN THE COMMAND. The environment
+// block travels with stage-1 now; only addressing does, so the session id is
+// asserted here as the addressing argument it became.
 func TestRemoteLauncher_ReachableThroughRealTransport(t *testing.T) {
 	srv := startReachSSHServer(t)
 	ws, conn := reachStack(t, srv, &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: log.NewSlogAdapter(nil)})
@@ -472,17 +497,20 @@ func TestRemoteLauncher_ReachableThroughRealTransport(t *testing.T) {
 	}
 
 	cmd := srv.waitForExec(t, 10*time.Second)
-	if !strings.Contains(cmd, "/usr/bin/env -u BASH_ENV bash -c") {
-		t.Errorf("exec command %q does not look like the launcher's bash start command", cmd)
+	if !strings.Contains(cmd, "/usr/bin/env -u BASH_ENV /bin/sh -c") {
+		t.Errorf("exec command %q does not look like the carrier", cmd)
 	}
-	if !strings.Contains(cmd, "exec bash --rcfile") {
-		t.Errorf("exec command %q does not carry the bash rcfile launcher", cmd)
+	if !strings.Contains(cmd, shellintegration.LoaderReadyToken) {
+		t.Errorf("exec command %q never emits %q — it is not the loader",
+			cmd, shellintegration.LoaderReadyToken)
 	}
-	if !strings.Contains(cmd, "NOCX_SHELL_INTEGRATION=1") {
-		t.Errorf("exec command %q lacks the NOCX_SHELL_INTEGRATION marker the launcher embeds", cmd)
+	if len(cmd) >= shellintegration.MaxCarrierLen {
+		t.Errorf("exec command is %d bytes; the stated bound is %d",
+			len(cmd), shellintegration.MaxCarrierLen)
 	}
-	if !strings.Contains(cmd, "NOCX_SESSION_ID=") {
-		t.Errorf("exec command %q lacks NOCX_SESSION_ID — the launcher did not see the session id", cmd)
+	if !strings.Contains(cmd, " nocx-loader '"+sid+"'") {
+		t.Errorf("exec command %q does not carry session %q as its first addressing "+
+			"argument — the launcher did not see the session id", cmd, sid)
 	}
 	if n := srv.shellRequestCount(); n != 0 {
 		t.Errorf("%d plain-shell request(s) alongside the launcher command; want 0", n)

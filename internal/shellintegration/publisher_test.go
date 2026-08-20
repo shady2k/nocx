@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // newTestPublisher returns a Publisher over a fresh temp home and the real
@@ -540,25 +539,24 @@ func TestForeignRootNeverModified(t *testing.T) {
 	})
 }
 
-// TestAtMostTwoGenerationsAndOneStaging: at most two generations and no
-// tmp/ leftovers survive a publish; orphaned staging directories and
-// uncommitted generation directories are removed under the lock.
+// TestAtMostTwoGenerationsAndOneStaging: the footprint converges to two
+// generations and no tmp/ leftovers, sweeping AT MOST ONE stale generation
+// per attempt (bound 3) — the keep-two policy implied exactly that and did
+// not enforce it. Orphaned staging directories are cleared before a new
+// slot is opened, and an uncommitted generation at the target version is
+// removed by the commit that replaces it.
 func TestAtMostTwoGenerationsAndOneStaging(t *testing.T) {
 	pub, home, _ := newTestPublisher(t)
 	root := filepath.Join(home, dirName)
 
-	if _, err := pub.Publish(testBundle("1")); err != nil {
-		t.Fatalf("publish v1: %v", err)
-	}
-	if _, err := pub.Publish(testBundle("2")); err != nil {
-		t.Fatalf("publish v2: %v", err)
-	}
-	if _, err := pub.Publish(testBundle("3")); err != nil {
-		t.Fatalf("publish v3: %v", err)
+	for _, v := range []string{"1", "2", "3"} {
+		if _, err := pub.Publish(testBundle(v)); err != nil {
+			t.Fatalf("publish v%s: %v", v, err)
+		}
 	}
 
 	// An orphaned staging dir and a crash-leftover generation dir planted
-	// before the next publish must be cleaned by it.
+	// before the next publish.
 	if err := os.MkdirAll(filepath.Join(root, tmpName, "deadbeef"), 0o700); err != nil {
 		t.Fatalf("mkdir orphan staging: %v", err)
 	}
@@ -582,6 +580,30 @@ func TestAtMostTwoGenerationsAndOneStaging(t *testing.T) {
 	if m.Generation != "v4" {
 		t.Fatalf("manifest names %s, want v4", m.Generation)
 	}
+	// The staging orphan is gone the moment a slot is opened; the
+	// generations converge one per attempt.
+	tmpEntries, err := os.ReadDir(filepath.Join(root, tmpName))
+	if err != nil {
+		t.Fatalf("readdir tmp: %v", err)
+	}
+	if len(tmpEntries) != 0 {
+		t.Errorf("tmp/ has %d leftovers after publish: %v", len(tmpEntries), names(tmpEntries))
+	}
+	for attempt := range 4 {
+		gens, rerr := os.ReadDir(filepath.Join(root, integrationDir))
+		if rerr != nil {
+			t.Fatalf("readdir integration: %v", rerr)
+		}
+		if len(gens) <= 2 {
+			break
+		}
+		if attempt == 3 {
+			t.Fatalf("integration/ still holds %v after four further attempts", names(gens))
+		}
+		if _, perr := pub.Publish(testBundle("4")); perr != nil {
+			t.Fatalf("converging attempt %d: %v", attempt, perr)
+		}
+	}
 	gens, err := os.ReadDir(filepath.Join(root, integrationDir))
 	if err != nil {
 		t.Fatalf("readdir integration: %v", err)
@@ -590,18 +612,11 @@ func TestAtMostTwoGenerationsAndOneStaging(t *testing.T) {
 		t.Errorf("integration/ has %d generations, want exactly 2: %v", len(gens), names(gens))
 	}
 	// Cleanup keeps the active generation and the newest other (the planted
-	// v9 crash leftover outranks the retired v1/v2/v3); the rest are removed.
+	// v9 crash leftover outranks the retired v1/v2/v3).
 	for _, g := range gens {
 		if g.Name() != "v4" && g.Name() != "v9" {
 			t.Errorf("unexpected surviving generation %s", g.Name())
 		}
-	}
-	tmpEntries, err := os.ReadDir(filepath.Join(root, tmpName))
-	if err != nil {
-		t.Fatalf("readdir tmp: %v", err)
-	}
-	if len(tmpEntries) != 0 {
-		t.Errorf("tmp/ has %d leftovers after publish: %v", len(tmpEntries), names(tmpEntries))
 	}
 }
 
@@ -735,13 +750,15 @@ func TestReadonlyHomeFailsCleanly(t *testing.T) {
 
 // TestLockStaleRuleBreaks: a lock left by a crashed publisher (dir plus
 // nonce, with and without its staging dir) does not strand the next
-// publish — the bounded wait applies the stale rule and the attempt
+// publish — K probes elapse, the stale rule applies and the attempt
 // converges with no manual cleanup.
+//
+// What it does NOT assert is elapsed time. The old form of this test
+// checked that at least half the bounded wait had passed on the wall clock,
+// which is a stopwatch reading: it passes or fails on how busy the machine
+// is. The bound is now read where it is decided — the number of probes the
+// publisher asked to wait for, and the injected time they added.
 func TestLockStaleRuleBreaks(t *testing.T) {
-	origBound, origPoll := lockWaitBound, lockPollInterval
-	lockWaitBound, lockPollInterval = 60*time.Millisecond, 5*time.Millisecond
-	t.Cleanup(func() { lockWaitBound, lockPollInterval = origBound, origPoll })
-
 	for _, tc := range []struct{ name, staging string }{
 		{"nonce without staging", "deadbeef"},
 		{"nonce with staging dir present", "cafebabe"},
@@ -770,7 +787,7 @@ func TestLockStaleRuleBreaks(t *testing.T) {
 			}
 
 			pub := NewPublisher(testLogger(), NewOSFS(), root)
-			start := time.Now()
+			clock := newFakeClock().install(pub)
 			res, err := pub.Publish(testBundle("10"))
 			if err != nil {
 				t.Fatalf("publish under stale lock: %v", err)
@@ -778,11 +795,19 @@ func TestLockStaleRuleBreaks(t *testing.T) {
 			if !res.Published {
 				t.Fatalf("expected publish, got %+v", res)
 			}
-			if elapsed := time.Since(start); elapsed < lockWaitBound/2 {
-				t.Errorf("stale lock broken before the bounded wait elapsed (%v)", elapsed)
+			if got := clock.waitCount(); got != lockProbes {
+				t.Errorf("the stale rule applied after %d probes, want K = %d", got, lockProbes)
+			}
+			if got := clock.waited(); got != lockProbeBudget {
+				t.Errorf("probing added %v of injected time, want the %v budget", got, lockProbeBudget)
 			}
 			if _, err := os.Stat(filepath.Join(root, lockName)); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("lock dir still present after publish: %v", err)
+			}
+			// The crashed holder's staging directory is residue the new
+			// attempt cleared before opening its own slot (bound 1).
+			if _, err := os.Stat(filepath.Join(root, tmpName, tc.staging)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the crashed holder's staging dir survived: %v", err)
 			}
 		})
 	}

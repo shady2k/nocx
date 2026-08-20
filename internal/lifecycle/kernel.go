@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"regexp"
 	"sort"
@@ -126,15 +127,30 @@ func (k *Kernel) RequestDomain(lane LaneID, parent *DomainID, t TransportID) (Do
 	} else if ls.top() != "" {
 		return DomainHandle{}, ErrLaneBusy
 	}
+	// Both secrets are minted BEFORE anything is registered: a mint that
+	// cannot get randomness must leave no domain behind, not a domain
+	// holding a value nobody can present (nocx-s16k8).
+	capability, err := k.randomCapability()
+	if err != nil {
+		return DomainHandle{}, err
+	}
+	recovery, err := k.randomFence()
+	if err != nil {
+		return DomainHandle{}, err
+	}
+	domHex, err := k.randomHex(8)
+	if err != nil {
+		return DomainHandle{}, err
+	}
 	d := &Domain{
-		ID:         DomainID("dom-" + k.randomHex(8)),
+		ID:         DomainID("dom-" + domHex),
 		Epoch:      k.registry.nextEpoch(),
 		Parent:     parentID,
 		Lane:       lane,
 		Transport:  t,
 		State:      DomainPending,
-		capability: k.randomCapability(),
-		recovery:   k.randomFence(),
+		capability: capability,
+		recovery:   recovery,
 	}
 	k.registry.Register(d)
 	// The lane mirrors the domain's recovery fence: the domain dies on
@@ -185,7 +201,20 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		k.recordAuthFailure(d.Lane)
 		return nil, ErrStaleEpoch
 	}
-	if d.capability != env.Capability {
+	if d.capability == (Capability{}) || d.capability != env.Capability {
+		// The zero test is not belt-and-braces, it is the difference between
+		// authenticating and not: `d.capability != env.Capability` compares
+		// EQUAL when both are zero, so a domain holding zeros would
+		// authenticate any candidate who sent thirty-two zero bytes.
+		//
+		// randomCapability no longer produces a zero capability — a failed
+		// random read is ErrNoRandomness and no domain is minted at all
+		// (nocx-s16k8). This guard is not therefore redundant, and removing
+		// it would be a mistake: it is the SECOND of two independent
+		// defences, and it is the one that does not care how the zero got
+		// there. A future path that writes the field, a deserialized domain,
+		// a mint that regresses — a domain with no capability authenticates
+		// nobody, whatever put it in that state.
 		k.recordAuthFailure(d.Lane)
 		return nil, ErrBadCapability
 	}
@@ -271,7 +300,11 @@ func (k *Kernel) notifyGapLocked(t TransportID, dID DomainID, garbageBytes, garb
 		d.desyncSince = k.now()
 		d.desyncBytes = garbageBytes
 		d.desyncFrames = garbageFrames
-		rid := RequestID("req-" + k.randomHex(8))
+		ridHex, ridErr := k.randomHex(8)
+		if ridErr != nil {
+			return nil, ridErr
+		}
+		rid := RequestID("req-" + ridHex)
 		d.refreshRequest = &rid
 		if ls.top() == d.ID {
 			k.setLifecycle(ls, LifecycleDesynchronized, d.ID, "")
@@ -406,7 +439,11 @@ func (k *Kernel) SubmitAttempt(domain DomainID, command, cwd, host string) (Exec
 	if open := k.openAttemptFor(d.ID); open != nil {
 		return ExecutionAttempt{}, ErrAttemptOpen
 	}
-	att := k.createAttempt(d, k.newAttemptID(), OriginApp, false, command, cwd, host, k.now())
+	aid, err := k.newAttemptID()
+	if err != nil {
+		return ExecutionAttempt{}, err
+	}
+	att := k.createAttempt(d, aid, OriginApp, false, command, cwd, host, k.now())
 	k.setLifecycle(ls, LifecycleRunning, d.ID, att.ID)
 	return *att, nil
 }
@@ -594,7 +631,10 @@ func (k *Kernel) applyStart(d *Domain, ls *laneState, env Envelope) ([]Outbound,
 		if env.Event.Start.AttemptID != nil {
 			id = *env.Event.Start.AttemptID
 		} else {
-			id = k.newAttemptID()
+			var idErr error
+			if id, idErr = k.newAttemptID(); idErr != nil {
+				return nil, idErr
+			}
 		}
 		att := k.createAttempt(d, id, OriginShell, true, env.Event.Start.Command, "", "", k.now())
 		k.setLifecycle(ls, LifecycleRunning, d.ID, att.ID)
@@ -1018,6 +1058,35 @@ func (k *Kernel) setLifecycle(ls *laneState, st LifecycleState, d DomainID, att 
 	ls.lifecycle = st
 	ls.lifecycleDomain = d
 	ls.lifecycleAttempt = att
+	if st == LifecycleNative {
+		// THE RECOVERY FENCE'S AUTHORITY INTERVAL CLOSES HERE, and it is a
+		// different interval from its confidentiality (carrier design §5.3).
+		//
+		// Authority opens once the bootstrap has succeeded and the backend
+		// has registered the fence for a domain generation, and closes at
+		// the FIRST of: the fence being sent once on channel loss and
+		// acknowledged, teardown with no recovery needed, or a generation
+		// replacement. Every one of those three ends with the lane back at
+		// Native — RecoverLane completing the composite ACK, a clean
+		// domain_closed, a revoke — which is why the close lives here
+		// rather than in three call sites that would drift apart.
+		//
+		// The third event, a generation replacement, closes it from the
+		// other direction: RequestDomain overwrites the nonce, so a late
+		// ack from the previous episode can no longer match.
+		//
+		// The lane keeps the expected value until then and must: it is what
+		// validates the acknowledgement, and dropping it at the moment the
+		// fence goes out would leave nothing to check the answer against.
+		//
+		// Closing authority is NOT closing confidentiality, and conflating
+		// them would promise more than we can hold. The domain's own record
+		// still carries its fence, and the shell's copy is a variable in a
+		// process on another host that we may no longer be able to address.
+		// This clears one backend copy — the one whose PURPOSE has ended —
+		// and claims nothing about the others.
+		ls.recoveryNonce = FenceNonce{}
+	}
 }
 
 func (k *Kernel) overHandshakeBudget(ls *laneState) bool {
@@ -1037,14 +1106,20 @@ func (k *Kernel) overHandshakeBudget(ls *laneState) bool {
 
 // randomFence mints the per-domain one-shot recovery fence: 32 random bytes,
 // distinct from the capability, handed to the shell in the bootstrap while
-// the channel is alive. Never reused: a fresh domain is a fresh nonce. A
-// failed random read mirrors randomCapability's tolerance and leaves a zero
-// fence — which the read model reads as "no recovery nonce", disabling the
-// recovery promise rather than shipping a forgeable one (the safe direction).
-func (k *Kernel) randomFence() FenceNonce {
+// the channel is alive. Never reused: a fresh domain is a fresh nonce.
+//
+// A failed read is an error here too, and not because a zero fence is
+// dangerous the way a zero capability is — the read model treats zero as "no
+// recovery nonce" and disables the promise, which is the safe direction. It
+// is an error because the fence and the capability come from the same source
+// in the same breath: if this read failed, that one did, and one rule for
+// "the machine has no randomness" is easier to hold than two (nocx-s16k8).
+func (k *Kernel) randomFence() (FenceNonce, error) {
 	var f FenceNonce
-	_, _ = io.ReadFull(k.rand, f[:])
-	return f
+	if _, err := io.ReadFull(k.rand, f[:]); err != nil {
+		return FenceNonce{}, fmt.Errorf("%w: recovery fence: %v", ErrNoRandomness, err)
+	}
+	return f, nil
 }
 
 // recordAuthFailure charges one failed handshake to the lane (decision 3's
@@ -1056,18 +1131,45 @@ func (k *Kernel) recordAuthFailure(lane LaneID) {
 	}
 }
 
-func (k *Kernel) randomHex(n int) string {
+// randomHex mints an IDENTIFIER — a domain id, a refresh request id, an
+// attempt id. None of these is an authenticator, so a zero value does not let
+// anybody in. It does something else that is still a defect: every id becomes
+// the SAME id, and every place that tells two things apart by id — the
+// attempt registry, the refresh request the shell echoes back, the domain a
+// frame names — stops telling them apart. That is the capability's failure
+// mode one layer down, so it gets the capability's answer (nocx-s16k8).
+func (k *Kernel) randomHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = io.ReadFull(k.rand, b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(k.rand, b); err != nil {
+		return "", fmt.Errorf("%w: identifier: %v", ErrNoRandomness, err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
-func (k *Kernel) randomCapability() Capability {
+// randomCapability mints the per-epoch bearer. A failed random read is an
+// ERROR and no capability is returned (nocx-s16k8).
+//
+// It used to be tolerated, leaving a zero capability, on the argument that
+// the caller has no useful answer to "the machine has no randomness". But a
+// zero capability is not a degraded authenticator, it is an authenticator
+// every candidate can produce: the check is an equality against the expected
+// value, and two zero values compare equal. ingestLocked refusing a zero
+// capability closed that hole and still does — but a domain minted from a
+// failed read was still registered, still offered to a shell, and still
+// waiting for a handshake that could never authenticate. Failing here is
+// what makes the failure a refusal instead of a session that hangs.
+func (k *Kernel) randomCapability() (Capability, error) {
 	var c Capability
-	_, _ = io.ReadFull(k.rand, c[:])
-	return c
+	if _, err := io.ReadFull(k.rand, c[:]); err != nil {
+		return Capability{}, fmt.Errorf("%w: per-epoch capability: %v", ErrNoRandomness, err)
+	}
+	return c, nil
 }
 
-func (k *Kernel) newAttemptID() AttemptID {
-	return AttemptID("att-" + k.randomHex(8))
+func (k *Kernel) newAttemptID() (AttemptID, error) {
+	h, err := k.randomHex(8)
+	if err != nil {
+		return "", err
+	}
+	return AttemptID("att-" + h), nil
 }

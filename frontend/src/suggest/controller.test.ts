@@ -224,18 +224,58 @@ describe('opening', () => {
 
   it('a pending command snapshot is named, not hidden', async () => {
     const { dropdown, controller } = rig({
-      providers: [emptyProvider('cmd', { kind: 'snapshot-pending' })],
+      providers: [
+        emptyProvider('cmd', { kind: 'command-names', state: 'running', ageMs: 0, reason: '' }),
+      ],
     })
     controller.open()
     await flush()
     expect(emptyRow(dropdown)?.textContent).toContain('Command names are still loading')
   })
 
+  // Assertion 36. Each of the five discovery states maps to a DISTINCT,
+  // user-visible string. Distinct enum values do not count: the whole defect
+  // was five states rendering as one sentence — "command names are still
+  // loading" — which is true for exactly one of them and tells a user whose
+  // scan failed to wait for something that is never coming.
+  it('each of the five discovery states renders a different sentence', async () => {
+    const states = [
+      { state: 'running' as const, ageMs: 0, reason: '' },
+      { state: 'ready' as const, ageMs: 0, reason: '' },
+      { state: 'stale' as const, ageMs: 90_000, reason: '' },
+      { state: 'timed-out' as const, ageMs: 0, reason: 'the scan did not finish' },
+      { state: 'failed' as const, ageMs: 0, reason: 'remote host refused the exec' },
+    ]
+    const rendered: string[] = []
+    for (const s of states) {
+      const { dropdown, controller } = rig({
+        providers: [emptyProvider('cmd', { kind: 'command-names', ...s })],
+      })
+      controller.open()
+      await flush()
+      const text = emptyRow(dropdown)?.textContent ?? ''
+      expect(text, `state ${s.state} rendered nothing`).not.toBe('')
+      rendered.push(text)
+      controller.dismiss()
+    }
+    expect(new Set(rendered).size, `two states render the same row: ${rendered.join(' | ')}`).toBe(
+      5,
+    )
+
+    // And each says the thing that is true of it, not a generic sentence.
+    expect(rendered[0]).toContain('still loading')
+    expect(rendered[1]).toContain('No command names match')
+    expect(rendered[2]).toContain('out of date')
+    expect(rendered[2]).toContain('2 min')
+    expect(rendered[3]).toContain('timed out')
+    expect(rendered[4]).toContain('remote host refused the exec')
+  })
+
   it('the most specific reason wins when several providers answer nothing', async () => {
     const { dropdown, controller } = rig({
       providers: [
         emptyProvider('history', { kind: 'no-match' }),
-        emptyProvider('cmd', { kind: 'snapshot-pending' }),
+        emptyProvider('cmd', { kind: 'command-names', state: 'running', ageMs: 0, reason: '' }),
         emptyProvider('fs', { kind: 'dirs-only-empty', dir: 'Downloads' }),
       ],
     })

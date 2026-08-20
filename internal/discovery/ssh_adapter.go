@@ -53,6 +53,8 @@ func classifySSHError(err error) error {
 		return &ExecError{Kind: ExecErrConnectionLost, Err: err}
 	case errors.Is(err, ssh.ErrExecClosed):
 		return &ExecError{Kind: ExecErrLeaseClosed, Err: err}
+	case errors.Is(err, ssh.ErrCommandTooLong):
+		return &ExecError{Kind: ExecErrCommandTooLong, Err: err}
 	default:
 		return err
 	}

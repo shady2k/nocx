@@ -27,10 +27,6 @@
   color: var(--color-text-muted);
 }
 
-.file-viewer__notice[hidden] {
-  display: none;
-}
-
 .file-viewer__line[data-tone='warning'] {
   color: var(--color-warning);
 }

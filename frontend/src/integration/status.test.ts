@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   INTEGRATION_EXPLANATION,
+  INTEGRATION_REASONS,
   IntegrationSilenceStore,
   integrationMessage,
   isDegraded,
@@ -12,18 +13,34 @@ import {
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
 
-/** Every reason the schema declares. Written out rather than derived, so a
- *  reason added to the contract without a message fails here instead of
- *  reaching a user as a card with no words in it. */
-const REASONS: IntegrationReason[] = [
-  'unsupported-shell',
-  'no-secure-temp',
-  'remote-command',
-  'handshake-timeout',
-  'startup-did-not-return',
-  'channel-lost',
-  'unknown',
-]
+/** Every reason the contract declares, taken from the CONTRACT and not from a
+ *  copy of it.
+ *
+ *  It was a hand-written list once, on the argument that a reason added to the
+ *  contract without a message would fail here. It would not: the list and the
+ *  message table were two places to forget the same thing, and the check
+ *  passed as long as they agreed with each other rather than with the wire.
+ *  The carrier design added twenty-four members and that is exactly the size
+ *  of mistake a hand-written copy makes silently.
+ *
+ *  The list then read `contracts/session.integrationChanged.schema.json` off
+ *  the disk, which is right on this machine and wrong in the container CI
+ *  actually runs: `vitest_containerized` assembles its workspace from
+ *  `frontend/` alone — deliberately, so the host's `node_modules` can never
+ *  leak in — so the relative path walked out of the workspace to `/` and the
+ *  suite died on ENOENT before asserting anything.
+ *
+ *  So the source is the GENERATED renderer type instead, and the chain to the
+ *  schema is unbroken and gated at every link: `npm run contracts:check`
+ *  proves the committed generated type matches the schema, `IntegrationReason`
+ *  is that type's own enum, and `MESSAGES` is a `Record` over it — so `tsc`
+ *  refuses a member with no message and a message with no member.
+ *  INTEGRATION_REASONS is that Record's keys, which makes it the wire's
+ *  vocabulary rather than a second declaration of it, and it reaches nothing
+ *  outside the workspace.
+ *
+ *  `unknown` is the renderer's fallback and is in the enum like any other. */
+const REASONS: IntegrationReason[] = INTEGRATION_REASONS
 
 const fact = (over: Partial<SessionIntegrationChanged> = {}): SessionIntegrationChanged => ({
   sessionId: 's1',
@@ -36,6 +53,15 @@ const fact = (over: Partial<SessionIntegrationChanged> = {}): SessionIntegration
 })
 
 describe('what the product says about a degraded session', () => {
+  // The loops below are all `for (const reason of REASONS)`, so a vocabulary
+  // that came back empty would make every one of them pass while asserting
+  // nothing. The count is stated here so that failure is loud.
+  it('reads a non-empty closed vocabulary out of the contract', () => {
+    expect(REASONS.length).toBeGreaterThanOrEqual(31)
+    expect(REASONS).toContain('generation-unavailable')
+    expect(REASONS).toContain('unknown')
+  })
+
   it('has words for every reason the wire can carry', () => {
     for (const reason of REASONS) {
       const m = integrationMessage(fact({ reason }))

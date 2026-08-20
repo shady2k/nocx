@@ -78,9 +78,12 @@ const UNREACHABLE_RE = /^(.+?):\d+:\d+: unreachable func: (.+)$/
 // called testseam.go inside a production package is a guess. Those stay
 // baselined, deliberately.
 //
-// This does NOT weaken the check that matters. InstalledFactStore.Record
-// lives in internal/ssh, an ordinary production package, and is still
-// reported.
+// This does NOT weaken the check that matters. The exclusion is matched on
+// the package directory, so a dead function in an ordinary production
+// package is still reported — which is how InstalledFactStore.Record was
+// reported for as long as it had no caller. It is wired now (nocx-ak2d) and
+// so is legitimately absent from the baseline; do not read that absence as
+// the exclusion having swallowed it.
 const TEST_SUPPORT_PKG_RE = /(^|\/)[a-z0-9]*test\/[^/]+\.go:\d+:\d+: unreachable func:/
 
 /**

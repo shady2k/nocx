@@ -11,6 +11,7 @@ import {
   parseOsc636,
   MAX_SNAPSHOT_NAMES,
   MAX_SNAPSHOT_CHARS,
+  MAX_SHARED_NAMES,
 } from './command-snapshot'
 
 const NONCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
@@ -34,6 +35,13 @@ function hexEscape(name: string): string {
 
 function snapshotPayload(names: string[], nonce = NONCE): string {
   return `S;${nonce};${names.map(hexEscape).join(';')}`
+}
+
+/** Give a store the SHARED half (the target's PATH set), the way the answer
+ *  to shell.commandNames does. `status` requires both halves, so a test that
+ *  asserts a store can judge existence has to supply both. */
+function applyShared(store: CommandSnapshotStore, names: string[], state = 'ready' as const): void {
+  store.applySharedNames({ state, names, ageMs: 0, reason: '', truncated: false })
 }
 
 describe('parseOsc636', () => {
@@ -143,6 +151,8 @@ describe('CommandSnapshotStore', () => {
     store.ingest(`H;${NONCE}`)
     expect(store.status).toBe('unavailable') // hello alone is not a snapshot
     store.ingest(snapshotPayload(['pwd', 'ls']))
+    expect(store.status).toBe('unavailable') // and one half is not both
+    applyShared(store, ['git'])
     expect(store.status).toBe('ready')
     expect(store.has('pwd')).toBe(true)
     expect(store.has('ls')).toBe(true)
@@ -158,6 +168,7 @@ describe('CommandSnapshotStore', () => {
     store.ingest(`H;${NONCE}`)
     store.ingest(snapshotPayload(['pwd']))
     store.ingest(snapshotPayload(['evil'], 'deadbeefdeadbeefdeadbeefdeadbeef'))
+    applyShared(store, ['git'])
     expect(store.status).toBe('ready')
     expect(store.has('pwd')).toBe(true)
     expect(store.has('evil')).toBe(false)
@@ -178,6 +189,8 @@ describe('CommandSnapshotStore', () => {
     a.ingest(snapshotPayload(['pwd', 'ls']))
     b.ingest(`H;${NONCE_B}`)
     b.ingest(snapshotPayload(['kubectl'], NONCE_B))
+    applyShared(a, ['git'])
+    applyShared(b, ['git'])
     expect(a.status).toBe('ready')
     expect(a.has('pwd')).toBe(true)
     expect(a.has('ls')).toBe(true)
@@ -205,6 +218,7 @@ describe('CommandSnapshotStore', () => {
     store.ingest(snapshotPayload(['pwd']))
     const huge = Array.from({ length: MAX_SNAPSHOT_NAMES + 1 }, (_, i) => `cmd${i}`)
     store.ingest(snapshotPayload(huge))
+    applyShared(store, ['git'])
     expect(store.status).toBe('ready')
     expect(store.has('pwd')).toBe(true)
   })
@@ -213,6 +227,7 @@ describe('CommandSnapshotStore', () => {
     store.ingest(snapshotPayload(['pwd']))
     const name = 'x'.repeat(MAX_SNAPSHOT_CHARS + 1)
     store.ingest(snapshotPayload([name]))
+    applyShared(store, ['git'])
     expect(store.status).toBe('ready')
     expect(store.has('pwd')).toBe(true)
   })
@@ -221,6 +236,7 @@ describe('CommandSnapshotStore', () => {
     store.ingest(`H;${NONCE}`)
     store.ingest(snapshotPayload(['pwd']))
     store.ingest('S;' + NONCE + ';bad\\escape')
+    applyShared(store, ['git'])
     expect(store.status).toBe('ready')
     expect(store.has('pwd')).toBe(true)
   })
@@ -246,11 +262,101 @@ describe('CommandSnapshotStore', () => {
     un()
   })
 
+  // ── the shared half (shell.commandNames) ──────────────────────────────
+  //
+  // Two halves, two truths: the session-local tables belong to THIS shell
+  // and arrive over OSC 636; the target's PATH set is identical for every
+  // session to that target and arrives over shell.commandNames. The store
+  // holds both and is careful about which question each can answer.
+
+  it('existence needs BOTH halves — one alone cannot say a command does not exist', () => {
+    store.ingest(`H;${NONCE}`)
+    store.ingest(snapshotPayload(['myalias']))
+    // With only the shell's own tables, `git` is not in the store — and
+    // saying "does not exist" here would strike through a real command
+    // because the PATH scan had not landed.
+    expect(store.status).toBe('unavailable')
+    applyShared(store, ['git', 'ls'])
+    expect(store.status).toBe('ready')
+    expect(store.has('git')).toBe(true)
+    expect(store.has('myalias')).toBe(true)
+    expect(store.has('sdfsdf')).toBe(false)
+  })
+
+  it('completion offers the union of whatever has arrived', () => {
+    store.ingest(`H;${NONCE}`)
+    store.ingest(snapshotPayload(['gitalias']))
+    expect(store.matching('git')).toEqual(['gitalias'])
+    applyShared(store, ['git', 'gitk'])
+    expect(store.matching('git')).toEqual(['git', 'gitalias', 'gitk'])
+  })
+
+  it('a shared half that did not complete publishes nothing and keeps its state', () => {
+    store.ingest(`H;${NONCE}`)
+    store.ingest(snapshotPayload(['myalias']))
+    applyShared(store, ['git'])
+    expect(store.has('git')).toBe(true)
+
+    store.applySharedNames({
+      state: 'timed-out',
+      names: ['partial'],
+      ageMs: 0,
+      reason: 'the scan did not finish',
+      truncated: false,
+    })
+    expect(store.commandNamesState).toBe('timed-out')
+    expect(store.has('partial')).toBe(false)
+    expect(store.has('git')).toBe(false)
+    // And existence is indeterminate again: the half that answers for PATH
+    // is gone, so nothing may be called nonexistent.
+    expect(store.status).toBe('unavailable')
+  })
+
+  it('a stale shared half is served, with its age', () => {
+    store.ingest(`H;${NONCE}`)
+    store.ingest(snapshotPayload(['myalias']))
+    store.applySharedNames({
+      state: 'stale',
+      names: ['git'],
+      ageMs: 90_000,
+      reason: '',
+      truncated: false,
+    })
+    expect(store.commandNamesState).toBe('stale')
+    expect(store.commandNamesAgeMs).toBe(90_000)
+    expect(store.has('git')).toBe(true)
+    expect(store.status).toBe('ready')
+  })
+
+  it('an over-long shared set is refused rather than truncated', () => {
+    const huge = Array.from({ length: MAX_SHARED_NAMES + 1 }, (_, i) => `cmd${i}`)
+    applyShared(store, huge)
+    expect(store.has('cmd0')).toBe(false)
+    expect(store.status).toBe('unavailable')
+  })
+
+  it('the shared half starts as running — nothing has been asked yet', () => {
+    expect(store.commandNamesState).toBe('running')
+    expect(store.commandNamesAgeMs).toBe(0)
+    expect(store.commandNamesReason).toBe('')
+  })
+
+  it('applying the shared half notifies subscribers', () => {
+    const seen: string[] = []
+    const un = store.subscribe(() => seen.push('applied'))
+    applyShared(store, ['git'])
+    expect(seen).toEqual(['applied'])
+    un()
+  })
+
   it('reset clears the nonce and the snapshot', () => {
     store.ingest(`H;${NONCE}`)
     store.ingest(snapshotPayload(['pwd']))
+    applyShared(store, ['git'])
     store.reset()
     expect(store.status).toBe('unavailable')
     expect(store.has('pwd')).toBe(false)
+    expect(store.has('git')).toBe(false)
+    expect(store.commandNamesState).toBe('running')
   })
 })

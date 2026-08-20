@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // errInjected is the fault the table injects at each boundary.
@@ -21,18 +20,20 @@ var errInjected = errors.New("injected fault")
 // cleanup) and lock acquire (mkdir of the lock dir).
 type faultFS struct {
 	FS
-	mu      sync.Mutex
-	failOn  map[string]int // kind -> 1-based call number to fail
-	failErr error
-	counts  map[string]int
-	ops     []string // ordered op log, "kind:path"
+	mu       sync.Mutex
+	failOn   map[string]int    // kind -> 1-based call number to fail
+	failPath map[string]string // kind -> path that always fails
+	failErr  error
+	counts   map[string]int
+	ops      []string // ordered op log, "kind:path"
 }
 
 func newFaultFS(inner FS) *faultFS {
 	return &faultFS{
-		FS:     inner,
-		failOn: map[string]int{},
-		counts: map[string]int{},
+		FS:       inner,
+		failOn:   map[string]int{},
+		failPath: map[string]string{},
+		counts:   map[string]int{},
 	}
 }
 
@@ -58,12 +59,31 @@ func (f *faultFS) resetCounts() {
 	f.mu.Unlock()
 }
 
+// setFaultPath makes every call of kind against exactly path fail. An
+// ordinal says WHEN a fault fires and is what an enumeration needs; a path
+// says WHERE, which is what a test about one boundary — this residue entry,
+// this directory — should say instead of counting calls to reach it. An
+// empty path clears.
+func (f *faultFS) setFaultPath(kind, path string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if path == "" {
+		delete(f.failPath, kind)
+		return
+	}
+	f.failPath[kind] = path
+	f.failErr = err
+}
+
 func (f *faultFS) hit(kind, path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counts[kind]++
 	f.ops = append(f.ops, kind+":"+path)
 	if n, ok := f.failOn[kind]; ok && f.counts[kind] == n {
+		return f.failErr
+	}
+	if p, ok := f.failPath[kind]; ok && p == path {
 		return f.failErr
 	}
 	return nil
@@ -129,27 +149,36 @@ func (f *faultFS) ReadFile(path string) ([]byte, error) {
 	return f.FS.ReadFile(path)
 }
 
-// faultFile makes File.Sync its own fault-injectable boundary.
+// faultFile makes each step of the write boundary — Write, Sync, Close —
+// its own fault-injectable kind, as publish_fs.go says they are ("the
+// returned File is the write boundary: Write, Sync and Close are separate
+// fault-injectable steps"). Sync was injectable from the start; the other
+// two became so for the P3 measurement, which enumerates every boundary.
 type faultFile struct {
 	File
 	fs   *faultFS
 	path string
 }
 
-func (w *faultFile) Sync() error {
-	w.fs.mu.Lock()
-	w.fs.counts["sync"]++
-	w.fs.ops = append(w.fs.ops, "sync:"+w.path)
-	n := w.fs.counts["sync"]
-	var err error
-	if want, ok := w.fs.failOn["sync"]; ok && n == want {
-		err = w.fs.failErr
+func (w *faultFile) Write(p []byte) (int, error) {
+	if err := w.fs.hit("write", w.path); err != nil {
+		return 0, err
 	}
-	w.fs.mu.Unlock()
-	if err != nil {
+	return w.File.Write(p)
+}
+
+func (w *faultFile) Sync() error {
+	if err := w.fs.hit("sync", w.path); err != nil {
 		return err
 	}
 	return w.File.Sync()
+}
+
+func (w *faultFile) Close() error {
+	if err := w.fs.hit("close", w.path); err != nil {
+		return err
+	}
+	return w.File.Close()
 }
 
 // recordingFS logs every operation in order (used by the rename-last test).
@@ -213,15 +242,12 @@ func (r *recordingFS) ReadFile(path string) ([]byte, error) {
 // inject a failure, assert the previous activation is untouched, then
 // assert the next attempt converges with no manual cleanup.
 func TestFaultAtEveryBoundaryConverges(t *testing.T) {
-	origBound, origPoll := lockWaitBound, lockPollInterval
-	lockWaitBound, lockPollInterval = 200*time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() { lockWaitBound, lockPollInterval = origBound, origPoll })
-
 	// Enumerate every boundary position from a clean version-bump publish:
 	// v1 installed, then v2 published, on a fault-free recording FS.
 	enumHome := t.TempDir()
 	enumFS := newFaultFS(NewOSFS())
 	enumPub := NewPublisher(testLogger(), enumFS, filepath.Join(enumHome, dirName))
+	newFakeClock().install(enumPub)
 	if _, err := enumPub.Publish(testBundle("1")); err != nil {
 		t.Fatalf("baseline publish v1: %v", err)
 	}
@@ -238,26 +264,27 @@ func TestFaultAtEveryBoundaryConverges(t *testing.T) {
 	enumFS.mu.Unlock()
 
 	type position struct {
-		kind           string
-		n              int
-		postActivation bool
+		kind string
+		n    int
 	}
 	var positions []position
-	for _, kind := range []string{"mkdir", "create", "sync", "syncdir", "rename", "remove"} {
+	// Every boundary publish_fs.go names, not only the six that were once
+	// enumerable: Write and Close became injectable for the measurement,
+	// and Lstat, ReadDir and ReadFile are boundaries a carrier pays for
+	// too (§11 assertion 27 says "every FS-seam boundary").
+	for _, kind := range []string{"lstat", "mkdir", "create", "write", "sync", "close", "syncdir", "rename", "remove", "readdir", "readfile"} {
 		for n := 1; n <= max[kind]; n++ {
-			// The final SyncDir is the root fsync after the manifest rename
-			// (design §4: "the manifest's directory after it"). A fault
-			// there fires after the activation pointer has moved.
-			postActivation := kind == "syncdir" && n == max["syncdir"]
-			positions = append(positions, position{kind, n, postActivation})
+			positions = append(positions, position{kind, n})
 		}
 	}
+	t.Logf("enumerated %d boundary positions across %d kinds", len(positions), len(max))
 
 	for _, pos := range positions {
 		t.Run(fmt.Sprintf("%s#%d", pos.kind, pos.n), func(t *testing.T) {
 			home := t.TempDir()
 			fsys := newFaultFS(NewOSFS())
 			pub := NewPublisher(testLogger(), fsys, filepath.Join(home, dirName))
+			newFakeClock().install(pub)
 			root := filepath.Join(home, dirName)
 
 			if _, err := pub.Publish(testBundle("1")); err != nil {
@@ -268,35 +295,17 @@ func TestFaultAtEveryBoundaryConverges(t *testing.T) {
 			fsys.setFault(pos.kind, pos.n, errInjected)
 			_, err := pub.Publish(testBundle("2"))
 
+			// The outcome is read from the state, not predicted from the
+			// ordinal: a fault before the manifest rename leaves the
+			// previous activation byte-identical, one after it (the root
+			// fsync, the lock release, the generation sweep) leaves the new
+			// manifest committed. Both are legitimate; a torn state in
+			// between is not, and neither is residue beyond one slot.
+			after := readFileT(t, filepath.Join(root, manifestName))
 			switch {
-			case pos.kind == "remove":
-				// The removes in a publish are the lock release, which fires
-				// after the manifest committed: the publish itself succeeds
-				// and the activation moves. The stale rule on the next
-				// attempt absorbs any lock left behind.
-				if err != nil {
-					t.Fatalf("release-fault publish should succeed, got %v", err)
-				}
-			case pos.postActivation:
-				// The root fsync after the manifest rename is fatal (the
-				// durability contract is stated, not assumed) but fires
-				// after the activation moved: the manifest now names v2,
-				// and the retry converges by skipping.
+			case string(after) == string(before):
 				if err == nil {
-					t.Fatalf("fault at %s#%d did not fail the publish", pos.kind, pos.n)
-				}
-				m := readManifestT(t, root)
-				if m.Generation != "v2" {
-					t.Fatalf("post-activation fault must leave the new manifest, got %s", m.Generation)
-				}
-			default:
-				if err == nil {
-					t.Fatalf("fault at %s#%d did not fail the publish", pos.kind, pos.n)
-				}
-				// Previous activation untouched: byte-identical manifest and
-				// the v1 generation still verifies.
-				if got := readFileT(t, filepath.Join(root, manifestName)); string(got) != string(before) {
-					t.Fatalf("manifest changed after fault at %s#%d", pos.kind, pos.n)
+					t.Fatalf("fault at %s#%d reported success without moving the activation", pos.kind, pos.n)
 				}
 				vr, verr := pub.Verify()
 				if verr != nil {
@@ -305,20 +314,21 @@ func TestFaultAtEveryBoundaryConverges(t *testing.T) {
 				if !vr.Installed || vr.Generation != "v1" {
 					t.Fatalf("previous activation not intact after fault: %+v", vr)
 				}
+			default:
+				m, perr := parseManifest(after)
+				if perr != nil {
+					t.Fatalf("fault at %s#%d left an unparseable manifest: %v", pos.kind, pos.n, perr)
+				}
+				if m.Generation != "v2" {
+					t.Fatalf("fault at %s#%d left the manifest naming %s", pos.kind, pos.n, m.Generation)
+				}
 			}
+			assertResidueWithinOneSlot(t, root)
 
 			// The next attempt converges with no manual cleanup.
 			fsys.setFault(pos.kind, 0, nil)
-			res, err := pub.Publish(testBundle("2"))
-			if err != nil {
-				t.Fatalf("retry after fault at %s#%d: %v", pos.kind, pos.n, err)
-			}
-			if pos.kind == "remove" || pos.postActivation {
-				if res.Published {
-					t.Fatalf("retry after a post-activation fault should skip, got %+v", res)
-				}
-			} else if !res.Published {
-				t.Fatalf("retry did not publish: %+v", res)
+			if _, retryErr := pub.Publish(testBundle("2")); retryErr != nil {
+				t.Fatalf("retry after fault at %s#%d: %v", pos.kind, pos.n, retryErr)
 			}
 			vr, err := pub.Verify()
 			if err != nil {
@@ -332,14 +342,44 @@ func TestFaultAtEveryBoundaryConverges(t *testing.T) {
 	}
 }
 
+// assertResidueWithinOneSlot is the residue half of §11 assertion 27: after
+// a failed attempt, what we own is at most ONE staging slot — one staging
+// directory and one manifest temp — and the generation directory holds at
+// most the keep-two footprint plus the uncommitted generation of the
+// attempt that just failed.
+func assertResidueWithinOneSlot(t *testing.T, root string) {
+	t.Helper()
+	tmpEntries, err := os.ReadDir(filepath.Join(root, tmpName))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("readdir tmp: %v", err)
+	}
+	if len(tmpEntries) > maxStagingSlotEntries {
+		t.Errorf("tmp/ holds %d entries after a failed attempt, want at most one slot (%d): %v",
+			len(tmpEntries), maxStagingSlotEntries, names(tmpEntries))
+	}
+	dirs := 0
+	for _, e := range tmpEntries {
+		if e.IsDir() {
+			dirs++
+		}
+	}
+	if dirs > maxStagingSlots {
+		t.Errorf("tmp/ holds %d staging directories, want at most %d: %v", dirs, maxStagingSlots, names(tmpEntries))
+	}
+	gens, err := os.ReadDir(filepath.Join(root, integrationDir))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("readdir integration: %v", err)
+	}
+	if len(gens) > 3 {
+		t.Errorf("integration/ holds %d generations after a failed attempt, want at most keep-two plus the uncommitted one: %v",
+			len(gens), names(gens))
+	}
+}
+
 // TestFirstPublishFaultLeavesNothingActive: a fault during the very first
 // publish leaves no activation pointer and no committed generation reachable
 // from one — torn publication is unrepresentable, and the retry converges.
 func TestFirstPublishFaultLeavesNothingActive(t *testing.T) {
-	origBound, origPoll := lockWaitBound, lockPollInterval
-	lockWaitBound, lockPollInterval = 100*time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() { lockWaitBound, lockPollInterval = origBound, origPoll })
-
 	for _, pos := range []struct {
 		kind string
 		n    int
@@ -354,6 +394,7 @@ func TestFirstPublishFaultLeavesNothingActive(t *testing.T) {
 			home := t.TempDir()
 			fsys := newFaultFS(NewOSFS())
 			pub := NewPublisher(testLogger(), fsys, filepath.Join(home, dirName))
+			newFakeClock().install(pub)
 			root := filepath.Join(home, dirName)
 
 			fsys.setFault(pos.kind, pos.n, errInjected)
@@ -395,10 +436,6 @@ func TestFirstPublishFaultLeavesNothingActive(t *testing.T) {
 // deferred sweep runs — a bare return or a swallowed error would leave
 // either a phantom ~/.nocx or a false Published result.
 func TestPublishFaultSurfacesErrorAndSweepsRoot(t *testing.T) {
-	origBound, origPoll := lockWaitBound, lockPollInterval
-	lockWaitBound, lockPollInterval = 100*time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() { lockWaitBound, lockPollInterval = origBound, origPoll })
-
 	for _, pos := range []struct {
 		kind      string
 		n         int
@@ -412,6 +449,7 @@ func TestPublishFaultSurfacesErrorAndSweepsRoot(t *testing.T) {
 			home := t.TempDir()
 			fsys := newFaultFS(NewOSFS())
 			pub := NewPublisher(testLogger(), fsys, filepath.Join(home, dirName))
+			newFakeClock().install(pub)
 			root := filepath.Join(home, dirName)
 
 			fsys.setFault(pos.kind, pos.n, errInjected)
@@ -472,8 +510,12 @@ func assertBoundedFootprint(t *testing.T, root, active string) {
 }
 
 // TestConcurrentPublishSameVersion: two concurrent publishes of the same
-// version produce one active generation, no duplicated work and no lost
-// bytes. Run under -race.
+// version produce ONE remote publish, no duplicated work and no lost bytes.
+// Both callers are told the same thing, because local singleflight joined
+// them to one attempt: "exactly one caller sees Published" was a property
+// of the lock serialising two remote attempts, and the remote attempt one
+// of them made is precisely what is now not made at all. What must stay
+// exactly one is the number of remote publishes. Run under -race.
 func TestConcurrentPublishSameVersion(t *testing.T) {
 	home := t.TempDir()
 	fsys := newFaultFS(NewOSFS())
@@ -494,29 +536,26 @@ func TestConcurrentPublishSameVersion(t *testing.T) {
 	}
 	wg.Wait()
 
-	published := 0
 	for i := range workers {
 		if errs[i] != nil {
 			t.Fatalf("worker %d: %v", i, errs[i])
 		}
-		if results[i].Published {
-			published++
+		if !results[i].Published || results[i].Generation != "v10" {
+			t.Fatalf("worker %d did not receive the published result: %+v", i, results[i])
 		}
 	}
-	if published != 1 {
-		t.Fatalf("exactly one publish must win, got %d winners: %+v", published, results)
-	}
 
-	// No duplicated work: both contenders serially take the lock and each
-	// writes its identifying nonce (2 creates), while exactly ONE publisher
-	// writes the generation files and the manifest temp (len(b.Files)+1).
-	// The loser's re-check under the lock skips all of that.
-	wantCreates := 2 + len(b.Files) + 1
+	// One remote publish: one generation rename and one manifest rename,
+	// and the generation files and manifest temp written once each. A
+	// second attempt — joined or serialised — would double both.
 	fsys.mu.Lock()
-	creates := fsys.counts["create"]
+	creates, renames := fsys.counts["create"], fsys.counts["rename"]
 	fsys.mu.Unlock()
-	if creates != wantCreates {
-		t.Errorf("create calls = %d, want %d (one publisher did the generation work)", creates, wantCreates)
+	if wantCreates := 1 + len(b.Files) + 1; creates != wantCreates {
+		t.Errorf("create calls = %d, want %d (one lock nonce, one bundle, one manifest temp)", creates, wantCreates)
+	}
+	if renames != 2 {
+		t.Errorf("rename calls = %d, want 2 (one generation, one manifest)", renames)
 	}
 
 	// No lost bytes: the active generation verifies against the bundle.

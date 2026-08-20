@@ -23,6 +23,8 @@ package transport
 //     RegisterIntegration;
 //   - the kernel's published facts say when a domain went live —
 //     PublishLifecycle calls noteIntegrationLive;
+//   - the bootstrap says how the far side answered nocx's own setup, before
+//     any shell or domain exists — NoteBootstrapOutcome;
 //   - the adapter says which path ended a transport — NoteIntegrationLoss.
 //
 // The split is not cosmetic. A handshake that times out never establishes a
@@ -238,6 +240,73 @@ func (s *WSServer) NoteIntegrationLoss(lane lifecycle.LaneID, cause string) {
 	s.emitIntegration(sid)
 }
 
+// NoteBootstrapOutcome records the terminal outcome of a session's shell
+// bootstrap (carrier design §5.5, §6.1) and publishes the resulting status.
+// reason is ReasonNone when the bootstrap was accepted, and the axis is then
+// left alone: "a domain is live" is the kernel's word and this is not it — an
+// accepted bootstrap means the shell is on its way to proving itself, not that
+// it has.
+//
+// It is a THIRD emission trigger on this axis, and it is one for the reason the
+// other two are. The bootstrap runs after the open ack has gone out and reaches
+// a terminal outcome of its own, before any domain exists: no lifecycle fact is
+// published for it, and no loss cause describes it. Before this the whole
+// closed outcome set — an absent hasher on the far host, a digest that did not
+// match, a generation that is not installed — was a log line, and the product
+// either said nothing at all or, seconds later, said "unknown".
+//
+// Keyed by the lifecycle lane, which is the addressing this file already uses
+// for the loss half. A session with no lane never had a channel to bootstrap.
+func (s *WSServer) NoteBootstrapOutcome(lane lifecycle.LaneID, reason ssh.RefusalReason) {
+	if reason == ssh.ReasonNone {
+		return
+	}
+	s.lifecycleMu.Lock()
+	sid, ok := s.lifecycleLanes[lane]
+	s.lifecycleMu.Unlock()
+	if !ok {
+		return
+	}
+	status, applied, changed := s.applyBootstrapOutcome(sid, reason)
+	if !changed {
+		return
+	}
+	s.log.Info("session integration degraded",
+		"session", sid, "status", status, "reason", string(applied), "cause", causeBootstrapRefused)
+	s.emitIntegration(sid)
+}
+
+// causeBootstrapRefused names this detector in the log, beside the adapter's
+// loss causes and the process observer. It is a diagnostic and never a wire
+// value.
+const causeBootstrapRefused = "bootstrap-refused"
+
+// applyBootstrapOutcome moves the axis for a refused bootstrap under the lock.
+//
+// The window it may answer in has both ends, exactly like the process
+// observer's: it opens when the session is registered as `starting` and closes
+// the moment anything else has concluded the axis. A session that has already
+// integrated is not degraded by a late bootstrap report — there is no such
+// thing, since the bootstrap precedes the shell — and a session already
+// answered keeps its first answer, which is the rule this file states twice
+// already and this is the third meeting of it.
+func (s *WSServer) applyBootstrapOutcome(sid session.ID, reason ssh.RefusalReason) (string, ssh.RefusalReason, bool) {
+	s.integrationMu.Lock()
+	defer s.integrationMu.Unlock()
+	st, ok := s.integrations[sid]
+	if !ok {
+		return "", "", false
+	}
+	if st.everLive || st.status != IntegrationStarting {
+		return "", "", false
+	}
+	next := *st
+	next.status = IntegrationConventional
+	next.reason = reason
+	*st = next
+	return next.status, next.reason, true
+}
+
 // NoteShellReplaced records that the executable nocx started is no longer the
 // one running under a session's pty, and concludes the axis now rather than
 // when the handshake bound expires.
@@ -370,6 +439,24 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 	case cause == LossCauseHelloTimeout:
 		next.status = IntegrationConventional
 		next.reason = ssh.ReasonHandshakeTimeout
+	case cause == LossCauseListenerGone || cause == LossCauseMasterSocketGone ||
+		cause == LossCauseMasterExited:
+		// §6.2's second row: after the channel existed and before
+		// integration was live. What went away is nocx's own channel to the
+		// shell — the forwarded listener, the multiplex socket, or the
+		// master holding it — so the shell is fine and the channel is not,
+		// which is a different sentence from "your shell did not answer".
+		next.status = IntegrationConventional
+		next.reason = ssh.ReasonChannelUnavailable
+	case cause == LossCauseTransportGone:
+		// The underlying SSH transport died. §6.2 is explicit that this
+		// ENDS THE SESSION rather than degrading it — there is no prompt to
+		// keep. The axis still records the honest reason, because the
+		// notification and the session's `exit` race and the renderer may
+		// see either; what it must never do is claim a usable conventional
+		// terminal, and channel-lost does not.
+		next.status = IntegrationConventional
+		next.reason = ssh.ReasonBootstrapInterrupted
 	default:
 		// The descriptor ended or broke before the shell ever proved
 		// itself. The backend genuinely cannot say why, and "unknown" is a
@@ -394,6 +481,20 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 const (
 	LossCauseHelloTimeout = "hello-timeout"
 	LossCauseClosed       = "closed"
+	// The carrier design's §6.2 events, which the REMOTE adapter reports and
+	// the local one has no analogue for. They are here as plain strings for
+	// the same reason the two above are, and a conformance test in the app
+	// package pins each spelling to the adapter constant that produces it.
+	//
+	// The design insists they are detected separately, and the reason is
+	// that they mean different things to a user: nocx's own channel going
+	// away, the SSH connection dying, and the shell falling silent are three
+	// situations with three different answers, and one word for all three is
+	// the "cannot say why" this axis exists to stop giving.
+	LossCauseListenerGone     = "listener-gone"
+	LossCauseTransportGone    = "transport-gone"
+	LossCauseMasterSocketGone = "master-socket-gone"
+	LossCauseMasterExited     = "master-exited"
 )
 
 // noteIntegrationLive records that an authenticated domain went live on a

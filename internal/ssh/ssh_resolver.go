@@ -88,6 +88,32 @@ type HostConfig struct {
 	// normalize to the canonical yes/no so callers are independent of
 	// the ssh version that produced the output.
 	RequestTTY string
+
+	// The multiplex directives, as the oracle resolves them for this exact
+	// argv — the user's config and their command-line -M/-S/-o together.
+	// ADR-0035's typed wrapper reads all three before it proposes a socket
+	// of its own, for two different reasons.
+	//
+	// The first is a REFUSAL: a user who expressed their own multiplex
+	// policy is never overridden, so any of these away from its default
+	// ends the rewrite before anything happens.
+	//
+	// The second is the SOCKET PATH, and it is why these are read off the
+	// oracle rather than composed here. ControlPath is percent-expanded by
+	// ssh, and the %C the wrapper proposes is a hash ssh computes from the
+	// local host, the remote host, the port and the remote user. Only ssh
+	// knows it — so the wrapper asks ssh, with its own options in the argv,
+	// and connects to the answer. Reading the config ourselves would be the
+	// second implementation ADR-0015 exists to prevent.
+	//
+	// Defaults, normalized: ControlMaster is "no", ControlPath is empty
+	// (ssh -G prints nothing for the "none" default), ControlPersist is
+	// "no". OpenSSH >= 10 serializes ControlMaster's booleans as
+	// true/false where older versions print yes/no; both normalize to the
+	// canonical yes/no, exactly as RequestTTY does above.
+	ControlMaster  string
+	ControlPath    string
+	ControlPersist string
 }
 
 // Sentinel errors for ssh -G resolution failures. Each is distinguishable
@@ -127,17 +153,29 @@ type sshConfigResolver struct {
 	lastMtime time.Time
 	cache     map[string]*HostConfig
 
-	// identityCache holds ResolveArgv results keyed by the RESOLVED
-	// identity (IdentityKey) — never by the typed hostname: with
+	// argvCache holds ResolveArgv results keyed by THE EXACT ARGV, which is
+	// the question that was asked. Never by the typed hostname: with
 	// command-line -F/-p/-l/-J/-o the same alias can resolve to different
 	// destinations, so the alias is not a key (ADR-0015 narrowed by the
-	// 2026-08-05 delivery-modes design §8). argvIndex maps the exact typed
-	// argv to the identity its first resolution produced, so a repeat of
-	// the same line skips the ssh -G spawn; it is an index into
-	// identityCache, never a second authoritative store. Both are cleared
-	// by the same config-mtime purge as `cache`.
-	identityCache map[string]*HostConfig
-	argvIndex     map[string]string
+	// 2026-08-05 delivery-modes design §8).
+	//
+	// AND NEVER BY THE RESOLVED IDENTITY EITHER, which is what it was until
+	// 2026-08-21. Keying by identity assumes every argv naming one
+	// destination has one answer, and since ADR-0035 that is false by
+	// design: the typed wrapper asks this oracle twice about the same
+	// destination, once about the user's own line and once about the same
+	// line plus our ControlMaster/ControlPath/ControlPersist, and the whole
+	// point of the second question is that it answers differently. Sharing
+	// one entry meant the second connection to a host got the first
+	// question's answer — an empty `controlpath` for the wrapped line — and
+	// nocx refused to interpose with `no-control-path`, so every typed ssh
+	// after the first came up unintegrated (measured in
+	// e2e/nocxify-journey.spec.ts, 2026-08-21).
+	//
+	// The identity is still computed and still narrows nothing away: it is
+	// what the answer resolved TO, not what was asked. Cleared by the same
+	// config-mtime purge as `cache`.
+	argvCache map[string]*HostConfig
 
 	// Per-condition one-time reporting via atomic bitmask.
 	reported atomic.Uint32
@@ -150,12 +188,11 @@ type sshConfigResolver struct {
 // warnings and has no other output path.
 func NewSSHConfigResolver(logger log.Logger, configPath, sshPath string) ConfigResolver {
 	return &sshConfigResolver{
-		configPath:    configPath,
-		sshPath:       sshPath,
-		log:           logger,
-		cache:         make(map[string]*HostConfig),
-		identityCache: make(map[string]*HostConfig),
-		argvIndex:     make(map[string]string),
+		configPath: configPath,
+		sshPath:    sshPath,
+		log:        logger,
+		cache:      make(map[string]*HostConfig),
+		argvCache:  make(map[string]*HostConfig),
 	}
 }
 
@@ -192,14 +229,14 @@ func (r *sshConfigResolver) ResolveConfig(ctx context.Context, host string) (*Ho
 // the default ~/.ssh/config, so the oracle answers about the configuration
 // the typed line will actually run (nocx-c5az).
 //
-// Caching: results are cached under the RESOLVED identity (IdentityKey),
-// not the typed hostname — the ADR-0015 narrowing of the 2026-08-05
-// delivery-modes design (§8): with command-line -F/-p/-l/-J/-o the same
-// alias can resolve to different destinations, so the alias is not a key.
-// argvIndex maps the exact typed argv to the identity its first resolution
-// produced, so a repeat of the same line skips the ssh -G spawn. The same
-// config-mtime purge that invalidates the host-keyed cache clears both
-// maps. A typed -F naming a different config file is a documented
+// Caching: results are cached under the EXACT ARGV, not the typed hostname
+// and not the resolved identity — the ADR-0015 narrowing of the 2026-08-05
+// delivery-modes design (§8) says the alias is not a key, and ADR-0035 makes
+// the destination not a key either: the typed wrapper asks about one
+// destination twice, with and without our own mux options, and needs two
+// different answers. A repeat of the same argv still skips the ssh -G spawn.
+// The same config-mtime purge that invalidates the host-keyed cache clears
+// it. A typed -F naming a different config file is a documented
 // limitation: only the main config file's mtime is watched, so a change to
 // a typed -F file is not observed (eviction stays safe — the cost of a
 // miss is one ssh -G spawn, never a wrong answer).
@@ -213,16 +250,11 @@ func (r *sshConfigResolver) ResolveArgv(ctx context.Context, argv []string) (*Ho
 	argvKey := strings.Join(argv, "\x00")
 
 	r.mu.RLock()
-	identity, indexed := r.argvIndex[argvKey]
+	cached, hit := r.argvCache[argvKey]
 	mtime := r.lastMtime
 	r.mu.RUnlock()
-	if indexed && !r.configChanged(mtime) {
-		r.mu.RLock()
-		cfg, ok := r.identityCache[identity]
-		r.mu.RUnlock()
-		if ok {
-			return cfg, nil
-		}
+	if hit && !r.configChanged(mtime) {
+		return cached, nil
 	}
 
 	cfg, err := r.runSSHGArgv(ctx, argv)
@@ -235,16 +267,14 @@ func (r *sshConfigResolver) ResolveArgv(ctx context.Context, argv []string) (*Ho
 			User:     currentUser(),
 		}, err
 	}
-	id := IdentityKey(cfg)
 	r.mu.Lock()
 	if r.configChanged(r.lastMtime) {
 		r.purgeCacheLocked()
 	}
-	r.argvIndex[argvKey] = id
-	r.identityCache[id] = cfg
+	r.argvCache[argvKey] = cfg
 	// Anchor the mtime like load() does: without it, a repeat of the same
 	// argv would always see configChanged(zero time) as "changed" and the
-	// argvIndex fast path would never hit in production.
+	// argv fast path would never hit in production.
 	if info, err := os.Stat(r.configPath); err == nil {
 		r.lastMtime = info.ModTime()
 	}
@@ -272,10 +302,13 @@ func oracleHost(argv []string) string {
 // IdentityKey returns the canonical key for a resolved destination: the
 // ssh -G answer for the exact argv — user, hostname and port after every
 // typed -F/-o/-J/-l/-p and the config file's directives — never the typed
-// hostname string. This is the key of the argv-oracle cache (ADR-0015
-// narrowing) and of the installed-fact store (2026-08-05 delivery-modes
-// design §5.4): two typed lines that resolve to the same destination share
-// one key. Port 0 (unset) normalizes to 22, ssh's default.
+// hostname string. It is the key of the installed-fact store (2026-08-05
+// delivery-modes design §5.4): two typed lines that resolve to the same
+// destination share one key. Port 0 (unset) normalizes to 22, ssh's default.
+//
+// It is NOT the key of the argv-oracle cache, and was until 2026-08-21 —
+// see argvCache for what that cost. What a destination IS and what was ASKED
+// about it are two different things, and only the second decides an answer.
 func IdentityKey(cfg *HostConfig) string {
 	port := cfg.Port
 	if port <= 0 {
@@ -366,8 +399,7 @@ func (r *sshConfigResolver) purgeCache() {
 // never leaves the argv family behind.
 func (r *sshConfigResolver) purgeCacheLocked() {
 	r.cache = make(map[string]*HostConfig)
-	r.identityCache = make(map[string]*HostConfig)
-	r.argvIndex = make(map[string]string)
+	r.argvCache = make(map[string]*HostConfig)
 	r.lastMtime = time.Time{}
 }
 
@@ -479,6 +511,35 @@ func parseSSHGOutput(output, host string) (*HostConfig, error) {
 			// the oracle's verdict.
 			if value != "none" {
 				cfg.RemoteCommand = value
+			}
+		case "controlmaster":
+			// "no" is the default and is what ssh -G prints for an unset
+			// directive; it collapses to the empty string so "the user
+			// expressed a policy" is a non-empty test on all three
+			// fields. true/false are OpenSSH >= 10's spelling of yes/no.
+			switch value {
+			case "no", "false":
+				cfg.ControlMaster = ""
+			case "true":
+				cfg.ControlMaster = "yes"
+			default:
+				cfg.ControlMaster = value
+			}
+		case "controlpath":
+			// ssh -G omits the line entirely when ControlPath is unset,
+			// and prints "none" when it is set to that sentinel; both mean
+			// "no socket", so both collapse to empty.
+			if value != "none" {
+				cfg.ControlPath = value
+			}
+		case "controlpersist":
+			switch value {
+			case "no", "false", "0":
+				cfg.ControlPersist = ""
+			case "true":
+				cfg.ControlPersist = "yes"
+			default:
+				cfg.ControlPersist = value
 			}
 		case "requesttty":
 			// "auto" is the RequestTTY default; ssh -G prints it when the

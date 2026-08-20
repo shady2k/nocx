@@ -89,6 +89,18 @@ html {
   --titlebar-inset-start: 0px;
 }
 
+/* 78px was calibrated for `mac.TitleBarHiddenInset()`, which pushes the traffic
+   lights inwards. 4c430dcf dropped it for `mac.TitleBarHidden()` — the inset
+   variant's NSToolbar left a minimised window unrestorable (nocx-dqg) — and
+   touched only main.go; its own message says "only the extra inset of the
+   traffic lights is lost". The lights moved left and the room reserved for them
+   did not, so the strip kept paying for a title bar the app had stopped asking
+   for (nocx-gm4fj).
+
+   66px is the geometry the app actually draws: the close button starts at 7px,
+   the three sit on a 20px pitch and are 12px across, so the green one ends at
+   59px. The remaining 7px, plus the 4px `.tabstrip-lead` adds of its own, is
+   the gutter between the last light and the first control. */
 :root[data-platform='darwin'] {
-  --titlebar-inset-start: 78px;
+  --titlebar-inset-start: 66px;
 }

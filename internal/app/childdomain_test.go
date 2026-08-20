@@ -1,13 +1,34 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/ssh"
 )
+
+// composeSSHChildLine is the production composer called the way the ssh child
+// calls it: our own multiplex options, the -t and the -R forward the child
+// needs, the user's own words, and the remote command last. It stands in for
+// the call site so each test below states only what it is about.
+//
+// The composer used to be a function of its own with this signature. ADR-0035
+// merged it with the typed wrapper's: there is one composer for "the line a
+// parent shell runs" now, and the ssh child is one of its callers.
+func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
+	wrap := ssh.TypedWrap{MuxOptions: []string{
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=/tmp/nocx-mux-0/m-%C",
+		"-o", "ControlPersist=no",
+	}}
+	inv := ssh.TypedInvocation{Opts: req.Opts, Host: req.Host, User: req.User, Port: req.Port}
+	extra := []string{"-t", "-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", remotePort, localPort)}
+	return composeSSHLine(wrap, extra, inv, startCmd)
+}
 
 // TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward is the ssh
 // child's wire contract (ADR-0022: the ssh command line is the carrier):
@@ -28,7 +49,7 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 		Env: "ssh", Host: "box.example.com", User: "alice", Port: 2222,
 	})
 
-	if !strings.Contains(line, "-R 127.0.0.1:40123:127.0.0.1:37777") {
+	if !strings.Contains(line, "'127.0.0.1:40123:127.0.0.1:37777'") {
 		t.Errorf("line does not carry the -R forward: %s", line)
 	}
 	if !strings.Contains(line, "-p 2222") {
@@ -40,8 +61,15 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 	// One -t: the client's stdin is the parent's terminal, so OpenSSH
 	// allocates the remote pty without being forced. -tt was a consequence
 	// of the pipe and must not return with it.
-	if !strings.Contains(line, "ssh -t -R") {
+	if !strings.Contains(line, "'-t'") {
 		t.Errorf("line does not request a remote pty with a single -t: %s", line)
+	}
+	// Our own two options, and only ours: the user's process is the
+	// multiplex master and the interactive session both (ADR-0035).
+	for _, want := range []string{"ControlMaster=auto", "ControlPath=", "ControlPersist=no"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line does not make the user's own process the master (%s missing): %s", want, line)
+		}
 	}
 	if strings.Contains(line, "-tt") {
 		t.Errorf("line forces a pty with -tt, which is only needed when the client's "+

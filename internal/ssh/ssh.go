@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -23,13 +24,19 @@ type Channel interface {
 	ShellIntegrationReason() RefusalReason
 }
 
-// RemoteInstaller installs shell integration scripts on a remote host via
-// SSH/SFTP and returns the start command for the shell. Defined here (not
-// in shellintegration) to avoid a cyclic import.
+// RemoteInstaller publishes the shell integration bundle on a remote host
+// over SSH/SFTP. Defined here (not in shellintegration) to avoid a cyclic
+// import.
+//
+// It no longer answers "what should the session run": that was
+// RemoteStartCommand, the far-side `[ -x "$HOME/.nocx/launch" ]` guard, and
+// the carrier design retired it — placed first, the guard loses a race
+// against the publish it runs concurrently with, so the session degraded
+// while the publish succeeded. The remote command now comes from the
+// launcher, unconditionally and whatever the publish did.
 type RemoteInstaller interface {
 	EnsureInstalledRemote(ctx context.Context, sshClient *gossh.Client, remoteHome string) error
 	GetRemoteHome(sshClient *gossh.Client) (string, error)
-	RemoteStartCommand() string
 	// UninstallRemote removes the committed integration bundle on the host,
 	// over the SFTP carrier, and reports the two lists: root-relative paths
 	// removed and root-relative paths the user modified (left in place).
@@ -72,6 +79,42 @@ const (
 	ShellAuto ShellKind = "auto"
 )
 
+// MaxRemoteCommandLen is the bound on any command internal/ssh puts on the
+// wire, enforced at the two gossh seams that send one: the launcher's start
+// command (shellStartCommand, before session.Start) and discovery's probes
+// (discoveryConn.Exec, before Run). internal/ssh/mux enforces the same bound
+// on the control-socket seam.
+//
+// It is enforced HERE, at the point of no return, and not only where a
+// command is built — that is the whole distinction (nocx-e4ir3). Before
+// nocx-m8jwn the remote command was ~92 KiB carrying the integration bundle
+// and two bearers, and the cap meant to stop it (120 KiB) lived beside the
+// builder that produced it: one producer policed itself, the measured command
+// sat at 75% of the cap, and nobody was watching. A RemoteLauncher is a seam
+// somebody else implements next; a bound that only its current implementation
+// applies to itself is a convention, not a bound.
+//
+// The number is 1 KiB, and it is a CONTRACT rather than a mechanical ceiling:
+// it is the size a consumer of an exec request must be able to carry whole as
+// one field of one record. Every mechanical ceiling in the path is far above
+// it — Linux's MAX_ARG_STRLEN caps the far side's execve at 131072 bytes,
+// OpenSSH and x/crypto/ssh cap a packet at 256 KiB — and reaching one of
+// those produces somebody else's opaque error instead of our named refusal.
+//
+// One number, three packages, because AD-8 forbids the imports that would
+// make it one symbol (internal/ssh must not depend on
+// internal/shellintegration; mux is a leaf): shellintegration.MaxCarrierLen is
+// the producer's contract, this is the gossh seams', mux.MaxCommandLen is the
+// control socket's. TestTheBoundIsOneNumber in internal/app pins all three
+// equal, so raising any one of them alone goes red.
+const MaxRemoteCommandLen = 1024
+
+// ErrCommandTooLong is a remote command at or above MaxRemoteCommandLen.
+// Nothing is sent: a refusal that has already written the request is not a
+// bound. The command is never truncated — a shortened command runs something
+// the caller did not ask for, on somebody else's machine.
+var ErrCommandTooLong = errors.New("ssh: the remote command is longer than the bound")
+
 // RefusalReason is why integration did not happen, in a form the product
 // renders. The empty string means "no refusal".
 type RefusalReason string
@@ -105,6 +148,21 @@ const (
 	// 8). Distinct from every reason above, all of which describe a session
 	// that never integrated at all.
 	ReasonChannelLost RefusalReason = "channel-lost"
+	// ReasonExecRefused and ReasonExecSubstituted are the two `exec` rows of
+	// §6.4. They are declared in the §6.4 matrix block below, with the rest
+	// of that vocabulary, rather than here: two packages of this epic
+	// reached them independently — one from the typed-`ssh` wrapper that has
+	// to branch on them, one from the refusal enum the product renders — and
+	// one owner is the point of AD-8.
+	//
+	// Kept from the wrapper's own reading, because the matrix block does not
+	// say it and it is why the refused row could not simply be assumed: a
+	// stock OpenSSH server cannot produce it. Five ways of restricting an
+	// account were measured (`exec_refusal_probe_test.go`) and every one
+	// ACCEPTS the request and substitutes what runs behind it. Real
+	// intermediaries do refuse it, and software that is not the server is
+	// what that row is about.
+	//
 	// ReasonUnknown means integration did not happen and the backend cannot
 	// say why — the remoteLauncherAdapter's fail-open for a refusal reason
 	// the ssh vocabulary does not yet know (nocx-axpz). It is a distinct
@@ -113,27 +171,199 @@ const (
 	ReasonUnknown RefusalReason = "unknown"
 )
 
+// The §6.4 selective-refusal matrix, and the bootstrap's own closed outcome
+// set (carrier design §5.2, §5.5, §6.1, §6.4).
+//
+// # Why this vocabulary got this much bigger, in one paragraph
+//
+// It had seven members and the bootstrap has twenty-one outcomes, so every one
+// of them reached the product as ReasonUnknown — "integration did not happen
+// and the backend cannot say why" — while the backend knew perfectly well that
+// the far host had no installed generation, or no hasher to verify with, or a
+// digest that did not match. The precise outcome went to a log the user cannot
+// read. That is a soft degrade the UI contradicts, which AGENTS.md names as how
+// a feature that does not exist survives a release, and it is what this block
+// closes. The rule it follows is the one that keeps the closed set honest:
+// EVERY MEMBER OF THE BOOTSTRAP'S CLOSED SET HAS A NAME HERE, spelled
+// identically, so the mapping is a rename and cannot lose a member quietly.
+//
+// The identical spelling is deliberate and load-bearing. It is asserted in
+// internal/app (mapBootstrapOutcome's exhaustive switch and its conformance
+// test), and it is what makes "a member was added to one and forgotten in the
+// other" a compile-or-test failure rather than a silent ReasonUnknown.
+//
+// ReasonUnknown does NOT go away and must not: a reason this vocabulary does
+// not know is still a degraded session, and the fail-open that names it is what
+// keeps a new outcome from crashing a terminal (ADR-0004:60).
+const (
+	// ── §6.4, the channel-type matrix ────────────────────────────────────
+	//
+	// The rows below are decided by the SSH layer before any frame is
+	// written. An intermediary or a server may permit some channels and not
+	// others, and the matrix is by real channel type: the bootstrap receiver
+	// is not an auxiliary channel, it is the main PTY session.
+
+	// ReasonSessionUnavailable: the primary `session` channel was refused,
+	// so there is no session for nocx at all. The measured case is a server
+	// at its MaxSessions bound: the user's line still reaches a working
+	// prompt on the connection it already has, with one authentication and
+	// nothing published and nothing minted.
+	ReasonSessionUnavailable RefusalReason = "session-unavailable"
+	// ReasonPTYUnavailable: `pty-req` was refused after the session was
+	// granted, so no interactive shell is possible on it. Refused BEFORE any
+	// frame — a frame into a channel with no terminal has nowhere to land.
+	ReasonPTYUnavailable RefusalReason = "pty-unavailable"
+	// ReasonExecRefused: the `exec` request was refused and the channel and
+	// its pty SURVIVED the refusal, so a `shell` request on the SAME channel
+	// reaches a working interactive prompt with no second authentication.
+	// The discriminator is the request result and never the error text: the
+	// client sees (false, nil) for refused-and-alive and (false, io.EOF) for
+	// the server having torn the channel down as it refused, while the
+	// client-side error is an undistinguished "command failed" in both.
+	ReasonExecRefused RefusalReason = "exec-refused"
+	// ReasonExecSubstituted: the `exec` request was ACCEPTED and something
+	// else ran behind it. Strictly worse than a refusal and never to be
+	// collapsed into it: the channel is consumed, `shell` on it fails, and a
+	// fresh channel on the same connection runs the substituted command too,
+	// so no native prompt exists anywhere on that connection. It is the only
+	// session-shaped outcome a stock OpenSSH server can actually be
+	// configured to produce.
+	ReasonExecSubstituted RefusalReason = "exec-substituted"
+	// ReasonPublishUnavailable: the `subsystem` (SFTP) channel was refused,
+	// so nothing was written to the far host. It is reported in place of the
+	// far side's own generation-unavailable when both are true, because "the
+	// far host has no copy of the integration" is the symptom and "nocx could
+	// not write one" is the cause, and only the cause can be acted on.
+	ReasonPublishUnavailable RefusalReason = "publish-unavailable"
+
+	// ── the bootstrap's closed outcome set ───────────────────────────────
+	//
+	// One name per shellintegration.Outcome, spelled identically. The
+	// grouping below is the one the design uses — which component decides
+	// the outcome — and not a grouping invented here.
+
+	// The loader's, decided before stage-1 exists.
+
+	// ReasonLoaderTermiosUnavailable: the terminal state could not be saved
+	// or could not be put into raw mode on the far host, so the loader could
+	// not promise to give the terminal back and refused rather than take it.
+	ReasonLoaderTermiosUnavailable RefusalReason = "loader-termios-unavailable"
+	// ReasonBootstrapInterrupted: EOF, a short body, or a catchable signal
+	// before the frame completed — §6.4's "any already-open channel, severed
+	// mid-frame" row. The frame is discarded, the descriptors closed and the
+	// termios restored.
+	ReasonBootstrapInterrupted RefusalReason = "bootstrap-interrupted"
+	// ReasonBootstrapProtocol: what arrived where a frame header belongs was
+	// not a header of this protocol.
+	ReasonBootstrapProtocol RefusalReason = "bootstrap-protocol"
+	// ReasonStageTooLarge: the frame-1 header declared more than the 32 KiB
+	// cap. Refused before a single body byte is read.
+	ReasonStageTooLarge RefusalReason = "stage-too-large"
+	// ReasonCommandTooLong: the command a RemoteLauncher returned is at or
+	// above MaxRemoteCommandLen, so it was never sent. The session falls
+	// open to a plain login shell carrying this reason — a bound that killed
+	// the session instead would be a worse failure than the one it prevents
+	// (ADR-0004).
+	ReasonCommandTooLong RefusalReason = "command-too-long"
+	// ReasonStageDigestUnavailable: neither sha256sum nor shasum is present
+	// on the far host, so what nocx sent cannot be verified — and unverified
+	// bootstrap code is never executed.
+	ReasonStageDigestUnavailable RefusalReason = "stage-digest-unavailable"
+	// ReasonStageDigestMismatch: the frame's digest is not the one the
+	// command committed to. It is also what an ABSENT commitment produces:
+	// "there is nothing to verify against" and "this is not what I asked
+	// for" have the same safe answer.
+	ReasonStageDigestMismatch RefusalReason = "stage-digest-mismatch"
+	// ReasonStageFDUnavailable: the descriptor could not be opened on the far
+	// host, so the verified bootstrap could not be handed to the shell.
+	ReasonStageFDUnavailable RefusalReason = "stage-fd-unavailable"
+	// ReasonStageSourceFailed: the bootstrap was sourced and returned instead
+	// of taking the session over.
+	ReasonStageSourceFailed RefusalReason = "stage-source-failed"
+
+	// Stage-1's, decided after the frame is verified.
+
+	// ReasonSecretTooLarge: the frame-2 header declared more than the 4 KiB
+	// cap. Refused before a body byte is read.
+	ReasonSecretTooLarge RefusalReason = "secret-too-large"
+	// ReasonSecretMalformed: frame 2 parsed and a bearer was not the shape a
+	// bearer has.
+	ReasonSecretMalformed RefusalReason = "secret-malformed"
+	// ReasonSecretNotForThisSession: frame 2 named a different session,
+	// domain or epoch than the command addressed — including a frame replayed
+	// at a session it was not minted for.
+	ReasonSecretNotForThisSession RefusalReason = "secret-not-for-this-session"
+	// ReasonCapabilityFDUnavailable: the read or the write descriptor for the
+	// capability could not be opened on the far host. Nothing was written.
+	ReasonCapabilityFDUnavailable RefusalReason = "capability-fd-unavailable"
+	// ReasonCapabilityUnlinkFailed: the temp file's name could not be removed
+	// on the far host, so nothing was written at all — the capability never
+	// reaches a filesystem object anything can open by name.
+	ReasonCapabilityUnlinkFailed RefusalReason = "capability-unlink-failed"
+	// ReasonCapabilityWriteFailed: the write or the close of the write
+	// descriptor failed, so the bootstrap did not succeed.
+	ReasonCapabilityWriteFailed RefusalReason = "capability-write-failed"
+	// ReasonGenerationUnavailable: there is no executable launch carrier on
+	// the far host, so there was nothing to exec. The next connection
+	// publishes and bootstraps again.
+	ReasonGenerationUnavailable RefusalReason = "generation-unavailable"
+
+	// The backend's own. The far side never speaks these: a portable shell
+	// has no timed read without a sleep loop, and the design forbids remote
+	// work whose duration the remote host decides, so the deadlines — and the
+	// outcomes they produce — are the writer's.
+
+	// ReasonReceiverUnready: the far side never announced that it had taken
+	// the terminal, so no frame was ever written.
+	ReasonReceiverUnready RefusalReason = "receiver-unready"
+	// ReasonBootstrapTimeout: the far side answered once and then did not
+	// reach a terminal outcome inside the frame deadline.
+	ReasonBootstrapTimeout RefusalReason = "bootstrap-timeout"
+	// ReasonBootstrapOutOfOrder: a token of the closed set arrived twice or
+	// out of its order (§6.1's first rule against a forged readiness token).
+	// The far side emits each of its tokens exactly once by construction, so
+	// a session that produces this had a token written into it by something
+	// that is not nocx's loader.
+	ReasonBootstrapOutOfOrder RefusalReason = "bootstrap-out-of-order"
+	// ReasonChannelUnavailable: the lifecycle forward or channel could not be
+	// opened, so NOTHING WAS MINTED (§6.1) and the far side was handed a
+	// non-secret refusal rather than a bearer it could not use. The shell
+	// still comes up; it simply has no authenticated channel.
+	ReasonChannelUnavailable RefusalReason = "channel-unavailable"
+)
+
 // LaunchOptions carries what the start command must embed.
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
-	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
-	// exported to the environment. Lane, Domain and Epoch are names, not
-	// secrets, and travel in the environment like the other NOCX_* fields.
+	// per-epoch bearer: it travels as a bounded FRAME on the session
+	// channel and reaches the far shell through an inherited, already
+	// unlinked descriptor — never the command, never argv, never the
+	// environment, never a named file. Lane, Domain and Epoch are names,
+	// not secrets, and travel in the environment like the other NOCX_*
+	// fields.
 	// The transport is a loopback TCP port (LifecyclePort, the remote
 	// path); zero means that side is absent. Empty Capability means no
 	// channel: the session is conventional. Mirrors
 	// shellintegration.LaunchOptions field for field; the composition
 	// root maps the two at wiring time.
 	Capability string
-	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
-	// substituted into the rcfile text like the capability.
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8). It
+	// travels in the same frame as the capability and by the same route.
 	Recovery      string
 	Lane          string
 	Domain        string
 	Epoch         uint64
 	LifecyclePort int
+	// StageDigest is the lowercase hex SHA-256 of the stage-1 frame the
+	// sender is about to write. It is an addressing value, not a secret,
+	// and the far-side loader refuses any frame that does not hash to it.
+	//
+	// It is set from RemoteLauncher.Prepare, which renders the frame and
+	// computes the digest, immediately before StartCommand is asked for the
+	// command that carries it.
+	StageDigest string
 }
 
 // RemoteLifecycleLaunch is what the launcher embeds: the addressing tuple
@@ -147,8 +377,8 @@ type RemoteLifecycleLaunch struct {
 	Epoch      uint64
 	Port       int
 	Capability string // 64 lowercase hex chars
-	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
-	// substituted into the rcfile text like the capability, never exported.
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8). It
+	// travels in the same frame as the capability, never exported.
 	Recovery string // 64 lowercase hex chars
 }
 
@@ -168,13 +398,35 @@ type RemoteLifecycle interface {
 	Establish(ctx context.Context, host string, opts ...ConnectOption) (RemoteLifecycleLaunch, io.Closer, error)
 }
 
-// RemoteLauncher builds the command string passed to an SSH session's Start()
-// to bring up an integrated interactive shell on the far host.
+// RemoteLauncher brings up an integrated interactive shell on the far host.
+// It owns BOTH halves of one delivery, which is why they are one interface
+// and not two wired seams: the command commits to the digest of the stage-1
+// frame, so the component that builds the command and the component that
+// writes the frame have to be the same one or they can disagree.
 type RemoteLauncher interface {
 	// StartCommand returns the remote command for the given far shell.
 	// ok is false when this shell cannot be integrated; reason then says
 	// why, and the caller falls back to a plain shell.
 	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
+
+	// Prepare renders this session's bootstrap and returns the stage-1
+	// digest the command must carry, the run that delivers the frames once
+	// the session has started, and the §6.1 gate the caller feeds the two
+	// facts that must precede the mint.
+	//
+	// It is called BEFORE StartCommand, and the caller puts the digest into
+	// the LaunchOptions it passes there. ok=false means no bootstrap is
+	// possible, and the caller then emits NO command at all: a carrier
+	// whose loader has no sender blocks on a frame that never arrives,
+	// which is the one outcome worse than an un-integrated prompt.
+	//
+	// The gate is returned rather than passed in because the thing behind it
+	// is the mint, which belongs to whoever builds the frame. This package
+	// holds only the two facts and hands them over as they land — which is
+	// what lets the publish run CONCURRENTLY with the loader (design §7: 3 +
+	// 3 + 10 exceeds the 15 s integration deadline, so the two are not
+	// sequential).
+	Prepare(shell ShellKind, opts LaunchOptions) (digest string, run BootstrapRun, gate BootstrapGate, ok bool)
 }
 
 type SSH interface {
@@ -468,10 +720,10 @@ func WithShell(shell ShellKind) ConnectOption {
 	return func(c *ConnectConfig) { c.Shell = shell }
 }
 
-// WithRemoteInstaller injects a shell integration installer for the remote
-// session. It remains as an EXPLICIT opt-in for the later persistent-install
-// flow: openShell consults it only when no RemoteLauncher is wired, so the
-// default path never SFTP-mutates a remote home (nocx-r52q).
+// WithRemoteInstaller injects the bundle publisher for the remote session.
+// It remains an EXPLICIT opt-in, so a connection that does not ask for it
+// never SFTP-mutates a remote home (nocx-r52q). What it publishes no longer
+// decides what the session runs — the carrier is emitted either way.
 func WithRemoteInstaller(ri RemoteInstaller) ConnectOption {
 	return func(c *ConnectConfig) { c.RemoteInstaller = ri }
 }

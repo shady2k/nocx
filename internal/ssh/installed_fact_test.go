@@ -18,6 +18,21 @@ func testFactStore(t *testing.T) (*InstalledFactStore, storage.DocumentStore) {
 	return NewInstalledFactStore(log.NewSlogAdapter(nil), doc, "installed-facts.json"), doc
 }
 
+// observed reads the store the way the product does. All() is the store's
+// only read (the per-identity Get went with the delivery planner that was
+// its only caller — nocx-m8jwn.10), so a test that asserted through Get
+// would be asserting through a seam no user can reach, which is AGENTS.md
+// testing rule 1. Every fail-closed assertion below therefore goes through
+// the enumeration shell.footprint.status actually calls.
+func observed(store *InstalledFactStore, identity string) (InstalledFact, bool) {
+	for _, f := range store.All() {
+		if f.Identity == identity {
+			return f, true
+		}
+	}
+	return InstalledFact{}, false
+}
+
 func testFact(identity string) InstalledFact {
 	return InstalledFact{
 		Identity:      identity,
@@ -28,18 +43,18 @@ func testFact(identity string) InstalledFact {
 	}
 }
 
-// TestInstalledFactStore_RoundTrip: Record then Get returns the same fact.
+// TestInstalledFactStore_RoundTrip: Record then All names the same fact.
 func TestInstalledFactStore_RoundTrip(t *testing.T) {
 	store, _ := testFactStore(t)
-	if _, ok := store.Get("pi@192.168.0.93:22"); ok {
+	if _, ok := observed(store, "pi@192.168.0.93:22"); ok {
 		t.Fatal("empty store reports an installation")
 	}
 	if err := store.Record(testFact("pi@192.168.0.93:22")); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	f, ok := store.Get("pi@192.168.0.93:22")
+	f, ok := observed(store, "pi@192.168.0.93:22")
 	if !ok {
-		t.Fatal("Get after Record missed")
+		t.Fatal("the fact is missing from All() after Record")
 	}
 	if f.Protocol != "1" || f.Generation != "v10" || f.ScriptVersion != "0.6.0" {
 		t.Errorf("fact = %+v, want the recorded values preserved verbatim", f)
@@ -55,7 +70,7 @@ func TestInstalledFactStore_SurvivesRestart(t *testing.T) {
 	}
 
 	restarted := NewInstalledFactStore(log.NewSlogAdapter(nil), doc, "installed-facts.json")
-	f, ok := restarted.Get("deploy@10.0.0.1:2222")
+	f, ok := observed(restarted, "deploy@10.0.0.1:2222")
 	if !ok {
 		t.Fatal("fact lost across a restart (new store over the same document)")
 	}
@@ -95,8 +110,8 @@ func TestInstalledFactStore_CorruptDocumentFailsClosed(t *testing.T) {
 		t.Fatalf("write corrupt document: %v", err)
 	}
 	store := NewInstalledFactStore(log.NewSlogAdapter(nil), doc, "installed-facts.json")
-	if _, ok := store.Get("pi@host:22"); ok {
-		t.Fatal("corrupt document reported an installation")
+	if got := store.All(); len(got) != 0 {
+		t.Fatalf("corrupt document reported %d installations, want 0", len(got))
 	}
 }
 
@@ -112,41 +127,13 @@ func TestInstalledFactStore_FutureVersionFailsClosed(t *testing.T) {
 		t.Fatalf("seed future-version document: %v", err)
 	}
 	store := NewInstalledFactStore(log.NewSlogAdapter(nil), doc, "installed-facts.json")
-	if _, ok := store.Get("pi@host:22"); ok {
-		t.Fatal("future-version document reported an installation")
-	}
-}
-
-// TestInstalledFactStore_Invalidate: a durable forget — the identity misses
-// and the on-disk document no longer names it.
-func TestInstalledFactStore_Invalidate(t *testing.T) {
-	store, doc := testFactStore(t)
-	if err := store.Record(testFact("pi@host:22")); err != nil {
-		t.Fatalf("Record: %v", err)
-	}
-	if err := store.Invalidate("pi@host:22"); err != nil {
-		t.Fatalf("Invalidate: %v", err)
-	}
-	if _, ok := store.Get("pi@host:22"); ok {
-		t.Fatal("Get after Invalidate still reports the installation")
-	}
-
-	restarted := NewInstalledFactStore(log.NewSlogAdapter(nil), doc, "installed-facts.json")
-	if _, ok := restarted.Get("pi@host:22"); ok {
-		t.Fatal("invalidated fact survived a restart")
-	}
-	// The document on disk really changed: nothing but the envelope remains.
-	var docOnDisk factDocument
-	if _, err := doc.Read("installed-facts.json", &docOnDisk); err != nil {
-		t.Fatalf("read document: %v", err)
-	}
-	if len(docOnDisk.Facts) != 0 {
-		t.Errorf("document still names %d facts after invalidation", len(docOnDisk.Facts))
+	if got := store.All(); len(got) != 0 {
+		t.Fatalf("future-version document reported %d installations, want 0", len(got))
 	}
 }
 
 // TestInstalledFactStore_WriteFailureLeavesMemoryEqual: when the durable
-// write fails, Get still answers "not installed" — the in-memory state never
+// write fails, All still omits the destination — the in-memory state never
 // diverges from what is on disk.
 func TestInstalledFactStore_WriteFailureLeavesMemoryEqual(t *testing.T) {
 	dir := t.TempDir()
@@ -160,8 +147,8 @@ func TestInstalledFactStore_WriteFailureLeavesMemoryEqual(t *testing.T) {
 	if err := store.Record(testFact("pi@host:22")); err == nil {
 		t.Fatal("Record succeeded against a path that cannot be written")
 	}
-	if _, ok := store.Get("pi@host:22"); ok {
-		t.Fatal("failed Record left the fact in memory; the planner would trust an unpersisted installation")
+	if _, ok := observed(store, "pi@host:22"); ok {
+		t.Fatal("failed Record left the fact in memory; the footprint surface would name an installation that is not on disk")
 	}
 }
 
@@ -192,7 +179,7 @@ func TestInstalledFactStore_DocumentShape(t *testing.T) {
 }
 
 // TestInstalledFactStore_All: enumeration answers every recorded fact,
-// ordered by identity — a surface (P10) must never depend on Go map
+// ordered by identity — shell.footprint.status must never depend on Go map
 // iteration order — and a store with nothing recorded answers an empty list,
 // not nil.
 func TestInstalledFactStore_All(t *testing.T) {

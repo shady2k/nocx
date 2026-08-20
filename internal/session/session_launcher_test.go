@@ -26,6 +26,12 @@ func (f *fakeLauncher) StartCommand(_ ssh.ShellKind, _ ssh.LaunchOptions) (strin
 	return "", ssh.ReasonNone, false
 }
 
+// A launcher that declines has no bootstrap to prepare either: the two are
+// one delivery.
+func (f *fakeLauncher) Prepare(_ ssh.ShellKind, _ ssh.LaunchOptions) (string, ssh.BootstrapRun, ssh.BootstrapGate, bool) {
+	return "", nil, nil, false
+}
+
 func (f *capturingSSHFactory) Connect(_ context.Context, _ string, opts ...ssh.ConnectOption) (ssh.Channel, error) {
 	f.opts = append(f.opts, opts...)
 	if f.err != nil {

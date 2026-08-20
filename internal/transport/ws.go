@@ -42,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/version"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -157,6 +158,11 @@ type WSServer struct {
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
 	// -32601 and the shell keeps its declared defaults.
 	uiState *uistate.Store
+	// build is what app.about answers with: what this binary is. Zero-valued
+	// unless the composition root passes one, and the zero value is honest —
+	// every field then reads "unknown" rather than claiming a version this
+	// build does not have (see WithBuildInfo).
+	build version.BuildInfo
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -184,6 +190,21 @@ type WSServer struct {
 	// Wired through WithRemoteLauncher; when nil, remote sessions open a
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
+
+	// remoteInstaller publishes the integration bundle over SFTP. It is
+	// stamped on the DIRECT-HOST ConnectConfig only: a saved profile gets
+	// its own from the connection resolver, which is where a profile's
+	// every other seam comes from too.
+	//
+	// It became load-bearing with the carrier (design §4.1). Before it, the
+	// remote command was the self-installing launcher and carried a publish
+	// prelude, so a direct-host session installed the bundle from inside the
+	// command it ran; the carrier carries no payload, so the SFTP publish is
+	// now the ONLY thing that installs it. Without this line a direct-host
+	// session finds no launch carrier on the far host, names
+	// generation-unavailable and stays conventional forever — a regression
+	// with no diagnosis, since every part of it works.
+	remoteInstaller ssh.RemoteInstaller
 
 	// remoteLifecycle establishes the authenticated lifecycle channel for
 	// remote sessions (ADR-0024 decision 2 "Over SSH"), stamped onto every
@@ -216,6 +237,9 @@ type WSServer struct {
 	// exact SSH options captured from the live terminal session. When nil,
 	// the method returns a stated empty reason for SSH sessions.
 	sshCompleter RemoteCompleter
+	// commandNames answers shell.commandNames — the shared PATH name set,
+	// cached per target by the backend (carrier design §8).
+	commandNames CommandNamesResolver
 
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
@@ -633,6 +657,13 @@ func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
 	return func(s *WSServer) { s.remoteLauncher = l }
 }
 
+// WithRemoteInstaller attaches the SFTP publisher stamped onto direct-host
+// ConnectConfigs. See remoteInstaller for why the carrier made it the only
+// thing that installs the bundle on that path.
+func WithRemoteInstaller(i ssh.RemoteInstaller) WSServerOption {
+	return func(s *WSServer) { s.remoteInstaller = i }
+}
+
 // WithRemoteLifecycle attaches the lifecycle-channel establisher that
 // remote sessions consult (ADR-0024 decision 2 "Over SSH"), stamped onto
 // every ConnectConfig alongside the launcher. The composition root
@@ -805,6 +836,20 @@ func WithNotes(svc *note.Service) WSServerOption {
 // which is what the product looked like before ADR-0033.
 func WithUIState(store *uistate.Store) WSServerOption {
 	return func(s *WSServer) { s.uiState = store }
+}
+
+// WithBuildInfo attaches the running binary's description, which is what
+// app.about answers with. The transport is told rather than reading
+// internal/version itself: that package's vars are link-time state, and a
+// second reader of them inside the transport would be a second place the
+// answer lives — and would leave no way for a test to assert what this method
+// sends for a build nobody can produce on demand.
+//
+// Not attaching it is not a failure mode with a hole in it: the descriptor's
+// fields are then the zero value, and the DTO says "unknown" in each, which is
+// what the About page is built to render.
+func WithBuildInfo(b version.BuildInfo) WSServerOption {
+	return func(s *WSServer) { s.build = b }
 }
 
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
@@ -1012,6 +1057,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
+	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)

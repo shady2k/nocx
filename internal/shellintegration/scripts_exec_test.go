@@ -709,7 +709,8 @@ __nocx_prompt_command
 		t.Errorf("snapshot nonce = %q, hello established %q — the renderer discards a mismatch, so command completion never works in this session", snapNonce, hello)
 	}
 
-	// And the payload is real: pwd is a builtin, so it is in every compgen -c.
+	// And the payload is real: pwd is a builtin, so it is in the
+	// session-local enumeration on every machine.
 	if !strings.Contains(after[1], "pwd") {
 		t.Errorf("snapshot carries no command names: %q", out)
 	}
@@ -1314,19 +1315,28 @@ source "$1"
 	}
 }
 
-// TestZshSnapshotCarriesTheShellsOwnTables is the assertion the bash tier
-// never had to make: a snapshot is only worth having if it reports what THIS
-// shell can run, and the four tables that answer that in zsh — aliases,
-// functions, builtins and PATH — are four different parameters. Enumerating
-// three of them would still produce a well-formed snapshot, a matching nonce
-// and a green count, while the editor marked the user's own alias as a
-// command that does not exist.
-func TestZshSnapshotCarriesTheShellsOwnTables(t *testing.T) {
+// TestZshSnapshotCarriesTheSessionLocalTablesAndNotThePath pins the split
+// of carrier design §8 in BOTH directions, on the tier where the tables are
+// four different parameters.
+//
+// One direction: a snapshot is only worth having if it reports what THIS
+// shell can run, and enumerating three of the session-local tables would
+// still produce a well-formed snapshot, a matching nonce and a green count
+// while the editor marked the user's own alias as a command that does not
+// exist.
+//
+// The other direction, and the one this package's own tests could not report
+// before: a PATH executable must NOT be here. It is identical for every
+// session to this host, so it is enumerated once by the backend and shared;
+// enumerating it here as well would be the per-session scan §8 exists to
+// remove, running a second time beside the shared one, and no count or nonce
+// check would notice.
+func TestZshSnapshotCarriesTheSessionLocalTablesAndNotThePath(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 	script := writeScriptFile(t, "nocx.zsh", zshScript)
 
-	// A PATH executable of our own, so the external-command table is checked
-	// against a name that cannot come from anywhere else.
+	// A PATH executable of our own, so the absence below is checked against
+	// a name that cannot come from anywhere else.
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "nocxprobebin"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // an executable probe is the point
 		t.Fatalf("write probe binary: %v", err)
@@ -1351,12 +1361,57 @@ source "$1"
 		";pwd;",            // builtin
 		";nocxprobealias;", // alias
 		";nocxprobefunc;",  // function
-		";nocxprobebin;",   // PATH executable
 		";if;",             // reserved word
 	} {
 		if !strings.Contains(payload, want) {
 			t.Errorf("snapshot does not report %q — the editor would mark it as a command that does not exist", strings.Trim(want, ";"))
 		}
+	}
+	if strings.Contains(payload, ";nocxprobebin;") {
+		t.Errorf("snapshot carries a PATH executable: that half is the backend's shared scan, and enumerating it here is the per-session scan §8 removes")
+	}
+}
+
+// TestBashSnapshotCarriesTheSessionLocalTablesAndNotThePath is the bash twin
+// of the assertion above. It matters more here than in zsh: `compgen -c`
+// merged all five tables into one answer, so the split is invisible unless
+// something asserts the PATH half is gone.
+func TestBashSnapshotCarriesTheSessionLocalTablesAndNotThePath(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "nocxprobebin"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // an executable probe is the point
+		t.Fatalf("write probe binary: %v", err)
+	}
+
+	prog := `
+alias nocxprobealias='echo hi'
+nocxprobefunc() { :; }
+export NOCX_SHELL_INTEGRATION=1
+shopt -s expand_aliases
+source "$1"
+__nocx_prompt_command
+`
+	out := runShellProgEnv(t, bash, prog, script,
+		"NOCX_SNAPSHOT_WAIT_MS=15000", "PATH="+bin+":"+os.Getenv("PATH"))
+
+	snap := strings.Index(out, "]636;S;")
+	if snap < 0 {
+		t.Fatalf("no snapshot emitted: %q", out)
+	}
+	payload := out[snap:]
+	for _, want := range []string{
+		";pwd;",           // builtin
+		";nocxprobefunc;", // function
+		";if;",            // reserved word
+	} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("snapshot does not report %q — the editor would mark it as a command that does not exist", strings.Trim(want, ";"))
+		}
+	}
+	if strings.Contains(payload, ";nocxprobebin;") {
+		t.Errorf("snapshot carries a PATH executable: that half is the backend's shared scan, and enumerating it here is the per-session scan §8 removes")
 	}
 }
 
@@ -1727,8 +1782,8 @@ printf 'CHARS_END'
 	out := runShellProg(t, zsh, prog, script)
 
 	names := between(t, out, "NAMES_START", "NAMES_END")
-	if got := strings.Count(names, ";"); got != 8192 {
-		t.Errorf("name cap: payload carries %d names, want the 8192 the frontend accepts", got)
+	if got := strings.Count(names, ";"); got != 4096 {
+		t.Errorf("name cap: payload carries %d names, want the 4096 §8 puts on the session-local half", got)
 	}
 
 	chars := between(t, out, "CHARS_START", "CHARS_END")

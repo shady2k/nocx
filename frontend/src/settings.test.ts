@@ -309,6 +309,7 @@ describe('SettingsContent', () => {
       'Application',
       'Backup & Restore',
       'Snippets',
+      'About',
       'AI',
       'Sandbox access',
     ])

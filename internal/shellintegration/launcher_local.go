@@ -32,7 +32,8 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 	if !opts.Enhanced || opts.SessionID == "" {
 		return "", fmt.Errorf("shellintegration: local lifecycle bootstrap requires an enhanced session with a session id")
 	}
-	return bashRcfile(launcherEnvBlock(opts), bashScript, opts.Capability, opts.Recovery), nil
+	return bashRcfile(localChild, launcherEnvBlock(opts), bashScript,
+		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 
 // writeLocalRcfileIn writes the rendered rcfile to a transient file whose
@@ -112,7 +113,8 @@ func LocalZshRcfile(opts LaunchOptions) (string, error) {
 	if !opts.Enhanced || opts.SessionID == "" {
 		return "", fmt.Errorf("shellintegration: local lifecycle bootstrap requires an enhanced session with a session id")
 	}
-	return zshRcfile(launcherEnvBlock(opts), zshScript, opts.Capability, opts.Recovery), nil
+	return zshRcfile(launcherEnvBlock(opts), zshScript,
+		capabilityLiteral(zshUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 
 // writeLocalZDOTDIRIn writes the rendered .zshrc into a transient directory

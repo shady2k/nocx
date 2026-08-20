@@ -64,7 +64,12 @@ describe('SandboxAccessSettings', () => {
   it('shows attribution and all three explicit decisions', async () => {
     render(() => <SandboxAccessSettings client={client()} />)
     expect(await screen.findByText('/private/data/report.txt')).toBeTruthy()
-    expect(screen.getByText('/usr/bin/python3', { selector: 'dd' })).toBeTruthy()
+    // The row's own grammar is the kit's (RecordRow): the observed program is
+    // the meta line and the shell is the first detail line. What this asserts
+    // is that both are still attributed, not which element holds them.
+    expect(
+      screen.getByText('/usr/bin/python3', { selector: '.ui-record-row__meta-text' }),
+    ).toBeTruthy()
     expect(screen.getByText('/bin/zsh')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Add global read-only' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Add global read-write' })).toBeTruthy()

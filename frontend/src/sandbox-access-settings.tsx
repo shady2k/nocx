@@ -6,7 +6,48 @@ import type {
   SandboxAccessResolve,
   SandboxAccessStatus,
 } from './ipc'
-import { Badge, Button, EmptyState, PageSection, SearchField, Select, Stack } from './ui'
+import {
+  Button,
+  CollectionView,
+  EmptyState,
+  PageSection,
+  RecordRow,
+  Select,
+  Stack,
+  StatusCard,
+} from './ui'
+import type { StatusDotTone } from './ui/status-dot'
+
+/**
+ * The inbox is a LIST OF RECORDS, which the kit already owns: CollectionView
+ * for the searchable shell and RecordRow for the row grammar (nocx-pp3y.3).
+ * This surface used to render its own <article> card with its own border,
+ * background and dt/dd body — a fourth dialect beside the three the composite
+ * was built to end — and check-row-grammar could not see it, because its rule
+ * matches -(item|row)__(name|meta) and these classes were named otherwise
+ * (nocx-a6yc7).
+ */
+
+/** The state of one attempt, in the kit's dot-and-text vocabulary. */
+function stateStatus(state: string): { tone: StatusDotTone; text: string } {
+  if (state === 'pending') return { tone: 'error', text: 'Pending' }
+  return { tone: 'neutral', text: state.charAt(0).toUpperCase() + state.slice(1) }
+}
+
+/** Everything the row says under its meta line, in reading order. */
+function eventDetail(event: SandboxAccessEvent): string[] {
+  const attempts = `${event.count} attempt${event.count === 1 ? '' : 's'}`
+  const lines = [
+    event.shell ?? 'Unknown shell',
+    `Last seen ${new Date(event.lastSeen).toLocaleString()} · ${attempts}`,
+  ]
+  if (event.directory !== '') lines.push(`Global rule directory: ${event.directory}`)
+  if (event.access === 'readWrite' && event.state === 'pending') {
+    lines.push('A read-only rule will not satisfy this write attempt.')
+  }
+  if (!event.canGrant && event.grantReason) lines.push(event.grantReason)
+  return lines
+}
 
 export interface SandboxAccessClient {
   sandboxAccessStatus(): Promise<SandboxAccessStatus | null>
@@ -165,24 +206,22 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
             }
           >
             <Stack>
-              <div class="sandbox-access-status" role="status">
-                <Badge tone={status()!.available ? 'success' : 'warning'}>
-                  {status()!.available ? 'Monitoring active' : 'Monitoring unavailable'}
-                </Badge>
-                <span>
-                  {status()!.detail ?? status()!.reason ?? 'Best-effort diagnostic observer.'}
-                </span>
-              </div>
+              <StatusCard
+                tone={status()!.available ? 'ok' : 'warning'}
+                title={status()!.available ? 'Monitoring active' : 'Monitoring unavailable'}
+                description={
+                  status()!.detail ?? status()!.reason ?? 'Best-effort diagnostic observer.'
+                }
+              />
               <Show when={Math.max(status()!.lost, page().lost) > 0}>
-                <div class="sandbox-access-loss" role="status">
-                  {Math.max(status()!.lost, page().lost)} events were dropped because the bounded
-                  inbox or observer could not keep up.
-                </div>
+                <StatusCard
+                  tone="warning"
+                  title={`${Math.max(status()!.lost, page().lost)} events were dropped`}
+                  description="The bounded inbox or the observer could not keep up."
+                />
               </Show>
               <Show when={actionError() !== ''}>
-                <div class="sandbox-access-error" role="alert">
-                  {actionError()}
-                </div>
+                <StatusCard tone="danger" title={actionError()} />
               </Show>
               <Show
                 when={page().events.length > 0}
@@ -193,29 +232,23 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
                   />
                 }
               >
-                <div
-                  class="sandbox-access-filters"
-                  role="search"
-                  aria-label="Filter sandbox access"
-                >
-                  <Select
-                    value={applicationFilter()}
-                    onChange={setApplicationFilter}
-                    options={applications()}
-                    placeholder="All applications"
-                    placeholderValue={ALL_APPLICATIONS}
-                    ariaLabel="Filter by application"
-                  />
-                  <SearchField
-                    value={keywordFilter()}
-                    onInput={setKeywordFilter}
-                    placeholder="Filter by keywords"
-                    ariaLabel="Filter by keywords"
-                  />
-                </div>
-                <Show
-                  when={visibleEvents().length > 0}
-                  fallback={
+                <CollectionView
+                  searchValue={keywordFilter()}
+                  onSearch={setKeywordFilter}
+                  searchPlaceholder="Filter by keywords"
+                  searchLabel="Filter by keywords"
+                  hasItems={visibleEvents().length > 0}
+                  actions={
+                    <Select
+                      value={applicationFilter()}
+                      onChange={setApplicationFilter}
+                      options={applications()}
+                      placeholder="All applications"
+                      placeholderValue={ALL_APPLICATIONS}
+                      ariaLabel="Filter by application"
+                    />
+                  }
+                  empty={
                     <EmptyState
                       title="No access attempts match these filters"
                       description="Change or clear the application and keyword filters."
@@ -223,51 +256,19 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
                     />
                   }
                 >
-                  <div class="sandbox-access-list">
-                    <For each={visibleEvents()}>
-                      {(event) => (
-                        <article class="sandbox-access-event">
-                          <div class="sandbox-access-event-heading">
-                            <code>{event.path}</code>
-                            <Badge tone={event.state === 'pending' ? 'warning' : 'neutral'}>
-                              {event.state}
-                            </Badge>
-                          </div>
-                          <dl class="sandbox-access-attribution">
-                            <div>
-                              <dt>Observed program (untrusted)</dt>
-                              <dd>{event.executable ?? 'Unknown program'}</dd>
-                            </div>
-                            <div>
-                              <dt>Shell</dt>
-                              <dd>{event.shell ?? 'Unknown shell'}</dd>
-                            </div>
-                            <div>
-                              <dt>Access</dt>
-                              <dd>{event.access === 'readWrite' ? 'Read / write' : 'Read only'}</dd>
-                            </div>
-                            <div>
-                              <dt>Last seen</dt>
-                              <dd>
-                                {new Date(event.lastSeen).toLocaleString()} · {event.count} attempt
-                                {event.count === 1 ? '' : 's'}
-                              </dd>
-                            </div>
-                          </dl>
-                          <Show when={event.directory !== ''}>
-                            <div class="sandbox-access-grant-root">
-                              Global rule directory: <code>{event.directory}</code>
-                            </div>
-                          </Show>
-                          <Show when={event.access === 'readWrite' && event.state === 'pending'}>
-                            <div class="sandbox-access-caution">
-                              A read-only rule will not satisfy this write attempt.
-                            </div>
-                          </Show>
-                          <Show when={!event.canGrant && event.grantReason}>
-                            <div class="sandbox-access-caution">{event.grantReason}</div>
-                          </Show>
-                          <div class="sandbox-access-actions">
+                  <For each={visibleEvents()}>
+                    {(event) => (
+                      <RecordRow
+                        title={event.path}
+                        kind={{
+                          label: event.access === 'readWrite' ? 'Read / write' : 'Read only',
+                          tone: event.access === 'readWrite' ? 'warning' : 'neutral',
+                        }}
+                        meta={event.executable ?? 'Unknown program'}
+                        status={stateStatus(event.state)}
+                        detail={eventDetail(event)}
+                        actions={
+                          <>
                             <Button
                               disabled={
                                 event.state !== 'pending' ||
@@ -294,12 +295,12 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
                             >
                               Dismiss
                             </Button>
-                          </div>
-                        </article>
-                      )}
-                    </For>
-                  </div>
-                </Show>
+                          </>
+                        }
+                      />
+                    )}
+                  </For>
+                </CollectionView>
               </Show>
             </Stack>
           </Show>

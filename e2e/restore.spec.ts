@@ -198,6 +198,54 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     })
   })
 
+  // THE PANE BELONGS TO THE PROGRAM, and the restore boundary is part of the
+  // chrome that has to step aside for it (nocx-nkwm2). An alternate-buffer
+  // program takes the pane; the blocks and the separator already went, and the
+  // words PREVIOUS SESSION with their rule stayed painted over the program's
+  // screen, because the rule that empties the stack named the two child kinds
+  // that existed when it was written and this one arrived later.
+  //
+  // Asserted through visibility rather than through the class, and after a real
+  // restore rather than by planting an element: the defect is in the stylesheet,
+  // so a test that reads the DOM cannot see it, and a test that reads the class
+  // would have been green throughout.
+  test('a program taking the pane hides the previous-session boundary', async ({ page }) => {
+    const ep1 = await backend.start(FIRST_PORT)
+    await bindEndpoint(page, ep1)
+    await page.goto('/')
+
+    await run(page, 'echo BOUNDARY-ALT-SCREEN')
+    await stored(page, ep1, 'echo BOUNDARY-ALT-SCREEN')
+
+    const ep2 = await backend.restart(SECOND_PORT)
+    await bindEndpoint(page, ep2)
+    await page.reload()
+
+    await expect(page.locator(TAB)).toHaveCount(1, { timeout: 90_000 })
+    await expect(page.locator(`.pane.active ${BOUNDARY}`)).toBeVisible({ timeout: 60_000 })
+
+    // Into the alternate buffer, and block there so nothing races a deadline.
+    await promptReady(page)
+    await clickIntoEditor(page)
+    await page.keyboard.type("printf '\\033[?1049h'; cat")
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.pane.active .xterm-live-container')).toHaveClass(
+      /live-fullscreen/,
+      { timeout: 30_000 },
+    )
+
+    // The whole assertion: nothing of the block chrome is left on screen.
+    await expect(page.locator(`.pane.active ${BOUNDARY}`)).toBeHidden()
+    await expect(page.locator(`.pane.active ${BLOCK}`).first()).toBeHidden()
+
+    // And it comes back when the program gives the pane up, because the
+    // boundary is still true — the shell below it is still a new one.
+    await page.keyboard.press('Control+c')
+    await page.keyboard.type("printf '\\033[?1049l'")
+    await page.keyboard.press('Enter')
+    await expect(page.locator(`.pane.active ${BOUNDARY}`)).toBeVisible({ timeout: 30_000 })
+  })
+
   test('with the setting off, the same restart gives one fresh tab', async ({ page }) => {
     const ep1 = await backend.start(FIRST_PORT)
     await bindEndpoint(page, ep1)

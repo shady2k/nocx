@@ -1,14 +1,20 @@
 # CI — quality gates for nocx.
 #
-# Runner decision: back-end job runs on macos-15 because:
+# Runner decision: back-end job runs on macos-latest because:
 #   - darwin is the target platform for this macOS-first MVP (see
 #     docs/architecture.md § "Operational / Environmental Envelope"), so CI
 #     should build and test what ships to users;
 #   - internal/pty exercises creack/pty, and PTY semantics differ between macOS
 #     and Linux — those tests are only meaningful on the target OS;
-#   - ADR-0036's deprecated Seatbelt backend must be exercised before merge,
-#     while newer hosted images have made sandbox-exec abort before its child
-#     starts. The release workflow uses the same pinned image.
+#   - the repo is public, so macos-latest runner minutes are free.
+#
+# It is NOT pinned. ADR-0036's Seatbelt backend is deprecated and runtime-only,
+# and this branch pinned macos-15 on the report that newer hosted images make
+# sandbox-exec abort before its child starts. The owner reverted the pin on
+# 2026-08-21: a pinned image is a gate that stops testing what ships the day
+# GitHub moves, and the claim is one CI run can settle. If the Seatbelt smoke
+# below goes red on macos-latest, the answer is a separate pinned job for that
+# ONE step, never the whole macOS gate.
 # (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
 # on the target-OS argument alone, without measuring ubuntu.)
 # Every job here has a local target of the SAME NAME that is the job, and
@@ -70,9 +76,9 @@
 # green (2026-08-10, nocx-cn86). The claim is now a list, and each line of it is
 # a command somebody can run.
 #
-# `ci-mac` is the one job with no container, and deliberately: macos-15 is the
-# supported Seatbelt release-gate host. That makes it the one place where local
-# and CI can still disagree — see the Makefile's `ci` target.
+# `ci-mac` is the one job with no container, and deliberately: macos-latest is
+# the target OS. That makes it the one place where local and CI can still
+# disagree — and they do (nocx-58gq, nocx-65v6). See the Makefile's `ci` target.
 #
 # Trigger decision: CI runs on pull requests to main, on release branches
 # (release/**) and manual workflow_dispatch, and is *called* by release.yml via
@@ -105,7 +111,7 @@ permissions:
 jobs:
   ci-mac:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -160,7 +166,7 @@ jobs:
       #
       # This job used to run the whole suite here. Small is the point: a
       # portable package proves nothing extra by being compiled twice, and
-      # macos-15 is the scarcest runner in this matrix. What belongs here
+      # macos-latest is the scarcest runner in this matrix. What belongs here
       # is what only Darwin can answer — PTY semantics, the profile directory,
       # the keystore binding, the socketpair — and nothing else. The header
       # explains why internal/shellintegration is not on that list even though
@@ -504,7 +510,7 @@ jobs:
   # divergence rather than remove it.
   #
   # What this gives up, checked rather than assumed: Darwin PTY semantics and
-  # Darwin paths are covered by `ci-mac` on macos-15 (internal/pty,
+  # Darwin paths are covered by `ci-mac` on macos-latest (internal/pty,
   # internal/storage, including the -tags release build), and both macOS shells
   # by its 31 bash and 14 zsh tests in internal/shellintegration. WKWebView was
   # never covered here on either runner — Playwright drives its own browser

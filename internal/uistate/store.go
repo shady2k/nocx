@@ -228,31 +228,105 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// Watch samples the platform on a ticker and records what it sees, until ctx
-// is cancelled. It is the save-on-change half of window persistence: Wails v2
-// has no moved/resized callback, so there is nothing to subscribe to.
+// Placer applies a placement to the live window. main.go implements it over
+// the Wails runtime, next to Probe and for the same reason: this is the only
+// place a window exists, and keeping the interface here is what lets the
+// sequencing below be tested without a display.
 //
-// Sampling is cheap and idempotent — SetWindow returns immediately when
-// nothing moved — so a still window costs one interface call per tick and no
-// writes at all.
-func (s *Store) Watch(ctx context.Context, p Probe, interval time.Duration) {
+// The methods are the platform's own vocabulary — states are entered, not
+// computed — so Maximise and Fullscreen take no argument: they are called only
+// when the saved state says so.
+type Placer interface {
+	SetSize(width, height int)
+	SetPosition(x, y int)
+	Center()
+	Maximise()
+	Fullscreen()
+}
+
+// RestoreAndWatch puts the window back where the user left it and then records
+// where they put it, until ctx is cancelled. It is the whole of the window half
+// of this package's job, and it is ONE loop on purpose.
+//
+// THE WINDOW IS NOT THERE YET, AND THAT IS ORDINARY. Under Wails v3 the
+// composition root runs during service startup, which is before the platform
+// window is realised: `WebviewWindow.Size()` answers (0,0) while the window has
+// no implementation behind it. The root used to probe once, at exactly that
+// moment, and return when the probe could not answer — which skipped starting
+// the sampler for the entire session. Nothing was ever recorded, the document
+// kept the zeros it was born with, and every launch restored them as the
+// default size (nocx-39vhn).
+//
+// So readiness is not a precondition here, it is the first thing the loop waits
+// for: each tick asks the platform, the first answer places the window, and
+// every answer after that is a sample. A window that never becomes readable
+// costs one interface call per tick and nothing else — there is no path through
+// this function that stops watching while the process lives, which is the
+// property the old shape could not state.
+//
+// Placement happens before the first sample and never after one. That ordering
+// is load-bearing in the other direction too: a sample taken before the restore
+// had been applied would record where the platform happened to open the window
+// and overwrite the position being restored.
+//
+// Sampling rather than subscribing is deliberate and is the whole of the write
+// side: the store coalesces what the poll sees, so a drag of any length costs
+// one write half a second after it stops. A still window costs one interface
+// call per tick and no writes at all — SetWindow returns immediately when
+// nothing moved.
+func (s *Store) RestoreAndWatch(ctx context.Context, p Probe, w Placer, interval time.Duration) {
 	if interval <= 0 {
 		interval = DefaultSampleInterval
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+
+	placed := false
 	for {
+		if placed {
+			s.Sample(p)
+		} else if _, displays, ok := p.Geometry(); ok {
+			place(w, Restore(s.Window(), displays))
+			placed = true
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			s.Sample(p)
 		}
 	}
 }
 
-// Sample takes one reading. Exported because Watch's loop is untestable
-// without a clock and this is the part with the behaviour in it.
+// place applies one Placement. Separated from the decision above it for the
+// reason Restore is separated from the probe: what to do is a rule that can be
+// tested, and doing it is a handful of platform calls that cannot.
+func place(w Placer, p Placement) {
+	w.SetSize(p.Width, p.Height)
+	if p.UsePosition {
+		w.SetPosition(p.X, p.Y)
+	} else {
+		// Either nothing was saved or the displays are not the ones the
+		// position was recorded on. Centring is the visible answer; the saved
+		// position stays in the document, so plugging the monitor back in
+		// restores the old arrangement.
+		w.Center()
+	}
+	// States, not pixels: entering them is what makes leaving them land on the
+	// normal geometry set just above.
+	if p.Maximise {
+		w.Maximise()
+	}
+	if p.FullScreen {
+		w.Fullscreen()
+	}
+}
+
+// Sample takes one reading and folds it into the recorded state.
+//
+// Exported because RestoreAndWatch's loop is untestable without a clock and
+// this is the part with the behaviour in it: a reading the platform could not
+// give is discarded rather than recorded as zeros, and a maximised window
+// carries its normal geometry forward (see Observe).
 func (s *Store) Sample(p Probe) {
 	live, displays, ok := p.Geometry()
 	if !ok {

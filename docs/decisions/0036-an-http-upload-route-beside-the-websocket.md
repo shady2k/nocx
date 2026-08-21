@@ -1,10 +1,11 @@
 # ADR-0036 — an HTTP upload route beside the WebSocket
 
 - **Status:** accepted (2026-08-21)
-- **Crosses:** `AD-1` (`docs/architecture.md:101`). It does not amend it; see
-  "What this leaves to AD-1" below.
+- **Amends:** `AD-1` (what may travel beside its two planes) —
+  `docs/architecture.md:101`, the amendment at `:111`. See "What this leaves to
+  AD-1" below.
 - **Reads, does not change:** `AD-9` and `AD-10`
-  (`docs/architecture.md:168`, `:175`), `AD-6`,
+  (`docs/architecture.md:169`, `:176`), `AD-6`,
   [ADR-0026](0026-control-plane-runs-off-the-read-loop.md) (the read-loop
   invariant and the admission bounds),
   [ADR-0001](0001-xterm-js-as-vt-frontend.md) (the framing this route stays out
@@ -34,8 +35,8 @@ enumerated exactly:
 
 It also allocates the growth room: "the version byte AND a reserved `metadata`
 msg-type are allocated now, so the Phase-2 Tier-B helper feed can ship without a
-wire break" (`:112`), and it names the security invariant "auth token +
-bind-to-localhost by default" (`:113`).
+wire break" (`:113`), and it names the security invariant "auth token +
+bind-to-localhost by default" (`:114`).
 
 What AD-1 does **not** say is that every byte between renderer and backend must
 travel over that socket. It says what the socket carries and how, and it forbids
@@ -90,12 +91,12 @@ a licence:
 
 ### What this leaves to AD-1
 
-AD-1's text is not amended here, and this ADR does not claim the authority to
-amend it. What it records is that AD-1's "Binds: all frontend↔backend
-communication" now has exactly one documented exception, in one direction, for
-one payload class: bulk file bytes for a transfer the control plane has already
-authorised. Whether AD-1's own wording should be widened to say so is the
-coordinator's call, not a side effect of writing this document.
+AD-1's "Binds: all frontend↔backend communication" now has exactly one
+documented exception, in one direction, for one payload class: bulk file bytes
+for a transfer the control plane has already authorised. This document was
+written without claiming the authority to widen AD-1's own wording, because that
+was the coordinator's call rather than a side effect of writing it. The call was
+made (`nocx-9le.5.16`), so AD-1 now carries the line.
 
 There is a house convention for that, and it is worth naming so the next person
 follows it rather than reinventing it: AD-1 has been widened twice before, and
@@ -105,8 +106,9 @@ and attributed inline — "amended 2026-08-02, nocx-m64b, nocx-rtg0.13"
 nocx-uz7f" (`:110`) for presentation requests. ADR-0024 likewise declares
 "**Amends:** `AD-1`" in its own header
 ([ADR-0024](0024-authenticated-shell-integration-channel.md):8). An ADR that
-crosses AD-1 and a line in AD-1 that says so are two halves of one change; this
-is the first half.
+crosses AD-1 and a line in AD-1 that says so are two halves of one change, and
+both halves are now in place: the amendment is at `docs/architecture.md:111`,
+dated and attributed the same way, and this header declares `Amends: AD-1`.
 
 ## Rationale
 
@@ -159,7 +161,7 @@ nocx has flow control, and it is the wrong direction.
 
 AD-10 is a "bounded in-flight-byte **credit per session**; when the credit is
 exhausted, apply backpressure to the PTY/SSH read (throttle the source — **never
-drop, never grow unbounded**)" (`docs/architecture.md:179`). It is implemented
+drop, never grow unbounded**)" (`docs/architecture.md:180`). It is implemented
 in `ringToConn`, which stops sending once unacked bytes reach `CreditLimit`
 (64 KiB, `internal/transport/ring.go:22`) and resumes when a client `ack` frees
 room (`internal/transport/ws.go:2181-2184`), and in `outputRing.write`, which
@@ -307,6 +309,6 @@ this mux are set to suit the upgrade, so every non-upgrade handler owns its own.
   `dev-web`, and against a networked backend, and it is `net/http` from the
   standard library on both sides.
 - **AD-1's security invariant holds.** "auth token + bind-to-localhost by
-  default" (`docs/architecture.md:113`) — the route is on the same
+  default" (`docs/architecture.md:114`) — the route is on the same
   loopback-bound listener and is credentialled, with the credential being the
   ticket rather than the launch token.

@@ -119,6 +119,35 @@ a tab's name is a real operation, so its caller must be able to tell "cleared" f
 "changed their mind". Both own no markup of their own: a Dialog, a TextField and the two
 kit Buttons.
 
+## A question with more than two answers: CollisionDialog
+
+**CollisionDialog** (`collision-dialog.tsx`) is the third thing built on `Dialog`, and it
+is here rather than in the inventory table for the same reason `showConfirm` and
+`showPrompt` are: it **owns no markup, no identity class and no stylesheet** — the panel
+is `Dialog`'s, the rhythm is `Stack`'s, the tick box is `Checkbox` and the three answers
+are kit `Button`s. A collision question needs no appearance the kit does not already
+have, and a class nothing paints is decoration while an empty stylesheet is what
+`check-css-integrity` calls unreachable.
+
+It asks about one file that already exists where it is going and answers
+`{ answer: 'overwrite' | 'keepBoth' | 'skip', applyToAll }` through an injected
+`onResolve` — never a promise, never a store. It knows nothing about uploads, hosts or
+protocols: `CollisionRequest` is `{ name, destination, remaining }` and every string in
+it comes from the caller. `remaining` counts the files still to send **including the one
+on screen**, so at 1 the "apply to all" tick box is not drawn — a question whose answer
+reaches nothing is noise. The caller applies `applyToAll` to the rest itself; the dialog
+remembers nothing between openings, which is why it is mounted per question rather than
+kept alive behind an `open` flag.
+
+Two placements carry the safety, and neither is cosmetic. **Dismissal is `skip`** —
+Escape, the native cancel and a click outside the panel all arrive as `onClose` and all
+three answer `skip`, because the one outcome this dialog exists to prevent is a file on a
+server destroyed by an accidental keypress. And the destructive answer is `danger` and
+**first**, so the flex-end actions row puts it furthest from the corner the pointer
+arrives at, while `Skip` is last and carries the `autofocus` — `Dialog`'s own rule that
+on a destructive question the explicitly focused control is the safe one. Focus trapping
+is `Dialog`'s; nothing here builds a second one.
+
 ## Vertical rhythm: Stack
 
 **Stack** (`stack.tsx`) is the only source of vertical spacing between kit components.

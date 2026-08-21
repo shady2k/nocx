@@ -682,3 +682,36 @@ func TestDetector_OneInFlight(t *testing.T) {
 		t.Errorf("execs = %d, want 2 (both samples ran, serially)", got)
 	}
 }
+
+// A command nocx itself refused is TERMINAL, and it is not a fact about the
+// host (nocx-e4ir3).
+//
+// internal/ssh refuses a remote command at or above its declared bound before
+// sending it. That error arrives here like any other, and the ladder's default
+// for an error it does not recognise is a transient failure — the honest
+// default for a host that might behave differently in a minute. It is the wrong
+// answer for this one: the command will be exactly as long on every retry, so
+// the ladder would back off and re-run a command that cannot ever be sent,
+// forever, while the sample says "failed transiently" about a host that did
+// nothing.
+//
+// It is a refusal, and the classification says who refused. Attributing it to
+// the far side would be a guess about the host, which this ladder deliberately
+// never makes.
+func TestDetector_CommandRefusedByOurOwnBound_IsTerminalAndNamesUs(t *testing.T) {
+	f := newFakeConn()
+	f.queue(fakeResponse{err: &ExecError{Kind: ExecErrCommandTooLong}})
+	d := newTestDetector(t, f)
+
+	s := d.Sample(context.Background())
+	if s.State == StateFailedTransiently {
+		t.Fatalf("state = %v: a command nocx refuses is refused on every retry, so a transient "+
+			"state schedules a backoff for a probe that can never succeed", s.State)
+	}
+	if s.State != StatePermissionOrPolicyRefused {
+		t.Fatalf("state = %v, want permission-or-policy-refused", s.State)
+	}
+	if !strings.Contains(s.Classification, "nocx") {
+		t.Errorf("classification = %q — it must name nocx as the refuser; the host did nothing", s.Classification)
+	}
+}

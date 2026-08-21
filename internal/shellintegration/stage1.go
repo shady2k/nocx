@@ -131,8 +131,43 @@ const (
 //  4. read frame 2 with the same fixed-width header and `dd bs=1 count=N` the
 //     loader uses — a shell's `read` builtin may pull a whole buffer off a
 //     terminal and hand back one line, which is what makes the reader
-//     over-consume;
+//     over-consume — with the stderr of EACH READ, and of nothing else, sent
+//     to /dev/null;
 //  5. validate the frame against THIS session, domain and epoch;
+//
+// # Why the silence is per-read here and not the loader's blanket one
+//
+// dd(1) writes a three-line summary of its record counts to stderr on every
+// invocation, and on the far side stderr is the user's terminal: unsilenced,
+// two reads put six lines of bookkeeping over the prompt of a bootstrap that
+// worked, and this side logs each of them as an unexpected line while it waits
+// for the outcome.
+//
+// The loader answers the same fact with `exec 2>/dev/null` for its whole body
+// (carrier.go), and the reason it gives is byte economy — a blanket redirect
+// buys the ~120 bytes that its eleven separate redirections would cost. That
+// reasoning is the loader's, and applying it HERE reverses the answer, because
+// stage-1's facts differ in both terms. Only two of its commands are noisy, so
+// the blanket would save about nine bytes rather than a hundred and twenty;
+// and stage-1 is a frame with 32 KiB to spend where the loader is a command
+// with 1 KiB, so those nine bytes buy nothing that is scarce. Measured: the
+// two redirections cost 24 bytes and took the largest rendered frame from
+// 1,641 to 1,665 of the 32,768 cap. Nothing published moves — stage-1 travels
+// on the channel and is not a bundle file — so publisher_measure_test.go's
+// measuredMaxPublishBytes is untouched by this, and that is the ratchet
+// agreeing rather than the ratchet being avoided.
+//
+// What the blanket would cost is the part that is not cosmetic. Stage-1's
+// remaining commands are the ones whose failure it must name — mktemp, the two
+// probes, rm, the write to the capability descriptor, stty — and their stderr
+// is the only DIAGNOSIS a user or an operator gets for why a named outcome
+// happened. The outcome line itself is a printf on stdout and no stderr
+// redirect could swallow it, but "the outcome is still named" is a lower bar
+// than "the reason is still visible", and a blanket clears the first while
+// failing the second. A per-read redirect also cannot outlive the reads: it is
+// scoped to one command each and needs no restore, so no path out of stage-1 —
+// neither Q's nor the exec below — has to remember to undo it in order to hand
+// the user's shell a working stderr.
 //
 // THE BODY IS READ BEFORE ANY FILESYSTEM WORK, and that ordering is
 // load-bearing rather than incidental. Every refusal here execs a native login
@@ -163,13 +198,13 @@ R "$1"
 }
 trap "Q @INTERRUPTED@" HUP INT QUIT TERM EXIT
 printf "@STAGEREADY@\n"
-X=$(dd bs=1 count=@HDRLEN@)
+X=$(dd bs=1 count=@HDRLEN@ 2>/dev/null)
 [ -n "$X" ] || Q @INTERRUPTED@
 [ "${X#@MAGIC@ @SEQ@ }" != "$X" ] || Q @PROTOCOL@
 L=${X##* }
 [ "$L" -gt 0 ] || Q @PROTOCOL@
 [ "$L" -le @MAXSECRET@ ] || Q @SECRETTOOLARGE@
-S=$(dd bs=1 count=$L)
+S=$(dd bs=1 count=$L 2>/dev/null)
 [ ${#S} -eq $((L - 1)) ] || Q @INTERRUPTED@
 NL='
 '

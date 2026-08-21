@@ -980,3 +980,97 @@ func TestBootstrap_ARefusalBeforeReadyPutsNoFrameIntoTheNativeShell(t *testing.T
 	s.assertNativeShellIsUsable()
 	s.assertNoSecretOnDisk()
 }
+
+// acceptingLaunchScript is the launch stand-in for the full-loop test below.
+// It mirrors the ONE thing the real launch carrier does that the plain
+// fakeLaunchScript does not: emit the terminal outcome, gated on the bootstrap
+// marker exactly as __nocx_outcome is (launch.go). Without that the writer
+// would sit in awaitOutcome until its deadline, and a test that waits out a
+// duration is a test that measures the machine.
+const acceptingLaunchScript = `#!/bin/sh
+if [ -n "${NOCX_BOOTSTRAP:-}" ]; then printf '@OUTPFX@@ACCEPTED@\n'; fi
+unset NOCX_BOOTSTRAP
+printf 'LAUNCH_DONE\n'
+exec /bin/sh -i
+`
+
+// installAcceptingLaunch writes that stand-in into a fixture home.
+func installAcceptingLaunch(t *testing.T, home string) {
+	t.Helper()
+	dir := filepath.Join(home, dirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body := strings.NewReplacer(
+		"@OUTPFX@", OutcomePrefix,
+		"@ACCEPTED@", OutcomeToken(OutcomeBootstrapAccepted),
+	).Replace(acceptingLaunchScript)
+	// #nosec G306 — test fixture, and the real carrier is 0700 too.
+	if err := os.WriteFile(filepath.Join(dir, launchName), []byte(body), 0o700); err != nil {
+		t.Fatalf("write accepting launch: %v", err)
+	}
+}
+
+// ddNoise is what dd(1) writes to stderr after every invocation. The three
+// lines are matched by their stable fragments rather than in full, because the
+// byte count and the rate differ per read and per host.
+var ddNoise = []string{"records in", "records out", "bytes copied"}
+
+// TestBootstrap_NoDDBookkeepingReachesTheUsersTerminal is the regression test
+// for the defect this file's own reads had: stage-1 reads its two frames with
+// `dd bs=1 count=N`, and dd(1) writes a three-line summary to stderr on every
+// invocation. On the far side stderr is the user's terminal, so a bootstrap
+// that worked perfectly still put six lines of bookkeeping over the user's
+// prompt — and this side logged every one of them as an unexpected line.
+//
+// It is written at the seam where both halves are observable at once: the real
+// writer driving the real loader over a real terminal, so the assertion is
+// about what the USER sees and what the PRODUCT logs, not about the text of a
+// template. The loader was already silent here (carrier.go's `exec
+// 2>/dev/null`); this asserts stage-1 is too.
+func TestBootstrap_NoDDBookkeepingReachesTheUsersTerminal(t *testing.T) {
+	home := loaderHome(t)
+	tmp := t.TempDir()
+	path := loaderPath(t, stageTools...)
+	installAcceptingLaunch(t, home)
+
+	opts := stageOpts()
+	stage, err := Stage1Frame(ShellAuto, opts)
+	if err != nil {
+		t.Fatalf("Stage1Frame: %v", err)
+	}
+	opts.StageDigest = StageDigest(stage)
+	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellAuto, opts)
+	if !ok {
+		t.Fatalf("carrier refused: %q", reason)
+	}
+
+	ls := startLoader(t, cmd, loaderEnv(home, path, tmp), stdoutOnTerminal)
+	stream := &loaderStream{s: ls}
+	lg, logs := captureLog()
+	minted := 0
+	outcome := DeliverBootstrap(context.Background(), lg, stream, testPlan(t, opts, &minted))
+	if outcome != OutcomeBootstrapAccepted {
+		t.Fatalf("outcome %q, want %q; terminal:\n%s", outcome, OutcomeBootstrapAccepted, ls.output())
+	}
+
+	// What the user sees. The frame text itself is echoed nowhere — the
+	// loader turns echo off — so any dd summary here came from a dd the far
+	// side ran with stderr still on the terminal.
+	term := ls.output()
+	for _, frag := range ddNoise {
+		if strings.Contains(term, frag) {
+			t.Errorf("dd(1) bookkeeping (%q) reached the user's terminal; terminal:\n%s", frag, term)
+		}
+	}
+	// And what the product logs. This is the same fact from the other side:
+	// the backend catches those lines while it waits for the outcome and
+	// records each one, which is the shape the defect was found by.
+	if got := logs.String(); strings.Contains(got, "unexpected line while awaiting the outcome") {
+		t.Errorf("the backend logged unexpected lines during a clean bootstrap; log:\n%s", got)
+	}
+	// Logged rather than only asserted, so `go test -v -run` on this one test
+	// is the evidence itself: a clean bootstrap is four lines end to end.
+	t.Logf("the user's terminal, whole:\n%s", term)
+	t.Logf("the product's log, whole:\n%s", logs.String())
+}

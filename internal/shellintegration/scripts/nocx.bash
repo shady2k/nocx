@@ -718,6 +718,21 @@ __nocx_nested_launch() {
     if ! __nocx_lc_read_grant "$__rid"; then
         return 1 # no grant: channel dead or refused without a reply
     fi
+    # A grant whose bootstrap is EMPTY is the protocol's refusal echo: the
+    # backend's grant builder declined this child and the publisher answered
+    # with the echo rather than with no reply at all (lifecyclepub's
+    # Publisher leaves Bootstrap zero when the builder returns an error).
+    # The documented contract for that echo is the honest fallback — run the
+    # user's line conventionally — and it is checked HERE, above the
+    # suspend, for two reasons. There is no child, so nothing may be
+    # suspended and no domain may be claimed. And `eval ""` succeeds: the
+    # ssh branch below would return 0 for a launch that never happened, and
+    # 0 is what tells the caller to skip the user's line (nocx-tyyo).
+    if [[ -z "$__nocx_grant_bootstrap" ]]; then
+        eval "$__line"
+        __nocx_nested_rc=$?
+        return 0
+    fi
     # The child's hello requires the parent Suspended (§9) — never exec the
     # child before this frame is written.
     __nocx_lc_send domain_suspended
@@ -727,7 +742,7 @@ __nocx_nested_launch() {
         # the -R reverse forward plus the in-band payload piped into ssh -t.
         eval "$__nocx_grant_bootstrap"
         __nocx_nested_rc=$?
-    elif [[ -n "$__nocx_grant_bootstrap" ]]; then
+    else
         # Same machine: stage the child's rcfile into a preserved descriptor
         # and launch. The child reads it via --rcfile /dev/fd/4 (ADR-0024's
         # preferred answer: the capability never enters a filesystem
@@ -839,10 +854,6 @@ __nocx_nested_launch() {
             eval "$__line"
             __nocx_nested_rc=$?
         fi
-    else
-        # The grant refused (empty bootstrap): run conventionally.
-        eval "$__line"
-        __nocx_nested_rc=$?
     fi
     return 0
 }

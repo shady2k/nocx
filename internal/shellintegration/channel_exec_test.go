@@ -82,6 +82,11 @@ type fakeKernel struct {
 	// answerHello, when false, reads and records the hello but never
 	// answers it: ACCEPT never comes (decision-9 fault variant 2).
 	answerHello bool
+	// answerGrantEmpty makes every domain_request come back as a grant
+	// carrying grantBootstrap — the empty string by default, which is the
+	// protocol's refusal echo (nocx-tyyo).
+	answerGrantEmpty bool
+	grantBootstrap   string
 }
 
 func newFakeKernel(t *testing.T, cap string) *fakeKernel {
@@ -148,7 +153,29 @@ func (k *fakeKernel) serve(conn net.Conn) {
 		if first && f.Evt == "hello" && k.answerHello {
 			k.sendAccept(conn)
 		}
+		// A domain_request is answered the way the real publisher answers
+		// one whose grant builder refused: the protocol's empty-bootstrap
+		// echo (publisher.go leaves Bootstrap zero when the builder errors).
+		// It is the shape the shell must survive, so the fixture can send
+		// it (nocx-tyyo).
+		if f.Evt == "domain_request" && k.answerGrantEmpty {
+			rid, _ := ev.Body["request"].(string)
+			env, _ := ev.Body["env"].(string)
+			k.sendEmptyGrant(conn, rid, env)
+		}
 	}
+}
+
+// sendEmptyGrant pushes the refusal echo: a domain_grant for this request
+// whose bootstrap is the empty string. The field order matches the codec's,
+// because the shell parses `bootstrap` as the LAST field of the frame.
+func (k *fakeKernel) sendEmptyGrant(conn net.Conn, rid, env string) {
+	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"cap":%q,"evt":"domain_grant","request":%q,"env":%q,"domain":"","bootstrap":%q}`,
+		testLane, testDom, testEpoch, k.cap, rid, env, k.grantBootstrap)
+	var hdr [4]byte
+	// #nosec G115 — a fixed-size test fixture, far under the protocol cap.
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	_, _ = conn.Write(append(hdr[:], body...))
 }
 
 func (k *fakeKernel) reject() {
@@ -1524,4 +1551,152 @@ func TestZshChannel_AcceptNeverComesKeepsVisiblePrompt(t *testing.T) {
 	k.answerHello = false
 	s := startChannelShellCfg(t, "zsh", "nocx.zsh", zshScript, k, "ZSH_PROMPT_SENTINEL> ", false)
 	assertConventionalAfterHandshakeFault(t, s, "ZSH_PROMPT_SENTINEL> ")
+}
+
+// A refused nested SSH runs the user's command, exactly once (nocx-tyyo).
+//
+// The grant builder refuses `ssh` under a REMOTE parent — the -R forward
+// would terminate on the far host and the multiplex socket would be created
+// where this backend cannot reach it (internal/app/childdomain.go). The
+// publisher answers a refusing builder with the protocol's empty-bootstrap
+// echo, and the documented contract for that echo is the honest fallback:
+// the parent runs the line conventionally.
+//
+// It did not. The ssh branch evaluated the bootstrap unconditionally, `eval
+// ""` succeeded, __nocx_nested_launch returned 0, and the DEBUG wrapper
+// returned 1 — which is how extdebug is TOLD to skip the original command.
+// So a user typing `ssh host` at an enhanced remote prompt got no ssh, no
+// error and their prompt straight back, while the backend logged a refusal
+// nobody saw. The sudo/su branch guarded the same shape and was correct.
+//
+// This drives the real thing: a real bash on a real pty, the real DEBUG
+// wrapper, a real domain_request over the real channel, and a stub `ssh` on
+// PATH that says whether it ran. Skipped and duplicated are both failures,
+// so the assertion is a count, not a presence.
+func TestBashNested_ARefusedSSHGrantStillRunsTheUsersCommandExactlyOnce(t *testing.T) {
+	forEachBash(t, testBashNestedRefusedSSHGrantRunsTheCommand)
+}
+
+func testBashNestedRefusedSSHGrantRunsTheCommand(t *testing.T, shell string) {
+	k := newFakeKernel(t, testCap)
+	k.answerGrantEmpty = true
+	s := startChannelShellCfg(t, shell, "nocx.bash", bashScript, k, "", true)
+	defer s.close()
+
+	// A stub `ssh` that reports it ran. It is on PATH rather than a shell
+	// function so the line the user types is dispatched exactly as it would
+	// be on their machine.
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "ssh")
+	// #nosec G306 — a stub that a shell must FIND and RUN on PATH has to
+	// carry the exec bit; 0o700 is already owner-only, and it lives in a
+	// t.TempDir that goes away with the test.
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf 'STUB-SSH-RAN\\n'\n"), 0o700); err != nil {
+		t.Fatalf("write stub ssh: %v", err)
+	}
+	s.run("export PATH=" + binDir + ":$PATH")
+
+	// The ssh line is written directly and waited on by an OBSERVABLE state
+	// change rather than by s.run: s.run stops at the FIRST accepted
+	// "complete", which this shell already has from the PATH export, so it
+	// would return before the line it just wrote ran at all. The prompt the
+	// shell returns to is the state change that means this line is finished
+	// — and it arrives whether the line ran or was swallowed, so the wait
+	// cannot itself decide the assertion.
+	promptsBefore := k.count("prompt_ready")
+	if _, err := s.ptmx.Write([]byte("ssh refused.example.com\n")); err != nil {
+		t.Fatalf("write the ssh line: %v", err)
+	}
+	waitForCount(t, func() int { return k.count("prompt_ready") },
+		promptsBefore+1, "the prompt after the refused nested ssh", s, 15*time.Second)
+
+	out := s.output()
+	if n := strings.Count(out, "STUB-SSH-RAN"); n != 1 {
+		t.Errorf("the user's ssh ran %d times, want exactly 1.\n"+
+			"0 means the refusal swallowed the command (the bug); 2 means the fallback ran it and extdebug ran it again.\npty:\n%s", n, out)
+	}
+	if n := k.count("domain_suspended"); n != 0 {
+		t.Errorf("the parent suspended itself %d time(s) for a child that was refused; "+
+			"a refused grant claims no domain and suspends nothing", n)
+	}
+}
+
+// And the paired success: a grant that DOES carry a bootstrap is evaluated,
+// and the original line is not also run — the refusal fix must not turn the
+// accepted path into a double execution.
+func TestBashNested_AnAcceptedSSHGrantRunsTheBootstrapInsteadOfTheLine(t *testing.T) {
+	forEachBash(t, testBashNestedAcceptedSSHGrantRunsBootstrap)
+}
+
+func testBashNestedAcceptedSSHGrantRunsBootstrap(t *testing.T, shell string) {
+	k := newFakeKernel(t, testCap)
+	k.answerGrantEmpty = true
+	k.grantBootstrap = "printf 'BOOTSTRAP-RAN\\n'"
+	s := startChannelShellCfg(t, shell, "nocx.bash", bashScript, k, "", true)
+	defer s.close()
+
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "ssh")
+	// #nosec G306 — a stub that a shell must FIND and RUN on PATH has to
+	// carry the exec bit; 0o700 is already owner-only, and it lives in a
+	// t.TempDir that goes away with the test.
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf 'STUB-SSH-RAN\\n'\n"), 0o700); err != nil {
+		t.Fatalf("write stub ssh: %v", err)
+	}
+	s.run("export PATH=" + binDir + ":$PATH")
+
+	promptsBefore := k.count("prompt_ready")
+	if _, err := s.ptmx.Write([]byte("ssh granted.example.com\n")); err != nil {
+		t.Fatalf("write the ssh line: %v", err)
+	}
+	waitForCount(t, func() int { return k.count("prompt_ready") },
+		promptsBefore+1, "the prompt after the granted nested ssh", s, 15*time.Second)
+
+	out := s.output()
+	if n := strings.Count(out, "BOOTSTRAP-RAN"); n != 1 {
+		t.Errorf("the granted bootstrap ran %d times, want 1.\npty:\n%s", n, out)
+	}
+	if strings.Contains(out, "STUB-SSH-RAN") {
+		t.Errorf("the original line ran as well as the grant: the child would be launched twice.\npty:\n%s", out)
+	}
+}
+
+// The same invariant on the zsh tier (nocx-tyyo).
+//
+// zsh reaches the nested launch through an accept-line widget rather than a
+// DEBUG trap, and its refusal echo had the identical shape: the ssh branch
+// evaluated the bootstrap unconditionally, and an empty one made the widget
+// report "the launch consumed the line" for a launch that never happened.
+// Same defect, different mechanism — which is why it is asserted separately
+// rather than assumed from the bash result.
+func TestZshNested_ARefusedSSHGrantStillRunsTheUsersCommandExactlyOnce(t *testing.T) {
+	k := newFakeKernel(t, testCap)
+	k.answerGrantEmpty = true
+	s := startChannelShellCfg(t, "zsh", "nocx.zsh", zshScript, k, "", true)
+	defer s.close()
+
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "ssh")
+	// #nosec G306 — a stub that a shell must FIND and RUN on PATH has to
+	// carry the exec bit; 0o700 is already owner-only, and it lives in a
+	// t.TempDir that goes away with the test.
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf 'STUB-SSH-RAN\\n'\n"), 0o700); err != nil {
+		t.Fatalf("write stub ssh: %v", err)
+	}
+	s.run("export PATH=" + binDir + ":$PATH")
+
+	promptsBefore := k.count("prompt_ready")
+	if _, err := s.ptmx.Write([]byte("ssh refused.example.com\n")); err != nil {
+		t.Fatalf("write the ssh line: %v", err)
+	}
+	waitForCount(t, func() int { return k.count("prompt_ready") },
+		promptsBefore+1, "the prompt after the refused nested ssh", s, 15*time.Second)
+
+	out := s.output()
+	if n := strings.Count(out, "STUB-SSH-RAN"); n != 1 {
+		t.Errorf("the user's ssh ran %d times, want exactly 1.\npty:\n%s", n, out)
+	}
+	if n := k.count("domain_suspended"); n != 0 {
+		t.Errorf("the parent suspended itself %d time(s) for a child that was refused", n)
+	}
 }

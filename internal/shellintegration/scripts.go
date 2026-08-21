@@ -219,7 +219,7 @@ var (
 // stopped the WAIT rather than the WORK. The name cap on this payload drops
 // from 8192 to 4096 with it: the session-local half has its own bound and
 // the shared half has another.
-const version = "40"
+const version = "41"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

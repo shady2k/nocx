@@ -61,13 +61,21 @@ import (
 // instead of re-run in every session. Three bytes of stripped code, net, in
 // the two generation scripts.
 //
-// The CALL counts did not move on any of the three occasions —
+// 2026-08-21, fourth move (nocx-tyyo, the refused nested ssh): 67,208 ->
+// 67,252, +44 across the two generation scripts that have a nested launch.
+// Both grew by the same guard: a grant whose bootstrap is EMPTY is the
+// protocol's refusal echo, and it is now checked BEFORE the parent suspends
+// itself, so the user's own line runs conventionally and exactly once. The
+// dead branch each script carried for that case below the suspend was
+// removed in the same edit, which is why 44 bytes buys a fix in two tiers.
+//
+// The CALL counts did not move on any of the four occasions —
 // 57/17/49/58/58/63 on every path — so N = 90 is untouched: the bundle
 // changed size, not the work. B = 256 KiB still holds, now at 3.81x
 // headroom.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 67208
+	measuredMaxPublishBytes = 67252
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

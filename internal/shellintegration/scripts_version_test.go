@@ -162,6 +162,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// internal/commandnames and shared across tabs; enumerating it in
 		// every shell as well is the per-session scan §8 removes.
 		"40": "ba20c03432b7b31072ba5878b07032189d73fec0d5bcc16308ebd94b86852eda",
+		"41": "aba1857806f6f43c2fbc19b418eda23f36fcd9585d581940fcf32601b9447f0d",
 	}
 
 	h := sha256.New()

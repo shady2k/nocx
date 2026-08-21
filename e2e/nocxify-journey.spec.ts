@@ -605,7 +605,28 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     const root = path.join(remoteHome(), '.nocx')
     const manifest = verifyInstallation(root)
     const genDirs = readdirSync(path.join(root, 'integration')).filter((n) => n.startsWith('v'))
-    expect(genDirs).toEqual([manifest.generation])
+    // What this journey is checking is that a HAND-TYPED ssh published no
+    // generation of its own beside the managed one. It is not "the host holds
+    // exactly one directory": the publisher's documented policy is keep-two —
+    // the active generation and the newest other survive, so a shell still
+    // running from the previous version does not have its directory deleted
+    // out from under it (publisher.go, cleanupOrphans).
+    //
+    // Asserting exactly one passed only because CI checks out a fresh tree and
+    // .e2e/remote-home starts empty, so no version bump had ever been seen
+    // here. The first one — nocx-tyyo, 40 -> 41 — failed it on a local run
+    // while the product did precisely what it promises. The assertion is
+    // therefore the invariant the product actually holds, and it still fails
+    // if this run mints a second generation, which is the thing being tested.
+    expect(genDirs).toContain(manifest.generation)
+    expect(genDirs.length).toBeLessThanOrEqual(2)
+    for (const g of genDirs) {
+      if (g === manifest.generation) continue
+      expect(
+        Number(g.slice(1)),
+        `${g} is a leftover from an older version, not a second generation minted by this run`,
+      ).toBeLessThan(Number(manifest.generation.slice(1)))
+    }
     expect(statSync(path.join(root, 'launch')).mode & 0o777).toBe(0o700)
     expect(statSync(path.join(root, 'manifest.json')).mode & 0o777).toBe(0o600)
     expect(statSync(root).mode & 0o777).toBe(0o700)

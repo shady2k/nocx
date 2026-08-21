@@ -33,6 +33,16 @@ type Key struct {
 }
 
 // Client is the sender. It is safe for concurrent use.
+//
+// limit and tlsConfig have NO Option. Both had one and nothing in the
+// product ever set either: the 2 MiB ceiling is the only ceiling any surface
+// offers, and Go's default trust is the only trust. An option nothing calls
+// is a second way to spell a constant, so the options went and the fields
+// stayed — the ceiling is still read on every send, and the config still
+// reaches every transport this builds. The tests set them directly (see
+// client_test.go), which is what makes a 30-byte truncation and a test
+// server's own certificate reachable without offering the product a knob it
+// has no surface for.
 type Client struct {
 	routes    Routes
 	limit     int64
@@ -59,18 +69,6 @@ func WithRoutes(r Routes) Option {
 		}
 	}
 }
-
-// WithMaxBytes lowers the ceiling on what this package puts on the control
-// plane — the captured body and the raw text of both sides, which are the
-// same question asked twice and so take the same answer (§12.3). It can
-// only lower it: a value above the inherited 2 MiB, or at or below zero,
-// means the ceiling.
-func WithMaxBytes(n int64) Option { return func(c *Client) { c.limit = n } }
-
-// WithTLSClientConfig supplies the TLS trust and parameters for every
-// instance this client builds — an internal CA, or a test server's own
-// certificate. Nil means Go's defaults, which is the product's normal case.
-func WithTLSClientConfig(cfg *tls.Config) Option { return func(c *Client) { c.tlsConfig = cfg } }
 
 // WithLogger supplies the logger the policy warns through. Nil is allowed.
 func WithLogger(l log.Logger) Option { return func(c *Client) { c.log = l } }

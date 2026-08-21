@@ -8,9 +8,10 @@ import (
 )
 
 // secretOffer is one value the import will hand to the BindWriter and to
-// nobody else. It exists only inside an ImportInto call: FromPostman and
-// FromCurl are deliberately unable to return one, so there is no public
-// path in this package by which a credential leaves it (design §8).
+// nobody else. It exists only inside an ImportInto call: FromCurl is
+// deliberately unable to return one and the Postman converter is not
+// exported at all, so there is no public path in this package by which a
+// credential leaves it (design §8).
 type secretOffer struct {
 	Environment string
 	Variable    string

@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -56,6 +57,11 @@ import (
 type apiCollectionHandlers struct {
 	op     capability.APICollectionOperation
 	sender apisend.Sender
+	// values is the binding document's read half: it answers what a
+	// variable is worth and has no parameter through which an identifier
+	// could arrive (design §8). nil is a build with no binding store, and
+	// then an auth variable resolves to nothing.
+	values apibind.ValueResolver
 	r      Responder
 }
 
@@ -190,9 +196,32 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
+	// The auth variable becomes a header HERE — outside the gate, and
+	// before the dial. It is done by the caller rather than inside apisend
+	// for two reasons the sender's own doc gives: that package knows nothing
+	// about the vault and has no syntax in which an identifier could be
+	// written (§8), and the resolved credential has to arrive at Send as a
+	// NAMED SECRET or it would ride the raw diagnostic in the clear (§11.2).
+	//
+	// The lookup is built per send and does not outlive it. It is keyed by
+	// the collection and the environment's NAME — the same triple
+	// api.import.postman binds under, so a token an import stored is the one
+	// this resolves. With no binding store the lookup is nil, and Apply then
+	// refuses the send naming the variable rather than sending an empty
+	// credential (§6.5).
+	var look apicoll.Lookup
+	if h.values != nil {
+		look = h.values.Variables(ctx, inputs.CookieScope, inputs.Environment)
+	}
+	sending, used, err := apisend.Apply(inputs.Request, look)
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
+		return
+	}
+
 	// No gate from here on. The cookie scope is the collection, so two
 	// collections never share a jar.
-	resp, err := h.sender.Send(ctx, inputs.Request, apisend.Key{RouteID: routeID, CookieScope: inputs.CookieScope})
+	resp, err := h.sender.Send(ctx, sending, apisend.Key{RouteID: routeID, CookieScope: inputs.CookieScope}, used...)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
 		return
@@ -961,11 +990,16 @@ func validateAPIImportCurlRaw(raw json.RawMessage) string {
 // Three availability gates, because three things wire independently: the
 // collection service backs api.collections.* and api.request.read/write; the
 // sender additionally backs api.request.send; the binding store additionally
-// backs api.import.postman, and it is the one that is not wired yet —
-// internal/apibind declares the interface ahead of its implementation, so
-// until that lands api.import.postman answers -32601 rather than pretending
-// it can put a secret somewhere. api.import.curl needs none of the three: it
-// converts a line into a value.
+// backs api.import.postman, which answers -32601 without one rather than
+// pretending it can put a secret somewhere. api.import.curl needs none of
+// the three: it converts a line into a value.
+//
+// The binding document's READ half (s.apiVariables) is NOT a fourth gate.
+// api.request.send answers with or without it; what changes is whether a
+// request whose auth names a variable can resolve it. Without it every such
+// send is refused as an unbound variable — which is the same answer a
+// misspelled variable gets, and an honest one — so making the whole method
+// disappear would report a missing binding store as a missing send.
 func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.Admission) []methodSpec {
 	collWired := s.apiCollections != nil
 	sendWired := collWired && s.apiSender != nil
@@ -983,7 +1017,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 	sub := s.operationQueue("api")
 	collAvailable := func() bool { return collWired }
 	collHandlers := func(r Responder) apiCollectionHandlers {
-		return apiCollectionHandlers{op: collOp, sender: s.apiSender, r: r}
+		return apiCollectionHandlers{op: collOp, sender: s.apiSender, values: s.apiVariables, r: r}
 	}
 
 	return []methodSpec{

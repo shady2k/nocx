@@ -153,11 +153,11 @@ const postmanFixture = `{
 
 func mustPostman(t *testing.T, doc string) (apicoll.Collection, []apicoll.Request, []apicoll.Environment, []Unsupported) {
 	t.Helper()
-	coll, reqs, envs, unsup, err := FromPostman(strings.NewReader(doc))
+	res, err := parsePostman(strings.NewReader(doc))
 	if err != nil {
-		t.Fatalf("FromPostman: %v", err)
+		t.Fatalf("parsePostman: %v", err)
 	}
-	return coll, reqs, envs, unsup
+	return res.Collection, res.Requests, res.Environments, res.Unsupported
 }
 
 func findRequest(t *testing.T, coll apicoll.Collection, reqs []apicoll.Request, name string) (apicoll.Request, apicoll.RequestRef) {
@@ -530,15 +530,15 @@ func TestPostmanRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, _, _, _, err := FromPostman(strings.NewReader(tc.doc)); err == nil {
-				t.Fatalf("FromPostman(%.40q) succeeded, want an error", tc.doc)
+			if _, err := parsePostman(strings.NewReader(tc.doc)); err == nil {
+				t.Fatalf("parsePostman(%.40q) succeeded, want an error", tc.doc)
 			}
 		})
 	}
 }
 
 func TestPostmanRefusesAnEndlessDocument(t *testing.T) {
-	if _, _, _, _, err := FromPostman(&endlessSpaces{}); err == nil {
+	if _, err := parsePostman(&endlessSpaces{}); err == nil {
 		t.Fatal("an endless document was accepted")
 	}
 }

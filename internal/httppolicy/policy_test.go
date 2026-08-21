@@ -124,7 +124,7 @@ func TestRouteOpensEveryConnection(t *testing.T) {
 	defer secure.Close()
 
 	route := newRecordingRoute(nil)
-	cl := NewClient(Params{Component: "apisend", Route: route, TLSClientConfig: trust(secure)})
+	cl := newPolicyClient(Params{Component: "apisend", Route: route, TLSClientConfig: trust(secure)})
 
 	for _, u := range []string{plain.URL, secure.URL} {
 		resp, err := cl.Get(u)
@@ -165,7 +165,7 @@ func TestDialsExactlyTheValidatedResolution(t *testing.T) {
 	route := newRecordingRoute(func(context.Context, string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("127.0.0.1")}, nil
 	})
-	cl := NewClient(Params{Component: "apisend", Route: route})
+	cl := newPolicyClient(Params{Component: "apisend", Route: route})
 
 	resp, err := cl.Get("http://resolved.invalid:" + port + "/")
 	if err != nil {
@@ -188,7 +188,7 @@ func TestDialsExactlyTheValidatedResolution(t *testing.T) {
 func TestResolveFailureIsReported(t *testing.T) {
 	boom := errors.New("no such host")
 	route := newRecordingRoute(func(context.Context, string) ([]net.IP, error) { return nil, boom })
-	cl := NewClient(Params{Component: "apisend", Route: route})
+	cl := newPolicyClient(Params{Component: "apisend", Route: route})
 
 	_, err := cl.Get("http://whatever.invalid/")
 	if err == nil {
@@ -208,7 +208,7 @@ func TestPublicHTTPRefusedOnTheConnection(t *testing.T) {
 	route := newRecordingRoute(func(_ context.Context, host string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP(testPublicIP)}, nil
 	})
-	cl := NewClient(Params{Component: "apisend", Route: route})
+	cl := newPolicyClient(Params{Component: "apisend", Route: route})
 
 	_, err := cl.Get("http://" + testPublicIP + "/v1")
 	if err == nil {
@@ -230,7 +230,7 @@ func TestLoopbackHTTPAllowed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl := NewClient(Params{Component: "apisend", Route: Local()})
+	cl := newPolicyClient(Params{Component: "apisend", Route: Local()})
 	resp, err := cl.Get(srv.URL)
 	if err != nil {
 		t.Fatalf("loopback http: %v", err)
@@ -246,7 +246,7 @@ func TestLoopbackHTTPAllowed(t *testing.T) {
 // destination this policy knows how to judge, so it is refused rather than
 // waved through.
 func TestUnsupportedSchemeRefused(t *testing.T) {
-	cl := NewClient(Params{Component: "apisend", Route: Local()})
+	cl := newPolicyClient(Params{Component: "apisend", Route: Local()})
 	_, err := cl.Get("ftp://example.com/x")
 	if err == nil || !strings.Contains(err.Error(), "unsupported URL scheme") {
 		t.Fatalf("err = %v, want an unsupported-scheme refusal", err)
@@ -263,7 +263,7 @@ func TestRedirectRecheckedAsANewEndpoint(t *testing.T) {
 	defer redirector.Close()
 
 	route := newRecordingRoute(nil)
-	cl := NewClient(Params{Component: "apisend", Route: route})
+	cl := newPolicyClient(Params{Component: "apisend", Route: route})
 	resp, err := cl.Get(redirector.URL)
 	if err == nil {
 		_ = resp.Body.Close()
@@ -293,7 +293,7 @@ func TestCredentialNeverCrossesOriginChange(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	cl := NewClient(Params{Component: "apisend", Route: Local()})
+	cl := newPolicyClient(Params{Component: "apisend", Route: Local()})
 	req, _ := http.NewRequest(http.MethodGet, redirector.URL, nil)
 	req.Header.Set("Authorization", "Bearer sk-secret")
 	resp, err := cl.Do(req)
@@ -319,7 +319,7 @@ func TestCredentialSurvivesSameOriginRedirect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl := NewClient(Params{Component: "apisend", Route: Local()})
+	cl := newPolicyClient(Params{Component: "apisend", Route: Local()})
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/start", nil)
 	req.Header.Set("Authorization", "Bearer sk-secret")
 	resp, err := cl.Do(req)
@@ -350,7 +350,7 @@ func TestCustomHeadersFollowTheCredentialRule(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	cl := NewClient(Params{Component: "apisend", Route: Local()})
+	cl := newPolicyClient(Params{Component: "apisend", Route: Local()})
 	req, _ := http.NewRequest(http.MethodGet, redirector.URL, nil)
 	req.Header.Set("X-Api-Key", "k")
 	req = req.WithContext(WithCustomHeaderNames(req.Context(), []string{"X-Api-Key"}))
@@ -373,7 +373,7 @@ func TestRedirectChainIsBounded(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl := NewClient(Params{Component: "apisend", Route: Local(), MaxRedirects: 3})
+	cl := newPolicyClient(Params{Component: "apisend", Route: Local(), MaxRedirects: 3})
 	_, err := cl.Get(srv.URL) //nolint:bodyclose // the client returns an error, not a body
 	if err == nil || !strings.Contains(err.Error(), "stopped after 3 redirects") {
 		t.Fatalf("err = %v, want the chain bounded at 3", err)
@@ -476,4 +476,16 @@ func TestSystemResolverAnswersOnAnOrdinaryMachine(t *testing.T) {
 			t.Fatalf("localhost resolved to %s, which the rule calls public", ip)
 		}
 	}
+}
+
+// newPolicyClient is the assembly every caller of this package performs: a
+// guarded transport, plus the redirect rule that belongs to it. There is no
+// exported constructor for it — there was one, and nothing outside these
+// tests ever called it, so it was a second way to spell what
+// internal/apisend and internal/assistant both already do inline. The two
+// lines live here instead, where the thing being asserted is the POLICY and
+// not the shape of a convenience.
+func newPolicyClient(p Params) *http.Client {
+	t := NewTransport(p)
+	return &http.Client{Transport: t, CheckRedirect: t.CheckRedirect}
 }

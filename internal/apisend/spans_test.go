@@ -395,7 +395,7 @@ func TestSend_ARawCutShortDamagesTheSpanRatherThanShowingItsBytes(t *testing.T) 
 
 	// "GET /?t=" is 8 bytes, so a 30-byte ceiling leaves 22 bytes of a
 	// 44-byte token — a prefix of a live credential.
-	got, err := New(WithMaxBytes(30)).Send(context.Background(),
+	got, err := newBounded(30).Send(context.Background(),
 		apicollGet(srv.URL+"/?t="+liveToken), Key{}, NamedSecret{Name: "API_TOKEN", Value: liveToken})
 	if err != nil {
 		t.Fatalf("Send: %v", err)

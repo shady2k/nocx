@@ -10,6 +10,13 @@ package assistant
 // The acceptance criteria this suite pins: "A remote http:// endpoint fails
 // validation; http://127.0.0.1:11434/v1 passes" — plus the redirect and
 // credential rules the design names in the same paragraph.
+//
+// The address rule's own case table is NOT here. It lives with the rule, in
+// internal/httppolicy's TestCheckDestination, and a copy of it lived here
+// only because this package once kept a one-line forwarder to call. The
+// forwarder is gone (one owner per behaviour), and what this file asserts is
+// what the assistant does WITH the rule: the guarded client, its redirects
+// and its credential handling, through real connections.
 
 import (
 	"context"
@@ -26,45 +33,6 @@ import (
 // testPublicIP is a public, non-routable address (TEST-NET-3) — public per
 // the rule, so http:// to it must be refused, and nothing ever dials it.
 const testPublicIP = "203.0.113.7"
-
-func TestCheckDestination(t *testing.T) {
-	cases := []struct {
-		name   string
-		scheme string
-		host   string
-		ips    []net.IP
-		wantOK bool
-	}{
-		{"https public allowed", "https", "api.openai.com", nil, true},
-		{"https private allowed", "https", "127.0.0.1", nil, true},
-		{"http loopback v4", "http", "127.0.0.1", []net.IP{net.ParseIP("127.0.0.1")}, true},
-		{"http loopback other 127", "http", "127.1.2.3", []net.IP{net.ParseIP("127.1.2.3")}, true},
-		{"http loopback v6", "http", "::1", []net.IP{net.ParseIP("::1")}, true},
-		{"http rfc1918", "http", "10.0.0.5", []net.IP{net.ParseIP("10.0.0.5")}, true},
-		{"http rfc1918 172.16", "http", "172.16.4.4", []net.IP{net.ParseIP("172.16.4.4")}, true},
-		{"http rfc1918 192.168", "http", "192.168.1.10", []net.IP{net.ParseIP("192.168.1.10")}, true},
-		{"http link-local", "http", "169.254.169.254", []net.IP{net.ParseIP("169.254.169.254")}, true},
-		{"http v6 link-local", "http", "fe80::1", []net.IP{net.ParseIP("fe80::1")}, true},
-		{"http ULA", "http", "fd00::1", []net.IP{net.ParseIP("fd00::1")}, true},
-		{"http v4-mapped loopback", "http", "::ffff:127.0.0.1", []net.IP{net.ParseIP("::ffff:127.0.0.1")}, true},
-		{"http v4-mapped private", "http", "::ffff:10.1.2.3", []net.IP{net.ParseIP("::ffff:10.1.2.3")}, true},
-		{"http public refused", "http", testPublicIP, []net.IP{net.ParseIP(testPublicIP)}, false},
-		{"http public name refused", "http", "api.example.com", []net.IP{net.ParseIP("198.51.100.9")}, false},
-		{"http mixed public+private refused", "http", "split.example", []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP(testPublicIP)}, false},
-		{"http no resolution refused", "http", "no-such-host.invalid", nil, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			err := checkDestination(c.scheme, c.host, c.ips)
-			if c.wantOK && err != nil {
-				t.Fatalf("checkDestination(%s, %s) = %v, want nil", c.scheme, c.host, err)
-			}
-			if !c.wantOK && err == nil {
-				t.Fatalf("checkDestination(%s, %s) = nil, want a refusal", c.scheme, c.host)
-			}
-		})
-	}
-}
 
 // TestGuardedHTTPClient_Acceptance pins the design's acceptance criterion
 // end to end: http://127.0.0.1:<port>/v1 (an httptest server) passes the

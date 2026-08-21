@@ -718,10 +718,11 @@ func TestImportIntoWritesReadableJSON(t *testing.T) {
 	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture)); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
-	coll, reqs, envs, _, err := FromPostman(strings.NewReader(postmanFixture))
+	converted, err := parsePostman(strings.NewReader(postmanFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
+	coll, reqs, envs := converted.Collection, converted.Requests, converted.Environments
 	files := walkFiles(t, dest)
 
 	var gotColl struct {

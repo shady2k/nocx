@@ -76,13 +76,6 @@ type Transport struct {
 	maxRedirects int
 }
 
-// NewClient is the whole assembly: a guarded transport plus the redirect
-// rule. A client built any other way does not have the policy.
-func NewClient(p Params) *http.Client {
-	t := NewTransport(p)
-	return &http.Client{Transport: t, CheckRedirect: t.CheckRedirect}
-}
-
 // NewTransport builds the guarded transport alone, for a caller that needs
 // to hold the client itself (a cookie jar, a timeout).
 func NewTransport(p Params) *Transport {

@@ -80,7 +80,7 @@ func TestSend_OverTLSReportsTheVersion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New(WithTLSClientConfig(trust(srv))).Send(context.Background(),
+	got, err := newTrusting(trust(srv)).Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
 	if err != nil {
 		t.Fatalf("Send: %v", err)

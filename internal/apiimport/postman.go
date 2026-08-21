@@ -24,25 +24,17 @@ const maxDocumentBytes = 16 << 20 // 16 MiB
 // environment rather than in each of them.
 const defaultEnvName = "default"
 
-// FromPostman converts a Postman v2.1 document: either a collection export
-// or an environment export, told apart by shape.
+// postmanResult is a converted document: the collection, its requests read
+// two ways — Collection.Requests[i].RelPath is where Requests[i] belongs,
+// because a request is addressed by its path within the collection (§6.1)
+// and the model itself holds no path — its environments, the secret VALUES,
+// and what could not be carried.
 //
-// The returned Requests and the returned Collection's RequestRefs are one
-// list read two ways — Collection.Requests[i].RelPath is where Requests[i]
-// belongs — because a request is addressed by its path within the
-// collection (§6.1) and the model itself holds no path.
-//
-// Secret VALUES are not returned. A Postman variable of "type": "secret"
-// leaves here as a name in Environment.SecretVars and nothing else; the
-// value goes to a BindWriter, which only ImportInto has (§8).
-func FromPostman(r io.Reader) (apicoll.Collection, []apicoll.Request, []apicoll.Environment, []Unsupported, error) {
-	res, err := parsePostman(r)
-	if err != nil {
-		return apicoll.Collection{}, nil, nil, nil, err
-	}
-	return res.Collection, res.Requests, res.Environments, res.Unsupported, nil
-}
-
+// It is unexported, and the values are why. There was a public FromPostman
+// returning everything but them; nothing outside this package's own tests
+// ever called it, because api.import.postman WRITES A FOLDER rather than
+// answering with a collection, so it was a converter with no entrance. The
+// entrance is ImportInto, which has a BindWriter to hand the values to (§8).
 type postmanResult struct {
 	Collection   apicoll.Collection
 	Requests     []apicoll.Request

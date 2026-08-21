@@ -8,6 +8,7 @@ package apisend
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -195,4 +196,30 @@ func localFakeRoute() Route {
 		},
 		dial: (&net.Dialer{}).DialContext,
 	}
+}
+
+// ── the two seams that replaced two options ──────────────────────────────
+//
+// WithMaxBytes and WithTLSClientConfig were exported Options that nothing in
+// the product set — the deadcode ratchet reported both, and it was right.
+// What the tests need is not an option: it is a Client whose ceiling is small
+// enough to cross in a test, and one that trusts an httptest server's own
+// certificate. Both are fields on Client and both are still read on the
+// production path; these set them directly, in the same package, so the
+// BEHAVIOUR under test (truncation, TLS) stays testable while the product
+// surface keeps only the knobs it actually has.
+
+// newBounded builds a sender whose control-plane ceiling is n bytes.
+func newBounded(n int64, opts ...Option) *Client {
+	c := New(opts...)
+	c.limit = n
+	return c
+}
+
+// newTrusting builds a sender that trusts cfg and nothing else. It is a way
+// to supply trust, never a way to skip verification.
+func newTrusting(cfg *tls.Config, opts ...Option) *Client {
+	c := New(opts...)
+	c.tlsConfig = cfg
+	return c
 }

@@ -27,6 +27,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/apicoll"
 )
@@ -59,15 +60,29 @@ const DefaultAPIKeyHeader = "X-API-Key"
 // look is the same apicoll.Lookup substitution uses — one seam for "what is
 // this variable worth", so an unbound auth variable and an unbound URL
 // variable are one concept with one owner and one message.
-func Apply(r apicoll.Request, look apicoll.Lookup) (apicoll.Request, error) {
+//
+// # The second return, and why it is not the variable's plaintext
+//
+// Apply also reports what it PLACED, so the caller can hand it to Send as a
+// NamedSecret and the raw diagnostic elides it (§11.2). The reported value is
+// the bytes that went INTO THE HEADER, which for basic auth is
+// base64(user:password) and not the password: redacting the plaintext would
+// find nothing in the composed text and leave the encoded credential sitting
+// in a JSON-RPC frame. The name is always the VARIABLE's, because that is
+// what a person recognises and the only half of a credential that may cross.
+//
+// It is a slice so the call site splats it into Send's variadic used, and
+// because "how many values did this scheme place" is the scheme's answer
+// rather than a fact of the signature. Today it is one or none.
+func Apply(r apicoll.Request, look apicoll.Lookup) (apicoll.Request, []NamedSecret, error) {
 	kind := r.Auth.Kind
 	if kind == "" || kind == apicoll.AuthNone {
-		return r, nil
+		return r, nil, nil
 	}
 
 	value, err := resolveAuthVar(r.Auth, look)
 	if err != nil {
-		return apicoll.Request{}, err
+		return apicoll.Request{}, nil, err
 	}
 
 	var header apicoll.Header
@@ -93,7 +108,7 @@ func Apply(r apicoll.Request, look apicoll.Lookup) (apicoll.Request, error) {
 		// without its credential — and the error names the KIND and never
 		// the value, because an error is written to a log the user did not
 		// choose.
-		return apicoll.Request{}, fmt.Errorf("%s: auth kind %q is not one of %s, %s or %s",
+		return apicoll.Request{}, nil, fmt.Errorf("%s: auth kind %q is not one of %s, %s or %s",
 			component, kind, apicoll.AuthBearer, apicoll.AuthBasic, apicoll.AuthAPIKey)
 	}
 
@@ -113,7 +128,25 @@ func Apply(r apicoll.Request, look apicoll.Lookup) (apicoll.Request, error) {
 	}
 	out.Headers = append(out.Headers, header)
 	out.Auth = apicoll.Auth{Kind: apicoll.AuthNone}
-	return out, nil
+	// What was placed is the header's value minus the scheme word: "Bearer "
+	// is not a secret and marking it would badge four public characters, but
+	// everything after it is the credential — including the base64 blob,
+	// which is the whole reason this is taken from the header rather than
+	// from the variable.
+	return out, []NamedSecret{{Name: r.Auth.Var, Value: placed(kind, header.Value)}}, nil
+}
+
+// placed strips the scheme word an Authorization header carries, so the
+// marked span is the credential and not the sentence around it.
+func placed(kind, headerValue string) string {
+	switch kind {
+	case apicoll.AuthBearer:
+		return strings.TrimPrefix(headerValue, "Bearer ")
+	case apicoll.AuthBasic:
+		return strings.TrimPrefix(headerValue, "Basic ")
+	default:
+		return headerValue
+	}
 }
 
 // resolveAuthVar asks for the variable and reports the two failures apart.

@@ -5114,6 +5114,13 @@ func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket
 	opts := []WSServerOption{WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)))}
 	if bindings != nil {
 		opts = append(opts, WithAPIBindings(bindings))
+		// The read half is a separate option because the two halves wire
+		// apart (ws.go). A store that has one gets it; apiFakeBindings does
+		// not, which is how the import tests keep exercising a build where
+		// an auth variable resolves to nothing.
+		if values, ok := bindings.(apibind.ValueResolver); ok {
+			opts = append(opts, WithAPIVariables(values))
+		}
 	}
 	ws := NewWSServer(logger, newRegWithStub(logger), opts...)
 	ctx := context.Background()

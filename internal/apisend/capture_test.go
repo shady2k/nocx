@@ -95,7 +95,7 @@ func TestCapture_TheCeilingCanOnlyBeLowered(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := New(WithMaxBytes(c.maxByte)).Send(context.Background(),
+			got, err := newBounded(c.maxByte).Send(context.Background(),
 				apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
 			if err != nil {
 				t.Fatalf("Send: %v", err)
@@ -184,7 +184,7 @@ func TestCapture_TruncatedTextRemainsValidUTF8(t *testing.T) {
 	defer srv.Close()
 
 	// 9 bytes cuts inside the fifth "é" (2 bytes each).
-	got, err := New(WithMaxBytes(9)).Send(context.Background(),
+	got, err := newBounded(9).Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
 	if err != nil {
 		t.Fatalf("Send: %v", err)

@@ -109,6 +109,20 @@ type SendInputs struct {
 	// path the user named is the stable identity across handles; a handle
 	// is minted fresh every run.
 	CookieScope string
+	// Environment is the environment's NAME as its file declares it —
+	// empty when no environment was named. It is carried out of the
+	// snapshot because it is half of the binding key (collection,
+	// environment, variable) the send path needs to resolve an auth
+	// variable, and it is READ HERE for the same reason the route is: the
+	// name and the values must come from one record at one moment, or a
+	// request resolves its address from one environment and its credential
+	// from another.
+	//
+	// It is the name in the file and never the file's path. apiimport binds
+	// under the name, so deriving one from the other at the send would be a
+	// second answer to "which environment is this" — and the two would agree
+	// until somebody renamed an environment without renaming its file.
+	Environment string
 	// Route is the environment's answer to "how do I get there" (§6.5). It
 	// comes from the SAME record as the address that was just substituted,
 	// which is the whole reason the route lives on the environment: the two
@@ -325,10 +339,18 @@ func (s *apiCollectionService) WriteRequest(h apicoll.HandleID, relPath string, 
 // rejected (§6.5).
 //
 // A variable the environment declares SECRET is not answered here: its value
-// lives in the binding document beside the vault (§8.1), and until that is
-// wired such a variable is unresolved and blocks the send — which is the
-// honest state, and the same one the user sees for a variable they have not
-// given a value.
+// lives in the binding document beside the vault (§8.1), which this service
+// is not given. Such a variable in the URL, a header or the body is
+// unresolved and blocks the send — the honest state, and the same one the
+// user sees for a variable they have not given a value.
+//
+// The AUTH variable is the exception, and it is resolved by the caller
+// rather than here: the auth block names a variable rather than containing
+// one, so it is not substitution's business, and the resolved credential
+// must reach the sender as a NAMED SECRET or it would appear in the raw
+// diagnostic (§11.2). What this snapshot contributes to that is the
+// environment's NAME, below — the half of the binding key that only the
+// record just read can supply.
 func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {
 	if err := s.guard.check(); err != nil {
 		return SendInputs{}, err
@@ -355,7 +377,7 @@ func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath 
 	if err != nil {
 		return SendInputs{}, err
 	}
-	return SendInputs{Request: resolved, CookieScope: scope, Route: env.Route}, nil
+	return SendInputs{Request: resolved, CookieScope: scope, Environment: env.Name, Route: env.Route}, nil
 }
 
 // stillOpen refuses a handle the user has closed — or never opened — before

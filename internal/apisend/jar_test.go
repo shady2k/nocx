@@ -206,7 +206,7 @@ func TestJar_ASecureCookieIsNotSentOverPlainHTTP(t *testing.T) {
 	plain := httptest.NewServer(handler)
 	defer plain.Close()
 
-	c := New(WithRoutes(fixedRoute(namedRoute())), WithTLSClientConfig(trust(secure)))
+	c := newTrusting(trust(secure), WithRoutes(fixedRoute(namedRoute())))
 	k := Key{CookieScope: "collection-a"}
 	httpsURL := byName(t, secure.URL)
 	httpURL := byName(t, plain.URL)

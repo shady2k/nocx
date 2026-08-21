@@ -142,7 +142,7 @@ func TestSend_TLSHandshakeSucceedsWithTrust(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New(WithTLSClientConfig(trust(srv))).Send(context.Background(), apicollGet(srv.URL), Key{})
+	got, err := newTrusting(trust(srv)).Send(context.Background(), apicollGet(srv.URL), Key{})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}

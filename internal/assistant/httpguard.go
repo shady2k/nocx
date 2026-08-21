@@ -68,12 +68,6 @@ func newGuardedHTTPClientWithResolver(logger log.Logger, resolve func(ctx contex
 	}
 }
 
-// checkDestination applies the address rule to one resolved destination for
-// the assistant. The rule is httppolicy's; this names the caller.
-func checkDestination(scheme, host string, ips []net.IP) error {
-	return httppolicy.CheckDestination(component, scheme, host, ips)
-}
-
 // withCustomHeaderNames tags ctx with the canonical names of the custom
 // headers the request carries. Set by the request builders (engine.go for
 // the completion, connection.go for the connection check) so the guard never

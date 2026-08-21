@@ -67,25 +67,30 @@ func TestApply_Bearer(t *testing.T) {
 	defer srv.Close()
 
 	look := &countingLookup{values: map[string]string{"token": "t0k3n"}}
-	r, err := Apply(apicoll.Request{
+	r, used, err := Apply(apicoll.Request{
 		Method: http.MethodGet, URL: srv.URL,
 		Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: "token"},
 	}, look.lookup)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if _, err := New().Send(context.Background(), r, Key{}); err != nil {
+	if _, err := New().Send(context.Background(), r, Key{}, used...); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if got != "Bearer t0k3n" {
 		t.Errorf("Authorization = %q, want Bearer t0k3n", got)
+	}
+	// And what was placed is the token alone: "Bearer " is four public
+	// words and badging them would elide the scheme a reader needs to see.
+	if len(used) != 1 || used[0].Name != "token" || used[0].Value != "t0k3n" {
+		t.Errorf("Apply placed %+v, want exactly the token under its variable name", used)
 	}
 }
 
 // TestApply_Basic: the username is the non-secret half and lives in the
 // file; the password is the variable.
 func TestApply_Basic(t *testing.T) {
-	r, err := Apply(apicoll.Request{
+	r, used, err := Apply(apicoll.Request{
 		URL:  "https://api/",
 		Auth: apicoll.Auth{Kind: apicoll.AuthBasic, Var: "pw", User: "ada"},
 	}, (&countingLookup{values: map[string]string{"pw": "lovelace"}}).lookup)
@@ -96,12 +101,32 @@ func TestApply_Basic(t *testing.T) {
 	if v := headerValue(r, "Authorization"); v != want {
 		t.Errorf("Authorization = %q, want %q", v, want)
 	}
+
+	// What Apply reports as placed is the ENCODED credential, not the
+	// password. Nothing in the composed request contains "lovelace" — it is
+	// base64 by the time it is a header — so a caller redacting the
+	// plaintext would find nothing to redact and leave the blob in the
+	// frame. This is the whole reason the second return is taken from the
+	// header rather than from the variable.
+	if len(used) != 1 {
+		t.Fatalf("Apply placed %d secrets, want 1", len(used))
+	}
+	if used[0].Name != "pw" {
+		t.Errorf("the placed secret is named %q, want the VARIABLE's name", used[0].Name)
+	}
+	if used[0].Value != strings.TrimPrefix(want, "Basic ") {
+		t.Errorf("the placed value is %q, want the base64 credential %q",
+			used[0].Value, strings.TrimPrefix(want, "Basic "))
+	}
+	if used[0].Value == "lovelace" {
+		t.Error("the placed value is the plaintext password, which appears nowhere in the request")
+	}
 }
 
 // TestApply_APIKey: the key rides the header the endpoint names — Azure's
 // is `api-key`, not `X-API-Key` — with a default for the common case.
 func TestApply_APIKey(t *testing.T) {
-	named, err := Apply(apicoll.Request{
+	named, _, err := Apply(apicoll.Request{
 		URL:  "https://api/",
 		Auth: apicoll.Auth{Kind: apicoll.AuthAPIKey, Var: "k", User: "api-key"},
 	}, (&countingLookup{values: map[string]string{"k": "abc"}}).lookup)
@@ -112,7 +137,7 @@ func TestApply_APIKey(t *testing.T) {
 		t.Errorf("api-key = %q, want abc", v)
 	}
 
-	unnamed, err := Apply(apicoll.Request{
+	unnamed, _, err := Apply(apicoll.Request{
 		URL:  "https://api/",
 		Auth: apicoll.Auth{Kind: apicoll.AuthAPIKey, Var: "k"},
 	}, (&countingLookup{values: map[string]string{"k": "abc"}}).lookup)
@@ -128,7 +153,7 @@ func TestApply_APIKey(t *testing.T) {
 // through and no header is invented.
 func TestApply_NoneLeavesTheRequestSendable(t *testing.T) {
 	for _, kind := range []string{"", apicoll.AuthNone} {
-		r, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: kind}}, nil)
+		r, _, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: kind}}, nil)
 		if err != nil {
 			t.Fatalf("Apply(%q): %v", kind, err)
 		}
@@ -144,7 +169,7 @@ func TestApply_NoneLeavesTheRequestSendable(t *testing.T) {
 // is what turns one into the other, so the cleared field is part of its
 // contract rather than an implementation detail.
 func TestApply_ClearsTheAuthSoTheSenderAccepts(t *testing.T) {
-	r, err := Apply(apicoll.Request{
+	r, _, err := Apply(apicoll.Request{
 		URL:  "https://api/",
 		Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: "token"},
 	}, (&countingLookup{values: map[string]string{"token": "x"}}).lookup)
@@ -168,7 +193,7 @@ func TestApply_LeavesTheCallersRequestUntouched(t *testing.T) {
 		Headers: []apicoll.Header{{Name: "X-A", Value: "1", Enabled: true}},
 		Auth:    apicoll.Auth{Kind: apicoll.AuthBearer, Var: "token"},
 	}
-	if _, err := Apply(in, (&countingLookup{values: map[string]string{"token": "t0k3n"}}).lookup); err != nil {
+	if _, _, err := Apply(in, (&countingLookup{values: map[string]string{"token": "t0k3n"}}).lookup); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	if in.Auth.Kind != apicoll.AuthBearer || in.Auth.Var != "token" {
@@ -187,7 +212,7 @@ func TestApply_LeavesTheCallersRequestUntouched(t *testing.T) {
 // one concept has one owner, and the surface has one message for it.
 func TestApply_AnUnboundVariableBlocksTheSendAndNamesItself(t *testing.T) {
 	for _, kind := range []string{apicoll.AuthBearer, apicoll.AuthBasic, apicoll.AuthAPIKey} {
-		_, err := Apply(apicoll.Request{
+		_, _, err := Apply(apicoll.Request{
 			URL:  "https://api/",
 			Auth: apicoll.Auth{Kind: kind, Var: "token", User: "u"},
 		}, (&countingLookup{values: map[string]string{"other": "x"}}).lookup)
@@ -211,13 +236,16 @@ func TestApply_NeverSendsAnEmptyCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r, err := Apply(apicoll.Request{
+	r, used, err := Apply(apicoll.Request{
 		Method: http.MethodGet, URL: srv.URL,
 		Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: "token"},
 	}, (&countingLookup{}).lookup)
 	if err == nil {
-		_, _ = New().Send(context.Background(), r, Key{})
+		_, _ = New().Send(context.Background(), r, Key{}, used...)
 		t.Fatal("Apply succeeded with an unbound variable")
+	}
+	if used != nil {
+		t.Errorf("Apply reported %+v as placed while refusing the request", used)
 	}
 	if reached.Load() != 0 {
 		t.Errorf("the server was reached %d times, want 0", reached.Load())
@@ -228,7 +256,7 @@ func TestApply_NeverSendsAnEmptyCredential(t *testing.T) {
 // empty Var is not "no auth" — the user asked for a credential and there is
 // none, so the send is blocked rather than quietly downgraded to anonymous.
 func TestApply_RefusesAuthThatNamesNoVariableAtAll(t *testing.T) {
-	_, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: apicoll.AuthBearer}}, nil)
+	_, _, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: apicoll.AuthBearer}}, nil)
 	if !errors.Is(err, apicoll.ErrUnresolvedVariable) {
 		t.Fatalf("Apply returned %v, want it blocked", err)
 	}
@@ -237,7 +265,7 @@ func TestApply_RefusesAuthThatNamesNoVariableAtAll(t *testing.T) {
 // TestApply_RefusesAnAuthKindItDoesNotKnow: three schemes, no more (§2). A
 // fourth is refused rather than sent without its credential.
 func TestApply_RefusesAnAuthKindItDoesNotKnow(t *testing.T) {
-	if _, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: "oauth2", Var: "t"}},
+	if _, _, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: "oauth2", Var: "t"}},
 		(&countingLookup{values: map[string]string{"t": "x"}}).lookup); err == nil {
 		t.Fatal("Apply accepted an auth kind it does not implement")
 	}
@@ -248,7 +276,7 @@ func TestApply_RefusesAnAuthKindItDoesNotKnow(t *testing.T) {
 // different remedy — so the two must not be flattened into one.
 func TestApply_ReportsALookupFailure(t *testing.T) {
 	sealed := errors.New("vault is sealed")
-	_, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: "t"}},
+	_, _, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: "t"}},
 		(&countingLookup{err: sealed}).lookup)
 	if !errors.Is(err, sealed) {
 		t.Fatalf("Apply returned %v, want the lookup's own failure", err)
@@ -261,7 +289,7 @@ func TestApply_ReportsALookupFailure(t *testing.T) {
 // TestApply_NeverPutsTheCredentialInAnError: an error is written to a log
 // the user did not choose, which is exactly where a token must not be.
 func TestApply_NeverPutsTheCredentialInAnError(t *testing.T) {
-	_, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: "oauth2", Var: "t"}},
+	_, _, err := Apply(apicoll.Request{URL: "https://api/", Auth: apicoll.Auth{Kind: "oauth2", Var: "t"}},
 		(&countingLookup{values: map[string]string{"t": "s3cr3t-material"}}).lookup)
 	if err == nil {
 		t.Fatal("Apply accepted an unknown kind")
@@ -307,7 +335,7 @@ func TestApply_AVaultIdentifierIsJustAnUnknownVariableName(t *testing.T) {
 	// the test is that the shape buys the file nothing.
 	//nolint:gosec // G101: an identifier a hostile FILE might write, not a credential — it names nothing and this test asserts it resolves to nothing
 	const sshProfileSecret = "keychain:nocx-ssh-prod-bastion-passphrase"
-	_, err := Apply(apicoll.Request{
+	_, _, err := Apply(apicoll.Request{
 		Method: http.MethodGet, URL: srv.URL,
 		Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: sshProfileSecret},
 	}, look.lookup)
@@ -412,11 +440,11 @@ func TestApply_SubstitutionAndAuthComposeIntoOneSend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Substitute: %v", err)
 	}
-	ready, err := Apply(resolved, look)
+	ready, used, err := Apply(resolved, look)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if _, err := New().Send(context.Background(), ready, Key{}); err != nil {
+	if _, err := New().Send(context.Background(), ready, Key{}, used...); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 

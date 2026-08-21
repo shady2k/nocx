@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
@@ -583,12 +584,10 @@ func New(opts ...Option) (*App, error) {
 	// request on this machine's own interface, around the bastion the
 	// environment named.
 	//
-	// NOT wired: transport.WithAPIBindings. The binding document is the one
-	// thing in this feature that holds an identifier for stored credential
-	// material (design §8.1), internal/apibind declares its interface ahead
-	// of the implementation, and there is no implementation yet — so
-	// api.import.postman answers -32601 rather than being handed somewhere
-	// to put a token that is not the vault.
+	// The binding document itself is built further down, once the vault
+	// exists: it is the one thing in this feature that holds an identifier
+	// for stored credential material (design §8.1), so it cannot be
+	// constructed before the store that holds the values.
 	apiCollections := apicoll.NewCollections(paths)
 	apiRoutes := &apiRouteLeaser{client: sshClient}
 	apiSender := apisend.New(
@@ -660,6 +659,28 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
+
+	// The binding document (design §8, §8.1): the map from a collection's
+	// variable NAME to a value in the vault. It is constructed HERE rather
+	// than beside the collection service above because it takes the vault,
+	// and it is handed to the transport twice under two different contracts
+	// — which is apibind's own split, not a second answer to one question.
+	//
+	// apibind.Store is the WRITE half and it is what turns on
+	// api.import.postman: an import that had nowhere to put a token would
+	// have to drop it silently or write it into the collection folder, and
+	// the folder being safe to commit BY CONSTRUCTION is the whole security
+	// argument. apibind.ValueResolver is the READ half, and it is the half
+	// that never yields an identifier: a caller holding one can ask what a
+	// variable is worth and has nothing to hand an id to. The send path gets
+	// exactly that one, which is how §8's property survives the wiring as
+	// well as the format.
+	//
+	// The document store is this composition root's choice, not apibind's,
+	// and it is the same one the profiles, the snippets and the vault file
+	// provider use: one directory, one version protocol, one place a backup
+	// has to know about.
+	apiBindings := apibind.NewStore(docStore, v, apibind.WithLogger(logger))
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -862,6 +883,8 @@ func New(opts ...Option) (*App, error) {
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
 		transport.WithAPI(apiCollections, apiSender),
+		transport.WithAPIBindings(apiBindings),
+		transport.WithAPIVariables(apiBindings),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather
 		// than inside the transport: internal/version's vars are link-time
 		// state, and the composition root is where state becomes a

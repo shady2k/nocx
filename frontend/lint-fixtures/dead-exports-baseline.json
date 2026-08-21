@@ -51,22 +51,22 @@
     {
       "kind": "exports",
       "file": "src/recall.ts",
-      "symbol": "MIN_USEFUL_ROWS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "SCOPE_LABELS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
       "symbol": "isRecallShortcut"
     },
     {
       "kind": "exports",
       "file": "src/recall.ts",
+      "symbol": "MIN_USEFUL_ROWS"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
       "symbol": "nextScope"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "SCOPE_LABELS"
     },
     {
       "kind": "exports",
@@ -76,12 +76,12 @@
     {
       "kind": "exports",
       "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "STORAGE_KEY"
+      "symbol": "cacheThemeId"
     },
     {
       "kind": "exports",
       "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "cacheThemeId"
+      "symbol": "STORAGE_KEY"
     },
     {
       "kind": "exports",
@@ -180,16 +180,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/ui/icons/PauseIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/PlayIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
       "file": "src/ui/icons/index.ts",
       "symbol": "PauseIcon"
     },
@@ -200,33 +190,18 @@
     },
     {
       "kind": "exports",
+      "file": "src/ui/icons/PauseIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PlayIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
       "file": "src/unresolved-redactions.ts",
       "symbol": "hasUnresolved"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/dialog.openFileForUpload.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.dropped.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.uploadDone.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.uploadProgress.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/ledger.artifact.ts",
-      "symbol": ""
     },
     {
       "kind": "files",
@@ -240,17 +215,7 @@
     },
     {
       "kind": "files",
-      "file": "src/generated/ledger.get.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
       "file": "src/generated/ledger.open.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/ledger.query.ts",
       "symbol": ""
     },
     {
@@ -304,11 +269,6 @@
       "symbol": ""
     },
     {
-      "kind": "files",
-      "file": "src/ui/overlay/portal.ts",
-      "symbol": ""
-    },
-    {
       "kind": "types",
       "file": "src/authentication-editor.tsx",
       "symbol": "AuthMethodEditorProps"
@@ -332,16 +292,6 @@
       "kind": "types",
       "file": "src/generated/backup.restore.ts",
       "symbol": "ProfileRef"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.upload.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.uploadCancel.ts",
-      "symbol": ""
     },
     {
       "kind": "types",

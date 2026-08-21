@@ -25,7 +25,7 @@ import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
-import { RefreshIcon } from '../ui/icons'
+import { ArrowUpIcon, CloseIcon, RefreshIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -36,6 +36,11 @@ import {
   type FilesNode,
   type FilesTreeStore,
 } from './files-store'
+import { formatProgress } from './upload-format'
+import { pickUploadSources } from './upload-picker'
+import type { UploadDestination, UploadSource } from './upload-flow'
+import type { UploadSurface } from './upload-surface'
+import type { TransferPhase, UploadTransfer } from './upload-store'
 
 // ── The opener seam ────────────────────────────────────────────────────────
 
@@ -84,6 +89,47 @@ const FilesIcon: Component = () => (
   </svg>
 )
 
+/** The overflow mark — three dots, the same stroke vocabulary and viewBox
+ *  as the kit's icons and as FilesIcon above. It lives here for the same
+ *  reason FilesIcon does: it is this surface's glyph, and the control it
+ *  marks is the kit's IconButton. */
+const MoreIcon: Component = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <circle cx="5" cy="12" r="1" />
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+  </svg>
+)
+
+// ── Transfers ─────────────────────────────────────────────────────────────
+
+/** How a finished transfer reads. `cancelled` and `skipped` are NOT
+ *  failures — a cancelled transfer's underlying error is a context
+ *  cancellation, and a skipped one is the person's own decision — so
+ *  neither is danger. */
+const PHASE_TONE: Record<Exclude<TransferPhase, 'running'>, 'success' | 'neutral' | 'danger'> = {
+  written: 'success',
+  skipped: 'neutral',
+  cancelled: 'neutral',
+  failed: 'danger',
+}
+
+const PHASE_LABEL: Record<Exclude<TransferPhase, 'running'>, string> = {
+  written: 'Uploaded',
+  skipped: 'Skipped',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+}
+
 // ── Panel ─────────────────────────────────────────────────────────────────
 
 export const FILES_VIEW_ID = 'files'
@@ -104,6 +150,10 @@ interface FilesPanelProps {
   /** The ACTIVE tab's origin — a reactive accessor, never a capture: the
    *  panel follows the tab in front. */
   activeOrigin: () => ActiveOrigin | null
+  /** The app's single upload surface, or null where none was injected —
+   *  the panel then shows no transfers and offers no Upload action, rather
+   *  than offering one that reaches nothing. */
+  upload: UploadSurface | null
 }
 
 function FilesPanel(props: FilesPanelProps) {
@@ -378,8 +428,64 @@ function FilesPanel(props: FilesPanelProps) {
   // central state, and something has to be able to say WHICH machine and
   // directory this tree is: a check that waits on "a row appeared" cannot
   // tell a correct tree from a wrong machine's.
+  /** One transfer's row. Running says how far and how fast and offers the
+   *  cancel; finished says how it ended and offers to be forgotten. The
+   *  progress line renders the SIZE alone until a sample has arrived — a
+   *  transfer that produced none is not at zero, it is unobserved. */
+  const renderTransfer = (t: UploadTransfer) => (
+    <div
+      class="files-upload-row"
+      data-testid="files-upload-row"
+      data-transfer-id={t.transferId}
+      data-phase={t.phase}
+    >
+      <span class="files-upload-name">{t.finalName !== '' ? t.finalName : t.name}</span>
+      <Show
+        when={t.phase === 'running'}
+        fallback={
+          <>
+            <Badge tone={PHASE_TONE[t.phase as Exclude<TransferPhase, 'running'>]}>
+              {PHASE_LABEL[t.phase as Exclude<TransferPhase, 'running'>]}
+            </Badge>
+            <Show when={t.error !== null}>
+              <span class="files-upload-detail">{t.error}</span>
+            </Show>
+            <IconButton
+              size="sm"
+              ariaLabel={`Dismiss ${t.name}`}
+              data-testid="files-upload-dismiss"
+              onClick={() => props.upload?.store.dismiss(t.transferId)}
+            >
+              <CloseIcon />
+            </IconButton>
+          </>
+        }
+      >
+        <span class="files-upload-detail" data-testid="files-upload-progress">
+          {formatProgress(t)}
+        </span>
+        <Button
+          size="sm"
+          data-testid="files-upload-cancel"
+          onClick={() => props.upload?.store.cancel(t.transferId)}
+        >
+          Cancel
+        </Button>
+      </Show>
+    </div>
+  )
+
   return (
     <div class="files-panel" data-testid="files-panel" data-root={props.store.root()?.path}>
+      {/* The transfers this renderer knows about, above the tree and
+          outside the phase switch: a transfer outlives a re-scope, and an
+          upload that vanished because the panel changed tab would be an
+          upload nobody could account for. */}
+      <Show when={(props.upload?.store.transfers().length ?? 0) > 0}>
+        <div class="files-uploads" data-testid="files-uploads">
+          <For each={props.upload?.store.transfers() ?? []}>{(t) => renderTransfer(t)}</For>
+        </div>
+      </Show>
       <Show when={props.store.phase() === 'no-origin'}>
         <EmptyState
           icon={<FilesIcon />}
@@ -444,6 +550,17 @@ export interface FilesViewDeps {
    *  it to PaneManager.activeOrigin() through onActivePaneChange, exactly like
    *  the ports target id. */
   activeOrigin: () => ActiveOrigin | null
+  /** The app's single upload surface (upload-surface.ts). Optional so the
+   *  panel still runs standalone in a test; main.tsx owns the real one, and
+   *  the terminal drop resolves the SAME instance from the same dispatcher
+   *  — one store, because a transfer has one state. */
+  upload?: UploadSurface
+  /** How the person names the files to upload. The default raises the
+   *  native picker where Wails exists and the browser's where it does not
+   *  (upload-picker.ts); it is a parameter because a picker is the one step
+   *  a test cannot perform, and a gesture whose middle step cannot be
+   *  driven is a gesture no test can watch a user complete. */
+  pickSources?: () => Promise<UploadSource[]>
 }
 
 /** Build the Files view descriptor. The store is created once, per
@@ -453,11 +570,82 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const opener = deps.opener ?? NOOP_OPENER
   const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
-  return {
-    id: FILES_VIEW_ID,
-    title: 'Files',
-    icon: FilesIcon,
-    actions: () => (
+  const upload = deps.upload ?? null
+  /** Who asks the person for files. The default is the real picker; a
+   *  test substitutes its own, because raising a picker is the one step a
+   *  test cannot perform. */
+  const pick = (): Promise<UploadSource[]> => {
+    if (deps.pickSources !== undefined) return deps.pickSources()
+    if (upload === null) return Promise.resolve([])
+    return pickUploadSources({
+      services: upload.services,
+      report: (message, level) => showToast({ message, level }),
+    })
+  }
+
+  /**
+   * Where the panel's Upload action puts a file: the folder the panel is
+   * SHOWING (design §4), which is the path the last completed reveal
+   * reached — the tab's verified cwd, since that is what moves the panel.
+   * Null before any reveal has landed, and the action then says so rather
+   * than picking somewhere.
+   *
+   * This is the one derivation; dropping onto an individual folder row is
+   * deliberately out (§4), so there is no second rule that could disagree
+   * with it.
+   */
+  const uploadDestination = (): UploadDestination | null => {
+    const b = store.binding()
+    const folder = store.revealTarget()
+    if (b === null || folder === null) return null
+    return { bindingId: b.bindingId, destDir: folder }
+  }
+
+  const uploadHere = async (): Promise<void> => {
+    if (upload === null) return
+    const destination = uploadDestination()
+    if (destination === null) {
+      showToast({
+        level: 'warning',
+        message: 'nocx does not know which folder this panel is showing yet.',
+      })
+      return
+    }
+    const sources = await pick()
+    if (sources.length === 0) return
+    await upload.flow.send(destination, sources)
+  }
+
+  /**
+   * The header's actions, including the OVERFLOW.
+   *
+   * The Upload action is in the overflow menu and not in the header, and
+   * that is deliberate rather than incidental: the header is already
+   * over-full and how it overflows belongs to nocx-a8cz. A seventh button
+   * in a header that cannot hold six is the thing that bead exists to stop.
+   *
+   * The item is absent on a LOCAL tab. That is not a greyed-out row: a
+   * local binding has no uploader at all (R1), so the capability does not
+   * apply to that machine, and absence is what says so — the same rule
+   * "Show in Finder" follows in the opposite direction.
+   */
+  const FilesHeaderActions: Component = () => {
+    const [overflowAt, setOverflowAt] = createSignal<{ x: number; y: number } | null>(null)
+
+    const overflowItems = (): ContextMenuItem[] => {
+      const items: ContextMenuItem[] = []
+      if (upload !== null && store.origin()?.kind === 'ssh') {
+        items.push({
+          id: 'upload',
+          label: 'Upload File…',
+          icon: ArrowUpIcon,
+          onSelect: () => void uploadHere(),
+        })
+      }
+      return items
+    }
+
+    return (
       <>
         {/* Read store.root() INSIDE the JSX: a component body executes once,
             so capturing `const root = store.root()` would freeze the header
@@ -515,8 +703,39 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
             </Badge>
           </Show>
         </span>
+        {/* The overflow. It draws nothing when it would open empty — a
+            menu button that opens on nothing is worse than no button. */}
+        <Show when={overflowItems().length > 0}>
+          <IconButton
+            data-testid="files-overflow"
+            size="sm"
+            ariaLabel="More file actions"
+            title="More file actions"
+            onClick={(e: MouseEvent) => {
+              const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+              setOverflowAt({ x: r.left, y: r.bottom })
+            }}
+          >
+            <MoreIcon />
+          </IconButton>
+          <ContextMenu
+            open={overflowAt() !== null}
+            x={overflowAt()?.x ?? 0}
+            y={overflowAt()?.y ?? 0}
+            items={overflowItems()}
+            data-testid="files-overflow-menu"
+            onClose={() => setOverflowAt(null)}
+          />
+        </Show>
       </>
-    ),
+    )
+  }
+
+  return {
+    id: FILES_VIEW_ID,
+    title: 'Files',
+    icon: FilesIcon,
+    actions: FilesHeaderActions,
     view: (props) => (
       <FilesPanel
         store={store}
@@ -524,6 +743,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         opener={opener}
         clipboard={clipboard}
         activeOrigin={props.activeOrigin}
+        upload={upload}
       />
     ),
     order: FILES_VIEW_ORDER,

@@ -56,6 +56,7 @@ import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { uploadSurfaceFor } from './files/upload-surface'
 import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
@@ -468,11 +469,16 @@ async function main() {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
+  // The upload surface (design §5.5), resolved from the dispatcher — the
+  // SAME instance the terminal panes resolve, because a transfer has one
+  // state and two stores would each mint a row for every transfer the other
+  // started. Without this the panel's Upload action would be dead code.
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
     clipboard,
     activeOrigin,
+    upload: uploadSurfaceFor(dispatcher),
   })
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────

@@ -220,6 +220,53 @@ describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
     expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(false)
     expect(tab.pane.hasAttribute('data-session-id')).toBe(false)
   })
+
+  // D9, through the seam a person actually reaches: the pane element, a
+  // real drag, and the draft afterwards. The module's own tests cover the
+  // routing; this one covers that the pane is WIRED to it — a handler
+  // nothing attached is a gesture that does nothing, and no unit test of
+  // the handler can say so.
+  it('a drop on a LOCAL tab puts the name in the command line and uploads nothing', async () => {
+    const client = makeClient()
+    const { content, view, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      editorOf(content).show()
+      const transfer = {
+        types: ['Files'],
+        files: [new File(['hello'], 'notes.txt')],
+      } as unknown as DataTransfer
+      const drop = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+      Object.defineProperty(drop, 'dataTransfer', { value: transfer })
+      tab.pane.dispatchEvent(drop)
+
+      await vi.waitFor(() => expect(view.state.doc.toString()).toBe('notes.txt'))
+      // Copying a file onto the machine it is already on is not a thing
+      // anybody asked for: no upload method is called at all.
+      expect(client.dispatcher.call).not.toHaveBeenCalledWith('files.upload', expect.anything())
+      expect(client.dispatcher.call).not.toHaveBeenCalledWith('files.open', expect.anything())
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaves a drag that is not a files drag alone, so the tab strip still reorders', async () => {
+    const { tab, teardown } = await mountTerminal()
+    try {
+      // The tab strip's own drag carries application/x-nocx-tab, never
+      // Files (layout/strip-drag.ts) — and this is the same condition v3's
+      // runtime applies before it touches a drag.
+      const transfer = {
+        types: ['application/x-nocx-tab'],
+        files: [],
+      } as unknown as DataTransfer
+      const over = new Event('dragover', { bubbles: true, cancelable: true }) as DragEvent
+      Object.defineProperty(over, 'dataTransfer', { value: transfer })
+      tab.pane.dispatchEvent(over)
+      expect(over.defaultPrevented).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
 })
 
 describe('SSH open host-key recovery', () => {

@@ -27,6 +27,10 @@ import type { FilesPanelServices } from './files-client'
 import type { ActiveOrigin, PaneContent } from '../pane-content'
 import { ToastHost, clearToasts } from '../ui/toast'
 import type { ClipboardAccess } from '../clipboard'
+import { createUploadFlow, type UploadSource } from './upload-flow'
+import { createUploadStore } from './upload-store'
+import { fakeUploadServices } from './upload-fixtures'
+import type { UploadSurface } from './upload-surface'
 
 /** A clipboard fake: the seam's contract is writeText rejects when the
  *  platform refused — tests that assert failure override it. */
@@ -130,7 +134,14 @@ const SSH_ORIGIN: ActiveOrigin = {
 
 const liveHandles: SidebarHandle[] = []
 
-async function mountApp(services: FilesPanelServices, clipboard?: ClipboardAccess) {
+async function mountApp(
+  services: FilesPanelServices,
+  clipboard?: ClipboardAccess,
+  uploadDeps?: {
+    upload: UploadSurface
+    pickSources?: () => Promise<UploadSource[]>
+  },
+) {
   const client = makeClient()
   const { manager } = await mountPaneManager(client)
 
@@ -151,7 +162,14 @@ async function mountApp(services: FilesPanelServices, clipboard?: ClipboardAcces
   // assertions call it detached from the object, and unbound-method exists
   // to catch exactly that detachment — the mock is the object's own.
   const open = vi.fn()
-  const files = createFilesView({ services, opener: { open }, activeOrigin, clipboard })
+  const files = createFilesView({
+    services,
+    opener: { open },
+    activeOrigin,
+    clipboard,
+    upload: uploadDeps?.upload,
+    pickSources: uploadDeps?.pickSources,
+  })
   // Ports stands in at order 0 (main.tsx registers it there); the views
   // reach mountSidebar in order-sorted arrangement, which is what makes
   // Files the FIRST activity-bar icon (SidebarSolid renders array order).
@@ -900,5 +918,170 @@ describe('files sidebar view', () => {
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-watch-error"]')).toBeNull(),
     )
+  })
+})
+
+// ── The Upload action (design §4: the panel's gesture) ────────────────────
+//
+// A user opens the overflow, picks Upload, chooses files, and they arrive in
+// the folder the panel is showing. The header must NOT grow a seventh
+// button: it is already over-full and nocx-a8cz owns how it overflows.
+describe('uploading from the panel', () => {
+  function uploadFixture() {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services })
+    const said: string[] = []
+    const flow = createUploadFlow({
+      services,
+      store,
+      ask: () => Promise.resolve({ answer: 'skip', applyToAll: false }),
+      report: (m) => said.push(m),
+    })
+    const surface: UploadSurface = { services, store, flow }
+    return { services, store, flow, surface, said }
+  }
+
+  /** A menu row, found by the words on it — ContextMenu gives its items no
+   *  test id of their own, and a person picks the row that says Upload. */
+  function menuItem(label: string): HTMLElement {
+    const items = document.querySelectorAll<HTMLElement>(
+      '[data-testid="files-overflow-menu"] .ui-context-menu__item',
+    )
+    for (const item of items) if ((item.textContent ?? '').includes(label)) return item
+    throw new Error(`no menu item named ${label}`)
+  }
+
+  /** The bar the header actions render into. */
+  function header(panel: HTMLElement): HTMLElement {
+    const el = panel.querySelector<HTMLElement>('.ui-sidebar-view__actions')
+    if (!el) throw new Error('no header actions')
+    return el
+  }
+
+  /** An ssh tab whose cwd is verified — the panel reveals it, and the
+   *  revealed folder is what the action uploads into. */
+  async function mountOnRemote(over: { pickSources?: () => Promise<UploadSource[]> } = {}) {
+    const u = uploadFixture()
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockImplementation((_b: string, path: string) =>
+          Promise.resolve(
+            path === '/'
+              ? listFixture('C:/', [entryFixture({ name: 'srv', path: '/srv', kind: 'dir' })])
+              : listFixture('C:/srv', []),
+          ),
+        ),
+    })
+    const app = await mountApp(services, undefined, {
+      upload: u.surface,
+      pickSources: over.pickSources,
+    })
+    app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-testid="files-overflow"]')).not.toBeNull(),
+    )
+    // The panel's folder is the one the reveal reached, so the action has
+    // no destination until the reveal lands — wait for the selection the
+    // reveal draws, not merely for the button.
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-selected="true"]')?.textContent).toContain('srv'),
+    )
+    return { ...app, ...u }
+  }
+
+  it('puts Upload in the overflow menu and not in the header', async () => {
+    const app = await mountOnRemote()
+    // Nothing in the header says "upload" — the whole point of the bead
+    // that owns this header is that it cannot hold another button.
+    expect(header(app.panel).textContent ?? '').not.toContain('Upload')
+
+    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    const menu = document.querySelector('[data-testid="files-overflow-menu"]')
+    expect(menu).not.toBeNull()
+    expect(menu?.textContent).toContain('Upload File')
+  })
+
+  it('offers no Upload on a LOCAL tab, because a local binding has no uploader', async () => {
+    // R1 stated as absence, not as a greyed-out row — the same rule "Show
+    // in Finder" follows in the opposite direction.
+    const u = uploadFixture()
+    const { panel } = await mountApp(fakeServices(), undefined, { upload: u.surface })
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-panel"]')).not.toBeNull(),
+    )
+    expect(panel.querySelector('[data-testid="files-overflow"]')).toBeNull()
+  })
+
+  it('sends the chosen files into the folder the panel is showing', async () => {
+    const app = await mountOnRemote({
+      pickSources: () =>
+        Promise.resolve([{ name: 'notes.txt', size: 5, blob: new Blob([new Uint8Array(5)]) }]),
+    })
+    app.services.nextResult = [{ transferId: 't1' }]
+
+    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    menuItem('Upload File').click()
+
+    await vi.waitFor(() => expect(app.services.uploads).toHaveLength(1))
+    expect(app.services.uploads[0]).toEqual({
+      bindingId: 'b1',
+      destDir: '/srv',
+      name: 'notes.txt',
+      size: 5,
+    })
+  })
+
+  it('shows the transfer it started, and what it knows about it', async () => {
+    const app = await mountOnRemote({
+      pickSources: () =>
+        Promise.resolve([{ name: 'big.iso', size: 400, blob: new Blob([new Uint8Array(400)]) }]),
+    })
+    app.services.nextResult = [{ transferId: 't1' }]
+    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    menuItem('Upload File').click()
+
+    const row = () => app.panel.querySelector('[data-testid="files-upload-row"]')
+    await vi.waitFor(() => expect(row()).not.toBeNull())
+    expect(row()?.getAttribute('data-phase')).toBe('running')
+    // No sample has arrived, so the line says the size and NOT "0 B of
+    // 400 B", which would claim the transfer had stalled at zero.
+    expect(app.panel.querySelector('[data-testid="files-upload-progress"]')?.textContent).toBe(
+      '400 B',
+    )
+
+    app.services.emitDone({
+      transferId: 't1',
+      outcome: 'written',
+      finalName: 'big.iso',
+      stranded: [],
+    })
+    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
+    expect(row()?.textContent).toContain('Uploaded')
+
+    // And the person can put it away.
+    app.panel.querySelector<HTMLElement>('[data-testid="files-upload-dismiss"]')!.click()
+    await vi.waitFor(() => expect(row()).toBeNull())
+  })
+
+  it('cancels a running transfer through the wire, not by deciding locally', async () => {
+    const app = await mountOnRemote({
+      pickSources: () =>
+        Promise.resolve([{ name: 'a.txt', size: 1, sourceTicket: 'c'.repeat(32) }]),
+    })
+    app.services.nextResult = [{ transferId: 't1' }]
+    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    menuItem('Upload File').click()
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-testid="files-upload-cancel"]')).not.toBeNull(),
+    )
+
+    app.panel.querySelector<HTMLElement>('[data-testid="files-upload-cancel"]')!.click()
+    expect(app.services.cancels).toEqual(['t1'])
+    // Still running: the cancel races the transfer's own completion, and
+    // uploadDone is what says which won.
+    expect(
+      app.panel.querySelector('[data-testid="files-upload-row"]')?.getAttribute('data-phase'),
+    ).toBe('running')
   })
 })

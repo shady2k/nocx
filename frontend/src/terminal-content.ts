@@ -73,6 +73,9 @@ import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
 import { showConfirm } from './ui/dialog'
+import { createFilesPanelServices } from './files/files-client'
+import { attachTerminalDrop } from './files/terminal-drop'
+import { uploadSurfaceFor } from './files/upload-surface'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
@@ -604,6 +607,14 @@ export class TerminalContent extends BasePaneContent {
   // _readyPromise resolves true when the renderer mounts and the PTY session
   // opens; resolves false when mount() throws. Never rejects.
   private readonly _readyPromise: Promise<boolean>
+  /** The drop gesture's detach, held for dispose. */
+  private _dropDetach: (() => void) | null = null
+  /** This pane's files binding, opened on the FIRST upload and reused. A
+   *  terminal does not need one to run, so it is not opened at mount: a
+   *  binding is a provider, a pooled SSH reference and a watch set, and a
+   *  tab nobody ever drops on should hold none of them. */
+  private _uploadBinding: string | null = null
+  private _uploadBindingInFlight: Promise<string | null> | null = null
   private _readyResolve!: (value: boolean) => void
 
   constructor(
@@ -2347,6 +2358,13 @@ export class TerminalContent extends BasePaneContent {
       // nothing: there is no Wails runtime to read them, and a drop yields
       // File objects the renderer streams itself.
       this.markAsFileDropTarget(session.sessionId)
+      // …and this is where it starts LISTENING. Both halves of the gesture
+      // are attached here: the DOM drop (a browser, where the renderer gets
+      // File objects) and the files.dropped notification (the Wails window,
+      // where the drop went to Go and came back as source tickets). The
+      // module decides which half is live; this decides only that the pane
+      // has one, and that it stops when the pane does.
+      this.attachDrop(target)
       // The workspace is READ here, not assumed: the renderer named a pane
       // and the backend walked pane -> tab -> workspace itself, so this is
       // where a session's placement is learnt at all. It is recorded as
@@ -3602,7 +3620,96 @@ export class TerminalContent extends BasePaneContent {
     // exists, and the ticket minted for it would sit out its TTL for
     // nobody.
     this.clearFileDropTarget()
+    this._dropDetach?.()
+    this._dropDetach = null
+    // The binding a drop opened dies with the pane. Nothing else holds it —
+    // the Files panel opens its own — so leaving it would leak a provider
+    // and a pooled SSH reference for the life of the session.
+    if (this._uploadBinding !== null) {
+      const binding = this._uploadBinding
+      this._uploadBinding = null
+      void createFilesPanelServices(this.client.dispatcher)
+        .close(binding)
+        .catch(() => {})
+    }
     this.host = null
+  }
+
+  /**
+   * Wire the drop gesture onto this pane (design §4, §5.5).
+   *
+   * Everything about WHAT a drop means lives in files/terminal-drop.ts —
+   * including D9, that a local tab inserts the name and starts no transfer.
+   * What lives here is the three things only the pane can answer: which
+   * machine it is on, where text goes when it is typed at, and which
+   * binding a write is addressed by.
+   *
+   * The upload surface is resolved from the dispatcher this pane already
+   * holds, which is how the terminal and the Files panel end up sharing ONE
+   * transfer store: two would each mint a row for every transfer the other
+   * started.
+   */
+  private attachDrop(target: HTMLElement): void {
+    const surface = uploadSurfaceFor(this.client.dispatcher)
+    this._dropDetach = attachTerminalDrop({
+      element: target,
+      // Read at drop time and never captured: the tab's cwd moves under it,
+      // and the answer is null inside a hand-typed ssh — where this tab
+      // cannot speak for the machine in front of it, and an upload
+      // addressed by the local session would put the file on the wrong
+      // one (§0).
+      origin: () => {
+        const o = this.activeOrigin()
+        if (o === null) return null
+        return {
+          sessionId: o.sessionId,
+          kind: o.kind,
+          cwd: o.cwd,
+          cwdVerified: o.cwdVerified,
+        }
+      },
+      services: surface.services,
+      flow: surface.flow,
+      bindingFor: (sessionId) => this.uploadBinding(sessionId),
+      // The ONE existing owner of "put text where the person is typing":
+      // the draft at a prompt, the pty at a password prompt. A drop does
+      // not decide which.
+      insert: (text) => {
+        void this.insertSnippet(text)
+      },
+      report: (message, level) => showToast({ message, level }),
+    })
+  }
+
+  /** The pane's files binding, opened once and reused. Concurrent drops
+   *  share the one in-flight open rather than racing two bindings into
+   *  existence, of which one would then be leaked. */
+  private uploadBinding(sessionId: string): Promise<string | null> {
+    if (this._uploadBinding !== null) return Promise.resolve(this._uploadBinding)
+    if (this._uploadBindingInFlight !== null) return this._uploadBindingInFlight
+    const services = createFilesPanelServices(this.client.dispatcher)
+    this._uploadBindingInFlight = services
+      .open(sessionId)
+      .then((res) => {
+        // Disposed while the open was in flight: close what we asked for
+        // rather than holding a binding for a pane that is gone.
+        if (this._disposed) {
+          void services.close(res.bindingId).catch(() => {})
+          return null
+        }
+        this._uploadBinding = res.bindingId
+        return res.bindingId
+      })
+      .catch((err: unknown) => {
+        log.warn('nocx: the files binding for an upload could not be opened', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return null
+      })
+      .finally(() => {
+        this._uploadBindingInFlight = null
+      })
+    return this._uploadBindingInFlight
   }
 
   /** Mark the pane element as the native file-drop target for this session

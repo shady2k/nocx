@@ -163,7 +163,7 @@ type WSServer struct {
 	// backs api.request.send; apiBindings is where an import puts a secret
 	// VALUE (design §8.1) and additionally backs api.import.postman.
 	// api.import.curl needs none of them.
-	apiCollections apicoll.Service
+	apiCollections apicoll.Collections
 	apiSender      apisend.Sender
 	apiBindings    apibind.Store
 	// uiState owns what the app remembers without being asked (ADR-0033);
@@ -797,11 +797,16 @@ func WithUIState(store *uistate.Store) WSServerOption {
 
 // WithAPI attaches the API-testing collection service and the sender,
 // enabling api.collections.*, api.request.read/write and api.request.send.
+//
+// The whole folder surface, not the reading half: api.collections.create
+// mints a folder and api.request.send resolves the environment it is sent
+// under, so both the creator and the environment reader are reached from
+// this one domain — through one handle table and one root re-validation.
 // With no collection service those methods return -32601; with a collection
 // service but no sender, everything but api.request.send answers — a
 // collection you can read and edit but not fire, which is an honest half of
 // the feature rather than a send that quietly does nothing.
-func WithAPI(collections apicoll.Service, sender apisend.Sender) WSServerOption {
+func WithAPI(collections apicoll.Collections, sender apisend.Sender) WSServerOption {
 	return func(s *WSServer) {
 		s.apiCollections = collections
 		s.apiSender = sender

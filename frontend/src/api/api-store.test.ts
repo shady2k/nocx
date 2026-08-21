@@ -8,7 +8,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { createApiStore } from './api-store'
 import type { ApiWorkbenchServices } from './api-client'
 import type { ApiRequest } from './api-model'
-import { REQUEST, sendFixture, servicesFixture } from './api-test-fixtures'
+import {
+  CREATED_HANDLE,
+  CREATED_NAME,
+  REQUEST,
+  createdFixture,
+  sendFixture,
+  servicesFixture,
+} from './api-test-fixtures'
 
 function storeWith(over: Partial<ApiWorkbenchServices> = {}) {
   return { store: createApiStore(servicesFixture(over)) }
@@ -55,6 +62,51 @@ describe('ApiStore — the collections', () => {
     await store.openFolder('/w/nope')
     expect(store.collections()).toEqual([])
     expect(store.error()).toBe('not a directory')
+  })
+
+  it('creating a collection adopts what the create answered — no second open', async () => {
+    const open = vi.fn()
+    const create = vi.fn().mockResolvedValue(createdFixture())
+    const { store } = storeWith({ createCollection: create, openCollection: open })
+
+    await store.createCollection(CREATED_NAME)
+
+    expect(create).toHaveBeenCalledWith(CREATED_NAME)
+    // The whole point of create answering an open's shape: one thing to do
+    // afterwards rather than two.
+    expect(open).not.toHaveBeenCalled()
+    expect(store.collections().map((c) => c.handle)).toEqual([CREATED_HANDLE])
+    expect(store.collections()[0].collection.name).toBe(CREATED_NAME)
+    expect(store.collections()[0].collection.requests).toEqual([])
+  })
+
+  it('the collection just created is the one the workbench is pointed at', async () => {
+    const { store } = storeWith()
+    await store.refresh()
+    expect(store.activeCollection()).toBe('')
+    await store.createCollection(CREATED_NAME)
+    expect(store.activeCollection()).toBe(CREATED_HANDLE)
+  })
+
+  it('a refused name leaves the list alone and reports the reason the backend gave', async () => {
+    const { store } = storeWith({
+      createCollection: vi.fn().mockRejectedValue(new Error('a folder called orders-api exists')),
+    })
+    await store.refresh()
+    const before = store.collections()
+
+    await store.createCollection('orders-api')
+
+    expect(store.collections()).toEqual(before)
+    expect(store.error()).toBe('a folder called orders-api exists')
+    expect(store.activeCollection()).toBe('')
+  })
+
+  it('closing the collection that was created stops pointing at it', async () => {
+    const { store } = storeWith()
+    await store.createCollection(CREATED_NAME)
+    await store.closeFolder(CREATED_HANDLE)
+    expect(store.activeCollection()).toBe('')
   })
 
   it('closing a folder removes it and releases the handle', async () => {

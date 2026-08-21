@@ -22,6 +22,8 @@ import { apiSidebarAction, openApiWorkbench, registerApiSurface } from './index'
 import type { ApiWorkbenchServices } from './api-client'
 import type { PaneHost } from '../pane-content'
 import {
+  CREATED_HANDLE,
+  CREATED_NAME,
   CREATE_REL_PATH,
   HANDLE,
   LIST_REL_PATH,
@@ -29,7 +31,9 @@ import {
   SECRET_PLACEHOLDER,
   SECRET_VALUE,
   collectionsFixture,
+  createdFixture,
   exchangeFixture,
+  noCollections,
   sendFixture,
   servicesFixture,
 } from './api-test-fixtures'
@@ -313,6 +317,125 @@ describe('a request goes out from the workbench', () => {
     await openRequest(bar)
     fireEvent.click(row(LIST_REL_PATH))
     await vi.waitFor(() => expect(read).toHaveBeenCalledWith(HANDLE, LIST_REL_PATH))
+  })
+})
+
+// ── Making one ────────────────────────────────────────────────────────────
+
+/** The tree row for one collection, by the handle that addresses it. */
+function collectionRow(handle: string): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>(`[data-row-key="${handle}:"] .ui-tree-row`)
+  if (!el) throw new Error(`no collection row for ${handle}`)
+  return el
+}
+
+/** The New collection dialog's own element. */
+function newCollectionDialog(): HTMLDialogElement {
+  const el = workbench().querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+  if (!el) throw new Error('the New collection dialog is not in the workbench')
+  return el
+}
+
+/** Open the workbench with nothing open, ask for a new collection, and type
+ *  a name into the dialog — the whole gesture a person makes. */
+async function typeNewCollectionName(bar: HTMLElement, name: string): Promise<void> {
+  await openWorkbench(bar)
+  await vi.waitFor(() => button('New collection'))
+  fireEvent.click(button('New collection'))
+  await vi.waitFor(() => field('api-new-collection-name'))
+  fireEvent.input(field('api-new-collection-name'), { target: { value: name } })
+}
+
+describe('a person can make a collection', () => {
+  it('the action is on screen and enabled from a cold start with nothing open', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+
+    await vi.waitFor(() => expect(workbench().textContent).toContain('No collections open'))
+    // The state a person actually starts in is exactly the one where they
+    // need this, so the action may not depend on a collection being open,
+    // on a path having been typed, or on anything else being filled in.
+    expect(button('New collection').disabled).toBe(false)
+  })
+
+  it('typing a name and confirming reaches api.collections.create', async () => {
+    const create = vi.fn().mockResolvedValue(createdFixture())
+    const { bar } = await mountApp({ ...noCollections(), createCollection: create })
+    await typeNewCollectionName(bar, CREATED_NAME)
+
+    fireEvent.click(button('Create'))
+
+    await vi.waitFor(() => expect(create).toHaveBeenCalledWith(CREATED_NAME))
+  })
+
+  it('the new collection is on screen and selected, and open is never called again', async () => {
+    const open = vi.fn()
+    const { bar } = await mountApp({ ...noCollections(), openCollection: open })
+    await typeNewCollectionName(bar, CREATED_NAME)
+
+    fireEvent.click(button('Create'))
+
+    await vi.waitFor(() => expect(workbench().textContent).toContain(CREATED_NAME))
+    await vi.waitFor(() =>
+      expect(collectionRow(CREATED_HANDLE).getAttribute('data-selected')).toBe('true'),
+    )
+    // create answers the same handle-and-collection an open does, so there is
+    // nothing left to ask for.
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('the dialog goes away once the collection exists', async () => {
+    const { bar } = await mountApp(noCollections())
+    await typeNewCollectionName(bar, CREATED_NAME)
+    expect(newCollectionDialog().open).toBe(true)
+
+    fireEvent.click(button('Create'))
+
+    // A `<dialog>` stays in the document when it closes; `open` is what the
+    // user sees the difference in.
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(false))
+  })
+
+  it('a name the backend refuses shows the reason it gave, on screen', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      createCollection: vi
+        .fn()
+        .mockRejectedValue(new Error('a folder called orders-api is already there')),
+    })
+    await typeNewCollectionName(bar, CREATED_NAME)
+
+    fireEvent.click(button('Create'))
+
+    await vi.waitFor(() =>
+      expect(workbench().textContent).toContain('a folder called orders-api is already there'),
+    )
+    // And the dialog stays, with what was typed still in it: the name is
+    // what has to change, and closing the form would make the person type it
+    // again to find out.
+    expect(field('api-new-collection-name').value).toBe(CREATED_NAME)
+  })
+
+  it('asking a second time starts with an empty field, not the last name', async () => {
+    const { bar } = await mountApp(noCollections())
+    await typeNewCollectionName(bar, CREATED_NAME)
+    fireEvent.click(button('Create'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(false))
+
+    fireEvent.click(button('New collection'))
+
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+    expect(field('api-new-collection-name').value).toBe('')
+  })
+
+  it('a blank name is never sent — the dialog refuses what the backend would', async () => {
+    const create = vi.fn().mockResolvedValue(createdFixture())
+    const { bar } = await mountApp({ ...noCollections(), createCollection: create })
+    await typeNewCollectionName(bar, '   ')
+
+    expect(button('Create').disabled).toBe(true)
+    fireEvent.click(button('Create'))
+    expect(create).not.toHaveBeenCalled()
   })
 })
 

@@ -46,6 +46,18 @@ var ErrRequestNotFound = errors.New("apicoll: no such request in the collection"
 // that one bad file is a bad file rather than a collection that will not open.
 var ErrMalformedRequest = errors.New("apicoll: request file is malformed")
 
+// ErrInvalidCollectionName — the name given for a new collection is not a
+// single folder name: it is empty, it is a path, it is `.` or `..`, it
+// starts with a dot, or it is longer than a filesystem component allows.
+//
+// A sentinel because it is the CALLER's error and a surface has to be able
+// to say so: the remedy is to name something else, which is a different
+// sentence from "that folder is already a collection" and from anything the
+// filesystem might have refused. Refused, never sanitised — a name quietly
+// stripped of its slashes creates a folder the user did not ask for under a
+// name they did not choose.
+var ErrInvalidCollectionName = errors.New("apicoll: that is not a collection name")
+
 // ErrCollectionExists — NewDefaultCollection was asked for a name that
 // already has a folder. Creating it again would write a fresh manifest over
 // somebody's collection, which is data loss wearing the word "create".

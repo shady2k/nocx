@@ -22,10 +22,12 @@
 //    that vanishes on failure teaches that nothing happened.
 //
 // 3. ONE LIST OF COLLECTIONS, WHICHEVER DOOR THE FOLDER CAME THROUGH.
-//    `api.collections.open` answers a handle plus a collection;
-//    `api.collections.list` answers rows. `adoptOpenedCollection` puts the
-//    first into the second's shape (api-model.ts), so nothing downstream has
-//    to ask which call produced the row it is looking at.
+//    `api.collections.open` answers a handle plus a collection, and so does
+//    `api.collections.create`; `api.collections.list` answers rows. The
+//    adopters in api-model.ts put the first two into the third's shape, so
+//    nothing downstream has to ask which call produced the row it is looking
+//    at — a collection a person has just made and one they opened an hour ago
+//    are the same row, and only the row knows the difference.
 //
 // The pretty/raw choice belongs to ONE run. A single flag for the list would
 // mean opening the raw text of the run you are reading also opens it for the
@@ -34,6 +36,7 @@
 import { createSignal } from 'solid-js'
 import type { ApiWorkbenchServices } from './api-client'
 import {
+  adoptCreatedCollection,
   adoptImportedRequest,
   adoptOpenedCollection,
   type ApiImportNote,
@@ -77,6 +80,15 @@ interface ApiSelection {
 
 export interface ApiStore {
   collections(): readonly ApiOpenCollection[]
+  /** The handle of the collection the workbench is pointed at — the one just
+   *  made, the one just opened, or the one holding the request in the form.
+   *  '' when there is none.
+   *
+   *  Deliberately not `selected()`, which answers a different question: that
+   *  one is WHICH FILE THE FORM IS SHOWING, and a folder is not a file. One
+   *  signal answering both would have to be read as "a request, unless it is
+   *  a collection", and Send is gated on it. */
+  activeCollection(): string
   selected(): ApiSelection | null
   draft(): ApiRequest | null
   /** True while the draft differs from what the file last answered. */
@@ -93,6 +105,10 @@ export interface ApiStore {
 
   refresh(): Promise<void>
   openFolder(path: string): Promise<void>
+  /** Make a collection under `name` and leave it open, selected and in the
+   *  list — one call, because `api.collections.create` answers the same
+   *  handle-and-collection an open does. */
+  createCollection(name: string): Promise<void>
   closeFolder(handle: string): Promise<void>
   openRequest(handle: string, relPath: string): Promise<void>
   editDraft(next: ApiRequest): void
@@ -108,6 +124,7 @@ function message(err: unknown): string {
 
 export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const [collections, setCollections] = createSignal<readonly ApiOpenCollection[]>([])
+  const [activeCollection, setActiveCollection] = createSignal('')
   const [selected, setSelected] = createSignal<ApiSelection | null>(null)
   const [draft, setDraft] = createSignal<ApiRequest | null>(null)
   const [saved, setSaved] = createSignal<ApiRequest | null>(null)
@@ -158,8 +175,46 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // the user already has open must not put a second copy of it in the
       // tree with a stale listing beside a fresh one.
       setCollections((prev) => [...prev.filter((c) => c.handle !== row.handle), row])
+      setActiveCollection(row.handle)
       setError('')
     } catch (err) {
+      setError(message(err))
+    }
+  }
+
+  /**
+   * Make one, and adopt what came back.
+   *
+   * ONE CALL, AND THAT IS THE WHOLE POINT OF THE CONTRACT'S SHAPE.
+   * `api.collections.create` answers the same `{handle, collection}` an open
+   * does — the schema says it is "api.collections.open's on purpose … so the
+   * renderer has one thing to do afterwards rather than two, and there is no
+   * moment at which a freshly made collection is not addressable". So this
+   * neither re-opens the folder nor re-lists: it puts the result straight
+   * into the one list, which is what makes the new collection visible and
+   * pointed at before any further round trip.
+   *
+   * There is NO PATH on the row, because the result carries none: §13.1
+   * leaves the location to the backend, so the renderer cannot spell where
+   * the folder went and does not pretend to. The next listing fills it in.
+   */
+  const createCollection = async (name: string): Promise<void> => {
+    try {
+      const result = await services.createCollection(name)
+      const row: ApiOpenCollection = {
+        handle: result.handle,
+        path: '',
+        error: '',
+        collection: adoptCreatedCollection(result.collection),
+      }
+      setCollections((prev) => [...prev.filter((c) => c.handle !== row.handle), row])
+      setActiveCollection(row.handle)
+      setError('')
+    } catch (err) {
+      // A refused name — blank, a path separator in it, `.`, `..`, a folder
+      // already there — is the backend's sentence, and it goes where every
+      // other failure goes so the surface can render it. Swallowing it here
+      // is what makes a refusal look like a button that does nothing.
       setError(message(err))
     }
   }
@@ -168,6 +223,8 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     try {
       await services.closeCollection(handle)
       setCollections((prev) => prev.filter((c) => c.handle !== handle))
+      // Nothing is pointed at a folder that has left.
+      if (activeCollection() === handle) setActiveCollection('')
       // The form was showing a request in the folder that just left. Keeping
       // it would leave a Send pointed at a handle that no longer resolves.
       if (selected()?.handle === handle) {
@@ -185,6 +242,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     try {
       const result = await services.readRequest(handle, relPath)
       setSelected({ handle, relPath })
+      setActiveCollection(handle)
       setDraft(result.request)
       setSaved(result.request)
       setError('')
@@ -286,6 +344,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
 
   return {
     collections,
+    activeCollection,
     selected,
     draft,
     dirty,
@@ -296,6 +355,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     sending,
     refresh,
     openFolder,
+    createCollection,
     closeFolder,
     openRequest,
     editDraft,

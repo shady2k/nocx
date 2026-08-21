@@ -20,6 +20,15 @@ type stubBindWriter struct{}
 
 func (stubBindWriter) Bind(context.Context, apibind.Key, []byte) error { return nil }
 
+// apiPaths is a storage.Paths whose three roles land under one test root, so
+// a created collection goes there rather than into the developer's own app
+// directory.
+type apiPaths struct{ root string }
+
+func (p apiPaths) ConfigDir() string { return filepath.Join(p.root, "config") }
+func (p apiPaths) DataDir() string   { return filepath.Join(p.root, "data") }
+func (p apiPaths) CacheDir() string  { return filepath.Join(p.root, "cache") }
+
 // newAPIOperation builds a collection operation over a real folder service
 // with generous gates — this file is about the operation's contract, not
 // about saturation.
@@ -28,7 +37,7 @@ func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 	return capability.NewAPICollectionOperation(
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
-		apicoll.NewService(),
+		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
 	)
 }
 
@@ -82,8 +91,11 @@ func TestAPICollectionService_IsUselessOutsideItsOperation(t *testing.T) {
 	if err := escaped.WriteRequest(handle, "ping.json", apicoll.Request{}); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("WriteRequest outside the operation = %v, want ErrOperationInactive", err)
 	}
-	if _, err := escaped.Snapshot(handle, "ping.json"); !errors.Is(err, capability.ErrOperationInactive) {
+	if _, err := escaped.Snapshot(handle, "ping.json", ""); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("Snapshot outside the operation = %v, want ErrOperationInactive", err)
+	}
+	if _, err := escaped.Create("later"); !errors.Is(err, capability.ErrOperationInactive) {
+		t.Errorf("Create outside the operation = %v, want ErrOperationInactive", err)
 	}
 }
 
@@ -128,7 +140,7 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 		if err := svc.WriteRequest(h, "ping.json", apicoll.Request{}); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("WriteRequest after Close = %v, want ErrUnknownHandle", err)
 		}
-		if _, err := svc.Snapshot(h, "ping.json"); !errors.Is(err, apicoll.ErrUnknownHandle) {
+		if _, err := svc.Snapshot(h, "ping.json", ""); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("Snapshot after Close = %v, want ErrUnknownHandle", err)
 		}
 		if err := svc.Close(h); !errors.Is(err, apicoll.ErrUnknownHandle) {
@@ -278,5 +290,240 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+// ─── creating one ──────────────────────────────────────────────────────────
+
+// "Just make one" (§6.1) as the user does it: they name a collection and it
+// is OPEN afterwards — in the list, addressable by the handle they were
+// given, with somewhere to put a request. Before this the app could open a
+// collection folder and never make one, so the first thing a new user could
+// do with the pane was nothing.
+func TestAPICollectionService_CreateLeavesTheCollectionOpen(t *testing.T) {
+	op := newAPIOperation(t)
+
+	var made apicoll.Created
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		var err error
+		made, err = svc.Create("acme")
+		return err
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if made.Handle == "" || made.Root == "" {
+		t.Fatalf("Create returned %+v, want a handle and a root", made)
+	}
+	if made.Collection.Name != "acme" {
+		t.Errorf("name = %q, want acme", made.Collection.Name)
+	}
+
+	// It is in the opened-folder list, under the path it was created at —
+	// which is what the renderer lists and what keys the cookie jar.
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		open, err := svc.ListOpen()
+		if err != nil {
+			return err
+		}
+		if len(open) != 1 {
+			t.Fatalf("opened folders = %+v, want the one just created", open)
+		}
+		if open[0].Handle != made.Handle || open[0].Path != made.Root {
+			t.Errorf("listed %+v, want handle %q at %q", open[0], made.Handle, made.Root)
+		}
+		if open[0].Err != nil {
+			t.Errorf("the created folder reports %v; it must be readable", open[0].Err)
+		}
+		// And the handle works for the next thing a user does.
+		return svc.WriteRequest(made.Handle, "ping.json",
+			apicoll.Request{ID: "r1", Name: "ping", Method: "GET", URL: "https://example.test/"})
+	}); err != nil {
+		t.Fatalf("after Create: %v", err)
+	}
+}
+
+// A second collection under a name already taken is REFUSED, and the
+// opened-folder list does not grow: a create that half-happened would leave
+// a row naming a folder nobody made.
+func TestAPICollectionService_CreateRefusesAnExistingNameAndListsNothingExtra(t *testing.T) {
+	op := newAPIOperation(t)
+
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		if _, err := svc.Create("acme"); err != nil {
+			return err
+		}
+		if _, err := svc.Create("acme"); !errors.Is(err, apicoll.ErrCollectionExists) {
+			t.Fatalf("second Create: err = %v, want ErrCollectionExists", err)
+		}
+		open, err := svc.ListOpen()
+		if err != nil {
+			return err
+		}
+		if len(open) != 1 {
+			t.Errorf("opened folders = %+v, want exactly the one that was created", open)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// ─── the environment reaches the send ──────────────────────────────────────
+
+// apiFolderWithEnvironments writes a collection whose request is written in
+// variables and whose two environments answer WHERE and HOW TO GET THERE in
+// one record (§6.5).
+func apiFolderWithEnvironments(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatalf("mkdir for %s: %v", rel, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write(apicoll.ManifestName, `{"schemaVersion":1,"name":"acme"}`)
+	write("users.json", `{"id":"r1","name":"users","method":"GET","url":"{{baseUrl}}/users",`+
+		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("environments/dev.json",
+		`{"name":"dev","values":{"baseUrl":"http://localhost:3000"},"route":{"kind":"direct"}}`)
+	write("environments/prod.json",
+		`{"name":"prod","values":{"baseUrl":"https://api.internal"},"route":{"kind":"connection","profileId":"ssh:bastion:1"}}`)
+	write("environments/broken.json",
+		`{"name":"broken","values":{},"route":{"kind":"direct"}}`)
+	return root
+}
+
+// Switching environment moves the ADDRESS and the ROUTE together, in one
+// motion (§6.5's second consequence). One request, two environments, and
+// both facts change at once — which is the property that cannot hold if the
+// route lives anywhere but on the environment.
+func TestAPICollectionService_SnapshotMovesTheAddressAndTheRouteTogether(t *testing.T) {
+	op := newAPIOperation(t)
+	root := apiFolderWithEnvironments(t)
+
+	for name, tc := range map[string]struct {
+		env      string
+		wantURL  string
+		wantKind string
+		wantID   string
+	}{
+		"dev is direct":       {"environments/dev.json", "http://localhost:3000/users", apicoll.RouteDirect, ""},
+		"prod is the bastion": {"environments/prod.json", "https://api.internal/users", apicoll.RouteConnection, "ssh:bastion:1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+				h, _, err := svc.Open(root)
+				if err != nil {
+					return err
+				}
+				in, err := svc.Snapshot(h, "users.json", tc.env)
+				if err != nil {
+					return err
+				}
+				if in.Request.URL != tc.wantURL {
+					t.Errorf("URL = %q, want %q — the address did not move with the environment", in.Request.URL, tc.wantURL)
+				}
+				if in.Route.Kind != tc.wantKind || in.Route.ProfileID != tc.wantID {
+					t.Errorf("route = %+v, want kind %q profile %q — the route did not move with the environment",
+						in.Route, tc.wantKind, tc.wantID)
+				}
+				if in.CookieScope != root {
+					t.Errorf("cookie scope = %q, want the collection %q", in.CookieScope, root)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+		})
+	}
+}
+
+// No environment named is the direct route and the request exactly as the
+// file has it: the pane can send before anybody has configured anything.
+func TestAPICollectionService_SnapshotWithNoEnvironmentIsTheDirectRoute(t *testing.T) {
+	op := newAPIOperation(t)
+	root := apiFolder(t)
+
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		h, _, err := svc.Open(root)
+		if err != nil {
+			return err
+		}
+		in, err := svc.Snapshot(h, "ping.json", "")
+		if err != nil {
+			return err
+		}
+		if in.Request.URL != "https://example.test" {
+			t.Errorf("URL = %q, want the file's own", in.Request.URL)
+		}
+		if in.Route.Kind != apicoll.RouteDirect || in.Route.ProfileID != "" {
+			t.Errorf("route = %+v, want the direct route", in.Route)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// An unresolved variable BLOCKS the send and names itself (§6.5). Not the
+// literal braces on the wire, not an empty string quietly substituted — the
+// snapshot never happens, so there is nothing plausible to send.
+func TestAPICollectionService_SnapshotBlocksOnAnUnresolvedVariable(t *testing.T) {
+	op := newAPIOperation(t)
+	root := apiFolderWithEnvironments(t)
+
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		h, _, err := svc.Open(root)
+		if err != nil {
+			return err
+		}
+		in, snapErr := svc.Snapshot(h, "users.json", "environments/broken.json")
+		if !errors.Is(snapErr, apicoll.ErrUnresolvedVariable) {
+			t.Fatalf("Snapshot = (%+v, %v), want ErrUnresolvedVariable", in, snapErr)
+		}
+		var unresolved *apicoll.UnresolvedError
+		if !errors.As(snapErr, &unresolved) || len(unresolved.Uses) == 0 {
+			t.Fatalf("err = %v, want it to name every unresolved variable", snapErr)
+		}
+		if unresolved.Uses[0].Name != "baseUrl" {
+			t.Errorf("named %q, want baseUrl", unresolved.Uses[0].Name)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// The environment is addressed by handle plus a path inside the collection,
+// like everything else (§13.1): a path that leaves the folder is refused by
+// apicoll and the send never happens.
+func TestAPICollectionService_SnapshotRefusesAnEnvironmentPathOutsideTheCollection(t *testing.T) {
+	op := newAPIOperation(t)
+	root := apiFolderWithEnvironments(t)
+
+	for name, rel := range map[string]string{
+		"escaping the folder": "../secrets.json",
+		"not an environment":  "users.json",
+		"not there at all":    "environments/nope.json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+				h, _, err := svc.Open(root)
+				if err != nil {
+					return err
+				}
+				if in, snapErr := svc.Snapshot(h, "users.json", rel); snapErr == nil {
+					t.Fatalf("Snapshot with envRelPath %q succeeded: %+v", rel, in)
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+		})
 	}
 }

@@ -42,7 +42,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,19 +96,13 @@ func (p *leasePool) routes(dialTimeout time.Duration) Routes {
 	}
 }
 
-// countingServer records what actually arrived. "The server was never
-// reached" is the assertion every refusal below is really making, and it can
-// only be made by something on the other end that counts.
-func countingServer(t *testing.T, body string) (*httptest.Server, *atomic.Int64) {
-	t.Helper()
-	var hits atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		_, _ = io.WriteString(w, body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &hits
-}
+// The counting server this file needs lives in routes_test.go as
+// newCountingServer. It arrived there in the same round as this file, from
+// another worker, and two helpers for one concept in one package is the
+// defect AGENTS.md names rather than a collision to rename away — so this
+// file uses that one. "The server was never reached" is the assertion every
+// refusal below is really making, and it can only be made by something on
+// the other end that counts.
 
 // onceClose closes c the first time the returned function is called, so a
 // test can release a blocked dial mid-way and still defer the release for
@@ -139,17 +132,17 @@ func noRun(t *testing.T, got Response, what string) {
 // machine's own interface, around the bastion the user chose, and it would
 // look like a success.
 func TestSend_APoolThatRefusesALeaseSendsNothingAtAll(t *testing.T) {
-	srv, hits := countingServer(t, "reached directly")
+	cs := newCountingServer(t, "reached directly")
 	pool := newLeasePool()
 	pool.refuse = errors.New("no connection in the pool for this environment")
 
 	got, err := New(WithRoutes(pool.routes(time.Minute))).
-		Send(context.Background(), apicollGet(srv.URL), Key{RouteID: "prod"})
+		Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
 	if !errors.Is(err, pool.refuse) {
 		t.Fatalf("Send: err = %v, want the pool's refusal", err)
 	}
 	noRun(t, got, "a refused lease")
-	if n := hits.Load(); n != 0 {
+	if n := cs.hits.Load(); n != 0 {
 		t.Fatalf("the server was reached %d times without a lease — the request went around the bastion", n)
 	}
 	if n := pool.connectionCount(); n != 0 {
@@ -162,24 +155,24 @@ func TestSend_APoolThatRefusesALeaseSendsNothingAtAll(t *testing.T) {
 // and nothing else. The lease's own dial count is what says the bytes went
 // through the tunnel rather than beside it.
 func TestSend_APoolThatGrantsALeaseSendsThroughIt(t *testing.T) {
-	srv, hits := countingServer(t, "through the tunnel")
+	cs := newCountingServer(t, "through the tunnel")
 	pool := newLeasePool()
 	pool.refuse = errors.New("no connection in the pool for this environment")
 	c := New(WithRoutes(pool.routes(time.Minute)))
 
-	if _, err := c.Send(context.Background(), apicollGet(srv.URL), Key{RouteID: "prod"}); err == nil {
+	if _, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"}); err == nil {
 		t.Fatal("Send succeeded while the pool was refusing; the pair below would prove nothing")
 	}
 
 	pool.refuse = nil
-	got, err := c.Send(context.Background(), apicollGet(srv.URL), Key{RouteID: "prod"})
+	got, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
 	if err != nil {
 		t.Fatalf("Send with a granted lease: %v", err)
 	}
 	if got.Status != http.StatusOK || got.Text != "through the tunnel" {
 		t.Fatalf("status %d body %q, want 200 and the body", got.Status, got.Text)
 	}
-	if n := hits.Load(); n != 1 {
+	if n := cs.hits.Load(); n != 1 {
 		t.Errorf("the server was reached %d times, want exactly 1", n)
 	}
 	if l := pool.lastLease(); l == nil || l.dialCount() != 1 {
@@ -202,19 +195,19 @@ func TestSend_APoolThatGrantsALeaseSendsThroughIt(t *testing.T) {
 // the only outcome available however slow or fast the machine is; a longer
 // value would only make the test slower, never more correct.
 func TestSend_ABoundedDialDeadlineEndsTheRun(t *testing.T) {
-	srv, hits := countingServer(t, "unreachable")
+	cs := newCountingServer(t, "unreachable")
 	pool := newLeasePool()
 	pool.block = make(chan struct{})
 	unblock := onceClose(pool.block)
 	defer unblock()
 	c := New(WithRoutes(pool.routes(time.Millisecond)))
 
-	got, err := c.Send(context.Background(), apicollGet(srv.URL), Key{RouteID: "prod"})
+	got, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
 	if !errors.Is(err, ErrSSHDialTimeout) {
 		t.Fatalf("Send: err = %v, want ErrSSHDialTimeout", err)
 	}
 	noRun(t, got, "a dial that timed out")
-	if n := hits.Load(); n != 0 {
+	if n := cs.hits.Load(); n != 0 {
 		t.Errorf("the server was reached %d times by a run whose dial timed out", n)
 	}
 
@@ -228,7 +221,7 @@ func TestSend_ABoundedDialDeadlineEndsTheRun(t *testing.T) {
 		conn := pool.lastLease().conn()
 		return conn != nil && conn.closed.Load()
 	})
-	if n := hits.Load(); n != 0 {
+	if n := cs.hits.Load(); n != 0 {
 		t.Errorf("the server was reached %d times by the late connection of a timed-out dial", n)
 	}
 }
@@ -236,18 +229,18 @@ func TestSend_ABoundedDialDeadlineEndsTheRun(t *testing.T) {
 // TestSend_ADialThatAnswersWithinTheDeadlineProducesARun is the pair: the
 // same bound, the same route, a far side that answers.
 func TestSend_ADialThatAnswersWithinTheDeadlineProducesARun(t *testing.T) {
-	srv, hits := countingServer(t, "answered")
+	cs := newCountingServer(t, "answered")
 	pool := newLeasePool()
 
 	got, err := New(WithRoutes(pool.routes(time.Minute))).
-		Send(context.Background(), apicollGet(srv.URL), Key{RouteID: "prod"})
+		Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if got.Status != http.StatusOK || got.Text != "answered" {
 		t.Fatalf("status %d body %q, want 200 answered", got.Status, got.Text)
 	}
-	if n := hits.Load(); n != 1 {
+	if n := cs.hits.Load(); n != 1 {
 		t.Errorf("the server was reached %d times, want 1", n)
 	}
 }
@@ -275,7 +268,7 @@ func TestSend_ADialThatAnswersWithinTheDeadlineProducesARun(t *testing.T) {
 // instead: the cancelled send produces NO RUN, and nothing of the request
 // ever reaches the far side — before the late connection arrives or after.
 func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T) {
-	srv, hits := countingServer(t, "must never be served")
+	cs := newCountingServer(t, "must never be served")
 	pool := newLeasePool()
 	pool.block = make(chan struct{})
 	c := New(WithRoutes(pool.routes(time.Minute)))
@@ -287,7 +280,7 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 	}
 	done := make(chan result, 1)
 	go func() {
-		r, sendErr := c.Send(ctx, apicollGet(srv.URL), Key{RouteID: "prod"})
+		r, sendErr := c.Send(ctx, apicollGet(cs.URL), Key{RouteID: "prod"})
 		done <- result{resp: r, err: sendErr}
 	}()
 
@@ -304,7 +297,7 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 		t.Fatalf("Send: err = %v, want context.Canceled", got.err)
 	}
 	noRun(t, got.resp, "a cancelled send")
-	if n := hits.Load(); n != 0 {
+	if n := cs.hits.Load(); n != 0 {
 		t.Fatalf("the server was reached %d times by a cancelled run", n)
 	}
 
@@ -317,7 +310,7 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 	if n := pool.lastLease().dialCount(); n != 1 {
 		t.Errorf("the lease was dialled %d times for one cancelled run, want 1", n)
 	}
-	if n := hits.Load(); n != 0 {
+	if n := cs.hits.Load(); n != 0 {
 		t.Fatalf("the server was reached %d times through the connection that arrived after cancellation", n)
 	}
 }
@@ -327,16 +320,16 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 // run is using. Without this, "closed on cancellation" would be satisfied by
 // an adapter that closed every connection it ever opened.
 func TestSend_ARunThatIsNotCancelledKeepsItsConnection(t *testing.T) {
-	srv, hits := countingServer(t, "served")
+	cs := newCountingServer(t, "served")
 	pool := newLeasePool()
 
 	got, err := New(WithRoutes(pool.routes(time.Minute))).
-		Send(context.Background(), apicollGet(srv.URL), Key{RouteID: "prod"})
+		Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if got.Text != "served" || hits.Load() != 1 {
-		t.Fatalf("body %q, %d hits; want the served body and one hit", got.Text, hits.Load())
+	if got.Text != "served" || cs.hits.Load() != 1 {
+		t.Fatalf("body %q, %d hits; want the served body and one hit", got.Text, cs.hits.Load())
 	}
 	if conn := pool.lastLease().conn(); conn == nil {
 		t.Fatal("no connection was recorded for a send that completed")

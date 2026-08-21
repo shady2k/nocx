@@ -2,15 +2,16 @@
 // contract types and never re-declared beside them.
 //
 // Two schemas describe the request: `api.request.read` (what the file holds)
-// and `api.import.curl` (what a pasted line converted to). Two more describe
-// a collection: `api.collections.list` and `api.collections.open`. Design
-// §6.4 says the file is the truth and every surface is a projection of it —
-// "there is nothing between them to diverge" — and §10 says the two import
-// entrances share one converter. Both claims are about SHAPE, and this
-// module is where the renderer states them once, in the type system:
-// `adoptImportedRequest` and `adoptOpenedCollection` assign one door's type
-// to the other's, so a schema that drifts stops the build here rather than
-// at the first field somebody happens to read off the wrong result.
+// and `api.import.curl` (what a pasted line converted to). Three describe a
+// collection: `api.collections.list`, `api.collections.open` and
+// `api.collections.create`. Design §6.4 says the file is the truth and every
+// surface is a projection of it — "there is nothing between them to diverge"
+// — and §10 says the two import entrances share one converter. Both claims
+// are about SHAPE, and this module is where the renderer states them once, in
+// the type system: `adoptImportedRequest`, `adoptOpenedCollection` and
+// `adoptCreatedCollection` assign one door's type to the other's, so a schema
+// that drifts stops the build here rather than at the first field somebody
+// happens to read off the wrong result.
 //
 // Nothing here is hand-written structure. Every type below is an alias of a
 // generated one; the aliases exist so the rest of the surface names the
@@ -42,6 +43,11 @@ import type {
   RequestRef as OpenedRequestRef,
   MalformedRef as OpenedMalformedRef,
 } from '../generated/api.collections.open'
+import type {
+  Collection as CreatedCollection,
+  RequestRef as CreatedRequestRef,
+  MalformedRef as CreatedMalformedRef,
+} from '../generated/api.collections.create'
 import type {
   Response as SendResponse,
   Header as SendHeader,
@@ -130,6 +136,27 @@ export function adoptOpenedCollection(opened: OpenedCollection): ApiCollection {
   const requests: ApiRequestRef[] = opened.requests satisfies OpenedRequestRef[]
   const malformed: ApiMalformedRef[] = opened.malformed satisfies OpenedMalformedRef[]
   return { name: opened.name, requests, malformed }
+}
+
+/**
+ * Adopt the collection `api.collections.create` answered with — the same
+ * shape again, and the same assertion.
+ *
+ * The create schema says the shape is the open's ON PURPOSE, "so the renderer
+ * has one thing to do afterwards rather than two, and there is no moment at
+ * which a freshly made collection is not addressable". A door is what this
+ * module makes of that: the claim is checked by the compiler here, so a create
+ * result that drifted from an open's would stop the build rather than reach
+ * the tree as a row with a field nobody filled in.
+ *
+ * It is a separate function rather than a cast to the open door's parameter
+ * because the two schemas are two documents. They agree today; the day one of
+ * them grows a field, this is the line that says which.
+ */
+export function adoptCreatedCollection(created: CreatedCollection): ApiCollection {
+  const requests: ApiRequestRef[] = created.requests satisfies CreatedRequestRef[]
+  const malformed: ApiMalformedRef[] = created.malformed satisfies CreatedMalformedRef[]
+  return { name: created.name, requests, malformed }
 }
 
 // ── Reading a response, in the product's words ────────────────────────────

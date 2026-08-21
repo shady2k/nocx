@@ -9,6 +9,7 @@ import { vi } from 'vitest'
 import type { ApiWorkbenchServices } from './api-client'
 import type { ApiExchange, ApiOpenCollection, ApiRequest, ApiResponse } from './api-model'
 import type { ApiRequestSendResult, Raw, Span } from '../generated/api.request.send'
+import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
 
 /**
  * The value of the secret the worked example binds. It is here so the tests
@@ -23,6 +24,11 @@ export const SECRET_VALUE = 'sk-live-9f2c4e7a11b3d8'
 export const SECRET_PLACEHOLDER = '\u2039API_TOKEN\u203a'
 
 export const HANDLE = 'h1'
+/** The handle `api.collections.create` mints. Deliberately not HANDLE: a
+ *  create that answered the handle a folder already open holds would let a
+ *  test pass while the renderer overwrote the wrong row. */
+export const CREATED_HANDLE = 'h9'
+export const CREATED_NAME = 'orders-api'
 const COLLECTION_PATH = '/w/acme-api'
 export const CREATE_REL_PATH = 'users/create.json'
 export const LIST_REL_PATH = 'users/list.json'
@@ -131,6 +137,22 @@ export function sendFixture(over: Partial<ApiResponse> = {}): ApiRequestSendResu
   return { response: responseFixture(over) }
 }
 
+/**
+ * What `api.collections.create` answers: the same handle-and-collection an
+ * open does, and nothing in it. A folder that has just been made has no
+ * requests and no malformed files — the schema says so in as many words —
+ * and there is no path, because the backend decided where it lives (§13.1).
+ */
+export function createdFixture(name = CREATED_NAME): ApiCollectionsCreateResult {
+  return { handle: CREATED_HANDLE, collection: { name, requests: [], malformed: [] } }
+}
+
+/** A backend that has no collections open — the state a person starts in,
+ *  and exactly when they need to be able to make one. */
+export function noCollections(): Partial<ApiWorkbenchServices> {
+  return { listCollections: vi.fn().mockResolvedValue({ collections: [] }) }
+}
+
 /** Every backend call the workbench makes, as spies that succeed. A test
  *  that is about a failure overrides exactly the one call it is about. */
 export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWorkbenchServices {
@@ -140,6 +162,7 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
     openCollection: vi
       .fn()
       .mockResolvedValue({ handle: opened.handle, collection: opened.collection }),
+    createCollection: vi.fn().mockResolvedValue(createdFixture()),
     closeCollection: vi.fn().mockResolvedValue({}),
     readRequest: vi.fn().mockResolvedValue({ request: REQUEST }),
     writeRequest: vi.fn().mockResolvedValue({}),

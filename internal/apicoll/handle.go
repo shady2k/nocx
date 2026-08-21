@@ -46,6 +46,11 @@ type service struct {
 	mu      sync.Mutex
 	handles map[HandleID]*handle
 
+	// paths decides where a NEW collection goes (create.go). It is nil for
+	// a service built by NewService, which reads folders the user chose and
+	// mints none; Create then refuses by name rather than dereferencing it.
+	paths storage.Paths
+
 	// newID and docStoreFor are the two calls this package makes that
 	// cannot be made to fail by arranging a temp directory. They are fields
 	// so each has a test where it fails, paired with one where it succeeds.
@@ -53,12 +58,13 @@ type service struct {
 	docStoreFor func(dir string) storage.DocumentStore
 }
 
-// NewService returns the collection service. It holds no state that outlives
-// the process: the app remembers the LIST of opened folders, never their
-// contents (§6.1), so handles are minted fresh each run and every read goes
-// to disk.
-func NewService() Service { return newService() }
-
+// newService builds the one implementation. NewCollections (environment.go)
+// is the only constructor this package exports: there is one folder service,
+// it holds no state that outlives the process — the app remembers the LIST
+// of opened folders, never their contents (§6.1), so handles are minted
+// fresh each run and every read goes to disk — and Service remains a
+// separate interface because §13.1's property, "Open is the only entry point
+// that accepts a root", is asserted against its method set.
 func newService() *service {
 	return &service{
 		handles:     make(map[HandleID]*handle),

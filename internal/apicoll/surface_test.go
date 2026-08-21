@@ -49,7 +49,7 @@ func TestService_OpenIsTheOnlyEntryPointThatTakesARoot(t *testing.T) {
 // The concrete service satisfies the interface the other two tasks are
 // written against. Without this the package can compile while nothing in it
 // is the Service anybody imported.
-func TestNewService_SatisfiesService(t *testing.T) {
-	var _ Service = NewService()
+func TestTheFolderService_SatisfiesService(t *testing.T) {
+	var _ Service = NewCollections(nil)
 	var _ Service = newService()
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -567,9 +568,20 @@ func New(opts ...Option) (*App, error) {
 	//
 	// The collection service holds no state that outlives the process: the
 	// app remembers the LIST of opened folders, never their contents, so
-	// handles are minted fresh each run and every read goes to disk. The
-	// sender sends from this machine on the direct route; the SSH-routed
-	// route arrives with the environment wave (design §6.5, §7.1).
+	// handles are minted fresh each run and every read goes to disk. It is
+	// given the app paths because a collection created with no place named
+	// goes to a default folder under the app directory (§6.1) — the location
+	// is derived inside apicoll, so no caller names a path in order to get
+	// one, and the build tag decides which app directory that is.
+	//
+	// The sender is given the ROUTE TABLE, which is what makes an
+	// environment's "how to get there" reach the dialer (§6.5, §7.1): a
+	// direct environment sends from this machine, and one naming a
+	// connection sends through a lease on that profile's pooled SSH
+	// connection. A connection that cannot be leased FAILS the send — it is
+	// never quietly downgraded to a local dial, which would put a production
+	// request on this machine's own interface, around the bastion the
+	// environment named.
 	//
 	// NOT wired: transport.WithAPIBindings. The binding document is the one
 	// thing in this feature that holds an identifier for stored credential
@@ -577,8 +589,12 @@ func New(opts ...Option) (*App, error) {
 	// of the implementation, and there is no implementation yet — so
 	// api.import.postman answers -32601 rather than being handed somewhere
 	// to put a token that is not the vault.
-	apiCollections := apicoll.NewService()
-	apiSender := apisend.New(apisend.WithLogger(logger))
+	apiCollections := apicoll.NewCollections(paths)
+	apiRoutes := &apiRouteLeaser{client: sshClient}
+	apiSender := apisend.New(
+		apisend.WithLogger(logger),
+		apisend.WithRoutes(apisend.NewRoutes(apiRoutes)),
+	)
 
 	// The UI-state document (ADR-0033): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
@@ -1159,6 +1175,14 @@ func New(opts ...Option) (*App, error) {
 		connection.WithRemoteInstaller(shint),
 	)
 	tp.SetProfileResolver(resolver)
+	// The same resolver the transport uses, handed to the API route table.
+	// It is set here rather than at construction for the reason the
+	// transport's own holder gives: the resolver needs the transport (the
+	// connection-password ask) and the transport needs the sender, so one of
+	// the three has to be wired after the other two exist. There is one
+	// resolver, not two — the API route asks the same question a tab asks
+	// and gets the same answer, credentials and jump route included.
+	apiRoutes.setResolver(resolver)
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,
@@ -1922,4 +1946,72 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 		Capability: cfg.Capability,
 		Recovery:   cfg.Recovery,
 	}, adapter, nil
+}
+
+// apiRouteLeaser turns the PROFILE an API-testing environment names into a
+// lease on that profile's pooled SSH connection (design §6.5, §7.1). It is
+// apisend.ConnectionLeaser, and it exists here rather than in that package
+// because resolving a profile is the composition root's job: the sender
+// knows about routes, not about credentials, jump routes or the profile
+// store.
+//
+// Two things it deliberately does NOT do.
+//
+// It does not resolve the profile itself. connection.Resolver is the one
+// owner of "what does this profile id mean", the same one a tab and a port
+// forward go through — so a request routed through a connection is
+// authorized by exactly the credential authorization a tab is, and reaches
+// the same host through the same jump route.
+//
+// It does not take a connection of its own. ssh.RealClient.TunnelConn goes
+// through acquirePooled, which SHARES when the resolved pool key matches and
+// establishes one otherwise (AD-7, AD-4). So a send rides the connection a
+// tab already has when the key matches, and authenticates anew when it does
+// not — a route names a destination, not a window, and the design says so in
+// as many words rather than promising a particular live session.
+//
+// The lease is not released here. apisend's route holds it for as long as
+// the connection lives and takes a fresh one when it dies; releasing it
+// after one send would drop a pool reference other tabs and forwards are
+// counting on, and would cost every send a new authentication.
+type apiRouteLeaser struct {
+	client *ssh.RealClient
+
+	// mu guards the resolver, which is set after construction. The
+	// transport's own resolverHolder has the same shape for the same
+	// reason: the value is read per call, never captured, so a lease taken
+	// before SetProfileResolver refuses by name instead of dereferencing
+	// nil.
+	mu       sync.RWMutex
+	resolver transport.ProfileResolver
+}
+
+func (l *apiRouteLeaser) setResolver(r transport.ProfileResolver) {
+	l.mu.Lock()
+	l.resolver = r
+	l.mu.Unlock()
+}
+
+// LeaseForProfile implements apisend.ConnectionLeaser.
+func (l *apiRouteLeaser) LeaseForProfile(ctx context.Context, profileID string) (ssh.TunnelConn, error) {
+	l.mu.RLock()
+	resolver := l.resolver
+	l.mu.RUnlock()
+	if resolver == nil {
+		return nil, fmt.Errorf("no profile resolver is wired, so connection %s cannot be resolved", profileID)
+	}
+	host, cfg, err := resolver.Resolve(profileID)
+	if err != nil {
+		// Resolving reads the stored secret, so a sealed vault surfaces
+		// here — and the sender wraps this into its own named refusal, so
+		// the reason reaches a surface that can offer the unlock prompt.
+		return nil, fmt.Errorf("resolve connection %s: %w", profileID, err)
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("connection %s resolved to no configuration", profileID)
+	}
+	// The WHOLE resolved config rides one option, exactly as a forward's
+	// does (ws_tunnel.go): credentials, jump route and authorized endpoints
+	// together, so the lease is pool-keyed and authorized like a tab.
+	return l.client.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
 }

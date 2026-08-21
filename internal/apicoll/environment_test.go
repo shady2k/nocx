@@ -34,7 +34,7 @@ func newEnvCollection(t *testing.T) (Collections, HandleID, string) {
 		[]byte(`{"schemaVersion":1,"name":"c"}`), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	svc := NewCollections()
+	svc := NewCollections(nil)
 	h, _, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -395,7 +395,7 @@ func TestEnvironment_OwnsTheRoute(t *testing.T) {
 // surface. Without this the package can compile while the environments half
 // belongs to nothing anybody constructs.
 func TestCollections_SatisfiesBothHalves(t *testing.T) {
-	var _ Service = NewCollections()
-	var _ EnvironmentReader = NewCollections()
+	var _ Service = NewCollections(nil)
+	var _ EnvironmentReader = NewCollections(nil)
 	var _ Collections = newService()
 }

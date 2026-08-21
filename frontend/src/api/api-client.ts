@@ -18,6 +18,7 @@
 import type { Dispatcher } from '../dispatcher'
 import type { ApiCollectionsListResult } from '../generated/api.collections.list'
 import type { ApiCollectionsOpenResult } from '../generated/api.collections.open'
+import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
 import type { ApiCollectionsCloseResult } from '../generated/api.collections.close'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
@@ -41,6 +42,15 @@ class ApiClient {
    *  the one that answers a handle the caller did not already have. */
   openCollection(path: string): Promise<ApiCollectionsOpenResult> {
     return this.dispatcher.call<ApiCollectionsOpenResult>('api.collections.open', { path })
+  }
+
+  /** Make a collection and leave it open. A NAME, never a path: the backend
+   *  decides where a new collection lives (§13.1), so this method could not
+   *  spell a location even if a caller wanted to. The result is the same
+   *  handle-and-collection `openCollection` answers, which is what leaves the
+   *  renderer one thing to do afterwards rather than two. */
+  createCollection(name: string): Promise<ApiCollectionsCreateResult> {
+    return this.dispatcher.call<ApiCollectionsCreateResult>('api.collections.create', { name })
   }
 
   /** Drop the folder from the opened list and stop resolving its handle. An
@@ -95,6 +105,7 @@ class ApiClient {
 export interface ApiWorkbenchServices {
   listCollections(): Promise<ApiCollectionsListResult>
   openCollection(path: string): Promise<ApiCollectionsOpenResult>
+  createCollection(name: string): Promise<ApiCollectionsCreateResult>
   closeCollection(handle: string): Promise<ApiCollectionsCloseResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
@@ -109,6 +120,7 @@ export function createApiWorkbenchServices(dispatcher: Dispatcher): ApiWorkbench
   return {
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
+    createCollection: (name) => client.createCollection(name),
     closeCollection: (handle) => client.closeCollection(handle),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),

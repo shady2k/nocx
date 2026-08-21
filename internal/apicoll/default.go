@@ -86,17 +86,17 @@ func NewDefaultCollection(p storage.Paths, name string) (string, error) {
 func validateCollectionName(name string) error {
 	switch {
 	case name == "":
-		return errors.New("apicoll: a collection needs a name")
+		return fmt.Errorf("%w: a collection needs a name", ErrInvalidCollectionName)
 	case len(name) > maxCollectionNameLen:
-		return fmt.Errorf("apicoll: collection name is %d bytes, longer than the %d-byte limit", len(name), maxCollectionNameLen)
+		return fmt.Errorf("%w: it is %d bytes, longer than the %d-byte limit", ErrInvalidCollectionName, len(name), maxCollectionNameLen)
 	case name == "." || name == "..":
-		return fmt.Errorf("apicoll: %q is not a collection name", name)
+		return fmt.Errorf("%w: %q names a directory, not a collection", ErrInvalidCollectionName, name)
 	case strings.HasPrefix(name, "."):
-		return fmt.Errorf("apicoll: collection name %q starts with a dot", name)
+		return fmt.Errorf("%w: %q starts with a dot", ErrInvalidCollectionName, name)
 	case strings.ContainsRune(name, 0):
-		return errors.New("apicoll: collection name contains a NUL byte")
+		return fmt.Errorf("%w: it contains a NUL byte", ErrInvalidCollectionName)
 	case strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator):
-		return fmt.Errorf("apicoll: collection name %q is a path, not a name", name)
+		return fmt.Errorf("%w: %q is a path, not a name", ErrInvalidCollectionName, name)
 	}
 	return nil
 }

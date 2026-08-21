@@ -29,9 +29,11 @@ import { TextField } from '../ui/text-field'
 import { TreeRow } from '../ui/tree-row'
 import { showToast } from '../ui/toast'
 import { flattenCollections, type ApiTreeRow } from './api-tree'
+import { NewCollectionDialog } from './new-collection-dialog'
 import { RequestForm } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore } from './api-store'
+import type { ApiOpenCollection } from './api-model'
 
 export interface ApiPaneProps {
   store: ApiStore
@@ -50,6 +52,13 @@ export function ApiPane(props: ApiPaneProps) {
   const [curlLine, setCurlLine] = createSignal('')
   const [postmanFile, setPostmanFile] = createSignal('')
   const [postmanDest, setPostmanDest] = createSignal('')
+  const [naming, setNaming] = createSignal(false)
+  const [creating, setCreating] = createSignal(false)
+  // The reason the LAST CREATE was refused, in the backend's words — read off
+  // the store the moment the call settles rather than tracked reactively,
+  // because `store.error()` is the last failure of ANY call and a listing that
+  // failed an hour ago is not a sentence about the name being typed now.
+  const [nameRefused, setNameRefused] = createSignal('')
 
   const rows = (): ApiTreeRow[] => flattenCollections(store.collections(), collapsed())
 
@@ -80,6 +89,26 @@ export function ApiPane(props: ApiPaneProps) {
     void store.openFolder(path).then(() => setFolderPath(''))
   }
 
+  const askForName = (): void => {
+    setNameRefused('')
+    setNaming(true)
+  }
+
+  const createCollection = (name: string): void => {
+    setCreating(true)
+    void store.createCollection(name).then(() => {
+      setCreating(false)
+      setNameRefused(store.error())
+      // The store has already put the collection in the list, open and
+      // pointed at — `api.collections.create` answered an open's shape — so
+      // there is nothing to fetch here and nothing to select. On a refusal
+      // the dialog stays, holding the name and the reason.
+      if (store.error() !== '') return
+      setNaming(false)
+      showToast({ level: 'success', message: `Created ${name}` })
+    })
+  }
+
   const importCurl = (): void => {
     const line = curlLine().trim()
     if (line === '') return
@@ -102,6 +131,19 @@ export function ApiPane(props: ApiPaneProps) {
       <aside class="api-workbench__tree">
         <Stack gap="loose">
           <Section title="Collections">
+            {/* First, and primary, because it is the action a person with no
+                collection at all needs — opening a folder somebody else made
+                is the second door, not the first. */}
+            <Button variant="primary" onClick={askForName}>
+              New collection
+            </Button>
+            <NewCollectionDialog
+              open={naming()}
+              error={nameRefused()}
+              busy={creating()}
+              onCancel={() => setNaming(false)}
+              onCreate={createCollection}
+            />
             <TextField
               id="api-collection-path"
               label="Collection folder"
@@ -110,7 +152,7 @@ export function ApiPane(props: ApiPaneProps) {
               value={folderPath()}
               onInput={setFolderPath}
             />
-            <Button variant="primary" disabled={folderPath().trim() === ''} onClick={openFolder}>
+            <Button disabled={folderPath().trim() === ''} onClick={openFolder}>
               Open folder
             </Button>
             <Show when={store.error() !== ''}>
@@ -131,7 +173,7 @@ export function ApiPane(props: ApiPaneProps) {
               fallback={
                 <EmptyState
                   title="No collections open"
-                  description="Open a folder above, or import a Postman export, and its requests appear here."
+                  description="Make one above, open a folder you already have, or import a Postman export — its requests appear here."
                 />
               }
             >
@@ -147,6 +189,9 @@ export function ApiPane(props: ApiPaneProps) {
                       name={row.name}
                       depth={row.depth}
                       kind={row.kind === 'request' ? 'regular' : rowKind(row)}
+                      selected={
+                        row.kind === 'collection' && row.handle === store.activeCollection()
+                      }
                       disabled={row.kind === 'malformed'}
                       expanded={row.expanded}
                       onToggle={() => toggle(row.key)}
@@ -168,14 +213,14 @@ export function ApiPane(props: ApiPaneProps) {
           <For each={store.collections()}>
             {(open) => (
               <div class="api-tree__folder">
-                <Caption>{open.path}</Caption>
+                <Caption>{collectionLabel(open)}</Caption>
                 <Show when={open.error !== ''}>
                   <p class="api-tree__reason">{open.error}</p>
                 </Show>
                 <IconButton
                   size="sm"
-                  title={`Close ${open.path}`}
-                  ariaLabel={`Close ${open.path}`}
+                  title={`Close ${collectionLabel(open)}`}
+                  ariaLabel={`Close ${collectionLabel(open)}`}
                   onClick={() => void store.closeFolder(open.handle)}
                 >
                   <CloseIcon />
@@ -261,6 +306,17 @@ export function ApiPane(props: ApiPaneProps) {
       </section>
     </div>
   )
+}
+
+/** What to call one open collection where its LOCATION belongs: the folder's
+ *  path, and its name when there is no path to show. A row minted from
+ *  `api.collections.create` has none — the backend decided where the folder
+ *  went and the result does not carry it (§13.1) — so the caption and the
+ *  Close button would otherwise be blank and "Close " respectively. The tree
+ *  row above prefers the other way round (api-tree.ts), because a row is
+ *  asking what the thing is CALLED and this is asking where it IS. */
+function collectionLabel(open: ApiOpenCollection): string {
+  return open.path !== '' ? open.path : open.collection.name
 }
 
 /** The kit's row vocabulary for a workbench row. A collection and a directory

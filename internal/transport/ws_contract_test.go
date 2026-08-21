@@ -5111,7 +5111,7 @@ func (b *apiFakeBindings) count() int {
 func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket.Conn) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	opts := []WSServerOption{WithAPI(apicoll.NewService(), apisend.New(apisend.WithLogger(logger)))}
+	opts := []WSServerOption{WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)))}
 	if bindings != nil {
 		opts = append(opts, WithAPIBindings(bindings))
 	}
@@ -5198,6 +5198,70 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 			}
 			validateJSON(t, schema, raw, "api.collections.open DTO")
 		})
+	}
+}
+
+// api.collections.create answers the SAME shape api.collections.open does —
+// a create leaves the collection open — so it is the same DTO validated
+// against its own schema. The interesting case is the one the method
+// actually produces: an empty collection, whose two lists must be [] and
+// never null.
+func TestAPICollectionsCreate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.collections.create.schema.json")
+
+	cases := map[string]apiOpenResponse{
+		"a collection just made": {
+			Handle:     "0123456789abcdef0123456789abcdef",
+			Collection: apiCollectionWire{Name: "acme", Requests: []apiRequestRefWire{}, Malformed: []apiMalformedRefWire{}},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.collections.create DTO")
+		})
+	}
+}
+
+// The real result off the real socket. A test that validates a payload the
+// test itself built proves the struct is well-formed, not that the server
+// sends it — which is the whole reason contracts/ exists.
+func TestAPICollectionsCreate_OverTheWireConformsToContract(t *testing.T) {
+	createSchema := loadSchema(t, "api.collections.create.schema.json")
+	listSchema := loadSchema(t, "api.collections.list.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	resp := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.create: %+v", resp.Error)
+	}
+	validateJSON(t, createSchema, resp.Result, "api.collections.create result")
+
+	var made apiOpenResponse
+	if err := json.Unmarshal(resp.Result, &made); err != nil {
+		t.Fatalf("unmarshal create result: %v", err)
+	}
+	if made.Collection.Name != "acme" {
+		t.Errorf("name = %q, want acme", made.Collection.Name)
+	}
+
+	// And it is open: the listing carries it, which is the difference
+	// between "a folder was written" and "the user has a collection".
+	listed := vaultCall(t, conn, "api.collections.list", map[string]any{}, 2)
+	if listed.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listed.Error)
+	}
+	validateJSON(t, listSchema, listed.Result, "api.collections.list after create")
+	var list apiCollectionsListResponse
+	if err := json.Unmarshal(listed.Result, &list); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if len(list.Collections) != 1 || list.Collections[0].Handle != made.Handle {
+		t.Fatalf("opened folders = %+v, want the collection just created", list.Collections)
 	}
 }
 
@@ -5793,12 +5857,13 @@ func TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath(t *testing.T) {
 	// Every method on the surface except the two that legitimately take
 	// one, with valid params for the method plus a path bolted on.
 	base := map[string]map[string]any{
-		"api.collections.list":  {},
-		"api.collections.close": {"handle": handle},
-		"api.request.read":      {"handle": handle, "relPath": "ping.json"},
-		"api.request.write":     {"handle": handle, "relPath": "ping.json", "request": map[string]any{"id": "r1", "name": "ping", "method": "GET", "url": "https://example.test", "body": map[string]any{"kind": "none"}, "auth": map[string]any{"kind": "none"}}},
-		"api.request.send":      {"handle": handle, "relPath": "ping.json"},
-		"api.import.curl":       {"line": "curl https://example.test"},
+		"api.collections.list":   {},
+		"api.collections.create": {"name": "made-up"},
+		"api.collections.close":  {"handle": handle},
+		"api.request.read":       {"handle": handle, "relPath": "ping.json"},
+		"api.request.write":      {"handle": handle, "relPath": "ping.json", "request": map[string]any{"id": "r1", "name": "ping", "method": "GET", "url": "https://example.test", "body": map[string]any{"kind": "none"}, "auth": map[string]any{"kind": "none"}}},
+		"api.request.send":       {"handle": handle, "relPath": "ping.json"},
+		"api.import.curl":        {"line": "curl https://example.test"},
 	}
 	// The names a path arrives under. Any of them reaching a handler would
 	// be a second way to address a file.
@@ -5840,14 +5905,16 @@ func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
 		schema string
 		raw    string
 	}{
-		"open with no handle":         {"api.collections.open.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
-		"open with an undeclared key": {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":[],"malformed":[]},"root":"/etc"}`},
-		"a null request list":         {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":null,"malformed":[]}}`},
-		"list with null collections":  {"api.collections.list.schema.json", `{"collections":null}`},
-		"a read with no request":      {"api.request.read.schema.json", `{}`},
-		"a send with no timings":      {"api.request.send.schema.json", `{"response":{"status":200,"headers":[],"text":"","binary":false,"lossy":false,"truncated":false,"size":0,"tlsVersion":"","remoteAddr":""}}`},
-		"an import with null list":    {"api.import.postman.schema.json", `{"unsupported":null}`},
-		"a close that says something": {"api.collections.close.schema.json", `{"closed":true}`},
+		"open with no handle":                 {"api.collections.open.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
+		"create with no handle":               {"api.collections.create.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
+		"create with a field nobody declared": {"api.collections.create.schema.json", `{"handle":"a","collection":{"name":"a","requests":[],"malformed":[]},"path":"/tmp/acme"}`},
+		"open with an undeclared key":         {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":[],"malformed":[]},"root":"/etc"}`},
+		"a null request list":                 {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":null,"malformed":[]}}`},
+		"list with null collections":          {"api.collections.list.schema.json", `{"collections":null}`},
+		"a read with no request":              {"api.request.read.schema.json", `{}`},
+		"a send with no timings":              {"api.request.send.schema.json", `{"response":{"status":200,"headers":[],"text":"","binary":false,"lossy":false,"truncated":false,"size":0,"tlsVersion":"","remoteAddr":""}}`},
+		"an import with null list":            {"api.import.postman.schema.json", `{"unsupported":null}`},
+		"a close that says something":         {"api.collections.close.schema.json", `{"closed":true}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			schema := loadSchema(t, tc.schema)

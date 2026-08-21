@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // ErrNotAnEnvironmentPath — the path is inside the collection but does not
@@ -69,11 +71,21 @@ type EnvironmentReader interface {
 type Collections interface {
 	Service
 	EnvironmentReader
+	Creator
 }
 
-// NewCollections returns the whole surface — requests and environments —
-// backed by one handle table.
-func NewCollections() Collections { return newService() }
+// NewCollections returns the whole surface — requests, environments and the
+// minting of a new collection — backed by one handle table.
+//
+// p decides where a collection created with no place named goes (§6.1); the
+// location is derived from it INSIDE this package, so no caller names a path
+// in order to get a collection. A nil p is a service that cannot create one,
+// and says so by name (ErrNoDefaultLocation).
+func NewCollections(p storage.Paths) Collections {
+	s := newService()
+	s.paths = p
+	return s
+}
 
 var (
 	_ EnvironmentReader = (*service)(nil)

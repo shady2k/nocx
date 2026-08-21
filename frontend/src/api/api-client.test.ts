@@ -54,6 +54,12 @@ describe('ApiClient — one method per contract', () => {
     expect(call).toHaveBeenCalledWith('api.collections.open', { path: '/w/acme-api' })
   })
 
+  it('creates a collection by NAME — the backend decides where it goes', async () => {
+    const { dispatcher, call } = fakeDispatcher({ handle: 'h9', collection: {} })
+    await createApiWorkbenchServices(dispatcher).createCollection('orders-api')
+    expect(call).toHaveBeenCalledWith('api.collections.create', { name: 'orders-api' })
+  })
+
   it('closes a folder by handle, never by path', async () => {
     const { dispatcher, call } = fakeDispatcher({})
     await createApiWorkbenchServices(dispatcher).closeCollection('h1')
@@ -107,6 +113,7 @@ describe('ApiClient — one method per contract', () => {
     const { dispatcher, call } = fakeDispatcher({})
     const s = createApiWorkbenchServices(dispatcher)
     await s.listCollections()
+    await s.createCollection('orders-api')
     await s.closeCollection('h1')
     await s.readRequest('h1', 'a.json')
     await s.writeRequest('h1', 'a.json', REQUEST)
@@ -124,6 +131,7 @@ describe('ApiClient — every call has a test where it fails', () => {
   > = [
     ['listCollections', (s) => s.listCollections()],
     ['openCollection', (s) => s.openCollection('/w/x')],
+    ['createCollection', (s) => s.createCollection('orders-api')],
     ['closeCollection', (s) => s.closeCollection('h1')],
     ['readRequest', (s) => s.readRequest('h1', 'a.json')],
     ['writeRequest', (s) => s.writeRequest('h1', 'a.json', REQUEST)],

@@ -83,6 +83,23 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				Handle:     string(handle),
 				Collection: wireCollection(coll),
 			}))
+		case "api.collections.create":
+			var p apiCollectionsCreateParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			made, err := svc.Create(p.Name)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			// The SAME result shape api.collections.open answers with, and
+			// deliberately so: a create leaves the collection open, so the
+			// renderer has one thing to do afterwards rather than two.
+			_ = h.r.TryResult(req.ID, mustMarshal(apiOpenResponse{
+				Handle:     string(made.Handle),
+				Collection: wireCollection(made.Collection),
+			}))
 		case "api.collections.close":
 			var p apiHandleParams
 			if !h.decode(req, &p) {
@@ -137,7 +154,7 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 // else. The context still bounds the exchange — a cancelled request stops
 // where it is.
 func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcRequest) {
-	var p apiRequestParams
+	var p apiRequestSendParams
 	var inputs capability.SendInputs
 	snapshotted := false
 
@@ -145,7 +162,7 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		if !h.decode(req, &p) {
 			return nil
 		}
-		got, err := svc.Snapshot(apicoll.HandleID(p.Handle), p.RelPath)
+		got, err := svc.Snapshot(apicoll.HandleID(p.Handle), p.RelPath, p.EnvRelPath)
 		if err != nil {
 			h.fail(req, err)
 			return nil
@@ -162,12 +179,20 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return // the callback has already answered
 	}
 
-	// No gate from here on. The route is the direct one: an environment
-	// answers "where and how to get there" (§6.5) and lands with the
-	// environment wave, so until then every send goes out from this
-	// machine. The cookie scope is the collection, so two collections
-	// never share a jar.
-	resp, err := h.sender.Send(ctx, inputs.Request, apisend.Key{CookieScope: inputs.CookieScope})
+	// The route comes off the environment the snapshot read, in the same
+	// record as the address it substituted (§6.5) — so a request cannot go
+	// out at the production address around its bastion. A route this build
+	// cannot name is refused here rather than falling through to the direct
+	// one, which would be exactly that send.
+	routeID, err := apisend.RouteIDFor(inputs.Route)
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
+
+	// No gate from here on. The cookie scope is the collection, so two
+	// collections never share a jar.
+	resp, err := h.sender.Send(ctx, inputs.Request, apisend.Key{RouteID: routeID, CookieScope: inputs.CookieScope})
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
 		return
@@ -265,6 +290,7 @@ func apiMethodErrorCode(err error) int {
 		errors.Is(err, apicoll.ErrRequestNotFound),
 		errors.Is(err, apicoll.ErrNoManifest),
 		errors.Is(err, apicoll.ErrCollectionExists),
+		errors.Is(err, apicoll.ErrInvalidCollectionName),
 		errors.Is(err, capability.ErrImportNotAFile):
 		return -32602
 	default:
@@ -278,9 +304,18 @@ func apiMethodErrorCode(err error) int {
 // are fixed by editing the request — so they are the caller's error. A
 // transport failure is not.
 func apiSendErrorCode(err error) int {
-	if errors.Is(err, apisend.ErrFileBody) || errors.Is(err, apisend.ErrAuthUnresolved) {
+	if errors.Is(err, apisend.ErrFileBody) ||
+		errors.Is(err, apisend.ErrAuthUnresolved) ||
+		// An http:// URL naming a host through a connection route: the far
+		// side resolves the name, so this end cannot check what will be
+		// reached and refuses rather than guessing. Fixed by editing the
+		// request — an address, or https — so it is the caller's.
+		errors.Is(err, apisend.ErrNameResolvedRemotely) {
 		return -32602
 	}
+	// apisend.ErrNoConnection falls through to -32603 on purpose: the
+	// environment is right and the world is not, so the user's move is to
+	// open the connection rather than to ask differently.
 	return -32603
 }
 
@@ -297,6 +332,30 @@ type apiHandleParams struct {
 type apiRequestParams struct {
 	Handle  string `json:"handle"`
 	RelPath string `json:"relPath"`
+}
+
+// apiCollectionsCreateParams carries a NAME and not a path. That is the
+// whole difference from api.collections.open: a name is a single folder
+// name, the location is derived from it inside apicoll, and this method
+// therefore does not join the two that accept a root (§13.1).
+type apiCollectionsCreateParams struct {
+	Name string `json:"name"`
+}
+
+// apiRequestSendParams is api.request.send's own params rather than
+// apiRequestParams with a field added, because the extra field is a send's
+// and not a read's: strict decoding refuses a field a method does not
+// declare, and sharing the struct would quietly teach api.request.read to
+// accept an environment it has no use for.
+//
+// envRelPath names the environment the request is sent UNDER, addressed
+// inside the collection exactly like the request itself. It is optional:
+// absent is no environment, which is the request as written on the direct
+// route — a collection with no environments is a collection (§6.2).
+type apiRequestSendParams struct {
+	Handle     string `json:"handle"`
+	RelPath    string `json:"relPath"`
+	EnvRelPath string `json:"envRelPath"`
 }
 
 type apiRequestWriteParams struct {
@@ -751,6 +810,43 @@ func validateAPIHandleRaw(raw json.RawMessage) string {
 	return validateAPIHandle(p.Handle)
 }
 
+// validateAPICollectionsCreateRaw bounds the NAME of a new collection.
+// Whether the name is a name at all — not a path, not `.`, not `..`, not
+// longer than a filesystem component — is apicoll's rule and stays there
+// (validateCollectionName): a second copy here would be two derivations of
+// one fact. This is the wire-cost ceiling before the call, and it is the
+// same bound every other user-typed name on this control plane gets.
+func validateAPICollectionsCreateRaw(raw json.RawMessage) string {
+	var p apiCollectionsCreateParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.Name == "" {
+		return "name is required"
+	}
+	return boundedRunes("name", p.Name, maxConfigNameRunes)
+}
+
+// validateAPIRequestSendRaw is validateAPIRequestRaw plus the optional
+// environment path. The environment is bounded like every other path inside
+// a collection; whether it names an environment file is apicoll's rule.
+func validateAPIRequestSendRaw(raw json.RawMessage) string {
+	var p apiRequestSendParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	if msg := validateAPIRelPath(p.RelPath); msg != "" {
+		return msg
+	}
+	if p.EnvRelPath == "" {
+		return ""
+	}
+	return boundedRunes("envRelPath", p.EnvRelPath, maxPathRunes)
+}
+
 func validateAPIRequestRaw(raw json.RawMessage) string {
 	var p apiRequestParams
 	if msg := decodeAPIParams(raw, &p); msg != "" {
@@ -899,6 +995,10 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.collections.create", params(validateAPICollectionsCreateRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
 		whenAvailable(regResponder(sub, "api.collections.close", params(validateAPIHandleRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
@@ -911,7 +1011,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.send", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
+		whenAvailable(regResponder(sub, "api.request.send", params(validateAPIRequestSendRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSend(ctx, req) }
 		}), func() bool { return sendWired }, "api sending not available"),

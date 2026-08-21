@@ -92,15 +92,33 @@ type OpenCollection struct {
 // exists so that the gate's hold is a snapshot rather than a whole request
 // lifetime — see the file comment.
 type SendInputs struct {
-	// Request is the request exactly as the file has it. Nothing here is
-	// resolved: a body naming a file and an auth naming a variable are the
-	// caller's to resolve, and apisend refuses both rather than guessing.
+	// Request is the request with the environment's plain variables
+	// resolved into it, and nothing else: a body naming a file and an auth
+	// naming a variable are still the caller's to resolve, and apisend
+	// refuses both rather than guessing. With no environment named it is
+	// the request exactly as the file has it.
+	//
+	// The substitution happens HERE rather than in the sender because it
+	// needs the environment, which needs the folder, which is what the gate
+	// is held for. The file is untouched: a resolved request is a
+	// projection of it (§6.4), so nothing written back can carry a value
+	// the user did not type.
 	Request apicoll.Request
 	// CookieScope is the collection's identity, and it is what keys the
 	// sender's client instance so two collections never share a jar. The
 	// path the user named is the stable identity across handles; a handle
 	// is minted fresh every run.
 	CookieScope string
+	// Route is the environment's answer to "how do I get there" (§6.5). It
+	// comes from the SAME record as the address that was just substituted,
+	// which is the whole reason the route lives on the environment: the two
+	// cannot drift, so a production request cannot go out around its
+	// bastion. With no environment named it is the direct route.
+	//
+	// It is the domain value rather than the sender's route id: mapping one
+	// onto the other is apisend's (RouteIDFor), and this layer does not
+	// learn a second spelling of it.
+	Route apicoll.Route
 }
 
 // APICollectionService is the collection surface: the opened-folder list,
@@ -113,6 +131,11 @@ type APICollectionService interface {
 	// Open adds a folder to the list and returns its handle plus the
 	// collection. It is the ONLY method here that accepts a root (§13.1).
 	Open(root string) (apicoll.HandleID, apicoll.Collection, error)
+	// Create mints an empty collection under a NAME — never a path — in the
+	// default location apicoll decides, and leaves it OPEN: it lands in
+	// this list exactly as Open's folder does, so a caller has one thing to
+	// do afterwards rather than two.
+	Create(name string) (apicoll.Created, error)
 	// Close removes a folder from the list. Every later call naming that
 	// handle is refused.
 	Close(h apicoll.HandleID) error
@@ -121,8 +144,10 @@ type APICollectionService interface {
 	// WriteRequest writes one request back.
 	WriteRequest(h apicoll.HandleID, relPath string, r apicoll.Request) error
 	// Snapshot takes what a send needs and nothing else, so the gate can be
-	// released before the dial.
-	Snapshot(h apicoll.HandleID, relPath string) (SendInputs, error)
+	// released before the dial. envRelPath names the environment to send
+	// under, addressed inside the collection like everything else; "" is no
+	// environment, which is the request as written on the direct route.
+	Snapshot(h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error)
 }
 
 // APICollectionOperation is the typed operation for every api.collections.*
@@ -135,7 +160,11 @@ type APICollectionOperation interface {
 
 // NewAPICollectionOperation builds the collection operation over the folder
 // service, acquiring the api gate and then the execution lane.
-func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Service) APICollectionOperation {
+//
+// It takes the WHOLE folder surface — requests, environments and creation —
+// because all three are reached from this one domain and all three must go
+// through one handle table and one root re-validation.
+func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
 		control.NewComposite(apiGate, lane),
@@ -144,13 +173,13 @@ func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Serv
 	)
 }
 
-func newAPICollectionService(g *guard, svc apicoll.Service) *apiCollectionService {
+func newAPICollectionService(g *guard, svc apicoll.Collections) *apiCollectionService {
 	return &apiCollectionService{guard: g, svc: svc}
 }
 
 type apiCollectionService struct {
 	guard *guard
-	svc   apicoll.Service
+	svc   apicoll.Collections
 
 	// mu guards the opened-folder list. The api gate already serialises
 	// every caller at capacity 1, so this is the lock that keeps the list
@@ -198,23 +227,49 @@ func (s *apiCollectionService) Open(root string) (apicoll.HandleID, apicoll.Coll
 	if err != nil {
 		return "", apicoll.Collection{}, err
 	}
+	s.register(h, root)
+	return h, coll, nil
+}
+
+// register puts one folder in the opened list, or replaces the row that is
+// already there.
+//
+// One folder is one entry however many times it is opened: re-opening
+// replaces the row rather than listing the same folder twice, and the
+// previous handle stops resolving. The match is on the path AS NAMED, which
+// is best-effort — apicoll canonicalises the root internally and does not
+// expose the canonical form, so two different names for one directory list
+// as two folders. That is a duplicate row in a list, not a folder anybody
+// loses.
+func (s *apiCollectionService) register(h apicoll.HandleID, root string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// One folder is one entry however many times it is opened: re-opening
-	// replaces the row rather than listing the same folder twice, and the
-	// previous handle stops resolving. The match is on the path AS NAMED,
-	// which is best-effort — apicoll canonicalises the root internally and
-	// does not expose the canonical form, so two different names for one
-	// directory list as two folders. That is a duplicate row in a list, not
-	// a folder anybody loses.
 	for i := range s.open {
 		if s.open[i].path == root {
 			s.open[i].handle = h
-			return h, coll, nil
+			return
 		}
 	}
 	s.open = append(s.open, openEntry{handle: h, path: root})
-	return h, coll, nil
+}
+
+// Create mints a collection and registers it exactly as Open does.
+//
+// The registration is deliberately Open's own bookkeeping rather than a
+// second copy of it: apicoll.Create opens the folder it made, so what comes
+// back here is an opened folder and the only question left is which list it
+// belongs in. A folder that could not be created registers nothing — there
+// is no row naming a collection nobody made.
+func (s *apiCollectionService) Create(name string) (apicoll.Created, error) {
+	if err := s.guard.check(); err != nil {
+		return apicoll.Created{}, err
+	}
+	made, err := s.svc.Create(name)
+	if err != nil {
+		return apicoll.Created{}, err
+	}
+	s.register(made.Handle, made.Root)
+	return made, nil
 }
 
 func (s *apiCollectionService) Close(h apicoll.HandleID) error {
@@ -252,7 +307,29 @@ func (s *apiCollectionService) WriteRequest(h apicoll.HandleID, relPath string, 
 	return s.svc.WriteRequest(h, relPath, r)
 }
 
-func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath string) (SendInputs, error) {
+// Snapshot reads the request, and — when an environment is named — the
+// environment beside it, resolves the request's variables against it and
+// carries that environment's route out.
+//
+// The three reads are one snapshot on purpose. The address and the route
+// come from ONE record (§6.5), so taking them at two moments would be the
+// drift the design exists to prevent; and doing it here, under the gate,
+// keeps every filesystem touch inside the interval the gate covers while
+// leaving the dial outside it.
+//
+// An unresolved variable does not produce a request. It comes back as
+// apicoll.ErrUnresolvedVariable naming every reference that has no value —
+// not the literal braces on the wire, not an empty string quietly
+// substituted, because an `Authorization: Bearer ` header is a
+// plausible-looking request that teaches the wrong lesson about why it was
+// rejected (§6.5).
+//
+// A variable the environment declares SECRET is not answered here: its value
+// lives in the binding document beside the vault (§8.1), and until that is
+// wired such a variable is unresolved and blocks the send — which is the
+// honest state, and the same one the user sees for a variable they have not
+// given a value.
+func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {
 	if err := s.guard.check(); err != nil {
 		return SendInputs{}, err
 	}
@@ -264,7 +341,21 @@ func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath string) (Sen
 	if err != nil {
 		return SendInputs{}, err
 	}
-	return SendInputs{Request: req, CookieScope: scope}, nil
+	if envRelPath == "" {
+		// No environment: the request as written, out of this machine. A
+		// collection with no environments is a collection (§6.2), so this
+		// is an ordinary state rather than a degraded one.
+		return SendInputs{Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}, nil
+	}
+	env, err := s.svc.ReadEnvironment(h, envRelPath)
+	if err != nil {
+		return SendInputs{}, err
+	}
+	resolved, err := apicoll.Substitute(req, apicoll.Chain(env.Lookup()))
+	if err != nil {
+		return SendInputs{}, err
+	}
+	return SendInputs{Request: resolved, CookieScope: scope, Route: env.Route}, nil
 }
 
 // stillOpen refuses a handle the user has closed — or never opened — before

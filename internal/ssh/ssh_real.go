@@ -829,6 +829,10 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 	// the schedule graph rather than on a stopwatch, by
 	// shellintegration's TestBootstrapSchedule_* assertions.
 	//
+	// Concurrent with the loader, and never with the CLAIM on the user's
+	// session channel: openShell has already opened it, so this auxiliary
+	// channel competes with nothing the user needs. See openShell.
+	//
 	// Step 4 is answered synchronously, because it already is: the
 	// transport was established before the session was opened, so by
 	// here the receiver either exists or never will.
@@ -919,15 +923,46 @@ func (rc *RealClient) publishBundle(ctx context.Context, gclient *gossh.Client, 
 // write). lc is the established lifecycle channel, or nil (refused or not
 // wired); it is closed on every path that does not hand the shell a
 // channel-using start command, and otherwise transferred to the channel.
+//
+// # The user's session channel is claimed FIRST, and that ordering is the
+// product's promise rather than the scheduler's
+//
+// The session channel is opened before shellStartCommand runs, because
+// shellStartCommand is what starts the publish, and the publish opens an
+// auxiliary channel of its own. A server bounds the sessions it will grant one
+// connection (OpenSSH's MaxSessions, and a subsystem counts), so with one slot
+// those two are competing for it — and they were, in opposite directions:
+// whichever asked first won, and when the publish won, gclient.NewSession()
+// for the INTERACTIVE session was refused and Connect returned an error, so
+// the user got no terminal at all. Measured before this line moved: 4 of 10
+// attempts reached the working un-integrated prompt §0 promises and 6 reached
+// nothing.
+//
+// ADR-0004 makes an ordinary usable terminal with a visible native prompt the
+// one thing no failure path may suppress, and losing it to nocx's OWN
+// auxiliary work is the single way to lose it that is nocx's fault. The typed
+// path never had the defect — there the user's own `ssh` is the interactive
+// session and it authenticates before nocx interposes — and one spelling of
+// the rule is better than two (AD-8), so this is the saved path saying the
+// same thing: the user's session exists before any channel of ours does.
+//
+// It does NOT make the publish sequential with the loader, and it must not:
+// design §6.1 step 2 and §7's arithmetic need those concurrent (3 + 3 + 10 is
+// 16 against a 15 s deadline; only the concurrent schedule closes at 13).
+// Opening the session CHANNEL is not finishing the bootstrap — the loader has
+// not been sent, the frames have not started, nothing has been minted. What
+// happens between these two statements is one round trip for a channel and its
+// pty; the publish then runs beside the loader on that same connection exactly
+// as before.
 func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
-	startCmd, reason, bootstrap := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
-
 	sess, err := rc.openSessionWithPTY(gclient, resolved, cfg)
 	if err != nil {
 		lc.close()
 		return nil, err
 	}
 	session, stdin, stdout := sess.session, sess.stdin, sess.stdout
+
+	startCmd, reason, bootstrap := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
 
 	// A start command that does not use the lifecycle channel — the
 	// launcher declined, the destination ran a configured remote command,

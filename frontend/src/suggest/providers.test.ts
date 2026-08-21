@@ -32,11 +32,30 @@ const ctx = (over: Partial<SuggestContext> = {}): SuggestContext => ({
   ...over,
 })
 
+/** A store holding the SESSION-LOCAL half only (the shell's own tables). */
 const snapshotted = (names: string[]): CommandSnapshotStore => {
   const store = new CommandSnapshotStore()
   const nonce = 'a'.repeat(32)
   store.ingest(`H;${nonce}`)
   store.ingest(`S;${nonce};${names.join(';')}`)
+  return store
+}
+
+/** A store holding both halves, with the shared one in a chosen state. */
+const discovered = (
+  local: string[],
+  shared: string[],
+  state: 'ready' | 'stale' | 'timed-out' | 'failed' = 'ready',
+  extra: { ageMs?: number; reason?: string } = {},
+): CommandSnapshotStore => {
+  const store = snapshotted(local)
+  store.applySharedNames({
+    state,
+    names: shared,
+    ageMs: extra.ageMs ?? 0,
+    reason: extra.reason ?? '',
+    truncated: false,
+  })
   return store
 }
 describe('commandProvider', () => {
@@ -70,17 +89,31 @@ describe('commandProvider', () => {
     expect(got.candidates[0].eligibleForGhostText).toBe(true)
   })
 
-  it('an empty snapshot payload cannot apply — the store stays pending, named honestly', async () => {
+  it('offers the union of both halves — the shell tables and the shared PATH set', async () => {
+    const provider = commandProvider(discovered(['gitalias'], ['git', 'gitk']))
+    const got = await provider.suggest(
+      ctx({ position: 'command', token: { text: 'git', from: 0, to: 3 }, doc: 'git' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates.map((c) => c.insertText)).toEqual(['git', 'gitalias', 'gitk'])
+  })
+
+  it('an empty snapshot payload cannot apply — the state is named, never "no matches"', async () => {
     // The store rejects an empty name list ("every command is unknown" is a
-    // lie), so the snapshot never applies and the provider must say the
-    // snapshot is still pending rather than "no matches".
+    // lie), so the snapshot never applies. Nothing has answered the shared
+    // half either, so the honest state is the one the request is in.
     const empty = commandProvider(snapshotted([]))
     const got = await empty.suggest(
       ctx({ position: 'command', token: { text: 'git', from: 0, to: 3 }, doc: 'git' }),
       new AbortController().signal,
     )
     expect(got.candidates).toEqual([])
-    expect(got.emptyReason).toEqual({ kind: 'snapshot-pending' })
+    expect(got.emptyReason).toEqual({
+      kind: 'command-names',
+      state: 'running',
+      ageMs: 0,
+      reason: '',
+    })
   })
 
   it('a snapshot that has not arrived yet is named, not hidden', async () => {
@@ -91,7 +124,47 @@ describe('commandProvider', () => {
       new AbortController().signal,
     )
     expect(got.candidates).toEqual([])
-    expect(got.emptyReason).toEqual({ kind: 'snapshot-pending' })
+    expect(got.emptyReason).toEqual({
+      kind: 'command-names',
+      state: 'running',
+      ageMs: 0,
+      reason: '',
+    })
+  })
+
+  // The defect this replaces: every one of these used to render as "command
+  // names are still loading". Four of the five are not loading, and three of
+  // them never will be.
+  it("reports the shared half's own state when nothing matches", async () => {
+    const cases = [
+      { state: 'ready' as const, extra: {} },
+      { state: 'stale' as const, extra: { ageMs: 90_000 } },
+      { state: 'timed-out' as const, extra: { reason: 'the scan did not finish in time' } },
+      { state: 'failed' as const, extra: { reason: 'remote host refused the exec' } },
+    ]
+    for (const c of cases) {
+      const provider = commandProvider(discovered(['zzz'], ['aaa'], c.state, c.extra))
+      const got = await provider.suggest(
+        ctx({ position: 'command', token: { text: 'nomatch', from: 0, to: 7 }, doc: 'nomatch' }),
+        new AbortController().signal,
+      )
+      expect(got.candidates).toEqual([])
+      expect(got.emptyReason).toEqual({
+        kind: 'command-names',
+        state: c.state,
+        ageMs: c.extra.ageMs ?? 0,
+        reason: c.extra.reason ?? '',
+      })
+    }
+  })
+
+  it('a stale shared half still OFFERS its names — only the row says it may be old', async () => {
+    const provider = commandProvider(discovered([], ['git'], 'stale', { ageMs: 60_000 }))
+    const got = await provider.suggest(
+      ctx({ position: 'command', token: { text: 'gi', from: 0, to: 2 }, doc: 'gi' }),
+      new AbortController().signal,
+    )
+    expect(got.candidates.map((c) => c.insertText)).toEqual(['git'])
   })
 
   it('an empty token asks for nothing — no reason, the line has no intent yet', async () => {

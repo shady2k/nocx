@@ -1040,8 +1040,10 @@ if [[ -z "${__nocx_snapshot_wait_ms:-}" ]]; then
     fi
 fi
 
-# Hex-escape the names into the `;`-joined payload on stdout, capped at 8192
-# names and 65536 encoded characters. Names arrive as ARGUMENTS (the bash twin
+# Hex-escape the names into the `;`-joined payload on stdout, capped at 4096
+# names and 65536 encoded characters. 4096, not 8192: this payload is the
+# session-local half only, which is the bound §8 puts on it — the PATH half
+# is bounded separately, at 8192, by the backend that owns it. Names arrive as ARGUMENTS (the bash twin
 # reads stdin because its producer is a pipeline; zsh's is an array, and a
 # pipeline here would be two processes on the path a fresh tab waits for).
 # Returns non-zero when the list is empty: an empty snapshot must never reach
@@ -1091,7 +1093,7 @@ __nocx_snapshot_build() {
         (( ${#__out} + ${#__name} + 1 > 65536 )) && break
         __out+="$__name;"
         __n+=1
-        (( __n >= 8192 )) && break
+        (( __n >= 4096 )) && break
     done
     [[ -n "$__out" ]] || return 1
     builtin printf '%s' "$__out"
@@ -1100,15 +1102,21 @@ __nocx_snapshot_build() {
 # The background job's body: enumerate, encode, stage, publish atomically.
 __nocx_snapshot_write() {
     local -a __names
-    # The tables that answer "what can this shell run". bash asks `compgen -c`
-    # for all of them at once; zsh keeps one parameter per table, so the list
-    # is their union — and the union is the point, not a detail: a tier that
-    # enumerated three of the five would still ship a well-formed snapshot
-    # under a matching nonce while the editor marked the user's own alias as a
-    # command that does not exist. Reading the whole `commands` parameter is
-    # what forces zsh to hash every PATH directory, which is the equivalent of
-    # compgen's PATH scan and the reason this runs in the background.
-    __names=( ${(k)commands} ${(k)builtins} ${(k)reswords} ${(k)functions} ${(k)aliases} )
+    # The SESSION-LOCAL tables, and only those (carrier design §8). bash asks
+    # `compgen -abkA function` for all four at once; zsh keeps one parameter
+    # per table, so the list is their union — and the union is the point, not
+    # a detail: a tier that enumerated three of the four would still ship a
+    # well-formed snapshot under a matching nonce while the editor marked the
+    # user's own alias as a command that does not exist.
+    #
+    # `${(k)commands}` is deliberately ABSENT. Reading it is what forces zsh
+    # to hash every PATH directory — the equivalent of compgen's PATH scan —
+    # and that half is no longer this shell's to answer: it is identical for
+    # every session to this host, so the backend computes it once, shares it
+    # across every tab, and invalidates it on the mtime of each PATH
+    # directory. Enumerating it here would be the per-session scan §8 exists
+    # to remove, run a second time beside the shared one.
+    __names=( ${(k)builtins} ${(k)reswords} ${(k)functions} ${(k)aliases} )
     # (o) sorts, (u) dedupes — in the shell, where the bash twin pipes through
     # `sort -u`. Two fewer processes on the path a fresh tab is waiting for.
     __nocx_snapshot_build "${(@ou)__names}" >| "$__nocx_snap_staging" 2>/dev/null \

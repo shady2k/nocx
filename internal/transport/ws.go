@@ -221,6 +221,9 @@ type WSServer struct {
 	// exact SSH options captured from the live terminal session. When nil,
 	// the method returns a stated empty reason for SSH sessions.
 	sshCompleter RemoteCompleter
+	// commandNames answers shell.commandNames — the shared PATH name set,
+	// cached per target by the backend (carrier design §8).
+	commandNames CommandNamesResolver
 
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created

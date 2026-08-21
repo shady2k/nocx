@@ -8,13 +8,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/ssh/mux"
+	"github.com/shady2k/nocx/internal/transport"
 )
 
 // The typed-`ssh` path: a host reached by typing `ssh` by hand comes up
@@ -155,6 +158,51 @@ type typedRunner struct {
 	// probes are the master observations §6.2's loss events are detected
 	// with. Injected so a test can state a loss instead of arranging one.
 	probes func(controlPath string, pid int, m TypedMaster) ssh.MasterProbes
+	// reportIntegration and reportBootstrapOutcome are this path's route
+	// into the session integration axis, and they are the SAME two seams the
+	// saved path uses — the launch side saying what it started, and the
+	// bootstrap saying how the far side answered (ws_integration.go names
+	// both). The composition root binds them in bindTypedIntegrationAxis.
+	//
+	// Without them this path reached a terminal outcome and lg.Warn'd it.
+	// The refusal vocabulary was opened from seven members to thirty-one so
+	// that a user could be told WHICH refusal happened, and on the typed
+	// path they were told nothing while the same refusal on the saved path
+	// was a structured reason — a soft degrade the UI contradicts, which is
+	// how a feature that does not exist survives a release (AGENTS.md).
+	//
+	// Nil reports nowhere, which is the state before this and the safe
+	// direction: a delivery driven without a composition root still runs.
+	reportIntegration      func(sid, shell, status string, reason ssh.RefusalReason)
+	reportBootstrapOutcome func(lane string, reason ssh.RefusalReason)
+}
+
+// bindTypedIntegrationAxis routes the two facts a typed delivery produces into
+// the session integration axis. It exists as a function rather than two
+// assignments at the composition root so that a test asserting the ROUTE
+// exercises the production wiring instead of a copy of it (AGENTS.md rule 5:
+// a check against a copy the test itself wrote proves the copy).
+func bindTypedIntegrationAxis(typed *typedRunner, axis typedIntegrationAxis) {
+	if typed == nil || axis == nil {
+		return
+	}
+	typed.reportIntegration = func(sid, shell, status string, reason ssh.RefusalReason) {
+		axis.RegisterIntegration(session.ID(sid), shell, status, reason)
+	}
+	typed.reportBootstrapOutcome = func(lane string, reason ssh.RefusalReason) {
+		if lane == "" {
+			return
+		}
+		axis.NoteBootstrapOutcome(lifecycle.LaneID(lane), reason)
+	}
+}
+
+// typedIntegrationAxis is the transport's half of that route, behind an
+// interface for AD-8's reason: this file must not decide anything about the
+// wire, and the two methods are the whole of what it needs.
+type typedIntegrationAxis interface {
+	RegisterIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason)
+	NoteBootstrapOutcome(lane lifecycle.LaneID, reason ssh.RefusalReason)
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +262,7 @@ func composeSSHLine(wrap ssh.TypedWrap, extra []string, inv ssh.TypedInvocation,
 type typedDelivery struct {
 	runner      *typedRunner
 	sessionID   string
+	lane        string
 	controlPath string
 	plan        shellintegration.BootstrapPlan
 	window      session.BootstrapWindow
@@ -224,6 +273,11 @@ type typedDelivery struct {
 	// publish then succeeds.
 	publishSettled chan struct{}
 	once           sync.Once
+	// publishErr is what the publish attempt ended with, or nil. Written by
+	// publish before publishSettled closes and read after the bootstrap that
+	// waited on publishSettled has finished, which is the same happens-before
+	// the saved path gets from its mint gate.
+	publishErr atomic.Pointer[error]
 }
 
 // arm opens the bootstrap window on the parent's session. It runs
@@ -235,19 +289,52 @@ type typedDelivery struct {
 // The window's READ side opens here. Its input quarantine does NOT — that
 // waits for ownership proof, because everything the user types until then is
 // theirs, addressed to their own ssh client (design §5.3).
-func (r *typedRunner) arm(sessionID, controlPath string, plan shellintegration.BootstrapPlan) (*typedDelivery, error) {
+func (r *typedRunner) arm(sessionID, lane, controlPath string, plan shellintegration.BootstrapPlan) (*typedDelivery, error) {
 	w, err := r.sessions.OpenBootstrapWindow(session.ID(sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("typed ssh: the parent session's terminal is not available: %w", err)
 	}
+	// The session's axis opens a NEW attempt here, and it has to be opened
+	// for the outcome below to land at all: the axis answers once per
+	// registration, and this session's answer is already in — the parent's
+	// own local shell integrated and the axis says so. A report arriving
+	// against that answer is dropped, by the rule ws_integration.go states
+	// three times over ("a session already answered keeps its first
+	// answer"), so routing the outcome without this line would be a call
+	// that reaches a drop: the worst shape of all, because it looks routed.
+	//
+	// What is being said is true and is the launch side's own sentence: a
+	// second shell is starting in this session, this is what nocx asked the
+	// far host to run, and it has not proved itself yet. `auto` is the
+	// honest shell name for the same reason remoteShellName gives it on the
+	// saved path — the carrier detects the login shell AT THE FAR END, so
+	// nocx did not choose one and must not name one.
+	if r.reportIntegration != nil {
+		r.reportIntegration(sessionID, string(ssh.ShellAuto), transport.IntegrationStarting, ssh.ReasonNone)
+	}
 	return &typedDelivery{
 		runner:         r,
 		sessionID:      sessionID,
+		lane:           lane,
 		controlPath:    controlPath,
 		plan:           plan,
 		window:         w,
 		publishSettled: make(chan struct{}),
 	}, nil
+}
+
+// reportOutcome carries one terminal outcome to the session integration axis.
+//
+// Every exit from doRun goes through it, including the one where ownership was
+// never proven: §7 forbids `starting` from being permanent, and arm has just
+// put this session there. An outcome that only reached the log would leave the
+// axis at `starting` with nothing else coming — which is the same defect this
+// whole route exists to close, wearing the opposite face.
+func (d *typedDelivery) reportOutcome(reason ssh.RefusalReason) {
+	if d.runner.reportBootstrapOutcome == nil {
+		return
+	}
+	d.runner.reportBootstrapOutcome(d.lane, reason)
 }
 
 // run drives the whole delivery to one terminal outcome and closes the
@@ -275,6 +362,12 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 		if _, werr := d.window.Write(shellintegration.AbortFrame()); werr != nil {
 			lg.Debug("typed ssh: the abort frame could not be written", "error", werr)
 		}
+		// §6.4's `channel` row: the channel nocx owns never came up, so
+		// nothing was published, nothing was minted and the far side was
+		// handed a non-secret refusal. The user has a working prompt on
+		// their own connection and is entitled to know why it is not
+		// integrated.
+		d.reportOutcome(ssh.ReasonChannelUnavailable)
 		return
 	}
 	defer func() { _ = master.Close() }()
@@ -298,14 +391,29 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), typedBootstrapDeadline)
 	defer cancel()
 	outcome := shellintegration.DeliverBootstrap(bctx, lg, d.window, d.plan)
+	// The same joining rule the saved path uses, in the same function: a far
+	// side that found no generation AFTER a failed publish is told the cause
+	// rather than the symptom (§6.4's subsystem row). publishSettled has
+	// closed by now — plan.Ordered waited on it before frame 2 — so the
+	// pointer read here is ordered after the write.
+	var publishErr error
+	if perr := d.publishErr.Load(); perr != nil {
+		publishErr = *perr
+	}
+	reason := bootstrapProductReason(lg, outcome, publishErr)
 	if outcome == shellintegration.OutcomeBootstrapAccepted {
 		own.MarkIntegrated()
 		lg.Info("typed ssh: the session came up integrated on the user's own connection",
 			"session_id", d.sessionID, "socket", d.controlPath)
 	} else {
 		lg.Warn("typed ssh: the session did not integrate; the far side is at a native login shell",
-			"session_id", d.sessionID, "outcome", string(outcome))
+			"session_id", d.sessionID, "outcome", string(outcome), "reason", string(reason))
 	}
+	// Reported on BOTH arms. An accepted bootstrap reports ReasonNone, which
+	// the axis deliberately treats as "leave it alone" — "a domain is live"
+	// is the kernel's word and this is not it — so the call is not a
+	// conditional here either.
+	d.reportOutcome(reason)
 
 	// The ownership interval closes when the last owned session and
 	// auxiliary channel have finished. The user's own process is still the
@@ -345,23 +453,34 @@ func (d *typedDelivery) awaitOwnership(ctx context.Context) (TypedMaster, error)
 // after a failed publish the far side may still accept a generation installed
 // earlier, so a failed publish is not a refusal.
 func (d *typedDelivery) publish(ctx context.Context, own *ssh.Ownership, master TypedMaster) {
-	defer close(d.publishSettled)
+	var perr error
+	defer func() {
+		// The error is stored BEFORE publishSettled closes, so the gate the
+		// bootstrap waits on is also the happens-before that lets the
+		// outcome read it. Stored on every path including success, so "not
+		// answered yet" is never mistaken for "answered nil".
+		d.publishErr.Store(&perr)
+		close(d.publishSettled)
+	}()
 	lg := d.runner.log
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), typedPublishDeadline)
 	defer cancel()
 
 	home, err := typedRemoteHome(master)
 	if err != nil {
+		perr = err
 		d.reportAuxFailure(own, "the far side's home directory could not be read", err)
 		return
 	}
 	aux, err := master.Aux(mux.SessionRequest{Subsystem: true, Command: "sftp"})
 	if err != nil {
+		perr = err
 		d.reportAuxFailure(own, "the subsystem session was refused; nothing is published", err)
 		return
 	}
 	own.Own(aux)
 	if err := d.runner.publish.EnsureInstalledOverPipe(pctx, aux, home); err != nil {
+		perr = err
 		lg.Warn("typed ssh: the publish did not commit; the far side decides whether an earlier generation is still valid",
 			"session_id", d.sessionID, "error", err)
 		return

@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
+	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
@@ -901,6 +902,17 @@ func New(opts ...Option) (*App, error) {
 			completion.NewLocal(),
 			&routedSSHCompleter{client: sshClient},
 		),
+		// Command discovery's shared half (carrier design §8, nocx-m8jwn.6).
+		// One backend-owned, in-memory cache serves every tab: the PATH
+		// enumeration is identical for every session to one target, so it
+		// is computed once per cache key and invalidated on the mtime of
+		// each PATH directory rather than re-run per session. Without this
+		// line the whole package is reachable from its own tests and
+		// nowhere else (AGENTS.md check 5).
+		transport.WithCommandNames(&commandNamesRouter{
+			svc:    commandnames.New(time.Now, logger),
+			client: sshClient,
+		}),
 
 		transport.WithProbeResultStore(probeResultStore),
 		transport.WithSSHConfigResolver(sshCfgResolver, sshConfigPath),
@@ -1142,6 +1154,13 @@ func New(opts ...Option) (*App, error) {
 		}
 		tp.NoteBootstrapOutcome(lifecycle.LaneID(lane), reason)
 	}
+	// And the same axis for the TYPED path, through the same two seams: the
+	// launch side says a second shell is starting in this session, and the
+	// bootstrap says how the far side answered. Before this line the typed
+	// path reached its terminal outcome and logged it, so the thirty-one
+	// refusal names the epic opened the vocabulary to were a structured
+	// reason on one path and nothing at all on the other.
+	bindTypedIntegrationAxis(typedSSH, tp)
 	// The session integration axis (nocx-dvql). Two seams, one owner: the
 	// pty factory says what it started and how far it got, and the adapter
 	// says which path ended the channel. The transport joins them with the
@@ -1978,23 +1997,16 @@ func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOpti
 		// interface directly — the translation is in the types, not in
 		// an object that copies bytes between them.
 		outcome := shellintegration.DeliverBootstrap(ctx, a.logger, stream, plan)
-		reason := a.mapBootstrapOutcome(outcome)
-		// §6.4's `subsystem` row, reported as the cause rather than the
-		// symptom. The far side is the authority on "is this installation
-		// valid" and it answers generation-unavailable, which is true and
-		// is not the half a user can act on: the reason there is no
-		// generation is that nocx could not write one. Only when BOTH are
-		// true — the far side found nothing AND the publish failed — is the
-		// substitution honest; a far side that finds nothing after a
-		// SUCCESSFUL publish is a different fault and keeps its own name.
-		if reason == ssh.ReasonGenerationUnavailable {
-			if perr := publishFailure.Load(); perr != nil && *perr != nil {
-				a.logger.Warn("shellintegration: the far host has no generation and the publish failed; "+
-					"reporting the cause rather than the symptom",
-					"session_id", opts.SessionID, "error", *perr)
-				reason = ssh.ReasonPublishUnavailable
-			}
+		// The publish's own failure joins the outcome here, in the one
+		// function that answers "which reason does the product hear" for
+		// BOTH paths. The gate is the happens-before between the two: the
+		// pointer is written by the ssh side before the gate opens, and read
+		// here only after the bootstrap that waited on it has finished.
+		var publishErr error
+		if perr := publishFailure.Load(); perr != nil {
+			publishErr = *perr
 		}
+		reason := bootstrapProductReason(a.logger, outcome, publishErr)
 		if reason != ssh.ReasonNone {
 			a.logger.Warn("shell bootstrap refused",
 				"outcome", string(outcome), "reason", string(reason), "session_id", opts.SessionID)
@@ -2055,7 +2067,7 @@ func (a gateAdapter) PublishSettled(err error) {
 // wire, past a contract whose whole point is that the enum is closed
 // (AGENTS.md rule 5). The switch cannot: a new outcome fails
 // TestBootstrapOutcomes_EachHasAProductReason instead.
-func (a *remoteLauncherAdapter) mapBootstrapOutcome(o shellintegration.Outcome) ssh.RefusalReason {
+func mapBootstrapOutcome(lg log.Logger, o shellintegration.Outcome) ssh.RefusalReason {
 	switch o {
 	case shellintegration.OutcomeBootstrapAccepted:
 		return ssh.ReasonNone
@@ -2100,10 +2112,34 @@ func (a *remoteLauncherAdapter) mapBootstrapOutcome(o shellintegration.Outcome) 
 	case shellintegration.OutcomeChannelUnavailable:
 		return ssh.ReasonChannelUnavailable
 	default:
-		a.logger.Error("shellintegration returned an unmapped bootstrap outcome; add it to mapBootstrapOutcome",
+		lg.Error("shellintegration returned an unmapped bootstrap outcome; add it to mapBootstrapOutcome",
 			"outcome", string(o))
 		return ssh.ReasonUnknown
 	}
+}
+
+// bootstrapProductReason is the WHOLE of "which reason does the product hear
+// for this bootstrap", and it is one function because there are two paths and
+// there must not be two answers (AD-8).
+//
+// The saved path reaches it from remoteLauncherAdapter.Prepare's run; the
+// typed path from typedDelivery. Both produce the same two inputs — the
+// bootstrap's terminal outcome, and whether nocx's own publish failed — and
+// §6.4's subsystem row is the rule that joins them: the far side answers
+// generation-unavailable, which is TRUE and is the symptom; when the publish
+// also failed, the half a user can act on is that nocx could not write a
+// generation, so the cause is reported in place of the symptom. Only when BOTH
+// are true — a far side that found nothing AND a publish that failed — is the
+// substitution honest; a far side that finds nothing after a SUCCESSFUL
+// publish is a different fault and keeps its own name.
+func bootstrapProductReason(lg log.Logger, o shellintegration.Outcome, publishErr error) ssh.RefusalReason {
+	reason := mapBootstrapOutcome(lg, o)
+	if reason == ssh.ReasonGenerationUnavailable && publishErr != nil {
+		lg.Warn("shellintegration: the far host has no generation and the publish failed; "+
+			"reporting the cause rather than the symptom", "error", publishErr)
+		return ssh.ReasonPublishUnavailable
+	}
+	return reason
 }
 
 // remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle

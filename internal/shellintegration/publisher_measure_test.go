@@ -53,12 +53,21 @@ import (
 // files run in their native phases. The bundle's three generation scripts did
 // not move at all: 27,161 / 21,924 / 661.
 //
-// The CALL counts did not move on either occasion — 57/17/49/58/58/63 on
-// every path — so N = 90 is untouched: the bundle got larger, not the work.
-// B = 256 KiB still holds, now at 3.77x headroom.
+// 2026-08-21, third move (nocx-m8jwn.6, command discovery): 67,211 ->
+// 67,208, and this one SHRANK. The shell tiers stopped enumerating the PATH:
+// bash asks `compgen -abkA function` where it asked `compgen -c`, and zsh
+// dropped `${(k)commands}` from its table union, because that half is now
+// computed once per host by internal/commandnames and shared across tabs
+// instead of re-run in every session. Three bytes of stripped code, net, in
+// the two generation scripts.
+//
+// The CALL counts did not move on any of the three occasions —
+// 57/17/49/58/58/63 on every path — so N = 90 is untouched: the bundle
+// changed size, not the work. B = 256 KiB still holds, now at 3.81x
+// headroom.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 67211
+	measuredMaxPublishBytes = 67208
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

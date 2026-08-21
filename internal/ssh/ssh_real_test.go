@@ -65,6 +65,12 @@ type testSSHServer struct {
 	// opens are rejected with ResourceShortage (OpenSSH's MaxSessions).
 	// Read under s.mu; set via setMaxSessions.
 	maxSessions int
+	// sessionChannels counts session channels GRANTED across every
+	// connection this server has served. It is what makes "the user's
+	// session was claimed before nocx opened anything of its own" a state a
+	// test can read at the moment the auxiliary call is made, rather than an
+	// ordering it has to arrange. Read under s.mu; see sessionChannelCount.
+	sessionChannels int
 	// execRefusal selects §6.4's `exec` rows. A real OpenSSH server cannot
 	// be made to refuse an exec request at all — measured in
 	// internal/app/exec_refusal_probe_test.go, five ways of restricting an
@@ -151,6 +157,14 @@ func (s *testSSHServer) setExecRefusal(m execRefusalMode, substitute string) {
 	s.execRefusal = m
 	s.execSubstitute = substitute
 	s.mu.Unlock()
+}
+
+// sessionChannelCount is how many session channels this server has granted so
+// far — the server's own view, taken at whatever moment the caller asks.
+func (s *testSSHServer) sessionChannelCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionChannels
 }
 
 // setMaxSessions caps session channels per connection (OpenSSH's
@@ -345,6 +359,9 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 				continue
 			}
 			sessions++
+			s.mu.Lock()
+			s.sessionChannels++
+			s.mu.Unlock()
 			ch, reqs, err := newChan.Accept()
 			if err != nil {
 				s.logf("test server accept channel: %v", err)

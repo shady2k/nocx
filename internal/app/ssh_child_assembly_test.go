@@ -47,7 +47,6 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -426,8 +425,11 @@ func (l *factLog) commands(domain lifecycle.DomainID) []string {
 
 func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	t.Helper()
-	logger := log.NewSlogAdapter(nil)
-	k := lifecycle.New(lifecycle.Options{})
+	logger := fx.log()
+	// The kernel's randomness comes from the fixture, so a test that needs a
+	// TAINTED capability and fence (the epic's canary) mints them through the
+	// production RequestDomain rather than reaching past it.
+	k := lifecycle.New(lifecycle.Options{Rand: fx.rand})
 	sessions := newSessionRegistry()
 	transports := newTransportRegistry()
 	lane := lifecycle.LaneID("lane-ssh-child-assembly")

@@ -162,6 +162,29 @@ func TestBootstrapSchedule_PublishAndReceiverAreConcurrent(t *testing.T) {
 	}
 }
 
+// The user's session channel is claimed before nocx opens an auxiliary one,
+// and claiming it does not serialize the publish behind the loader.
+//
+// Both halves matter and they pull in opposite directions. Without the first
+// edge the publish can spend the server's last session slot on nocx's own
+// work and the user gets no terminal at all — ADR-0004's one absolute,
+// broken by nocx itself. With an edge to the RECEIVER instead, the publish
+// would be sequential and §7's arithmetic would stop closing. So: a common
+// ancestor, and still no edge between the two concurrent branches.
+func TestBootstrapSchedule_ThePublishWaitsForTheUsersSessionChannel(t *testing.T) {
+	if !waitsFor(t, stepPublish, stepSessionEstablished) {
+		t.Error("the publish does not wait for the user's session channel; with one session slot " +
+			"it can take the slot the interactive shell needs and Connect returns no terminal")
+	}
+	if waitsFor(t, stepSessionEstablished, stepPublish) {
+		t.Error("the user's session channel waits for the publish; the whole point is that it does not")
+	}
+	if waitsFor(t, stepPublish, stepReceiverReady) || waitsFor(t, stepReceiverReady, stepPublish) {
+		t.Error("claiming the session channel serialized the publish against the receiver; " +
+			"§7's arithmetic closes only while those two are concurrent")
+	}
+}
+
 // The mint waits for BOTH, and for nothing less (§6.1 step 6).
 func TestBootstrapSchedule_TheMintWaitsForBothFacts(t *testing.T) {
 	if !waitsFor(t, stepMint, stepPublish) {
@@ -307,6 +330,15 @@ func TestBootstrapSchedule_TheMintWaitIsInsideThePublishBudget(t *testing.T) {
 // says so — it compiles without -test precisely so that a production function
 // whose only callers are its own tests is reported rather than excused.
 const (
+	// stepSessionEstablished is the saved path's spelling of §6.1 step 1 —
+	// the interactive session channel is open and its pty granted. It bounds
+	// nothing (one round trip on a connection that is already authenticated),
+	// and it is declared because the ABSENCE of its edges was the defect: the
+	// publish used to be scheduled with no dependency on it at all, so on a
+	// server with one session slot the two competed and the user's own shell
+	// lost six times in ten. It is a common ANCESTOR of the publish and the
+	// frames, never an edge between them.
+	stepSessionEstablished = "session-established"
 	// stepPublish is §6.1 step 2's publish half: bounded by T.
 	stepPublish = "publish"
 	// stepReceiverReady is step 4.
@@ -338,11 +370,12 @@ type bootstrapStep struct {
 // stepPublish and stepReceiverReady, and that absence IS §7's "not
 // sequential".
 var bootstrapSchedule = map[string]bootstrapStep{
-	stepPublish:       {bound: PublishDeadline},
-	stepReceiverReady: {bound: ReceiverReadyDeadline},
-	stepStageVerified: {bound: FrameCompletionDeadline, after: []string{stepReceiverReady}},
-	stepMint:          {bound: 0, after: []string{stepStageVerified, stepReceiverReady, stepPublish}},
-	stepOutcome:       {bound: FrameCompletionDeadline, after: []string{stepMint}},
+	stepSessionEstablished: {bound: 0},
+	stepPublish:            {bound: PublishDeadline, after: []string{stepSessionEstablished}},
+	stepReceiverReady:      {bound: ReceiverReadyDeadline},
+	stepStageVerified:      {bound: FrameCompletionDeadline, after: []string{stepReceiverReady, stepSessionEstablished}},
+	stepMint:               {bound: 0, after: []string{stepStageVerified, stepReceiverReady, stepPublish}},
+	stepOutcome:            {bound: FrameCompletionDeadline, after: []string{stepMint}},
 }
 
 // bootstrapStepDependencies reports which steps a step waits for. ok is false

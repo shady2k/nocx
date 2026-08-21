@@ -20,6 +20,8 @@ import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
+import type { CommandSnapshotStore } from './command-snapshot'
+import type { ShellCommandNames } from './generated/shell.commandNames'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
 import { AgentClient } from './agent'
@@ -731,6 +733,31 @@ export class TerminalContent extends BasePaneContent {
    *  MACHINE the tab speaks for and goes silent inside a hand-typed `ssh`,
    *  which would hide exactly the tabs a close prompt most needs to name.
    *  PROVENANCE ONLY (ADR-0020 §5) — see lineage.ts. */
+  /**
+   * Ask the backend for this target's shared command-name set and hand it to
+   * the tab's store.
+   *
+   * A failure is not silence. The store's five states are the surface's
+   * whole vocabulary for this — `running`, `ready`, `stale`, `timed-out`,
+   * `failed` — and a request that never answers must land on one of them, or
+   * the dropdown goes back to telling every user that names are still
+   * loading, which is true for exactly one of the five.
+   */
+  private async fetchCommandNames(sessionId: string, store: CommandSnapshotStore): Promise<void> {
+    try {
+      const res = await this.client.call<ShellCommandNames>('shell.commandNames', { sessionId })
+      store.applySharedNames(res)
+    } catch (err) {
+      store.applySharedNames({
+        state: 'failed',
+        names: [],
+        ageMs: 0,
+        reason: err instanceof Error ? err.message : String(err),
+        truncated: false,
+      })
+    }
+  }
+
   lineage(): { sessionId: string; parentSessionId: string | null } | null {
     if (this.session === null) return null
     return {
@@ -2353,6 +2380,20 @@ export class TerminalContent extends BasePaneContent {
         programTitle: this.sshOpts?.host || '',
       })
       this.env.attach()
+
+      // The SHARED half of command discovery (carrier design §8). The
+      // session's own shell answers the session-local half over OSC 636 —
+      // aliases, builtins, keywords and functions, which belong to this
+      // shell and to no other. The target's PATH set is the opposite: the
+      // same for every tab open on this target, and thousands of directory
+      // reads to enumerate. So it is asked ONCE here, and the backend serves
+      // ten tabs to one host from a single scan invalidated on the mtime of
+      // each PATH directory.
+      //
+      // Fired and not awaited: a session must come up whether or not a
+      // remote host answers, and the store starts in `running`, which is
+      // exactly what the dropdown says while this is outstanding.
+      void this.fetchCommandNames(session.sessionId, renderer.snapshotStore)
       // The origin answer changed from null to a live session: an
       // already-active tab whose session (re)opens must push the change
       // without a tab switch, the same as a cwd or an environment change.

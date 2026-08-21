@@ -60,10 +60,10 @@ func wireReasons(t *testing.T) map[string]bool {
 // ssh.ReasonUnknown, which is the answer for an outcome nobody has mapped.
 func TestBootstrapOutcomes_EachHasAProductReason(t *testing.T) {
 	wire := wireReasons(t)
-	a := &remoteLauncherAdapter{logger: log.NewSlogAdapter(nil)}
+	lg := log.NewSlogAdapter(nil)
 
 	for _, o := range shellintegration.AllOutcomes() {
-		reason := a.mapBootstrapOutcome(o)
+		reason := mapBootstrapOutcome(lg, o)
 		if o == shellintegration.OutcomeBootstrapAccepted {
 			if reason != ssh.ReasonNone {
 				t.Errorf("the accepted outcome maps to %q, want no refusal at all", reason)
@@ -92,12 +92,12 @@ func TestBootstrapOutcomes_EachHasAProductReason(t *testing.T) {
 // not the other is a test failure here, one line long, instead of a reason
 // nobody can trace back to its outcome.
 func TestBootstrapOutcomes_AreSpelledIdenticallyOnBothSides(t *testing.T) {
-	a := &remoteLauncherAdapter{logger: log.NewSlogAdapter(nil)}
+	lg := log.NewSlogAdapter(nil)
 	for _, o := range shellintegration.AllOutcomes() {
 		if o == shellintegration.OutcomeBootstrapAccepted {
 			continue
 		}
-		if got := string(a.mapBootstrapOutcome(o)); got != string(o) {
+		if got := string(mapBootstrapOutcome(lg, o)); got != string(o) {
 			t.Errorf("outcome %q maps to reason %q; the two vocabularies are spelled identically "+
 				"so that this mapping can be checked by reading it", o, got)
 		}
@@ -135,8 +135,8 @@ func TestSelectiveRefusalMatrix_EveryRowHasAWireReason(t *testing.T) {
 // what a new member looks like before somebody maps it — degrades to the
 // distinct visible failure and never to "integration succeeded".
 func TestBootstrapOutcomes_AnUnmappedOutcomeFailsOpenVisibly(t *testing.T) {
-	a := &remoteLauncherAdapter{logger: log.NewSlogAdapter(nil)}
-	if got := a.mapBootstrapOutcome(shellintegration.Outcome("brand-new-outcome")); got != ssh.ReasonUnknown {
+	lg := log.NewSlogAdapter(nil)
+	if got := mapBootstrapOutcome(lg, shellintegration.Outcome("brand-new-outcome")); got != ssh.ReasonUnknown {
 		t.Errorf("an unmapped outcome mapped to %q, want %q — never ReasonNone, which the "+
 			"product renders as success", got, ssh.ReasonUnknown)
 	}

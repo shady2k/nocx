@@ -11,7 +11,7 @@
 // name, not a path) — but in argument position it answers ANY token,
 // including the empty token, which lists the session cwd (`cd ` + Tab is
 // the case the dropdown exists for).
-import type { CommandSnapshotStore } from '../command-snapshot'
+import type { CommandNamesState, CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
 import type { ShellComplete } from '../generated/shell.complete'
@@ -61,9 +61,15 @@ export type EmptyReason =
    *  typed no prefix blames them for the folder (nocx-azxe.5). `dir` is the
    *  display name, '' when it is the session cwd. */
   | { kind: 'empty-dir'; dir: string }
-  /** The OSC 636 command snapshot has not arrived yet — command names
-   *  cannot be offered, and pretending the shell has none would be a lie. */
-  | { kind: 'snapshot-pending' }
+  /** Command names could not be offered, and WHICH of the five discovery
+   *  states we are in is the whole reason this carries a payload. A missing
+   *  snapshot used to render as "still loading" whatever had happened, which
+   *  is true only while a scan is running: a user whose scan timed out,
+   *  failed, or is being served a stale cache was being told to wait for
+   *  something that was not coming. `ageMs` is meaningful for `stale` — a
+   *  cached set offered without its age is indistinguishable from a current
+   *  one — and `reason` carries the backend's own words for a failure. */
+  | { kind: 'command-names'; state: CommandNamesState; ageMs: number; reason: string }
   /** The quick-connect alias resolver (`ssh -G`) could not answer — the
    *  degraded condition the picker would surface is routed through, never
    *  rebuilt: hosts cannot be offered, and naming WHY beats the generic
@@ -121,13 +127,24 @@ export function commandProvider(store: CommandSnapshotStore): SuggestionProvider
     suggest(ctx) {
       const q = ctx.token.text
       if (q === '') return { candidates: [] }
-      // No snapshot yet: name the degrade honestly rather than pretending
-      // the shell has no commands — "command names are still loading" is a
-      // different truth from "nothing matches".
-      if (store.status === 'unavailable') {
-        return { candidates: [], emptyReason: { kind: 'snapshot-pending' } }
-      }
+      // Offer whatever has arrived, and name the shared half's state when
+      // there is nothing to offer. The two halves land by different routes —
+      // the shell's own tables over OSC 636, the target's PATH over
+      // shell.commandNames — so "no candidates" has five different causes and
+      // exactly one of them is "wait a moment". Reporting the wrong one is
+      // the defect this replaces.
       const names = store.matching(q).slice(0, MAX_PROVIDER_CANDIDATES)
+      if (names.length === 0) {
+        return {
+          candidates: [],
+          emptyReason: {
+            kind: 'command-names',
+            state: store.commandNamesState,
+            ageMs: store.commandNamesAgeMs,
+            reason: store.commandNamesReason,
+          },
+        }
+      }
       return {
         candidates: names.map((name): Candidate => ({
           id: `cmd:${name}`,

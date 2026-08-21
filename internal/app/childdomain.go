@@ -326,7 +326,11 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	// opened afterwards could miss the loader's readiness token and leave
 	// the far side blocked on a frame nobody would send.
 	plan := shellintegration.BootstrapPlan{Stage1: stage}
-	delivery, err := typed.arm(sid, wrap.ControlPath, plan)
+	// The lane travels with the delivery because it is the addressing the
+	// session integration axis already uses to route this session's facts
+	// (RegisterLifecycleLane), so the bootstrap's terminal outcome needs no
+	// second registry to reach the product.
+	delivery, err := typed.arm(sid, string(req.Lane), wrap.ControlPath, plan)
 	if err != nil {
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err

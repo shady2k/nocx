@@ -10,6 +10,21 @@ import {
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
+
+/**
+ * Existence needs BOTH halves of command discovery: the shell's own tables,
+ * which arrive over OSC 636 and are what these tests write, and the target's
+ * PATH set, which the backend computes once per host and hands over
+ * shell.commandNames. A store holding only one answers `unavailable` on
+ * purpose — with the PATH half missing, calling a name nonexistent would
+ * strike through every real command on the machine. The renderer is not the
+ * seam that fetches the shared half (terminal-content is), so these tests
+ * supply it directly, empty: present so the store can judge, empty so an
+ * unseeded name is genuinely absent.
+ */
+function seedSharedHalf(store: CommandSnapshotStore): void {
+  store.applySharedNames({ state: 'ready', names: [], ageMs: 0, reason: '', truncated: false })
+}
 import type { OscNotification } from '../osc-notification'
 import { CaptureAbortedError, CaptureIdentityTracker } from '../frame/capture-identity'
 import { getCurrentTheme } from './theme-adapter'
@@ -399,6 +414,7 @@ describe('OSC 636 command-existence snapshot', () => {
     r.write(`\x1b]636;S;${NONCE};pwd;ls;café\x07`)
     await applied
 
+    seedSharedHalf(r.snapshotStore)
     expect(r.snapshotStore.status).toBe('ready')
     expect(r.snapshotStore.has('pwd')).toBe(true)
     expect(r.snapshotStore.has('ls')).toBe(true)
@@ -455,6 +471,8 @@ describe('OSC 636 command-existence snapshot', () => {
     // the old module singleton, r2's hello would have been discarded (nonce
     // already anchored by r1) and its snapshot rejected, leaving r2 judged
     // against r1's command set — this is the defect this test pins.
+    seedSharedHalf(r1.snapshotStore)
+    seedSharedHalf(r2.snapshotStore)
     expect(r1.snapshotStore.status).toBe('ready')
     expect(r1.snapshotStore.has('pwd')).toBe(true)
     expect(r1.snapshotStore.has('ls')).toBe(true)
@@ -480,7 +498,11 @@ describe('OSC 636 command-existence snapshot', () => {
     r1.write(`\x1b]636;S;${NONCE};pwd;ls\x07`)
     await applied1
 
-    // r2 never received a hello or snapshot — it must not inherit r1's.
+    // r2 never received a hello or snapshot — it must not inherit r1's. Both
+    // get the shared half, so the only difference between them is the one
+    // under test.
+    seedSharedHalf(r1.snapshotStore)
+    seedSharedHalf(r2.snapshotStore)
     expect(r1.snapshotStore.status).toBe('ready')
     expect(r2.snapshotStore.status).toBe('unavailable')
     expect(r2.snapshotStore.has('pwd')).toBe(false)

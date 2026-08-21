@@ -63,6 +63,24 @@ type FSConn interface {
 	// cannot hold a slot forever: the lane's hard timeout closes and
 	// poisons the client, which is what unblocks File.Read.
 	ReadFile(ctx context.Context, path string, maxBytes int64) (data []byte, truncated bool, err error)
+	// Create opens path for writing and returns a handle whose every call
+	// is itself a lane call. It is OpenFile with O_WRONLY|O_CREATE|O_EXCL,
+	// NOT sftp.Client.Create — which is O_RDWR|O_CREATE|O_TRUNC and would
+	// empty an existing file (design D5). Refusing an existing path is the
+	// point: the create, not an earlier stat, is what arbitrates a
+	// collision, because a stat is a moment and a transfer is a span.
+	Create(path string) (FSFile, error)
+	// PosixRename renames old to new with the posix-rename@openssh.com
+	// extension, which replaces an existing destination atomically. A
+	// server that does not implement the extension is reported as
+	// ErrPosixRenameUnsupported and nothing else, because that is the one
+	// error a caller's non-atomic fallback may key on (design D6).
+	PosixRename(old, new string) error
+	// Rename renames old to new with plain SFTP v3 rename, which refuses an
+	// existing destination.
+	Rename(old, new string) error
+	// Remove deletes the file at path.
+	Remove(path string) error
 	// Done closes when the underlying connection shuts down: connection
 	// loss, server close, keepalive failure. It does NOT close on Close: an
 	// intentional stop while the connection is still shared must not read
@@ -76,6 +94,23 @@ type FSConn interface {
 	// flight — then waits for the subsystem's reader to observe the close,
 	// so no reader goroutine from this lease outlives Close. The
 	// connection stays open for every other reference.
+	Close() error
+}
+
+// FSFile is a write handle on a lease, returned by FSConn.Create. It exists
+// BETWEEN lane calls, and every call it makes is a lane call — which is the
+// property that matters: no write escapes the lane, the watchdog, the error
+// classification or cancellation, and a transfer is therefore bounded per
+// chunk rather than in total (design D2). An upload routinely outlives
+// fsHardTimeout; a single chunk that does not means the link is gone.
+// Poisoning the lease closes the subsystem, which invalidates this handle
+// and is what unblocks a wedged write.
+type FSFile interface {
+	// Write writes p as one lane call. A short write is reported the way
+	// io.Writer requires: the count written and the error.
+	Write(p []byte) (int, error)
+	// Close closes the remote file as one lane call. It does not release
+	// the lease; the lease is closed by its own Close.
 	Close() error
 }
 
@@ -105,6 +140,15 @@ var (
 	// nothing on this lease can ever succeed again. A poisoned lease is a
 	// terminal state the caller can observe — not a silent retry loop.
 	ErrFSDead = errors.New("ssh: sftp lease dead: hard timeout exceeded")
+	// ErrPosixRenameUnsupported is returned by PosixRename when the server
+	// does not implement posix-rename@openssh.com — it answers the extended
+	// request SSH_FX_OP_UNSUPPORTED. It is deliberately distinguishable
+	// from every other failure: replacing a destination without the
+	// extension needs a non-atomic fallback, and a fallback that cannot
+	// tell "the server lacks the extension" from "the rename failed" either
+	// never runs or runs when it must not (design D6).
+	// TODO(nocx-9le.5.1): wrap transfer.ErrPosixRenameUnsupported once both land.
+	ErrPosixRenameUnsupported = errors.New("ssh: server does not support posix-rename@openssh.com")
 )
 
 // fsLaneCap bounds concurrent in-flight SFTP calls per lease. One SFTP
@@ -537,6 +581,92 @@ func (c *fsConn) ReadFile(ctx context.Context, path string, maxBytes int64) ([]b
 		return nil, false, c.classify(err)
 	}
 	return data, truncated, nil
+}
+
+// fsFile is the concrete FSFile: a *sftp.File plus the lease that owns it.
+// Handing the *sftp.File out raw would be the whole design lost — every
+// subsequent write would escape the lane, the watchdog, the classification
+// and cancellation — so the handle keeps the lease and every call goes
+// through run.
+type fsFile struct {
+	c *fsConn
+	f *sftp.File
+}
+
+func (w *fsFile) Write(p []byte) (int, error) {
+	var n int
+	err := w.c.run(context.Background(), func() error {
+		var err error
+		n, err = w.f.Write(p)
+		return err
+	})
+	if err != nil {
+		return n, w.c.classify(err)
+	}
+	return n, nil
+}
+
+func (w *fsFile) Close() error {
+	err := w.c.run(context.Background(), func() error { return w.f.Close() })
+	if err != nil {
+		return w.c.classify(err)
+	}
+	return nil
+}
+
+func (c *fsConn) Create(path string) (FSFile, error) {
+	var f *sftp.File
+	err := c.run(context.Background(), func() error {
+		var err error
+		f, err = c.sftp.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		return err
+	})
+	if err != nil {
+		return nil, c.classify(err)
+	}
+	return &fsFile{c: c, f: f}, nil
+}
+
+func (c *fsConn) PosixRename(old, new string) error {
+	err := c.run(context.Background(), func() error { return c.sftp.PosixRename(old, new) })
+	if err == nil {
+		return nil
+	}
+	// pkg/sftp sends the extended request without consulting the server's
+	// advertised extensions (client.go:912), so a server that lacks it
+	// answers SSH_FX_OP_UNSUPPORTED — that status, and only that status, is
+	// what the caller's fallback keys on. The lease itself is healthy: a
+	// refused capability is not a transport failure.
+	if isUnsupportedExtension(err) {
+		return fmt.Errorf("%w: %v", ErrPosixRenameUnsupported, err)
+	}
+	return c.classify(err)
+}
+
+func (c *fsConn) Rename(old, new string) error {
+	err := c.run(context.Background(), func() error { return c.sftp.Rename(old, new) })
+	if err != nil {
+		return c.classify(err)
+	}
+	return nil
+}
+
+func (c *fsConn) Remove(path string) error {
+	err := c.run(context.Background(), func() error { return c.sftp.Remove(path) })
+	if err != nil {
+		return c.classify(err)
+	}
+	return nil
+}
+
+// isUnsupportedExtension reports whether err is the server saying it does not
+// implement the extended request. pkg/sftp surfaces the status packet as a
+// *StatusError carrying the raw code (sftp.go:220) and normaliseError only
+// translates NoSuchFile, PermissionDenied and EOF, so SSH_FX_OP_UNSUPPORTED
+// arrives intact and typed.
+func isUnsupportedExtension(err error) bool {
+	var se *sftp.StatusError
+	return errors.As(err, &se) && se.FxCode() == sftp.ErrSSHFxOpUnsupported
 }
 
 // classifyFSConnectError maps a refused session channel open to the typed

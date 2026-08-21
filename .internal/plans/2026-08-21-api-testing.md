@@ -4,22 +4,31 @@
 
 **Goal:** Open a collection exported from Postman, edit a request in a form, press Send, and get the response — with the token in the vault rather than in the file, and the request going out either from this machine or from inside an SSH connection already open. No account anywhere.
 
-**Architecture:** A collection is a folder of JSON files the user places; `internal/apicoll` owns the model and the folder. `internal/apisend` owns one `http.Client` whose dialer is supplied — `net.Dialer` locally, a lease on the existing SSH pool otherwise — so local and remote are one code path, not two strategies. Secrets live in the vault under their own scope and the resolver refuses references outside it. The surface is one singleton **pane** holding the tree, the form and the list of runs.
+**Architecture:** A collection is a folder of JSON files the user places; `internal/apicoll` owns the model and the folder, and addresses files through a backend-held handle so the renderer never names a path twice. `internal/apisend` owns the HTTP client implementation whose dialer is supplied — `net.Dialer` locally, an adapter over an SSH pool lease otherwise. **A collection file names a variable, never a secret**, so a folder from a pull request has no way to spell "the production SSH password". The surface is one singleton **pane**.
 
 **Tech Stack:** Go 1.x (`github.com/shady2k/nocx`), `golang.org/x/crypto/ssh`, JSON-RPC 2.0 over the existing WebSocket control plane, Solid + TypeScript frontend, JSON Schema in `contracts/` with generated renderer types, vitest + `go test -race` + Playwright.
 
-**Spec:** `.internal/specs/2026-08-21-api-testing-design.md` — every section reference below (§N) points there.
+**Spec:** `.internal/specs/2026-08-21-api-testing-design.md` — every §N below points there.
+
+**This plan is the second draft.** The first was reviewed against the code and several of its claims were wrong. What changed, so nobody re-proposes the discarded versions:
+
+- The secret **scope** on `SecretRecord`, its document version bump and its migration are **gone**. A file cannot name a secret at all, so there is nothing to scope (§8). This removed an entire task from the vault.
+- The **body cap moved from the last task to the first send**, and it is `files.read`'s streamed 2 MiB rather than a number of ours (§12.3). Shipping an unbounded send and capping it eight tasks later would have released exactly the failure the design promises to prevent.
+- **`tunnelConn.Dial` is `Dial(addr string)`** — not `DialContext`, and it takes no context. An adapter is needed and cancellation does not reach a blocked remote dial (§7.1).
+- **`Reconcile` keeps an orphan whose catalogue record landed**, the opposite of the first draft's claim (§12.2).
+- Several tasks were **not vertical** and could not have been committed past the deadcode ratchet. Boundaries were redrawn around user-reachable operations.
 
 ## Global Constraints
 
-- **AGENTS.md is binding.** Read it before the first edit; the testing rules and the git-authority rules are not optional.
-- **A task that adds a Go package lands with the wiring that makes it reachable** (`nocx-z7s6`). Every task below is a vertical slice for exactly this reason: package + composition-root wiring + transport method + the surface that calls it. A task that leaves a package callable only from its own tests cannot pass the pre-commit deadcode ratchet, and the ratchet is the hook, not the brief.
-- **Every JSON-RPC result gets a JSON Schema in `contracts/`** with `additionalProperties: false` and an explicit `required`, plus both conformance tests. `npm run contracts:check` runs in pre-commit from `frontend/`.
-- **Secrets never cross to the renderer.** ADR-0011. What crosses is an opaque reference or, for the raw view, a span annotated with a name.
-- **A test may not depend on timing.** Wait on an observable state change, never on a duration.
-- **The kit owns appearance.** Read `frontend/src/ui/README.md` and list `frontend/src/ui/` before building any control. A surface may place a kit component and may never repaint it.
-- **Commit subject ends with the bead id.** Body is prose explaining what was wrong, what changed, and why this way rather than the obvious alternative.
-- **A worker runs the unit tests for the files it changed and stops there.** `make ci-full`, the containerized jobs and the e2e suite belong to whoever integrates.
+- **AGENTS.md is binding.** Read it before the first edit.
+- **A task that adds a Go package lands with the wiring that makes it reachable** (`nocx-z7s6`). Every task is a vertical slice for this reason: package + composition root + transport method + the surface that calls it. `deadcode` cannot see a dead method behind a live interface, so each task also records `-whylive` for **its own** entry point — not only the epic's.
+- **Every JSON-RPC result gets a JSON Schema in `contracts/`** with `additionalProperties: false` and an explicit `required`, plus the DTO test and `…_OverTheWireConformsToContract`.
+- **Persisted files are a different compatibility boundary from RPC results.** The collection manifest, request and environment formats get their own schemas **and** a `storage.Module` version, refusing a version newer than ours before decoding anything.
+- **Secrets never cross to the renderer**, and **identifiers for them never enter a collection file** (§8).
+- **A test may not depend on timing.** Wait on an observable state change. `runtime.NumGoroutine` is not an observation — it is polluted by unrelated runtime goroutines and is timing-dependent.
+- **The kit owns appearance.** Read `frontend/src/ui/README.md` first.
+- **Commit subject ends with the bead id**; the body is prose about what was wrong and why this way.
+- **A worker runs the unit tests for the files it changed and stops there.** The full gate belongs to whoever integrates.
 
 ---
 
@@ -27,232 +36,193 @@
 
 **New Go packages**
 
-| Path                   | Responsibility                                                                                                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `internal/apicoll/`    | The collection model, the on-disk JSON format, the folder reader/writer, the opened-folder list. Knows nothing about HTTP or transport.                 |
-| `internal/apisend/`    | One `http.Client`, the `Dialer` seam, request assembly from the model, response capture including timings and the raw spans. Knows nothing about files. |
-| `internal/apiimport/`  | Postman v2.1 and `curl` → the `apicoll` model. Hostile input; one converter, two entrances.                                                             |
-| `internal/httppolicy/` | The guard extracted from `internal/assistant/httpguard.go`, with the policy as a parameter.                                                             |
+| Path                   | Responsibility                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/apicoll/`    | The collection model, the on-disk JSON format and its version protocol, the handle, path safety. Knows nothing about HTTP.            |
+| `internal/apibind/`    | The binding document: (collection, environment, variable) → vault id. The only thing that holds a secret identifier for this feature. |
+| `internal/apisend/`    | The HTTP client implementation, the `Dialer` seam, bounded streamed response capture, raw spans. Knows nothing about files.           |
+| `internal/apiimport/`  | Postman v2.1 and `curl` → the model. Hostile input; one converter, two entrances.                                                     |
+| `internal/httppolicy/` | The policy engine extracted from `internal/assistant/httpguard.go`, with resolve-and-dial as a route-specific capability.             |
 
-**Modified Go**
+**Modified Go:** `internal/assistant/httpguard.go` (becomes a caller), `internal/capability/` (new operations, template `snippet.go`), `internal/transport/ws_api_handlers.go` (new; template `ws_snippet_handlers.go`), `internal/transport/ws_config_handlers.go` (`regResponder` entries), `internal/app/app.go` (composition root).
 
-| Path                                       | Change                                                                                         |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `internal/vault/meta.go:18`                | `SecretMeta` gains a scope; the closed kind vocabulary gains the API kinds                     |
-| `internal/assistant/httpguard.go`          | Becomes a thin caller of `internal/httppolicy`                                                 |
-| `internal/capability/`                     | New `APIOperation` interfaces, following `internal/capability/snippet.go`                      |
-| `internal/transport/ws_api_handlers.go`    | New. Template: `internal/transport/ws_snippet_handlers.go`                                     |
-| `internal/transport/ws_config_handlers.go` | `regResponder` entries for every `api.*` method                                                |
-| `internal/app/app.go`                      | Composition root: construct the stores, the sender and the importers; `transport.WithAPI(...)` |
+**New frontend:** `frontend/src/api/api-content.ts` (**extends `SolidPaneContent`** — the object the registry actually takes), `api-client.ts`, `api-store.ts`, `api-pane.tsx`, `request-form.tsx`, `run-list.tsx`, `raw-view.tsx`.
 
-**New frontend**
-
-| Path                                | Responsibility                                     |
-| ----------------------------------- | -------------------------------------------------- |
-| `frontend/src/api/api-client.ts`    | The JSON-RPC client for `api.*`, framework-neutral |
-| `frontend/src/api/api-store.ts`     | The one list every part of the surface reads       |
-| `frontend/src/api/api-pane.tsx`     | The pane: tree, form, run list                     |
-| `frontend/src/api/request-form.tsx` | The form projection of one request                 |
-| `frontend/src/api/run-list.tsx`     | Runs, pretty/raw toggle                            |
-| `frontend/src/api/raw-view.tsx`     | Raw text with the secret spans rendered as badges  |
-
-**Modified frontend**
-
-| Path                               | Change                                                            |
-| ---------------------------------- | ----------------------------------------------------------------- |
-| `frontend/src/surface-registry.ts` | `SURFACE_ID_API` constant                                         |
-| `frontend/src/main.tsx:348`        | `registry.register(SURFACE_ID_API, …)` and the activity-bar entry |
+**Modified frontend:** `frontend/src/surface-registry.ts` (`SURFACE_ID_API`), `frontend/src/main.tsx:348`.
 
 ---
 
 ## Task Ordering
 
 ```
-T1 ──▶ T2 ──▶ T3
-        │
-        ├────▶ T4 ──▶ T5 ──┬──▶ T6 ──▶ T8 ──▶ T9 ──▶ T10 ──▶ T11
-        │                  └──▶ T7 ──┘
+T1 ──▶ T2 ──▶ T3 ──▶ T4 ──┬──▶ T5 ──┬──▶ T7 ──▶ T8 ──▶ T9 ──▶ T10
+                          └──▶ T6 ──┘
 ```
 
-T3 and T4 are independent of each other. T6 and T7 are independent of each other. Everything else is a chain.
+T5 and T6 are independent of each other. Everything else is a chain.
 
 ---
 
-### Task 1: A collection folder opens and its requests are listed
+### Task 1: A collection folder opens as a handle, and its requests are listed
 
 **Files:**
 
-- Create: `internal/apicoll/collection.go`, `internal/apicoll/folder.go`, `internal/apicoll/opened.go`
-- Create: `internal/apicoll/collection_test.go`, `internal/apicoll/folder_test.go`
-- Create: `internal/capability/api.go`
-- Create: `internal/transport/ws_api_handlers.go`
-- Create: `contracts/api.collections.list.schema.json`, `contracts/api.collections.open.schema.json`
-- Create: `frontend/src/api/api-client.ts`, `frontend/src/api/api-store.ts`, `frontend/src/api/api-pane.tsx`
-- Modify: `internal/transport/ws_config_handlers.go` (regResponder entries)
-- Modify: `internal/app/app.go` (composition root)
-- Modify: `frontend/src/surface-registry.ts`, `frontend/src/main.tsx:348`
-- Test: `internal/transport/ws_contract_test.go`, `frontend/src/api/api-store.test.ts`
+- Create: `internal/apicoll/{collection,folder,handle,path,version}.go` and their tests
+- Create: `contracts/api.collections.open.schema.json`, `contracts/api.collections.list.schema.json`
+- Create: `contracts/files/collection-manifest.schema.json`, `contracts/files/request.schema.json` — **persisted** formats, not RPC results
+- Create: `internal/capability/api.go`, `internal/transport/ws_api_handlers.go`
+- Create: `frontend/src/api/{api-content.ts,api-client.ts,api-store.ts,api-pane.tsx}`
+- Modify: `internal/transport/ws_config_handlers.go`, `internal/app/app.go`, `frontend/src/surface-registry.ts`, `frontend/src/main.tsx:348`
 
-**Interfaces:**
-
-Produces — every later task consumes these names verbatim:
+**Interfaces produced:**
 
 ```go
 package apicoll
 
-// Request is the model. Both projections (form now, line later) are views of it.
 type Request struct {
-    ID      string            `json:"id"`
-    Name    string            `json:"name"`
-    Method  string            `json:"method"`
-    URL     string            `json:"url"`
-    Headers []Header          `json:"headers"`
-    Query   []Param           `json:"query"`
-    Body    Body              `json:"body"`
-    Auth    Auth              `json:"auth"`
+    ID      string   `json:"id"`
+    Name    string   `json:"name"`
+    Method  string   `json:"method"`
+    URL     string   `json:"url"`
+    Headers []Header `json:"headers"`
+    Query   []Param  `json:"query"`
+    Body    Body     `json:"body"`
+    Auth    Auth     `json:"auth"`
 }
-
 type Header struct { Name, Value string; Enabled bool }
 type Param  struct { Name, Value string; Enabled bool }
-type Body   struct { Kind string; Text string; FileRef string } // Kind: "none"|"raw"|"form"|"file"
-type Auth   struct { Kind string; SecretRef string; User string } // Kind: "none"|"bearer"|"basic"|"apikey"
+type Body   struct { Kind, Text, FileRef string } // "none"|"raw"|"form"|"file"
+type Auth   struct { Kind, Var, User string }     // Kind: "none"|"bearer"|"basic"|"apikey"
+                                                  // Var: a VARIABLE NAME, never a secret id (§8)
 
-// Collection is a folder. Requests are addressed by their path within it.
-type Collection struct {
-    Root     string
-    Name     string
-    Requests []RequestRef
-}
-type RequestRef struct { RelPath, Name, Method string }
+// HandleID is minted by the backend on open. The renderer names this and a
+// relative path; it never names a root again (§13.1).
+type HandleID string
 
-type Folder interface {
-    Open(root string) (Collection, error)
-    ReadRequest(root, relPath string) (Request, error)
-    WriteRequest(root, relPath string, r Request) error
+type Service interface {
+    Open(root string) (HandleID, Collection, error)
+    List(h HandleID) (Collection, error)
+    ReadRequest(h HandleID, relPath string) (Request, error)
+    WriteRequest(h HandleID, relPath string, r Request) error
 }
 
-type OpenedList interface {   // the app remembers folders, never their contents
-    List() ([]string, error)
-    Add(root string) error
-    Remove(root string) error
-}
+// Module is the persisted format's own version, separate from any RPC contract.
+var Module = storage.Module{Name: "apicoll", Current: 1}
 ```
-
-JSON-RPC surface added here: `api.collections.list` (no params) and `api.collections.open` (`{path}`).
 
 **Acceptance Criteria:**
 
-- A folder containing a manifest and two request files opens, and both requests appear in the tree with their method and name.
-- A folder with no manifest is refused with a named error, not a panic and not an empty collection.
-- A request file whose JSON does not match the schema is refused **by name**, and the other requests in the folder still list — one bad file does not hide the collection.
-- The opened-folder list survives a restart; the contents are re-read from disk, never cached.
-- `api.collections.list` validates against its contract schema **off the real socket**, not only as a marshalled struct.
-- **The round trip holds on the file, from day one:** `Read(Write(r)) == r` for every request, including empty headers, a nil body and a `{{var}}` in every field. This is the half of §6.4's invariant that is testable before the line projection exists, and writing it now is what stops the model being quietly shaped by the form.
-- **The default location for a new collection is decided in this task and written into the bead** (spec §15, open question 1). Whichever way it goes — a fixed directory under the app dir, or asked once and remembered — leaving it open in the code is not an option, because "where did my collection go" is answered by the first line of code that guesses.
-- `deadcode -tags gtk3 -whylive 'github.com/shady2k/nocx/internal/apicoll.folder.Open' ./...` prints a path from `main`, and the contrast against a deliberately unwired symbol in the same package is recorded in the bead.
+- A folder with a manifest and two request files opens; both appear with method and name.
+- A folder with no manifest is refused by name — not a panic, not an empty collection.
+- One malformed request file is refused **by name** and the others still list. One bad file does not hide a collection.
+- A manifest whose version is **newer than ours is refused before any decoding**, with a sentence naming the version. This is the persisted-format protocol of `internal/storage/document.go`, which RPC contracts do not provide.
+- `Read(Write(r)) == r` for every request, including empty headers, a nil body and a `{{var}}` in each field. This is the half of §6.4's invariant testable before the line projection, and writing it now is what stops the model being shaped by the form.
+- **Path safety, one test each:** `..` in a relative path is refused; an absolute path is refused; a request file that is a symlink out of the root is refused **without following it**; a write through a symlink is refused (`internal/storage/document.go:159` already refuses exactly this); a root replaced between open and read is reported, not papered over. Refused, never clamped — a silently rewritten path reports success for something it did not do.
+- The renderer can name `root` **only** on `open`. A test asserts every other `api.*` method rejects a params object carrying a path.
+- The opened-folder list survives a restart; contents are re-read, never cached.
+- **The default location for a new collection is decided in this task and written into the bead** (§15 q1).
+- `api.collections.list` validates against its contract **off the real socket**.
+- `deadcode -tags gtk3 -whylive 'github.com/shady2k/nocx/internal/apicoll.service.Open' ./...` prints a path from `main`; the contrast against a deliberately unwired symbol in the same package goes in the bead.
 
-- [ ] **Step 1: Write the failing folder test**
+- [ ] **Step 1: Write the failing path-escape test first** — it is the one that would otherwise be written last and cut
 
 ```go
-// internal/apicoll/folder_test.go
-func TestOpen_ListsRequestsAndKeepsGoingPastOneBadFile(t *testing.T) {
+// internal/apicoll/path_test.go
+func TestReadRequest_RefusesEscapingTheRoot(t *testing.T) {
     root := t.TempDir()
+    outside := filepath.Join(t.TempDir(), "id_ed25519")
+    os.WriteFile(outside, []byte("PRIVATE KEY"), 0o600)
+    os.MkdirAll(filepath.Join(root, "users"), 0o755)
+    os.Symlink(outside, filepath.Join(root, "users", "steal.json"))
     write(t, root, "nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
-    write(t, root, "users/create.json", `{"id":"a","name":"create","method":"POST","url":"{{baseUrl}}/users"}`)
-    write(t, root, "users/broken.json", `{ not json`)
 
-    c, err := newFolder().Open(root)
-    if err != nil {
-        t.Fatalf("Open: %v", err)
-    }
-    if c.Name != "acme" {
-        t.Errorf("Name = %q, want acme", c.Name)
-    }
-    if len(c.Requests) != 1 {
-        t.Fatalf("Requests = %d, want 1 — a broken file must not hide the good ones", len(c.Requests))
-    }
-    if c.Requests[0].Method != "POST" || c.Requests[0].Name != "create" {
-        t.Errorf("Requests[0] = %+v", c.Requests[0])
+    svc := newService()
+    h, _, err := svc.Open(root)
+    if err != nil { t.Fatalf("Open: %v", err) }
+
+    for _, rel := range []string{"../../id_ed25519", outside, "users/steal.json"} {
+        if _, err := svc.ReadRequest(h, rel); !errors.Is(err, ErrPathOutsideCollection) {
+            t.Errorf("ReadRequest(%q) err = %v, want ErrPathOutsideCollection — a collection "+
+                "from a pull request must not read files outside itself", rel, err)
+        }
     }
 }
 ```
 
 - [ ] **Step 2: Run it and confirm it fails**
 
-Run: `go test ./internal/apicoll/ -run TestOpen_ListsRequests -v`
-Expected: FAIL — `undefined: newFolder`.
+Run: `go test ./internal/apicoll/ -run TestReadRequest_Refuses -v` → FAIL, `undefined: newService`.
 
-- [ ] **Step 3: Write the model and the folder reader**
+- [ ] **Step 3: Write the model, the version protocol, the handle and the folder reader**
 
-`collection.go` holds the structs above. `folder.go` walks the root, decodes each `*.json` that is not the manifest, collects decode failures into a returned slice rather than aborting, and returns the manifest name.
+The handle table lives in the service. `Open` canonicalises the root; every later call re-validates rather than trusting open time. Decode failures are collected and returned, never aborting the listing.
 
-- [ ] **Step 4: Run it and confirm it passes**
+- [ ] **Step 4: Run and confirm green**, `go test ./internal/apicoll/ -race -v`
 
-Run: `go test ./internal/apicoll/ -race -v`
+- [ ] **Step 5: Capability and transport**
 
-- [ ] **Step 5: Add the capability operation and the transport handlers**
+`internal/capability/api.go` follows `internal/capability/snippet.go`'s shape. **But not its gate:** snippets hold the config gate because the snippet library is a document in the profile directory that backup/restore also writes (`ws_snippet_handlers.go:9`). **A collection is an arbitrary folder the user chose** (§6.1) — backup/restore does not touch it, so the snippet analogy does not transfer. Collections get their **own conflict domain**. Do not serialise them behind config.
 
-`internal/capability/api.go` follows `internal/capability/snippet.go` exactly: an `APIOperation` whose `Run` hands the service to the callback guard-bound. `internal/transport/ws_api_handlers.go` follows `internal/transport/ws_snippet_handlers.go` — a constructed handler type holding the operation and the `Responder`, never the `*WSServer`.
+- [ ] **Step 6: Both contract schemas, and separately the persisted-file schemas**
 
-Collections live under the profile directory the way the snippet library does, so this belongs to the **config conflict domain**: hold the config gate, and not the vault gate (no secrets are resolved in this task).
+RPC results under `contracts/`; the manifest and request-file formats under `contracts/files/`. They are different boundaries: generated renderer DTOs give no migrations, no newer-version refusal and no strict validation of a file on disk.
 
-- [ ] **Step 6: Write the contract schemas and both conformance tests**
+- [ ] **Step 7: Wire the composition root** — `internal/app/app.go` near line 552 and `transport.WithAPI(...)` near line 823.
 
-`additionalProperties: false` plus an explicit `required` on every object. Then in `internal/transport/ws_contract_test.go`, both shapes — the DTO test and, the one that matters, `…_OverTheWireConformsToContract`, which validates the real result off the real socket.
+- [ ] **Step 8: The pane — as a `PaneContent`, not a bare component**
 
-- [ ] **Step 7: Wire the composition root**
+`frontend/src/api/api-content.ts` **extends `SolidPaneContent`** (`frontend/src/solid-pane-content.ts:18`), the way `SettingsContent` does (`settings-content.ts:29`). The registry factory returns a `PaneContent`, whose lifecycle is `mount`, `viewportChanged`, `focus`, `dispose`, `setVisible`, `setTarget` — a Solid component registered directly does not type-check.
 
-`internal/app/app.go` near line 552, where `snippetStore`/`snippetSvc` are built, and `transport.WithAPI(...)` near line 823 where `WithSnippets` is passed.
+Branded `SURFACE_API` and `SINGLETON_API` beside the Settings constants. Test the lifecycle: abort during mount, visibility before measurement, focus, and singleton deduplication.
 
-- [ ] **Step 8: Register the pane and the activity-bar entry**
+The activity-bar entry **opens or focuses the pane and does not expand the side panel** — the bottom-zone pattern `sidebar.tsx` describes, which the Settings gear uses (§9.2).
 
-`frontend/src/surface-registry.ts` gains `SURFACE_ID_API`. `frontend/src/main.tsx:348` registers it beside `SURFACE_ID_SETTINGS`, singleton-keyed. The activity-bar entry **opens or focuses the pane and does not expand the side panel** — the bottom-zone pattern `sidebar.tsx` describes and the Settings gear uses (§9.2).
-
-- [ ] **Step 9: Run the gates for what changed and commit**
+- [ ] **Step 9: Run the gates for what changed, and commit**
 
 ```bash
 go test ./internal/apicoll/ ./internal/transport/ -race
 cd frontend && npm run test -- api && npm run contracts:check && npm run typecheck
-git add -A && git commit   # subject ends with the bead id
 ```
 
 ---
 
-### Task 2: Send a request from this machine and see the response
+### Task 2: Send from this machine — bounded and streamed from the first commit
 
 **Files:**
 
-- Create: `internal/httppolicy/policy.go`, `internal/httppolicy/policy_test.go`
-- Create: `internal/apisend/sender.go`, `internal/apisend/dialer.go`, `internal/apisend/sender_test.go`
+- Create: `internal/httppolicy/{policy,dial}.go` + tests
+- Create: `internal/apisend/{sender,client,dialer,capture}.go` + tests
 - Create: `contracts/api.request.send.schema.json`
-- Create: `frontend/src/api/request-form.tsx`, `frontend/src/api/run-list.tsx`
-- Modify: `internal/assistant/httpguard.go` (becomes a caller of `httppolicy`)
-- Modify: `internal/transport/ws_api_handlers.go`, `internal/app/app.go`, `frontend/src/api/api-pane.tsx`
+- Create: `frontend/src/api/{request-form.tsx,run-list.tsx}`
+- Modify: `internal/assistant/httpguard.go`, `internal/transport/ws_api_handlers.go`, `internal/app/app.go`, `frontend/src/api/api-pane.tsx`
 
-**Interfaces:**
-
-Consumes: `apicoll.Request` from Task 1.
-
-Produces:
+**Interfaces produced:**
 
 ```go
 package apisend
 
-// Dialer is the seam. Local and remote are ONE sender with a different
-// dialer, never two strategies and never a flag inside one (AD-8).
 type Dialer interface {
     DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
+// Key is what a client instance is keyed by. One shared mutable client
+// cannot hold a per-environment jar and a per-call dialer at once without
+// leaking one environment's cookies or route into another's request, so
+// instances are immutable and cached by this.
+type Key struct { RouteID, CookieScope string }
+
 type Sender interface {
-    Send(ctx context.Context, r apicoll.Request, d Dialer) (Response, error)
+    Send(ctx context.Context, r apicoll.Request, k Key) (Response, error)
 }
 
 type Response struct {
     Status     int
     Headers    []apicoll.Header
-    Body       []byte
-    Truncated  bool          // §12.3 — a capped body is a STATE, never a silent short read
+    Text       string // decoded, always valid UTF-8; EMPTY when Binary
+    Binary     bool   // never base64 — the run says "binary body, N bytes"
+    Lossy      bool   // invalid sequences replaced
+    Truncated  bool   // the 2 MiB ceiling was hit
+    Size       int64
     Timings    Timings
     TLSVersion string
     RemoteAddr string
@@ -262,125 +232,76 @@ type Timings struct { DNS, Connect, TLS, TTFB, Total time.Duration }
 
 **Acceptance Criteria:**
 
-- A request against a local test server returns status, headers, decoded body and non-zero `Total` timing.
-- The response appears in the run list with status, elapsed time and size, and a second Send **adds a second run rather than replacing the first**.
-- `internal/assistant`'s existing guard tests still pass **unchanged** after the extraction — the extraction may not alter the assistant's policy.
-- `http://` to a public address is refused; `http://` to loopback is allowed; the check happens on the connection, not on the form. (Inherited from the extracted guard, asserted here as a fresh test that the wiring is live.)
-- A test exists for each of: DNS failure, connection refused, TLS handshake failure, a server that closes mid-body — and each has its paired "and on an ordinary machine it succeeds".
+- A request against a local test server returns status, headers, decoded body and a non-zero `Total`.
+- A second Send **adds a run** rather than replacing the first.
+- **The body is bounded in this task, not a later one.** The reader stops at the ceiling **plus one byte and never buffers the whole body** — the property `files.read` states and the reason a 40 GB response is safe. A cap applied after reading is not a cap. Test with a server that streams far past the ceiling and assert peak allocation, not just the returned length.
+- `Truncated`, `Binary` and `Lossy` are distinct states with distinct sentences in the UI. A binary body sends **empty text**, never base64.
+- **The 2 MiB default is inherited from `files.read`, not chosen**, and a parameter may only lower it.
+- `internal/assistant`'s existing guard tests pass **unedited**. If one needs editing, stop and say so — that is the signal the extraction changed the assistant's policy.
+- **The extraction separates policy from transport.** `httpguard.go:140` resolves locally and `:208`/`:226` dial with a concrete `net.Dialer`; that is correct for the assistant and cannot be reused verbatim for a route that must resolve remotely. Extract a policy engine **plus a route-specific resolve-and-dial capability**; the assistant's constructor stays locked to its existing concrete behaviour.
+- `http://` to a public address refused, to loopback allowed, checked on the connection and on every redirect hop.
+- A failure test for each of DNS, connection refused, TLS handshake, mid-body close — each paired with "and on an ordinary machine it succeeds".
+- The send holds no global gate across network I/O. Secrets and request data are snapshotted under a short-lived gate which is **released before dialling**; holding config or vault behind arbitrary remote latency would block unrelated settings, imports and backup.
 
-- [ ] **Step 1: Write the failing send test**
+- [ ] **Step 1: Write the failing streaming-bound test**
 
 ```go
-// internal/apisend/sender_test.go
-func TestSend_ReturnsStatusHeadersAndBody(t *testing.T) {
-    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(201)
-        _, _ = w.Write([]byte(`{"id":"usr_1"}`))
+// internal/apisend/capture_test.go
+func TestCapture_StopsAtTheCeilingWithoutBufferingTheBody(t *testing.T) {
+    srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        chunk := bytes.Repeat([]byte("x"), 1<<20)
+        for i := 0; i < 64; i++ { _, _ = w.Write(chunk) } // 64 MiB
     }))
     defer srv.Close()
 
+    var before, after runtime.MemStats
+    runtime.GC(); runtime.ReadMemStats(&before)
     got, err := newSender().Send(context.Background(),
-        apicoll.Request{Method: "POST", URL: srv.URL + "/users"},
-        &net.Dialer{})
-    if err != nil {
-        t.Fatalf("Send: %v", err)
-    }
-    if got.Status != 201 {
-        t.Errorf("Status = %d, want 201", got.Status)
-    }
-    if string(got.Body) != `{"id":"usr_1"}` {
-        t.Errorf("Body = %q", got.Body)
-    }
-    if got.Timings.Total == 0 {
-        t.Error("Total timing is zero — the diagnostics of §11 depend on it")
+        apicoll.Request{Method: "GET", URL: srv.URL}, Key{})
+    runtime.ReadMemStats(&after)
+
+    if err != nil { t.Fatalf("Send: %v", err) }
+    if !got.Truncated { t.Error("Truncated = false, want true") }
+    if int64(len(got.Text)) > ceiling { t.Errorf("len = %d, want <= %d", len(got.Text), ceiling) }
+    if d := after.TotalAlloc - before.TotalAlloc; d > 8<<20 {
+        t.Errorf("allocated %d bytes — the body was buffered; a cap applied AFTER "+
+            "reading is not a cap (§12.3)", d)
     }
 }
 ```
 
-- [ ] **Step 2: Run it and confirm it fails**
+- [ ] **Step 2: Run, fail, then extract `internal/httppolicy` FIRST**
 
-Run: `go test ./internal/apisend/ -run TestSend_Returns -v`
-Expected: FAIL — `undefined: newSender`.
+Carry the four reasons in `httpguard.go`'s header comment across verbatim — a reader who does not know them will "simplify" the guard into a form validator.
 
-- [ ] **Step 3: Extract the guard into `internal/httppolicy` FIRST**
+- [ ] **Step 3: Write the sender over the extracted policy**, `httptrace` for timings, the ceiling in the reader
 
-Move `guardedTransport` and its resolver out of `internal/assistant/httpguard.go` with the policy as a **parameter**, not a mode string. The four reasons in that file's header comment for why this cannot be a form check are carried across verbatim — a future reader who does not know them will "simplify" it into a form validator.
+- [ ] **Step 4: Run all three packages**, `go test ./internal/apisend/ ./internal/httppolicy/ ./internal/assistant/ -race`
 
-`internal/assistant` becomes a caller. Its existing tests must pass untouched; if any needs editing, stop and say so rather than editing it.
+- [ ] **Step 5: `api.request.send`, its schema, both conformance tests, the form and the run list**
 
-- [ ] **Step 4: Write the sender over the extracted policy**
-
-`httptrace` supplies the timings. The `Dialer` is threaded into `http.Transport.DialContext`.
-
-- [ ] **Step 5: Run and confirm both packages pass**
-
-```bash
-go test ./internal/apisend/ ./internal/httppolicy/ ./internal/assistant/ -race
-```
-
-- [ ] **Step 6: Add `api.request.send`, its schema, both conformance tests, and the run list**
-
-This method resolves secrets from Task 5 later, so its operation holds **both** the config gate and the vault gate from the start — adding a gate to a live method later is a change of concurrency behaviour, not a refactor.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ---
 
-### Task 3: Send from inside an SSH connection
+### Task 3: Environments, variables, and the route — landing together
+
+The SSH dialer and the thing that selects it are one deliverable. Split apart, the dialer has no caller and the task cannot commit.
 
 **Files:**
 
-- Create: `internal/apisend/ssh_dialer.go`, `internal/apisend/ssh_dialer_test.go`
-- Modify: `internal/app/app.go` (hand the pool connector to the sender)
+- Create: `internal/apicoll/{environment,substitute}.go`, `internal/apisend/ssh_dialer.go` + tests
+- Create: `contracts/api.environments.list.schema.json`, `contracts/files/environment.schema.json`
+- Modify: `internal/apisend/sender.go`, `internal/transport/ws_api_handlers.go`, `internal/app/app.go`, `frontend/src/api/{api-pane.tsx,api-client.ts}`
 
-**Interfaces:**
-
-Consumes: `apisend.Dialer` (Task 2); `tunnel.Connector` (`internal/tunnel/tunnel.go:110`) and `ssh.TunnelConn` (`internal/ssh/ssh_tunnel.go:12`).
-
-Produces: `apisend.NewSSHDialer(conn ssh.TunnelConn) Dialer`.
-
-**Acceptance Criteria:**
-
-- A request whose environment names a connection is dialled through `tunnelConn.Dial`, and the test asserts the **remote** side resolved the name — the address the sender was given is not resolved locally.
-- The dialer takes a **lease on the existing pool** and opens no second SSH connection: the test asserts the pool's connection count is unchanged across a send. (AD-7: `session` references, never owns.)
-- Losing the connection mid-request surfaces as a named error on the run, distinguishable from an HTTP error and from a user cancel.
-- A closed lease refuses to dial rather than dialling locally — a silent fallback to the local dialer would send a production request around its bastion, which §6.5 exists to make impossible.
-
-- [ ] **Step 1: Write the failing test that the local dialer is never used**
-
-```go
-func TestSSHDialer_NeverFallsBackToLocal(t *testing.T) {
-    lease := &fakeTunnelConn{dialErr: ssh.ErrTunnelConnClosed}
-    _, err := apisend.NewSSHDialer(lease).DialContext(context.Background(), "tcp", "api.internal:443")
-    if !errors.Is(err, ssh.ErrTunnelConnClosed) {
-        t.Fatalf("err = %v, want ErrTunnelConnClosed — a spent lease must refuse, never dial locally", err)
-    }
-}
-```
-
-- [ ] **Step 2: Run it, confirm it fails, implement, confirm it passes, commit**
-
----
-
-### Task 4: Environments and `{{var}}` — and the route lives there too
-
-**Files:**
-
-- Create: `internal/apicoll/environment.go`, `internal/apicoll/substitute.go`, and their tests
-- Create: `contracts/api.environments.list.schema.json`
-- Modify: `frontend/src/api/api-pane.tsx` (the environment picker and the route line)
-
-**Interfaces:**
-
-Produces:
+**Interfaces produced:**
 
 ```go
 type Environment struct {
-    Name      string            `json:"name"`
-    Values    map[string]string `json:"values"`
-    SecretRefs map[string]string `json:"secretRefs"` // name → opaque vault reference
-    Route     Route             `json:"route"`
+    Name        string            `json:"name"`
+    Values      map[string]string `json:"values"`
+    SecretVars  []string          `json:"secretVars"` // NAMES ONLY — no values, no ids (§8)
+    Route       Route             `json:"route"`
 }
 // Route answers "how to get there" in the SAME record as baseUrl answers
 // "where" (§6.5). Two records would drift; one cannot.
@@ -388,27 +309,88 @@ type Route struct {
     Kind      string `json:"kind"`      // "direct" | "connection"
     ProfileID string `json:"profileId"` // empty for "direct"
 }
+
+func apisend.NewSSHDialer(lease ssh.TunnelConn, dialTimeout time.Duration) Dialer
 ```
 
 **Acceptance Criteria:**
 
-- `{{baseUrl}}/users` with `baseUrl=http://localhost:3000` resolves to `http://localhost:3000/users`.
-- An unresolved `{{var}}` **blocks Send and names the variable**. It does not send the literal braces and it does not send an empty string.
-- Substitution happens in URL, headers, query and body alike — a test for each, because a substitution that works in three places out of four is the shape that ships.
-- Switching environment changes the base URL **and** the route in one motion; a test asserts a request under `prod` dials the connection dialer and the same request under `dev` dials locally.
-- There is no connection control on the request. A test asserts the request model carries no route field — the model, not just the UI, must make it inexpressible.
+- `{{baseUrl}}/users` with `baseUrl=http://localhost:3000` resolves; substitution works in URL, headers, query and body, with a test for each — one that works in three places out of four is the shape that ships.
+- An unresolved `{{var}}` **blocks Send and names the variable**. Not the literal braces, not an empty string.
+- Switching environment moves the address **and** the route in one motion: the same request under `prod` dials the SSH dialer and under `dev` dials locally.
+- The request model carries **no route field**. A test asserts it — the model, not only the UI, must make a per-request route inexpressible.
+- The SSH dialer takes a lease and **opens no second SSH connection when the pool key matches**: assert the pool's connection count across a send.
+- **The adapter's limits are tested, not assumed.** `tunnelConn.Dial(addr string)` takes no context, so: a cancelled request cannot be interrupted mid-dial, but the dial has a **bounded deadline**, and a connection that arrives after cancellation is **closed and never produces a run**. Both directions get a test.
+- A spent lease **refuses** rather than dialling locally. A silent fallback would send a production request around its bastion, which §6.5 exists to make impossible.
+- Losing the connection mid-request is a named error, distinguishable from an HTTP error and from a user cancel.
+- The bead records the honest reading of "any connection already open": `TunnelConn` goes through `acquirePooled` and shares only when the resolved pool key matches, so a send may authenticate anew. A route names a destination, not a window.
 
-- [ ] **Step 1: Write the failing test that an unresolved variable blocks the send**
+- [ ] **Step 1: Write the failing no-local-fallback test**
 
 ```go
-func TestSubstitute_UnresolvedVariableIsNamedAndBlocks(t *testing.T) {
-    _, err := Substitute("{{baseUrl}}/users", Environment{Values: map[string]string{}})
-    var unresolved *ErrUnresolved
-    if !errors.As(err, &unresolved) {
-        t.Fatalf("err = %v, want ErrUnresolved", err)
+func TestSSHDialer_ASpentLeaseRefusesRatherThanDiallingLocally(t *testing.T) {
+    d := apisend.NewSSHDialer(&fakeTunnelConn{dialErr: ssh.ErrTunnelConnClosed}, time.Second)
+    _, err := d.DialContext(context.Background(), "tcp", "api.internal:443")
+    if !errors.Is(err, ssh.ErrTunnelConnClosed) {
+        t.Fatalf("err = %v, want ErrTunnelConnClosed — falling back to the local dialer "+
+            "would send a production request around its bastion", err)
     }
-    if unresolved.Name != "baseUrl" {
-        t.Errorf("Name = %q, want baseUrl — the user must be told WHICH variable", unresolved.Name)
+}
+```
+
+- [ ] **Step 2: Run, fail, implement substitution, the route, the dialer and the wiring, pass, commit**
+
+---
+
+### Task 4: Secret variables — the binding document and auth
+
+**Files:**
+
+- Create: `internal/apibind/{binding,store}.go` + tests
+- Create: `internal/apisend/auth.go` + tests
+- Create: `contracts/api.bindings.set.schema.json`
+- Modify: `internal/apisend/sender.go`, `internal/transport/ws_api_handlers.go`, `internal/app/app.go`, `frontend/src/api/request-form.tsx`
+
+**Interfaces produced:**
+
+```go
+package apibind
+// The ONLY place a secret identifier for this feature is held. Never a file
+// under the collection root, and never the renderer (§8).
+type Key struct { Collection, Environment, Variable string }
+type Store interface {
+    Lookup(k Key) (credential.SecretID, bool, error)
+    Bind(ctx context.Context, k Key, value credential.Secret) error
+    Unbind(ctx context.Context, k Key) error
+    UnbindCollection(ctx context.Context, collection string) error // §12.2's closing event
+}
+```
+
+**Acceptance Criteria:**
+
+- **A collection file cannot name a secret.** A test writes a request file whose auth `Var` is a raw vault id belonging to an SSH profile, sends it, and asserts the value is not sent: the id is looked up as a _variable name_, finds no binding, and the send is blocked as unresolved. The point is that the file's content is irrelevant, not that a check caught it.
+- No `api.*` params or result ever carries a `credential.SecretID`. Assert over every method.
+- Bearer, basic and api-key each produce the right header from a binding; the value appears in no JSON-RPC frame.
+- **Ordering:** the vault value is written before the binding. A crash between them leaves an unreachable value (harmless) and never a binding pointing at nothing.
+- **The closing event exists and is tested:** deleting a collection removes its bindings and the values only those bindings referenced. This is what §12.2's invariant needs and what the first draft did not have.
+- The first draft's `Reconcile` claim is **not** re-used. `internal/vault/journal.go:119` clears the entry and keeps the secret when a catalogue record exists, and `CreateNamed` writes value and record together (`vault.go:1122`) — so a crashed create is treated as complete. Any cleanup here is ours, not reconciliation's.
+
+- [ ] **Step 1: Write the failing test that a file naming a raw vault id gets nothing**
+
+```go
+func TestSend_AFileNamingARawVaultIDResolvesNothing(t *testing.T) {
+    v := newTestVault(t)
+    sshID, _ := v.CreateNamed(ctx, credential.Secret("prod-root-password"),
+        vault.SecretMeta{Name: "prod", Kind: vault.KindPassword})
+
+    r := apicoll.Request{Method: "GET", URL: "http://x/", Auth: apicoll.Auth{
+        Kind: "bearer", Var: string(sshID), // a hostile file's best attempt
+    }}
+    _, err := send(t, r, envWithNoSuchVariable)
+    var unresolved *apicoll.ErrUnresolved
+    if !errors.As(err, &unresolved) {
+        t.Fatalf("err = %v, want ErrUnresolved — a vault id in a file is just an unknown "+
+            "VARIABLE NAME; there is no syntax for naming a secret (§8)", err)
     }
 }
 ```
@@ -417,129 +399,81 @@ func TestSubstitute_UnresolvedVariableIsNamedAndBlocks(t *testing.T) {
 
 ---
 
-### Task 5: Secrets get their own scope, and auth uses them
+### Task 5: Import a Postman v2.1 collection
 
 **Files:**
 
-- Modify: `internal/vault/meta.go:18` — `SecretMeta` gains `Scope Scope`, where `type Scope string` with `ScopeConnection Scope = "connection"` (the default every existing secret takes) and `ScopeAPI Scope = "api"`. The closed kind vocabulary of `meta.go:27` gains `KindBearerToken`, `KindAPIKey`. The vocabulary is closed on purpose — its comment says the format carries the set from day one so a new kind does not degrade into "unknown" — so extending it is the sanctioned move and inventing a kind string at a call site is not.
-- Create: `internal/apisend/auth.go`, `internal/apisend/auth_test.go`
-- Create: `internal/apicoll/resolve.go`, `internal/apicoll/resolve_test.go`
-- Modify: `frontend/src/api/request-form.tsx` (auth as chips, per ADR-0021 — never a text field)
+- Create: `internal/apiimport/postman.go`, `internal/apiimport/fs.go` + tests, `internal/apiimport/testdata/`
+- Create: `contracts/api.import.postman.schema.json`
+- Modify: `internal/transport/ws_api_handlers.go`, `internal/app/app.go`, `frontend/src/api/{api-pane.tsx,api-client.ts}`
 
-**Interfaces:**
-
-Produces: `apicoll.ResolveSecret(ref string, scope vault.Scope) (credential.Secret, error)`, which **refuses any reference outside the API scope**.
-
-**Acceptance Criteria — this task is the gate on the format decision (§8):**
-
-- A collection file referencing a secret belonging to an SSH profile is **refused at resolve time**, with a named error. The test constructs a real profile secret, references it from a collection file, and asserts the send never happens.
-- The refusal is in the **resolver**, not in the importer and not in the UI: a hand-edited file, a file arriving in a pull request, and a file written by our own importer all hit the same check.
-- Bearer, basic and api-key each produce the correct header, each from a vault reference, and the value never appears in any JSON-RPC params or result.
-- A test asserts the renderer cannot name a secret id on any `api.*` method — the same refusal `credentials.create` already makes (`ws.go:1371`).
-- **If this cannot be made to hold, stop and raise it.** §8 of the spec says the file-based format is re-opened rather than shipped with a warning, and that decision is the owner's.
-
-- [ ] **Step 1: Write the failing cross-scope refusal test**
+**Interfaces produced:**
 
 ```go
-func TestResolve_RefusesASecretOutsideTheAPIScope(t *testing.T) {
-    v := newTestVault(t)
-    sshRef, _ := v.CreateNamed(ctx, credential.Secret("prod-root-password"),
-        vault.SecretMeta{Name: "prod", Kind: vault.KindPassword, Scope: vault.ScopeConnection})
-
-    _, err := apicoll.ResolveSecret(string(sshRef), vault.ScopeAPI)
-    if !errors.Is(err, apicoll.ErrSecretOutOfScope) {
-        t.Fatalf("err = %v, want ErrSecretOutOfScope — a collection file from a pull "+
-            "request must not reach a connection's password (spec §8, nocx-jb20.1)", err)
-    }
-}
-```
-
-- [ ] **Step 2: Run, fail, implement the scope, pass**
-
-- [ ] **Step 3: Check the existing vault tests still pass unedited**
-
-Run: `go test ./internal/vault/ ./internal/credential/ ./internal/connection/ -race`
-A `SecretMeta` change touches the profile path. If an existing test needs editing to pass, that is a signal the scope defaulted wrongly — fix the default, not the test.
-
-- [ ] **Step 4: Implement the three auth schemes, run, commit**
-
----
-
-### Task 6: Import a Postman v2.1 collection
-
-**Files:**
-
-- Create: `internal/apiimport/postman.go`, `internal/apiimport/postman_test.go`
-- Create: `internal/apiimport/testdata/` (a real export, secrets replaced)
-- Create: `contracts/api.import.schema.json`
-
-**Interfaces:**
-
-Produces two entry points, and the split matters: the pure one is testable without a disk, the other owns the atomicity of §12.2.
-
-```go
-// Pure: bytes in, model out. No disk, no vault.
 func FromPostman(r io.Reader) (apicoll.Collection, []apicoll.Request, []apicoll.Environment, []Unsupported, error)
-
-// Effectful: assembles in a temp dir, writes secrets to the vault under
-// ScopeAPI FIRST, then arrives by one rename (§12.2).
-func ImportInto(root string, v SecretWriter, r io.Reader) ([]Unsupported, error)
+func ImportInto(ctx context.Context, fs FS, b apibind.Store, dest string, r io.Reader) ([]Unsupported, error)
 
 type Unsupported struct { What, Why string } // itemised to the user, never logged away
-type SecretWriter interface {
-    CreateNamed(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
+type FS interface {                          // injected so "fail at file N" is testable
+    MkdirTemp(dir, pattern string) (string, error)
+    WriteFile(name string, b []byte, perm os.FileMode) error
+    Sync(name string) error
+    Rename(old, new string) error
+    RemoveAll(path string) error
 }
 ```
 
 **Acceptance Criteria:**
 
-- A real Postman v2.1 export imports: folders become directories, requests become files, `{{baseUrl}}` survives as `{{baseUrl}}`.
-- An environment variable of `"type": "secret"` lands **in the vault under the API scope**, and a scan of every written file finds the value in none of them.
-- Anything not carried over is **itemised to the user**, not logged. A test asserts the list is non-empty for an export using a feature we do not model, and that it reaches the RPC result.
-- **Partial failure:** an import that fails on the last file leaves **no** partial collection on disk. The test injects a write failure at file N and asserts the target directory does not exist.
-- **Ordering:** the secret is written before the file that references it, and an interrupted import leaves an orphan vault record that `Reconcile` collects — never a file referencing nothing. The test asserts the invariant with **both ends**: the record exists from before the first referencing write until the last referencing file is removed.
-- Parsing happens backend-side. A test asserts the renderer sends a **path**, never file contents (`nocx-52b`).
+- A real Postman v2.1 export imports: folders become directories, requests become files, `{{baseUrl}}` survives.
+- A `"type": "secret"` variable becomes a **declared secret variable** — its name in the environment file, its value in the vault, its identifier in the binding document. A walk of every written file finds the value in none of them **and finds no vault identifier either**.
+- Anything not carried over is **itemised into the RPC result**, not logged. Test with an export using a feature we do not model.
+- **Atomicity, stated rather than implied:** the temporary directory is created **inside the destination's parent** so the rename stays on one filesystem; an existing destination is **refused**, not replaced; files and the staging directory are synced before the rename and the parent after it. The injected `FS` makes each of these a test: fail at file N, fail at sync, fail at rename, fail after rename.
+- After a failure at any of those points, the destination does not exist and no binding references a missing value.
+- Parsing is backend-side: the renderer sends a **path**, never file contents (`nocx-52b`).
 - **An import never fires a request.**
+- It lands with its RPC method, handler, client call and the UI entrance that invokes it — `FromPostman` with no caller cannot commit.
 
-- [ ] **Step 1: Write the failing test that no file contains the secret**
+- [ ] **Step 1: Write the failing test that no file carries the secret or its id**
 
 ```go
-func TestFromPostman_SecretGoesToTheVaultAndNoFileCarriesIt(t *testing.T) {
-    root := t.TempDir()
-    v := newTestVault(t)
-    if err := ImportInto(root, v, strings.NewReader(postmanExportWithSecret)); err != nil {
+func TestImportInto_NoFileCarriesTheValueOrItsIdentifier(t *testing.T) {
+    dest := filepath.Join(t.TempDir(), "acme")
+    binds := newBindStore(t)
+    if _, err := ImportInto(ctx, realFS{}, binds, dest, strings.NewReader(exportWithSecret)); err != nil {
         t.Fatalf("ImportInto: %v", err)
     }
-    filepath.WalkDir(root, func(p string, d fs.DirEntry, _ error) error {
+    id, _, _ := binds.Lookup(apibind.Key{Collection: dest, Environment: "prod", Variable: "token"})
+    filepath.WalkDir(dest, func(p string, d fs.DirEntry, _ error) error {
         if d.IsDir() { return nil }
         b, _ := os.ReadFile(p)
         if bytes.Contains(b, []byte("s3cr3t-token-value")) {
-            t.Errorf("%s carries the secret in the clear — the whole point of §6.3 is that "+
-                "this folder is safe to commit BY CONSTRUCTION", p)
+            t.Errorf("%s carries the value in the clear", p)
+        }
+        if id != "" && bytes.Contains(b, []byte(id)) {
+            t.Errorf("%s carries the vault identifier — a file must not be able to name a "+
+                "secret at all, which is the whole of §8", p)
         }
         return nil
     })
 }
 ```
 
-- [ ] **Step 2: Run, fail, implement (temp dir + one rename), pass, commit**
+- [ ] **Step 2: Run, fail, implement, pass, commit**
 
 ---
 
-### Task 7: Import a `curl` command line
+### Task 6: Import a `curl` command line
 
-**Files:**
-
-- Create: `internal/apiimport/curl.go`, `internal/apiimport/curl_test.go`
-
-**Interfaces:** Produces `apiimport.FromCurl(line string) (apicoll.Request, []Unsupported, error)`.
+**Files:** Create `internal/apiimport/curl.go` + tests; `contracts/api.import.curl.schema.json`; modify the handler, the client and the pane's paste entrance.
 
 **Acceptance Criteria:**
 
-- `-X`, `-H`, `-d`/`--data-raw`/`--data-binary`/`--data-urlencode`, `-F`, `--json`, `-u`, `-b`, `-G`, `-L`, `-k`, `--compressed` each produce the right field; one test per flag.
-- Quoting and line continuations are handled by **our own parser**. A test asserts a line containing `$(rm -rf /)` and one containing backticks are parsed as literal text and that **no shell is invoked** — assert on the absence of any exec, not merely on the absence of damage.
-- `--proxy`, `--cert` and `-o` are **refused out loud and itemised**. A test asserts the refusal reaches the RPC result, because a flag that changes the meaning of the request may not be silently dropped.
-- A line carrying `-H 'Authorization: Bearer …'` is detected as a secret candidate and offered to the vault; the imported file carries a reference, not the token.
+- One test per supported flag: `-X`, `-H`, `-d`/`--data-raw`/`--data-binary`/`--data-urlencode`, `-F`, `--json`, `-u`, `-b`, `-G`, `-L`, `-k`, `--compressed`.
+- Quoting and continuations are handled by **our parser**. A line containing `$(…)` and one containing backticks parse as literal text, and the test asserts **no shell was invoked** — assert on the absence of an exec, not on the absence of damage.
+- `--proxy`, `--cert`, `-o` are **refused out loud and itemised into the RPC result**. A flag that changes the meaning of a request may not be silently dropped.
+- A line carrying `-H 'Authorization: Bearer …'` is offered as a secret variable; the written file carries the variable name only.
+- Lands with its RPC method, handler, client call and UI entrance.
 
 - [ ] **Step 1: Write the failing no-shell test**
 
@@ -557,57 +491,47 @@ func TestFromCurl_NeverInvokesAShell(t *testing.T) {
 
 ---
 
-### Task 8: Raw, and the three states of a secret in it
+### Task 7: Raw — placements on the request, a bounded search on the response
 
-**Files:**
+**Files:** Create `internal/apisend/spans.go` + tests, `contracts/api.request.raw.schema.json`, `frontend/src/api/raw-view.tsx` + test; modify `internal/apisend/sender.go` so the live send produces the raw.
 
-- Create: `internal/apisend/spans.go`, `internal/apisend/spans_test.go`
-- Create: `contracts/api.request.raw.schema.json`
-- Create: `frontend/src/api/raw-view.tsx`, `frontend/src/api/raw-view.test.tsx`
-
-**Interfaces:**
-
-Produces — the value never crosses; only spans do (ADR-0021, §11.2):
+**Interfaces produced:**
 
 ```go
 type Span struct {
     From, To int    `json:"from"`
-    Kind     string `json:"kind"`     // "text" | "secret" | "secret-damaged"
-    Name     string `json:"name"`     // the secret's NAME, never its value
-    Damage   string `json:"damage"`   // e.g. "truncated, 24 of 214 bytes"; empty unless damaged
+    Kind     string `json:"kind"`   // "text" | "secret" | "secret-damaged"
+    Name     string `json:"name"`   // the NAME, never the value
+    Damage   string `json:"damage"` // "truncated, 24 of 214 bytes"; empty unless damaged
 }
 type Raw struct { Text string `json:"text"`; Spans []Span `json:"spans"` }
 
-// Placement is what the SENDER knows because it did the substituting: where
-// a secret was put, and what it should still be. This is why §11.2 is a
-// VERIFICATION and not a scan — there is nothing to search for.
-type Placement struct {
-    From, To int
-    Name     string
-    Want     string // the expected bytes; never crosses the wire
-}
+// Placement is what the sender knows because it did the substituting. It is
+// why the REQUEST side is verification and not a search.
+type Placement struct { From, To int; Name string; Want string } // Want never crosses
 
-func MarkSpans(text string, placed []Placement) Raw
+func MarkRequest(text string, placed []Placement) Raw
+// The response has no placements: a placement in the request says nothing
+// about whether a server echoed the bytes back, or where. §11.3.
+func SearchResponse(decoded string, used []NamedSecret) Raw
 ```
 
 **Acceptance Criteria:**
 
-- Raw shows the request line, headers, body, the connection diagnostics (resolved address, route, TLS version, per-phase timings) and the response — for both sides.
-- **Exact byte match → a badge naming the secret.**
-- **Our span, bytes differ → a damage badge naming the shape of the damage, and the bytes are NOT rendered.** The test truncates a token to its first 24 bytes and asserts those 24 bytes appear **nowhere** in the payload — a truncated token is a prefix of a live one.
-- **Not our span → plain text.**
-- A test asserts no `Span` ever carries a secret value, over the wire, for all three states.
-- The response is marked by the same mechanism: a server echoing the token back is shown as a badge, which is the finding people otherwise miss.
-- No reveal state persists: a test asserts a revealed value is not written to any store and does not survive a remount.
+- Raw shows request line, headers, body, the connection diagnostics (resolved address, route, TLS version, per-phase timings) and the response.
+- Exact byte match → a badge naming the secret. Our span with different bytes → a **damage badge naming the shape**, and the surviving bytes appear **nowhere** in the payload — a truncated token is a prefix of a live one. Not our span → plain text.
+- No `Span` ever carries a secret value, in any of the three states, over the wire.
+- **The response search is bounded and its limits are stated, not discovered:** it runs on the **decoded** body only (after decompression and de-chunking, never before); it does **not** find transformed spellings — a base64-wrapped or URL-escaped token is missed, and a test pins that so the coverage is never overstated; overlapping matches collapse to the longest.
+- A server echoing the token into an error message shows it as a badge. Without this the raw view — whose whole purpose is to show everything — ships a live credential to the renderer as ordinary text.
+- No reveal state persists: a revealed value is written to no store and does not survive a remount.
 
-- [ ] **Step 1: Write the failing truncation test**
+- [ ] **Step 1: Write the failing truncation-leak test**
 
 ```go
-func TestSpans_ADamagedSecretNeverLeaksItsSurvivingBytes(t *testing.T) {
+func TestMarkRequest_ADamagedSecretNeverLeaksItsSurvivingBytes(t *testing.T) {
     secret := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature"
-    sent := "Bearer " + secret[:24] // truncated in transit
-
-    raw := MarkSpans(sent, []Placement{{From: 7, To: len(sent), Name: "API_TOKEN", Want: secret}})
+    sent := "Bearer " + secret[:24]
+    raw := MarkRequest(sent, []Placement{{From: 7, To: len(sent), Name: "API_TOKEN", Want: secret}})
 
     if raw.Spans[1].Kind != "secret-damaged" {
         t.Fatalf("Kind = %q, want secret-damaged", raw.Spans[1].Kind)
@@ -621,71 +545,62 @@ func TestSpans_ADamagedSecretNeverLeaksItsSurvivingBytes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run, fail, implement, pass, commit**
+- [ ] **Step 2: Run, fail, implement both sides, pass, commit**
 
 ---
 
-### Task 9: Cookies and session between requests
+### Task 8: Cookies, scoped per environment, in the live sender
 
-**Files:**
-
-- Create: `internal/apisend/jar.go`, `internal/apisend/jar_test.go`
-- Modify: `frontend/src/api/api-pane.tsx` (a visible, clearable session indicator)
+**Files:** Create `internal/apisend/jar.go` + tests; modify `internal/apisend/{sender,client}.go` and `frontend/src/api/api-pane.tsx`.
 
 **Acceptance Criteria:**
 
-- A login request setting a cookie is followed by a request that carries it, with no configuration.
-- The jar is scoped per environment. A test asserts a `dev` cookie is never sent under `prod` — cross-environment leakage is the failure mode this scoping exists to prevent.
-- The jar is **visible and clearable in the product**, not only in memory: a soft state the UI does not admit to is how a stale session becomes an hour of debugging.
-- A cookie marked `Secure` is not sent over plain http; a test for each direction.
-- Whether the jar survives a restart is decided **in this task and written into the bead**, either way — spec §15 open question 2 leaves it open, and leaving it open in the code is not an option.
+- A login request that sets a cookie is followed by a request carrying it, with no configuration.
+- **The jar is part of the client `Key`.** A test sends concurrently under `dev` and `prod` and asserts neither the cookie nor the dialer crossed. This is the concrete reason instances are immutable and cached rather than one shared client mutated per send.
+- A `Secure` cookie is not sent over plain http; a test each way.
+- The jar is **visible and clearable in the product**. A soft state the UI does not admit to is how a stale session becomes an hour of debugging.
+- **Whether the jar survives a restart is decided in this task and written into the bead** (§15 q2).
 
-- [ ] **Step 1: Write the failing cross-environment test, run, fail, implement, pass, commit**
+- [ ] **Step 1: Write the failing concurrent cross-environment isolation test, run, fail, implement, pass, commit**
 
 ---
 
-### Task 10: The body cap, and the failure paths in one pass
+### Task 9: The failure paths, and an honest cancellation boundary
 
-**Files:**
-
-- Modify: `internal/apisend/sender.go`
-- Create: `internal/apisend/failure_test.go`
+**Files:** Create `internal/apisend/failure_test.go`; modify `internal/apisend/sender.go`.
 
 **Acceptance Criteria:**
 
-- The body is capped. **A capped body is a state the run displays**, and three sentences stay distinct: truncated, empty, and gone.
-- The cap is measured, not asserted: the bead records what was measured and at what size the control plane degrades. (§15 open question 3.)
-- A response larger than the cap does not put an unbounded value on the control plane — the test asserts the frame size, not merely that nothing crashed.
-- Failure tests, each paired with its success case: DNS, TCP refused, TLS failure, mid-body close, pool lease refused, vault sealed, collection folder unreadable, collection folder read-only on write, malformed import.
-- Cancelling a request in flight leaves no goroutine and no half-written run. Assert with `-race` and a goroutine count, not by eye.
+- Failure tests, each paired with its success case: DNS, TCP refused, TLS failure, mid-body close, pool lease refused, vault sealed, collection folder unreadable, folder read-only on write, malformed import, handle invalidated by a root replaced underneath.
+- **Cancellation is asserted on an observable, not on a goroutine count.** The sender exposes a lifecycle completion signal and the test waits on that. `runtime.NumGoroutine` is polluted by unrelated runtime goroutines and is timing-dependent, which the repository's own rule forbids.
+- The cancellation **boundary is stated**: a blocked remote dial cannot be interrupted, because `tunnelConn.Dial` takes no context. What is guaranteed instead — a bounded dial deadline, and a late connection closed without producing a run — is tested in both directions. A context-aware tunnel seam would remove the limit and is a separate bead, filed by this task.
+- Cancelling in flight leaves no half-written run.
 
-- [ ] **Step 1: Write the failing cap test, run, fail, implement, pass, commit**
+- [ ] **Step 1: Write the failing late-connection test, run, fail, implement, pass, commit**
 
 ---
 
-### Task 11: The end-to-end check that watches a person do it
+### Task 10: The end-to-end check that watches a person do it
 
-**Files:**
+**Files:** Create `e2e/api-testing.spec.ts`, `e2e/fixtures/postman-collection.json`.
 
-- Create: `e2e/api-testing.spec.ts`
-- Create: `e2e/fixtures/postman-collection.json`
+**Acceptance Criteria — the epic's DONE WHEN, as one scenario:**
 
-**Acceptance Criteria — this is the epic's DONE WHEN, and it is written as one scenario:**
+- The spec starts a local test server.
+- A Postman v2.1 export with `{{baseUrl}}/users` and a bearer token is imported through the UI.
+- The value is in the vault; a walk of every file under the collection root finds neither the value **nor any vault identifier**.
+- The request opens, Send is pressed, a run appears with `201` and the decoded body.
+- Raw is opened; the token appears **as a badge naming the secret**, never as its bytes.
+- It waits on observable state — a run row, a DOM state — never on a duration.
+- It runs in the container (`e2e/run-in-container.sh`) and is confirmed in CI. A failure red only in the container is investigated before it is "fixed": that image is Linux WebKit at a container-default viewport, and CI is the source of truth.
 
-- A local test server is started by the spec.
-- A Postman v2.1 export carrying `{{baseUrl}}/users` and a bearer token is imported through the UI.
-- The token is in the vault, and a walk of every file under the collection root finds it in none.
-- The request opens, Send is pressed, and a run appears with `201` and the decoded body.
-- Raw is opened, and the token appears **as a badge naming the secret**, never as its bytes.
-- The spec waits on observable state — a run row, a DOM state — and never on a duration.
-- It runs in the container (`e2e/run-in-container.sh`) and is confirmed in CI. A layout-sensitive failure that is red only in the container is investigated before it is "fixed": the container is Linux WebKit at a container-default viewport, and CI is the source of truth.
-
-- [ ] **Step 1: Write the spec, watch it fail at each stage, make each stage pass, commit**
+- [ ] **Step 1: Write the spec, watch each stage fail, make each pass, commit**
 
 ---
 
 ## Where this plan deliberately says no
 
-- **Splits** — not built and not designed around (§9.4). The workbench is a pane, so it inherits them.
-- **The HTTPie-style line** — the second projection. The model is built for it and `parse(render(r)) == r` is written in Task 1's model tests, but no line parser ships here.
+- **Splits** — not built and not designed around (§9.4).
+- **The HTTPie-style line** — the second projection. The model is built for it and the file round trip is tested in Task 1, but no line parser ships here.
+- **A context-aware tunnel dial seam** — filed as its own bead by Task 9, not smuggled into this epic.
 - **Everything in spec §3.**

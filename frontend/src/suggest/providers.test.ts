@@ -9,6 +9,7 @@ import {
   historyProvider,
   fsProvider,
   createShellProviders,
+  shellCompleteProvider,
   MAX_HISTORY_IN_ARGUMENT_POSITION,
   MAX_PROVIDER_CANDIDATES,
   type SuggestContext,
@@ -16,6 +17,7 @@ import {
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { HistoryQuery } from '../generated/history.query'
 import type { FsComplete } from '../generated/fs.complete'
+import type { ShellComplete } from '../generated/shell.complete'
 import type { Candidate } from './candidate'
 import { ProfileClient } from '../profiles'
 import type { SSHProfile } from '../profiles'
@@ -960,5 +962,84 @@ describe('createShellProviders and the snippet library (nocx-nlhe)', () => {
     )
     const ranked = rankCandidates(candidates, { query: 'git', now: 1_750_000_000_000 })
     expect(ranked.map((r) => r.source)).toEqual(['command', 'snippet'])
+  })
+})
+
+// ── the remote shell adapter: what a pick actually inserts ────────────────
+//
+// The adapter had no test of its own, and that is how `cd repos/t` shipped
+// completing to `cd repos/repos/tabby/` (nocx-yqoy5): the row's insert text is
+// the token's prefix PLUS the candidate name, so a backend that answers with
+// the whole word rather than the last segment doubles the prefix. Asserting
+// the rendered row was never going to catch it — only assembling the line the
+// user ends up with does.
+describe('shellCompleteProvider — the line a pick produces', () => {
+  const answering = (entries: ShellComplete['entries']) =>
+    shellCompleteProvider({
+      complete: () => Promise.resolve({ entries, truncated: false }),
+      sessionId: () => 'sess-1',
+    })
+
+  /** The document after accepting the candidate, exactly as the controller
+   *  applies it (replacement range + insertText). */
+  const accepted = (doc: string, c: Candidate): string =>
+    doc.slice(0, c.replacement.from) + c.insertText + doc.slice(c.replacement.to)
+
+  const remote = (doc: string, text: string) =>
+    ctx({
+      isLocal: false,
+      doc,
+      token: { text, from: doc.length - text.length, to: doc.length },
+      position: 'argument',
+      cwd: '/home/dev',
+      host: 'dev@192.168.0.25',
+    })
+
+  it('keeps the typed directory once when the token is nested', async () => {
+    const provider = answering([
+      { name: 'tabby', path: '/home/dev/repos/tabby', source: 'path', isDir: true },
+    ])
+    const c = remote('cd repos/t', 'repos/t')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cd repos/tabby/')
+    // The row shows the segment, not the parent the line already carries.
+    expect(candidates[0].displayText).toBe('tabby/')
+  })
+
+  it('steps into a directory when the token ends in a slash', async () => {
+    const provider = answering([
+      { name: 'tabby', path: '/home/dev/repos/tabby', source: 'path', isDir: true },
+    ])
+    const c = remote('cd repos/', 'repos/')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cd repos/tabby/')
+  })
+
+  it('completes a bare token with no prefix to re-add', async () => {
+    const provider = answering([
+      { name: 'repos', path: '/home/dev/repos', source: 'path', isDir: true },
+    ])
+    const c = remote('cd re', 're')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cd repos/')
+  })
+
+  it('inserts a file without a trailing slash', async () => {
+    const provider = answering([
+      { name: 'notes.md', path: '/home/dev/repos/notes.md', source: 'path', isDir: false },
+    ])
+    const c = remote('cat repos/n', 'repos/n')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('cat repos/notes.md')
+  })
+
+  it('inserts a completion-function word whole — it is already the replacement', async () => {
+    // `function` answers come from the remote shell's own completion function
+    // (a git branch, say). They are the whole word by construction, so the
+    // token prefix must NOT be prepended to them.
+    const provider = answering([{ name: 'main', source: 'function' }])
+    const c = remote('git checkout ma', 'ma')
+    const { candidates } = await provider.suggest(c, new AbortController().signal)
+    expect(accepted(c.doc, candidates[0])).toBe('git checkout main')
   })
 })

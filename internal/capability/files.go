@@ -5,6 +5,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -96,7 +97,18 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	if a, ok := provider.(filesystemEndpointAttester); ok {
 		endpointID = a.EndpointID()
 	}
-	bid, err := s.reg.Register(provider, sess.ID(), endpointID, nil)
+	// The write seam is resolved HERE, beside the attestation, because this
+	// is the last moment the provider is in hand: Binding.provider is
+	// unexported and Acquire returns a Handle, so nothing downstream can
+	// perform this assertion (upload design D7). A provider that does not
+	// implement it — every local one — contributes no sink, and that nil is
+	// rule R1: the binding's Upload refuses because it has nothing to write
+	// through, not because somebody remembered to check where the tab is.
+	var sink transfer.Sink
+	if u, ok := provider.(filesystem.Uploader); ok {
+		sink = u.Sink()
+	}
+	bid, err := s.reg.Register(provider, sess.ID(), endpointID, sink)
 	if err != nil {
 		return "", "", err
 	}

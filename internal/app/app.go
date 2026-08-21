@@ -1295,8 +1295,8 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			opts = append(opts, sftp.WithRoot(rootPath))
 		}
 		return &endpointAttestedProvider{
-			Provider:   sftp.New(fsUploadLease{FSConn: fs}, opts...),
-			endpointID: endpointIDFor(sess),
+			remoteProvider: sftp.New(fsUploadLease{FSConn: fs}, opts...),
+			endpointID:     endpointIDFor(sess),
 		}, nil
 	}
 }
@@ -1353,12 +1353,33 @@ func (l fsUploadLease) PosixRename(old, new string) error {
 	return err
 }
 
+// remoteProvider is what the factory builds for a remote session: a
+// filesystem this backend can read AND write. The two halves are named
+// together because on a remote session they are not separable — a tab that
+// can list a host is a tab a file can be uploaded to (upload design R1) —
+// and because naming them together is what makes the day sftp.Provider
+// loses Sink a compile error here rather than a remote tab quietly refusing
+// every upload.
+type remoteProvider interface {
+	filesystem.Provider
+	filesystem.Uploader
+}
+
 // endpointAttestedProvider wraps a remote provider with the endpoint
 // attestation (spec §5.1, D4/D6). The transport reads it through the
 // optional filesystemEndpointAttester seam; a local provider never carries
 // it, which is what makes files.reveal a local-only capability.
+//
+// It embeds remoteProvider rather than filesystem.Provider, and the
+// difference is load-bearing: embedding an interface promotes exactly that
+// interface's methods, so a wrapper embedding filesystem.Provider has no
+// Sink at all however writable the value inside it is. files.open asserts
+// filesystem.Uploader on what the factory returned — this wrapper — so the
+// narrower embedding would drop the write capability there, with every
+// other files.* call still working and the only symptom being uploads
+// refusing on a remote tab.
 type endpointAttestedProvider struct {
-	filesystem.Provider
+	remoteProvider
 	endpointID string
 }
 

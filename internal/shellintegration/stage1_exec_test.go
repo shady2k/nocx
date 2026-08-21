@@ -305,8 +305,10 @@ func TestStage1_HandsTheCapabilityOverAnUnlinkedDescriptor(t *testing.T) {
 		opts.Lane, opts.Domain, opts.Epoch, opts.LifecyclePort) {
 		t.Errorf("lifecycle addressing = %s, want the launch options", got)
 	}
-	if got := s.capture("LAUNCH_CAPFD="); got != "["+capabilityFDLiteral()+"]" {
-		t.Errorf("descriptor number = %s, want [%s]", got, capabilityFDLiteral())
+	// The number is stated once, from the constant stage-1 exports it under.
+	capFD := strconv.Itoa(CapabilityFD)
+	if got := s.capture("LAUNCH_CAPFD="); got != "["+capFD+"]" {
+		t.Errorf("descriptor number = %s, want [%s]", got, capFD)
 	}
 	if !strings.Contains(s.output(), "LAUNCH_TEMP_GONE") {
 		t.Errorf("the temp name survived into the launcher; output:\n%s", s.output())

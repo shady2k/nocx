@@ -31,20 +31,34 @@ import (
 // integration/, lock polls) are measured separately by
 // TestMeasurePublishScaling and TestMeasureLockLoopCost and are NOT folded
 // into these constants.
-// measuredMaxPublishBytes moved once, on 2026-08-21, and the move is the
-// ratchet working rather than failing. It was 57,496 when measured against a
-// tree that had the carrier but not stage-1; merging the two grew the launch
-// carrier from 7,170 to 14,384 bytes, because it now also emits the terminal
-// bootstrap outcome and reads the capability from the inherited descriptor.
-// 57,496 + 7,214 = 64,710, exactly. Neither figure could be observed on either
-// branch alone, which is why only the merged gate reported it.
+// measuredMaxPublishBytes has moved twice, and both moves are the ratchet
+// working rather than failing. Every byte of both is the launch carrier,
+// which is the only bundle file either change touched.
 //
-// The CALL counts did not move — 57/17/49/58/58/63 on every path — so N = 90
-// is untouched: the bundle got larger, not the work. B = 256 KiB still holds
-// at 3.95x headroom rather than 4.6x.
+// 2026-08-21, first move: it was 57,496 when measured against a tree that had
+// the carrier but not stage-1; merging the two grew the launch carrier from
+// 7,170 to 14,384 bytes, because it now also emits the terminal bootstrap
+// outcome and reads the capability from the inherited descriptor. Neither
+// figure could be observed on either branch alone, which is why only the
+// merged gate reported it.
+//
+// 2026-08-21, second move (nocx-m8jwn.9, startup fidelity): 64,710 -> 67,211,
+// and the +2,501 is the carrier again, 14,384 -> 16,885. Three things grew
+// it: the login banner sshd skips is now emulated in the carrier itself (the
+// one point every tier passes through, so it is printed once per bootstrap
+// and ~/.hushlogin is honoured); the bash tier's rcfile, which the carrier
+// embeds, now sources the system profile a login shell would have read; and
+// the zsh tier's transient ZDOTDIR, which the carrier also embeds, now writes
+// a .zshenv and a .zprofile beside its .zshrc so the user's own login-phase
+// files run in their native phases. The bundle's three generation scripts did
+// not move at all: 27,161 / 21,924 / 661.
+//
+// The CALL counts did not move on either occasion — 57/17/49/58/58/63 on
+// every path — so N = 90 is untouched: the bundle got larger, not the work.
+// B = 256 KiB still holds, now at 3.77x headroom.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 64710
+	measuredMaxPublishBytes = 67211
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

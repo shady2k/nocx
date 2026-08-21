@@ -37,10 +37,11 @@ type LaunchOptions struct {
 	// per-epoch bearer. On the carrier path it travels as FRAME 2 and
 	// reaches the shell through an inherited, already-unlinked descriptor
 	// (stage1.go) — never the command, never argv, never the environment,
-	// never a named file. On the local child path, and on the retired full
-	// launcher P4 still owns, it is substituted into the rcfile TEXT
-	// instead (capability_source.go names both forms and why each is
-	// safe). Lane, Domain and Epoch are names, not secrets.
+	// never a named file. On the local child path — sudo and su, where the
+	// rcfile travels in a preserved descriptor rather than a command — it is
+	// substituted into the rcfile TEXT instead (capability_source.go names
+	// both forms and why each is safe). Lane, Domain and Epoch are names,
+	// not secrets.
 	// The transport is either an inherited descriptor (LifecycleFD, the
 	// local path) or a loopback TCP port (LifecyclePort, the remote path);
 	// zero means that side is absent. Empty Capability means no channel:
@@ -89,9 +90,11 @@ type RemoteLauncher interface {
 	// why, and the caller falls back to a plain shell.
 	//
 	// It is the bounded carrier (carrier.go): under 1 KiB, carrying no
-	// bundle bytes and neither secret. What it used to return — the full
-	// self-installing launcher — is FullBootstrapCommand below, which is
-	// no longer on this seam because no managed session may emit it.
+	// bundle bytes and neither secret. The full self-installing launcher it
+	// replaced is gone from the repository: its last caller, the nested
+	// typed `ssh` in internal/app/childdomain.go, emits this instead
+	// (ADR-0035), and with the caller went the launcher, the publish
+	// prelude and the argument-length cap that guarded them.
 	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
 }
 
@@ -106,44 +109,6 @@ func NewRemoteLauncher() RemoteLauncher { return remoteLauncher{} }
 // not stay.
 func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
 	return carrierCommand(shell, opts)
-}
-
-// FullBootstrapCommand is the pre-carrier delivery: the self-installing
-// launcher that publishes the bundle from inside the remote command and
-// then execs the tier. It is ~90 KiB, it carries the capability and the
-// recovery fence in its text, and NO managed session may emit it — that is
-// the whole point of carrier.go.
-//
-// It is still here because it is still reachable, from exactly one live
-// caller: internal/app/childdomain.go, which composes the `ssh` line a
-// nested typed `ssh` runs (ADR-0022). That path has no frame sender yet, so
-// converting it now would break nested `ssh` with nothing to replace it;
-// design §12 gives it to P4, which retires this function and with it
-// fullBootstrapLauncher, maxFullLauncherLen and the publish prelude.
-//
-// Selection is deliberate per kind: bash and zsh get their launchers,
-// ShellUnknown gets the minimal tier — the posix launcher (spec §6: dash /
-// busybox ash / POSIX sh are a real tier, verified; refusing them forever
-// would contradict D4) — and ShellAuto gets the dispatcher, which carries
-// all three tiers and lets the far login shell choose at runtime (the
-// only layer that knows which shell it is; nocx-6rj0). The default arm is
-// the tripwire for a future ShellKind with no launcher: refuse loudly
-// rather than guess.
-func FullBootstrapCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason, bool) {
-	switch shell {
-	case ShellBash:
-		return remoteLauncher{}.bashCommand(opts)
-	case ShellZsh:
-		return remoteLauncher{}.zshCommand(opts)
-	case ShellUnknown:
-		return remoteLauncher{}.posixCommand(opts)
-	case ShellAuto:
-		return remoteLauncher{}.autoCommand(opts)
-	default:
-		// Never a best-effort guess: an unmapped shell kind is refused
-		// outright and the caller falls back to a plain shell.
-		return "", ReasonUnsupportedShell, false
-	}
 }
 
 func launcherEnvBlock(opts LaunchOptions) string {
@@ -237,45 +202,3 @@ func printfBEscape(s string) string {
 	}
 	return b.String()
 }
-
-// maxFullLauncherLen caps the full bootstrap launcher.
-//
-// It is KEPT, deliberately, and the reasoning is worth a line because the
-// carrier design retires everything it guards. The cap and its erosion test
-// belong to FullBootstrapCommand, which is no longer on the managed path but
-// is still reachable from internal/app/childdomain.go — a live caller whose
-// replacement is design §12's P4. A cap deleted while the thing it bounds is
-// still emitted would be the worst of both: the code stays, the guard goes.
-// P4 removes the caller, this function, the prelude and this number together.
-//
-// The bound below is not the carrier's. The carrier states its own, two
-// orders smaller, in carrier.go (MaxCarrierLen).
-//
-// The original reasoning: it caps the publish prelude
-// (which carries the three generation scripts, the launch carrier and the
-// publish logic) plus the tier command. The whole remote command travels as
-// ONE argv word (the staged file is command-substituted into the ssh line),
-// so Linux's MAX_ARG_STRLEN of 128 KiB per argument is the binding bound —
-// macOS's per-argument cap is the whole 256 KiB block on older releases. The
-// prelude's embedded payloads are the only inputs that scale with this
-// number; a bundle that outgrows the cap must refuse rather than emit a
-// command the far host cannot exec. A var, not a const, so tests can prove
-// the refusal path.
-//
-// 120 KiB, raised from 112 KiB on 2026-08-07 (nocx-z9s9.18). The old comment
-// said the ShellAuto form was "~97 KiB today", which had stopped being true
-// without anybody noticing: measured at the raise it was 112,676 bytes
-// against a 114,688-byte cap — 98.2% full, 2 KB of headroom for THREE
-// scripts. The intended margin had been eaten a few hundred bytes at a time,
-// and nothing failed until a script grew by 2 KB and every remote launch
-// refused at once. Adding a line of shell had become impossible, which is
-// not a state a limit should be able to reach quietly.
-//
-// So the number moved, and TestFullLauncherStaysUnderArgLimit now asserts the
-// MARGIN rather than the ceiling — erosion is the failure mode, and only a
-// test that watches the gap can report it while there is still room to act.
-// The real fix landed with nocx-z9s9.17: the shipped payloads are
-// comment-stripped at embed time (stripShellComments), so the remote host
-// receives the code and none of the ~22 KB of prose the three scripts used
-// to carry — every tier now sits ~64 KB under this cap.
-var maxFullLauncherLen = 120 * 1024

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -530,6 +531,21 @@ func New(opts ...Option) (*App, error) {
 	sshConfigPath := filepath.Join(home, ".ssh", "config")
 	sshCfgResolver := ssh.NewSSHConfigResolver(logger, sshConfigPath, "")
 
+	// The typed-`ssh` delivery (ADR-0035, design §4.3): the one owner of
+	// "does nocx interpose on a line the user typed, and on which socket".
+	// Assembled here because every part of it is a product decision — which
+	// oracle answers for the user's configuration, where our control sockets
+	// live, how a multiplex master is proven, and who publishes over it —
+	// and the composition root is where product decisions belong.
+	typedSSH := &typedRunner{
+		log:      logger,
+		wrapper:  ssh.NewTypedWrapper(logger, sshCfgResolver, ssh.DefaultControlRoot()),
+		dial:     DialTypedMux,
+		publish:  shint,
+		sessions: sessionWindows{reg: sess},
+		probes:   defaultMasterProbes,
+	}
+
 	// SSH client (AD-4): real client on x/crypto/ssh, honors ~/.ssh/config.
 	sshClient, err := ssh.NewReal(logger, ssh.WithConfigResolver(sshCfgResolver))
 	if err != nil {
@@ -792,6 +808,13 @@ func New(opts ...Option) (*App, error) {
 		discovery.WithPromptDebounce(time.Second),
 		discovery.WithSampleInterval(10*time.Second),
 	)
+	// The remote shell launcher, built here so its bootstrap-outcome sink
+	// can be wired once the server exists (below, beside the other
+	// integration-axis seams). Without that sink the whole closed outcome
+	// set — the far host having no hasher, a digest that did not match, no
+	// generation installed — reaches the user as "cannot say why".
+	remoteLauncher := &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}
+
 	// Probe result store: operational evidence for connections.test.
 	// Process-lifetime only (not persisted across restarts).
 	probeResultStore := transport.NewProbeResultStore()
@@ -827,7 +850,7 @@ func New(opts ...Option) (*App, error) {
 		// identically-named declarations and wired into every ConnectConfig
 		// the transport builds. Before this line the launcher was reachable
 		// from its own tests and nowhere else (AGENTS.md check 5).
-		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
+		transport.WithRemoteLauncher(remoteLauncher),
 		// The SFTP publisher on the DIRECT-HOST path. A saved profile gets
 		// one from the connection resolver; a typed host had none, which
 		// did not matter while the remote command installed the bundle
@@ -937,7 +960,7 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions)))
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1101,6 +1124,24 @@ func New(opts ...Option) (*App, error) {
 	}
 	remoteLifecycle.registerLane = registerLane
 	ptf.registerLane = registerLane
+	// The bootstrap's terminal outcome (carrier design §5.5, §6.1), routed
+	// by the same lane the lifecycle facts use. It is a THIRD seam onto the
+	// integration axis and it has to be: the bootstrap concludes before any
+	// domain exists, so neither a published fact nor a transport loss cause
+	// can carry it, and until this line every one of its outcomes was a log
+	// entry the user cannot read.
+	// §6.2's loss events on the remote path, into the same sink the local
+	// adapter's already use. The cause crosses as its string so the transport
+	// does not depend on the adapter package.
+	remoteLifecycle.reportLoss = func(lane lifecycle.LaneID, cause lifecycleremote.LossCause) {
+		tp.NoteIntegrationLoss(lane, string(cause))
+	}
+	remoteLauncher.reportBootstrapOutcome = func(lane string, reason ssh.RefusalReason) {
+		if lane == "" {
+			return
+		}
+		tp.NoteBootstrapOutcome(lifecycle.LaneID(lane), reason)
+	}
 	// The session integration axis (nocx-dvql). Two seams, one owner: the
 	// pty factory says what it started and how far it got, and the adapter
 	// says which path ended the channel. The transport joins them with the
@@ -1782,6 +1823,18 @@ func (a *proberAdapter) TrustHostKey(ctx context.Context, addr string, key []byt
 type remoteLauncherAdapter struct {
 	inner  shellintegration.RemoteLauncher
 	logger log.Logger
+	// reportBootstrapOutcome carries the bootstrap's terminal outcome, as a
+	// product reason, to the session integration axis. Keyed by the lifecycle
+	// LANE, which is the addressing the transport already uses to route this
+	// session's facts (RegisterLifecycleLane), so no second registry is
+	// created for one more fact.
+	//
+	// Without it the outcome was a log line and nothing else: a refused
+	// bootstrap left the axis in `starting` until some other detector — a
+	// hello bound, a process observation — concluded it with a vaguer word,
+	// or in the remote case with nothing at all. Nil leaves the outcome in
+	// the log, which is the safe direction and the state before P5.
+	reportBootstrapOutcome func(lane string, reason ssh.RefusalReason)
 }
 
 func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
@@ -1852,22 +1905,19 @@ func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReaso
 // the one building the command, and the far side would refuse a stage-1 that
 // was perfectly valid.
 //
-// It owns one decision beyond translation, and it is worth stating because it
-// is a limitation rather than a design: a bootstrap OUTCOME is more precise
-// than anything ssh.RefusalReason can carry. The refusal vocabulary is a
-// closed enum in contracts/session.integrationChanged.json, and adding a
-// member to it is a schema change, a regenerated renderer type and a product
-// string. So the precise outcome goes to the log, and the session reports
-// ssh.ReasonUnknown — "integration did not happen and the backend cannot say
-// why", which is visible and honest but coarser than what this side knows.
-// A `bootstrap-refused` member would close that gap; it is named in the P2
-// report as a decision for the coordinator.
+// The gap it used to carry is closed. A bootstrap OUTCOME is more precise than
+// ssh.RefusalReason could carry, so every one of the twenty-one outcomes
+// reached the product as ssh.ReasonUnknown — "integration did not happen and
+// the backend cannot say why" — with the precise answer only in a log. That is
+// a soft degrade the UI contradicts. The vocabulary now has one member per
+// outcome, spelled identically, and mapBootstrapOutcome below is the exhaustive
+// switch that keeps the two tables from drifting apart silently.
 //
 // The secret is NOT built here. It is built inside the run, after frame 1 has
-// been verified and the receiver has announced itself, because design §6.1
-// forbids minting anything before it can be exercised — see
-// shellintegration.SecretSource for what P5 must still move behind that seam.
-func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.BootstrapRun, bool) {
+// been verified, the receiver has announced itself and the publish has reached
+// a terminal outcome — design §6.1's steps 3, 4 and 5, the last two behind the
+// MintGate this returns.
+func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.BootstrapRun, ssh.BootstrapGate, bool) {
 	sopts := shellintegration.LaunchOptions{
 		SessionID:     opts.SessionID,
 		Enhanced:      opts.Enhanced,
@@ -1885,11 +1935,40 @@ func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOpti
 		// frame nobody will send.
 		a.logger.Error("shellintegration: stage-1 could not be rendered; the session runs a plain shell",
 			"shell", shell, "session_id", opts.SessionID, "error", err)
-		return "", nil, false
+		return "", nil, nil, false
 	}
+	gate := shellintegration.NewMintGate()
+	// The publish's own error, kept so the §6.4 subsystem row can be
+	// reported as its cause rather than as its symptom. It is written once,
+	// by the ssh side, before the gate opens, and read once, after the
+	// bootstrap has finished — the gate is the happens-before between them.
+	publishFailure := &atomic.Pointer[error]{}
 	plan := shellintegration.BootstrapPlan{Stage1: stage}
+	// §6.1 steps 4 and 5, on EVERY path and not only the one with something
+	// to mint: frame 2 is not delivered until the lifecycle receiver has
+	// answered and the publish has reached a terminal outcome. Step 8 — the
+	// far side re-proving the generation as it now stands — follows frame 2
+	// whether it carried the pair or a refusal, so a session with no
+	// lifecycle channel needs this barrier for exactly the reason a session
+	// with one does. It was inside the `Capability != ""` arm below, and
+	// that is what left a refused forward racing its own publish.
+	//
+	// The wait is bounded by T, and it has to be bounded here rather than
+	// left to the session's own context: a publish that never settles would
+	// otherwise hold the frame — and the session in `starting` — for the
+	// life of the tab, which §7 forbids outright.
+	plan.Ordered = func(ctx context.Context) error {
+		wctx, cancel := context.WithTimeout(ctx, shellintegration.PublishDeadline)
+		defer cancel()
+		_, gerr := gate.Await(wctx)
+		return gerr
+	}
 	if opts.Capability != "" {
-		plan.Secret = shellintegration.SecretFunc(func() ([]byte, error) {
+		// The bearer itself. By the time this runs the barrier above has
+		// returned without an error, so both facts are in; what is left is
+		// the mint, and an error here still means the far side gets a
+		// NON-SECRET refusal rather than a secret we then discard.
+		plan.Secret = shellintegration.SecretFunc(func(context.Context) ([]byte, error) {
 			return shellintegration.SecretFrame(sopts)
 		})
 	}
@@ -1899,14 +1978,132 @@ func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOpti
 		// interface directly — the translation is in the types, not in
 		// an object that copies bytes between them.
 		outcome := shellintegration.DeliverBootstrap(ctx, a.logger, stream, plan)
-		if outcome == shellintegration.OutcomeBootstrapAccepted {
-			return ssh.ReasonNone
+		reason := a.mapBootstrapOutcome(outcome)
+		// §6.4's `subsystem` row, reported as the cause rather than the
+		// symptom. The far side is the authority on "is this installation
+		// valid" and it answers generation-unavailable, which is true and
+		// is not the half a user can act on: the reason there is no
+		// generation is that nocx could not write one. Only when BOTH are
+		// true — the far side found nothing AND the publish failed — is the
+		// substitution honest; a far side that finds nothing after a
+		// SUCCESSFUL publish is a different fault and keeps its own name.
+		if reason == ssh.ReasonGenerationUnavailable {
+			if perr := publishFailure.Load(); perr != nil && *perr != nil {
+				a.logger.Warn("shellintegration: the far host has no generation and the publish failed; "+
+					"reporting the cause rather than the symptom",
+					"session_id", opts.SessionID, "error", *perr)
+				reason = ssh.ReasonPublishUnavailable
+			}
 		}
-		a.logger.Warn("shell bootstrap refused",
-			"outcome", string(outcome), "session_id", opts.SessionID)
+		if reason != ssh.ReasonNone {
+			a.logger.Warn("shell bootstrap refused",
+				"outcome", string(outcome), "reason", string(reason), "session_id", opts.SessionID)
+		}
+		// The fence's confidentiality interval, backend side, closes here
+		// on the copy this attempt holds — refusal, timeout AND after a
+		// SUCCESSFUL bootstrap alike (§5.3, assertion 11). The kernel's own
+		// expected value is a DIFFERENT copy and deliberately outlives this
+		// one: it is what validates a recovery acknowledgement, so closing
+		// the authority interval is not what destroys it and the two must
+		// not be conflated.
+		sopts.Capability = ""
+		sopts.Recovery = ""
+		if a.reportBootstrapOutcome != nil {
+			a.reportBootstrapOutcome(opts.Lane, reason)
+		}
+		return reason
+	}
+	return shellintegration.StageDigest(stage), run, gateAdapter{g: gate, publishErr: publishFailure}, true
+}
+
+// gateAdapter is the composition root doing what it is for: the ssh side
+// produces §6.1's two facts and shellintegration.MintGate consumes them, and
+// neither package may import the other. Four lines rather than a second
+// vocabulary for one concept (AD-8).
+//
+// The publish OUTCOME does not cross: all four of §6.1's terminal outcomes
+// open the gate, because a failed publish is not a refusal — the far side may
+// still accept a generation installed earlier, and it is the owner of that
+// question. What crosses is the error, and only so a diagnosis can name it.
+type gateAdapter struct {
+	g          *shellintegration.MintGate
+	publishErr *atomic.Pointer[error]
+}
+
+func (a gateAdapter) ReceiverReady()                { a.g.ReceiverReady() }
+func (a gateAdapter) ReceiverUnavailable(err error) { a.g.ReceiverUnavailable(err) }
+
+func (a gateAdapter) PublishSettled(err error) {
+	if a.publishErr != nil {
+		a.publishErr.Store(&err)
+	}
+	if err != nil {
+		a.g.PublishSettled(shellintegration.PublishFailed)
+		return
+	}
+	a.g.PublishSettled(shellintegration.PublishCommitted)
+}
+
+// mapBootstrapOutcome turns the bootstrap's closed outcome set into the
+// product vocabulary. The switch is exhaustive on purpose and the default arm
+// is a tripwire: an outcome added to shellintegration and forgotten here is a
+// loud log and ssh.ReasonUnknown, never a silent ReasonNone.
+//
+// The two vocabularies are spelled identically, which makes this look like a
+// cast and is exactly why it is not one. A cast would accept a member that
+// exists on one side and not the other and put an undeclared string on the
+// wire, past a contract whose whole point is that the enum is closed
+// (AGENTS.md rule 5). The switch cannot: a new outcome fails
+// TestBootstrapOutcomes_EachHasAProductReason instead.
+func (a *remoteLauncherAdapter) mapBootstrapOutcome(o shellintegration.Outcome) ssh.RefusalReason {
+	switch o {
+	case shellintegration.OutcomeBootstrapAccepted:
+		return ssh.ReasonNone
+	case shellintegration.OutcomeLoaderTermiosUnavailable:
+		return ssh.ReasonLoaderTermiosUnavailable
+	case shellintegration.OutcomeBootstrapInterrupted:
+		return ssh.ReasonBootstrapInterrupted
+	case shellintegration.OutcomeBootstrapProtocol:
+		return ssh.ReasonBootstrapProtocol
+	case shellintegration.OutcomeStageTooLarge:
+		return ssh.ReasonStageTooLarge
+	case shellintegration.OutcomeNoSecureTemp:
+		return ssh.ReasonNoSecureTemp
+	case shellintegration.OutcomeStageDigestUnavailable:
+		return ssh.ReasonStageDigestUnavailable
+	case shellintegration.OutcomeStageDigestMismatch:
+		return ssh.ReasonStageDigestMismatch
+	case shellintegration.OutcomeStageFDUnavailable:
+		return ssh.ReasonStageFDUnavailable
+	case shellintegration.OutcomeStageSourceFailed:
+		return ssh.ReasonStageSourceFailed
+	case shellintegration.OutcomeSecretTooLarge:
+		return ssh.ReasonSecretTooLarge
+	case shellintegration.OutcomeSecretMalformed:
+		return ssh.ReasonSecretMalformed
+	case shellintegration.OutcomeSecretNotForThisSession:
+		return ssh.ReasonSecretNotForThisSession
+	case shellintegration.OutcomeCapabilityFDUnavailable:
+		return ssh.ReasonCapabilityFDUnavailable
+	case shellintegration.OutcomeCapabilityUnlinkFailed:
+		return ssh.ReasonCapabilityUnlinkFailed
+	case shellintegration.OutcomeCapabilityWriteFailed:
+		return ssh.ReasonCapabilityWriteFailed
+	case shellintegration.OutcomeGenerationUnavailable:
+		return ssh.ReasonGenerationUnavailable
+	case shellintegration.OutcomeReceiverUnready:
+		return ssh.ReasonReceiverUnready
+	case shellintegration.OutcomeBootstrapTimeout:
+		return ssh.ReasonBootstrapTimeout
+	case shellintegration.OutcomeBootstrapOutOfOrder:
+		return ssh.ReasonBootstrapOutOfOrder
+	case shellintegration.OutcomeChannelUnavailable:
+		return ssh.ReasonChannelUnavailable
+	default:
+		a.logger.Error("shellintegration returned an unmapped bootstrap outcome; add it to mapBootstrapOutcome",
+			"outcome", string(o))
 		return ssh.ReasonUnknown
 	}
-	return shellintegration.StageDigest(stage), run, true
 }
 
 // remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle
@@ -1915,6 +2112,12 @@ type remoteLifecycleProvider struct {
 	client *ssh.RealClient
 	kernel lifecyclechannel.Kernel
 	logger log.Logger
+	// reportLoss carries the remote adapter's §6.2 loss cause to the session
+	// integration axis, keyed by the adapter's own lane. Wired at the
+	// composition root once the server exists; nil reports nowhere, which is
+	// the state before P5 and the reason a refused remote session used to sit
+	// in `starting` forever.
+	reportLoss lifecycleremote.LossReporter
 	// transports records each remote adapter's transport kind and its
 	// forwarded port so the child grant builder can compose the child's
 	// launch (nocx-u7uh.11).
@@ -1940,6 +2143,13 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 	adapter, cfg, err := lifecycleremote.New(p.logger, p.kernel, tc,
 		lifecycleremote.WithHelloTimeout(lifecycle.HelloTimeout),
 		lifecycleremote.WithMaxCandidates(lifecycleremote.DefaultMaxCandidates),
+		// §6.2's loss events, routed to the session integration axis. The
+		// local path has had this since nocx-dvql and the remote path had
+		// nothing: a remote session whose shell never spoke established no
+		// domain, so no fact was published and no cause was reported, and
+		// the axis stayed at `starting` for the life of the tab — which §7
+		// forbids outright.
+		lifecycleremote.WithLossReporter(p.reportLoss),
 	)
 	if err != nil {
 		_ = tc.Close()

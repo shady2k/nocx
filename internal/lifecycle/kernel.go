@@ -185,7 +185,16 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		k.recordAuthFailure(d.Lane)
 		return nil, ErrStaleEpoch
 	}
-	if d.capability != env.Capability {
+	if d.capability == (Capability{}) || d.capability != env.Capability {
+		// The zero test is not belt-and-braces, it is the difference between
+		// authenticating and not. randomCapability tolerates a failed random
+		// read and leaves a zero capability — deliberately for the FENCE,
+		// where the read model treats zero as "no recovery nonce" and
+		// disables the promise, which is the safe direction. For the
+		// capability the same value is the opposite of safe: with the domain
+		// holding zeros, any candidate sending thirty-two zero bytes
+		// compares equal and is authenticated. A domain with no capability
+		// can authenticate nobody.
 		k.recordAuthFailure(d.Lane)
 		return nil, ErrBadCapability
 	}
@@ -1018,6 +1027,35 @@ func (k *Kernel) setLifecycle(ls *laneState, st LifecycleState, d DomainID, att 
 	ls.lifecycle = st
 	ls.lifecycleDomain = d
 	ls.lifecycleAttempt = att
+	if st == LifecycleNative {
+		// THE RECOVERY FENCE'S AUTHORITY INTERVAL CLOSES HERE, and it is a
+		// different interval from its confidentiality (carrier design §5.3).
+		//
+		// Authority opens once the bootstrap has succeeded and the backend
+		// has registered the fence for a domain generation, and closes at
+		// the FIRST of: the fence being sent once on channel loss and
+		// acknowledged, teardown with no recovery needed, or a generation
+		// replacement. Every one of those three ends with the lane back at
+		// Native — RecoverLane completing the composite ACK, a clean
+		// domain_closed, a revoke — which is why the close lives here
+		// rather than in three call sites that would drift apart.
+		//
+		// The third event, a generation replacement, closes it from the
+		// other direction: RequestDomain overwrites the nonce, so a late
+		// ack from the previous episode can no longer match.
+		//
+		// The lane keeps the expected value until then and must: it is what
+		// validates the acknowledgement, and dropping it at the moment the
+		// fence goes out would leave nothing to check the answer against.
+		//
+		// Closing authority is NOT closing confidentiality, and conflating
+		// them would promise more than we can hold. The domain's own record
+		// still carries its fence, and the shell's copy is a variable in a
+		// process on another host that we may no longer be able to address.
+		// This clears one backend copy — the one whose PURPOSE has ended —
+		// and claims nothing about the others.
+		ls.recoveryNonce = FenceNonce{}
+	}
 }
 
 func (k *Kernel) overHandshakeBudget(ls *laneState) bool {
@@ -1062,6 +1100,13 @@ func (k *Kernel) randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// randomCapability mints the per-epoch bearer. A failed random read leaves a
+// ZERO capability, and unlike the fence's tolerance above that is not a safe
+// direction — it is an authenticator every candidate can produce. It is left
+// tolerant here rather than made fallible, because the caller has no useful
+// answer to "the machine has no randomness"; what closes the hole is
+// ingestLocked refusing a zero capability outright, so a domain that failed to
+// mint one authenticates nobody instead of authenticating everybody.
 func (k *Kernel) randomCapability() Capability {
 	var c Capability
 	_, _ = io.ReadFull(k.rand, c[:])

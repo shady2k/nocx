@@ -111,12 +111,182 @@ const (
 	// 8). Distinct from every reason above, all of which describe a session
 	// that never integrated at all.
 	ReasonChannelLost RefusalReason = "channel-lost"
+	// ReasonExecRefused and ReasonExecSubstituted are the two `exec` rows of
+	// §6.4. They are declared in the §6.4 matrix block below, with the rest
+	// of that vocabulary, rather than here: two packages of this epic
+	// reached them independently — one from the typed-`ssh` wrapper that has
+	// to branch on them, one from the refusal enum the product renders — and
+	// one owner is the point of AD-8.
+	//
+	// Kept from the wrapper's own reading, because the matrix block does not
+	// say it and it is why the refused row could not simply be assumed: a
+	// stock OpenSSH server cannot produce it. Five ways of restricting an
+	// account were measured (`exec_refusal_probe_test.go`) and every one
+	// ACCEPTS the request and substitutes what runs behind it. Real
+	// intermediaries do refuse it, and software that is not the server is
+	// what that row is about.
+	//
 	// ReasonUnknown means integration did not happen and the backend cannot
 	// say why — the remoteLauncherAdapter's fail-open for a refusal reason
 	// the ssh vocabulary does not yet know (nocx-axpz). It is a distinct
 	// visible failure, never a synonym for ReasonNone: the product renders
 	// "no refusal" as "integration succeeded", which would be a lie.
 	ReasonUnknown RefusalReason = "unknown"
+)
+
+// The §6.4 selective-refusal matrix, and the bootstrap's own closed outcome
+// set (carrier design §5.2, §5.5, §6.1, §6.4).
+//
+// # Why this vocabulary got this much bigger, in one paragraph
+//
+// It had seven members and the bootstrap has twenty-one outcomes, so every one
+// of them reached the product as ReasonUnknown — "integration did not happen
+// and the backend cannot say why" — while the backend knew perfectly well that
+// the far host had no installed generation, or no hasher to verify with, or a
+// digest that did not match. The precise outcome went to a log the user cannot
+// read. That is a soft degrade the UI contradicts, which AGENTS.md names as how
+// a feature that does not exist survives a release, and it is what this block
+// closes. The rule it follows is the one that keeps the closed set honest:
+// EVERY MEMBER OF THE BOOTSTRAP'S CLOSED SET HAS A NAME HERE, spelled
+// identically, so the mapping is a rename and cannot lose a member quietly.
+//
+// The identical spelling is deliberate and load-bearing. It is asserted in
+// internal/app (mapBootstrapOutcome's exhaustive switch and its conformance
+// test), and it is what makes "a member was added to one and forgotten in the
+// other" a compile-or-test failure rather than a silent ReasonUnknown.
+//
+// ReasonUnknown does NOT go away and must not: a reason this vocabulary does
+// not know is still a degraded session, and the fail-open that names it is what
+// keeps a new outcome from crashing a terminal (ADR-0004:60).
+const (
+	// ── §6.4, the channel-type matrix ────────────────────────────────────
+	//
+	// The rows below are decided by the SSH layer before any frame is
+	// written. An intermediary or a server may permit some channels and not
+	// others, and the matrix is by real channel type: the bootstrap receiver
+	// is not an auxiliary channel, it is the main PTY session.
+
+	// ReasonSessionUnavailable: the primary `session` channel was refused,
+	// so there is no session for nocx at all. The measured case is a server
+	// at its MaxSessions bound: the user's line still reaches a working
+	// prompt on the connection it already has, with one authentication and
+	// nothing published and nothing minted.
+	ReasonSessionUnavailable RefusalReason = "session-unavailable"
+	// ReasonPTYUnavailable: `pty-req` was refused after the session was
+	// granted, so no interactive shell is possible on it. Refused BEFORE any
+	// frame — a frame into a channel with no terminal has nowhere to land.
+	ReasonPTYUnavailable RefusalReason = "pty-unavailable"
+	// ReasonExecRefused: the `exec` request was refused and the channel and
+	// its pty SURVIVED the refusal, so a `shell` request on the SAME channel
+	// reaches a working interactive prompt with no second authentication.
+	// The discriminator is the request result and never the error text: the
+	// client sees (false, nil) for refused-and-alive and (false, io.EOF) for
+	// the server having torn the channel down as it refused, while the
+	// client-side error is an undistinguished "command failed" in both.
+	ReasonExecRefused RefusalReason = "exec-refused"
+	// ReasonExecSubstituted: the `exec` request was ACCEPTED and something
+	// else ran behind it. Strictly worse than a refusal and never to be
+	// collapsed into it: the channel is consumed, `shell` on it fails, and a
+	// fresh channel on the same connection runs the substituted command too,
+	// so no native prompt exists anywhere on that connection. It is the only
+	// session-shaped outcome a stock OpenSSH server can actually be
+	// configured to produce.
+	ReasonExecSubstituted RefusalReason = "exec-substituted"
+	// ReasonPublishUnavailable: the `subsystem` (SFTP) channel was refused,
+	// so nothing was written to the far host. It is reported in place of the
+	// far side's own generation-unavailable when both are true, because "the
+	// far host has no copy of the integration" is the symptom and "nocx could
+	// not write one" is the cause, and only the cause can be acted on.
+	ReasonPublishUnavailable RefusalReason = "publish-unavailable"
+
+	// ── the bootstrap's closed outcome set ───────────────────────────────
+	//
+	// One name per shellintegration.Outcome, spelled identically. The
+	// grouping below is the one the design uses — which component decides
+	// the outcome — and not a grouping invented here.
+
+	// The loader's, decided before stage-1 exists.
+
+	// ReasonLoaderTermiosUnavailable: the terminal state could not be saved
+	// or could not be put into raw mode on the far host, so the loader could
+	// not promise to give the terminal back and refused rather than take it.
+	ReasonLoaderTermiosUnavailable RefusalReason = "loader-termios-unavailable"
+	// ReasonBootstrapInterrupted: EOF, a short body, or a catchable signal
+	// before the frame completed — §6.4's "any already-open channel, severed
+	// mid-frame" row. The frame is discarded, the descriptors closed and the
+	// termios restored.
+	ReasonBootstrapInterrupted RefusalReason = "bootstrap-interrupted"
+	// ReasonBootstrapProtocol: what arrived where a frame header belongs was
+	// not a header of this protocol.
+	ReasonBootstrapProtocol RefusalReason = "bootstrap-protocol"
+	// ReasonStageTooLarge: the frame-1 header declared more than the 32 KiB
+	// cap. Refused before a single body byte is read.
+	ReasonStageTooLarge RefusalReason = "stage-too-large"
+	// ReasonStageDigestUnavailable: neither sha256sum nor shasum is present
+	// on the far host, so what nocx sent cannot be verified — and unverified
+	// bootstrap code is never executed.
+	ReasonStageDigestUnavailable RefusalReason = "stage-digest-unavailable"
+	// ReasonStageDigestMismatch: the frame's digest is not the one the
+	// command committed to. It is also what an ABSENT commitment produces:
+	// "there is nothing to verify against" and "this is not what I asked
+	// for" have the same safe answer.
+	ReasonStageDigestMismatch RefusalReason = "stage-digest-mismatch"
+	// ReasonStageFDUnavailable: the descriptor could not be opened on the far
+	// host, so the verified bootstrap could not be handed to the shell.
+	ReasonStageFDUnavailable RefusalReason = "stage-fd-unavailable"
+	// ReasonStageSourceFailed: the bootstrap was sourced and returned instead
+	// of taking the session over.
+	ReasonStageSourceFailed RefusalReason = "stage-source-failed"
+
+	// Stage-1's, decided after the frame is verified.
+
+	// ReasonSecretTooLarge: the frame-2 header declared more than the 4 KiB
+	// cap. Refused before a body byte is read.
+	ReasonSecretTooLarge RefusalReason = "secret-too-large"
+	// ReasonSecretMalformed: frame 2 parsed and a bearer was not the shape a
+	// bearer has.
+	ReasonSecretMalformed RefusalReason = "secret-malformed"
+	// ReasonSecretNotForThisSession: frame 2 named a different session,
+	// domain or epoch than the command addressed — including a frame replayed
+	// at a session it was not minted for.
+	ReasonSecretNotForThisSession RefusalReason = "secret-not-for-this-session"
+	// ReasonCapabilityFDUnavailable: the read or the write descriptor for the
+	// capability could not be opened on the far host. Nothing was written.
+	ReasonCapabilityFDUnavailable RefusalReason = "capability-fd-unavailable"
+	// ReasonCapabilityUnlinkFailed: the temp file's name could not be removed
+	// on the far host, so nothing was written at all — the capability never
+	// reaches a filesystem object anything can open by name.
+	ReasonCapabilityUnlinkFailed RefusalReason = "capability-unlink-failed"
+	// ReasonCapabilityWriteFailed: the write or the close of the write
+	// descriptor failed, so the bootstrap did not succeed.
+	ReasonCapabilityWriteFailed RefusalReason = "capability-write-failed"
+	// ReasonGenerationUnavailable: there is no executable launch carrier on
+	// the far host, so there was nothing to exec. The next connection
+	// publishes and bootstraps again.
+	ReasonGenerationUnavailable RefusalReason = "generation-unavailable"
+
+	// The backend's own. The far side never speaks these: a portable shell
+	// has no timed read without a sleep loop, and the design forbids remote
+	// work whose duration the remote host decides, so the deadlines — and the
+	// outcomes they produce — are the writer's.
+
+	// ReasonReceiverUnready: the far side never announced that it had taken
+	// the terminal, so no frame was ever written.
+	ReasonReceiverUnready RefusalReason = "receiver-unready"
+	// ReasonBootstrapTimeout: the far side answered once and then did not
+	// reach a terminal outcome inside the frame deadline.
+	ReasonBootstrapTimeout RefusalReason = "bootstrap-timeout"
+	// ReasonBootstrapOutOfOrder: a token of the closed set arrived twice or
+	// out of its order (§6.1's first rule against a forged readiness token).
+	// The far side emits each of its tokens exactly once by construction, so
+	// a session that produces this had a token written into it by something
+	// that is not nocx's loader.
+	ReasonBootstrapOutOfOrder RefusalReason = "bootstrap-out-of-order"
+	// ReasonChannelUnavailable: the lifecycle forward or channel could not be
+	// opened, so NOTHING WAS MINTED (§6.1) and the far side was handed a
+	// non-secret refusal rather than a bearer it could not use. The shell
+	// still comes up; it simply has no authenticated channel.
+	ReasonChannelUnavailable RefusalReason = "channel-unavailable"
 )
 
 // LaunchOptions carries what the start command must embed.
@@ -197,15 +367,23 @@ type RemoteLauncher interface {
 	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
 
 	// Prepare renders this session's bootstrap and returns the stage-1
-	// digest the command must carry, together with the run that delivers
-	// the frames once the session has started.
+	// digest the command must carry, the run that delivers the frames once
+	// the session has started, and the §6.1 gate the caller feeds the two
+	// facts that must precede the mint.
 	//
 	// It is called BEFORE StartCommand, and the caller puts the digest into
 	// the LaunchOptions it passes there. ok=false means no bootstrap is
 	// possible, and the caller then emits NO command at all: a carrier
 	// whose loader has no sender blocks on a frame that never arrives,
 	// which is the one outcome worse than an un-integrated prompt.
-	Prepare(shell ShellKind, opts LaunchOptions) (digest string, run BootstrapRun, ok bool)
+	//
+	// The gate is returned rather than passed in because the thing behind it
+	// is the mint, which belongs to whoever builds the frame. This package
+	// holds only the two facts and hands them over as they land — which is
+	// what lets the publish run CONCURRENTLY with the loader (design §7: 3 +
+	// 3 + 10 exceeds the 15 s integration deadline, so the two are not
+	// sequential).
+	Prepare(shell ShellKind, opts LaunchOptions) (digest string, run BootstrapRun, gate BootstrapGate, ok bool)
 }
 
 type SSH interface {

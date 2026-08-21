@@ -251,20 +251,29 @@ func TestCarrier_SecretsAppearNowhereInTheCommand(t *testing.T) {
 	}
 }
 
-// TestCarrier_TodaysCommandCarriesTheSecrets is the contrast that makes the
-// assertion above evidence rather than a tautology: the launcher this
-// carrier retires from the managed path DOES put both secrets in the
-// command, so a canary check that passes on both would be proving nothing.
-func TestCarrier_TodaysCommandCarriesTheSecrets(t *testing.T) {
-	cmd, _, ok := FullBootstrapCommand(ShellAuto, carrierOpts())
-	if !ok {
-		t.Fatal("the full launcher refused; the contrast cannot be measured")
+// TestCarrier_TheCanaryDetectorCanFail is the contrast that makes the
+// assertion above evidence rather than a tautology: a canary check that
+// cannot fail proves nothing about the command it passes on.
+//
+// It used to take that contrast from the launcher this carrier replaced,
+// which really did put both secrets in the command — 92,204 bytes of it, both
+// bearers verbatim. That launcher is gone from the repository (ADR-0035, P4),
+// so the contrast is stated directly instead: the same detector, run over a
+// command shaped like the old one, still fires. What is lost with the old
+// code is only that the sample is now a fixture rather than a live artefact;
+// what the assertion above needs from it — "this detector distinguishes" —
+// is unchanged.
+func TestCarrier_TheCanaryDetectorCanFail(t *testing.T) {
+	opts := carrierOpts()
+	// The shape the retired launcher emitted: an rcfile substituted into
+	// the command text, with both bearers inside it.
+	asItWas := "/usr/bin/env -u BASH_ENV /bin/sh -c 'NOCX_CAPABILITY=" + opts.Capability +
+		"; NOCX_RECOVERY=" + opts.Recovery + "; exec bash --rcfile /dev/fd/3 -i'"
+	if !strings.Contains(asItWas, canaryCapability) {
+		t.Error("the detector does not find a capability that is plainly there")
 	}
-	if !strings.Contains(cmd, canaryCapability) {
-		t.Error("the full launcher no longer carries the capability — re-read this test's premise")
-	}
-	if !strings.Contains(cmd, canaryRecovery) {
-		t.Error("the full launcher no longer carries the recovery fence — re-read this test's premise")
+	if !strings.Contains(asItWas, canaryRecovery) {
+		t.Error("the detector does not find a recovery fence that is plainly there")
 	}
 }
 
@@ -306,19 +315,16 @@ func TestCarrier_FitsARecorderThatTodaysCommandDoesNot(t *testing.T) {
 	}
 
 	// And the contrast, without which the assertion above is satisfied by
-	// any recorder with a generous limit: the command this replaces is
-	// refused by the SAME recorder.
-	for _, kind := range carrierKinds {
-		old, _, ok := FullBootstrapCommand(kind, carrierOpts())
-		if !ok {
-			t.Fatalf("the full launcher refused for %s; the contrast cannot be measured", kind)
-		}
-		if err := rec.record(old); err == nil {
-			t.Errorf("%s: the recorder accepted today's %d-byte command; it must refuse it",
-				kind, len(old))
-		} else {
-			t.Logf("%s: today %d bytes — %v", kind, len(old), err)
-		}
+	// any recorder with a generous limit: the SAME recorder refuses a
+	// command of the size this design retired. 92,204 bytes is the measured
+	// ShellAuto form of the self-installing launcher, taken from ADR-0035
+	// before it was deleted; the number is kept here because it is what
+	// makes the recorder's limit mean something.
+	const retiredCommandBytes = 92_204
+	if err := rec.record(strings.Repeat("x", retiredCommandBytes)); err == nil {
+		t.Errorf("the recorder accepted a %d-byte command; it must refuse it", retiredCommandBytes)
+	} else {
+		t.Logf("the command this design retired: %d bytes — %v", retiredCommandBytes, err)
 	}
 }
 
@@ -491,6 +497,11 @@ func TestOutcomeTokens_AreATotalBijection(t *testing.T) {
 	carrierOutcomes := []Outcome{OutcomeBootstrapAccepted, OutcomeGenerationUnavailable}
 	backendOutcomes := []Outcome{
 		OutcomeReceiverUnready, OutcomeBootstrapTimeout, OutcomeChannelUnavailable,
+		// §6.1's rule 1: a repeated or out-of-order token. Named by the
+		// backend for the same reason the two deadlines are — the far side
+		// emits each of its tokens once by construction, so only the
+		// writer can observe a second one.
+		OutcomeBootstrapOutOfOrder,
 	}
 
 	all := map[Outcome]bool{}
@@ -551,5 +562,41 @@ func TestOutcomeTokens_AreATotalBijection(t *testing.T) {
 
 	if _, ok := OutcomeForToken("not-ours"); ok {
 		t.Error("a token that is not ours was accepted as an outcome")
+	}
+}
+
+// The reader is built FROM the enumeration, so an enumeration that misses a
+// member is a member no session can be refused for in words.
+//
+// What a user loses if this regresses: the far side names a real outcome on
+// the terminal, outcomeInLine cannot resolve its token, the line is dropped as
+// "not one of ours", and session.integrationChanged carries no reason at all —
+// a session sitting at a native prompt with the product unable to say why.
+// That is the silent degrade the whole outcome vocabulary exists to prevent,
+// and it is one forgotten table entry away.
+func TestOutcomeInLine_ResolvesEveryMemberTheEnumerationDeclares(t *testing.T) {
+	outcomes := AllOutcomes()
+	if len(outcomes) != len(outcomeTokens) {
+		t.Fatalf("AllOutcomes enumerates %d of the table's %d members; the reader is built "+
+			"from it and is blind to the rest", len(outcomes), len(outcomeTokens))
+	}
+	for _, o := range outcomes {
+		line := OutcomePrefix + OutcomeToken(o)
+		got, ok := outcomeInLine(line)
+		if !ok {
+			t.Errorf("the far side's line %q reads as no outcome at all; the session would "+
+				"be refused with nothing to say", line)
+			continue
+		}
+		if got != o {
+			t.Errorf("line %q read as outcome %q, want %q", line, got, o)
+		}
+		// Twice, because the reader used to answer by ranging a Go map:
+		// two members sharing one token resolved to either of them, and
+		// the diagnosis a user was shown changed between reads of it.
+		if again, _ := outcomeInLine(line); again != got {
+			t.Errorf("line %q read as %q and then as %q; the reason a user is shown "+
+				"must not depend on when it is read", line, got, again)
+		}
 	}
 }

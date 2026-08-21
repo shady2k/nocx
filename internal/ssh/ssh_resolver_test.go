@@ -68,6 +68,10 @@ func (s *StubConfigResolver) ResolveConfig(_ context.Context, host string) (*Hos
 			IdentityFile:  e.IdentityFile,
 			RemoteCommand: e.RemoteCommand,
 			RequestTTY:    e.RequestTTY,
+
+			ControlMaster:  e.ControlMaster,
+			ControlPath:    e.ControlPath,
+			ControlPersist: e.ControlPersist,
 		}, nil
 	}
 	return &HostConfig{HostName: host, User: currentUser(), Port: 22}, nil

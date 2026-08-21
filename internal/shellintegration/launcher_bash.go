@@ -9,17 +9,20 @@ import "strings"
 // survive framework prompt initialisation). @ENV@ is replaced by the
 // session environment block and @NOCX_BASH@ by the embedded nocx.bash.
 //
-// Declared equivalence set (what this rcfile promises, nothing more):
+// What this tier does and does not reproduce is declared in ONE place —
+// fidelity.go's startupFidelity table — and not here. The three tiers each
+// used to carry their own equivalence set in prose, which is two answers to
+// one question in the sense AD-8 names; one of the three had been wrong for
+// months and no test could say so. What belongs here is only what is local
+// to this file:
+//
 //   - exported variables, cwd, umask, shell options, functions and aliases,
 //     traps and history configuration are whatever the user's ~/.bashrc
 //     leaves them; nocx resets none of them;
-//   - $0 is "bash", non-login, interactive ([[ $- == *i* ]]);
-//   - /etc/bash.bashrc is not sourced: --rcfile replaces the whole standard
-//     interactive startup sequence, so it is skipped on every platform
-//     (declared deviation on Debian-derived systems, whose ordinary
-//     interactive bash reads it);
-//   - SHLVL is one higher than a native session — the outer `bash -c` is
-//     itself a shell — and the whole child subtree is consistently shifted;
+//   - $0 is "bash", non-login, interactive ([[ $- == *i* ]]) — the login
+//     PHASE is reproduced by bashLoginPhase() rather than by the -l flag,
+//     because --rcfile is the delivery vehicle and bash ignores it for a
+//     login shell;
 //   - if the user's ~/.bashrc execs or exits, control never reaches the
 //     install below: user startup wins. That outcome is no longer silent —
 //     the bootstrap progress descriptor carries "startup entered" before the
@@ -28,7 +31,9 @@ import "strings"
 //     (nocx-yww2). A top-level `return` in the user's file stops only that
 //     file — bash resumes the source — which is indistinguishable from
 //     completion, so the install proceeds; that case is a reported
-//     limitation, not a silent equivalence (nocx-xs1d).
+//     limitation, not a silent equivalence (nocx-xs1d). The same is true of
+//     the system profile the login phase sources, which is inside the same
+//     bracketed span for exactly that reason.
 //
 // BASH_ENV: the outer `bash -c` is non-interactive and would read BASH_ENV
 // before this file exists, executing attacker-or-accident code (spec §4.3);
@@ -69,6 +74,7 @@ case "${__nocx_bp_fd}" in
     *) { builtin printf 'startup-entered\n' >&"${__nocx_bp_fd}"; } 2>/dev/null || : ;;
 esac
 
+@LOGINPHASE@
 # User startup — first, and it wins.
 if [[ -f "${HOME}/.bashrc" ]]; then
     . "${HOME}/.bashrc"
@@ -166,7 +172,10 @@ unset __nocx_old_opts
 // user's login shell, which may be dash, ash, csh or a restricted shell, and
 // the rcfile this writes is bash's.
 //
-// bashRcfile renders the bash rcfile from its template: @ENV@ is the session
+// bashRcfile renders the bash rcfile from its template. mode says whether
+// this rcfile stands in for a login sshd never started (remoteLogin) or is a
+// local child that never had one (localChild); @LOGINPHASE@ carries
+// bashLoginPhase() in the first case and nothing in the second. @ENV@ is the session
 // environment block (launcherEnvBlock for the argv launchers, empty for the
 // launch carrier, which exports the stable variables itself before exec),
 // @CAPSRC@ is where the capability and the fence come from
@@ -174,8 +183,13 @@ unset __nocx_old_opts
 // the local child path), and @NOCX_BASH@ is the nocx.bash body (embedded for
 // the argv launchers, a source of the installed generation file for the
 // carrier).
-func bashRcfile(envBlock, scriptSource, capSource string) string {
+func bashRcfile(mode startupMode, envBlock, scriptSource, capSource string) string {
+	login := ""
+	if mode == remoteLogin {
+		login = loginPhase(ShellBash)
+	}
 	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", envBlock)
+	rc = strings.ReplaceAll(rc, "@LOGINPHASE@", login)
 	rc = strings.ReplaceAll(rc, "@CAPSRC@", capSource)
 	rc = strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
 	// The rendered rcfile ships inside the bootstrap payload, so its
@@ -232,46 +246,9 @@ func bashArgFor(rc string) string {
 	return strings.ReplaceAll(bashOuterScript, "@RC@", printfBEscape(rc))
 }
 
-func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {
-	if opts.Enhanced && opts.SessionID == "" {
-		// Pinned contract: SessionID is never empty when Enhanced. Fail
-		// closed — a marker-only session with no id cannot anchor the
-		// ownership protocol — rather than emit one that half-works.
-		return "", false
-	}
-	// The rcfile SOURCES the installed generation file rather than
-	// embedding the script: the publish prelude that always precedes this
-	// tier in the full launcher has already published the bundle, so the
-	// file exists — and embedding the script would double the payload
-	// (prelude + rcfile), which the 120 KiB cap cannot absorb (measured:
-	// 171,678 bytes over the 122,880 cap before this change; ~95 KB after).
-	// A failed publish leaves NOCX_GENERATION unset, the source line names
-	// no file, and the session is a conventional terminal with a visible
-	// native prompt (ADR-0024 decision 4 — the transient-integrated middle
-	// tier is deleted, not degraded to).
-	// The literal form, and it is the reason FullBootstrapCommand may not
-	// be emitted by a managed session: this rcfile travels inside the
-	// remote COMMAND, so both bearers reach the far host's argv. P4 retires
-	// the one caller that remains (design §12).
-	return bashArgFor(bashRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.bash"),
-		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery))), true
-}
-
-// bashCommand builds the bash remote command: the pinned single-tier form,
-// which is what a client sends when the far shell is already known to be
-// bash. The ShellAuto dispatcher sends bashArg instead, wrapped by its own
-// argv plumbing, so the two paths share one payload.
-func (remoteLauncher) bashCommand(opts LaunchOptions) (string, RefusalReason, bool) {
-	arg, ok := remoteLauncher{}.bashArg(opts)
-	if !ok {
-		return "", ReasonUnsupportedShell, false
-	}
-	cmd, ok := fullBootstrapLauncher(bashExecTail, arg)
-	if !ok {
-		// The publish prelude carries the bundle; a bundle that outgrows
-		// the cap must refuse rather than emit a command the far host
-		// cannot exec.
-		return "", ReasonUnsupportedShell, false
-	}
-	return cmd, ReasonNone, true
-}
+// The per-tier ARG method that used to sit here went with the command that
+// consumed it (ADR-0035). It substituted the two bearers into the rcfile TEXT
+// and that text travelled inside the remote COMMAND, so both reached the far
+// host's process arguments — the defect this epic exists to remove. What
+// survives is bashArgFor, which the installed launch carrier uses and which
+// carries no per-session value at all.

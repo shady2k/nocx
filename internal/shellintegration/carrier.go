@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -276,6 +277,15 @@ const (
 	// writer's, and so are the outcomes they produce.
 	OutcomeReceiverUnready  Outcome = "receiver-unready"
 	OutcomeBootstrapTimeout Outcome = "bootstrap-timeout"
+	// OutcomeBootstrapOutOfOrder is the BACKEND's too, and it is §6.1's
+	// first rule against a forged readiness token made into an outcome:
+	// each token of the closed set is accepted AT MOST ONCE AND ONLY IN ITS
+	// ORDER, and a repeat or an out-of-order token is a named bootstrap
+	// failure rather than a second trigger. The far side never speaks it —
+	// the loader emits each of its tokens once, by construction — so a
+	// session that produces it has had a token written into it by somebody
+	// who is not our loader.
+	OutcomeBootstrapOutOfOrder Outcome = "bootstrap-out-of-order"
 	// OutcomeChannelUnavailable: the lifecycle channel could not be opened,
 	// so nothing was minted (design §6.1) and stage-1 received a non-secret
 	// refusal. The shell still comes up integrated in the prompt sense; it
@@ -306,25 +316,70 @@ var outcomeTokens = map[Outcome]string{
 	OutcomeCapabilityWriteFailed:   "capability-write-failed",
 	OutcomeGenerationUnavailable:   "generation-unavailable",
 
-	OutcomeReceiverUnready:    "receiver-unready",
-	OutcomeBootstrapTimeout:   "bootstrap-timeout",
-	OutcomeChannelUnavailable: "channel-unavailable",
+	OutcomeReceiverUnready:     "receiver-unready",
+	OutcomeBootstrapTimeout:    "bootstrap-timeout",
+	OutcomeBootstrapOutOfOrder: "bootstrap-out-of-order",
+	OutcomeChannelUnavailable:  "channel-unavailable",
 }
 
 // OutcomeToken returns the token the loader emits for o, or the empty string
 // for a value that is not in the closed set.
 func OutcomeToken(o Outcome) string { return outcomeTokens[o] }
 
+// AllOutcomes is the closed set itself, in a stable order.
+//
+// It is derived from outcomeTokens rather than restated, which is the whole
+// point: a consumer that has to answer "and every one of these" — the product
+// vocabulary, the wire enum — asks the table that already exists, so a member
+// added here cannot be missed by a check that keeps its own copy of the list.
+// The order is by token so a failure names the same member twice in a row.
+func AllOutcomes() []Outcome {
+	out := make([]Outcome, 0, len(outcomeTokens))
+	for o := range outcomeTokens {
+		out = append(out, o)
+	}
+	sort.Slice(out, func(i, j int) bool { return outcomeTokens[out[i]] < outcomeTokens[out[j]] })
+	return out
+}
+
+// outcomeByToken is the reverse direction, built once from the closed set.
+//
+// It is built rather than scanned because "a reader of a session's output
+// turns one token into one outcome, and OutcomeForToken cannot have two
+// owners" is stated above as an invariant, and until this existed nothing
+// held it: outcomeTokens is keyed by Outcome, so two outcomes sharing a token
+// were accepted silently, and the scan that answered the reverse question
+// ranged over a Go map — whose iteration order is randomised per run. A
+// session refused for one reason would then be named after either of the two
+// outcomes, differently on each read of the same line, and the user would be
+// shown a diagnosis that changed while they were looking at it.
+//
+// AllOutcomes is what it enumerates, for the reason that function gives:
+// asking the table that already exists is what stops a member added there
+// from being missed by a consumer keeping its own copy of the list. A
+// collision panics at init, in the same breath and for the same reason
+// stageDigestRE compiles at init — it is a mistake in this file's own table,
+// every test binary that loads the package trips it, and no build carrying
+// one can start.
+var outcomeByToken = func() map[string]Outcome {
+	m := make(map[string]Outcome, len(outcomeTokens))
+	for _, o := range AllOutcomes() {
+		tok := outcomeTokens[o]
+		if first, dup := m[tok]; dup {
+			panic("shellintegration: outcomes " + string(first) + " and " + string(o) +
+				" share the token " + tok + "; a token names exactly one outcome")
+		}
+		m[tok] = o
+	}
+	return m
+}()
+
 // OutcomeForToken maps a token read off the session back to the outcome the
 // product names. ok is false for anything that is not one of ours — which a
 // reader must treat as "not an outcome", never as a refusal it invented.
 func OutcomeForToken(token string) (Outcome, bool) {
-	for outcome, tok := range outcomeTokens {
-		if tok == token {
-			return outcome, true
-		}
-	}
-	return "", false
+	o, ok := outcomeByToken[token]
+	return o, ok
 }
 
 // FrameHeader builds the header for one frame. It is the writer's half of

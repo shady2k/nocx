@@ -731,14 +731,21 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     script (or empty — the direct-host default) publishes and
 //     integrates.
 //  3. In script mode the bundle is published over SFTP through the
-//     RemoteInstaller. Its outcome is REPORTED AND NOT CONSULTED: the same
-//     carrier is emitted whether the publish succeeded, failed, or was
-//     never attempted. That is the carrier design's first decision, and it
-//     is what the old shape got wrong — the command used to begin with a
-//     far-side test of installation state, which on a first contact fails
-//     while the publish that would have satisfied it is still in flight.
-//     The far side stays the owner of "is this installation valid"; that
-//     verification now runs after the bootstrap settles, inside stage-1.
+//     RemoteInstaller, CONCURRENTLY with the loader (design §6.1 step 2,
+//     §7). Its outcome is REPORTED AND NOT CONSULTED for which command is
+//     emitted: the same carrier goes out whether the publish succeeded,
+//     failed, or was never attempted. That is the carrier design's first
+//     decision, and it is what the old shape got wrong — the command used to
+//     begin with a far-side test of installation state, which on a first
+//     contact fails while the publish that would have satisfied it is still
+//     in flight. The far side stays the owner of "is this installation
+//     valid"; that verification runs after the bootstrap settles, inside
+//     stage-1. What the outcome DOES gate is the mint: §6.1 step 5 puts the
+//     publish's terminal outcome ahead of the pair, to close the mutation
+//     race where stage-1 verifies a manifest microseconds before an atomic
+//     commit. It was sequential and inline until P5, which is why the
+//     deadline arithmetic did not close: 3 + 3 + 10 is 16 against a 15 s
+//     deadline, and concurrent it is 13.
 //  4. The launcher builds the carrier: a bounded loader carrying no bundle
 //     bytes and neither secret (shellintegration/carrier.go). A profile pin
 //     (cfg.Shell) is still passed — a user who says "this host runs zsh"
@@ -762,73 +769,145 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		return "", ReasonNone, nil
 	}
 
-	// The publish is best-effort and its result is a LOG, never an input to
-	// the decision below: the fail-open contract says a failed publish
-	// leaves the previous activation byte-identical and the session still
-	// starts, and the carrier is what starts it either way.
-	if cfg.RemoteInstaller != nil {
-		remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
-		if err != nil {
-			rc.log.Warn("ssh: could not determine remote home for shell integration",
-				"host", resolved.hostName, "error", err)
-		} else if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
-			rc.log.Warn("ssh: shell integration publish failed",
-				"host", resolved.hostName, "error", err)
-		}
+	// No launcher wired: the publish still runs — it is what puts a
+	// generation on the far host — and the session opens a plain shell. The
+	// installer supplies no command any more; a session either runs the
+	// carrier or runs nothing at all.
+	if cfg.RemoteLauncher == nil {
+		rc.startPublish(ctx, gclient, resolved, cfg, nil)
+		return "", ReasonNone, nil
 	}
 
-	if cfg.RemoteLauncher != nil {
-		shell := cfg.Shell
-		if shell == "" {
-			shell = ShellAuto
-		}
-		opts := LaunchOptions{
-			SessionID: cfg.SessionID,
-			Enhanced:  cfg.Enhanced,
-		}
-		// The lifecycle channel config addresses the carrier: lane, domain,
-		// epoch and port are names and travel in the command. The
-		// capability and the recovery fence are carried too, so the
-		// launcher can prove it does not put them there — they reach the
-		// far shell as a frame on the channel, never as command text. lc is
-		// nil when establishment was refused; the launch then carries no
-		// channel config and the shell stays conventional.
-		if lc != nil {
-			opts.Lane = lc.launch.Lane
-			opts.Domain = lc.launch.Domain
-			opts.Epoch = lc.launch.Epoch
-			opts.LifecyclePort = lc.launch.Port
-			opts.Capability = lc.launch.Capability
-			opts.Recovery = lc.launch.Recovery
-		}
-		// The bootstrap is prepared first: the carrier commits to the
-		// digest of the stage-1 frame, so the frame exists before the
-		// command that names it does. Without a bootstrapper there is
-		// nothing to feed the loader, and a loader with no sender blocks
-		// on a frame that never arrives — so the session runs a plain
-		// shell instead, with a named reason.
-		digest, run, prepared := cfg.RemoteLauncher.Prepare(shell, opts)
-		if !prepared {
-			rc.log.Warn("ssh: the shell bootstrap could not be prepared; the session runs a plain shell",
-				"host", resolved.hostName, "shell", shell)
-			return "", ReasonUnsupportedShell, nil
-		}
-		opts.StageDigest = digest
-		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, opts)
-		if ok && cmd != "" {
-			return cmd, ReasonNone, run
-		}
-		// Decline or degenerate result: fall back to a plain shell. Normalize
-		// a missing reason so the degrade stays visible in the product
-		// (AGENTS.md: a soft degrade must never be log-only). The lifecycle
-		// channel is not used by a plain shell; openShell closes lc.
-		if reason == "" {
-			reason = ReasonUnsupportedShell
-		}
-		return "", reason, nil
+	shell := cfg.Shell
+	if shell == "" {
+		shell = ShellAuto
 	}
+	opts := LaunchOptions{
+		SessionID: cfg.SessionID,
+		Enhanced:  cfg.Enhanced,
+	}
+	// The lifecycle channel config addresses the carrier: lane, domain,
+	// epoch and port are names and travel in the command. The
+	// capability and the recovery fence are carried too, so the
+	// launcher can prove it does not put them there — they reach the
+	// far shell as a frame on the channel, never as command text. lc is
+	// nil when establishment was refused; the launch then carries no
+	// channel config and the shell stays conventional.
+	if lc != nil {
+		opts.Lane = lc.launch.Lane
+		opts.Domain = lc.launch.Domain
+		opts.Epoch = lc.launch.Epoch
+		opts.LifecyclePort = lc.launch.Port
+		opts.Capability = lc.launch.Capability
+		opts.Recovery = lc.launch.Recovery
+	}
+	// The bootstrap is prepared first: the carrier commits to the
+	// digest of the stage-1 frame, so the frame exists before the
+	// command that names it does. Without a bootstrapper there is
+	// nothing to feed the loader, and a loader with no sender blocks
+	// on a frame that never arrives — so the session runs a plain
+	// shell instead, with a named reason.
+	digest, run, gate, prepared := cfg.RemoteLauncher.Prepare(shell, opts)
+	if !prepared {
+		rc.log.Warn("ssh: the shell bootstrap could not be prepared; the session runs a plain shell",
+			"host", resolved.hostName, "shell", shell)
+		// The publish still runs. It is what puts a generation on the
+		// far host for the NEXT connection, and a session that cannot
+		// bootstrap today is exactly the one that most needs the next
+		// one to work.
+		rc.startPublish(ctx, gclient, resolved, cfg, nil)
+		return "", ReasonUnsupportedShell, nil
+	}
+	opts.StageDigest = digest
 
-	return "", ReasonNone, nil
+	// §6.1 step 2: the publish and the loader start CONCURRENTLY, and
+	// §7 requires it — 3 + 3 + 10 is 16 against a 15 s integration
+	// deadline, so a sequential publish cannot close. The publish runs
+	// on its own auxiliary channel from here while the loader takes the
+	// terminal and quarantines input; the mint waits for both through
+	// the gate, and the longest path is 13 s rather than 16 — asserted on
+	// the schedule graph rather than on a stopwatch, by
+	// shellintegration's TestBootstrapSchedule_* assertions.
+	//
+	// Step 4 is answered synchronously, because it already is: the
+	// transport was established before the session was opened, so by
+	// here the receiver either exists or never will.
+	rc.startPublish(ctx, gclient, resolved, cfg, gate)
+	if lc != nil {
+		gate.ReceiverReady()
+	} else {
+		gate.ReceiverUnavailable(errors.New("ssh: no lifecycle channel for this session"))
+	}
+	cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, opts)
+	if ok && cmd != "" {
+		return cmd, ReasonNone, run
+	}
+	// Decline or degenerate result: fall back to a plain shell. Normalize
+	// a missing reason so the degrade stays visible in the product
+	// (AGENTS.md: a soft degrade must never be log-only). The lifecycle
+	// channel is not used by a plain shell; openShell closes lc.
+	if reason == "" {
+		reason = ReasonUnsupportedShell
+	}
+	return "", reason, nil
+}
+
+// startPublish runs the SFTP publish on its own schedule and tells the gate
+// when it has settled (design §6.1 step 5, §7).
+//
+// It used to run inline, ahead of everything, and that is what made the
+// deadline arithmetic fail to close: the publish is bounded at T = 10 s and
+// the receiver and the frame at 3 s each, so a sequential schedule costs 16 s
+// against a 15 s deadline. Concurrent, the longest path is the publish plus
+// the terminal outcome after frame 2 — 13 s.
+//
+// Its result stays a LOG and never an input to which command is emitted: the
+// fail-open contract says a failed publish leaves the previous activation
+// byte-identical and the session still starts, and the carrier is what starts
+// it either way. What the result DOES decide is one thing — whether the gate
+// opens with an error to name, so that a far side reporting
+// generation-unavailable can be told that the reason there is no generation is
+// that nocx could not write one.
+//
+// The context is deliberately not the caller's: Connect returns as soon as the
+// session is started, and a cancelled connect context must not abort a publish
+// that is already writing to the far host. The bound is the publisher's own T,
+// which it enforces against its own clock; adding a second timer here would be
+// a second, unsynchronised deadline for one budget.
+func (rc *RealClient) startPublish(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, gate BootstrapGate) {
+	if cfg.RemoteInstaller == nil {
+		// A terminal outcome all the same, and it must be: a gate waiting
+		// for a fact nobody will ever supply is a session that never leaves
+		// `starting`, which §7 forbids outright.
+		if gate != nil {
+			gate.PublishSettled(nil)
+		}
+		return
+	}
+	pctx := context.WithoutCancel(ctx)
+	go func() {
+		err := rc.publishBundle(pctx, gclient, resolved, cfg)
+		if gate != nil {
+			gate.PublishSettled(err)
+		}
+	}()
+}
+
+// publishBundle is the publish itself, separated so startPublish is about the
+// schedule and this is about the work.
+func (rc *RealClient) publishBundle(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) error {
+	remoteHome, err := cfg.RemoteInstaller.GetRemoteHome(gclient)
+	if err != nil {
+		rc.log.Warn("ssh: could not determine remote home for shell integration",
+			"host", resolved.hostName, "error", err)
+		return err
+	}
+	if err := cfg.RemoteInstaller.EnsureInstalledRemote(ctx, gclient, remoteHome); err != nil {
+		rc.log.Warn("ssh: shell integration publish failed",
+			"host", resolved.hostName, "error", err)
+		return err
+	}
+	return nil
 }
 
 // openShell opens a session, requests a PTY, optionally requests agent
@@ -843,50 +922,12 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
 	startCmd, reason, bootstrap := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
 
-	session, err := gclient.NewSession()
+	sess, err := rc.openSessionWithPTY(gclient, resolved, cfg)
 	if err != nil {
 		lc.close()
-		return nil, fmt.Errorf("new session: %w", err)
+		return nil, err
 	}
-
-	ptyReq := ptyReqMsg{
-		Term:     "xterm-256color",
-		Columns:  uint32(resolved.cols),
-		Rows:     uint32(resolved.rows),
-		Width:    uint32(resolved.xpixel),
-		Height:   uint32(resolved.ypixel),
-		Modelist: buildTerminalModes(),
-	}
-	_, err = session.SendRequest("pty-req", true, gossh.Marshal(&ptyReq))
-	if err != nil {
-		lc.close()
-		_ = session.Close()
-		return nil, fmt.Errorf("pty-req: %w", err)
-	}
-
-	if cfg.AgentForward {
-		// Per-connection handler already registered in Connect (initAgentForward).
-		// Per-session: request agent forwarding on this session so the remote
-		// side can open auth-agent@openssh.com channels. agent.RequestAgentForwarding
-		// uses wantReply=true, so a server refusal surfaces as an error.
-		if reqErr := agent.RequestAgentForwarding(session); reqErr != nil {
-			lc.close()
-			_ = session.Close()
-			return nil, fmt.Errorf("agent-forward request: %w", reqErr)
-		}
-	}
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		lc.close()
-		_ = session.Close()
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := session.StdoutPipe()
-	if err != nil {
-		lc.close()
-		_ = session.Close()
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
+	session, stdin, stdout := sess.session, sess.stdin, sess.stdout
 
 	// A start command that does not use the lifecycle channel — the
 	// launcher declined, the destination ran a configured remote command,
@@ -899,11 +940,33 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		lc.close()
 	}
 
+	// execAccepted records the REQUEST RESULT, which is what §6.4 says to
+	// branch on. It is the discriminator for the sixth row: an accepted
+	// request whose loader never announces itself is a substituted command,
+	// not a refused one, and the two leave the user in opposite places.
+	execAccepted := false
 	if startCmd != "" {
-		if err := session.Start(startCmd); err != nil {
+		if startErr := session.Start(startCmd); startErr != nil {
+			// §6.4 amendment A. The exec request was refused; whether the
+			// channel survived it is a property of the server, so it is
+			// OBSERVED rather than assumed — a shell on the same channel,
+			// and a replacement session channel on the same connection if
+			// that channel is gone. Neither costs a second authentication.
+			recovered, rerr := rc.recoverFromRefusedExec(gclient, resolved, cfg, session, startErr)
+			if rerr != nil {
+				lc.close()
+				_ = session.Close()
+				return nil, rerr
+			}
+			session, stdin, stdout = recovered.session, recovered.stdin, recovered.stdout
+			// What is on the far side now is a NATIVE login shell: our
+			// loader never ran, so there is nothing to send frames to and
+			// no channel for it to use. Sending them anyway would type them
+			// into the user's shell.
+			reason, bootstrap = ReasonExecRefused, nil
 			lc.close()
-			_ = session.Close()
-			return nil, fmt.Errorf("shell start: %w", err)
+		} else {
+			execAccepted = true
 		}
 	} else {
 		if err := session.Shell(); err != nil {
@@ -969,8 +1032,53 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 			// leaves the far side on its way to a usable prompt.
 			bootReason := bootstrap(bctx, bootstrapStream{sessionFeed: feed, w: stdin})
 			if bootReason != ReasonNone {
+				// §6.4's sixth row, named at the only moment it is
+				// observable. The exec request was ACCEPTED, so the far
+				// side agreed to run our loader; the loader never spoke
+				// and the channel is already gone. Something else ran on
+				// it, it reported its status, and no native prompt exists
+				// on any channel of that connection — which is why this is
+				// session-failed and not a refusal that a prompt survives.
+				//
+				// It does not claim to diagnose the server's
+				// configuration, and it cannot: a far side that died
+				// before the loader spoke reaches the same state. What it
+				// names is the OUTCOME, which is the same either way — the
+				// user has no prompt here.
+				if execAccepted && feed.Ended() {
+					bootReason = ReasonExecSubstituted
+				}
+				ch.setShellIntegrationReason(bootReason)
 				ch.log.Warn("ssh: shell bootstrap did not integrate the session",
 					"reason", bootReason)
+				// THE HARD INVALIDATION of design §5.3's validity
+				// interval, named where it does its work.
+				//
+				// The capability's validity opens at minting and is
+				// closed hard by backend invalidation — a bootstrap
+				// refusal or timeout among them — after which a frame
+				// of that epoch is rejected. This is that close, and
+				// it is what bounds the one exposure §6.1 admits it
+				// cannot remove: a forged STAGE_READY that outruns an
+				// honest refusal produces a bearer, and this is the
+				// event that kills it. Nothing else on this path did
+				// it before — the transport stayed live until the
+				// session ended, so a refusal left a valid epoch
+				// behind it for as long as the tab was open.
+				//
+				// It is also the ONLY thing that moves a refused
+				// remote session out of `starting`: with no domain
+				// ever established the kernel publishes nothing, so
+				// without this the axis would wait for a fact that is
+				// never coming (§7: `starting` can never be
+				// permanent).
+				//
+				// Closing the handle is the whole invalidation: it
+				// ends the domain through the kernel's TransportLost,
+				// releases the tunnel lease and removes the remote
+				// listener. It is idempotent, so the channel's own
+				// Close still runs exactly once.
+				lc.close()
 			}
 			gate.release()
 			close(bootstrapDone)
@@ -993,6 +1101,116 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 	}()
 
 	return ch, nil
+}
+
+// ptySession is one session channel with a pty and its pipes: everything
+// needed to carry an interactive shell.
+type ptySession struct {
+	session *gossh.Session
+	stdin   io.WriteCloser
+	stdout  io.Reader
+}
+
+// openSessionWithPTY opens a session channel on an EXISTING connection,
+// requests a pty and (when asked) agent forwarding, and returns its pipes.
+//
+// It is a function rather than four inline statements because §6.4's fourth
+// row needs it twice: a server that tears the channel down as it refuses the
+// exec request leaves the CONNECTION intact, and a replacement channel on it
+// reaches a prompt at the cost of a second session and no second
+// authentication.
+func (rc *RealClient) openSessionWithPTY(gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (ptySession, error) {
+	session, err := gclient.NewSession()
+	if err != nil {
+		return ptySession{}, fmt.Errorf("new session: %w", err)
+	}
+	ptyReq := ptyReqMsg{
+		Term:     "xterm-256color",
+		Columns:  uint32(resolved.cols),
+		Rows:     uint32(resolved.rows),
+		Width:    uint32(resolved.xpixel),
+		Height:   uint32(resolved.ypixel),
+		Modelist: buildTerminalModes(),
+	}
+	if _, err = session.SendRequest("pty-req", true, gossh.Marshal(&ptyReq)); err != nil {
+		_ = session.Close()
+		return ptySession{}, fmt.Errorf("pty-req: %w", err)
+	}
+	if cfg.AgentForward {
+		// Per-connection handler already registered in Connect (initAgentForward).
+		// Per-session: request agent forwarding on this session so the remote
+		// side can open auth-agent@openssh.com channels. agent.RequestAgentForwarding
+		// uses wantReply=true, so a server refusal surfaces as an error.
+		if reqErr := agent.RequestAgentForwarding(session); reqErr != nil {
+			_ = session.Close()
+			return ptySession{}, fmt.Errorf("agent-forward request: %w", reqErr)
+		}
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		_ = session.Close()
+		return ptySession{}, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		_ = session.Close()
+		return ptySession{}, fmt.Errorf("stdout pipe: %w", err)
+	}
+	return ptySession{session: session, stdin: stdin, stdout: stdout}, nil
+}
+
+// recoverFromRefusedExec is §6.4's third and fourth rows, in code.
+//
+// The refusal is CONDITIONAL and the condition is observable at the moment it
+// matters, so nothing here has to guess: a request refused with the channel
+// intact leaves a pty already granted on it and a `shell` succeeds there; a
+// request refused with the channel torn down does not, and the answer is a
+// replacement session channel on the SAME connection. Neither opens a
+// connection and neither costs a second authentication — the whole point of
+// the row, and the difference between conventional(exec-refused) and
+// session-failed(exec-refused).
+//
+// The recovery is attempted in that order rather than branched on the error
+// value on purpose. The discriminator §6.4 names — (false, nil) against
+// (false, io.EOF) — is the client's view of the REQUEST, and gossh's
+// Session.Start folds the first into an error of its own while passing the
+// second through; asking the channel whether it still works answers the same
+// question at the seam an implementer actually holds, and it never reads an
+// error's text.
+func (rc *RealClient) recoverFromRefusedExec(gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, refused *gossh.Session, startErr error) (ptySession, error) {
+	rc.log.Warn("ssh: the server refused the exec request; recovering to a native prompt without a second authentication",
+		"host", resolved.hostName, "error", startErr)
+
+	// The channel may have survived the refusal with its pty. A Start whose
+	// exec request was refused leaves the Session unstarted, so a Shell on
+	// that same Session is a Shell on that same channel.
+	stdin, inErr := refused.StdinPipe()
+	stdout, outErr := refused.StdoutPipe()
+	if inErr == nil && outErr == nil {
+		if shellErr := refused.Shell(); shellErr == nil {
+			rc.log.Info("ssh: the refused exec left the channel usable; the session is a native prompt on it",
+				"host", resolved.hostName, "reason", string(ReasonExecRefused))
+			return ptySession{session: refused, stdin: stdin, stdout: stdout}, nil
+		}
+	}
+
+	// It did not. A replacement channel on the same connection is the whole
+	// of the recovery — never a new connection, never a second
+	// authentication.
+	_ = refused.Close()
+	replacement, err := rc.openSessionWithPTY(gclient, resolved, cfg)
+	if err != nil {
+		return ptySession{}, fmt.Errorf("shell start: %s: the exec request was refused and no replacement session channel could be opened on the same connection: %w",
+			ReasonExecRefused, err)
+	}
+	if shellErr := replacement.session.Shell(); shellErr != nil {
+		_ = replacement.session.Close()
+		return ptySession{}, fmt.Errorf("shell start: %s: the exec request was refused and the replacement session channel reached no prompt: %w",
+			ReasonExecRefused, shellErr)
+	}
+	rc.log.Info("ssh: the refused exec took the channel; a replacement session channel on the same connection reached a native prompt",
+		"host", resolved.hostName, "reason", string(ReasonExecRefused))
+	return replacement, nil
 }
 
 // isAuthError returns true if the error likely comes from a failed SSH authentication.

@@ -99,34 +99,9 @@ func posixArgFor(envFile string) string {
 	return singleLine(outer)
 }
 
-func (remoteLauncher) posixArg(opts LaunchOptions) (string, bool) {
-	if opts.Enhanced && opts.SessionID == "" {
-		// Pinned contract: SessionID is never empty when Enhanced. The
-		// minimal tier has no ownership protocol to anchor, but the
-		// precondition is the caller's, enforced uniformly across tiers.
-		return "", false
-	}
-	// The ENV file SOURCES the installed generation file rather than
-	// embedding the script — same reasoning and failure semantics as the
-	// bash tier (see launcher_bash.go bashArg).
-	return posixArgFor(posixEnvFile(launcherEnvBlock(opts), launchSourceLine("nocx.posix"))), true
-}
-
-// posixCommand builds the minimal-tier remote command, sent when the far
-// shell is already known to be neither bash nor zsh. The ShellAuto
-// dispatcher sends posixArg instead, wrapped by its own argv plumbing, so
-// the two paths share one payload.
-func (remoteLauncher) posixCommand(opts LaunchOptions) (string, RefusalReason, bool) {
-	arg, ok := remoteLauncher{}.posixArg(opts)
-	if !ok {
-		return "", ReasonUnsupportedShell, false
-	}
-	cmd, ok := fullBootstrapLauncher(shExecTail, arg)
-	if !ok {
-		// The publish prelude carries the bundle; a bundle that outgrows
-		// the cap must refuse rather than emit a command the far host
-		// cannot exec.
-		return "", ReasonUnsupportedShell, false
-	}
-	return cmd, ReasonNone, true
-}
+// The per-tier ARG method that used to sit here went with the command that
+// consumed it (ADR-0035). It substituted the two bearers into the rcfile TEXT
+// and that text travelled inside the remote COMMAND, so both reached the far
+// host's process arguments — the defect this epic exists to remove. What
+// survives is posixArgFor, which the installed launch carrier uses and which
+// carries no per-session value at all.

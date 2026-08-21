@@ -56,7 +56,7 @@ func TestTier_BashReadsTheCapabilityFromTheDescriptorOnceAndClosesIt(t *testing.
 		t.Fatalf("write .bashrc: %v", err)
 	}
 	rcPath, dataPath := capFixture(t,
-		bashRcfile("", capProbe, capabilityFromDescriptor(bashUnsetExport)))
+		bashRcfile(remoteLogin, "", capProbe, capabilityFromDescriptor(bashUnsetExport)))
 
 	s := startLoader(t,
 		"exec 7<"+dataPath+"; "+CapabilityFDEnv+"=7 exec bash --rcfile "+rcPath+" -i",

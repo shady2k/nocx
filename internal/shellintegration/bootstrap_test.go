@@ -66,6 +66,15 @@ func (f *scriptedFarSide) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// remaining is how many scripted lines the driver never asked for. Zero means
+// the far side reached the end of its script, which for a script ending in a
+// terminal outcome means the driver read that outcome.
+func (f *scriptedFarSide) remaining() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.steps)
+}
+
 func (f *scriptedFarSide) written() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -90,7 +99,7 @@ func testPlan(t *testing.T, opts LaunchOptions, minted *int) BootstrapPlan {
 	}
 	return BootstrapPlan{
 		Stage1: stage,
-		Secret: SecretFunc(func() ([]byte, error) {
+		Secret: SecretFunc(func(context.Context) ([]byte, error) {
 			*minted++
 			return SecretFrame(opts)
 		}),
@@ -272,6 +281,17 @@ func TestDeliverBootstrap_AFarSideRefusalIsReportedAsItself(t *testing.T) {
 // design §6.1's last paragraph: the earlier draft delivered the secret and
 // then discarded it when the channel turned out to be refused, which hands a
 // bearer across a boundary before establishing that it has any use.
+//
+// It also pins §6.4's row for that refusal — "nothing minted; native shell;
+// channel-unavailable" — and the second half of it is the half that was
+// wrong. This asserted OutcomeBootstrapAccepted, on the reading that the far
+// side had the last word. The far side is answering a different question:
+// stage-1 execs the launcher on a refusal exactly as it does on a secret, so
+// `accepted` is the truth about the SHELL and says nothing about the channel,
+// which only this side knows there was none of. Reported as accepted, the
+// session claimed integration with no domain behind it and never left
+// `starting`, because the hard invalidation that moves it out runs only on a
+// named refusal.
 func TestDeliverBootstrap_WithNoLifecycleChannelTheFrameCarriesARefusal(t *testing.T) {
 	opts := stageOpts()
 	stage, err := Stage1Frame(ShellAuto, opts)
@@ -287,8 +307,16 @@ func TestDeliverBootstrap_WithNoLifecycleChannelTheFrameCarriesARefusal(t *testi
 
 	out := DeliverBootstrap(context.Background(), lg, far,
 		BootstrapPlan{Stage1: stage, Secret: nil})
-	if out != OutcomeBootstrapAccepted {
-		t.Fatalf("outcome %q, want the session to come up without a channel", out)
+	if out != OutcomeChannelUnavailable {
+		t.Fatalf("outcome %q, want %q — §6.4's row for a refused lifecycle channel",
+			out, OutcomeChannelUnavailable)
+	}
+	// And the shell did come up: the far side was asked for its terminal
+	// outcome and answered `accepted`, which is what makes this a NAMED
+	// conventional session rather than one that failed to start.
+	if far.remaining() != 0 {
+		t.Errorf("%d scripted lines were never read; the far side did not reach its "+
+			"terminal outcome, so this is not the row under test", far.remaining())
 	}
 	sent := far.allBytes()
 	if !bytes.Contains(sent, RefusalFrame(OutcomeChannelUnavailable)) {
@@ -314,7 +342,12 @@ func TestDeliverBootstrap_DoesNotEndTheIntervalAtReady(t *testing.T) {
 	far := &scriptedFarSide{steps: []farSideStep{
 		{line: LoaderReadyToken},
 		{line: StageReadyToken},
-		{line: LoaderReadyToken}, // a second READY is not an outcome either
+		// Ordinary far-side output is not an outcome either. It was a
+		// second LOADER_READY here until §6.1's rule 1 landed: a repeated
+		// token is now a NAMED failure rather than a line to drop, and
+		// asserting it here would be asserting rule 1 twice under the
+		// wrong name (bootstrap_forgery_test.go owns it).
+		{line: "Last login: Tue Aug 19 09:12:44 2026"},
 		{deadline: true},
 	}}
 	lg, _ := captureLog()

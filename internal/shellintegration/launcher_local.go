@@ -32,7 +32,7 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 	if !opts.Enhanced || opts.SessionID == "" {
 		return "", fmt.Errorf("shellintegration: local lifecycle bootstrap requires an enhanced session with a session id")
 	}
-	return bashRcfile(launcherEnvBlock(opts), bashScript,
+	return bashRcfile(localChild, launcherEnvBlock(opts), bashScript,
 		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 

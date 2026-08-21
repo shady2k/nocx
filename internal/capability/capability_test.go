@@ -486,6 +486,14 @@ func (f *fakeSession) Done() <-chan struct{} { return make(chan struct{}) }
 func (f *fakeSession) StartOutput(context.Context, session.OutputHandler) error {
 	return nil
 }
+
+// OpenBootstrapWindow is the typed-`ssh` delivery's seam (design §5.5). This
+// double never reaches it: nothing in the capability layer opens a bootstrap
+// window, and a fake that answered one would be advertising a terminal it
+// does not have.
+func (f *fakeSession) OpenBootstrapWindow() (session.BootstrapWindow, error) {
+	return nil, errors.New("fakeSession has no terminal")
+}
 func (f *fakeSession) ShellIntegrationReason() ssh.RefusalReason { return "" }
 func (f *fakeSession) ExitOutcome() (session.ExitCause, int) {
 	return session.ExitInterrupted, 0

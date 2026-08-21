@@ -55,6 +55,37 @@ type BootstrapStream interface {
 // returns why integration did not happen, or ReasonNone when it did.
 type BootstrapRun func(ctx context.Context, s BootstrapStream) RefusalReason
 
+// BootstrapGate is the ssh side of design §6.1's ordering: the two facts that
+// must both be in before the far side is handed a bearer.
+//
+// It is declared here, and driven from here, because this package is the one
+// that knows both of them — it opens the lifecycle transport and it runs the
+// publish. It is CONSUMED on the other side of the seam, where the frame is
+// built; the composition root adapts the two declarations exactly as it does
+// for BootstrapStream and the launcher.
+//
+// Why the publish outcome does not cross this interface. §6.1 names four
+// terminal outcomes — committed, unchanged, failed and contended — and every
+// one of them opens the gate, because "after a failed publish the far side may
+// still accept a generation installed earlier, so a failed publish is not a
+// refusal". The far side is the owner of "is this installation valid" and
+// re-proves it after the frame arrives. So what the gate needs is that the
+// attempt SETTLED, and the error is carried only so the failure can be named
+// in a diagnosis.
+type BootstrapGate interface {
+	// ReceiverReady records §6.1 step 4: the lifecycle transport and its
+	// receiver are fully ready.
+	ReceiverReady()
+	// ReceiverUnavailable records that step 4 will never be true, so
+	// nothing is minted and the far side is handed a non-secret refusal
+	// rather than a bearer it has no channel to use.
+	ReceiverUnavailable(err error)
+	// PublishSettled records §6.1 step 5: the publish attempt reached a
+	// terminal outcome. err is nil when it committed and non-nil otherwise,
+	// and either way the gate opens.
+	PublishSettled(err error)
+}
+
 // ---------------------------------------------------------------------------
 // The stream
 // ---------------------------------------------------------------------------
@@ -87,6 +118,13 @@ type sessionFeed struct {
 	// err holds why the pump stopped. Written before chunks is closed, read
 	// only after, so the close orders it.
 	err error
+	// ended is closed by the pump when the session's output stream has
+	// ended, and is the race-free way to ask "is the far side gone".
+	// Design §6.4's substituted-exec row needs exactly that question
+	// answered at the moment the bootstrap gives up, and asking the
+	// session's own done channel would be a race between two goroutines
+	// with no ordering between them.
+	ended chan struct{}
 	// after is the deadline source, injected so a test states "the deadline
 	// fires" instead of waiting for it (AGENTS.md: no test may depend on
 	// timing). Production is time.After.
@@ -94,8 +132,9 @@ type sessionFeed struct {
 }
 
 func newSessionFeed(r io.Reader) *sessionFeed {
-	f := &sessionFeed{chunks: make(chan []byte, 8), after: time.After}
+	f := &sessionFeed{chunks: make(chan []byte, 8), ended: make(chan struct{}), after: time.After}
 	go func() {
+		defer close(f.ended)
 		defer close(f.chunks)
 		for {
 			buf := make([]byte, 32*1024)
@@ -110,6 +149,18 @@ func newSessionFeed(r io.Reader) *sessionFeed {
 		}
 	}()
 	return f
+}
+
+// Ended reports whether the session's output stream has ended. The pump
+// closes `ended` after it has recorded why it stopped, so a true answer is
+// ordered after everything the pump wrote.
+func (f *sessionFeed) Ended() bool {
+	select {
+	case <-f.ended:
+		return true
+	default:
+		return false
+	}
 }
 
 // Read implements io.Reader for the terminal side.

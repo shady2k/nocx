@@ -21,6 +21,13 @@ type RealChannel struct {
 	// shellIntegrationReason is why shell integration did not happen,
 	// decided by openShell when the session started (nocx-r52q). ReasonNone
 	// means integration succeeded or was never attempted.
+	//
+	// It is guarded because one row of design §6.4 can only be named LATER:
+	// an exec request that was ACCEPTED and substituted is indistinguishable
+	// from an accepted one until the loader fails to announce itself, which
+	// is after the channel has been handed out. The reason is set once more
+	// at that point, and the transport reads it from another goroutine.
+	reasonMu               sync.Mutex
 	shellIntegrationReason RefusalReason
 
 	// waitMu guards waitErr/waitSet: the watcher records the outcome of
@@ -178,6 +185,8 @@ func (c *RealChannel) Done() <-chan struct{} {
 }
 
 func (c *RealChannel) ShellIntegrationReason() RefusalReason {
+	c.reasonMu.Lock()
+	defer c.reasonMu.Unlock()
 	return c.shellIntegrationReason
 }
 
@@ -267,4 +276,13 @@ func buildTerminalModes() string {
 	}
 	buf = append(buf, 0) // TTY_OP_END
 	return string(buf)
+}
+
+// setShellIntegrationReason records a refusal decided after the channel was
+// built. Only design §6.4's substituted-exec row reaches it: everything else
+// is known before the session is handed out.
+func (c *RealChannel) setShellIntegrationReason(r RefusalReason) {
+	c.reasonMu.Lock()
+	defer c.reasonMu.Unlock()
+	c.shellIntegrationReason = r
 }

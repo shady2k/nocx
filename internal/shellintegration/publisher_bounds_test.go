@@ -1030,3 +1030,21 @@ func TestShippedBundleFitsTheByteCeiling(t *testing.T) {
 			total, float64(maxPublishBytes)/float64(total))
 	}
 }
+
+// joined reports how many callers are waiting on this flight, read under the
+// lock that guards the counter.
+//
+// It is an OBSERVATION and lives with the tests that make it: the publisher
+// itself never reads the live count — finish returns it, once, for the log —
+// so a production accessor would be a function with no production caller, and
+// the dead-code ratchet is configured to say so.
+//
+// The tests below spin on it rather than sleeping, which is the point: "the
+// leader is held until every waiter has joined" is an event, and waiting for
+// an event is what AGENTS.md requires of a test that must not depend on
+// timing.
+func (f *publishFlight) joined() int {
+	publishFlights.mu.Lock()
+	defer publishFlights.mu.Unlock()
+	return f.waiters
+}

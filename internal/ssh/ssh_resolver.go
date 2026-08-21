@@ -88,6 +88,32 @@ type HostConfig struct {
 	// normalize to the canonical yes/no so callers are independent of
 	// the ssh version that produced the output.
 	RequestTTY string
+
+	// The multiplex directives, as the oracle resolves them for this exact
+	// argv — the user's config and their command-line -M/-S/-o together.
+	// ADR-0035's typed wrapper reads all three before it proposes a socket
+	// of its own, for two different reasons.
+	//
+	// The first is a REFUSAL: a user who expressed their own multiplex
+	// policy is never overridden, so any of these away from its default
+	// ends the rewrite before anything happens.
+	//
+	// The second is the SOCKET PATH, and it is why these are read off the
+	// oracle rather than composed here. ControlPath is percent-expanded by
+	// ssh, and the %C the wrapper proposes is a hash ssh computes from the
+	// local host, the remote host, the port and the remote user. Only ssh
+	// knows it — so the wrapper asks ssh, with its own options in the argv,
+	// and connects to the answer. Reading the config ourselves would be the
+	// second implementation ADR-0015 exists to prevent.
+	//
+	// Defaults, normalized: ControlMaster is "no", ControlPath is empty
+	// (ssh -G prints nothing for the "none" default), ControlPersist is
+	// "no". OpenSSH >= 10 serializes ControlMaster's booleans as
+	// true/false where older versions print yes/no; both normalize to the
+	// canonical yes/no, exactly as RequestTTY does above.
+	ControlMaster  string
+	ControlPath    string
+	ControlPersist string
 }
 
 // Sentinel errors for ssh -G resolution failures. Each is distinguishable
@@ -479,6 +505,35 @@ func parseSSHGOutput(output, host string) (*HostConfig, error) {
 			// the oracle's verdict.
 			if value != "none" {
 				cfg.RemoteCommand = value
+			}
+		case "controlmaster":
+			// "no" is the default and is what ssh -G prints for an unset
+			// directive; it collapses to the empty string so "the user
+			// expressed a policy" is a non-empty test on all three
+			// fields. true/false are OpenSSH >= 10's spelling of yes/no.
+			switch value {
+			case "no", "false":
+				cfg.ControlMaster = ""
+			case "true":
+				cfg.ControlMaster = "yes"
+			default:
+				cfg.ControlMaster = value
+			}
+		case "controlpath":
+			// ssh -G omits the line entirely when ControlPath is unset,
+			// and prints "none" when it is set to that sentinel; both mean
+			// "no socket", so both collapse to empty.
+			if value != "none" {
+				cfg.ControlPath = value
+			}
+		case "controlpersist":
+			switch value {
+			case "no", "false", "0":
+				cfg.ControlPersist = ""
+			case "true":
+				cfg.ControlPersist = "yes"
+			default:
+				cfg.ControlPersist = value
 			}
 		case "requesttty":
 			// "auto" is the RequestTTY default; ssh -G prints it when the

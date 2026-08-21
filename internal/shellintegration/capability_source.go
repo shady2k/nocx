@@ -1,9 +1,6 @@
 package shellintegration
 
-import (
-	"strconv"
-	"strings"
-)
+import "strings"
 
 // Where a tier's two bearer values come from.
 //
@@ -28,9 +25,10 @@ import (
 // spelling: the same substitution into an rcfile that travelled inside the
 // remote COMMAND, where both bearers reached the far host's process arguments
 // and every recorder of the exec request. That is the defect this epic exists
-// to remove. It survives here only for FullBootstrapCommand, whose one live
-// caller (nested typed `ssh`) design §12 gives to P4, together with this
-// function's second caller.
+// to remove, and it is gone — the command that carried it was deleted with
+// its last caller (ADR-0035). What is left is the two forms above, and each
+// of them has a transport that never becomes a filesystem name or an argv
+// word.
 //
 // Both forms end by dropping the export attribute. A user rc running under
 // `set -a` would auto-export the assignment and publish the capability in
@@ -100,7 +98,3 @@ const (
 	bashUnsetExport = "export -n"
 	zshUnsetExport  = "typeset +x"
 )
-
-// capabilityFDLiteral is the descriptor number as the far shell sees it,
-// exported by stage-1. It exists so a test can state the number once.
-func capabilityFDLiteral() string { return strconv.Itoa(CapabilityFD) }

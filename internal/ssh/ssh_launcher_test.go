@@ -29,6 +29,12 @@ type fakeLauncher struct {
 	cmd            string
 	reason         RefusalReason
 	ok             bool
+	// bootstrapReason is what the run reports as the bootstrap's terminal
+	// outcome. ReasonNone (the zero value) is "it integrated".
+	bootstrapReason RefusalReason
+	// gate is the §6.1 gate Prepare handed back, kept so a test can read
+	// which facts the ssh side reported into it.
+	gate *recordingGate
 }
 
 // waitBootstrapped blocks until the input quarantine has closed. "Usable"
@@ -58,13 +64,17 @@ func waitBootstrapped(t *testing.T, ch Channel) {
 // prepareFails and blockBootstrap are how a test states the two cases this
 // side owns: a bootstrap that cannot be prepared (no command may be emitted
 // at all) and one that is still running (the input quarantine is closed).
-func (f *fakeLauncher) Prepare(shell ShellKind, opts LaunchOptions) (string, BootstrapRun, bool) {
+func (f *fakeLauncher) Prepare(shell ShellKind, opts LaunchOptions) (string, BootstrapRun, BootstrapGate, bool) {
 	f.mu.Lock()
 	fails, block := f.prepareFails, f.blockBootstrap
 	f.mu.Unlock()
 	if fails {
-		return "", nil, false
+		return "", nil, nil, false
 	}
+	gate := &recordingGate{}
+	f.mu.Lock()
+	f.gate = gate
+	f.mu.Unlock()
 	return strings.Repeat("ab", 32), func(ctx context.Context, s BootstrapStream) RefusalReason {
 		if block != nil {
 			select {
@@ -72,8 +82,52 @@ func (f *fakeLauncher) Prepare(shell ShellKind, opts LaunchOptions) (string, Boo
 			case <-ctx.Done():
 			}
 		}
-		return ReasonNone
-	}, true
+		f.mu.Lock()
+		reason := f.bootstrapReason
+		f.mu.Unlock()
+		return reason
+	}, gate, true
+}
+
+// recordingGate records the two §6.1 facts the ssh side reports, so a test can
+// assert the ORDER and the concurrency rather than a duration.
+type recordingGate struct {
+	mu           sync.Mutex
+	receiver     string // "", "ready" or "unavailable"
+	publish      bool
+	publishErr   error
+	settledFirst bool // the publish settled before the receiver was answered
+}
+
+func (g *recordingGate) ReceiverReady() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.receiver == "" {
+		g.receiver = "ready"
+		g.settledFirst = g.publish
+	}
+}
+
+func (g *recordingGate) ReceiverUnavailable(err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.receiver == "" {
+		g.receiver = "unavailable"
+		g.settledFirst = g.publish
+	}
+}
+
+func (g *recordingGate) PublishSettled(err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.publish = true
+	g.publishErr = err
+}
+
+func (g *recordingGate) snapshot() (receiver string, publish bool, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.receiver, g.publish, g.publishErr
 }
 
 func (f *fakeLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool) {
@@ -108,6 +162,33 @@ type recordInstaller struct {
 	publishCalls int
 	publishErr   error
 	home         string
+	// published is closed by the first publish. The publish runs
+	// CONCURRENTLY with the loader now (design §6.1 step 2, §7's parallel
+	// schedule), so "did it publish" is a question a test answers by waiting
+	// on the event rather than by reading a counter at a moment of its own
+	// choosing — which was both a race and, under -race, a report.
+	published chan struct{}
+}
+
+// waitPublished blocks until the first publish has been made, and fails rather
+// than hanging if none is. The timeout is a failsafe against a hang and never
+// the thing being measured.
+func (f *recordInstaller) waitPublished(t *testing.T) {
+	t.Helper()
+	f.mu.Lock()
+	if f.published == nil {
+		f.published = make(chan struct{})
+	}
+	ch, already := f.published, f.publishCalls > 0
+	f.mu.Unlock()
+	if already {
+		return
+	}
+	select {
+	case <-ch:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the publish never ran")
+	}
 }
 
 func (f *recordInstaller) GetRemoteHome(_ *gossh.Client) (string, error) {
@@ -121,7 +202,28 @@ func (f *recordInstaller) EnsureInstalledRemote(_ context.Context, _ *gossh.Clie
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.publishCalls++
+	if f.published == nil {
+		f.published = make(chan struct{})
+	}
+	if f.publishCalls == 1 {
+		close(f.published)
+	}
 	return f.publishErr
+}
+
+// publishCount is the counter read under the lock. Every reader takes the
+// lock now: the publish runs on its own goroutine.
+func (f *recordInstaller) publishCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.publishCalls
+}
+
+// counts is the pair, read together under one lock.
+func (f *recordInstaller) counts() (home, publish int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.homeCalls, f.publishCalls
 }
 
 func (f *recordInstaller) UninstallRemote(_ context.Context, _ *gossh.Client, _ string) ([]string, []string, error) {
@@ -291,9 +393,9 @@ func TestConnect_DesiredModeRaw_OpensPlainShell(t *testing.T) {
 	if n := launcher.callCount(); n != 0 {
 		t.Fatalf("launcher consulted %d times under raw, want 0 (plain shell at open)", n)
 	}
-	if installer.homeCalls != 0 || installer.publishCalls != 0 {
+	if h, p := installer.counts(); h != 0 || p != 0 {
 		t.Fatalf("installer consulted under raw (home=%d publish=%d), want 0 — raw publishes nothing",
-			installer.homeCalls, installer.publishCalls)
+			h, p)
 	}
 	if got := srv.lastExecCommand(); got != "" {
 		t.Errorf("session.Start received %q under raw, want a plain shell request", got)
@@ -328,9 +430,9 @@ func TestConnect_DesiredModeRelay_OpensPlainShell(t *testing.T) {
 	if n := launcher.callCount(); n != 0 {
 		t.Fatalf("launcher consulted %d times under relay, want 0 (plain shell at open)", n)
 	}
-	if installer.homeCalls != 0 || installer.publishCalls != 0 {
+	if h, p := installer.counts(); h != 0 || p != 0 {
 		t.Fatalf("installer consulted under relay (home=%d publish=%d), want 0 — relay behaves as raw this epic",
-			installer.homeCalls, installer.publishCalls)
+			h, p)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
 		t.Errorf("ShellIntegrationReason = %q, want %q (never attempted)", got, ReasonNone)
@@ -442,9 +544,9 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 	if n := launcher.callCount(); n != 0 {
 		t.Fatalf("launcher called %d times with a RemoteCommand configured, want 0", n)
 	}
-	if installer.homeCalls != 0 || installer.publishCalls != 0 {
+	if h, p := installer.counts(); h != 0 || p != 0 {
 		t.Fatalf("installer consulted with a RemoteCommand configured (home=%d publish=%d), want 0 — the configured command wins outright",
-			installer.homeCalls, installer.publishCalls)
+			h, p)
 	}
 	if got := srv.waitExecCommand(t); got != "tmux attach -t work" {
 		t.Errorf("session.Start received %q, want the configured RemoteCommand", got)
@@ -547,9 +649,10 @@ func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 	if n := launcher.callCount(); n != 1 {
 		t.Fatalf("launcher consulted %d times under script, want 1", n)
 	}
-	if installer.homeCalls != 1 || installer.publishCalls != 1 {
+	installer.waitPublished(t)
+	if h, p := installer.counts(); h != 1 || p != 1 {
 		t.Errorf("publish under script: home=%d publish=%d, want 1 each",
-			installer.homeCalls, installer.publishCalls)
+			h, p)
 	}
 	if got := srv.waitExecCommand(t); got != wantCmd {
 		t.Errorf("session.Start received %q, want the launcher command %q", got, wantCmd)
@@ -619,9 +722,12 @@ func TestConnect_SameCarrierWhateverThePublishDid(t *testing.T) {
 
 			assertUsable(t, srv, ch)
 
-			if tc.installer != nil && tc.installer.publishCalls != 1 {
+			if tc.installer != nil {
+				tc.installer.waitPublished(t)
+			}
+			if tc.installer != nil && tc.installer.publishCount() != 1 {
 				t.Errorf("publish calls = %d, want 1 — the publish still happens, it is "+
-					"only its OUTCOME that stops deciding anything", tc.installer.publishCalls)
+					"only its OUTCOME that stops deciding anything", tc.installer.publishCount())
 			}
 			if n := launcher.callCount(); n != 1 {
 				t.Fatalf("launcher consulted %d times, want 1", n)
@@ -671,9 +777,10 @@ func TestConnect_InstallerAloneRunsNoCommand(t *testing.T) {
 	)
 
 	assertUsable(t, srv, ch)
+	installer.waitPublished(t)
 
-	if installer.publishCalls != 1 {
-		t.Errorf("publish calls = %d, want 1", installer.publishCalls)
+	if got := installer.publishCount(); got != 1 {
+		t.Errorf("publish calls = %d, want 1", got)
 	}
 	if got := srv.execCommandCount(); got != 0 {
 		t.Errorf("%d exec request(s) sent; the installer supplies no command any more", got)

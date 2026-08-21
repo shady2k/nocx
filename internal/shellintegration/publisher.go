@@ -768,13 +768,6 @@ type publishFlight struct {
 	waiters int
 }
 
-// joined reports how many callers are waiting on this flight.
-func (f *publishFlight) joined() int {
-	publishFlights.mu.Lock()
-	defer publishFlights.mu.Unlock()
-	return f.waiters
-}
-
 // publishFlightKey identifies what may be joined: the seam VALUE, the root
 // and the content digest. The root alone is not the destination — two hosts
 // have the same ~/.nocx path, and joining them would report to one host a

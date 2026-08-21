@@ -530,3 +530,105 @@ func TestIntegration_NothingObservedSendsNoDetail(t *testing.T) {
 		t.Errorf("detail = %+v, want none when the backend observed nothing", got.Detail)
 	}
 }
+
+// ── §6.2's loss intervals, and the three events kept apart ────────────────
+
+// Assertion 24: each loss interval of §6.2 produces its outcome, and the three
+// loss events are distinguished from one another.
+//
+// The intervals are the design's three rows, and which one applies is decided
+// by WHERE the session was when the channel went, not by which timer noticed:
+// before integration was live the session degrades with a named reason; after
+// it was live the answer is `channel-lost` whichever path saw it end.
+func TestIntegration_SixTwoLossRowsEachProduceTheirOutcome(t *testing.T) {
+	cases := []struct {
+		name       string
+		cause      string
+		everLive   bool
+		wantStatus string
+		wantReason ssh.RefusalReason
+	}{
+		// Row 2 — after the channel existed, before integration was live.
+		// Three different events, and answers a user can tell apart.
+		{
+			"the shell never proved itself", LossCauseHelloTimeout, false,
+			IntegrationConventional, ssh.ReasonHandshakeTimeout,
+		},
+		{
+			"nocx's own listener went away", LossCauseListenerGone, false,
+			IntegrationConventional, ssh.ReasonChannelUnavailable,
+		},
+		{
+			"the multiplex socket file went", LossCauseMasterSocketGone, false,
+			IntegrationConventional, ssh.ReasonChannelUnavailable,
+		},
+		{
+			"the multiplex master exited", LossCauseMasterExited, false,
+			IntegrationConventional, ssh.ReasonChannelUnavailable,
+		},
+		{
+			"the underlying SSH transport died", LossCauseTransportGone, false,
+			IntegrationConventional, ssh.ReasonBootstrapInterrupted,
+		},
+		// Row 3 — after integration was live. Which path noticed does not
+		// change the answer the user needs.
+		{
+			"the socket went after integration", LossCauseMasterSocketGone, true,
+			IntegrationLost, ssh.ReasonChannelLost,
+		},
+		{
+			"the master exited after integration", LossCauseMasterExited, true,
+			IntegrationLost, ssh.ReasonChannelLost,
+		},
+		{
+			"the transport died after integration", LossCauseTransportGone, true,
+			IntegrationLost, ssh.ReasonChannelLost,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newIntegrationEnv(t)
+			if tc.everLive {
+				e.establish(t)
+			}
+			e.ws.NoteIntegrationLoss(e.lane, tc.cause)
+			got := awaitIntegration(t, e.conn, e.sid, tc.wantStatus)
+			if got.Reason != string(tc.wantReason) {
+				t.Errorf("reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// The distinguishability, stated as the property rather than read off the
+// table above: before integration is live, the events §6.2 names do not all
+// collapse into one answer. Two of them share a reason deliberately — the
+// socket going and the master dying are the same thing happening to nocx's own
+// channel — and the others do not, which is what makes "distinguished" a claim
+// rather than a coincidence.
+func TestIntegration_TheUnderlyingTransportIsNotTheChannelGoing(t *testing.T) {
+	reason := func(cause string) ssh.RefusalReason {
+		e := newIntegrationEnv(t)
+		e.ws.NoteIntegrationLoss(e.lane, cause)
+		got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
+		return ssh.RefusalReason(got.Reason)
+	}
+	channelGone := reason(LossCauseListenerGone)
+	transportGone := reason(LossCauseTransportGone)
+	shellSilent := reason(LossCauseHelloTimeout)
+	if channelGone == transportGone {
+		t.Errorf("nocx's channel going and the SSH transport dying both report %q; "+
+			"§6.2 detects them separately and they need different answers", channelGone)
+	}
+	if channelGone == shellSilent {
+		t.Errorf("nocx's channel going and the shell falling silent both report %q", channelGone)
+	}
+	if transportGone == shellSilent {
+		t.Errorf("the SSH transport dying and the shell falling silent both report %q", transportGone)
+	}
+	for _, r := range []ssh.RefusalReason{channelGone, transportGone, shellSilent} {
+		if r == ssh.ReasonUnknown {
+			t.Errorf("a §6.2 event reports %q; the backend knows which event it was", r)
+		}
+	}
+}

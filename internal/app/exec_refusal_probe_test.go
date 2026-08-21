@@ -71,6 +71,11 @@ type execProbeSshd struct {
 	signer  gossh.Signer
 	hostKey gossh.PublicKey
 	log     *lockedBuffer
+	// keyPath is the client private key on disk, for the probes that drive
+	// a REAL ssh client rather than gossh (the mux measurement in
+	// typed_mux_live_test.go). The fixture writes it either way; a probe
+	// that does not need it simply never reads the field.
+	keyPath string
 }
 
 // execProbeSshdOrSkip returns the sshd path, skipping the probe where the
@@ -133,15 +138,24 @@ func startExecProbeSshd(t *testing.T, keyOptions, extraConfig string) *execProbe
 
 	dir := t.TempDir()
 	hostKeyRaw, hostSigner := execProbeGenSigner(t)
-	_, clientSigner := execProbeGenSigner(t)
+	clientKeyRaw, clientSigner := execProbeGenSigner(t)
 
 	hostKeyPEM, err := gossh.MarshalPrivateKey(hostKeyRaw, "")
 	if err != nil {
 		t.Fatalf("marshal host key: %v", err)
 	}
 	hostKeyPath := filepath.Join(dir, "hostkey")
-	if err := os.WriteFile(hostKeyPath, pem.EncodeToMemory(hostKeyPEM), 0o600); err != nil {
-		t.Fatalf("write host key: %v", err)
+	if wErr := os.WriteFile(hostKeyPath, pem.EncodeToMemory(hostKeyPEM), 0o600); wErr != nil {
+		t.Fatalf("write host key: %v", wErr)
+	}
+
+	clientKeyPEM, err := gossh.MarshalPrivateKey(clientKeyRaw, "")
+	if err != nil {
+		t.Fatalf("marshal client key: %v", err)
+	}
+	clientKeyPath := filepath.Join(dir, "clientkey")
+	if err := os.WriteFile(clientKeyPath, pem.EncodeToMemory(clientKeyPEM), 0o600); err != nil {
+		t.Fatalf("write client key: %v", err)
 	}
 
 	line := strings.TrimSpace(string(gossh.MarshalAuthorizedKey(clientSigner.PublicKey())))
@@ -204,6 +218,7 @@ LogLevel VERBOSE
 		signer:  clientSigner,
 		hostKey: hostSigner.PublicKey(),
 		log:     logBuf,
+		keyPath: clientKeyPath,
 	}
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
 	deadline := time.Now().Add(20 * time.Second)

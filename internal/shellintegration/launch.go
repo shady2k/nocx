@@ -31,6 +31,9 @@ const launchCarrierTemplate = `#!/bin/sh
 __nocx_root="${HOME}/.nocx"
 __nocx_manifest="$__nocx_root/manifest.json"
 __nocx_protocol_version="1"
+# Captured before __nocx_outcome unsets it: the banner and the outcome are
+# gated on the same fact, that this run came from a bootstrap.
+__nocx_boot="${@BOOTENV@:-}"
 
 # The terminal outcome of the bootstrap (design §5.3), and the only place it
 # is decided: this script is the one that knows whether the generation it is
@@ -48,7 +51,29 @@ __nocx_outcome() {
     unset @BOOTENV@
 }
 
-__nocx_native() { __nocx_outcome @NOGEN@; exec "${SHELL:-/bin/sh}" -l; }
+# The login banner sshd skipped (design §9; fidelity.go owns the set of
+# differences and both paths below). sshd prints @MOTD@ when it starts an
+# interactive session itself; nocx hands it a COMMAND, so it updates the
+# login records and prints nothing — and ~/@HUSH@, the file the user
+# already uses to say "not on this host", is never consulted either. Both
+# halves are reproduced here.
+#
+# Here, and only here: this script is the one point every tier passes
+# through, so the banner is printed once per bootstrap whichever tier runs
+# and whether or not the generation was accepted. Three tier rcfiles would
+# have been three answers to one question, and a user who reaches the
+# native fallback still logged in.
+#
+# It runs AFTER the outcome line, which is what closes the bootstrap window
+# (design §5.5): the reader matches a closed token vocabulary as framed
+# bytes, and the banner is somebody else's arbitrary text.
+__nocx_motd() {
+    [ -n "$__nocx_boot" ] || return 0
+    [ -e "${HOME}/@HUSH@" ] && return 0
+    cat "@MOTD@" 2>/dev/null || :
+}
+
+__nocx_native() { __nocx_outcome @NOGEN@; __nocx_motd; exec "${SHELL:-/bin/sh}" -l; }
 
 # --- the manifest must exist and parse as ours -------------------------------
 [ -f "$__nocx_manifest" ] || __nocx_native
@@ -90,6 +115,7 @@ export NOCX_PROMPT_MODE=marker-only
 # it is emitted BEFORE the exec because after it there is no longer a script
 # here to emit anything.
 __nocx_outcome @ACCEPTED@
+__nocx_motd
 # $2 is the profile's pinned shell, carried by stage-1 (design §4.1 keeps a
 # shell name out of the command, and there is no room for one there). It wins
 # over $SHELL when it names a tier: a user who says "this host runs zsh" knows
@@ -123,6 +149,39 @@ func launchSourceLine(name string) string {
 	return `. "${HOME}/.nocx/integration/${NOCX_GENERATION}/` + name + `" 2>/dev/null`
 }
 
+// tierArg is the payload one tier ships: the rendered startup file wrapped in
+// that tier's pinned transport, with the rcfile body SOURCING the installed
+// generation file rather than embedding it.
+//
+// It is one function rather than three expressions inlined into launchCarrier
+// because "what does tier X ship" is one question, and the carrier is no
+// longer the only thing that asks it — a test asking the same question by
+// re-deriving the expression is a second answer that agrees until the day it
+// does not (AD-8). Neither bearer appears in any of the three: the capability
+// and the fence reach the far shell through an inherited descriptor, which is
+// what capabilityFromDescriptor renders and what the per-tier ARG METHODS
+// that used to build these payloads did not (ADR-0035).
+//
+// envBlock is the session environment the tier exports. The carrier passes ""
+// — it is published once and reused by every session, so it can carry nothing
+// per-session at all; a caller rendering a payload for one session passes
+// launcherEnvBlock(opts). An unknown kind returns "", which the carrier's
+// template would show as an empty arm rather than a wrong one.
+func tierArg(kind ShellKind, envBlock string) string {
+	switch kind {
+	case ShellBash:
+		return bashArgFor(bashRcfile(remoteLogin, envBlock, launchSourceLine("nocx.bash"),
+			capabilityFromDescriptor(bashUnsetExport)))
+	case ShellZsh:
+		return zshArgFor(zshRcfile(envBlock, launchSourceLine("nocx.zsh"),
+			capabilityFromDescriptor(zshUnsetExport)))
+	case ShellUnknown:
+		return posixArgFor(posixEnvFile(envBlock, launchSourceLine("nocx.posix")))
+	default:
+		return ""
+	}
+}
+
 // launchCarrier renders the compact carrier: the template with the three tier
 // payloads substituted. The payloads are the same pinned transports the argv
 // launchers use, but the rcfile bodies source the INSTALLED generation files
@@ -135,19 +194,16 @@ func launchSourceLine(name string) string {
 // The shebang survives the strip, so `exec "$HOME/.nocx/launch"` keeps
 // working.
 func launchCarrier() string {
-	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
-		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"),
-			capabilityFromDescriptor(bashUnsetExport))))
-	s = strings.ReplaceAll(s, "@ZSH_ARG@",
-		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"),
-			capabilityFromDescriptor(zshUnsetExport))))
-	s = strings.ReplaceAll(s, "@POSIX_ARG@",
-		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
+	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@", tierArg(ShellBash, ""))
+	s = strings.ReplaceAll(s, "@ZSH_ARG@", tierArg(ShellZsh, ""))
+	s = strings.ReplaceAll(s, "@POSIX_ARG@", tierArg(ShellUnknown, ""))
 	// The bootstrap vocabulary the far side speaks, from the constants that
 	// declare it: the marker stage-1 exports, the outcome prefix and the two
 	// outcomes this script can name.
 	s = strings.NewReplacer(
 		"@BOOTENV@", BootstrapEnv,
+		"@MOTD@", motdPath(),
+		"@HUSH@", hushloginFile,
 		"@OUTPFX@", OutcomePrefix,
 		"@ACCEPTED@", OutcomeToken(OutcomeBootstrapAccepted),
 		"@NOGEN@", OutcomeToken(OutcomeGenerationUnavailable),

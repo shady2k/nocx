@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -99,6 +100,28 @@ func startMuxLiveMaster(t *testing.T, fx *execProbeSshd) *muxLiveMaster {
 	}
 	cmd := exec.Command(sshPath, args...) // #nosec G204 — sshPath is LookPath-validated; every argument is fixture-owned.
 	cmd.Env = append(os.Environ(), "HOME="+home)
+	// THE WHOLE GROUP GOES, not the pid — the same answer startExecProbeSshd
+	// already gives above for sshd's re-exec'd listener, and for the same
+	// reason. `cmd.Stdout`/`Stderr` are buffers rather than files, so exec
+	// hands the child a PIPE and copies it on a goroutine that `Wait` waits
+	// for; every descendant ssh leaves behind (a backgrounded multiplex
+	// master is the documented one) inherits the write end. Kill only the
+	// pid and the process is reaped while that copier stays parked for as
+	// long as the descendant lives — which is not a slow test, it is a
+	// cleanup that never returns.
+	//
+	// That is exactly what CI showed on 2026-08-21 (run 32474316825,
+	// ci-linux/no Secret Service): this test's waitReady had already
+	// FAILED, and its cleanup then held the package until Go's 10-minute
+	// panic — `awaitGoroutines` parked 8 minutes, the process long gone,
+	// one copier still reading. Measured here: with a grandchild holding
+	// the pipe, killing the pid leaves Wait blocked past 20s; killing the
+	// group returns in 0.30s.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// And the bound for the descendant that leaves the group before we
+	// signal it — ssh's backgrounded master detaches, so no kill reaches
+	// it: see fixtureWaitDelay.
+	cmd.WaitDelay = fixtureWaitDelay
 	out := &lockedBuffer{}
 	cmd.Stdout = out
 	errOut := &lockedBuffer{}
@@ -114,7 +137,10 @@ func startMuxLiveMaster(t *testing.T, fx *execProbeSshd) *muxLiveMaster {
 	t.Cleanup(func() {
 		_ = stdin.Close()
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			// #nosec G206 — the group is this test's own ssh: Setpgid above
+			// made the child a group leader, so its pgid IS its pid and
+			// nothing else can be in it.
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		_ = cmd.Wait()
 	})
@@ -124,6 +150,12 @@ func startMuxLiveMaster(t *testing.T, fx *execProbeSshd) *muxLiveMaster {
 // waitReady blocks until the master's own session has produced its banner —
 // an observable state change, not a duration. The deadline exists only so a
 // hang reports rather than hanging the suite.
+//
+// STDERR IS PART OF THE REPORT. `ssh` says why it did not connect there and
+// nowhere else, and this printed stdout alone — so when the runner hit this
+// on 2026-08-21 the failure carried an empty buffer and named nothing at
+// all. A diagnostic that omits the one stream carrying the diagnosis is how
+// a failure becomes unexplainable a second time.
 func (m *muxLiveMaster) waitReady(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
@@ -133,7 +165,8 @@ func (m *muxLiveMaster) waitReady(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("the master's own session never reached its prompt; it said:\n%s", m.out.String())
+	t.Fatalf("the master's own session never reached its prompt; it said:\n%s\nand ssh said:\n%s",
+		m.out.String(), m.errOut.String())
 }
 
 // openOwned waits for the control socket to answer OUR handshake. Ownership
@@ -151,7 +184,8 @@ func (m *muxLiveMaster) openOwned(t *testing.T) *mux.Master {
 		last = err
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("the control socket never completed the handshake: %v; master said:\n%s", last, m.out.String())
+	t.Fatalf("the control socket never completed the handshake: %v; master said:\n%s\nand ssh said:\n%s",
+		last, m.out.String(), m.errOut.String())
 	return nil
 }
 

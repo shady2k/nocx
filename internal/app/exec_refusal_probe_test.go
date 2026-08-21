@@ -201,6 +201,11 @@ LogLevel VERBOSE
 	// sshd -D re-execs its listener into a child (OpenSSH 9.8+), so the whole
 	// group has to go or the listener is orphaned (as live_sshd_test.go found).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// And the bound for a session child that has left that group, holding
+	// the log pipe: see fixtureWaitDelay. This fixture is where it was
+	// measured — with the mux master's own cleanup fixed, the hang moved
+	// here, to sshd's Wait, on the very next run.
+	cmd.WaitDelay = fixtureWaitDelay
 	logBuf := &lockedBuffer{}
 	cmd.Stdout = logBuf
 	cmd.Stderr = logBuf

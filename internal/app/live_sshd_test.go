@@ -368,6 +368,11 @@ LogLevel VERBOSE
 	// into flaking unrelated suites. Kill the whole group instead
 	// (nocx-u7uh.29 found the leak this way).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// And the bound for a session child that has left that group, holding
+	// the log pipe: see fixtureWaitDelay. The group kill above is what ends
+	// this in the ordinary case; without the bound, one survivor turns this
+	// cleanup into a package timeout.
+	cmd.WaitDelay = fixtureWaitDelay
 	logBuf := &lockedBuffer{}
 	cmd.Stdout = logBuf
 	cmd.Stderr = logBuf
@@ -663,6 +668,32 @@ func (o *outputBuffer) String() string {
 	defer o.mu.Unlock()
 	return string(o.b)
 }
+
+// fixtureWaitDelay bounds what a fixture's cleanup may cost when a process it
+// spawned leaves a descendant behind.
+//
+// A lockedBuffer is an io.Writer and not a file, so os/exec gives the child a
+// PIPE and copies it on a goroutine that Cmd.Wait waits for. Every descendant
+// inherits the write end, and Wait cannot finish while one of them holds it —
+// the process itself being long dead makes no difference. Killing the process
+// GROUP is what ends that in the ordinary case, and every fixture here does
+// it; this is for the descendant that has left the group, which no kill can
+// reach: sshd gives each connection its own session, and ssh's backgrounded
+// multiplex master detaches and keeps STDERR (it sends stdin and stdout to
+// /dev/null, which is why exactly one copier survives it).
+//
+// Measured on 2026-08-21, CI run 32474316825: a mux fixture cleanup parked in
+// awaitGoroutines for 8m33s after ITS TEST HAD ALREADY FAILED, and Go's
+// 10-minute panic took the whole internal/app package with it — a one-line
+// failure reported as a dead suite. Reproduced here with a real ssh that
+// backgrounds a master: killing the pid alone left the cleanup blocked past
+// 60s, killing the group returned it in 0.30s, and for the descendant no
+// kill reaches this bound is what ends it — at a cost of seconds, and to
+// this test rather than to the package.
+//
+// It is a HANG DETECTOR, never an expectation: a run that has to wait it out
+// has already failed for its own reasons, and no assertion may depend on it.
+const fixtureWaitDelay = 10 * time.Second
 
 type lockedBuffer struct {
 	mu sync.Mutex

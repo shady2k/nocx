@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.uploadCancel.schema.json",
+  "title": "FilesUploadCancelResult",
+  "description": "Result of the files.uploadCancel JSON-RPC method: the transfer named by transferId is cancelled. The call is idempotent and deliberately so — cancelling a transfer that has already finished, or one that never existed, is not an error, because the person's cancel races the transfer's own completion every time and losing that race is not a failure to show them. An empty result is still a contract: additionalProperties: false on an empty shape is what makes 'returns nothing' enforceable, and a renderer that wants a field here cannot be written. What actually happened arrives as files.uploadDone, whose outcome is 'cancelled' when the cancel landed and 'written' when it did not. Cancellation is refused in exactly one window, inside the two-rename fallback used on servers without posix-rename@openssh.com: a cancel landing there would be the one path that deliberately leaves a person with no file at all, and 'I pressed cancel' must never be how the destination goes missing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

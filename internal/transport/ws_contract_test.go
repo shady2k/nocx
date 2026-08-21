@@ -2761,6 +2761,119 @@ func TestFilesReveal_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestFilesUpload_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.upload.schema.json")
+
+	// One case per branch of the union. They are separate Go types rather
+	// than one struct with everything optional, so "exactly one branch
+	// matches" is a property of the code and not only of the schema.
+	cases := map[string]any{
+		"collision": filesUploadCollision{Collision: "exists"},
+		"started (no body needed)": filesUploadStarted{
+			TransferID: "0123456789abcdef0123456789abcdef",
+		},
+		"stream (the sink is waiting for a body)": filesUploadStream{
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     strings.Repeat("ab", uploadTicketHexLen/2),
+			URL:        "/upload/" + strings.Repeat("ab", uploadTicketHexLen/2),
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.upload DTO")
+		})
+	}
+}
+
+// The one that matters: all three branches taken off the real socket, from
+// the real handler, against the real schema. A payload the test itself
+// built proves the struct is well-formed, not that the server sends it.
+func TestFilesUpload_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.upload.schema.json")
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "taken.txt"), []byte("original"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	// Branch 3: a free name — the sink is waiting for a body.
+	stream := callUpload(t, e.conn, uploadParams(bid, dir, "fresh.txt", 5), 3)
+	if stream.Error != nil {
+		t.Fatalf("files.upload (stream): %+v", stream.Error)
+	}
+	validateJSON(t, schema, stream.Result, "files.upload result, stream branch (real socket)")
+
+	// Branch 1: a taken name and no decision.
+	collision := callUpload(t, e.conn, uploadParams(bid, dir, "taken.txt", 5), 4)
+	if collision.Error != nil {
+		t.Fatalf("files.upload (collision): %+v", collision.Error)
+	}
+	validateJSON(t, schema, collision.Result, "files.upload result, collision branch (real socket)")
+
+	// Branch 2: skip — a transfer that needs no body.
+	skipParams := uploadParams(bid, dir, "taken.txt", 5)
+	skipParams["onExists"] = "skip"
+	skipped := callUpload(t, e.conn, skipParams, 5)
+	if skipped.Error != nil {
+		t.Fatalf("files.upload (skip): %+v", skipped.Error)
+	}
+	validateJSON(t, schema, skipped.Result, "files.upload result, started branch (real socket)")
+
+	// And the branches really are distinct on the wire, not one shape with
+	// fields that happened to be empty.
+	if got := stream.mustResult(t); got.Collision != "" || got.Ticket == "" {
+		t.Errorf("stream branch = %+v", got)
+	}
+	if got := collision.mustResult(t); got.Collision != "exists" || got.TransferID != "" {
+		t.Errorf("collision branch = %+v", got)
+	}
+	if got := skipped.mustResult(t); got.TransferID == "" || got.Ticket != "" {
+		t.Errorf("started branch = %+v", got)
+	}
+}
+
+func TestFilesUploadCancel_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadCancel.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.uploadCancel DTO")
+}
+
+func TestFilesUploadCancel_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadCancel.schema.json")
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callUpload(t, e.conn, uploadParams(bid, dir, "a.txt", 1<<20), 3).mustResult(t)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.uploadCancel", map[string]any{
+		"transferId": started.TransferID,
+	}, 4)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.uploadCancel: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.uploadCancel result (real socket)")
+	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateCancelled {
+		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
+	}
+}
+
 func TestFilesChanged_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.changed.schema.json")
 	cases := map[string]filesChangedParams{

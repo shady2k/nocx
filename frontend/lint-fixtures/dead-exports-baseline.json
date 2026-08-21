@@ -314,6 +314,16 @@
       "symbol": "ProfileRef"
     },
     {
+      "kind": "files",
+      "file": "src/generated/files.upload.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.uploadCancel.ts",
+      "symbol": ""
+    },
+    {
       "kind": "types",
       "file": "src/generated/fs.complete.ts",
       "symbol": "FsEntry"

@@ -465,6 +465,13 @@ type WSServer struct {
 	// session closes — a late ack is rejected (session death wins).
 	recoveryMu sync.Mutex
 	recoveries map[session.ID]*recoveryState
+	// uploads is the running-transfer registry and the sink tickets that
+	// name their bodies (ws_upload.go). Its zero value is usable, so it is
+	// a value rather than a pointer and needs no line in the constructor.
+	// A transfer is registered per SESSION (design D8): closing the
+	// binding, closing the session or stopping the server cancels the set
+	// and waits for it to unwind, bounded — never for the upload.
+	uploads uploadRegistry
 }
 
 // ── Tabby import plan store (server-side, never reaches renderer) ─────────
@@ -1119,6 +1126,13 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
+	// Cancel every running upload first. A transfer holds a filesystem
+	// use-guard and (over SFTP) a pooled connection reference for its
+	// lifetime, and nothing else in this teardown would ever release
+	// either: the POST that carries its body waits on the transfer, so an
+	// uncancelled one would also hold Shutdown open below.
+	s.cancelAllUploads()
+
 	// Cancel and drain in-flight off-loop control work (probes, dialogs).
 	// Cancellation makes cooperative tasks return promptly; waitDrained
 	// bounds the wait at controlDrainTimeout (the documented maximum, see

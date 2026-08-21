@@ -309,6 +309,9 @@ type filesMachine interface {
 	// filesBaseline takes the watch baseline synchronously: one listing per
 	// path in the new set, inside files.watch, before the response.
 	filesBaseline(h filesystem.Handle, paths []string) map[string]string
+	// cancelBindingUploads cancels every running transfer of one binding
+	// and waits, bounded, for them to unwind — files.close's half of D8.
+	cancelBindingUploads(bid string)
 }
 
 // ── wire shapes (contracts/files.*.schema.json) ──────────────────────────
@@ -804,6 +807,14 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 		if b != nil && b.watcher != nil {
 			h.machine.stopFilesWatcher(b.watcher)
 		}
+		// Cancel this binding's running uploads BEFORE the registry close,
+		// and this ordering is load-bearing rather than tidy (upload design
+		// D8). A transfer holds a use-guard for its lifetime and
+		// Binding.close waits for the guards to drain (binding.go:187), so
+		// without the cancel first, files.close would wait for as long as
+		// the upload runs. The wait after the cancel is bounded and never
+		// waits for the upload itself.
+		h.machine.cancelBindingUploads(params.BindingID)
 		if err := svc.Close(params.BindingID); err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
@@ -910,6 +921,14 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 		reg(bindingSub, "files.reveal", params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.upload", params(validateFilesUploadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := uploadHandlers{op: bindingOp, machine: s, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUpload(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.uploadCancel", params(validateFilesUploadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := uploadHandlers{op: bindingOp, machine: s, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUploadCancel(ctx, state, req) }
 		}),
 	}
 }
@@ -1201,6 +1220,9 @@ func (s *WSServer) filesSessionClosed(sid session.ID) {
 	for _, w := range watchers {
 		s.stopFilesWatcher(w)
 	}
+	// Same ordering, same reason as files.close: CloseSession drains every
+	// binding's use-guard, and a running transfer holds one (D8).
+	s.cancelSessionUploads(sid)
 	if s.filesys != nil {
 		s.filesys.CloseSession(sid)
 	}
@@ -1317,7 +1339,12 @@ func filesErrorCode(err error) int {
 	case *filesystem.ErrUnknownBinding, *filesystem.ErrNotOwned,
 		*filesystem.ErrInvalidPath, *filesystem.ErrInvalidPage,
 		*filesystem.ErrNotFound, *filesystem.ErrNotDir,
-		*filesystem.ErrNotRegular, *filesystem.ErrPermission:
+		*filesystem.ErrNotRegular, *filesystem.ErrPermission,
+		// A binding with no sink cannot be uploaded to (upload rule R1).
+		// It belongs with the request-shaped refusals and not with -32603:
+		// the caller named a binding that cannot do this, which is a
+		// property of what they asked for, not of the server going wrong.
+		*filesystem.ErrUploadUnsupported:
 		return -32602
 	default:
 		return -32603

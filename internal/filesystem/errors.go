@@ -168,3 +168,20 @@ func (e *ErrHandleReleased) Error() string { return "filesystem: handle released
 type ErrWatchUnavailable struct{}
 
 func (e *ErrWatchUnavailable) Error() string { return "filesystem: watching is not available yet" }
+
+// ErrUploadUnsupported — Upload was called on a binding with no write seam,
+// which is a binding whose provider did not implement Uploader. That is the
+// upload design's rule R1 ("a file can only be uploaded to the machine the
+// tab is actually on") arriving as a typed refusal: a local binding cannot
+// be written to, and neither can a tab where somebody typed `ssh srv-01` by
+// hand, because that session is KindLocal and its binding is the local one.
+//
+// It names the binding rather than the path: the refusal is a property of
+// where the tab is, not of what was being written.
+type ErrUploadUnsupported struct {
+	BindingID string
+}
+
+func (e *ErrUploadUnsupported) Error() string {
+	return fmt.Sprintf("filesystem: binding %q has no write seam; this tab is not on a remote machine", e.BindingID)
+}

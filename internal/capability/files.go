@@ -96,7 +96,7 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	if a, ok := provider.(filesystemEndpointAttester); ok {
 		endpointID = a.EndpointID()
 	}
-	bid, err := s.reg.Register(provider, sess.ID(), endpointID)
+	bid, err := s.reg.Register(provider, sess.ID(), endpointID, nil)
 	if err != nil {
 		return "", "", err
 	}

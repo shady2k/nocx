@@ -43,6 +43,8 @@ package filesystem
 import (
 	"context"
 	"time"
+
+	"github.com/shady2k/nocx/internal/transfer"
 )
 
 // Provider is a read-only view of one machine's filesystem.
@@ -58,6 +60,30 @@ type Provider interface {
 	Watch(ctx context.Context, path string) (Watch, error)
 	Canonical(ctx context.Context, path string) (string, error)
 	Close() error
+}
+
+// Uploader is the optional write seam (upload design D7). A provider that
+// can write a file onto the machine it views implements it; the local
+// provider deliberately does not, and that silence is rule R1 — "a file can
+// only be uploaded to the machine the tab is actually on" — expressed as a
+// missing method rather than as a check somebody performs.
+//
+// It is not part of Provider because Provider is read-only by contract and
+// a mutating method there would have to land on BOTH providers (§5.1); a
+// local Write has no caller — a local tab inserts a path, it does not copy
+// — and a write path with no caller is the nocx-rtg0 failure exactly.
+//
+// The assertion is performed once, where the endpoint attester's already is:
+// in the composition of files.open, the last moment the provider is in hand
+// before Register. Binding.provider is unexported and Acquire returns a
+// Handle, so nothing downstream could perform it — which is the structural
+// guarantee working as designed, not an obstacle to route around.
+type Uploader interface {
+	// Sink returns the write half of this provider's view. It is never
+	// nil: a provider that implements Uploader can write, and one that
+	// cannot must not implement it, because a nil sink from a live
+	// Uploader would be a capability that refuses without saying why.
+	Sink() transfer.Sink
 }
 
 // Root is the provider-computed navigation root (spec D2). The provider

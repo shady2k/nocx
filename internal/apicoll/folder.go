@@ -142,6 +142,44 @@ func (s *service) WriteRequest(h HandleID, relPath string, r Request) error {
 	return nil
 }
 
+// DeleteRequest removes one request file, and never follows a symlink to do
+// it.
+//
+// The same path rules as every read (validateRequestPath, resolveWithin): a
+// caller that may not READ a file may not delete it either, which is the
+// property §13.1 is made of — and it matters more here, because a delete
+// that followed a symlink out of the collection would remove somebody's file
+// from somewhere they never opened.
+//
+// os.Remove, not RemoveAll: this deletes a FILE. A directory that happens to
+// be named `x.json` is refused rather than emptied.
+func (s *service) DeleteRequest(h HandleID, relPath string) error {
+	hd, err := s.resolve(h)
+	if err != nil {
+		return err
+	}
+	if err = validateRequestPath(relPath); err != nil {
+		return err
+	}
+	full, err := resolveWithin(hd.root, relPath)
+	if err != nil {
+		return err
+	}
+	fi, err := os.Lstat(full)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("%w: %q", ErrRequestNotFound, relPath)
+	case err != nil:
+		return fmt.Errorf("apicoll: stat request %q: %w", relPath, err)
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%w: %q is not a regular file", ErrNotARequestPath, relPath)
+	}
+	if err := os.Remove(full); err != nil {
+		return fmt.Errorf("apicoll: delete request %q: %w", relPath, err)
+	}
+	return nil
+}
+
 // readCollection walks the folder and builds the listing. A decode failure is
 // collected, never fatal: one bad file must not hide a collection.
 func readCollection(hd *handle, m manifest) (Collection, error) {

@@ -147,6 +147,8 @@ function responseFixture(over: Partial<ApiResponse> = {}): ApiResponse {
     status: 201,
     headers: [{ name: 'Content-Type', value: 'application/json', enabled: true }],
     text: '{"id":"usr_8f21"}',
+    tlsCipherSuite: '',
+    certificates: [],
     binary: false,
     lossy: false,
     truncated: false,
@@ -171,8 +173,9 @@ function responseFixture(over: Partial<ApiResponse> = {}): ApiResponse {
 export function sendFixture(
   over: Partial<ApiResponse> = {},
   environment = '',
+  route: ApiRequestSendResult['route'] = { kind: 'direct', profileId: '', insecureTls: false },
 ): ApiRequestSendResult {
-  return { response: responseFixture(over), environment }
+  return { response: responseFixture(over), environment, route }
 }
 
 /**
@@ -277,6 +280,17 @@ export function watchFixture(
   }
 }
 
+/** One environment whole, as api.environment.read answers it: the shape an
+ *  editor opens onto. Its name and path match the ref the collection fixture
+ *  lists, so a test that picks that environment and opens it is exercising
+ *  one environment rather than two that happen to share a panel. */
+const ENVIRONMENT = {
+  name: 'Local',
+  values: { baseUrl: 'https://api.example.test' },
+  secretVars: [],
+  route: { kind: 'direct' as const, profileId: '', insecureTls: false },
+}
+
 /** A backend that has no collections open — the state a person starts in,
  *  and exactly when they need to be able to make one. */
 export function noCollections(): Partial<ApiWorkbenchServices> {
@@ -294,6 +308,9 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
       .mockResolvedValue({ handle: opened.handle, collection: opened.collection }),
     createCollection: vi.fn().mockResolvedValue(createdFixture()),
     closeCollection: vi.fn().mockResolvedValue({}),
+    readEnvironment: vi.fn().mockResolvedValue({ environment: ENVIRONMENT }),
+    writeEnvironment: vi.fn().mockResolvedValue({}),
+    deleteRequest: vi.fn().mockResolvedValue({}),
     readRequest: vi.fn().mockResolvedValue({ request: REQUEST }),
     writeRequest: vi.fn().mockResolvedValue({}),
     sendRequest: vi.fn().mockResolvedValue(sendFixture()),

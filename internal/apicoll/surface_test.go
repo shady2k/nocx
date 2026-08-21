@@ -10,16 +10,22 @@ import (
 // asserted against the interface: Open is the only method that takes a root,
 // and every other method's first parameter is the backend-minted handle.
 //
-// The method count is part of the assertion. Adding a fifth method that takes
-// a path fails here, which is the whole point — the guard has to break when
+// The method count is part of the assertion. Adding a method that takes a
+// path fails here, which is the whole point — the guard has to break when
 // somebody widens the surface, not when somebody misuses it.
+//
+// It has been raised once, deliberately: DeleteRequest arrived when the panel
+// grew a way to remove a request (before it, a file made by mistake could
+// only be removed with a file manager). It takes the handle and a path
+// RELATIVE to it, like the two accessors beside it, so §13.1 holds — a caller
+// that cannot name a file still cannot delete one.
 func TestService_OpenIsTheOnlyEntryPointThatTakesARoot(t *testing.T) {
 	svcType := reflect.TypeOf((*Service)(nil)).Elem()
 	handleType := reflect.TypeOf(HandleID(""))
 	stringType := reflect.TypeOf("")
 
-	if got := svcType.NumMethod(); got != 4 {
-		t.Fatalf("Service has %d methods, want 4 — a new method must be checked against §13.1 "+
+	if got := svcType.NumMethod(); got != 5 {
+		t.Fatalf("Service has %d methods, want 5 — a new method must be checked against §13.1 "+
 			"before this count is raised", got)
 	}
 

@@ -526,14 +526,27 @@ async function main() {
   registerApiSurface(
     registry,
     tm,
-    createApiWorkbenchServices(dispatcher, directoryPicker(dialogClient), {
-      localSession: () => localSessionId(),
-      open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
-      watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
-      close: (bindingId) => filesServicesTracked.close(bindingId),
-      subscribeChanged: (handler) => filesServicesTracked.subscribeFilesChanged(handler),
-      onConnect: (handler) => filesServicesTracked.onConnect(handler),
-    }),
+    createApiWorkbenchServices(
+      dispatcher,
+      directoryPicker(dialogClient),
+      {
+        localSession: () => localSessionId(),
+        open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+        watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
+        close: (bindingId) => filesServicesTracked.close(bindingId),
+        subscribeChanged: (handler) => filesServicesTracked.subscribeFilesChanged(handler),
+        onConnect: (handler) => filesServicesTracked.onConnect(handler),
+      },
+      // The connections an environment may route through (§6.5). Bound HERE
+      // because only the composition root may know both halves: `profiles.list`
+      // is ProfileClient's, and the API workbench names a connection without
+      // learning to speak that domain (AD-8). Narrowed to the two fields the
+      // route needs — an id to store and a name to show.
+      () =>
+        profileClient
+          .listProfiles()
+          .then((profiles) => profiles.map((p) => ({ id: p.id, name: p.name }))),
+    ),
   )
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────

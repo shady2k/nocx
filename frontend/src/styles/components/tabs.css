@@ -51,7 +51,28 @@
 
 .ui-tabs[data-orientation='horizontal'] .ui-tabs__list {
   flex-direction: row;
+  padding-bottom: var(--space-2);
+}
+
+/* The row that holds the tablist and the section's own control. The rule
+   under the tabs belongs to the ROW, not to the list, so it runs the whole
+   width whether or not there is a control at the end of it. */
+.ui-tabs__bar {
+  display: contents;
+}
+
+.ui-tabs[data-orientation='horizontal'] .ui-tabs__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   border-bottom: 1px solid var(--color-divider);
+}
+
+.ui-tabs__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   padding-bottom: var(--space-2);
 }
 

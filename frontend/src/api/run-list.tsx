@@ -10,40 +10,49 @@
 // body says it is a prefix; a body that was not valid text says that; and an
 // empty body says it is empty. Collapsing any two of them loses one.
 //
-// The pretty/raw choice belongs to ONE run. A single flag for the list would
-// mean opening the raw text of the run you are reading also opens it for the
-// nineteen above it.
+// WHICH PART is being read belongs to ONE run. A single flag for the list
+// would mean opening the raw text of the run you are reading also opens it
+// for the nineteen above it.
+//
+// The three parts are TABS rather than a stack. Headers used to sit above the
+// body in one pane, each with its own scroll box, so a long body pushed the
+// headers off screen and twenty-four headers pushed the body off — two things
+// competing for one column when a person looks at one of them at a time.
 
 import { For, Show, type JSX } from 'solid-js'
 import { Badge } from '../ui/badge'
-import { CodeBlock } from '../ui/code-block'
 import { Caption } from '../ui/caption'
+import { CodeBlock } from '../ui/code-block'
+import { StatusCard } from '../ui/status-card'
+import { Tabs } from '../ui/tabs'
 import { EmptyState } from '../ui/empty-state'
-import { SegmentedControl } from '../ui/segmented-control'
 import { StatusDot } from '../ui/status-dot'
 import { createSecretChip, createSecretChipDamaged } from '../ui/secret-chip'
+import { ResponseBody } from './response-body'
 import type { ApiRun, ApiRunView } from './api-store'
 import {
+  type ApiCertificate,
   type ApiExchange,
   type ApiRawSegment,
   bodySummary,
+  certificateText,
   connectionRawText,
   formatElapsed,
   formatSize,
   hasBodyText,
+  isJSONResponse,
   rawSegments,
   responseHeaderText,
   statusTone,
 } from './api-model'
 
-const VIEWS = [
-  { value: 'pretty', label: 'Pretty' },
-  { value: 'raw', label: 'Raw' },
-]
-
 export interface RunListProps {
   runs: readonly ApiRun[]
   onView: (id: number, view: ApiRunView) => void
+  /** What a connection is CALLED, by the id a run reports. The run carries
+   *  the id — that is the backend's fact — and the name belongs to whoever
+   *  owns connections (AD-8), so the surface hands the translation in. */
+  connectionName: (profileId: string) => string
 }
 
 export function RunList(props: RunListProps) {
@@ -58,18 +67,33 @@ export function RunList(props: RunListProps) {
           />
         }
       >
-        <For each={props.runs}>{(run) => <Run run={run} onView={props.onView} />}</For>
+        <For each={props.runs}>
+          {(run) => <Run run={run} onView={props.onView} connectionName={props.connectionName} />}
+        </For>
       </Show>
     </div>
   )
 }
 
-function Run(props: { run: ApiRun; onView: (id: number, view: ApiRunView) => void }) {
+function Run(props: {
+  run: ApiRun
+  onView: (id: number, view: ApiRunView) => void
+  connectionName: (profileId: string) => string
+}) {
   const run = () => props.run
   const response = () => props.run.response
 
   return (
     <div class="api-run" data-run-id={run().id}>
+      {/* WHAT WAS SENT, which the response pane owes a person as much as what
+          came back: this is a LIST, so a card that only said "404" would be a
+          number with no question attached to it. */}
+      {/* TWO LINES, and the reason is what each is for. The first is the
+          exchange itself — verb and address — and an address is the longest
+          thing on this surface; the second is what it went out under. On one
+          line the badges took the width and the URL was elided to
+          `https://localhost:…`, which is the one part of a run that must
+          stay readable. */}
       <div class="api-run__head">
         <span class="api-run__verb">
           <Badge tone="neutral">{run().method}</Badge>
@@ -77,71 +101,120 @@ function Run(props: { run: ApiRun; onView: (id: number, view: ApiRunView) => voi
         <span class="api-run__url" title={run().url}>
           {run().url}
         </span>
-        {/* Which environment answered — in the BACKEND's words, off the send
-            result. Absent when the send named none, which is a request that
-            went out exactly as its file has it; a badge reading "None" would
-            be a label on the ordinary case. It is a Badge and not a second
-            vocabulary for one: the method beside it is one too. */}
-        <Show when={run().environment !== ''}>
-          <span class="api-run__environment">
+      </div>
+      <Show
+        when={
+          run().environment !== '' || run().route.kind === 'connection' || run().route.insecureTls
+        }
+      >
+        <div class="api-run__under">
+          {/* Which environment answered — in the BACKEND's words, off the
+              send result. Absent when the send named none, which is a
+              request that went out exactly as its file has it; a badge
+              reading "None" would be a label on the ordinary case. */}
+          <Show when={run().environment !== ''}>
             <Badge tone="neutral">{run().environment}</Badge>
-          </span>
-        </Show>
-        <Show
-          when={response()}
-          fallback={
-            <span class="api-run__status">
-              <StatusDot tone="error" accessibleName="the exchange failed">
-                <span>failed</span>
-              </StatusDot>
-            </span>
-          }
-        >
-          {(res) => (
-            <>
-              <span class="api-run__status">
+          </Show>
+          {/* WHERE IT LEFT FROM. Absent on a direct send, which needs no
+              label — a badge reading "this machine" on every run would be
+              noise. Present when it went through a connection, because that
+              is the one fact a person routing through a bastion needs on the
+              answer: not which environment was chosen, but which host
+              actually dialled. */}
+          <Show when={run().route.kind === 'connection'}>
+            <Badge tone="info">{`via ${props.connectionName(run().route.profileId)}`}</Badge>
+          </Show>
+          {/* AND WHETHER IT CHECKED WHO ANSWERED. A warning tone, on the run
+              rather than only in the file that allowed it: an environment
+              with verification off is a setting somebody turned on for one
+              host and will forget, and the run is where they will be looking
+              when it matters. */}
+          <Show when={run().route.insecureTls}>
+            <Badge tone="warning">unverified TLS</Badge>
+          </Show>
+        </div>
+      </Show>
+
+      {/* A SEND THAT NEVER LANDED IS STILL A RUN. It used to be one red line
+          under the head — the same weight as a caption, in a column where
+          everything else has a box — so the one state a person most needs to
+          read was the one that looked like an aside. It is the kit's danger
+          card now, which is what "this did not work, and here is what was
+          said" looks like everywhere else in the product. */}
+      <Show when={run().error}>
+        {(reason) => (
+          <StatusCard tone="danger" title="The request did not go out" description={reason()} />
+        )}
+      </Show>
+
+      <Show when={response()}>
+        {(res) => (
+          <Tabs
+            orientation="horizontal"
+            ariaLabel="This exchange"
+            active={run().view}
+            onChange={(v) => props.onView(run().id, v as ApiRunView)}
+            // THE NUMBERS RIDE THE TAB ROW, which is where the owner's
+            // reference puts them and where they cost no line of their own:
+            // what came back, how long it took and how much of it there was
+            // are one glance, beside the choice of what to look at.
+            actions={
+              <span class="api-run__stats">
                 <StatusDot
                   tone={statusTone(res().status)}
                   accessibleName={`HTTP status ${res().status}`}
                 >
                   <span>{String(res().status)}</span>
                 </StatusDot>
+                <span class="api-run__elapsed">{formatElapsed(res().timings.totalMs)}</span>
+                <span class="api-run__size">{formatSize(res().size)}</span>
               </span>
-              <span class="api-run__elapsed">{formatElapsed(res().timings.totalMs)}</span>
-              <span class="api-run__size">{formatSize(res().size)}</span>
-            </>
-          )}
-        </Show>
-        <span class="api-run__view">
-          <SegmentedControl
-            ariaLabel="How to read this run"
-            options={VIEWS}
-            value={run().view}
-            onChange={(v) => props.onView(run().id, v as ApiRunView)}
-          />
-        </span>
-      </div>
-
-      <Show when={run().error}>{(reason) => <p class="api-run__failure">{reason()}</p>}</Show>
-
-      <Show when={response()}>
-        {(res) => (
-          <Show
-            when={run().view === 'raw'}
-            fallback={
-              <div class="api-run__body">
-                <Caption>{bodySummary(res())}</Caption>
-                <Show when={res().headers.length > 0}>
-                  <CodeBlock ariaLabel="Response headers">{responseHeaderText(res())}</CodeBlock>
-                </Show>
-                <Show when={hasBodyText(res())}>
-                  <CodeBlock ariaLabel="Response body">{res().text}</CodeBlock>
-                </Show>
-              </div>
             }
-          >
-            <RawExchange exchange={res().raw} connection={connectionRawText(res())} />
-          </Show>
+            items={[
+              {
+                id: 'body',
+                label: 'Body',
+                content: () => (
+                  <Show
+                    when={hasBodyText(res())}
+                    fallback={<Caption>{bodySummary(res())}</Caption>}
+                  >
+                    <ResponseBody
+                      ariaLabel="Response body"
+                      text={res().text}
+                      language={isJSONResponse(res()) ? 'json' : 'text'}
+                    />
+                    {/* The summary stays for the three states that are not
+                        "here it is": truncated, lossy, and the size itself
+                        (§12.3). Four sentences, still four. */}
+                    <Caption>{bodySummary(res())}</Caption>
+                  </Show>
+                ),
+              },
+              {
+                id: 'headers',
+                label: `Headers ${res().headers.length}`,
+                content: () => (
+                  <ResponseBody
+                    ariaLabel="Response headers"
+                    text={responseHeaderText(res())}
+                    language="text"
+                  />
+                ),
+              },
+              {
+                id: 'raw',
+                label: 'Raw',
+                content: () => (
+                  <RawExchange
+                    exchange={res().raw}
+                    connection={connectionRawText(res())}
+                    certificates={res().certificates}
+                  />
+                ),
+              },
+            ]}
+          />
         )}
       </Show>
     </div>
@@ -159,7 +232,11 @@ function Run(props: { run: ApiRun; onView: (id: number, view: ApiRunView) => voi
  * they did not, which is the failure AGENTS.md's rule about two derivations of
  * one fact is written against.
  */
-function RawExchange(props: { exchange: ApiExchange; connection: string }) {
+function RawExchange(props: {
+  exchange: ApiExchange
+  connection: string
+  certificates: readonly ApiCertificate[]
+}) {
   return (
     <div class="api-run__raw">
       <Caption>── request ──</Caption>
@@ -168,6 +245,21 @@ function RawExchange(props: { exchange: ApiExchange; connection: string }) {
       </CodeBlock>
       <Caption>── connection ──</Caption>
       <CodeBlock ariaLabel="Connection">{props.connection}</CodeBlock>
+      {/* WHAT WAS ON THE OTHER END. Present for any TLS exchange, not only
+          the unverified ones — but it is the unverified ones it exists for:
+          with the check off, "which certificate did I just trust" is the
+          only question left, and it had no answer anywhere in the product.
+          Leaf first, the whole presented chain, as text — because a
+          fingerprint is a thing people COPY out of a pane and into a
+          terminal. */}
+      <Show when={props.certificates.length > 0}>
+        <Caption>── certificate chain ──</Caption>
+        <For each={props.certificates}>
+          {(cert, i) => (
+            <CodeBlock ariaLabel={`Certificate ${i() + 1}`}>{certificateText(cert, i())}</CodeBlock>
+          )}
+        </For>
+      </Show>
       <Caption>── response ──</Caption>
       <CodeBlock ariaLabel="Raw response">
         <For each={rawSegments(props.exchange.response)}>{(seg) => rawSegment(seg)}</For>

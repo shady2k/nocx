@@ -20,6 +20,9 @@ import type { ApiCollectionsListResult } from '../generated/api.collections.list
 import type { ApiCollectionsOpenResult } from '../generated/api.collections.open'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
 import type { ApiCollectionsCloseResult } from '../generated/api.collections.close'
+import type { ApiEnvironmentReadResult } from '../generated/api.environment.read'
+import type { ApiEnvironmentWriteResult } from '../generated/api.environment.write'
+import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
 import type { ApiRequestSendResult } from '../generated/api.request.send'
@@ -29,7 +32,7 @@ import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesWatchResult } from '../generated/files.watch'
 import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesChanged } from '../generated/files.changed'
-import type { ApiRequest } from './api-model'
+import type { ApiEnvironment, ApiRequest } from './api-model'
 
 class ApiClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -61,6 +64,41 @@ class ApiClient {
    *  empty result is still the contract. */
   closeCollection(handle: string): Promise<ApiCollectionsCloseResult> {
     return this.dispatcher.call<ApiCollectionsCloseResult>('api.collections.close', { handle })
+  }
+
+  /** ONE environment whole — the values and the route, which the collection
+   *  listing deliberately does not carry (§6.4). This is what an editor
+   *  reads before it can show a person what they are about to change. */
+  readEnvironment(handle: string, relPath: string): Promise<ApiEnvironmentReadResult> {
+    return this.dispatcher.call<ApiEnvironmentReadResult>('api.environment.read', {
+      handle,
+      relPath,
+    })
+  }
+
+  /** Put what the editor holds into the file, creating it when nothing
+   *  occupies the name — a write to a free name is how an environment comes
+   *  to exist, so there is no second create call. */
+  writeEnvironment(
+    handle: string,
+    relPath: string,
+    environment: ApiEnvironment,
+  ): Promise<ApiEnvironmentWriteResult> {
+    return this.dispatcher.call<ApiEnvironmentWriteResult>('api.environment.write', {
+      handle,
+      relPath,
+      environment,
+    })
+  }
+
+  /** Remove one request file. The tree is what says it is gone: the folder
+   *  is re-read afterwards, so the row leaves the same way a colleague's
+   *  `git pull` would have taken it (§6.1). */
+  deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult> {
+    return this.dispatcher.call<ApiRequestDeleteResult>('api.request.delete', {
+      handle,
+      relPath,
+    })
   }
 
   /** One request, exactly as its file has it — nothing resolved on the way
@@ -208,11 +246,33 @@ export interface ApiWorkbenchServices {
   openCollection(path: string): Promise<ApiCollectionsOpenResult>
   createCollection(name: string): Promise<ApiCollectionsCreateResult>
   closeCollection(handle: string): Promise<ApiCollectionsCloseResult>
+  readEnvironment(handle: string, relPath: string): Promise<ApiEnvironmentReadResult>
+  writeEnvironment(
+    handle: string,
+    relPath: string,
+    environment: ApiEnvironment,
+  ): Promise<ApiEnvironmentWriteResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
+  deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult>
   sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult>
   importPostman(path: string, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
+  /**
+   * The SSH connections this window knows about, for an environment that
+   * routes through one (§6.5).
+   *
+   * ABSENT rather than empty when this build has no profile store, for the
+   * same reason `openDirectory` is: optionality IS the capability, so the
+   * environment editor offers "through a connection" only where there are
+   * connections to name — a picker over nothing is a control that governs
+   * nothing.
+   *
+   * It is another domain's method reached through another client (AD-8):
+   * `profiles.list` belongs to ProfileClient, and the composition root binds
+   * it here rather than this client learning to speak it.
+   */
+  listConnections?: () => Promise<readonly ApiConnection[]>
   /**
    * The native directory picker, when the backend offers one — and ABSENT,
    * not a function that rejects, when it does not.
@@ -239,6 +299,14 @@ export interface ApiWorkbenchServices {
   watchCollections?: CollectionWatchPort
 }
 
+/** One connection an environment may route through: the id the route
+ *  stores, and the name a person chose for it. Two fields and no more —
+ *  the API surface names a connection, it does not describe one. */
+export interface ApiConnection {
+  id: string
+  name: string
+}
+
 /** Real implementation over the dispatcher.
  *
  *  `picker` is threaded through rather than built here: `dialog.*` is not an
@@ -250,15 +318,21 @@ export function createApiWorkbenchServices(
   dispatcher: Dispatcher,
   picker?: DirectoryPicker,
   watchCollections?: CollectionWatchPort,
+  listConnections?: () => Promise<readonly ApiConnection[]>,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
     ...(picker ? { openDirectory: picker } : {}),
     ...(watchCollections ? { watchCollections } : {}),
+    ...(listConnections ? { listConnections } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),
     closeCollection: (handle) => client.closeCollection(handle),
+    readEnvironment: (handle, relPath) => client.readEnvironment(handle, relPath),
+    writeEnvironment: (handle, relPath, environment) =>
+      client.writeEnvironment(handle, relPath, environment),
+    deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),
     sendRequest: (handle, relPath, envRelPath) => client.sendRequest(handle, relPath, envRelPath),

@@ -64,7 +64,7 @@
         "kind": {
           "description": "A body too large or too awkward for the line projection is NAMED by a file rather than lost (design §6.4).",
           "type": "string",
-          "enum": ["none", "raw", "form", "file"]
+          "enum": ["none", "raw", "json", "form", "file"]
         },
         "text": { "type": "string" },
         "fileRef": {

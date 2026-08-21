@@ -165,10 +165,26 @@ type APICollectionService interface {
 	// apicoll.ListEnvironments anywhere in the tree was apicoll's own tests
 	// — a read path that existed and was reachable from nothing (nocx-pnvnn).
 	ListEnvironments(h apicoll.HandleID) ([]apicoll.EnvironmentRef, []apicoll.MalformedRef, error)
+	// ReadEnvironment reads ONE environment whole — the values and the
+	// route, not the ref the listing carries. The listing answers "which
+	// environments are there"; this answers "what does this one say", which
+	// is the question an editor asks and the only way a person can be shown
+	// what they are about to change.
+	ReadEnvironment(h apicoll.HandleID, relPath string) (apicoll.Environment, error)
+	// WriteEnvironment writes one back, creating the file when nothing
+	// occupies the name. It is how an environment is configured from the
+	// product at all: before this, `environments/` could be read by the
+	// sender and written by nothing, so every environment in existence had
+	// been typed into a file by hand or landed by the Postman importer.
+	WriteEnvironment(h apicoll.HandleID, relPath string, env apicoll.Environment) error
 	// ReadRequest reads one request by its path within the collection.
 	ReadRequest(h apicoll.HandleID, relPath string) (apicoll.Request, error)
 	// WriteRequest writes one request back.
 	WriteRequest(h apicoll.HandleID, relPath string, r apicoll.Request) error
+	// DeleteRequest removes one request file. It is the only method here
+	// that takes something away, and it takes away exactly one file: a
+	// collection is closed through Close and never emptied through this.
+	DeleteRequest(h apicoll.HandleID, relPath string) error
 	// Snapshot takes what a send needs and nothing else, so the gate can be
 	// released before the dial. envRelPath names the environment to send
 	// under, addressed inside the collection like everything else; "" is no
@@ -214,6 +230,19 @@ type apiCollectionService struct {
 	// on it.
 	mu   sync.Mutex
 	open []openEntry
+	// starterDone is set by the first ListOpen of the process, whatever it
+	// found: the built-in collection is opened ONCE per session, so a user
+	// who closes it is not arguing with the panel on the next refresh. It
+	// returns on the next start, which is what makes it built-in rather
+	// than a seeding nobody can get back.
+	starterDone bool
+	// starterErr is why the built-in collection is not in the list, kept so
+	// the listing can SAY so. A first run that could not write to the app
+	// directory is a panel with no collections and no reason given — the
+	// silent degrade AGENTS.md names — and the row below is what a person
+	// sees instead.
+	starterErr error
+	starterAt  string
 }
 
 // openEntry is one row of the opened-folder list.
@@ -226,12 +255,21 @@ func (s *apiCollectionService) ListOpen() ([]OpenCollection, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
+	s.ensureStarter()
 	s.mu.Lock()
 	entries := make([]openEntry, len(s.open))
 	copy(entries, s.open)
 	s.mu.Unlock()
 
-	out := make([]OpenCollection, 0, len(entries))
+	out := make([]OpenCollection, 0, len(entries)+1)
+	// The built-in collection could not be opened. It is a ROW with the
+	// reason on it rather than an error that replaces the listing: the
+	// folders the user opened themselves are still there and still readable,
+	// and one folder that would not open must not hide them — apicoll's own
+	// rule for a malformed file, one level up.
+	if at, err := s.starterFailure(); err != nil {
+		out = append(out, OpenCollection{Path: at, Err: err})
+	}
 	for _, e := range entries {
 		oc := OpenCollection{Handle: e.handle, Path: e.path}
 		coll, err := s.svc.List(e.handle)
@@ -243,6 +281,46 @@ func (s *apiCollectionService) ListOpen() ([]OpenCollection, error) {
 		out = append(out, oc)
 	}
 	return out, nil
+}
+
+// ensureStarter opens the built-in collection, once per process, before the
+// first listing answers.
+//
+// Here rather than in the composition root because this is the layer that
+// owns the opened-folder LIST: a starter opened in app.go would exist on
+// disk, hold a handle nothing had registered, and not appear in
+// api.collections.list at all. The once-per-process flag is taken under the
+// same mutex as the list for the reason the list has one — the api gate
+// serialises callers at capacity 1 today, and this must stay correct if that
+// capacity is ever raised.
+func (s *apiCollectionService) ensureStarter() {
+	s.mu.Lock()
+	already := s.starterDone
+	s.starterDone = true
+	s.mu.Unlock()
+	if already {
+		return
+	}
+
+	made, err := s.svc.EnsureStarter()
+	if err != nil {
+		s.mu.Lock()
+		s.starterErr = err
+		s.starterAt = made.Root
+		s.mu.Unlock()
+		return
+	}
+	s.register(made.Handle, made.Root)
+}
+
+// starterFailure is where the built-in collection should be and why it is
+// not there, or "" and nil. Both facts come back from one locked read: they
+// are one row, and a Path taken outside the lock would be a second read of
+// state this mutex exists to protect.
+func (s *apiCollectionService) starterFailure() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.starterAt, s.starterErr
 }
 
 func (s *apiCollectionService) Open(root string) (apicoll.HandleID, apicoll.Collection, error) {
@@ -327,6 +405,31 @@ func (s *apiCollectionService) ListEnvironments(h apicoll.HandleID) ([]apicoll.E
 	return s.svc.ListEnvironments(h)
 }
 
+// ReadEnvironment and WriteEnvironment answer out of a folder the user still
+// has open, and refuse one they have closed — the same rule ListEnvironments
+// above keeps, and for the same reason: this registry is the authority on
+// whether a handle is still live, and apicoll's own table would go on
+// resolving it.
+func (s *apiCollectionService) ReadEnvironment(h apicoll.HandleID, relPath string) (apicoll.Environment, error) {
+	if err := s.guard.check(); err != nil {
+		return apicoll.Environment{}, err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return apicoll.Environment{}, err
+	}
+	return s.svc.ReadEnvironment(h, relPath)
+}
+
+func (s *apiCollectionService) WriteEnvironment(h apicoll.HandleID, relPath string, env apicoll.Environment) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return err
+	}
+	return s.svc.WriteEnvironment(h, relPath, env)
+}
+
 func (s *apiCollectionService) ReadRequest(h apicoll.HandleID, relPath string) (apicoll.Request, error) {
 	if err := s.guard.check(); err != nil {
 		return apicoll.Request{}, err
@@ -377,6 +480,16 @@ func (s *apiCollectionService) WriteRequest(h apicoll.HandleID, relPath string, 
 // diagnostic (§11.2). What this snapshot contributes to that is the
 // environment's NAME, below — the half of the binding key that only the
 // record just read can supply.
+func (s *apiCollectionService) DeleteRequest(h apicoll.HandleID, relPath string) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return err
+	}
+	return s.svc.DeleteRequest(h, relPath)
+}
+
 func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {
 	if err := s.guard.check(); err != nil {
 		return SendInputs{}, err

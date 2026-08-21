@@ -38,6 +38,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/apibind"
@@ -130,6 +131,41 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				return nil
 			}
 			if err := svc.Close(apicoll.HandleID(p.Handle)); err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
+		case "api.environment.read":
+			var p apiEnvironmentParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			env, err := svc.ReadEnvironment(apicoll.HandleID(p.Handle), p.RelPath)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiEnvironmentReadResponse{
+				Environment: wireEnvironment(env),
+			}))
+		case "api.environment.write":
+			var p apiEnvironmentWriteParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			err := svc.WriteEnvironment(
+				apicoll.HandleID(p.Handle), p.RelPath, storedEnvironment(p.Environment))
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
+		case "api.request.delete":
+			var p apiRequestParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			if err := svc.DeleteRequest(apicoll.HandleID(p.Handle), p.RelPath); err != nil {
 				h.fail(req, err)
 				return nil
 			}
@@ -239,7 +275,14 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 
 	// No gate from here on. The cookie scope is the collection, so two
 	// collections never share a jar.
-	resp, err := h.sender.Send(ctx, sending, apisend.Key{RouteID: routeID, CookieScope: inputs.CookieScope}, used...)
+	resp, err := h.sender.Send(ctx, sending, apisend.Key{
+		RouteID:     routeID,
+		CookieScope: inputs.CookieScope,
+		// The environment's own declaration, carried into the KEY so a
+		// transport that verifies and one that does not are never the same
+		// transport (apisend.Key).
+		InsecureTLS: inputs.Route.InsecureTLS,
+	}, used...)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
 		return
@@ -247,6 +290,7 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	_ = h.r.TryResult(req.ID, mustMarshal(apiSendResponse{
 		Response:    wireSendResponse(resp),
 		Environment: inputs.Environment,
+		Route:       wireRoute(inputs.Route),
 	}))
 }
 
@@ -408,6 +452,20 @@ type apiRequestSendParams struct {
 	EnvRelPath string `json:"envRelPath"`
 }
 
+// apiEnvironmentParams addresses one environment file the way every other
+// api.* method addresses a file: the backend-held handle plus a path inside
+// it, never a root (§13.1).
+type apiEnvironmentParams struct {
+	Handle  string `json:"handle"`
+	RelPath string `json:"relPath"`
+}
+
+type apiEnvironmentWriteParams struct {
+	Handle      string             `json:"handle"`
+	RelPath     string             `json:"relPath"`
+	Environment apiEnvironmentWire `json:"environment"`
+}
+
 type apiRequestWriteParams struct {
 	Handle  string         `json:"handle"`
 	RelPath string         `json:"relPath"`
@@ -501,6 +559,106 @@ type apiMalformedRefWire struct {
 	Reason  string `json:"reason"`
 }
 
+type apiEnvironmentReadResponse struct {
+	Environment apiEnvironmentWire `json:"environment"`
+}
+
+// apiEnvironmentWire is ONE environment whole: what it is called, what it
+// answers, which of its variables are secret by name, and how a request
+// under it gets there.
+//
+// It carries the values that apiEnvironmentRefWire deliberately does not,
+// and the difference is the question being asked. The listing names
+// environments so a person can CHOOSE one, and a copy of every address in
+// every environment would be a second truth beside the files (§6.4). This is
+// the editor's read of ONE file, taken at the moment it is opened for
+// editing and written straight back — so the copy lives exactly as long as
+// the ask that made it.
+//
+// SecretVars holds NAMES and never values, which is §8 restated in a field
+// list: there is no field here in which a secret or an identifier for one
+// can be spelled, so the wire cannot carry one in either direction.
+type apiEnvironmentWire struct {
+	Name string `json:"name"`
+	// Values is never nil — an environment that declares none is {}, because
+	// the renderer's first Object.entries on a null throws.
+	Values map[string]string `json:"values"`
+	// SecretVars is never nil — none is [].
+	SecretVars []string     `json:"secretVars"`
+	Route      apiRouteWire `json:"route"`
+}
+
+// apiRouteWire is the environment's answer to "how do I get there" (§6.5).
+// ProfileID is the connection a `connection` route leases and is empty on a
+// `direct` one — the two states the closed kind vocabulary already names.
+type apiRouteWire struct {
+	Kind      string `json:"kind"`
+	ProfileID string `json:"profileId"`
+	// InsecureTLS — the environment sends without verifying the server's
+	// certificate. On the wire in BOTH directions: the editor writes it, and
+	// a send REPORTS it, so a run that went out unverified says so on the
+	// run rather than only in the file that caused it.
+	InsecureTLS bool `json:"insecureTls"`
+}
+
+// apiRouteKinds is the closed set the wire declares, and it is apicoll's own
+// constants rather than a second list of strings beside them.
+var apiRouteKinds = []string{apicoll.RouteDirect, apicoll.RouteConnection}
+
+// wireRoute renders a route for the wire, spelling the zero value out as
+// `direct` — the same normalisation wireEnvironment does for the same
+// reason: a renderer meets one spelling of one state.
+func wireRoute(r apicoll.Route) apiRouteWire {
+	kind := r.Kind
+	if kind == "" {
+		kind = apicoll.RouteDirect
+	}
+	return apiRouteWire{Kind: kind, ProfileID: r.ProfileID, InsecureTLS: r.InsecureTLS}
+}
+
+// wireEnvironment renders one environment for the renderer, filling in the
+// two collections the stored form is allowed to omit. A file may leave
+// `values` and `secretVars` out entirely — `omitempty` is right for a file —
+// and null is not what a panel can iterate.
+func wireEnvironment(env apicoll.Environment) apiEnvironmentWire {
+	values := env.Values
+	if values == nil {
+		values = map[string]string{}
+	}
+	secrets := env.SecretVars
+	if secrets == nil {
+		secrets = []string{}
+	}
+	return apiEnvironmentWire{
+		Name:       env.Name,
+		Values:     values,
+		SecretVars: secrets,
+		Route:      wireRoute(env.Route),
+	}
+}
+
+// storedEnvironment is the other direction: what the file will hold. The
+// empty map and the empty slice go back to nil so the stored form is the one
+// `omitempty` produces — the same normalisation storedRequest states, and
+// for the same reason: one canonical file whoever wrote it.
+func storedEnvironment(w apiEnvironmentWire) apicoll.Environment {
+	env := apicoll.Environment{
+		Name: w.Name,
+		Route: apicoll.Route{
+			Kind:        w.Route.Kind,
+			ProfileID:   w.Route.ProfileID,
+			InsecureTLS: w.Route.InsecureTLS,
+		},
+	}
+	if len(w.Values) > 0 {
+		env.Values = w.Values
+	}
+	if len(w.SecretVars) > 0 {
+		env.SecretVars = w.SecretVars
+	}
+	return env
+}
+
 type apiRequestReadResponse struct {
 	Request apiRequestWire `json:"request"`
 }
@@ -554,6 +712,17 @@ type apiSendResponse struct {
 	// list drawn from what the renderer believed it asked for would be the
 	// vault.status defect in reverse.
 	Environment string `json:"environment"`
+	// Route is HOW this exchange got there — the route the snapshot took
+	// off the same record the address came from (§6.5), never an echo of
+	// anything the caller sent. A run that said only which environment it
+	// used would leave the panel unable to answer the question this whole
+	// feature exists for: did this request leave from THIS machine, or
+	// through the connection the environment names?
+	//
+	// The profile ID and not a name: an id is a fact this layer holds, and
+	// the name belongs to whoever owns connections (AD-8). The renderer
+	// already has that list and turns one into the other for display.
+	Route apiRouteWire `json:"route"`
 }
 
 type apiSendResponseWire struct {
@@ -569,12 +738,60 @@ type apiSendResponseWire struct {
 	Size       int64          `json:"size"`
 	Timings    apiTimingsWire `json:"timings"`
 	TLSVersion string         `json:"tlsVersion"`
-	RemoteAddr string         `json:"remoteAddr"`
+	// TLSCipherSuite is the negotiated suite, "" off TLS.
+	TLSCipherSuite string `json:"tlsCipherSuite"`
+	// Certificates is the chain the SERVER PRESENTED, leaf first, described
+	// by the side that saw the bytes — never DER for the renderer to parse
+	// (apisend.Certificate says why). Never null: a plain http exchange
+	// presents none and that is [].
+	Certificates []apiCertificateWire `json:"certificates"`
+	RemoteAddr   string               `json:"remoteAddr"`
 	// Raw is the diagnostic text of both sides, already segmented. It rides
 	// on the send result rather than on a method of its own because the raw
 	// text belongs to a PARTICULAR run, and a second round trip could only
 	// fetch the raw of a different send (apisend/spans.go).
 	Raw apiRawExchangeWire `json:"raw"`
+}
+
+// apiCertificateWire is one certificate of the presented chain, in the fields
+// a person reads when deciding whether to trust it. Strings, all of them: the
+// renderer does not parse X.509 and must not learn to.
+type apiCertificateWire struct {
+	Subject     string   `json:"subject"`
+	Issuer      string   `json:"issuer"`
+	NotBefore   string   `json:"notBefore"`
+	NotAfter    string   `json:"notAfter"`
+	DNSNames    []string `json:"dnsNames"`
+	IPAddresses []string `json:"ipAddresses"`
+	SelfSigned  bool     `json:"selfSigned"`
+	Fingerprint string   `json:"fingerprint"`
+}
+
+// wireCertificates renders the chain, filling in the two lists the domain
+// type is allowed to leave nil — the renderer's first .map on a null throws.
+func wireCertificates(in []apisend.Certificate) []apiCertificateWire {
+	out := make([]apiCertificateWire, 0, len(in))
+	for _, c := range in {
+		names := c.DNSNames
+		if names == nil {
+			names = []string{}
+		}
+		ips := c.IPAddresses
+		if ips == nil {
+			ips = []string{}
+		}
+		out = append(out, apiCertificateWire{
+			Subject:     c.Subject,
+			Issuer:      c.Issuer,
+			NotBefore:   c.NotBefore,
+			NotAfter:    c.NotAfter,
+			DNSNames:    names,
+			IPAddresses: ips,
+			SelfSigned:  c.SelfSigned,
+			Fingerprint: c.Fingerprint,
+		})
+	}
+	return out
 }
 
 // apiRawExchangeWire and the two below carry §11's segmented text. A
@@ -724,7 +941,13 @@ func wireCollection(c apicoll.Collection, envs []apicoll.EnvironmentRef, badEnvs
 // they are apicoll's own constants rather than a second list of strings
 // beside them.
 var (
-	apiBodyKinds = []string{apicoll.BodyNone, apicoll.BodyRaw, apicoll.BodyForm, apicoll.BodyFile}
+	apiBodyKinds = []string{
+		apicoll.BodyNone,
+		apicoll.BodyRaw,
+		apicoll.BodyJSON,
+		apicoll.BodyForm,
+		apicoll.BodyFile,
+	}
 	apiAuthKinds = []string{apicoll.AuthNone, apicoll.AuthBearer, apicoll.AuthBasic, apicoll.AuthAPIKey}
 )
 
@@ -833,8 +1056,10 @@ func wireSendResponse(r apisend.Response) apiSendResponseWire {
 			TTFBMs:    float64(r.Timings.TTFB.Microseconds()) / 1000,
 			TotalMs:   float64(r.Timings.Total.Microseconds()) / 1000,
 		},
-		TLSVersion: r.TLSVersion,
-		RemoteAddr: r.RemoteAddr,
+		TLSVersion:     r.TLSVersion,
+		TLSCipherSuite: r.TLSCipherSuite,
+		Certificates:   wireCertificates(r.Certificates),
+		RemoteAddr:     r.RemoteAddr,
 		Raw: apiRawExchangeWire{
 			Request:  wireRaw(r.Raw.Request),
 			Response: wireRaw(r.Raw.Response),
@@ -995,6 +1220,64 @@ func validateAPIRequestSendRaw(raw json.RawMessage) string {
 		return ""
 	}
 	return boundedRunes("envRelPath", p.EnvRelPath, maxPathRunes)
+}
+
+func validateAPIEnvironmentRaw(raw json.RawMessage) string {
+	var p apiEnvironmentParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	return validateAPIRelPath(p.RelPath)
+}
+
+func validateAPIEnvironmentWriteRaw(raw json.RawMessage) string {
+	var p apiEnvironmentWriteParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	if msg := validateAPIRelPath(p.RelPath); msg != "" {
+		return msg
+	}
+	return validateAPIEnvironmentBody(p.Environment)
+}
+
+// validateAPIEnvironmentBody bounds every field of an environment being
+// written. Each one reaches something real: a value is substituted into the
+// URL that gets dialled, a secret name becomes a binding key, and the route
+// decides which machine the request leaves from.
+func validateAPIEnvironmentBody(e apiEnvironmentWire) string {
+	if msg := boundedRunes("environment.name", e.Name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	if len(e.Values) > maxAPIRequestRows {
+		return fmt.Sprintf("environment.values exceeds %d rows", maxAPIRequestRows)
+	}
+	for name, value := range e.Values {
+		if msg := boundedRunes("environment.values.name", name, maxHeaderNameRunes); msg != "" {
+			return msg
+		}
+		if msg := boundedRunes("environment.values.value", value, maxHeaderValueRunes); msg != "" {
+			return msg
+		}
+	}
+	if len(e.SecretVars) > maxAPIRequestRows {
+		return fmt.Sprintf("environment.secretVars exceeds %d rows", maxAPIRequestRows)
+	}
+	for _, name := range e.SecretVars {
+		if msg := boundedRunes("environment.secretVars", name, maxHeaderNameRunes); msg != "" {
+			return msg
+		}
+	}
+	if !slices.Contains(apiRouteKinds, e.Route.Kind) {
+		return fmt.Sprintf("environment.route.kind must be one of %v", apiRouteKinds)
+	}
+	return boundedRunes("environment.route.profileId", e.Route.ProfileID, maxConfigIDRunes)
 }
 
 func validateAPIRequestRaw(raw json.RawMessage) string {
@@ -1158,7 +1441,19 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.environment.read", params(validateAPIEnvironmentRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.environment.write", params(validateAPIEnvironmentWriteRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
 		whenAvailable(regResponder(sub, "api.request.read", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.request.delete", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),

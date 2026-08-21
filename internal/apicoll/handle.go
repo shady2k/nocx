@@ -25,6 +25,12 @@ type Service interface {
 	List(h HandleID) (Collection, error)
 	ReadRequest(h HandleID, relPath string) (Request, error)
 	WriteRequest(h HandleID, relPath string, r Request) error
+	// DeleteRequest removes one request file. It is on Service rather than
+	// in an interface of its own because it is addressed exactly as the two
+	// accessors are — the handle plus a path inside it — and it is the same
+	// property being asserted: a caller that cannot name a file cannot
+	// delete one.
+	DeleteRequest(h HandleID, relPath string) error
 }
 
 // handle is one opened folder, held as three facts because a replaced root

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.delete.schema.json",
+  "title": "ApiRequestDeleteResult",
+  "description": "Result of the api.request.delete JSON-RPC method: the request file is gone from the collection folder. An empty result is still a contract — what remains is the folder, and the listing is what answers for it (design §6.2), so there is nothing here for the delete to echo back that a re-read would not answer more honestly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

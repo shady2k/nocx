@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.environment.write.schema.json",
+  "title": "ApiEnvironmentWriteResult",
+  "description": "Result of the api.environment.write JSON-RPC method: the environment file on disk now holds what was sent, and the file is created when nothing occupied the name — a write to a free name is how an environment comes to exist, so there is no second create method. An empty result is still a contract: the file is the truth (design §6.4), so there is nothing for the write to echo back that a read would not answer more honestly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

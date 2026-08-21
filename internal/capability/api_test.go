@@ -120,7 +120,8 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 		if _, err := svc.ReadRequest(h, "ping.json"); err != nil {
 			t.Fatalf("ReadRequest on an open collection: %v", err)
 		}
-		open, listErr := svc.ListOpen()
+		listed, listErr := svc.ListOpen()
+		open := chosenFolders(listed)
 		if listErr != nil {
 			t.Fatalf("ListOpen: %v", listErr)
 		}
@@ -146,7 +147,8 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 		if err := svc.Close(h); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("second Close = %v, want ErrUnknownHandle", err)
 		}
-		after, afterErr := svc.ListOpen()
+		listedAfter, afterErr := svc.ListOpen()
+		after := chosenFolders(listedAfter)
 		if afterErr != nil {
 			t.Fatalf("ListOpen after Close: %v", afterErr)
 		}
@@ -178,7 +180,8 @@ func TestAPICollectionService_ReopeningReplacesTheEntry(t *testing.T) {
 		if first == second {
 			t.Fatal("re-opening minted the same handle; each open mints its own")
 		}
-		open, err := svc.ListOpen()
+		listed, err := svc.ListOpen()
+		open := chosenFolders(listed)
 		if err != nil {
 			return err
 		}
@@ -215,7 +218,8 @@ func TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne(t *testin
 		if err := os.RemoveAll(doomed); err != nil {
 			t.Fatalf("remove: %v", err)
 		}
-		open, err := svc.ListOpen()
+		listed, err := svc.ListOpen()
+		open := chosenFolders(listed)
 		if err != nil {
 			return err
 		}
@@ -321,7 +325,8 @@ func TestAPICollectionService_CreateLeavesTheCollectionOpen(t *testing.T) {
 	// It is in the opened-folder list, under the path it was created at —
 	// which is what the renderer lists and what keys the cookie jar.
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-		open, err := svc.ListOpen()
+		listed, err := svc.ListOpen()
+		open := chosenFolders(listed)
 		if err != nil {
 			return err
 		}
@@ -355,7 +360,8 @@ func TestAPICollectionService_CreateRefusesAnExistingNameAndListsNothingExtra(t 
 		if _, err := svc.Create("acme"); !errors.Is(err, apicoll.ErrCollectionExists) {
 			t.Fatalf("second Create: err = %v, want ErrCollectionExists", err)
 		}
-		open, err := svc.ListOpen()
+		listed, err := svc.ListOpen()
+		open := chosenFolders(listed)
 		if err != nil {
 			return err
 		}
@@ -525,5 +531,73 @@ func TestAPICollectionService_SnapshotRefusesAnEnvironmentPathOutsideTheCollecti
 				t.Fatalf("Run: %v", err)
 			}
 		})
+	}
+}
+
+// chosenFolders drops the BUILT-IN collection from a listing.
+//
+// `ListOpen` opens the Playground once per process before it answers
+// (apiCollectionService.ensureStarter), because a panel with nothing in it
+// asks a person to do administration before it will show them anything. Every
+// test below is about the opened-folder LIST — what Open adds, what Close
+// removes, what a re-open replaces — and the built-in row is not part of the
+// question any of them asks. It has a test of its own instead, which is where
+// that behaviour belongs.
+func chosenFolders(open []capability.OpenCollection) []capability.OpenCollection {
+	out := make([]capability.OpenCollection, 0, len(open))
+	for _, c := range open {
+		if filepath.Base(c.Path) == apicoll.StarterName {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// TestAPICollectionService_ListOpenOpensTheBuiltInCollection is that test.
+//
+// Both ends of the interval: the Playground is in the list from the first
+// ListOpen of the process, and it stays there until somebody closes it — a
+// close that must STICK, because the ensure runs once and a person who closed
+// it is not to be argued with until the next start.
+func TestAPICollectionService_ListOpenOpensTheBuiltInCollection(t *testing.T) {
+	op := newAPIOperation(t)
+
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		open, err := svc.ListOpen()
+		if err != nil {
+			t.Fatalf("ListOpen: %v", err)
+		}
+		var starter *capability.OpenCollection
+		for i := range open {
+			if filepath.Base(open[i].Path) == apicoll.StarterName {
+				starter = &open[i]
+			}
+		}
+		if starter == nil {
+			t.Fatalf("opened folders = %+v, want the built-in collection among them", open)
+		}
+		if starter.Err != nil {
+			t.Fatalf("the built-in collection did not read: %v", starter.Err)
+		}
+		// It is seeded rather than empty: an empty collection is the same
+		// blank surface one folder deeper.
+		if len(starter.Collection.Requests) == 0 {
+			t.Errorf("the built-in collection has no requests in it")
+		}
+
+		if closeErr := svc.Close(starter.Handle); closeErr != nil {
+			t.Fatalf("Close: %v", closeErr)
+		}
+		after, afterErr := svc.ListOpen()
+		if afterErr != nil {
+			t.Fatalf("ListOpen after close: %v", afterErr)
+		}
+		if len(chosenFolders(after)) != len(after) {
+			t.Errorf("opened folders = %+v, want the built-in one to stay closed", after)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }

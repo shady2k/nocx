@@ -34,27 +34,46 @@
 // nineteen above it.
 
 import { createSignal, untrack } from 'solid-js'
-import type { ApiWorkbenchServices } from './api-client'
+import type { ApiConnection, ApiWorkbenchServices } from './api-client'
 import type { FilesChanged } from '../generated/files.changed'
 import {
   adoptCreatedCollection,
   adoptImportedRequest,
   adoptOpenedCollection,
+  type ApiEnvironment,
   type ApiEnvironmentRef,
   type ApiImportNote,
   type ApiOpenCollection,
   type ApiRequest,
   type ApiResponse,
+  type ApiSentRoute,
 } from './api-model'
+import { slugify } from './api-paths'
+import { foldQueryIntoParams } from './api-url'
 import type { Unsupported as PostmanNote } from '../generated/api.import.postman'
 
-/** How a run's body is being read. */
-export type ApiRunView = 'pretty' | 'raw'
+/** WHICH PART of an exchange is being read. Three, not two: the headers
+ *  were stacked above the body in one pane, so a long body pushed them off
+ *  screen and a long header list pushed the body off. They are what a person
+ *  looks at one at a time. */
+export type ApiRunView = 'body' | 'headers' | 'raw'
 
 /** One exchange, as the list holds it. Exactly one of `response` and `error`
  *  is set: an exchange either came back or did not, and a row that could
  *  hold both would have to decide which one to believe. */
 export interface ApiRun {
+  /**
+   * WHICH REQUEST this run belongs to — the collection handle and the path
+   * within it, the same pair that addresses the file.
+   *
+   * The list used to be the workbench's, flat: every send anybody made, in
+   * one column, whichever request was on screen. So opening another request
+   * showed it somebody else's answers, and deleting a request left its runs
+   * behind with nothing to explain what they were replies to. A run is an
+   * answer to one question and it is kept beside that question.
+   */
+  readonly handle: string
+  readonly relPath: string
   readonly id: number
   /** The method and URL as the FORM had them when Send was pressed — what
    *  the person asked for. Kept on the run so scrolling back through twenty
@@ -79,6 +98,8 @@ export interface ApiRun {
    *  because the panel's picker says what the NEXT send will do, and a
    *  scrollback of twenty runs is asking what a past one did. */
   readonly environment: string
+  /** How it went out (§6.5) — the backend's account, never the panel's. */
+  readonly route: ApiSentRoute
   readonly response: ApiResponse | null
   readonly error: string | null
   readonly view: ApiRunView
@@ -117,6 +138,8 @@ export interface ApiStore {
   draft(): ApiRequest | null
   /** True while the draft differs from what the file last answered. */
   dirty(): boolean
+  /** The exchanges of the request that is OPEN, newest first — never the
+   *  whole session's. An answer belongs beside its question. */
   runs(): readonly ApiRun[]
   notes(): readonly ApiImportNote[]
   /** The last failure, in the words the backend used, or '' when the last
@@ -158,7 +181,51 @@ export interface ApiStore {
    *  handle-and-collection an open does. */
   createCollection(name: string): Promise<void>
   closeFolder(handle: string): Promise<void>
+  /** The SSH connections an environment may route through, or [] where this
+   *  build offers none. Read once, when the panel first needs them: a
+   *  profile list changes when a person edits their connections, and the
+   *  editor re-reads it every time it opens. */
+  connections(): readonly ApiConnection[]
+  /** Ask for that list. The environments page calls it when it opens. */
+  loadConnections(): Promise<void>
+  /** Point the workbench at one open collection — what a click on its row
+   *  already does, reachable for an action that must act on THAT row rather
+   *  than on whatever the panel happened to be pointed at. */
+  pointAt(handle: string): void
   openRequest(handle: string, relPath: string): Promise<void>
+  /**
+   * Write the draft into a file that does not exist yet, in the collection
+   * the workbench is pointed at, and select it.
+   *
+   * The missing half of the curl import. `api.import.curl` fills the FORM —
+   * there is no file behind it (importCurl says so), so nothing is selected
+   * and Send is refused, correctly: `api.request.send` reads the file. What
+   * was missing was any way to give it one, so an imported request could be
+   * looked at and never sent. This is that way, and it is also how a request
+   * comes to exist at all — there is no other creator.
+   */
+  saveDraftAs(): Promise<void>
+  /** Write the draft back to the file it came from. */
+  saveDraft(): Promise<void>
+  /**
+   * Delete one request file.
+   *
+   * The form is cleared only when the file DELETED is the one it is showing
+   * — a request open from another collection is nobody's business here. What
+   * replaces it is nothing rather than the next row: picking a person's next
+   * request for them is a choice they did not make.
+   */
+  deleteRequest(handle: string, relPath: string): Promise<void>
+  /**
+   * Make a request that does not exist yet, in the collection the workbench
+   * is pointed at, and open it.
+   *
+   * Until this there was NO WAY TO CREATE A REQUEST at all: the panel could
+   * open one a file already held, convert a curl line into a form with no
+   * file behind it, or import somebody's Postman export — and a person
+   * starting from nothing had to write JSON into the folder by hand.
+   */
+  newRequest(): Promise<void>
   editDraft(next: ApiRequest): void
   /** Point the active collection at one of its environments, or at none
    *  ('' ). A person's choice is remembered for as long as the workbench
@@ -167,9 +234,39 @@ export interface ApiStore {
    *  states here rather than one. */
   setEnvironment(relPath: string): void
   send(): Promise<void>
+  /** Read ONE environment whole, for an ask that is about to edit it. It
+   *  answers null when the read failed — the reason is on `error()`, the way
+   *  every other failed call reports — because there is nothing to open an
+   *  editor onto. */
+  readEnvironment(relPath: string): Promise<ApiEnvironment | null>
+  /** Write one back, creating the file when nothing occupies the name, and
+   *  re-list so the picker names what is now on disk. */
+  writeEnvironment(relPath: string, environment: ApiEnvironment): Promise<void>
   importCurl(line: string): Promise<void>
   importPostman(path: string, dest: string): Promise<void>
   setRunView(id: number, view: ApiRunView): void
+}
+
+/**
+ * The file a request called `name` can have, given what the folder already
+ * holds: `create-user.json`, then `create-user-2.json`, and so on.
+ *
+ * The suffix counts FILES rather than requests, because what must not
+ * collide is the path — two requests may legitimately be called the same
+ * thing, and the folder is what refuses that. A name that slugs to nothing
+ * (punctuation, another script) falls back to `untitled`, which is a file
+ * name rather than a judgement about the name.
+ */
+function freePath(open: readonly ApiOpenCollection[], handle: string, name: string): string {
+  const taken = new Set(
+    open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.relPath) ?? [],
+  )
+  const stem = slugify(name) || 'untitled'
+  if (!taken.has(`${stem}.json`)) return `${stem}.json`
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}.json`
+    if (!taken.has(candidate)) return candidate
+  }
 }
 
 function message(err: unknown): string {
@@ -405,6 +502,15 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     return envs.length === 1 ? envs[0].relPath : ''
   }
 
+  /** The runs of the request that is OPEN, newest first. The list holds
+   *  every exchange this session made; what a person is shown is the answers
+   *  to the question in front of them. */
+  const visibleRuns = (): readonly ApiRun[] => {
+    const target = selected()
+    if (target === null) return []
+    return runs().filter((r) => r.handle === target.handle && r.relPath === target.relPath)
+  }
+
   const environments = (): readonly ApiEnvironmentRef[] => environmentsOf(activeCollection())
   const activeEnvironment = (): string => environmentFor(activeCollection())
 
@@ -568,8 +674,15 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       const result = await services.readRequest(handle, relPath)
       setSelected({ handle, relPath })
       setActiveCollection(handle)
-      setDraft(result.request)
-      setSaved(result.request)
+      // FOLDED ONCE, into both. A file may carry its query in the URL, in
+      // the rows, or in both — the sender concatenates them (§6.4) — and the
+      // panel shows one of the two. Folding here makes the rows the one
+      // owner from the moment the file is opened; doing it to the saved
+      // snapshot as well is what keeps `dirty` false, so opening a request
+      // does not report itself as edited.
+      const adopted = foldQueryIntoParams(result.request)
+      setDraft(adopted)
+      setSaved(adopted)
       setError('')
     } catch (err) {
       // The previous request stays in the form. Clearing it would make one
@@ -582,9 +695,137 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     setDraft(next)
   }
 
+  const saveDraftAs = async (): Promise<void> => {
+    const handle = untrack(activeCollection)
+    const request = untrack(draft)
+    if (handle === '' || request === null) return
+    // NO ASK. The request already HAS a name — the curl importer takes one
+    // from the URL, and a person who wants a different one renames it in the
+    // header where the name is shown. Asking for a file name at Save was
+    // asking a second time for something already answered, in the currency
+    // of paths rather than of names, at the moment somebody was trying to
+    // press Send.
+    const relPath = freePath(untrack(collections), handle, request.name)
+    try {
+      await services.writeRequest(handle, relPath, request)
+      // Selected the moment it exists: what makes Send legal is that there
+      // is a file, and this is where that becomes true.
+      setSelected({ handle, relPath })
+      setSaved(request)
+      setError('')
+      // The tree does not know about the new file until the folder is
+      // re-read; the disk is the truth, so the row arrives the same way a
+      // colleague's would.
+      await refresh()
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
+  const [connections, setConnections] = createSignal<readonly ApiConnection[]>([])
+
+  const loadConnections = async (): Promise<void> => {
+    // ABSENT is a build with no profile store, and the editor then offers no
+    // route through a connection at all — optionality is the capability
+    // (api-client.ts). A FAILURE is different: it leaves the list as it was
+    // and says so, because an empty picker that quietly replaced a full one
+    // would tell a person their connections are gone.
+    if (!services.listConnections) return
+    try {
+      setConnections(await services.listConnections())
+      setError('')
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
+  const pointAt = (handle: string): void => {
+    setActiveCollection(handle)
+  }
+
+  const newRequest = async (): Promise<void> => {
+    const handle = untrack(activeCollection)
+    if (handle === '') return
+    // NO ASK. A person pressing "new request" has already said what they
+    // want, and answering with a dialog puts a naming decision before the
+    // thing they came to do — which is type a URL. The request arrives
+    // named "Untitled request" and is renamed in the header, in place,
+    // whenever they know what it is (api-pane.tsx).
+    const name = 'Untitled request'
+    const relPath = freePath(untrack(collections), handle, name)
+    try {
+      // A GET at no address, which is the request a person is about to type
+      // rather than a template with opinions in it. The id is the file's
+      // stem, so two machines seeding the same name produce the same file.
+      await services.writeRequest(handle, relPath, {
+        id: relPath.replace(/\.json$/, ''),
+        name,
+        method: 'GET',
+        url: '',
+        headers: [],
+        query: [],
+        body: { kind: 'none', text: '', fileRef: '' },
+        auth: { kind: 'none', var: '', user: '' },
+      })
+      setError('')
+      await refresh()
+      // Opened through the ordinary path, so what lands in the form is what
+      // the FILE says — never the object we just sent.
+      await openRequest(handle, relPath)
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
+  const saveDraft = async (): Promise<void> => {
+    const target = untrack(selected)
+    const request = untrack(draft)
+    if (target === null || request === null) return
+    try {
+      await services.writeRequest(target.handle, target.relPath, request)
+      setSaved(request)
+      setError('')
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
+  const deleteRequest = async (handle: string, relPath: string): Promise<void> => {
+    try {
+      await services.deleteRequest(handle, relPath)
+      const open = untrack(selected)
+      if (open !== null && open.handle === handle && open.relPath === relPath) {
+        setSelected(null)
+        setDraft(null)
+        setSaved(null)
+      }
+      // The answers go with the question. Keeping them would leave a column
+      // of exchanges belonging to a file that no longer exists, under a
+      // panel that can no longer say what they were replies to.
+      setRuns((prev) => prev.filter((r) => !(r.handle === handle && r.relPath === relPath)))
+      setError('')
+      await refresh()
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
   const send = async (): Promise<void> => {
-    const target = selected()
-    const request = draft()
+    let request = untrack(draft)
+    if (request === null) return
+    // A REQUEST WITH NO FILE GETS ONE, HERE. `api.request.send` sends the
+    // FILE — the backend snapshots it off disk, which is what makes the run
+    // and the folder agree (§6.4) — so a converted curl line could not be
+    // sent until somebody saved it. Refusing Send for that reason was the
+    // rule stated at the person instead of applied for them: this path
+    // ALREADY writes the draft before sending when it is dirty, and "there
+    // is no file yet" is the same sentence with the same answer.
+    if (untrack(selected) === null) {
+      await saveDraftAs()
+      if (untrack(error) !== '') return
+      request = untrack(draft)
+    }
+    const target = untrack(selected)
     if (target === null || request === null) return
     setSending(true)
     try {
@@ -609,14 +850,20 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       setRuns((prev) => [
         {
           id: nextRunId++,
+          handle: target.handle,
+          relPath: target.relPath,
           method: request.method,
           url: request.url,
           // The backend's account of which record answered, never an echo
           // of the path we sent.
           environment: result.environment,
+          // WHERE IT WENT OUT FROM, in the backend's account. The panel knows
+          // which route it configured; what it must show is the one the send
+          // actually took, read off the same record the address came from.
+          route: result.route,
           response: result.response,
           error: null,
-          view: 'pretty',
+          view: 'body',
         },
         ...prev,
       ])
@@ -631,6 +878,8 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         setRuns((prev) => [
           {
             id: nextRunId++,
+            handle: target.handle,
+            relPath: target.relPath,
             method: request.method,
             url: request.url,
             // Nothing came back, so nothing said which environment answered.
@@ -638,15 +887,48 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
             // reported an environment the backend never confirmed would be
             // the guess this field exists to avoid.
             environment: '',
+            // Nothing went out, so nothing says how it would have. Direct is
+            // the zero value and not a claim: the failure card carries the
+            // reason, which is the only thing true about this run.
+            route: { kind: 'direct', profileId: '', insecureTls: false },
             response: null,
             error: reason,
-            view: 'pretty',
+            view: 'body',
           },
           ...prev,
         ])
       }
     } finally {
       setSending(false)
+    }
+  }
+
+  const readEnvironment = async (relPath: string): Promise<ApiEnvironment | null> => {
+    const handle = untrack(activeCollection)
+    if (handle === '') return null
+    try {
+      const result = await services.readEnvironment(handle, relPath)
+      setError('')
+      return result.environment
+    } catch (err) {
+      setError(message(err))
+      return null
+    }
+  }
+
+  const writeEnvironment = async (relPath: string, environment: ApiEnvironment): Promise<void> => {
+    const handle = untrack(activeCollection)
+    if (handle === '') return
+    try {
+      await services.writeEnvironment(handle, relPath, environment)
+      setError('')
+      // The file is the truth (§6.4), so what the picker offers next comes
+      // from a re-read rather than from what was just sent: a new
+      // environment appears because the folder now has it, which is the same
+      // route a colleague's `git pull` takes.
+      await refresh()
+    } catch (err) {
+      setError(message(err))
     }
   }
 
@@ -658,7 +940,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // is nothing on disk for api.request.send to send.
       setSelected(null)
       setSaved(null)
-      setDraft(adoptImportedRequest(result.request))
+      setDraft(foldQueryIntoParams(adoptImportedRequest(result.request)))
       setNotes(result.unsupported)
       setError('')
     } catch (err) {
@@ -730,7 +1012,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     selected,
     draft,
     dirty,
-    runs,
+    runs: visibleRuns,
     notes,
     error,
     loading,
@@ -744,10 +1026,19 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     openFolder,
     createCollection,
     closeFolder,
+    connections,
+    loadConnections,
+    pointAt,
     openRequest,
+    saveDraftAs,
+    saveDraft,
+    deleteRequest,
+    newRequest,
     editDraft,
     setEnvironment,
     send,
+    readEnvironment,
+    writeEnvironment,
     importCurl,
     importPostman,
     setRunView,

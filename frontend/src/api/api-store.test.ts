@@ -248,16 +248,19 @@ describe('ApiStore — sending', () => {
     expect(send).not.toHaveBeenCalled()
   })
 
-  it('a run is shown pretty until the reader asks for raw, and the choice is per run', async () => {
+  it('a run opens on its body, and which part is read is per run', async () => {
+    // Three parts now, not two: the headers were stacked above the body in
+    // one pane, where a long body pushed them off screen and a long header
+    // list pushed the body off.
     const { store } = storeWith()
     await store.openRequest('h1', 'users/create.json')
     await store.send()
     await store.send()
     const [newest, oldest] = store.runs()
-    expect(newest.view).toBe('pretty')
+    expect(newest.view).toBe('body')
     store.setRunView(oldest.id, 'raw')
     expect(store.runs()[1].view).toBe('raw')
-    expect(store.runs()[0].view).toBe('pretty')
+    expect(store.runs()[0].view).toBe('body')
   })
 })
 

@@ -352,6 +352,35 @@ func TestRoutes_ALiveConnectionIsReusedAndALostOneIsReplaced(t *testing.T) {
 
 // ─── who resolves the name (httppolicy's Route contract) ───────────────────
 
+// The paired case, and the one the whole feature is for: `localhost` through
+// a connection is the service on the FAR SIDE's loopback — an admin port, a
+// dev server, a database console on a box somebody has SSH to. It is allowed
+// because it is TRUTHFUL rather than by exemption: RFC 6761 §6.3 makes
+// `localhost` resolve to loopback wherever it is resolved, so this end can
+// say what will be reached, and the direct-tcpip channel then names 127.0.0.1
+// for the far side's own stack to answer.
+func TestRoutes_HTTPToLocalhostThroughAConnectionReachesTheFarSidesLoopback(t *testing.T) {
+	leaser := newFakeLeaser()
+	id, _ := RouteIDFor(apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "ssh:p1:1"})
+
+	c := New(WithRoutes(NewRoutes(leaser)))
+	_, err := c.Send(context.Background(),
+		apicoll.Request{Method: http.MethodGet, URL: "http://localhost:9443/health"}, Key{RouteID: id})
+
+	// The send still fails — the fake leaser's connection dials nothing —
+	// but it must fail at the DIAL and never at the address rule: what is
+	// asserted here is that the name was resolved and permitted.
+	if errors.Is(err, ErrNameResolvedRemotely) {
+		t.Fatalf("localhost was refused as an unresolvable name: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "not a loopback or private address") {
+		t.Fatalf("localhost was refused by the http:// address rule: %v", err)
+	}
+	if leaser.pool.connectionCount() == 0 {
+		t.Error("no connection was opened: the send never reached the far side at all")
+	}
+}
+
 // A tunnelled route cannot answer "which addresses will this dial reach" for
 // a NAME: the far side resolves it (§7.1). The contract says such a route
 // must return an error rather than a guess, and the guess would be a real

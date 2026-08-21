@@ -52,7 +52,7 @@ export interface Body {
   /**
    * A body too large or too awkward for the line projection is NAMED by a file rather than lost (design §6.4).
    */
-  kind: 'none' | 'raw' | 'form' | 'file'
+  kind: 'none' | 'raw' | 'json' | 'form' | 'file'
   text: string
   /**
    * A path WITHIN the collection, read on send under the handle's path rules — never a path the renderer supplies (design §13.1).

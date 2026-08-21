@@ -5286,8 +5286,9 @@ func TestAPICollectionsCreate_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(listed.Result, &list); err != nil {
 		t.Fatalf("unmarshal list: %v", err)
 	}
-	if len(list.Collections) != 1 || list.Collections[0].Handle != made.Handle {
-		t.Fatalf("opened folders = %+v, want the collection just created", list.Collections)
+	chosen := chosenCollections(list.Collections)
+	if len(chosen) != 1 || chosen[0].Handle != made.Handle {
+		t.Fatalf("opened folders = %+v, want the collection just created", chosen)
 	}
 }
 
@@ -5368,11 +5369,12 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(listResp.Result, &listed); err != nil {
 		t.Fatalf("unmarshal list result: %v", err)
 	}
-	if len(listed.Collections) != 1 || listed.Collections[0].Handle != opened.Handle {
-		t.Fatalf("opened-folder list = %+v, want the one folder just opened", listed.Collections)
+	chosen := chosenCollections(listed.Collections)
+	if len(chosen) != 1 || chosen[0].Handle != opened.Handle {
+		t.Fatalf("opened-folder list = %+v, want the one folder just opened", chosen)
 	}
-	if listed.Collections[0].Path != root {
-		t.Errorf("listed path = %q, want %q", listed.Collections[0].Path, root)
+	if chosen[0].Path != root {
+		t.Errorf("listed path = %q, want %q", chosen[0].Path, root)
 	}
 
 	readResp := vaultCall(t, conn, "api.request.read",
@@ -5436,8 +5438,8 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(gone.Result, &empties); err != nil {
 		t.Fatalf("unmarshal list after close: %v", err)
 	}
-	if len(empties.Collections) != 0 {
-		t.Errorf("opened-folder list after close = %+v, want empty", empties.Collections)
+	if left := chosenCollections(empties.Collections); len(left) != 0 {
+		t.Errorf("opened-folder list after close = %+v, want empty", left)
 	}
 }
 
@@ -5512,13 +5514,14 @@ func TestAPICollectionsList_ReportsARootThatWasReplaced(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &listed); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(listed.Collections) != 1 {
-		t.Fatalf("collections = %+v, want the folder still listed with its failure named", listed.Collections)
+	chosen := chosenCollections(listed.Collections)
+	if len(chosen) != 1 {
+		t.Fatalf("collections = %+v, want the folder still listed with its failure named", chosen)
 	}
-	if listed.Collections[0].Handle != handle {
-		t.Errorf("handle = %q, want %q", listed.Collections[0].Handle, handle)
+	if chosen[0].Handle != handle {
+		t.Errorf("handle = %q, want %q", chosen[0].Handle, handle)
 	}
-	if listed.Collections[0].Error == "" {
+	if chosen[0].Error == "" {
 		t.Error("a folder whose root was removed listed with no error; the failure must be reported, not papered over")
 	}
 }
@@ -5899,4 +5902,23 @@ func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// chosenCollections drops the BUILT-IN collection from a listing.
+//
+// api.collections.list opens the Playground once per process before it
+// answers (capability.apiCollectionService.ensureStarter), because a panel
+// with nothing in it asks a person to do administration before it will show
+// them anything. The assertions below are about the folder the TEST opened —
+// what a create leaves open, what a close removes, how a replaced root is
+// reported — and the built-in row is not part of any of those questions.
+func chosenCollections(in []apiOpenCollectionWire) []apiOpenCollectionWire {
+	out := make([]apiOpenCollectionWire, 0, len(in))
+	for _, c := range in {
+		if filepath.Base(c.Path) == apicoll.StarterName {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }

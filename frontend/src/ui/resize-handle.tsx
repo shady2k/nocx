@@ -32,6 +32,23 @@
 import { createEffect, createSignal, on, untrack } from 'solid-js'
 
 export interface ResizeHandleProps {
+  /**
+   * Which edge this is, in the separator role's own vocabulary — and with
+   * it, the axis the drag reads.
+   *
+   * `vertical` (the default, and what the sidebar has always been) is a
+   * vertical line between a left pane and a right one: the drag reads
+   * clientX, and ArrowRight/ArrowLeft step it. `horizontal` is a horizontal
+   * line between a top pane and a bottom one: the drag reads clientY, and
+   * ArrowDown/ArrowUp step it — DOWN grows, because what the value measures
+   * is the pane above.
+   *
+   * A variant rather than a second component, because everything else about
+   * a resize edge — the capture, the clamping, the commit-once rule, the
+   * idle-gesture suppression — is identical, and two of them would be two
+   * owners of one behaviour.
+   */
+  orientation?: 'vertical' | 'horizontal'
   /** The settled value between interactions (px). */
   value: number
   /** Hard floor — a drag or a step can never produce less. */
@@ -67,7 +84,7 @@ export function ResizeHandle(props: ResizeHandleProps) {
   const [dragging, setDragging] = createSignal(false)
   let live = untrack(() => clamp(props.value))
   let startValue = 0
-  let startX = 0
+  let startPos = 0
   let captureEl: HTMLElement | null = null
   let capturePointerId: number | null = null
   // Whether THIS interaction has produced any change — the drag-end commit
@@ -98,9 +115,14 @@ export function ResizeHandle(props: ResizeHandleProps) {
     if (commit) props.onCommit(clamped)
   }
 
-  const endDrag = (clientX: number): void => {
+  /** Where the pointer is ALONG THIS HANDLE'S AXIS. The one place the
+   *  orientation reaches the drag maths; everything below is axis-blind. */
+  const positionOf = (e: PointerEvent): number =>
+    props.orientation === 'horizontal' ? e.clientY : e.clientX
+
+  const endDrag = (position: number): void => {
     if (!dragging()) return
-    const final = clamp(startValue + (clientX - startX))
+    const final = clamp(startValue + (position - startPos))
     // The release itself can move the pointer past the last reported point,
     // so recompute from the FINAL event's position; a no-op here means the
     // last move already reported it, and the commit below still fires once.
@@ -124,7 +146,7 @@ export function ResizeHandle(props: ResizeHandleProps) {
 
   const onPointerDown = (e: PointerEvent): void => {
     startValue = live
-    startX = e.clientX
+    startPos = positionOf(e)
     interactionChanged = false
     captureEl = e.currentTarget as HTMLElement
     capturePointerId = e.pointerId
@@ -139,22 +161,33 @@ export function ResizeHandle(props: ResizeHandleProps) {
 
   const onPointerMove = (e: PointerEvent): void => {
     if (!dragging()) return
-    report(startValue + (e.clientX - startX), false)
+    report(startValue + (positionOf(e) - startPos), false)
   }
 
-  const onPointerUp = (e: PointerEvent): void => endDrag(e.clientX)
+  const onPointerUp = (e: PointerEvent): void => endDrag(positionOf(e))
 
   const onKeyDown = (e: KeyboardEvent): void => {
     const step = props.step ?? 8
+    const horizontal = props.orientation === 'horizontal'
     let next: number | null = null
     switch (e.key) {
+      // The growing key is the one that points AWAY from the pane being
+      // measured: right for a left pane, down for a top one. A horizontal
+      // edge deliberately does not answer Left/Right at all — a key that
+      // moves nothing is better than a key that moves the wrong edge.
       case 'ArrowRight':
-      case 'ArrowUp':
+        if (horizontal) return
         next = live + step
         break
       case 'ArrowLeft':
-      case 'ArrowDown':
+        if (horizontal) return
         next = live - step
+        break
+      case 'ArrowDown':
+        next = horizontal ? live + step : live - step
+        break
+      case 'ArrowUp':
+        next = horizontal ? live - step : live + step
         break
       case 'Home':
         next = props.min
@@ -173,17 +206,18 @@ export function ResizeHandle(props: ResizeHandleProps) {
     <div
       role="separator"
       aria-label={props.ariaLabel}
-      aria-orientation="vertical"
+      aria-orientation={props.orientation ?? 'vertical'}
       aria-valuenow={value()}
       aria-valuemin={props.min}
       aria-valuemax={props.max}
       tabIndex={0}
       class="ui-resize-handle"
+      data-orientation={props.orientation ?? 'vertical'}
       data-dragging={dragging() ? 'true' : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={(e: PointerEvent) => endDrag(e.clientX)}
+      onPointerCancel={(e: PointerEvent) => endDrag(positionOf(e))}
       onKeyDown={onKeyDown}
     />
   )

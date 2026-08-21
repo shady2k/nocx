@@ -71,7 +71,9 @@ type EnvironmentReader interface {
 type Collections interface {
 	Service
 	EnvironmentReader
+	EnvironmentWriter
 	Creator
+	Starter
 }
 
 // NewCollections returns the whole surface — requests, environments and the
@@ -272,4 +274,61 @@ func validateRoute(r Route) error {
 	default:
 		return fmt.Errorf("unknown route kind %q", r.Kind)
 	}
+}
+
+// EnvironmentWriter writes one environment file back.
+//
+// A fifth interface beside Service, EnvironmentReader, Creator and Starter,
+// for the reason each of the others gives: Service's property — Open is the
+// ONLY entry point that accepts a root — is asserted against Service's
+// method set, and this takes no root either.
+//
+// It is separate from EnvironmentReader rather than folded into it because
+// the two have different audiences: the sender reads and never writes, and a
+// reader handed a writer is a reader that could.
+type EnvironmentWriter interface {
+	// WriteEnvironment writes one environment file atomically, and never
+	// through a symlink. The path is validated exactly as ReadEnvironment
+	// validates it — `environments/<file>.json`, directly under the
+	// directory, nothing cleaned — so a caller that may not read a file may
+	// not write it either.
+	//
+	// A path that does not exist yet is how an environment is CREATED:
+	// there is no separate create, because a write to a name nothing
+	// occupies is the whole of it and a second method would be a second
+	// answer to "how does an environment come to exist".
+	WriteEnvironment(h HandleID, relPath string, env Environment) error
+}
+
+var _ EnvironmentWriter = (*service)(nil)
+
+// WriteEnvironment implements EnvironmentWriter.
+//
+// The route is validated before anything is written, by the SAME predicate
+// that guards a file being read (validateRoute). A collection is shared
+// through git, so a file this build writes is a file some other build reads:
+// writing a route this package would refuse to read back would put a folder
+// on disk that only its author can open.
+func (s *service) WriteEnvironment(h HandleID, relPath string, env Environment) error {
+	hd, err := s.resolve(h)
+	if err != nil {
+		return err
+	}
+	if err = validateEnvironmentPath(relPath); err != nil {
+		return err
+	}
+	if _, err = resolveWithin(hd.root, relPath); err != nil {
+		return err
+	}
+	if err = validateRoute(env.Route); err != nil {
+		return err
+	}
+	// The atomic write, the mode bits and the refusal to rename over a
+	// symlink at the target are storage.DocumentStore's — the existing
+	// answer, not a second one. WriteRequest says the same thing one file
+	// over, and for the same reason.
+	if err = s.docStoreFor(hd.root).Write(relPath, env); err != nil {
+		return fmt.Errorf("apicoll: write environment %q: %w", relPath, err)
+	}
+	return nil
 }

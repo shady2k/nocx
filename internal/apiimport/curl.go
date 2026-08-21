@@ -207,7 +207,7 @@ func parseCurl(line string, namer *varNamer) (apicoll.Request, []secretOffer, []
 		return req, nil, nil, errors.New("apiimport: empty command line")
 	}
 	if base := strings.ToLower(path.Base(toks[0])); base != "curl" && base != "curl.exe" {
-		return req, nil, nil, fmt.Errorf("apiimport: not a curl command line (starts with %q)", toks[0])
+		return req, nil, nil, fmt.Errorf("apiimport: not a curl command line (starts with %q)", ellipsis(toks[0], 60))
 	}
 
 	// handle applies one recognised flag. value is meaningful only when the
@@ -609,4 +609,24 @@ func requestNameFor(method, rawURL string) string {
 		seg = "request"
 	}
 	return method + " " + seg
+}
+
+// ellipsis bounds a fragment of the CALLER'S OWN INPUT quoted back at them.
+//
+// A refusal quotes what it refused so a person can see which part it meant,
+// and the first token of a pasted line is usually short — `wget`, `http`, a
+// prompt. It is not always: a URL pasted by mistake is one token and can be
+// two kilobytes of query string, and the sentence built from it then arrives
+// in a panel as a wall of text with no spaces in it to wrap on. The message
+// is for a person to read; sixty runes is as much of a wrong first word as
+// anybody needs to recognise it.
+//
+// Runes, not bytes: cutting a UTF-8 sequence in half would put a replacement
+// character in a message about somebody's own text.
+func ellipsis(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }

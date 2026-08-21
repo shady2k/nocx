@@ -64,6 +64,12 @@ export class ApiContent extends SolidPaneContent {
     // arrived during the listing had nobody to tell.
     this.store.startWatching()
     await this.store.refresh()
+    // The connections a run may have gone through, so a run that went
+    // through one can be LABELLED the moment it arrives rather than after
+    // somebody opens the environments page. Not awaited into the mount path
+    // in a way that could delay the tree: a failure here costs a name, and
+    // the run still says which id it used.
+    void this.store.loadConnections()
   }
 
   /**
@@ -86,8 +92,9 @@ export class ApiContent extends SolidPaneContent {
    *
    * With a request in the form that is the URL — the field edited between one
    * send and the next. With nothing open the URL field is disabled and cannot
-   * take focus at all, so the keyboard goes to the primary ACTION, which is
-   * the only thing that can be done from the state the workbench starts in.
+   * take focus at all, so the keyboard goes to the collections menu, which is
+   * the only thing that can be done from the state the workbench starts in —
+   * and which is now the one control the three doors are behind.
    * It used to be the folder field, and that field no longer sits in the
    * panel: opening a folder is an ask now (nocx-84shs), so the field lives
    * inside a closed dialog where nothing can focus it. Focusing a disabled
@@ -103,7 +110,7 @@ export class ApiContent extends SolidPaneContent {
       url.focus()
       return
     }
-    host.querySelector<HTMLButtonElement>('#api-new-collection')?.focus()
+    host.querySelector<HTMLButtonElement>('#api-collections-menu')?.focus()
   }
 
   // viewportChanged is inherited as a no-op: the workbench lays itself out in

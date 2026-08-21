@@ -163,12 +163,22 @@ function rawBlockText(card: HTMLElement, label: string): string {
 }
 
 /** One run's pretty/raw choice, by the words on it. */
+/** One of a run's view tabs, by its label. It was a SegmentedControl of two
+ *  (Pretty/Raw) and is a tab row of three (Body/Headers/Raw): the headers
+ *  used to be stacked above the body in one pane, where a long body pushed
+ *  them off screen and a long header list pushed the body off. */
 function optionIn(card: HTMLElement, label: string): HTMLElement {
-  const found = [...card.querySelectorAll<HTMLElement>('[role="radio"]')].find(
-    (b) => (b.textContent ?? '').trim() === label,
+  const found = [...card.querySelectorAll<HTMLElement>('[role="tab"]')].find((b) =>
+    (b.textContent ?? '').trim().startsWith(label),
   )
-  if (!found) throw new Error(`no ${label} option on this run`)
+  if (!found) throw new Error(`no ${label} tab on this run`)
   return found
+}
+
+/** Which of a run's view tabs is the current one. */
+function currentTab(card: HTMLElement): string {
+  const on = card.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+  return (on?.textContent ?? '').trim()
 }
 
 /** Open the workbench the way a person does, and wait for the tree. */
@@ -248,7 +258,12 @@ describe('the workbench notices the folder changed', () => {
     const { bar } = await mountApp({ watchCollections: watch.port })
     await openWorkbench(bar)
     await vi.waitFor(() => expect(watch.sets()).toEqual([[COLLECTION_PATH]]))
-    fireEvent.click(button(`Close ${COLLECTION_PATH}`))
+    // Closing is a MENU ITEM now, not a bare ✕ on the row: one unlabelled
+    // click from closing somebody's folder, with nothing between the pointer
+    // and the act, is what it replaced.
+    fireEvent.click(button('More actions for acme-api'))
+    await vi.waitFor(() => menuItem('Close collection'))
+    fireEvent.click(menuItem('Close collection'))
     await vi.waitFor(() => expect(watch.lastSet()).toEqual([]))
   })
 })
@@ -294,7 +309,9 @@ describe('the header says whether the panel is still following the disk', () => 
     // …and it clears the instant watching recovers, which is the other end of
     // the interval: a warning that outlives its cause teaches the reader to
     // ignore the next one.
-    fireEvent.click(button('Re-read the open folders'))
+    fireEvent.click(button('More collection actions'))
+    await vi.waitFor(() => menuItem('Re-read the open folders'))
+    fireEvent.click(menuItem('Re-read the open folders'))
     await vi.waitFor(() =>
       expect(workbench().querySelector('[data-testid="api-polling-badge"]')).toBeNull(),
     )
@@ -312,27 +329,35 @@ describe('the header says whether the panel is still following the disk', () => 
   })
 })
 
-describe('the refresh action sits in the pane header', () => {
-  it('is in the header, at the top of the pane, and is still one press away', async () => {
+describe('re-reading the disk is one of the rare actions, in the menu', () => {
+  // It sat in a header of its own across the top of the pane, which is where
+  // it went when it was the only action the panel had. It is one of four
+  // occasional, deliberate acts now — open a folder, import one, re-read —
+  // and they are together behind one control, so the column belongs to the
+  // tree.
+  it('is one press from the collections menu, and re-lists', async () => {
     const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
     const { bar } = await mountApp({ listCollections: list })
     await openWorkbench(bar)
-    const header = workbench().querySelector<HTMLElement>('.api-workbench__header')
-    expect(header).not.toBeNull()
-    // The owner asked for it "наверх, как в других панелях": the header is
-    // the pane's first child, so the action is above the tree rather than
-    // under the last thing in it.
-    expect(workbench().firstElementChild).toBe(header)
-    const refresh = button('Re-read the open folders')
-    expect(header?.contains(refresh)).toBe(true)
-    fireEvent.click(refresh)
+
+    fireEvent.click(button('More collection actions'))
+    await vi.waitFor(() => menuItem('Re-read the open folders'))
+    fireEvent.click(menuItem('Re-read the open folders'))
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
   })
 
-  it('there is exactly one of it — the copy at the foot of the tree is gone', async () => {
+  it('there is exactly one of it — no copy is left in the column', async () => {
     const { bar } = await mountApp()
     await openWorkbench(bar)
-    expect(buttonNames().filter((n) => n === 'Re-read the open folders')).toHaveLength(1)
+    fireEvent.click(button('More collection actions'))
+    await vi.waitFor(() => menuItem('Re-read the open folders'))
+    const inPanel = buttonNames().filter((n) => n === 'Re-read the open folders')
+    expect(inPanel).toHaveLength(0)
+    expect(
+      [...document.querySelectorAll('.ui-context-menu__item')].filter(
+        (b) => (b.textContent ?? '').trim() === 'Re-read the open folders',
+      ),
+    ).toHaveLength(1)
   })
 })
 
@@ -550,6 +575,28 @@ function newCollectionDialog(): HTMLDialogElement {
   return dialogFor('api-new-collection-name')
 }
 
+/** Reach the "open a folder" ask, which lives behind the collections menu.
+ *  It was a button in the sidebar; the `+` beside COLLECTIONS makes a
+ *  collection now — the act people do most — and the rarer doors moved into
+ *  the menu beside it. */
+async function openFolderAsk(): Promise<void> {
+  await vi.waitFor(() => button('More collection actions'))
+  fireEvent.click(button('More collection actions'))
+  await vi.waitFor(() => menuItem('Open folder…'))
+  fireEvent.click(menuItem('Open folder…'))
+}
+
+/** A row of the kit's context menu. It is searched in the DOCUMENT and not
+ *  in the workbench: the menu is a Portal onto document.body, which is what
+ *  keeps a popover out of the scroll box it was opened from. */
+function menuItem(label: string): HTMLButtonElement {
+  const found = [...document.querySelectorAll<HTMLButtonElement>('.ui-context-menu__item')].find(
+    (b) => (b.textContent ?? '').trim() === label,
+  )
+  if (!found) throw new Error(`no menu item named ${label}`)
+  return found
+}
+
 /** The Open folder dialog's own element. */
 function openFolderDialog(): HTMLDialogElement {
   return dialogFor('api-collection-path')
@@ -559,8 +606,7 @@ function openFolderDialog(): HTMLDialogElement {
  *  path into the dialog — the whole gesture a person makes. */
 async function typeFolderPath(bar: HTMLElement, path: string): Promise<void> {
   await openWorkbench(bar)
-  await vi.waitFor(() => button('Open folder…'))
-  fireEvent.click(button('Open folder…'))
+  await openFolderAsk()
   await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
   fireEvent.input(field('api-collection-path'), { target: { value: path } })
 }
@@ -692,8 +738,11 @@ describe('a person can open a folder somebody else made', () => {
     // the ask, and until the ask is on screen it is not reachable.
     expect(workbench().querySelector('#api-collection-path')).not.toBeNull()
     expect(reachable(workbench().querySelector('#api-collection-path')!)).toBe(false)
+    // Making one is the `+` beside COLLECTIONS; opening somebody else's is
+    // in the menu next to it, with the other occasional acts.
     expect(button('New collection').disabled).toBe(false)
-    expect(button('Open folder…').disabled).toBe(false)
+    fireEvent.click(button('More collection actions'))
+    await vi.waitFor(() => menuItem('Open folder…'))
   })
 
   it('typing a folder and confirming reaches api.collections.open', async () => {
@@ -744,7 +793,7 @@ describe('a person can open a folder somebody else made', () => {
     fireEvent.click(button('Open'))
     await vi.waitFor(() => expect(openFolderDialog().open).toBe(false))
 
-    fireEvent.click(button('Open folder…'))
+    await openFolderAsk()
 
     await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
     expect(field('api-collection-path').value).toBe('')
@@ -1005,8 +1054,12 @@ describe('the raw view and the body', () => {
 
     fireEvent.click(optionIn(runCards()[1], 'Raw'))
 
-    await vi.waitFor(() => expect(runCards()[1].textContent).toContain('HTTP/1.1 201 Created'))
-    expect(runCards()[0].textContent).not.toContain('── request ──')
+    // Asserted on which tab is CURRENT, not on the text in the card: every
+    // panel is rendered and the inactive ones are `hidden`, which keeps a
+    // section's own state while it is not on screen (ui/tabs.tsx). textContent
+    // would read them all and say nothing about what a person is looking at.
+    await vi.waitFor(() => expect(currentTab(runCards()[1])).toBe('Raw'))
+    expect(currentTab(runCards()[0])).toBe('Body')
   })
 })
 
@@ -1023,36 +1076,40 @@ describe('the raw view and the body', () => {
 // That is AGENTS.md's first testing rule in its exact shape — every unit
 // correct, the user's task impossible — so these two go through the door.
 
-describe('the Import section is a door a person can open', () => {
-  it('opens on a click, closes on the next, and says which it is', async () => {
+// ── Importing a collection ───────────────────────────────────────────────
+//
+// It was a collapsible SECTION in the sidebar holding a curl box, two path
+// fields and two buttons — four controls and a disclosure, permanently
+// occupying the column whose job is the tree. It is an ask off the
+// collections menu now, and the curl half is on the request line, where a
+// person pasting a command is already looking.
+
+describe('a Postman export is imported through an ask', () => {
+  it('the panel wears no import form — the fields live inside the ask', async () => {
     const { bar } = await mountApp()
     await openWorkbench(bar)
 
-    // aria-expanded is the disclosure's own account of whether its body is on
-    // screen (ui/section.tsx), so it answers the question directly rather
-    // than being inferred from a field appearing.
-    expect(button('Import').getAttribute('aria-expanded')).toBe('false')
-    fireEvent.click(button('Import'))
-    await vi.waitFor(() => expect(button('Import').getAttribute('aria-expanded')).toBe('true'))
-    fireEvent.click(button('Import'))
-    await vi.waitFor(() => expect(button('Import').getAttribute('aria-expanded')).toBe('false'))
+    // Present in the document (the dialog is mounted for the life of the
+    // surface) and NOT reachable, which is the difference this suite's
+    // `reachable` exists for.
+    const file = workbench().querySelector('#api-import-postman-file')
+    expect(file).not.toBeNull()
+    expect(reachable(file!)).toBe(false)
   })
 
-  it('a Postman export is imported through it — entrance, fields, confirm', async () => {
+  it('entrance, fields, confirm — and the backend is reached', async () => {
     const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
     const { bar } = await mountApp({ importPostman })
     await openWorkbench(bar)
 
-    // Not merely hidden: a collapsed Section does not render its body, so
-    // there is nothing to type into until the door is opened.
-    expect(workbench().querySelector('#api-import-postman-file')).toBeNull()
+    fireEvent.click(button('More collection actions'))
+    await vi.waitFor(() => menuItem('Import collection…'))
+    fireEvent.click(menuItem('Import collection…'))
 
-    fireEvent.click(button('Import'))
-    await vi.waitFor(() => field('api-import-postman-file'))
-
+    await vi.waitFor(() => expect(reachable(field('api-import-postman-file'))).toBe(true))
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
-    fireEvent.click(button('Import Postman export'))
+    fireEvent.click(button('Import'))
 
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith('/w/acme.json', '/w/acme-api'),
@@ -1075,8 +1132,25 @@ describe('the Import section is a door a person can open', () => {
 
 /** The environment picker, as a person reaches it — and it is absent, not
  *  disabled, for a collection that has no environments at all. */
-function environmentPicker(): HTMLSelectElement | null {
-  return workbench().querySelector<HTMLSelectElement>('[data-api-field="environment"] select')
+/** One row of the environments rail, by the name it shows. The picker was a
+ *  Select on the pane's header; it is a list in the SIDEBAR now, beside the
+ *  collections — an environment is chosen many times a day and edited rarely,
+ *  so what is always on screen is the list, and the list IS the picker. */
+function environmentRow(name: string): HTMLButtonElement | null {
+  const rail = workbench().querySelector('.api-environments-rail')
+  if (!rail) return null
+  return (
+    [...rail.querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) => (b.textContent ?? '').trim() === name,
+    ) ?? null
+  )
+}
+
+/** Which row a send will go out under: the one the rail marks selected. */
+function chosenEnvironment(): string {
+  const rail = workbench().querySelector('.api-environments-rail')
+  const on = rail?.querySelector<HTMLButtonElement>('button[aria-selected="true"]')
+  return (on?.textContent ?? '').trim()
 }
 
 /** Open the workbench on a collection with the given environments, and put
@@ -1101,11 +1175,11 @@ describe('the environment a request goes out under', () => {
   it('one environment needs no choosing — the send carries it', async () => {
     const { sendRequest } = await openRequestWithEnvironments([DEV_ENV])
 
-    // The picker is there and already on it. A collection with exactly one
+    // The rail is there and already on it. A collection with exactly one
     // environment has no choice in it, and starting on None would make every
     // imported collection fail its first Send on a variable the folder can
     // answer.
-    await vi.waitFor(() => expect(environmentPicker()?.value).toBe(DEV_ENV.relPath))
+    await vi.waitFor(() => expect(chosenEnvironment()).toBe(DEV_ENV.name))
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() =>
@@ -1116,19 +1190,14 @@ describe('the environment a request goes out under', () => {
   it('a person chooses, and the NEXT send goes out under what they chose', async () => {
     const { sendRequest } = await openRequestWithEnvironments([DEV_ENV, PROD_ENV])
 
-    const picker = await vi.waitFor(() => {
-      const el = environmentPicker()
-      if (!el) throw new Error('no environment picker')
-      return el
-    })
     // Several environments and nothing chosen: NONE, deliberately. The first
     // in a list is not a choice a person made, and one of them is usually
     // production.
-    expect(picker.value).toBe('')
-    expect([...picker.options].map((o) => o.textContent)).toContain(PROD_ENV.name)
+    await vi.waitFor(() => expect(chosenEnvironment()).toBe('No environment'))
+    const prod = environmentRow(PROD_ENV.name)
+    if (!prod) throw new Error('no row for the production environment')
 
-    picker.value = PROD_ENV.relPath
-    fireEvent.change(picker)
+    fireEvent.click(prod)
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() =>
@@ -1138,21 +1207,22 @@ describe('the environment a request goes out under', () => {
 
   it('choosing None again sends the request as written', async () => {
     const { sendRequest } = await openRequestWithEnvironments([DEV_ENV])
-    await vi.waitFor(() => expect(environmentPicker()?.value).toBe(DEV_ENV.relPath))
+    await vi.waitFor(() => expect(chosenEnvironment()).toBe(DEV_ENV.name))
 
-    const picker = environmentPicker()
-    if (!picker) throw new Error('no environment picker')
-    picker.value = ''
-    fireEvent.change(picker)
+    // Sending under NONE is a choice somebody makes, so it is a row like the
+    // others rather than an absence they have to work out.
+    const none = environmentRow('No environment')
+    if (!none) throw new Error('no row for sending as written')
+    fireEvent.click(none)
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
   })
 
-  it('a collection with no environments offers no picker and says so', async () => {
+  it('a collection with no environments offers no rows and says so', async () => {
     await openRequestWithEnvironments([])
-    expect(environmentPicker()).toBeNull()
-    expect(workbench().textContent).toContain('No environments in this collection')
+    expect(environmentRow(DEV_ENV.name)).toBeNull()
+    expect(workbench().textContent).toContain('None yet')
   })
 
   it('the run says which environment answered, in the words the BACKEND used', async () => {
@@ -1162,7 +1232,7 @@ describe('the environment a request goes out under', () => {
     // file's stem, so a renderer deriving one from the other fails here.
     const sendRequest = vi.fn().mockResolvedValue(sendFixture({}, DEV_ENV.name))
     await openRequestWithEnvironments([DEV_ENV], { sendRequest })
-    await vi.waitFor(() => expect(environmentPicker()?.value).toBe(DEV_ENV.relPath))
+    await vi.waitFor(() => expect(chosenEnvironment()).toBe(DEV_ENV.name))
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() => expect(runCards()).toHaveLength(1))
@@ -1223,11 +1293,11 @@ describe('ApiContent lifecycle', () => {
     await vi.waitFor(() => expect(target.querySelector('#api-url')).not.toBeNull())
 
     // Nothing open: the URL is disabled and cannot take focus, so the
-    // keyboard goes to the one thing a person can do from here. That is the
-    // primary ACTION now, not a field — the panel wears no form since
-    // nocx-84shs, and the path field lives inside a dialog that is closed.
+    // keyboard goes to the one thing a person can do from here — the control
+    // the rare doors are behind. The panel wears no form (nocx-84shs) and
+    // every path field lives inside a dialog that is closed.
     content.focus()
-    expect(document.activeElement).toBe(target.querySelector('#api-new-collection'))
+    expect(document.activeElement).toBe(target.querySelector('#api-collections-menu'))
 
     // With a request in the form it is the URL, which is the field edited
     // between one send and the next.

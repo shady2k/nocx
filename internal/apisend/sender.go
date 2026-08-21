@@ -11,7 +11,10 @@ package apisend
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -68,6 +71,16 @@ type Response struct {
 	Timings    Timings
 	TLSVersion string
 	RemoteAddr string
+	// TLSCipherSuite is the negotiated suite's name, and "" when the
+	// exchange was not over TLS.
+	TLSCipherSuite string
+	// Certificates is the chain the SERVER PRESENTED, leaf first — not the
+	// chain that was verified, which is a different list and is empty when
+	// verification was off. It is what the panel shows for an environment
+	// that accepts self-signed certificates: with verification off, "which
+	// certificate did I actually just trust" is the only question left, and
+	// before this the answer existed nowhere in the product.
+	Certificates []Certificate
 	// Raw is the diagnostic text of both sides, segmented and carrying no
 	// secret value (design §11). It rides on the result of the send that
 	// produced it: the raw text belongs to a PARTICULAR run, so a second
@@ -158,6 +171,8 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 	}
 	if resp.TLS != nil {
 		out.TLSVersion = tls.VersionName(resp.TLS.Version)
+		out.TLSCipherSuite = tls.CipherSuiteName(resp.TLS.CipherSuite)
+		out.Certificates = describeChain(resp.TLS.PeerCertificates)
 	}
 	out.RemoteAddr = tr.remote()
 	out.Raw = Exchange{
@@ -336,7 +351,9 @@ func appendQuery(u *url.URL, params []apicoll.Param) {
 // requestBody turns the model's body into the TEXT that goes out and the
 // content type the KIND declares. A raw body declares nothing — the user's
 // own Content-Type header is the only answer, and guessing one would send a
-// header they did not write.
+// header they did not write. A JSON body declares application/json, because
+// there the user has said which format it is; that is the whole difference
+// between the two kinds.
 //
 // The text is returned rather than a reader because the raw diagnostic
 // needs the same bytes the request carries, and a reader can be read once.
@@ -346,6 +363,11 @@ func requestBody(b apicoll.Body) (string, string, error) {
 		return "", "", nil
 	case apicoll.BodyRaw:
 		return b.Text, "", nil
+	case apicoll.BodyJSON:
+		// The kind IS the declaration, so the header comes from it. A
+		// Content-Type the user wrote themselves still wins: the caller
+		// only fills this in when the request has none (sendRequest).
+		return b.Text, "application/json", nil
 	case apicoll.BodyForm:
 		return b.Text, "application/x-www-form-urlencoded", nil
 	case apicoll.BodyFile:
@@ -501,4 +523,79 @@ func (t *tracer) remote() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.remoteAddr
+}
+
+// Certificate is one certificate from the chain a server presented, in the
+// fields a person reads when they are deciding whether to trust it.
+//
+// DESCRIBED, NEVER RAW. The panel gets strings this package derived; it does
+// not get the DER and does not parse anything. Two reasons, and the second is
+// the load-bearing one: a renderer that parsed certificates would be a second
+// X.509 implementation in the product, and the fingerprint — the one field
+// somebody compares against a value their colleague read out over the phone —
+// must be computed once, by the side that saw the bytes.
+type Certificate struct {
+	Subject   string
+	Issuer    string
+	NotBefore string
+	NotAfter  string
+	// DNSNames and IPAddresses are the SANs, which is what a name is
+	// actually checked against — the CN in the subject has not been the
+	// answer since 2017 and showing it alone is how people conclude a
+	// certificate is fine when the host is not on it.
+	DNSNames    []string
+	IPAddresses []string
+	// SelfSigned is true when the subject and the issuer are the same name.
+	// It is a description of THIS certificate and never a verdict about the
+	// connection: a self-signed leaf is exactly what an environment that
+	// accepts self-signed certificates is for.
+	SelfSigned bool
+	// Fingerprint is the SHA-256 of the DER, lower-case hex in colon-
+	// separated pairs — the spelling `openssl x509 -fingerprint -sha256`
+	// prints, so the value on screen can be compared with the one a person
+	// has in a terminal without either of them reformatting anything.
+	Fingerprint string
+}
+
+// describeChain renders the presented chain, leaf first. A cap, because the
+// list rides one JSON-RPC result and a hostile server may present many: ten
+// is more than any real chain and the panel says nothing about what it did
+// not receive, because the chain it shows is the chain that was used.
+func describeChain(chain []*x509.Certificate) []Certificate {
+	const maxChain = 10
+	if len(chain) > maxChain {
+		chain = chain[:maxChain]
+	}
+	out := make([]Certificate, 0, len(chain))
+	for _, c := range chain {
+		ips := make([]string, 0, len(c.IPAddresses))
+		for _, ip := range c.IPAddresses {
+			ips = append(ips, ip.String())
+		}
+		sum := sha256.Sum256(c.Raw)
+		out = append(out, Certificate{
+			Subject:     c.Subject.String(),
+			Issuer:      c.Issuer.String(),
+			NotBefore:   c.NotBefore.UTC().Format(time.RFC3339),
+			NotAfter:    c.NotAfter.UTC().Format(time.RFC3339),
+			DNSNames:    append([]string{}, c.DNSNames...),
+			IPAddresses: ips,
+			SelfSigned:  c.Subject.String() == c.Issuer.String(),
+			Fingerprint: hexPairs(sum[:]),
+		})
+	}
+	return out
+}
+
+// hexPairs renders bytes as `ab:cd:ef…`, which is how every tool that prints
+// a fingerprint prints one.
+func hexPairs(b []byte) string {
+	var sb strings.Builder
+	for i, x := range b {
+		if i > 0 {
+			sb.WriteByte(':')
+		}
+		sb.WriteString(hex.EncodeToString([]byte{x}))
+	}
+	return sb.String()
 }

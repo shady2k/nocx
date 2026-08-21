@@ -332,6 +332,7 @@ func TestAPICollections_TheWireNamesTheEnvironmentsAPersonCanChooseBetween(t *te
 	}
 	var listed struct {
 		Collections []struct {
+			Handle     string `json:"handle"`
 			Collection struct {
 				Environments []struct {
 					RelPath string `json:"relPath"`
@@ -343,8 +344,21 @@ func TestAPICollections_TheWireNamesTheEnvironmentsAPersonCanChooseBetween(t *te
 	if err := json.Unmarshal(listResp.Result, &listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listed.Collections) != 1 || len(listed.Collections[0].Collection.Environments) != 3 {
-		t.Fatalf("listing carried %+v, want the same three environments", listed.Collections)
+	// BY HANDLE, not by position. The listing also carries the built-in
+	// collection, which every stand opens before it answers; this test is
+	// about the folder it opened itself.
+	found := false
+	for _, c := range listed.Collections {
+		if c.Handle != opened.Handle {
+			continue
+		}
+		found = true
+		if len(c.Collection.Environments) != 3 {
+			t.Fatalf("listing carried %+v, want the same three environments", c.Collection.Environments)
+		}
+	}
+	if !found {
+		t.Fatalf("listing = %+v, want the folder that was opened in it", listed.Collections)
 	}
 }
 
@@ -437,7 +451,7 @@ func TestAPICollectionsList_AnUnreadableEnvironmentsFolderIsOnTheEntryNotTheList
 	}
 	conn := newAPIWSServerWithSender(t, &recordingSender{})
 	root := apiEnvironmentFolder(t)
-	openAPICollection(t, conn, root, 1)
+	handle := openAPICollection(t, conn, root, 1)
 
 	dir := filepath.Join(root, "environments")
 	if err := os.Chmod(dir, 0o000); err != nil {
@@ -452,6 +466,7 @@ func TestAPICollectionsList_AnUnreadableEnvironmentsFolderIsOnTheEntryNotTheList
 	}
 	var listed struct {
 		Collections []struct {
+			Handle     string `json:"handle"`
 			Error      string `json:"error"`
 			Collection struct {
 				Requests []struct {
@@ -466,10 +481,28 @@ func TestAPICollectionsList_AnUnreadableEnvironmentsFolderIsOnTheEntryNotTheList
 	if err := json.Unmarshal(resp.Result, &listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listed.Collections) != 1 {
+	// By handle: the listing also carries the built-in collection, and this
+	// test is about the folder whose environments/ was made unreadable.
+	var row *struct {
+		Handle     string `json:"handle"`
+		Error      string `json:"error"`
+		Collection struct {
+			Requests []struct {
+				RelPath string `json:"relPath"`
+			} `json:"requests"`
+			Environments []struct {
+				RelPath string `json:"relPath"`
+			} `json:"environments"`
+		} `json:"collection"`
+	}
+	for i := range listed.Collections {
+		if listed.Collections[i].Handle == handle {
+			row = &listed.Collections[i]
+		}
+	}
+	if row == nil {
 		t.Fatalf("collections = %+v, want the one folder still listed", listed.Collections)
 	}
-	row := listed.Collections[0]
 	if row.Error == "" {
 		t.Error("the entry says nothing — an environments folder that will not read is a degrade the panel must be able to show")
 	}
@@ -518,11 +551,12 @@ func TestAPICollectionsCreate_MakesACollectionThatIsOpenAndUsable(t *testing.T) 
 	if err := json.Unmarshal(listed.Result, &list); err != nil {
 		t.Fatalf("unmarshal list: %v", err)
 	}
-	if len(list.Collections) != 1 || list.Collections[0].Handle != made.Handle {
-		t.Fatalf("opened folders = %+v, want the one just created", list.Collections)
+	chosen := chosenCollections(list.Collections)
+	if len(chosen) != 1 || chosen[0].Handle != made.Handle {
+		t.Fatalf("opened folders = %+v, want the one just created", chosen)
 	}
-	if list.Collections[0].Error != "" {
-		t.Errorf("the created folder reports %q; it must be readable", list.Collections[0].Error)
+	if chosen[0].Error != "" {
+		t.Errorf("the created folder reports %q; it must be readable", chosen[0].Error)
 	}
 
 	// And the handle is a working handle: the next thing the user does is

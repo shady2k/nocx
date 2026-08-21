@@ -36,6 +36,59 @@ export interface ApiTreeRow {
   readonly expanded: boolean
 }
 
+/**
+ * Narrow the open collections to what a filter matches, keeping the shape.
+ *
+ * FILTERING IS A NARROWING OF THE INPUT, not a second flattener. The rows a
+ * person sees are still built by flattenCollections below — one owner of what
+ * a tree looks like — and this decides only which refs go into it. A second
+ * walk that knew about directories, depths and collapsed keys as well as
+ * matching would be two answers to "what does the tree show", and they would
+ * agree until the day one of them learnt about a row kind the other did not.
+ *
+ * What matches, and why each:
+ *
+ *  - A COLLECTION matches by its name or by the path it was opened at, and
+ *    then it is kept WHOLE. Typing the name of a folder is how a person says
+ *    "show me that one", and answering it with the subset of its requests
+ *    that happen to contain the same letters would be the panel arguing.
+ *  - A REQUEST matches by the name it shows and by its path within the
+ *    collection, so `users/create` finds it by either half — the path is
+ *    real structure (§6.2) and the only name a request with an empty `name`
+ *    field has.
+ *  - A MALFORMED file matches by its path, because that is all it has. It
+ *    stays findable on purpose: a file that will not read is exactly what
+ *    somebody goes looking for.
+ *
+ * A collection with nothing left is dropped rather than shown empty: an empty
+ * folder in a filtered tree reads as "no matches in here", which is a sentence
+ * the absence of the row already says, once, for all of them.
+ */
+export function filterCollections(
+  collections: readonly ApiOpenCollection[],
+  query: string,
+): readonly ApiOpenCollection[] {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return collections
+
+  const hit = (text: string): boolean => text.toLowerCase().includes(needle)
+  const kept: ApiOpenCollection[] = []
+
+  for (const open of collections) {
+    if (hit(open.collection.name) || hit(open.path)) {
+      kept.push(open)
+      continue
+    }
+    const requests = open.collection.requests.filter(
+      (ref) => hit(leafName(ref.name, ref.relPath)) || hit(ref.relPath),
+    )
+    const malformed = open.collection.malformed.filter((bad) => hit(bad.relPath))
+    if (requests.length === 0 && malformed.length === 0) continue
+    kept.push({ ...open, collection: { ...open.collection, requests, malformed } })
+  }
+  return kept
+}
+
 /** The name a request row shows: the collection's `name` for it when there is
  *  one, and the file's own basename when there is not — a request file whose
  *  name field is empty must still be findable by the name it has on disk. */

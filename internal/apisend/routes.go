@@ -194,11 +194,54 @@ type connectionRoute struct {
 
 // lookupIP answers only what this end can answer truthfully. See
 // ErrNameResolvedRemotely.
+//
+// LOOPBACK NAMES ARE THE ONE EXCEPTION, and it is the case this whole
+// feature exists for: `http://localhost:9443` through a connection means the
+// service on the FAR SIDE's loopback, which is how anybody reaches an
+// internal admin port, a dev server or a database console on a box they have
+// SSH to. Refusing it made the headline feature useless for the request
+// people most want to make with it.
+//
+// It is truthful, which is the property ErrNameResolvedRemotely protects.
+// `localhost` is the one name whose answer does not depend on WHO resolves it
+// — RFC 6761 §6.3 requires it and `*.localhost` to resolve to loopback
+// everywhere — so this end can say what will be reached without knowing the
+// far side's resolver. The dial then goes to that address ON THAT HOST: the
+// direct-tcpip channel names 127.0.0.1 and the far side's own stack answers
+// it (§7.1).
+//
+// And the http:// rule is satisfied for the reason it exists rather than by
+// an exemption from it. That rule refuses plaintext across a network
+// (httppolicy: "http:// is permitted only for loopback and private
+// addresses"). Here the plaintext rides the SSH channel to the far side and
+// terminates on that host's own loopback, so it crosses no network in the
+// clear at either end — a stronger guarantee than the local case the rule
+// was written for, not a weaker one.
+//
+// Every OTHER name is still refused. `http://api.internal` through a bastion
+// means the bastion talking plaintext to api.internal across their LAN,
+// which is the thing the rule is about, and this end cannot resolve it
+// truthfully anyway.
 func (c *connectionRoute) lookupIP(_ context.Context, host string) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		return []net.IP{ip}, nil
 	}
+	if isLoopbackName(host) {
+		// IPv4 first: the dialer tries these in order, and a far side with
+		// no IPv6 is the ordinary case.
+		return []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}, nil
+	}
 	return nil, fmt.Errorf("%w (host %q, connection %q)", ErrNameResolvedRemotely, host, c.profileID)
+}
+
+// isLoopbackName reports whether host is a name that resolves to loopback
+// wherever it is resolved: `localhost` and anything under `.localhost`, which
+// RFC 6761 §6.3 reserves for exactly that. A trailing dot is the same name
+// fully qualified. Nothing else qualifies — `127.0.0.1.nip.io` resolves to
+// loopback today and is a name somebody else controls tomorrow.
+func isLoopbackName(host string) bool {
+	name := strings.ToLower(strings.TrimSuffix(host, "."))
+	return name == "localhost" || strings.HasSuffix(name, ".localhost")
 }
 
 func (c *connectionRoute) dial(ctx context.Context, network, addr string) (net.Conn, error) {

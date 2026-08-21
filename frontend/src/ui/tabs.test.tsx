@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@solidjs/testing-library'
+import { createSignal } from 'solid-js'
+import { render, screen, cleanup, fireEvent } from '@solidjs/testing-library'
 import { Tabs, type TabsProps, type TabItemStatus } from './tabs'
 
 afterEach(() => cleanup())
@@ -171,6 +172,69 @@ describe('Tabs', () => {
       const panels = screen.queryAllByRole('tabpanel')
       expect(panels).toHaveLength(1)
       expect(panels[0].getAttribute('id')).toBe('ui-tabpanel-a')
+    })
+  })
+
+  // ── The identity contract ───────────────────────────────────────────────
+  //
+  // Callers write `items` inline in JSX. Any signal that expression reads —
+  // a label carrying a count, a status derived from the form — rebuilds the
+  // whole array on every keystroke, with new item objects in it. Keyed by
+  // reference, every panel was disposed and rebuilt, and the input the person
+  // was typing into went with it: FOCUS LEFT THE FIELD AFTER EVERY
+  // CHARACTER. These are the two tests that keep it gone.
+
+  describe('a rebuilt items array does not rebuild the panels', () => {
+    /** A caller of the shape every real one has: the items array reads a
+     *  signal, so it is a new array with new objects on every change. */
+    function typingSubject() {
+      const [text, setText] = createSignal('')
+      render(() => (
+        <Tabs
+          active="a"
+          onChange={() => {}}
+          items={[
+            {
+              id: 'a',
+              // The label reads the signal — this is what makes the array
+              // reactive, and it is what a count on a tab looks like.
+              label: `A ${text().length}`,
+              content: () => (
+                <input
+                  data-testid="field"
+                  value={text()}
+                  onInput={(e) => setText(e.currentTarget.value)}
+                />
+              ),
+            },
+            { id: 'b', label: 'B', content: () => 'Content B' },
+          ]}
+        />
+      ))
+      return { text }
+    }
+
+    it('the field a person is typing into keeps the focus', () => {
+      typingSubject()
+      const field = screen.getByTestId('field')
+      field.focus()
+      expect(document.activeElement).toBe(field)
+
+      fireEvent.input(field, { target: { value: 'x' } })
+
+      // The SAME element, still focused. Before the fix this node had been
+      // discarded and replaced, so activeElement was <body>.
+      expect(screen.getByTestId('field')).toBe(field)
+      expect(document.activeElement).toBe(field)
+    })
+
+    it('and the label still updates in place', () => {
+      typingSubject()
+      const field = screen.getByTestId('field')
+      fireEvent.input(field, { target: { value: 'xy' } })
+      // The point of keeping the DOM is not to freeze it: the count on the
+      // tab is exactly the reactive label that used to cause the rebuild.
+      expect(screen.getByText('A 2')).toBeTruthy()
     })
   })
 })

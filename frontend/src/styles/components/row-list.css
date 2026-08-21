@@ -37,3 +37,54 @@
 .ui-row-list__add {
   align-self: flex-start;
 }
+
+/* ── The table variant ─────────────────────────────────────────────────── */
+/* Rows of two or three SHORT values, with the labels said once in a header
+   instead of once per row. The kit owns the grid, the header rule and the
+   cell rhythm; the caller's controls keep their own appearance. */
+
+.ui-row-list[data-variant='table'] {
+  gap: var(--space-2);
+}
+
+.ui-row-list__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ui-row-list__table th {
+  text-align: left;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-muted);
+  padding: 0 var(--space-2) var(--space-1) 0;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.ui-row-list__table td {
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+  vertical-align: middle;
+}
+
+/* A column holding one control — a tick box, the remove button — takes the
+   width of that control and no more, so the two text columns get the rest. */
+.ui-row-list__table th:first-child:has(.ui-row-list__sr),
+.ui-row-list__table td.ui-row-list__remove,
+.ui-row-list__table th:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.ui-row-list__table td:last-child,
+.ui-row-list__table th:last-child {
+  padding-right: 0;
+}
+
+.ui-row-list__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

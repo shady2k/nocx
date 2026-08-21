@@ -30,6 +30,18 @@ const component = "apisend"
 type Key struct {
 	RouteID     string
 	CookieScope string
+	// InsecureTLS sends this exchange WITHOUT verifying the server's
+	// certificate — the environment's own choice (§6.5), for a development
+	// host with a self-signed certificate, which is the case every API
+	// client in the world has a switch for.
+	//
+	// It is in the KEY and not a field on the Client, and that is the whole
+	// safety of it: instances are cached by this key, so a transport that
+	// verifies and one that does not are two different transports and no
+	// connection is ever reused across them. Without it, one environment
+	// turning verification off would hand its pooled connection to the next
+	// send from an environment that had not.
+	InsecureTLS bool
 }
 
 // Client is the sender. It is safe for concurrent use.
@@ -117,7 +129,7 @@ func (c *Client) instanceFor(ctx context.Context, k Key) (*http.Client, error) {
 		Component:       component,
 		Route:           tracingRoute{Route: route},
 		Log:             c.log,
-		TLSClientConfig: c.tlsConfig,
+		TLSClientConfig: c.tlsFor(k),
 	})
 	built := &http.Client{Transport: tr, CheckRedirect: tr.CheckRedirect, Jar: jar}
 
@@ -128,6 +140,25 @@ func (c *Client) instanceFor(ctx context.Context, k Key) (*http.Client, error) {
 	}
 	c.instances[k] = built
 	return built, nil
+}
+
+// tlsFor is the TLS configuration this key's transport gets: the client's
+// own, and a copy of it with verification off when the environment asked for
+// that.
+//
+// A COPY, never a mutation: c.tlsConfig is shared by every other instance,
+// and turning verification off in place would turn it off for all of them —
+// the exact defect the key exists to prevent, moved one field deeper.
+func (c *Client) tlsFor(k Key) *tls.Config {
+	if !k.InsecureTLS {
+		return c.tlsConfig
+	}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec // InsecureSkipVerify is set below, deliberately and per environment
+	if c.tlsConfig != nil {
+		cfg = c.tlsConfig.Clone()
+	}
+	cfg.InsecureSkipVerify = true //nolint:gosec // the environment declares it; every run that used it says so
+	return cfg
 }
 
 // tracingRoute times the two phases httptrace cannot see for every route.

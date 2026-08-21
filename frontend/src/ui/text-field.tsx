@@ -15,6 +15,18 @@ import { mirrorControlledValue } from './controlled-value'
 export interface TextFieldProps {
   id?: string
   label?: string
+  /**
+   * The control's accessible name when it has NO visible label.
+   *
+   * For a field whose surroundings already say what it is — a filter at the
+   * head of the list it filters, a search box in a toolbar — where a visible
+   * label would be a second word for a thing the person is looking straight
+   * at. It is not an alternative to `label`: a field that has one does not
+   * need this, and a field that has neither is a control assistive tech
+   * announces as unnamed, which is the defect Field's own `label` comment
+   * describes (nocx-uxs5.5).
+   */
+  ariaLabel?: string
   description?: string
   error?: string
   /** When true, renders a <textarea> instead of an <input>. */
@@ -101,6 +113,7 @@ export function TextField(props: TextFieldProps) {
       max={props.max !== undefined ? String(props.max) : undefined}
       disabled={props.disabled === true}
       required={props.required === true}
+      aria-label={props.ariaLabel}
       aria-invalid={props.error !== undefined ? true : undefined}
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
@@ -134,6 +147,7 @@ export function TextField(props: TextFieldProps) {
       placeholder={props.placeholder ?? ''}
       disabled={props.disabled === true}
       required={props.required === true}
+      aria-label={props.ariaLabel}
       aria-invalid={props.error !== undefined ? true : undefined}
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}

@@ -18,6 +18,17 @@ export interface ApiRequestSendResult {
    * The NAME of the environment this exchange actually went out under, as the environment FILE declares it — and "" when the send named none, which is the request as written on the direct route. It is the backend's own account rather than an echo of the caller's `envRelPath`: the renderer names an environment by its path and the name is read out of the file at the moment the address and the route are (capability.SendInputs), so this is the one field that says which record answered. A run list drawn from what the renderer BELIEVED it asked for is the vault.status defect in reverse — a value written by one side and never read back from the other.
    */
   environment: string
+  /**
+   * HOW this exchange got there: the route read off the same environment record the address came from (design §6.5), never an echo of anything the caller sent. `direct` left from this machine; `connection` left through the named SSH profile's pooled connection — the same one a terminal tab uses, authorized the same way. A file that omits the route reads as direct, and the zero value is spelled out here rather than sent as "", so the renderer meets one spelling of one state. The profileId is an ID and not a name: the name belongs to whoever owns connections, and the renderer turns one into the other for display.
+   */
+  route: {
+    kind: 'direct' | 'connection'
+    profileId: string
+    /**
+     * Send WITHOUT verifying the server's certificate — for a development host with a self-signed certificate. It is on the ROUTE because it is part of how a destination is reached, and it is per ENVIRONMENT rather than per app on purpose: a person turns it on for dev and cannot thereby turn it off for production, which is what a global switch would do the moment they forgot it was set. It is written into the collection file, so a colleague sees it in review, and every run that went out under it says so on the run — it can never be quietly on.
+     */
+    insecureTls: boolean
+  }
 }
 export interface Response {
   status: number
@@ -49,6 +60,14 @@ export interface Response {
   tlsVersion: string
   remoteAddr: string
   raw: Exchange
+  /**
+   * The negotiated cipher suite's name, and "" when the exchange was not over TLS.
+   */
+  tlsCipherSuite: string
+  /**
+   * The chain the SERVER PRESENTED, leaf first — not the chain that was verified, which is a different list and is empty when verification was off. It is the answer to the only question left once an environment accepts self-signed certificates: which certificate did I actually just trust. Described by the side that saw the bytes and never sent as DER: a renderer that parsed certificates would be a second X.509 implementation, and the fingerprint — the field somebody compares against a value read out over the phone — must be computed once. Never null: a plain http exchange presents none and that is [].
+   */
+  certificates: Certificate[]
 }
 export interface Header {
   name: string
@@ -112,4 +131,32 @@ export interface Span {
    * The shape of the damage — "truncated, 24 of 214 bytes" — carrying only lengths, because the surviving bytes are the beginning of a live credential. Empty unless the kind is secret-damaged.
    */
   damage: string
+}
+export interface Certificate {
+  subject: string
+  issuer: string
+  /**
+   * RFC 3339, UTC.
+   */
+  notBefore: string
+  /**
+   * RFC 3339, UTC.
+   */
+  notAfter: string
+  /**
+   * The SANs, which is what a host name is actually checked against — the CN in the subject has not been the answer since 2017, and showing it alone is how somebody concludes a certificate is fine when the host is not on it. Never null.
+   */
+  dnsNames: string[]
+  /**
+   * The IP SANs. Never null.
+   */
+  ipAddresses: string[]
+  /**
+   * Subject and issuer are the same name. A description of THIS certificate and never a verdict about the connection: a self-signed leaf is exactly what an environment that accepts self-signed certificates is for.
+   */
+  selfSigned: boolean
+  /**
+   * SHA-256 of the DER, lower-case hex in colon-separated pairs — the spelling `openssl x509 -fingerprint -sha256` prints, so the value on screen compares with the one in a terminal without either being reformatted.
+   */
+  fingerprint: string
 }

@@ -52,6 +52,12 @@ import type {
   EnvironmentRef as CreatedEnvironmentRef,
 } from '../generated/api.collections.create'
 import type {
+  Environment as ReadEnvironment,
+  Route as ReadRoute,
+} from '../generated/api.environment.read'
+import type {
+  ApiRequestSendResult,
+  Certificate as SendCertificate,
   Response as SendResponse,
   Header as SendHeader,
   Timings as SendTimings,
@@ -75,9 +81,26 @@ type ApiMalformedRef = ListedMalformedRef
  *  field, and the contract says why — the values and the route stay in the
  *  file (§6.4), so the renderer names an environment and never holds one. */
 export type ApiEnvironmentRef = ListedEnvironmentRef
+
+/** ONE environment whole, as the editor reads and writes it: the name, the
+ *  plain values, the names of the secret variables, and the route. The ref
+ *  above names an environment so a person can CHOOSE one; this is what an
+ *  ask holds while it is open, which is the only interval in which the
+ *  renderer legitimately has a copy of a file's contents (§6.4). */
+export type ApiEnvironment = ReadEnvironment
+export type ApiRoute = ReadRoute
 export type ApiOpenCollection = OpenCollection
 
 export type ApiResponse = SendResponse
+/** How an exchange got there, off the SEND RESULT — the backend's account of
+ *  the record it read, never an echo of what the panel asked for. The schema
+ *  inlines it, so it is named here off the result rather than declared a
+ *  second time: a hand-written copy is the shape contracts/ exists against. */
+export type ApiSentRoute = ApiRequestSendResult['route']
+
+/** One certificate of the chain a server presented, already described by the
+ *  backend: the renderer reads strings and parses no X.509. */
+export type ApiCertificate = SendCertificate
 
 /**
  * Both sides of one exchange, already segmented (design §11).
@@ -303,12 +326,48 @@ export function responseHeaderText(response: ApiResponse): string {
   return headers.map((h) => `${h.name}: ${h.value}`).join('\n')
 }
 
+/**
+ * Whether the body should be painted as JSON.
+ *
+ * Decided by the CONTENT TYPE THE SERVER SENT, never by parsing the bytes. A
+ * server that declares `application/json` and sends something else is a
+ * server whose answer is worth seeing exactly as it is — and the raw view is
+ * one tab away for that case. Suffixed types count (`application/problem+json`
+ * is JSON), and parameters after the semicolon do not.
+ */
+export function isJSONResponse(response: ApiResponse): boolean {
+  const headers: ApiResponseHeader[] = response.headers
+  const found = headers.find((h) => h.name.toLowerCase() === 'content-type')
+  if (!found) return false
+  const media = found.value.split(';')[0].trim().toLowerCase()
+  return media === 'application/json' || media.endsWith('+json')
+}
+
 /** Where it went and how long each phase took. A reused connection reports a
  *  zero dns and connect, which is the honest answer: nothing was resolved
  *  and nothing was dialled. */
+/** The chain as the Raw view shows it: one block per certificate, leaf
+ *  first, each field on its own line. Text rather than a table because it
+ *  sits in the raw view beside the request and the response, and because a
+ *  fingerprint is a thing people COPY — out of a pane, into a terminal. */
+export function certificateText(cert: ApiCertificate, index: number): string {
+  const lines = [
+    `#${index + 1}${index === 0 ? '  (leaf)' : ''}${cert.selfSigned ? '  self-signed' : ''}`,
+    `subject     ${cert.subject}`,
+    `issuer      ${cert.issuer}`,
+    `valid       ${cert.notBefore}  →  ${cert.notAfter}`,
+  ]
+  if (cert.dnsNames.length > 0) lines.push(`dns         ${cert.dnsNames.join(', ')}`)
+  if (cert.ipAddresses.length > 0) lines.push(`ip          ${cert.ipAddresses.join(', ')}`)
+  lines.push(`sha-256     ${cert.fingerprint}`)
+  return lines.join('\n')
+}
+
 export function connectionRawText(response: ApiResponse): string {
   const t: ApiTimings = response.timings
-  const where = [response.remoteAddr, response.tlsVersion].filter((s) => s !== '').join('  ')
+  const where = [response.remoteAddr, response.tlsVersion, response.tlsCipherSuite]
+    .filter((s) => s !== '')
+    .join('  ')
   const phases = `dns ${t.dnsMs}ms · connect ${t.connectMs}ms · tls ${t.tlsMs}ms · ttfb ${t.ttfbMs}ms · total ${t.totalMs}ms`
   return where === '' ? phases : `${where}\n${phases}`
 }

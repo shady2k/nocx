@@ -44,9 +44,17 @@ type Param struct {
 
 // BodyKind values. A body too large or too awkward for a line is named by a
 // file rather than lost — HTTPie's own answer to its own limit (§6.4).
+//
+// JSON is its own kind rather than raw-with-a-header, and the difference is
+// what the kind DECLARES. Raw declares nothing: the user's own Content-Type
+// header is the only answer, and guessing one would send a header they did
+// not write (apisend.requestBody). JSON is the user saying which format this
+// is, so the header follows from the kind the way the form kind's already
+// does — and the editor above it can highlight what it now knows it is.
 const (
 	BodyNone = "none"
 	BodyRaw  = "raw"
+	BodyJSON = "json"
 	BodyForm = "form"
 	BodyFile = "file"
 )
@@ -87,6 +95,19 @@ const (
 type Route struct {
 	Kind      string `json:"kind"`
 	ProfileID string `json:"profileId,omitempty"`
+	// InsecureTLS sends without verifying the server's certificate.
+	//
+	// It is on the ROUTE because it is part of how a destination is reached,
+	// the same question the kind and the profile answer — a development host
+	// with a self-signed certificate is reached that way or not at all.
+	//
+	// It is per ENVIRONMENT and not per app, and that is deliberate: a
+	// person turns it on for the dev environment and cannot thereby turn it
+	// on for production, which is what a global switch would do the moment
+	// they forgot it was set. It is in the FILE, so a colleague reviewing
+	// the collection sees it in the diff; and every run that used it says so
+	// in the panel, so it can never be quietly on.
+	InsecureTLS bool `json:"insecureTls,omitempty"`
 }
 
 // Environment holds plain values, the NAMES of its secret variables, and the

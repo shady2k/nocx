@@ -87,7 +87,13 @@ func uploadableFactory(sess session.Session, rootPath string) (filesystem.Provid
 // newUploadTestEnv boots a server whose bindings can be written to.
 func newUploadTestEnv(t *testing.T, opts ...WSServerOption) *filesTestEnv {
 	t.Helper()
-	logger := log.NewSlogAdapter(nil)
+	return newUploadTestEnvWithLogger(t, log.NewSlogAdapter(nil), opts...)
+}
+
+// newUploadTestEnvWithLogger is the same, with the logger injected — the
+// ticket-never-logged assertion needs to read everything the server said.
+func newUploadTestEnvWithLogger(t *testing.T, logger log.Logger, opts ...WSServerOption) *filesTestEnv {
+	t.Helper()
 	reg := newRegWithStub(logger)
 	all := append([]WSServerOption{
 		WithFilesystemRegistry(filesystem.New()),

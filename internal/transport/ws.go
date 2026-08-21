@@ -1088,6 +1088,15 @@ func (s *WSServer) Start(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session", s.handleSession)
+	// The upload route (ADR: an HTTP upload beside the WebSocket, upload
+	// design D3). Bytes travel as a streamed POST rather than as a new
+	// binary msg-type because the data plane carries PTY I/O: a
+	// multi-gigabyte upload multiplexed onto it would compete with terminal
+	// responsiveness and need a flow-control scheme invented for the
+	// purpose, where an HTTP request is a separate connection whose
+	// backpressure is TCP's. The method is in the pattern, so anything but
+	// POST is answered 405 by the mux itself.
+	mux.HandleFunc("POST "+uploadRoutePrefix+"{ticket}", s.handleUpload)
 
 	addr := s.listenAddr
 	if addr == "" {

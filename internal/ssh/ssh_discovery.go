@@ -220,6 +220,15 @@ func (c *discoveryConn) Close() error {
 // Exec implements DiscoveryConn.Exec. See the interface doc for the
 // cancellation contract.
 func (c *discoveryConn) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
+	// The bound, before anything is opened (nocx-e4ir3). Discovery's probes
+	// are short and ours, which is exactly what was true of the integration
+	// command until it was 92 KiB. Refusing here keeps that true of the
+	// probe added next, and gives the caller OUR named error rather than
+	// the far side's: an over-long command dies in the remote execve at
+	// MAX_ARG_STRLEN, reporting nothing a person can act on.
+	if len(cmd) >= MaxRemoteCommandLen {
+		return nil, fmt.Errorf("%w: %d bytes, bound %d", ErrCommandTooLong, len(cmd), MaxRemoteCommandLen)
+	}
 	// closed is checked before done — sequentially, not in one select: when
 	// the lease was explicitly closed AND the connection died, a select
 	// would pick between two ready cases at random.

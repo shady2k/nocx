@@ -150,6 +150,40 @@ what we ran, and making the command disappear from a record would be evasion
 rather than hygiene. Short is a consequence of carrying nothing; honest and
 carriable is the goal.
 
+**And the bound is enforced where the command LEAVES the process, not only
+where it is built** (`nocx-e4ir3`, added after the first implementation). The
+original 92 KiB command was produced by a builder policing itself against a cap
+that lived beside it — `maxFullLauncherLen`, 120 KiB — and the measured command
+sat at 75% of it with nobody watching. Declaring 1 KiB in the producer
+reproduces that arrangement exactly, one order of magnitude down: a
+`RemoteLauncher` is a seam somebody else implements next, and a bound only its
+current implementation applies to itself is a convention.
+
+So all three seams that put a remote command on a wire refuse one at or above
+the bound, before anything is sent and never by truncating: `session.Start` in
+`internal/ssh` (the managed carrier, which then falls open to a plain login
+shell with `ReasonCommandTooLong`), `discoveryConn.Exec` (the probes), and
+`mux.Master.Session` (the typed path's control socket). The local-argv seam
+needs no guard because it is closed by construction — the typed path never
+appends a command to the user's `ssh` argv and refuses a configured
+`RemoteCommand`.
+
+The number is one number in three packages, because AD-8 forbids the imports
+that would make it one symbol: `internal/ssh` must not depend on
+`internal/shellintegration`, and `mux` is a leaf. `TestTheBoundOnARemoteCommandIsOneNumber`
+in the composition root pins them equal, so raising any one alone goes red.
+
+It is worth saying what the bound is NOT. It is not a mechanical ceiling —
+every mechanical ceiling in this path is orders above it. Linux caps a single
+`execve` argument at `MAX_ARG_STRLEN` = 131,072 bytes (measured: 131,071 passes,
+131,072 is `E2BIG`), which binds on the far side where `sshd` runs
+`$SHELL -c "<command>"`, and on the near side too whenever we exec `ssh`
+ourselves; macOS has no per-argument cap but bounds `argv`+`envp` together at
+`kern.argmax` = 262,144. The SSH transport caps a packet at 256 KiB in both
+OpenSSH and `x/crypto/ssh`. Those are what a caller hits when nobody declared a
+contract, and hitting one produces somebody else's opaque error — the far
+execve's `E2BIG` — rather than our named refusal.
+
 **For a saved connection**, the bundle is published over SFTP on the connection
 nocx already holds. That is unchanged in shape; what goes is the second
 delivery, which sent the same bundle again inline.

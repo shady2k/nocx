@@ -260,6 +260,20 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
     lastGoodStep: 'The connection opened and ran what it was configured to run.',
   },
 
+  // nocx's OWN guard, and the only reason on this list the far side had no
+  // part in: the command nocx was about to run exceeded the bound it declares
+  // for a remote command, so it was refused before it was sent rather than
+  // truncated into something else (nocx-e4ir3). A user cannot cause this and
+  // cannot fix it, so there is no remedy offered — it is a defect in nocx,
+  // and the sentence says so rather than implying the host did something.
+  'command-too-long': {
+    title: 'Not integrated',
+    description:
+      'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+    happening: PLAIN_TERMINAL,
+    lastGoodStep: 'The connection opened and authenticated. nocx stopped before sending anything.',
+  },
+
   // ── the selective-refusal matrix, by real SSH channel type ─────────────
   //
   // A server or an intermediary may permit some channels and not others, and

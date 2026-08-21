@@ -2,7 +2,11 @@ package app
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -139,5 +143,66 @@ func TestBootstrapOutcomes_AnUnmappedOutcomeFailsOpenVisibly(t *testing.T) {
 	if got := mapBootstrapOutcome(lg, shellintegration.Outcome("brand-new-outcome")); got != ssh.ReasonUnknown {
 		t.Errorf("an unmapped outcome mapped to %q, want %q — never ReasonNone, which the "+
 			"product renders as success", got, ssh.ReasonUnknown)
+	}
+}
+
+// EVERY member of the ssh refusal vocabulary is on the wire, not only the
+// members some other list happens to enumerate (nocx-e4ir3).
+//
+// The three tests above walk the bootstrap outcome set and the selective
+// refusal matrix, which is what those two lists were: a way to catch a reason
+// added there and forgotten here. But `ssh.RefusalReason` is the vocabulary,
+// and a member added straight to it — from a guard, a new seam, anything that
+// is not a bootstrap outcome or a matrix row — was caught by none of them. The
+// product then renders nothing, or the notification is refused at the schema,
+// which is the "soft degrade the UI contradicts" the schema's own description
+// warns about.
+//
+// This reads the constant block itself, so the vocabulary cannot be extended
+// without the wire learning about it. Go has no reflection over a package's
+// constants, so the declaration is parsed — the same "read the authority, do
+// not restate it" the schema loader above is built on.
+func TestEveryRefusalReasonIsDeclaredOnTheWire(t *testing.T) {
+	wire := wireReasons(t)
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "../ssh/ssh.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse the refusal vocabulary: %v", err)
+	}
+
+	found := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+			return true
+		}
+		id, ok := vs.Type.(*ast.Ident)
+		if !ok || id.Name != "RefusalReason" {
+			return true
+		}
+		lit, ok := vs.Values[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		value := strings.Trim(lit.Value, `"`)
+		found++
+		// ReasonNone is the empty string — "integration succeeded" — and is
+		// deliberately not a wire value: the field is absent, not empty.
+		if value == "" {
+			return true
+		}
+		if !wire[value] {
+			t.Errorf("ssh.%s = %q is not in the contract's closed reason enum. "+
+				"A session refused for this reason would have its notification rejected at the "+
+				"schema, so the product would show nothing at all — add it to %s",
+				vs.Names[0].Name, value, contractPath)
+		}
+		return true
+	})
+
+	if found < 20 {
+		t.Fatalf("only %d RefusalReason constants were parsed; the vocabulary is larger than that, "+
+			"so this test is not reading what it thinks it is reading", found)
 	}
 }

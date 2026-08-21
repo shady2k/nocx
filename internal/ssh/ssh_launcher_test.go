@@ -789,3 +789,61 @@ func TestConnect_InstallerAloneRunsNoCommand(t *testing.T) {
 		t.Errorf("shell requests = %d, want 1 (the plain shell)", got)
 	}
 }
+
+// The bound is at the seam, not at the builder (nocx-e4ir3).
+//
+// A launcher is a seam, and a seam is something somebody else implements
+// next. The ~92 KiB command that carried the integration bundle and two
+// bearers was produced by a builder that was checking itself against a cap
+// beside it; the transport accepted whatever it was handed. This asserts the
+// half that does not depend on the producer: an over-long command is refused
+// HERE, before session.Start, and the session still fails open to a plain
+// login shell with a named reason — ADR-0004's contract, not a dead session.
+func TestConnect_LauncherCommandOverTheBound_NeverReachesTheWire(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	launcher := &fakeLauncher{cmd: strings.Repeat("x", MaxRemoteCommandLen), reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if got := srv.execCommandCount(); got != 0 {
+		t.Errorf("%d exec(s) were sent; an over-long command must never reach the wire", got)
+	}
+	if got := srv.shellRequestCount(); got != 1 {
+		t.Errorf("shell requests = %d, want 1 (the session still fails open to a plain shell)", got)
+	}
+	if got := ch.ShellIntegrationReason(); got != ReasonCommandTooLong {
+		t.Errorf("ShellIntegrationReason = %q, want %q — a degrade the product cannot name is invisible", got, ReasonCommandTooLong)
+	}
+}
+
+// And the paired success: the longest command the bound admits is still
+// carried whole, unmodified. A bound that quietly shortens the command runs
+// something the caller did not ask for on somebody else's machine.
+func TestConnect_LauncherCommandJustUnderTheBound_IsCarriedWhole(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	wantCmd := strings.Repeat("x", MaxRemoteCommandLen-1)
+	launcher := &fakeLauncher{cmd: wantCmd, reason: ReasonNone, ok: true}
+
+	ch := launcherConnect(
+		t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+		WithRemoteLauncher(launcher),
+	)
+
+	assertUsable(t, srv, ch)
+
+	if got := srv.lastExecCommand(); got != wantCmd {
+		t.Errorf("the server received a %d-byte command, want the %d bytes submitted", len(got), len(wantCmd))
+	}
+	if got := ch.ShellIntegrationReason(); got != ReasonNone {
+		t.Errorf("ShellIntegrationReason = %q, want none", got)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -425,5 +426,67 @@ func TestDiscoveryConn_Loss_ClosesDoneAndReclaimsPool(t *testing.T) {
 			t.Fatalf("pool count after loss = %d, want 0 (dead entry reclaimed)", client.pool.Count())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The bound is at the seam, not at the builder (nocx-e4ir3).
+//
+// Discovery's probes are short and ours, which is exactly the argument that
+// was true of the integration command until it was 92 KiB. The bound is
+// enforced on the way out so that stays true of whatever probe is added
+// next, and so the caller gets OUR named refusal rather than the far side's
+// opaque one — on Linux an over-long command dies in the far execve at
+// MAX_ARG_STRLEN, which reports nothing a person can act on.
+func TestDiscoveryConn_Exec_ACommandOverTheBoundIsRefusedAndNeverRun(t *testing.T) {
+	srv := startTestSSHServer(t)
+	var ran atomic.Bool
+	srv.setExecHandler(func(cmd string) (stdout, stderr string, exit int) {
+		ran.Store(true)
+		return "", "", 0
+	})
+	client := tunnelTestClient(t, srv)
+	dc, err := client.DiscoveryConn(context.Background(), srv.addr, tunnelConnectOpts(srv)...)
+	if err != nil {
+		t.Fatalf("DiscoveryConn: %v", err)
+	}
+	defer func() { _ = dc.Close() }()
+
+	res, err := dc.Exec(context.Background(), strings.Repeat("x", MaxRemoteCommandLen))
+	if !errors.Is(err, ErrCommandTooLong) {
+		t.Fatalf("Exec returned (%v, %v), want ErrCommandTooLong", res, err)
+	}
+	if res != nil {
+		t.Error("a refused Exec returned a result; there is no result for a command that never ran")
+	}
+	if ran.Load() {
+		t.Error("the far side ran the command: it reached the wire before it was refused")
+	}
+}
+
+// The paired success: one byte under the bound still runs, whole.
+func TestDiscoveryConn_Exec_TheLongestAdmissibleCommandRuns(t *testing.T) {
+	srv := startTestSSHServer(t)
+	want := strings.Repeat("x", MaxRemoteCommandLen-1)
+	var got atomic.Value
+	srv.setExecHandler(func(cmd string) (stdout, stderr string, exit int) {
+		got.Store(cmd)
+		return "OUT\n", "", 0
+	})
+	client := tunnelTestClient(t, srv)
+	dc, err := client.DiscoveryConn(context.Background(), srv.addr, tunnelConnectOpts(srv)...)
+	if err != nil {
+		t.Fatalf("DiscoveryConn: %v", err)
+	}
+	defer func() { _ = dc.Close() }()
+
+	res, err := dc.Exec(context.Background(), want)
+	if err != nil {
+		t.Fatalf("Exec one byte under the bound: %v", err)
+	}
+	if string(res.Stdout) != "OUT\n" {
+		t.Errorf("stdout = %q, want %q", res.Stdout, "OUT\n")
+	}
+	if s, _ := got.Load().(string); s != want {
+		t.Errorf("the far side saw a %d-byte command, want the %d bytes submitted", len(s), len(want))
 	}
 }

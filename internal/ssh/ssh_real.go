@@ -844,6 +844,17 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 	}
 	cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, opts)
 	if ok && cmd != "" {
+		// The bound, at the point of no return (nocx-e4ir3). A launcher is
+		// a seam somebody else implements next, and the producer that put
+		// 92 KiB and two bearers in a command was policing itself against
+		// a cap beside it. Refused here, the command is never sent and the
+		// session still fails open to a plain login shell — the reason is
+		// named so the degrade is visible in the product, not only in a log.
+		if len(cmd) >= MaxRemoteCommandLen {
+			rc.log.Warn("ssh: the remote command is longer than the bound; the session runs a plain shell",
+				"bytes", len(cmd), "bound", MaxRemoteCommandLen, "shell", string(shell))
+			return "", ReasonCommandTooLong, nil
+		}
 		return cmd, ReasonNone, run
 	}
 	// Decline or degenerate result: fall back to a plain shell. Normalize

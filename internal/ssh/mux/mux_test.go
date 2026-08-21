@@ -502,3 +502,79 @@ func TestExit_ReachesTheMasterAfterTheClientReleasedItsConnection(t *testing.T) 
 		t.Fatalf("terminate requests=%d, want 1", terminate)
 	}
 }
+
+// The bound is at the seam, not at the builder (nocx-e4ir3).
+//
+// The ~92 KiB command that carried the integration bundle and two bearers was
+// removed by nocx-m8jwn, and the replacement declares a 1 KiB contract. That
+// contract lived in ONE producer. This asserts the other half: the transport
+// refuses an over-long command itself, so no producer — the one that exists,
+// or the next one — can put a long command on the wire by handing it here.
+//
+// "Nothing was sent" is the assertion that matters. A refusal that has
+// already written the packet is not a bound, it is a log line.
+func TestSession_ACommandAtTheBoundIsRefusedAndNothingIsSent(t *testing.T) {
+	m := newFakeMaster(t)
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	_, err = master.Session(SessionRequest{Command: strings.Repeat("x", MaxCommandLen)})
+	if !errors.Is(err, ErrCommandTooLong) {
+		t.Fatalf("Session with a command at the bound returned %v, want ErrCommandTooLong", err)
+	}
+	if _, ok := m.lastOpened(); ok {
+		t.Fatal("the master recorded an opened session: the command reached the wire before it was refused")
+	}
+	if _, _, sessions, _ := m.counts(); sessions != 0 {
+		t.Fatalf("the master saw %d session requests, want 0", sessions)
+	}
+}
+
+// Refusal never truncates: a bounded transport that silently shortens the
+// command runs something the caller did not ask for, on somebody else's
+// machine.
+func TestSession_AnOverLongCommandIsNeverTruncatedIntoAShorterOne(t *testing.T) {
+	m := newFakeMaster(t)
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	if _, err := master.Session(SessionRequest{Command: strings.Repeat("x", MaxCommandLen*4)}); !errors.Is(err, ErrCommandTooLong) {
+		t.Fatalf("Session returned %v, want ErrCommandTooLong", err)
+	}
+	if got, ok := m.lastOpened(); ok {
+		t.Fatalf("a session was opened with a %d-byte command; the bound must refuse, never truncate", len(got.command))
+	}
+}
+
+// The largest command the bound admits still goes through untouched — the
+// paired "and on a normal machine it succeeds" AGENTS.md asks for next to
+// every "returns an error when...".
+func TestSession_TheLongestAdmissibleCommandIsCarriedWhole(t *testing.T) {
+	m := newFakeMaster(t)
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	cmd := strings.Repeat("x", MaxCommandLen-1)
+	s, err := master.Session(SessionRequest{Command: cmd})
+	if err != nil {
+		t.Fatalf("Session with a command one byte under the bound: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	got, ok := m.lastOpened()
+	if !ok {
+		t.Fatal("the master recorded no opened session")
+	}
+	if got.command != cmd {
+		t.Fatalf("the master saw a %d-byte command, want the %d bytes submitted", len(got.command), len(cmd))
+	}
+}

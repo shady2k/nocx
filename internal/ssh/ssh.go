@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -77,6 +78,42 @@ const (
 	// no shell.
 	ShellAuto ShellKind = "auto"
 )
+
+// MaxRemoteCommandLen is the bound on any command internal/ssh puts on the
+// wire, enforced at the two gossh seams that send one: the launcher's start
+// command (shellStartCommand, before session.Start) and discovery's probes
+// (discoveryConn.Exec, before Run). internal/ssh/mux enforces the same bound
+// on the control-socket seam.
+//
+// It is enforced HERE, at the point of no return, and not only where a
+// command is built — that is the whole distinction (nocx-e4ir3). Before
+// nocx-m8jwn the remote command was ~92 KiB carrying the integration bundle
+// and two bearers, and the cap meant to stop it (120 KiB) lived beside the
+// builder that produced it: one producer policed itself, the measured command
+// sat at 75% of the cap, and nobody was watching. A RemoteLauncher is a seam
+// somebody else implements next; a bound that only its current implementation
+// applies to itself is a convention, not a bound.
+//
+// The number is 1 KiB, and it is a CONTRACT rather than a mechanical ceiling:
+// it is the size a consumer of an exec request must be able to carry whole as
+// one field of one record. Every mechanical ceiling in the path is far above
+// it — Linux's MAX_ARG_STRLEN caps the far side's execve at 131072 bytes,
+// OpenSSH and x/crypto/ssh cap a packet at 256 KiB — and reaching one of
+// those produces somebody else's opaque error instead of our named refusal.
+//
+// One number, three packages, because AD-8 forbids the imports that would
+// make it one symbol (internal/ssh must not depend on
+// internal/shellintegration; mux is a leaf): shellintegration.MaxCarrierLen is
+// the producer's contract, this is the gossh seams', mux.MaxCommandLen is the
+// control socket's. TestTheBoundIsOneNumber in internal/app pins all three
+// equal, so raising any one of them alone goes red.
+const MaxRemoteCommandLen = 1024
+
+// ErrCommandTooLong is a remote command at or above MaxRemoteCommandLen.
+// Nothing is sent: a refusal that has already written the request is not a
+// bound. The command is never truncated — a shortened command runs something
+// the caller did not ask for, on somebody else's machine.
+var ErrCommandTooLong = errors.New("ssh: the remote command is longer than the bound")
 
 // RefusalReason is why integration did not happen, in a form the product
 // renders. The empty string means "no refusal".
@@ -222,6 +259,12 @@ const (
 	// ReasonStageTooLarge: the frame-1 header declared more than the 32 KiB
 	// cap. Refused before a single body byte is read.
 	ReasonStageTooLarge RefusalReason = "stage-too-large"
+	// ReasonCommandTooLong: the command a RemoteLauncher returned is at or
+	// above MaxRemoteCommandLen, so it was never sent. The session falls
+	// open to a plain login shell carrying this reason — a bound that killed
+	// the session instead would be a worse failure than the one it prevents
+	// (ADR-0004).
+	ReasonCommandTooLong RefusalReason = "command-too-long"
 	// ReasonStageDigestUnavailable: neither sha256sum nor shasum is present
 	// on the far host, so what nocx sent cannot be verified — and unverified
 	// bootstrap code is never executed.

@@ -74,6 +74,34 @@ const (
 // broken peer sent looking for an end.
 const maxPacket = 256 * 1024
 
+// MaxCommandLen is the bound on SessionRequest.Command, enforced HERE —
+// at the seam that hands the command to the master — and not only where a
+// command is built (nocx-e4ir3).
+//
+// The distinction is the whole point. Before nocx-m8jwn the remote command
+// was ~92 KiB carrying the integration bundle and two bearers, and the cap
+// that was supposed to stop it (120 KiB) sat beside the builder that made
+// it: one producer checked itself, and the measured command sat at 75% of
+// the cap with nobody watching. A bound a producer applies to itself is a
+// convention. A bound the transport applies to everything it is handed is
+// a bound, and it holds for the producer that does not exist yet.
+//
+// The number is 1 KiB: the size a consumer of an exec request has to be
+// able to carry whole as one field of one record. It is deliberately far
+// below every mechanical ceiling in the path — Linux's MAX_ARG_STRLEN is
+// 131072 bytes for the far side's execve, and maxPacket above is 256 KiB —
+// because those ceilings are what a caller hits when nobody declared a
+// contract, and hitting them produces somebody else's opaque error rather
+// than our named refusal.
+//
+// It is one number declared in three packages, because AD-8 forbids the
+// imports that would make it one symbol: internal/shellintegration owns
+// MaxCarrierLen (the producer's contract), internal/ssh owns
+// MaxRemoteCommandLen (the gossh seams), and this package owns the control
+// socket. TestTheBoundIsOneNumber in internal/app pins all three equal, so
+// raising any one of them alone goes red.
+const MaxCommandLen = 1024
+
 // dialTimeout bounds the connect to the control socket. It is a local unix
 // socket, so this is a liveness bound on a file, not a network wait.
 const dialTimeout = 5 * time.Second
@@ -83,6 +111,13 @@ var (
 	// It is the whole of D3's fallback question: a caller that sees this
 	// refuses the delivery, and there is nothing else it may do.
 	ErrSessionRefused = errors.New("mux: the master refused the session request")
+
+	// ErrCommandTooLong is a SessionRequest whose Command is at or above
+	// MaxCommandLen. Nothing is dialled, nothing is encoded and nothing is
+	// sent: a refusal that has already written the packet is not a bound.
+	// The command is never truncated — a shortened command runs something
+	// the caller did not ask for, on somebody else's machine.
+	ErrCommandTooLong = errors.New("mux: the remote command is longer than the bound")
 
 	// ErrHandshake is a socket that did not complete the mux handshake.
 	// Ownership is not proven, so nothing may be published or minted.
@@ -266,6 +301,11 @@ func (m *Master) Close() error {
 // D3, and it is why this package exists rather than an `sftp -o
 // ControlMaster=auto`, which answers a refusal by authenticating again.
 func (m *Master) Session(req SessionRequest) (*Session, error) {
+	// Before the dial, so a refused command costs no socket and leaves no
+	// trace on the master (nocx-e4ir3).
+	if len(req.Command) >= MaxCommandLen {
+		return nil, fmt.Errorf("%w: %d bytes, bound %d", ErrCommandTooLong, len(req.Command), MaxCommandLen)
+	}
 	c, err := dialControl(m.path)
 	if err != nil {
 		return nil, err

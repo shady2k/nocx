@@ -72,15 +72,75 @@ const LOCAL_HALF_PROBE = { prefix: 'prin', name: 'printf' }
 const SHARED_HALF_PROBE = { prefix: 'unam', name: 'uname' }
 
 /**
- * Type a prefix, press Tab, and report whether a row for `name` appeared with
- * the `command` SOURCE BADGE — not merely a row containing the text.
+ * What the person has typed, with the completion's inline ghost taken out.
  *
- * The badge is the whole point. Every spec in a run shares one home and one
- * history (nocx-8rda), and this file runs `printf` commands, so `prin`
- * matches a HISTORY row long before any command names exist. Matching on text
- * alone made the probe report "ready" against a history hit, and the caller
- * then failed on the real assertion — the probe answering a different
- * question from the one it was asked.
+ * The ghost is a `span.nocx-editor-ghost` INSIDE the content DOM, so the
+ * element's own text is the draft plus whatever the top candidate would
+ * complete it to — `unam` reads as `uname`. Every reader below is asking
+ * about the draft.
+ */
+const draft = (page: Page) =>
+  page.evaluate(() => {
+    const content = document.querySelector<HTMLElement>('.pane.active .nocx-editor-input')
+    if (content === null) return ''
+    const copy = content.cloneNode(true) as HTMLElement
+    for (const ghost of copy.querySelectorAll('.nocx-editor-ghost')) ghost.remove()
+    return copy.textContent ?? ''
+  })
+
+/**
+ * Backspace until the draft is OBSERVED empty, rather than as many times as
+ * characters were typed.
+ *
+ * A counted erase assumes Tab left the document exactly as the typing did,
+ * and Tab does not: with one way to complete the token it applies it
+ * (controller.applyUniqueCompletion), so four keystrokes of `unam` become the
+ * five characters of `uname` and the fourth Backspace leaves a `u` behind.
+ * That single character then rides into everything after it — `prin` becomes
+ * `uprin`, which matches no command, so the readiness poll below can never
+ * succeed and burns its whole budget; and when it escapes the poll it lands
+ * in the test's own assertion, where the suite reported
+ * `uzzznocxe2enope…` for a line it had just typed as `zzznocxe2enope…`.
+ *
+ * Bounded, and waiting on the document rather than on a duration.
+ */
+const clearDraft = async (page: Page) => {
+  await expect
+    .poll(
+      async () => {
+        const text = await draft(page)
+        if (text !== '') await page.keyboard.press('Backspace')
+        return text
+      },
+      { timeout: 5_000, intervals: [50] },
+    )
+    .toBe('')
+}
+
+/**
+ * Type a prefix, press Tab, and report whether `name` was offered as a
+ * COMMAND — by either of the two things the product does with a completion.
+ *
+ * 1. A row in the panel carrying the `command` SOURCE BADGE. The badge is
+ *    what makes it an answer to the question asked: every spec in a run
+ *    shares one home and one history (nocx-8rda), and this file runs `printf`
+ *    commands, so `prin` matches a HISTORY row long before any command names
+ *    exist. Matching on text alone made the probe report "ready" against a
+ *    history hit, and the caller then failed on the real assertion.
+ *
+ * 2. The draft becoming exactly `name`, which is Tab's unique-completion
+ *    path. When the finished candidate list holds exactly ONE way to complete
+ *    the token, Tab completes it and opens no panel at all — the shell's own
+ *    rule, and the owner's. History and snippet rows are excluded from that
+ *    count by `applyUniqueCompletion` itself, so a draft that became `name`
+ *    proves precisely what the badge proves: a non-history candidate that
+ *    completes the word exists.
+ *
+ * Reading only the panel is what broke here. `unam` has exactly one
+ * completion on this host, so Tab applied it and the row never appeared;
+ * whether the panel then re-opened around the completed token was a race
+ * between the providers, which is why the same probe passed on one engine and
+ * spent thirty seconds failing on the other in the same run.
  */
 const offeredAsCommand = async (page: Page, probe: { prefix: string; name: string }) => {
   const row = page
@@ -94,19 +154,19 @@ const offeredAsCommand = async (page: Page, probe: { prefix: string; name: strin
   // and the instant after Tab is before the panel has rendered — so it
   // reports "not offered" on a tab that offers it, every time, and the poll
   // can never succeed.
-  const ready = await row
+  const inPanel = await row
     .waitFor({ state: 'visible', timeout: 2_000 })
     .then(() => true)
     .catch(() => false)
+  const applied = (await draft(page)) === probe.name
   // Esc closes exactly the panel and keeps the draft; the draft is then
-  // removed by as many Backspaces as were typed. Deliberately counted rather
-  // than a clear-line binding: what this editor binds to Ctrl-U is a question
-  // about the keymap, and getting it wrong leaves the prefix in front of
-  // whatever the caller types next — a failure that would read as a product
-  // defect.
+  // erased to an observed empty. Deliberately not a clear-line binding: what
+  // this editor binds to Ctrl-U is a question about the keymap, and getting
+  // it wrong leaves the prefix in front of whatever the caller types next —
+  // a failure that would read as a product defect.
   await page.keyboard.press('Escape')
-  for (let i = 0; i < probe.prefix.length; i++) await page.keyboard.press('Backspace')
-  return ready
+  await clearDraft(page)
+  return inPanel || applied
 }
 
 const commandSnapshotReady = async (page: Page) => {

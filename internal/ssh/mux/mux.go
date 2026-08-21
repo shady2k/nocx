@@ -113,10 +113,11 @@ type Master struct {
 	path string
 	pid  int
 
-	mu   sync.Mutex
-	ctl  *net.UnixConn
-	rid  uint32
-	done bool
+	mu     sync.Mutex
+	ctl    *net.UnixConn
+	rid    uint32
+	done   bool
+	closed bool
 }
 
 // Open proves ownership of the control socket at path: it connects,
@@ -177,20 +178,36 @@ func (m *Master) alive() (int, error) {
 // of the ownership interval: the socket is removed only after the master's
 // exit is confirmed, and confirming it is the caller's job because only the
 // caller knows what "the last owned session" was.
+//
+// ON A FRESH CONTROL CONNECTION, exactly like Alive and for the same reason:
+// this must keep working after the caller has released the connection Open
+// took, and releasing it early is what lets the master exit at all (see
+// Close).
 func (m *Master) Exit() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.done {
 		return nil
 	}
-	m.rid++
+	c, err := dialControl(m.path)
+	if err != nil {
+		// No socket to ask on is not a refusal: a master that cannot be
+		// reached on its own socket is not running, which is the outcome
+		// this asks for. The caller confirms the exit either way.
+		m.done = true
+		return nil
+	}
+	defer func() { _ = c.Close() }()
+	if hErr := helloExchange(c); hErr != nil {
+		return hErr
+	}
 	e := &encoder{}
 	e.u32(cTerminate)
-	e.u32(m.rid)
-	if err := writePacket(m.ctl, e.b); err != nil {
-		return err
+	e.u32(1)
+	if wErr := writePacket(c, e.b); wErr != nil {
+		return wErr
 	}
-	body, err := readPacket(m.ctl)
+	body, err := readPacket(c)
 	if err != nil {
 		// A master that exits without answering has still exited. That
 		// is the outcome we asked for, so it is not an error.
@@ -216,9 +233,29 @@ func (m *Master) Exit() error {
 // Close drops this client's control connection. It does NOT stop the master:
 // the master is the user's own ssh process and its lifetime is theirs until
 // the ownership interval closes.
+//
+// IT DOES, HOWEVER, DECIDE WHEN THAT LIFETIME CAN END, which is the opposite
+// of what the paragraph above used to imply. An attached mux client is an
+// open channel on the master's connection, and `ssh` does not exit while one
+// is open — so holding this connection for the whole delivery kept the user's
+// own `ssh` alive after their remote shell had exited, and their local prompt
+// with it. Measured on 2026-08-21 in e2e/nocxify-journey.spec.ts: the far
+// shell ended and the master was still there 20.1 s later; released at the
+// terminal outcome instead, the same two events are 65 ms apart.
+//
+// Nothing else on this type needs it: Session and Alive each dial their own,
+// and Exit does now too. So a caller may close this as soon as it stops
+// needing the proof, and everything that follows still works.
+//
+// Idempotent: the release and the deferred cleanup are two different callers
+// and neither knows about the other.
 func (m *Master) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	m.closed = true
 	return m.ctl.Close()
 }
 

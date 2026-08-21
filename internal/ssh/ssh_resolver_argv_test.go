@@ -139,11 +139,26 @@ func TestResolveArgv_CacheSkipsRepeatSpawn(t *testing.T) {
 	}
 }
 
-// TestResolveArgv_CacheKeyedByResolvedIdentity: two different typed lines
-// that resolve to the same destination share ONE cache entry, keyed by the
-// resolved identity (user@hostname:port), never by the typed host string
-// (ADR-0015 narrowing).
-func TestResolveArgv_CacheKeyedByResolvedIdentity(t *testing.T) {
+// TestResolveArgv_CacheKeyedByTheArgvNotTheDestination: two different typed
+// lines that resolve to the same destination keep TWO cache entries, one per
+// question. The typed host string is still not a key (the ADR-0015
+// narrowing); neither is the destination they resolve to.
+//
+// THIS CASE USED TO ASSERT THE OPPOSITE — one entry, keyed by the resolved
+// identity, with the argv only an index into it — and it is reversed
+// deliberately rather than relaxed. ADR-0035 gave one destination two
+// questions with two different right answers: the typed wrapper asks about
+// the user's own line, and then about the same line plus our own
+// ControlMaster/ControlPath/ControlPersist, because only ssh can expand the
+// %C in the socket path. Sharing one entry gave the second question the
+// first one's answer, and nocx refused to interpose on every typed ssh after
+// the first (`no-control-path`; e2e/nocxify-journey.spec.ts, 2026-08-21).
+//
+// Nothing is paid for it. The spawn count below was TWO under the old key as
+// well — it is right there in the assertion this replaces — so the shared
+// entry never saved a subprocess. It only ever shared an answer, which is
+// the whole of the defect.
+func TestResolveArgv_CacheKeyedByTheArgvNotTheDestination(t *testing.T) {
 	sshPath, logPath := scriptedSSH(t)
 	r, ok := NewSSHConfigResolver(log.NewSlogAdapter(nil), "/nonexistent/config", sshPath).(*sshConfigResolver)
 	if !ok {
@@ -163,11 +178,11 @@ func TestResolveArgv_CacheKeyedByResolvedIdentity(t *testing.T) {
 	if IdentityKey(cfgA) != IdentityKey(cfgB) {
 		t.Fatalf("IdentityKey differs: %q vs %q; the cache key would split one destination", IdentityKey(cfgA), IdentityKey(cfgB))
 	}
-	if len(r.identityCache) != 1 {
-		t.Errorf("identityCache has %d entries, want 1 — the cache must be keyed by the resolved identity, not the typed host", len(r.identityCache))
+	if len(r.argvCache) != 2 {
+		t.Errorf("argvCache has %d entries, want 2 — one per question asked, so two argvs for one destination cannot answer for each other", len(r.argvCache))
 	}
-	if len(r.argvIndex) != 2 {
-		t.Errorf("argvIndex has %d entries, want 2 (one per typed argv)", len(r.argvIndex))
+	if cfgA == cfgB {
+		t.Error("both argvs were served the same *HostConfig; a second question about one destination must get its own answer")
 	}
 	if n := spawnCount(t, logPath); n != 2 {
 		t.Errorf("ssh -G spawned %d times, want 2 (one per distinct argv)", n)

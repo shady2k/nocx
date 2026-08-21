@@ -471,3 +471,34 @@ func TestExit_AsksTheMasterToGo(t *testing.T) {
 	}
 	_ = master.Close()
 }
+
+// Exit must still reach the master after this client has released the
+// connection Open took.
+//
+// That release is not optional tidiness: an attached mux client is an open
+// channel on the master's connection and `ssh` does not exit while one is
+// open, so holding it for the whole delivery is what kept the user's own ssh
+// — and their local prompt — alive for 20 s after their remote shell exited.
+// Releasing it early is only safe if the closing half of the interval still
+// works afterwards, which is this.
+func TestExit_ReachesTheMasterAfterTheClientReleasedItsConnection(t *testing.T) {
+	m := newFakeMaster(t)
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := master.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// And twice, because the release and the deferred cleanup are two
+	// callers that do not know about each other.
+	if err := master.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if err := master.Exit(); err != nil {
+		t.Fatalf("Exit after Close: %v", err)
+	}
+	if _, _, _, terminate := m.counts(); terminate != 1 {
+		t.Fatalf("terminate requests=%d, want 1", terminate)
+	}
+}

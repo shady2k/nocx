@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -433,4 +434,126 @@ func TestTypedLine_TheLineCarriesNeitherBearerNorTheBundle(t *testing.T) {
 		t.Errorf("the line is %d bytes; the bundle is back in the command", len(line))
 	}
 	t.Logf("the typed line is %d bytes, of which the carrier is %d", len(line), len(carrier))
+}
+
+// ---------------------------------------------------------------------------
+// Design §5.3: the input interval closes AT THE TERMINAL OUTCOME.
+//
+// "The interval closes at exactly one terminal outcome — BOOTSTRAP_ACCEPTED
+// or BOOTSTRAP_REFUSED(reason) — and input is re-enabled on that outcome,
+// never on READY", and again on the window: "it closes at exactly one
+// terminal outcome […] no later than the integration deadline of §7".
+//
+// Only the deferred Close stood for that edge, and a defer runs after
+// awaitMasterEnd — a DIFFERENT interval, which ends when the user's own ssh
+// master does. So a session that had just come up integrated went on refusing
+// every keystroke for the whole life of that master, and said so on screen:
+// "this connection has stopped accepting input". e2e/nocxify-journey.spec.ts
+// found it; no Go test could, because the one that drives a typed session
+// end to end types straight into the pty and never touches the session write
+// queue where the quarantine lives.
+//
+// The observable is ORDERING, so the master here never ends: the window must
+// be closed while the delivery is still inside awaitMasterEnd.
+func TestTypedLine_TheInputQuarantineEndsWithTheOutcomeNotWithTheMaster(t *testing.T) {
+	runner, _, _, _ := typedTestRunner(t, refusingOracle{})
+	win := &orderingWindow{closed: make(chan struct{})}
+	master := &livingMaster{}
+	runner.dial = func(string) (TypedMaster, error) { return master, nil }
+	// Probes that never report a loss: this master outlives the bootstrap,
+	// which is the ordinary case and the one the defect hid in.
+	runner.probes = func(string, int, TypedMaster) ssh.MasterProbes {
+		return ssh.MasterProbes{
+			SocketPresent: func(string) bool { return true },
+			ProcessAlive:  func(int) bool { return true },
+			Terminate:     func() error { return nil },
+		}
+	}
+
+	d := &typedDelivery{
+		runner:         runner,
+		sessionID:      "aabbccddeeff00112233445566778899",
+		controlPath:    filepath.Join(t.TempDir(), "m"),
+		window:         win,
+		publishSettled: make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.doRun(ctx)
+	}()
+
+	select {
+	case <-win.closed:
+	case <-done:
+		t.Fatal("the delivery returned before the window was closed; this case can no longer see the ordering it is about")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the bootstrap window was never closed: the user's keystrokes are refused for as long as their own ssh master lives")
+	}
+
+	// And the paired half: the quarantine was actually opened, so the test
+	// above is not passing against a delivery that never quarantined
+	// anything.
+	if !win.quarantined() {
+		t.Error("input was never quarantined; §5.3's interval has no opening edge either")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the delivery did not return after its context was cancelled")
+	}
+}
+
+// orderingWindow is a bootstrap window that refuses to answer, so the
+// delivery reaches its terminal outcome at once, and that records WHEN it was
+// closed rather than only whether.
+type orderingWindow struct {
+	mu     sync.Mutex
+	quar   bool
+	closed chan struct{}
+	once   sync.Once
+}
+
+// ReadLine answers EOF immediately: there is no far side in this test, so the
+// bootstrap refuses on its first token instead of spending a deadline.
+func (w *orderingWindow) ReadLine(context.Context, time.Duration) (string, error) {
+	return "", io.EOF
+}
+
+func (w *orderingWindow) Write(p []byte) (int, error) { return len(p), nil }
+
+func (w *orderingWindow) QuarantineInput() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.quar = true
+}
+
+func (w *orderingWindow) quarantined() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.quar
+}
+
+func (w *orderingWindow) Close() error {
+	w.once.Do(func() { close(w.closed) })
+	return nil
+}
+
+// livingMaster is a master that is still there: its auxiliary channels are
+// refused (this test is not about the publish) and it never exits.
+type livingMaster struct{}
+
+func (*livingMaster) PID() int    { return os.Getpid() }
+func (*livingMaster) Exit() error { return nil }
+func (*livingMaster) Close() error {
+	return nil
+}
+
+func (*livingMaster) Aux(mux.SessionRequest) (io.ReadWriteCloser, error) {
+	return nil, mux.ErrSessionRefused
 }

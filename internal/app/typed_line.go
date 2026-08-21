@@ -415,6 +415,42 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 	// conditional here either.
 	d.reportOutcome(reason)
 
+	// §5.3'S CLOSING EDGE, AND IT IS THE OUTCOME — not the end of the
+	// ownership interval, which is a different interval with a different
+	// end. The design says it in two places and in as many words: the input
+	// interval "closes at exactly one terminal outcome — BOOTSTRAP_ACCEPTED
+	// or BOOTSTRAP_REFUSED(reason)", and the reader's one effect on input is
+	// "to end the quarantine the bootstrap opened".
+	//
+	// Only the deferred Close stood here, and a deferred Close runs after
+	// awaitMasterEnd — so the quarantine outlived the outcome by the whole
+	// life of the user's master. A session that had JUST come up integrated
+	// dropped every keystroke and told the user so: "this connection has
+	// stopped accepting input". Measured on the epic's own journey, where
+	// `echo journey-1-ok` was refused 0.4 s after the log said the session
+	// came up integrated.
+	//
+	// Idempotent (the window's Close is a sync.Once), so the defer above
+	// stays exactly as it is — it is the closing edge for every path that
+	// returns before an outcome exists.
+	_ = d.window.Close()
+	// AND THE CONTROL CONNECTION GOES WITH IT, for a reason that is not
+	// tidiness. An attached mux client is an open channel on the master's
+	// connection and `ssh` does not exit while one is open — so the
+	// connection Open took to PROVE ownership, held until the deferred
+	// Close below, kept the user's own `ssh` running after their far shell
+	// had exited, and their local shell waiting on it. Measured on
+	// 2026-08-21 in e2e/nocxify-journey.spec.ts: `exit` on the far side, and
+	// the master still alive 20.1 s later; released here instead, the two
+	// events are 65 ms apart and the remote command that preceded them fell
+	// from 19 s to 49 ms.
+	//
+	// Everything after this line still works without it: awaitMasterEnd
+	// probes the PROCESS and the SOCKET FILE, and mux.Master.Exit dials its
+	// own connection exactly as Alive does. Close is idempotent, so the
+	// defer above remains the closing edge for the paths that return early.
+	_ = master.Close()
+
 	// The ownership interval closes when the last owned session and
 	// auxiliary channel have finished. The user's own process is still the
 	// master and still theirs; what ends here is OUR use of it.

@@ -104,6 +104,20 @@ type Environment struct {
 type Collection struct {
 	Name     string       `json:"name"`
 	Requests []RequestRef `json:"requests"`
+	// Malformed names the files that could not be read as requests. It is
+	// ON the collection, not in an error beside it, and that placement is
+	// the whole point: a caller which returns early on err != nil would
+	// otherwise make one broken file hide every good one. One bad file is a
+	// bad file, never a collection that will not open.
+	Malformed []MalformedRef `json:"malformed,omitempty"`
+}
+
+// MalformedRef is a file inside the collection that is not a request — bad
+// JSON, a field the format does not declare, a symlink that was not followed.
+// Reason is for a person: it says which file and what was wrong with it.
+type MalformedRef struct {
+	RelPath string `json:"relPath"`
+	Reason  string `json:"reason"`
 }
 
 type RequestRef struct {

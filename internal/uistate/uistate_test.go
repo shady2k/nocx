@@ -1,6 +1,7 @@
 package uistate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -667,4 +668,208 @@ func (p *fakeProbe) Geometry() (Window, []Display, bool) {
 		return Window{}, nil, false
 	}
 	return p.window, p.displays, true
+}
+
+// ── Restoring against a window that does not exist yet ─────────────────
+
+// THE DEFECT THIS ASSERTS AGAINST. The composition root used to probe the
+// window once, and abandon window persistence for the whole session when that
+// one probe could not answer:
+//
+//	_, displays, ok := probe.Geometry()
+//	if !ok { return }        // <- the sampler below never started
+//
+// Under Wails v3 that probe CANNOT answer. Services start before the window is
+// realised, `WebviewWindow.Size()` reports (0,0) until the platform window
+// exists, and so the one moment the code asked was the one moment there was
+// nothing to ask. Nothing was ever sampled, nothing was ever written, and every
+// launch read back a document of zeros and opened at the default (nocx-39vhn).
+//
+// So the contract is stated the other way round: not being ready yet is an
+// ordinary state that costs a tick, never the session.
+func TestRestoreAndWatchWaitsForAWindowThatIsNotReadyYet(t *testing.T) {
+	displays := []Display{{Width: 2560, Height: 1440, Primary: true}}
+	saved := Window{Width: 1440, Height: 900, X: 120, Y: 64, Displays: Fingerprint(displays)}
+
+	rec := &recordingDocStore{}
+	clock := &fakeTimer{}
+	s := newStore(rec, quietLogger(), DefaultDebounce, clock.after)
+	s.SetWindow(saved)
+
+	// Silent for the first three asks, exactly as an unrealised window is.
+	probe := &lateProbe{
+		silentFor: 3,
+		window:    Window{Width: 1440, Height: 900, X: 120, Y: 64},
+		displays:  displays,
+	}
+	placer := &fakePlacer{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.RestoreAndWatch(ctx, probe, placer, time.Millisecond)
+
+	// Waited on the state changing, never on a duration: the tick is an
+	// implementation detail and a test that slept for one would be a test about
+	// this machine's speed.
+	waitFor(t, "the window to be placed once it can answer", func() bool {
+		return placer.calls() > 0
+	})
+
+	if got := placer.size(); got != [2]int{1440, 900} {
+		t.Fatalf("placed at %v, want the saved 1440x900", got)
+	}
+	if got := placer.position(); got != [2]int{120, 64} {
+		t.Fatalf("positioned at %v, want the saved (120,64)", got)
+	}
+	if placer.centred {
+		t.Fatal("the displays match the saved fingerprint, so the position must be used, not centred")
+	}
+}
+
+// AND IT GOES ON WATCHING. Placement is half the feature; a session that
+// restores the window and then records nothing leaves the next launch reading
+// the same stale document — which is the shape the defect actually took.
+func TestRestoreAndWatchRecordsAfterAnUnreadyStart(t *testing.T) {
+	displays := []Display{{Width: 2560, Height: 1440, Primary: true}}
+	rec := &recordingDocStore{}
+	s := newStore(rec, quietLogger(), time.Millisecond, realAfterFunc)
+
+	probe := &lateProbe{
+		silentFor: 2,
+		window:    Window{Width: 1280, Height: 800, X: 40, Y: 20},
+		displays:  displays,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.RestoreAndWatch(ctx, probe, &fakePlacer{}, time.Millisecond)
+
+	waitFor(t, "the moved window to reach the document", func() bool {
+		w := s.Window()
+		return w.Width == 1280 && w.Height == 800 && w.X == 40 && w.Y == 20
+	})
+	waitFor(t, "the document to be written", func() bool { return rec.writes() > 0 })
+}
+
+// A window that never becomes readable must not spin forever, and must let go
+// at shutdown like every other background owner.
+func TestRestoreAndWatchStopsWhenTheContextIsCancelled(t *testing.T) {
+	s := newStore(&recordingDocStore{}, quietLogger(), DefaultDebounce, (&fakeTimer{}).after)
+	probe := &lateProbe{silentFor: 1 << 30}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.RestoreAndWatch(ctx, probe, &fakePlacer{}, time.Millisecond)
+		close(done)
+	}()
+
+	waitFor(t, "the probe to be asked at least once", func() bool { return probe.asked() > 0 })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RestoreAndWatch outlived its context")
+	}
+}
+
+// waitFor blocks until cond holds, failing with what it was waiting for rather
+// than with a bare timeout. Polling a condition is what keeps these tests
+// independent of how fast the machine is (AGENTS.md: a test may not depend on
+// timing).
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+// lateProbe answers `ok=false` for its first `silentFor` calls, which is what
+// an unrealised Wails window does.
+type lateProbe struct {
+	mu        sync.Mutex
+	calls     int
+	silentFor int
+	window    Window
+	displays  []Display
+}
+
+func (p *lateProbe) Geometry() (Window, []Display, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.calls <= p.silentFor {
+		return Window{}, nil, false
+	}
+	return p.window, p.displays, true
+}
+
+func (p *lateProbe) asked() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+type fakePlacer struct {
+	mu         sync.Mutex
+	n          int
+	w, h       int
+	x, y       int
+	centred    bool
+	maximised  bool
+	fullscreen bool
+}
+
+func (f *fakePlacer) SetSize(w, h int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n++
+	f.w, f.h = w, h
+}
+
+func (f *fakePlacer) SetPosition(x, y int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.x, f.y = x, y
+}
+
+func (f *fakePlacer) Center() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.centred = true
+}
+
+func (f *fakePlacer) Maximise() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.maximised = true
+}
+
+func (f *fakePlacer) Fullscreen() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fullscreen = true
+}
+
+func (f *fakePlacer) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
+}
+
+func (f *fakePlacer) size() [2]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return [2]int{f.w, f.h}
+}
+
+func (f *fakePlacer) position() [2]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return [2]int{f.x, f.y}
 }

@@ -329,100 +329,15 @@ jobs:
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
 
+      # The packaging itself lives in scripts/appimage/package-appimage.sh so it
+      # can be run against a real build outside a tag push. Packaging that only
+      # exists inside a workflow cannot be tested before it ships, and this step
+      # is exactly where nocx-azxe.7 shipped from.
       - name: Package AppImage
-        run: |
-          set -euo pipefail
-          BIN="build/bin/nocx"
-          base="nocx-${VERSION}-linux-amd64"
-          mkdir -p dist
+        run: scripts/appimage/package-appimage.sh
 
-          # ── AppDir skeleton ──────────────────────────────────────────
-          mkdir -p AppDir/usr/bin
-          cp "$BIN" AppDir/usr/bin/nocx
-
-          # .desktop file — required for linuxdeploy to recognise the app.
-          # `Icon` is not decoration: appimagetool refuses to package without
-          # one ("Icon entry not found in desktop file"), and the value must
-          # name an icon actually installed in the AppDir. It is `nocx`, and
-          # the resize below writes nocx.png so the basename answers it
-          # (nocx-zvd7).
-          cat > AppDir/nocx.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=nocx
-          Exec=nocx
-          Icon=nocx
-          Type=Application
-          Categories=Utility;TerminalEmulator;
-          DESKTOP
-
-          # AppRun — the entry point the AppImage executes at runtime.
-          cat > AppDir/AppRun << 'APPRUN'
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "$0")")"
-          export PATH="$HERE/usr/bin:$PATH"
-          export LD_LIBRARY_PATH="$HERE/usr/lib:$LD_LIBRARY_PATH"
-          exec "$HERE/usr/bin/nocx" "$@"
-          APPRUN
-          chmod +x AppDir/AppRun
-
-          # ── linuxdeploy + GTK plugin ─────────────────────────────────
-          # The GTK plugin bundles libgtk-3, libwebkit2gtk-4.1 and their
-          # transitive dependencies into the AppDir, so the AppImage is
-          # self-contained (the whole point vs a bare tarball — ADR-0007).
-          wget -q -O linuxdeploy.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy.AppImage
-
-          wget -q -O linuxdeploy-plugin-gtk.sh \
-            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
-          chmod +x linuxdeploy-plugin-gtk.sh
-
-          # linuxdeploy deploys icons into hicolor, so it accepts only that
-          # spec's resolutions and refuses anything else outright: "Icon
-          # build/appicon.png has invalid x resolution: 1024 … Valid
-          # resolutions are 8x8 … 512x512". The master is 1024x1024 because
-          # that is what macOS wants.
-          #
-          # Derived here rather than committed as a second file: build/appicon.png
-          # stays the one icon in the repository, and a resize cannot drift from
-          # its master the way a checked-in copy silently would. The basename is
-          # what answers the desktop file's Icon=nocx — linuxdeploy resolves the
-          # NAME, not the path — so it is nocx.png and needs no --icon-filename.
-          icondir="$(mktemp -d)"
-          convert build/appicon.png -resize 512x512 "$icondir/nocx.png"
-
-          export LDAI_OUTPUT="${base}.AppImage"
-          # --desktop-file and --icon-file are what INSTALL the two files
-          # linuxdeploy then links into the AppDir root; dropping the .desktop
-          # into AppDir/ by hand is not the same thing, and linuxdeploy said so
-          # ("Could not find desktop file in AppDir") right before appimagetool
-          # refused for want of an icon. --icon-filename renames appicon.png to
-          # `nocx` so it answers the desktop file's Icon= key — appimagetool
-          # resolves that name, not the path.
-          #
-          # build/appicon.png is in git precisely so a clean CI checkout has it
-          # (nocx-azxe.4); until now nothing on the Linux path used it, so even
-          # a successful AppImage would have carried no icon.
-          ./linuxdeploy.AppImage --appdir AppDir \
-            --desktop-file AppDir/nocx.desktop \
-            --icon-file "$icondir/nocx.png" \
-            --plugin gtk --output appimage
-          mv "${base}.AppImage" dist/
-
-          # ── Verify the result ────────────────────────────────────────
-          test -f "dist/${base}.AppImage"
-          test -x "dist/${base}.AppImage"
-
-          # Version check: --appimage-extract-and-run bypasses FUSE and
-          # works even when the kernel module is absent.
-          echo "=== version check ==="
-          "./dist/${base}.AppImage" --appimage-extract-and-run --version 2>&1 | tee /dev/stderr | grep -qw "$VERSION"
-
-          # Confirm WebKitGTK was bundled (the support-envelope commitment).
-          echo "=== bundled libs ==="
-          "./dist/${base}.AppImage" --appimage-extract-and-run ls /usr/lib 2>&1 | head -20 || true
-
-          shasum -a 256 dist/*
+      - name: Verify the AppImage on a foreign distribution
+        run: scripts/appimage/verify-appimage.sh "dist/nocx-${VERSION}-linux-amd64.AppImage"
 
       - uses: actions/upload-artifact@v7
         with:

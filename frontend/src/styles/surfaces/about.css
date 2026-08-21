@@ -1,0 +1,72 @@
+/* ── About (nocx-8bbp) — placement only ───────────────────────────────────
+   The page's own wrappers: the identity block at the top and the list of
+   build facts under it. Every control on it is a kit component and nothing
+   here repaints one. */
+
+.ab-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.ab-identity__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+}
+
+/* The icon is the app's own, at its natural 96px source rendered at 72 so it
+   stays crisp on a 1x display and sharp on a 2x one. */
+.ab-icon {
+  flex: none;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--control-radius-md);
+}
+
+.ab-name {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  color: var(--color-text);
+}
+
+.ab-version {
+  margin: 0;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* Two columns, label then value, so the values line up and can be read down
+   the page — which is how somebody checks one against a bug report. The value
+   column is mono because every one of these is an identifier. */
+.ab-rows {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+}
+
+.ab-rows dt {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.ab-rows dd {
+  margin: 0;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.ab-actions {
+  display: flex;
+}
+
+.ab-loading,
+.ab-failed {
+  margin: 0;
+  color: var(--color-text-muted);
+}

@@ -218,3 +218,40 @@ describe('EditableHost — what an editable field must already have', () => {
     host.dispose()
   })
 })
+
+describe('wrapping — a line that outruns the box, in both modes', () => {
+  const mount = (host: EditableHost | ReadOnlyHost): HTMLElement => {
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    host.mount(parent, new AbortController().signal)
+    return parent
+  }
+
+  // A FIELD SOMEBODY TYPES PROSE INTO WRAPS. The snippet body and a note are
+  // sentences, and CM6 does not wrap unless it is told to — so a pasted
+  // paragraph became one line running off the right edge of the dialog, with
+  // the text clipped at the frame and a horizontal scrollbar under it
+  // (nocx-dn33v). Asserted through the class `EditorView.lineWrapping`
+  // installs, which is the thing that carries `white-space: pre-wrap` into the
+  // content: jsdom does no layout, so a width measurement here would assert
+  // nothing at all.
+  it('an editable host wraps', () => {
+    const host = new EditableHost()
+    const parent = mount(host)
+    expect(parent.querySelector('.cm-content')?.classList.contains('cm-lineWrapping')).toBe(true)
+    host.dispose()
+  })
+
+  // AND A READ-ONLY ONE DOES NOT, deliberately. Its two surfaces are the file
+  // viewer and the git diff, where a line is a LINE: wrapping one silently
+  // renumbers what the reader is looking at against what the file says, and a
+  // diff whose rows no longer align row-for-row has stopped being a diff. Same
+  // reasoning the terminal's frozen output is held to (nocx-juau) — long
+  // content is reached by scrolling sideways.
+  it('a read-only host does not', () => {
+    const host = new ReadOnlyHost()
+    const parent = mount(host)
+    expect(parent.querySelector('.cm-content')?.classList.contains('cm-lineWrapping')).toBe(false)
+    host.dispose()
+  })
+})

@@ -10,6 +10,30 @@
   box-sizing: border-box;
 }
 
+/* `hidden` MEANS HIDDEN, and it takes `!important` to mean it.
+
+   The UA stylesheet says `[hidden] { display: none }`, and that rule loses to
+   any author `display` declaration on the same element — so a component that
+   declares `display: flex` on a box it also toggles with `hidden` renders an
+   empty box that still takes its padding, its gap and its place in a flex row.
+   It looks hidden while it is not.
+
+   The app met this three times before it was fixed once. `.ui-tabs__panel`,
+   `.git-diff__notice` and `.file-viewer__notice` each answered it locally, and
+   the fourth and fifth — `.update-notice` and `.connection-notice` — did not,
+   which cost 48px at the head of the tab strip on every platform and made the
+   macOS traffic-light gap look like a padding mistake (nocx-gm4fj). A trap
+   every component has to remember to sidestep is one that will be walked into
+   again; this is the sidestep, made once, for all of them.
+
+   `!important` is the whole mechanism and not a shortcut: without it this rule
+   loses to exactly the declarations it exists to beat. An element that must
+   render while carrying `hidden` does not exist — that is what the attribute
+   says. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;

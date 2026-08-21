@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/app.about.schema.json",
+  "title": "AppAbout",
+  "description": "The app.about JSON-RPC result: what this build is (nocx-8bbp). Read-only and constant for the life of the process — three fields are written by the linker (-X, see internal/version/version.go for the exact paths) and three are read from the running process. It exists because a person filing a bug, or checking whether an update landed, previously had nothing to read and nothing to quote. Every field is required and every field is a non-empty string: a value the build does not carry is the word \"unknown\", never \"\", because a blank row on the About page cannot be told apart from a row that has not loaded. The renderer therefore never has to decide what to draw for a missing value, and never has to know the \"dev\" sentinel — `development` names that fact on the wire.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "commit", "date", "go", "wails", "platform", "development"],
+  "properties": {
+    "version": {
+      "description": "The release number, matching the release manifest's `version` field so the two never need translating (\"0.2.0\"). An unstamped build reports \"dev\", and `development` is then true — read that flag rather than comparing this string to a sentinel.",
+      "type": "string",
+      "minLength": 1
+    },
+    "commit": {
+      "description": "The git sha the build came from, or \"unknown\".",
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "description": "When the build was made, or \"unknown\". A stamped build writes RFC 3339; the field is not constrained to it, because the value is quoted into a bug report rather than parsed.",
+      "type": "string",
+      "minLength": 1
+    },
+    "go": {
+      "description": "The toolchain that compiled the binary, as runtime.Version reports it (\"go1.25.0\").",
+      "type": "string",
+      "minLength": 1
+    },
+    "wails": {
+      "description": "The desktop shell's module version, taken from the build's own dependency list rather than restated as a constant, so it cannot disagree with go.mod. \"unknown\" when the binary carries no build info.",
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "description": "GOOS/GOARCH (\"darwin/arm64\") — the pair that decides which release artifact this is.",
+      "type": "string",
+      "minLength": 1
+    },
+    "development": {
+      "description": "True when nothing stamped this build, so `version` is a placeholder rather than a release number. The updater keys the same fact off Version == \"dev\" (internal/version); this carries it to the renderer so no surface has to spell the sentinel a second time.",
+      "type": "boolean"
+    }
+  }
+}

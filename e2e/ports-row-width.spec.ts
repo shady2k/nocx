@@ -41,6 +41,7 @@
 import { test, expect, promptReady } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
+import { createServer, connect } from 'node:net'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import type { ChildProcess } from 'node:child_process'
@@ -197,6 +198,46 @@ async function pointerAway(page: Page): Promise<void> {
   await page.mouse.move(2, 2)
 }
 
+/** Ask the kernel for a port nothing is using, rather than guessing one.
+ *
+ *  The guess was `38200 + rand(100)`, and its comment said random avoided a
+ *  collision with a leaked listener from a retried run. It does the opposite:
+ *  a hundred candidates is a hundred ways to land on a port something already
+ *  holds, and `listen()` then fails, `node` exits, and the spec waits out its
+ *  timeout on a row that was never going to exist. A port the kernel just
+ *  handed out is free by construction. */
+async function reserveFreePort(): Promise<number> {
+  const probe = createServer()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      probe.once('error', reject)
+      probe.listen(0, '0.0.0.0', resolve)
+    })
+    const address = probe.address()
+    if (typeof address !== 'object' || address === null) {
+      throw new Error('the probe socket reported no port')
+    }
+    return address.port
+  } finally {
+    await new Promise<void>((resolve) => probe.close(() => resolve()))
+  }
+}
+
+/** Can something be reached on this port? A yes/no observation, not a wait. */
+function isListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = connect({ port, host: '127.0.0.1' })
+    const settle = (answer: boolean) => {
+      socket.destroy()
+      resolve(answer)
+    }
+    socket.setTimeout(1_000)
+    socket.once('connect', () => settle(true))
+    socket.once('timeout', () => settle(false))
+    socket.once('error', () => settle(false))
+  })
+}
+
 /** The rail must be at its default width for the measurement to mean what
  *  the bug is about. The fresh disposable home has no persisted width, so
  *  240 is guaranteed; the assertion makes that a fact rather than a hope. */
@@ -214,13 +255,28 @@ test('a plain detected row keeps its address readable at the default rail width,
   await promptReady(page)
 
   // A listener in the LOCAL shell (the initial tab is this machine's shell,
-  // and local discovery reads the kernel — no probe binary involved). The
-  // port is random so a leaked listener from a retried run cannot collide.
-  const port = 38200 + Math.floor(Math.random() * 100)
+  // and local discovery reads the kernel — no probe binary involved).
+  const port = await reserveFreePort()
   await page.keyboard.type(`node -e 'require("net").createServer().listen(${port},"0.0.0.0")' &`)
   await page.keyboard.press('Enter')
 
-  // Open the Ports view and wait for the row that owns the listener.
+  // The listener must be UP before the panel can be blamed for not showing it.
+  // Without this the spec waited thirty seconds on a row whose absence could
+  // mean the port was taken, the keystrokes were dropped, or `node` never ran
+  // — and reported all three as "element(s) not found", which is what it did
+  // on CI webkit. The test process shares this container's network namespace,
+  // so connecting to the port is a direct observation, not a proxy for one.
+  await expect
+    .poll(() => isListening(port), {
+      message:
+        `nothing is listening on ${port} — the shell never started the ` +
+        `listener, so this run cannot say anything about the ports panel`,
+      timeout: 20_000,
+    })
+    .toBe(true)
+
+  // Open the Ports view and wait for the row that owns the listener. From here
+  // a timeout IS the product's fault, which is the only reason to wait at all.
   await page.locator(VIEW_PORTS).click()
   const row = page.locator(DETECTED_ROW, { hasText: String(port) })
   await expect(row).toBeVisible({ timeout: 30_000 })

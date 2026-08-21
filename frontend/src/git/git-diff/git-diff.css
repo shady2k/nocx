@@ -28,10 +28,6 @@
   color: var(--color-text-muted);
 }
 
-.git-diff__notice[hidden] {
-  display: none;
-}
-
 .git-diff__line[data-tone='warning'] {
   color: var(--color-warning);
 }

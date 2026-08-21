@@ -78,6 +78,7 @@
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/connection-notice.css';
+@import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';
 @import './styles/surfaces/backup-restore.css';
 @import './styles/surfaces/connections.css';
@@ -659,11 +660,22 @@
   min-height: auto;
 }
 
-/* During fullscreen, hide the DOM blocks and separator but NOT the
-   xterm-live-container (which is position:fixed and must stay visible).
-   display:none on an ancestor would hide fixed descendants too (P0-2). */
-.scrollback-inner.inner-fullscreen-mode > .cmd-block,
-.scrollback-inner.inner-fullscreen-mode > .scrollback-separator {
+/* Alt-screen: the pane belongs to the program, so everything the block layer
+   draws steps aside and only the live region is left.
+
+   STATED AS AN EXCLUSION, NOT AS A LIST. It used to name the two child kinds
+   that existed when it was written — `.cmd-block` and `.scrollback-separator` —
+   which made it a list every future child of this stack had to be added to. The
+   restore boundary (nocx-m3fqk) was the first one that arrived afterwards and
+   nobody added it, so PREVIOUS SESSION and its rule stayed painted over htop
+   and over every agent TUI (nocx-nkwm2). One kind of child has a reason to
+   survive here and it is named; a fourth kind is hidden by default, which is the
+   direction this rule can afford to be wrong in.
+
+   The live container is excluded rather than the whole stack being hidden from
+   an ancestor: `display: none` on `.scrollback-inner` would take fixed
+   descendants with it (P0-2). */
+.scrollback-inner.inner-fullscreen-mode > *:not(.xterm-live-container) {
   display: none;
 }
 

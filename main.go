@@ -364,13 +364,24 @@ func (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {
 	w.backend.Logger.Info("notification authorization resolved", "permission", perm.String())
 }
 
-// restoreWindow puts the window back where the user left it and then starts
-// watching it, which is the whole of nocx-mqie.1 on this side of the seam.
+// restoreWindow hands the window to internal/uistate and gets out of the way,
+// which is the whole of nocx-mqie.1 on this side of the seam.
 //
-// The decision is not made here — uistate.Restore makes it, from the saved
-// geometry and the displays attached now — because a rule that can only run
-// with a window on a screen is a rule nobody can test. This function reads the
-// probe, applies the answer, and owns no policy of its own.
+// No decision is made here. Where the window goes is uistate.Restore's, from
+// the saved geometry and the displays attached now; WHEN it goes there is
+// uistate.RestoreAndWatch's, because it depends on a window that does not exist
+// yet at the moment this runs. Both are rules, and a rule that can only run
+// with a window on a screen is a rule nobody can test — so this function owns
+// two adapters over the Wails API and nothing else.
+//
+// THE WINDOW IS NOT THERE YET WHEN THIS IS CALLED. ServiceStartup runs inside
+// application.Run, before the platform window is realised (v3 runs the pending
+// window runnables after the services are up), so a probe here answers (0,0)
+// and `ok=false`. This used to be read as a failure and it ended the feature
+// for the session: the one-shot probe below the warning returned before the
+// sampler was started, so nothing was ever recorded, the document kept its
+// zeros, and every launch opened at the default (nocx-39vhn). The waiting is
+// inside RestoreAndWatch now, where a fake probe can be made to answer late.
 //
 // PORTED FROM WAILS v2 AT THE MERGE. The worker built this against the v2
 // runtime package (`runtime.WindowSetSize`, `runtime.ScreenGetAll`) because
@@ -382,44 +393,36 @@ func (w *WailsApp) restoreWindow() {
 	if w.window == nil {
 		return
 	}
-	store := w.backend.UIState
-	probe := wailsWindowProbe{window: w.window, screens: w.screens}
-
-	_, displays, ok := probe.Geometry()
-	if !ok {
-		w.backend.Logger.Warn("window geometry unavailable; opening at the default")
-		return
-	}
-
-	p := uistate.Restore(store.Window(), displays)
-	w.window.SetSize(p.Width, p.Height)
-	if p.UsePosition {
-		w.window.SetPosition(p.X, p.Y)
-	} else {
-		// Either nothing was saved or the displays are not the ones the
-		// position was recorded on. Centring is the visible answer; the saved
-		// position stays in the document, so plugging the monitor back in
-		// restores the old arrangement.
-		w.window.Center()
-	}
-	// States, not pixels: entering them is what makes leaving them land on
-	// the normal geometry set just above.
-	if p.Maximise {
-		w.window.Maximise()
-	}
-	if p.FullScreen {
-		w.window.Fullscreen()
-	}
-
+	watchCtx, cancel := context.WithCancel(context.Background())
+	w.stopGeometry = cancel
 	// Save-on-change, by sampling. v3 does raise move and resize events, and
 	// they would be a smaller seam — but the store already coalesces what the
 	// poll sees, so a drag of any length costs one write half a second after
 	// it stops either way, and swapping the mechanism at a merge would be a
 	// change nobody had tested. Filed rather than done here.
-	watchCtx, cancel := context.WithCancel(context.Background())
-	w.stopGeometry = cancel
-	go store.Watch(watchCtx, probe, uistate.DefaultSampleInterval)
+	go w.backend.UIState.RestoreAndWatch(
+		watchCtx,
+		wailsWindowProbe{window: w.window, screens: w.screens},
+		wailsWindowPlacer{window: w.window},
+		uistate.DefaultSampleInterval,
+	)
 }
+
+// wailsWindowPlacer applies a placement through the Wails v3 API. Its own type
+// rather than more methods on the probe: reading where the window is and
+// putting it somewhere are two jobs, and the store asks for them through two
+// interfaces. The adapters exist because v3's builders return the window for
+// chaining and uistate.Placer, which is about doing a thing rather than
+// building one, returns nothing.
+type wailsWindowPlacer struct {
+	window *application.WebviewWindow
+}
+
+func (p wailsWindowPlacer) SetSize(width, height int) { p.window.SetSize(width, height) }
+func (p wailsWindowPlacer) SetPosition(x, y int)      { p.window.SetPosition(x, y) }
+func (p wailsWindowPlacer) Center()                   { p.window.Center() }
+func (p wailsWindowPlacer) Maximise()                 { p.window.Maximise() }
+func (p wailsWindowPlacer) Fullscreen()               { p.window.Fullscreen() }
 
 // wailsWindowProbe reads the live window and the attached displays through the
 // Wails v3 API. It is the only implementation of uistate.Probe and it lives

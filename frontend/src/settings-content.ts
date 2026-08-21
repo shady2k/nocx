@@ -47,6 +47,10 @@ export class SettingsContent extends SolidPaneContent {
      *  retention age and a two-number budget that govern nothing when the
      *  store never opened. */
     private readonly historyStatus?: HistoryStatusStore,
+    /** What build this is, for the About page (nocx-8bbp). */
+    private readonly aboutClient?: import('./about-client').AboutClient,
+    /** The clipboard the About page's Copy diagnostics writes through. */
+    private readonly clipboard?: import('./clipboard').ClipboardAccess,
   ) {
     super()
   }
@@ -64,6 +68,8 @@ export class SettingsContent extends SolidPaneContent {
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           historyStatus: this.historyStatus,
+          aboutClient: this.aboutClient,
+          clipboard: this.clipboard,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

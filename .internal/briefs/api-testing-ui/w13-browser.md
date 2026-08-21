@@ -83,6 +83,13 @@ export interface FolderEntry {
 export function showFolderPicker(props: FolderPickerProps): Promise<string | null>
 ```
 
+**The component supports every filesystem nocx can reach, and that is deliberate.** It is a
+general dialog, not part of collections. The CALLER decides which machine to look at, and
+for a collection the caller passes the backend's own filesystem — not because a remote one
+is hard, but because of availability: a collection that lives on a remote host stops
+opening the moment that host is unreachable, and a collection must open always. That is a
+property we are choosing, not a limitation waiting to be lifted.
+
 **The `list` callback is the whole design.** The component does not import a client, does
 not know about `bindingId`, and cannot tell a local filesystem from a remote one. That is
 what makes it testable without a backend and what keeps the routing decision with the

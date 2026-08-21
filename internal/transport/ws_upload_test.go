@@ -117,6 +117,13 @@ func withUploadUnwind(d time.Duration) WSServerOption {
 	return func(s *WSServer) { s.uploads.unwind = d }
 }
 
+// withUploadHeaderTimeout shortens the guard's bound on a header block, and
+// with it the handler's own entry deadline. Not an exported option for the
+// same reason as withUploadUnwind.
+func withUploadHeaderTimeout(d time.Duration) WSServerOption {
+	return func(s *WSServer) { s.uploads.header = d }
+}
+
 // uploadFactoryWithSink is uploadableFactory with the write half replaced,
 // so one test can decide how the sink behaves.
 func uploadFactoryWithSink(sink transfer.Sink) FilesystemProviderFactory {

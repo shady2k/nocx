@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -90,15 +91,15 @@ const (
 	// nothing above this handler bounds a request that goes quiet.
 	//
 	// What each one actually covers, stated rather than implied. Go's server
-	// parses the COMPLETE header block before dispatching, so an incomplete
-	// one never reaches this handler and neither deadline can bound it; that
-	// residual gap is /session's too, and closing it would take a ConnState
-	// hook that /session clears on entry, which is a change to a route this
-	// task does not own. uploadHeaderTimeout therefore covers everything
-	// from handler entry until the first body read, and the stall deadline —
-	// re-armed before EVERY read — is what bounds "valid headers followed by
-	// silence", which is the failure the spec names: without it a body that
-	// stops holds a transfer, a temp file and a lease open indefinitely.
+	// parses the COMPLETE header block before dispatching, so a request whose
+	// headers never end does not reach this handler and nothing inside it can
+	// bound the wait; that interval belongs to uploadGuardConn below, which
+	// sits under the server and applies uploadHeaderTimeout to it. The same
+	// bound then covers handler entry until the first body read, and the
+	// stall deadline — re-armed before EVERY read — is what bounds "valid
+	// headers followed by silence", which is the failure the spec names:
+	// without it a body that stops holds a transfer, a temp file and a lease
+	// open indefinitely.
 	uploadHeaderTimeout       = 10 * time.Second
 	defaultUploadStallTimeout = 30 * time.Second
 
@@ -407,6 +408,11 @@ type uploadRegistry struct {
 	// default.
 	stall time.Duration
 
+	// header is how long a connection may take to finish an upload's header
+	// block; zero means the default. Read at Start, when the guarded
+	// listener is built.
+	header time.Duration
+
 	// unwind is how long teardown waits for a cancelled transfer; zero
 	// means the default. A test shortens it in place (ws_upload_test.go),
 	// the way filesPollInterval is shortened: an exported option would be
@@ -422,6 +428,13 @@ func (u *uploadRegistry) stallTimeout() time.Duration {
 		return u.stall
 	}
 	return defaultUploadStallTimeout
+}
+
+func (u *uploadRegistry) headerDeadline() time.Duration {
+	if u.header > 0 {
+		return u.header
+	}
+	return uploadHeaderTimeout
 }
 
 func (u *uploadRegistry) unwindTimeout() time.Duration {
@@ -1065,6 +1078,214 @@ func newUploadID() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
+// ── the route's own header deadline (spec §5.4) ──────────────────────────
+
+// maxUploadRequestLine bounds what the guard remembers of a request line
+// while deciding which route it names. It only ever has to recognise a
+// prefix, so this is a memory bound and not a protocol limit — a longer line
+// is still read, it is simply no longer accumulated.
+const maxUploadRequestLine = 512
+
+// uploadGuardListener wraps the transport's listener so every accepted
+// connection carries an upload guard.
+//
+// Why here and not ReadHeaderTimeout on the shared server: that setting is
+// deliberately zero (ws.go) and turning it on would bound /session's header
+// block as well, which is the one thing this must not do. A ConnState hook
+// has the same problem in the other direction — StateActive fires when the
+// first byte of a request is read, long before the target is known, so a
+// deadline armed there could only be cleared by a handler, and /session's
+// handler is not ours to change. The bytes themselves are the only thing
+// that can tell the two routes apart before the parse finishes, which is
+// what this reads.
+type uploadGuardListener struct {
+	net.Listener
+	timeout func() time.Duration
+}
+
+func (l uploadGuardListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return newUploadGuardConn(c, l.timeout), nil
+}
+
+// uploadGuardPhase is where the guard is in the request in front of it.
+type uploadGuardPhase int
+
+const (
+	uploadGuardLine    uploadGuardPhase = iota // reading the request line; the target is not known yet
+	uploadGuardHeaders                         // it names the upload route; reading its header block
+	uploadGuardOff                             // decided; the bytes flow past untouched
+)
+
+// uploadGuardConn is one accepted connection, watched for exactly as long as
+// it takes to find out what it is asking for.
+//
+// The interval, both ends named. It opens at Accept, before net/http has
+// read a byte. It closes at the end of the request line for every target but
+// this route's — so a /session connection is bound until its target is
+// known and never afterwards, and the upgrade, the handler and the hijacked
+// connection that follow are all outside it. For POST /upload/... it closes
+// at the end of the header block, which is the interval §5.4 asks the route
+// to bound and the one Go's server would otherwise leave unbounded.
+//
+// It also counts. headerEnd plus the request's declared Content-Length is
+// exactly how many bytes the request is, so a connection that has delivered
+// more than that has sent a body longer than its own framing — which §5.4
+// requires be cut at the bound and failed, and which nothing above this can
+// see: net/http hands the handler exactly Content-Length bytes and leaves
+// the excess to be misparsed as the next request.
+type uploadGuardConn struct {
+	net.Conn
+	timeout func() time.Duration
+
+	mu        sync.Mutex
+	phase     uploadGuardPhase
+	deadline  time.Time // absolute; the end of the interval, re-applied before every read
+	line      []byte    // the request line so far, bounded by maxUploadRequestLine
+	lineLen   int       // bytes on the current header line, ignoring CR
+	read      int64     // bytes this connection has delivered
+	headerEnd int64     // offset just past the upload request's header block; -1 when unknown
+}
+
+func newUploadGuardConn(c net.Conn, timeout func() time.Duration) *uploadGuardConn {
+	g := &uploadGuardConn{Conn: c, timeout: timeout, headerEnd: -1}
+	g.arm()
+	return g
+}
+
+// arm opens the interval, and re-applying it before every read is not
+// belt-and-braces: net/http sets the read deadline itself at the top of
+// every request — to the zero time, because ReadHeaderTimeout is zero — so
+// a deadline set once at Accept is cleared before the first byte is read.
+// The value is absolute and computed once, so re-applying it bounds the
+// whole header block rather than degrading into "no progress for N", which
+// a client dribbling one byte per interval would hold open for ever.
+func (c *uploadGuardConn) arm() {
+	c.mu.Lock()
+	c.deadline = time.Now().Add(c.timeout())
+	d := c.deadline
+	c.mu.Unlock()
+	_ = c.Conn.SetReadDeadline(d)
+}
+
+func (c *uploadGuardConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	armed, d := c.phase != uploadGuardOff, c.deadline
+	c.mu.Unlock()
+	if armed {
+		_ = c.Conn.SetReadDeadline(d)
+	}
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.scan(p[:n])
+	}
+	return n, err
+}
+
+// scan advances the guard over the bytes just delivered.
+//
+// It is a request-line matcher and a blank-line detector, and deliberately
+// not an HTTP parser: it needs to know which route was named and where the
+// header block ended, and nothing else. A line is empty when a newline
+// arrives with nothing but an optional CR since the previous one.
+func (c *uploadGuardConn) scan(b []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	base := c.read
+	c.read += int64(len(b))
+	if c.phase == uploadGuardOff {
+		return
+	}
+	for i := 0; i < len(b); i++ {
+		ch := b[i]
+		if ch == '\r' {
+			continue
+		}
+		switch c.phase {
+		case uploadGuardLine:
+			if ch != '\n' {
+				if len(c.line) < maxUploadRequestLine {
+					c.line = append(c.line, ch)
+				}
+				continue
+			}
+			if !uploadRequestLine(c.line) {
+				c.phase = uploadGuardOff
+				c.releaseLocked()
+				return
+			}
+			c.phase = uploadGuardHeaders
+			c.lineLen = 0
+		case uploadGuardHeaders:
+			if ch != '\n' {
+				c.lineLen++
+				continue
+			}
+			if c.lineLen > 0 {
+				c.lineLen = 0
+				continue
+			}
+			c.headerEnd = base + int64(i) + 1
+			c.phase = uploadGuardOff
+			c.releaseLocked()
+			return
+		case uploadGuardOff:
+			return
+		}
+	}
+}
+
+// restart re-opens the interval for the next request on a reused connection.
+// Reached from ConnState at StateIdle, which is the only moment net/http
+// tells anyone that one request is over and the next has not begun.
+//
+// A client that pipelined its next request before going idle has already had
+// those bytes counted and not scanned, so the guard will not find that
+// request's header terminator and the connection dies at the bound. That is
+// the safe direction, and nothing legitimate reaches it: /session upgrades
+// and never sends a second request, and the upload route answers
+// Connection: close.
+func (c *uploadGuardConn) restart() {
+	c.mu.Lock()
+	c.phase = uploadGuardLine
+	c.line = c.line[:0]
+	c.lineLen = 0
+	c.headerEnd = -1
+	c.mu.Unlock()
+	c.arm()
+}
+
+// releaseLocked ends the interval, clearing the deadline rather than leaving
+// one in the future: everything after this point — a WebSocket that lives
+// for hours, an upload body that takes an hour — is bounded by its own owner
+// and must not inherit this one. Called from scan, which holds the lock.
+func (c *uploadGuardConn) releaseLocked() {
+	c.deadline = time.Time{}
+	_ = c.Conn.SetReadDeadline(time.Time{})
+}
+
+func (c *uploadGuardConn) headerBlockEnd() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.headerEnd
+}
+
+func (c *uploadGuardConn) bytesRead() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.read
+}
+
+// uploadRequestLine reports whether a request line names this route. The
+// method is part of the answer: the mux answers 405 for anything else, and a
+// GET of an upload URL has no header block worth bounding.
+func uploadRequestLine(line []byte) bool {
+	return bytes.HasPrefix(line, []byte(http.MethodPost+" "+uploadRoutePrefix))
+}
+
 // ── POST /upload/{ticket} — the data half (spec §5.4) ────────────────────
 
 // uploadBody is the claimed request body, wrapped so that it can be bounded
@@ -1134,6 +1355,16 @@ func (b *uploadBody) Close() error {
 // person as files.uploadDone, addressed by a transfer id that is not a
 // credential.
 func (s *WSServer) handleUpload(w http.ResponseWriter, r *http.Request) {
+	// One request per connection, on every path including the refusals.
+	// The ticket is one-shot, so nothing follows a POST here that could
+	// want the connection; and a connection that cannot be reused cannot be
+	// parked idle and then held open with a second, endless header block,
+	// which is the hole the guard's own interval would otherwise leave
+	// behind a completed request. It also keeps the guard's byte offsets
+	// meaningful: an upload is always the FIRST request on its connection,
+	// so headerEnd is known for every one of them.
+	w.Header().Set("Connection", "close")
+
 	policy := s.origins
 	if policy == nil {
 		policy = LoopbackOriginPolicy{}
@@ -1156,7 +1387,7 @@ func (s *WSServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// uploadHeaderTimeout). Cleared before returning so the connection can
 	// be reused — a deadline left in the past would kill keep-alive.
 	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
-	if err := rc.SetReadDeadline(time.Now().Add(uploadHeaderTimeout)); err != nil {
+	if err := rc.SetReadDeadline(time.Now().Add(s.uploads.headerDeadline())); err != nil {
 		// Sink.Put is explicit: a reader that cannot be unblocked at all
 		// must not be handed to it. Without a settable deadline this body
 		// is exactly that, so it is refused rather than started.

@@ -1115,11 +1115,26 @@ func (s *WSServer) Start(ctx context.Context) error {
 	s.port = tcpAddr.Port
 
 	s.server = &http.Server{
-		Handler:           mux,
+		Handler: mux,
+		// Deliberately zero: /session is a long-lived upgrade, and this
+		// setting would bound its header block along with everything
+		// else's. The upload route's own header deadline is applied one
+		// layer down, by uploadGuardConn, which can tell the two routes
+		// apart before the parse finishes because it reads the request
+		// line itself (ws_upload.go, §5.4).
 		ReadHeaderTimeout: 0,
+		// StateIdle is the only moment net/http says "that request is
+		// over and the next has not started", which is exactly the
+		// interval the guard needs to re-open on a reused connection.
+		ConnState: func(c net.Conn, state http.ConnState) {
+			if g, ok := c.(*uploadGuardConn); ok && state == http.StateIdle {
+				g.restart()
+			}
+		},
 	}
+	guarded := uploadGuardListener{Listener: listener, timeout: s.uploads.headerDeadline}
 	go func() {
-		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := s.server.Serve(guarded); err != nil && err != http.ErrServerClosed {
 			s.log.Error("ws server error", "error", err)
 		}
 	}()

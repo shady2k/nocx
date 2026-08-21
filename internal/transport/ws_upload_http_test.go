@@ -12,6 +12,7 @@ package transport
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -506,6 +507,152 @@ func TestUploadEndpoint_CancellingAStalledBodyUnwindsTheTransfer(t *testing.T) {
 	wg.Wait()
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Fatalf("directory holds %d entries (%v), want 0 — the temp goes with the cancel", len(entries), err)
+	}
+}
+
+// ── §5.4: this route sets its own deadlines, and the first one binds
+// before the handler exists ───────────────────────────────────────────────
+
+// TestUploadEndpoint_HeadersThatNeverEndAreDropped is the hole the handler's
+// own deadline cannot reach. Go's server parses the COMPLETE header block
+// before it dispatches, so a request whose headers never end never arrives
+// at handleUpload and nothing inside it can bound the wait. An
+// unauthenticated local process could therefore open loopback connections,
+// send a partial POST /upload/... header block and hold them for ever,
+// holding neither the WebSocket capability token nor a ticket.
+//
+// The ticket below is well-formed and names nothing, which is the point: the
+// guard acts before anything has looked a ticket up.
+func TestUploadEndpoint_HeadersThatNeverEndAreDropped(t *testing.T) {
+	e := newUploadTestEnv(t, withUploadHeaderTimeout(150*time.Millisecond))
+	c, dialErr := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", e.ws.Port()))
+	if dialErr != nil {
+		t.Fatalf("dial: %v", dialErr)
+	}
+	defer func() { _ = c.Close() }()
+
+	if _, err := c.Write([]byte("POST /upload/" + strings.Repeat("ab", uploadTicketHexLen/2) +
+		" HTTP/1.1\r\nHost: 127.0.0.1\r\n")); err != nil {
+		t.Fatalf("write partial headers: %v", err)
+	}
+	// The header block never ends. The failsafe is generous and is NOT the
+	// assertion: it is told apart from the answer, because a read that ends
+	// on our own deadline is precisely the failing case dressed as a pass.
+	// What passes is the connection going — an EOF or a reset.
+	_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var buf [1]byte
+	_, err := c.Read(buf[:])
+	switch {
+	case err == nil:
+		t.Fatal("the server answered a header block that never ended")
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		t.Fatal("a header block that never ends held the connection open")
+	}
+}
+
+// scriptedConn is a net.Conn that hands out prepared chunks and records
+// every read deadline set on it. The embedded nil interface is deliberate:
+// anything the guard reaches for beyond Read and SetReadDeadline panics
+// rather than silently doing nothing.
+type scriptedConn struct {
+	net.Conn
+	chunks    [][]byte
+	deadlines []time.Time
+}
+
+func (c *scriptedConn) Read(p []byte) (int, error) {
+	if len(c.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.chunks[0])
+	c.chunks = c.chunks[1:]
+	return n, nil
+}
+
+func (c *scriptedConn) SetReadDeadline(t time.Time) error {
+	c.deadlines = append(c.deadlines, t)
+	return nil
+}
+
+func (c *scriptedConn) armed() bool {
+	return len(c.deadlines) > 0 && !c.deadlines[len(c.deadlines)-1].IsZero()
+}
+
+// TestUploadGuard_BindsTheUploadRouteAndLetsEveryOtherGo is why the
+// mechanism can be a wrapped listener without touching /session.
+//
+// Both halves matter. A guard that armed everything and cleared at the
+// header terminator would be ReadHeaderTimeout by hand — which ws.go
+// deliberately leaves at zero — so the interval for a request that is not an
+// upload has to close at the request LINE: /session is bounded until its
+// target is known and never afterwards, so the upgrade, the handler and the
+// hijacked connection are all provably outside it. For the upload route the
+// interval runs to the end of the header block, which is what §5.4 asks for.
+func TestUploadGuard_BindsTheUploadRouteAndLetsEveryOtherGo(t *testing.T) {
+	const ticket = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("a request that is not an upload is released at the request line", func(t *testing.T) {
+		raw := &scriptedConn{chunks: [][]byte{
+			[]byte("GET /session HTTP/1.1\r\n"),
+			[]byte("Host: 127.0.0.1\r\nUpgrade: websocket\r\n"),
+		}}
+		g := newUploadGuardConn(raw, func() time.Duration { return time.Minute })
+		if !raw.armed() {
+			t.Fatal("the guard must arm before the first byte is read")
+		}
+		drain(t, g)
+		if raw.armed() {
+			t.Fatal("/session is still bound after its request line; the interval must close there")
+		}
+		cleared := len(raw.deadlines)
+		drain(t, g)
+		if len(raw.deadlines) != cleared {
+			t.Fatal("/session had a deadline set after its target was known")
+		}
+		if end := g.headerBlockEnd(); end >= 0 {
+			t.Fatalf("headerBlockEnd = %d for a route the guard released; want unknown", end)
+		}
+	})
+
+	t.Run("an upload is bound to the end of its header block", func(t *testing.T) {
+		head := "POST /upload/" + ticket + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+		raw := &scriptedConn{chunks: [][]byte{
+			[]byte(head),
+			[]byte("Content-Length: 5\r\n\r\n"),
+			[]byte("hello"),
+		}}
+		g := newUploadGuardConn(raw, func() time.Duration { return time.Minute })
+		readOnce(t, g)
+		if !raw.armed() {
+			t.Fatal("the upload route was released at its request line; §5.4 bounds the whole header block")
+		}
+		readOnce(t, g)
+		if raw.armed() {
+			t.Fatal("the guard is still bound after the header block ended")
+		}
+		want := int64(len(head) + len("Content-Length: 5\r\n\r\n"))
+		if got := g.headerBlockEnd(); got != want {
+			t.Fatalf("headerBlockEnd = %d, want %d", got, want)
+		}
+		drain(t, g)
+		if n := g.bytesRead(); n != want+5 {
+			t.Fatalf("bytesRead = %d, want %d", n, want+5)
+		}
+	})
+}
+
+func readOnce(t *testing.T, r io.Reader) {
+	t.Helper()
+	buf := make([]byte, 4096)
+	if _, err := r.Read(buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+}
+
+func drain(t *testing.T, r io.Reader) {
+	t.Helper()
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatalf("drain: %v", err)
 	}
 }
 

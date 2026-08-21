@@ -9,16 +9,35 @@ import { createApiStore } from './api-store'
 import type { ApiWorkbenchServices } from './api-client'
 import type { ApiRequest } from './api-model'
 import {
+  COLLECTION_PATH,
   CREATED_HANDLE,
   CREATED_NAME,
+  HANDLE,
   REQUEST,
+  WATCH_BINDING,
+  WATCH_SESSION,
+  collectionsFixture,
   createdFixture,
   sendFixture,
   servicesFixture,
+  watchFixture,
+  type WatchFixture,
 } from './api-test-fixtures'
 
 function storeWith(over: Partial<ApiWorkbenchServices> = {}) {
   return { store: createApiStore(servicesFixture(over)) }
+}
+
+/** A store that is watching, as the pane's mount leaves it: subscribed, with
+ *  the first listing in and its watch set published. */
+async function watchingStore(
+  over: Partial<ApiWorkbenchServices> = {},
+  fixture: WatchFixture = watchFixture(),
+) {
+  const store = createApiStore(servicesFixture({ watchCollections: fixture.port, ...over }))
+  store.startWatching()
+  await store.refresh()
+  return { store, watch: fixture }
 }
 
 describe('ApiStore — the collections', () => {
@@ -277,6 +296,202 @@ describe('ApiStore — import', () => {
     await store.importCurl('rm -rf /')
     expect(store.draft()).toBeNull()
     expect(store.error()).toBe('not a curl command line')
+  })
+})
+
+// ── Watching, so nothing has to be pressed (nocx-19rcp) ───────────────────
+//
+// A collection is a FOLDER ON DISK and it changes underneath us — a git pull,
+// a neighbouring editor, a colleague's branch. The product already answers
+// "how does a surface learn a folder changed": files.watch, which the Files
+// panel uses. Every assertion below is on the SET handed to it, because the
+// call REPLACES the set rather than adding to it — a count cannot tell a
+// removal from an addition, and it is the removal that leaks a watch.
+
+describe('ApiStore — watching the open collection roots', () => {
+  it('publishes the roots it renders, once the first listing has said what they are', async () => {
+    const { watch } = await watchingStore()
+    expect(watch.open).toHaveBeenCalledWith(WATCH_SESSION, '/')
+    expect(watch.sets()).toEqual([[COLLECTION_PATH]])
+  })
+
+  it('a folder opened afterwards joins the set, and the set is sent whole', async () => {
+    const { store, watch } = await watchingStore({
+      openCollection: vi
+        .fn()
+        .mockResolvedValue({ handle: 'h2', collection: collectionsFixture().collection }),
+    })
+    await store.openFolder('/w/orders-api')
+    expect(watch.lastSet()).toEqual([COLLECTION_PATH, '/w/orders-api'])
+  })
+
+  it('closing a collection removes ITS path from the set, and leaves the others in it', async () => {
+    const list = vi.fn().mockResolvedValue({
+      collections: [
+        collectionsFixture(),
+        collectionsFixture({ handle: 'h2', path: '/w/orders-api' }),
+      ],
+    })
+    const { store, watch } = await watchingStore({ listCollections: list })
+    expect(watch.lastSet()).toEqual([COLLECTION_PATH, '/w/orders-api'])
+    await store.closeFolder('h2')
+    expect(watch.lastSet()).toEqual([COLLECTION_PATH])
+  })
+
+  it('closing the last collection sends the empty set — a watch nobody holds is a leak', async () => {
+    const { store, watch } = await watchingStore()
+    await store.closeFolder(HANDLE)
+    expect(watch.lastSet()).toEqual([])
+  })
+
+  it('a set that has not changed is not sent twice', async () => {
+    const { store, watch } = await watchingStore()
+    const sent = watch.sets().length
+    await store.openRequest(HANDLE, 'users/create.json')
+    expect(watch.sets()).toHaveLength(sent)
+  })
+
+  it('re-lists when the backend says a watched folder is dirty, with nothing pressed', async () => {
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const { watch } = await watchingStore({ listCollections: list })
+    expect(list).toHaveBeenCalledTimes(1)
+    watch.changed(COLLECTION_PATH)
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+  })
+
+  it('re-lists for a file INSIDE a watched root, which is where a request file lands', async () => {
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const { watch } = await watchingStore({ listCollections: list })
+    watch.changed(`${COLLECTION_PATH}/users`)
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+  })
+
+  it('ignores a change for a folder it does not hold, and one for another binding', async () => {
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const { watch } = await watchingStore({ listCollections: list })
+    watch.changed('/w/somebody-elses-tree')
+    watch.changed(COLLECTION_PATH, 'another-binding')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ApiStore — when the watch does not come up', () => {
+  it('a refused files.watch is on the surface, and the collections stay listed', async () => {
+    const { store } = await watchingStore(
+      {},
+      watchFixture({ watch: vi.fn().mockRejectedValue(new Error('watch limit reached')) }),
+    )
+    expect(store.watchFailed()).toBe('watch limit reached')
+    expect(store.collections().map((c) => c.path)).toEqual([COLLECTION_PATH])
+  })
+
+  it('a watch that fails while a NEW folder joins leaves the folders already watched watched', async () => {
+    // The contract's own rule, from the client's side: "a newly-added watch
+    // that fails to establish must not take the healthy existing watches down
+    // with it". The observable is not a flag — it is that a change on the
+    // first folder still re-lists it after the second folder's watch was
+    // refused.
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const watch = vi.fn().mockResolvedValueOnce({ mode: 'polling' })
+    watch.mockRejectedValueOnce(new Error('watch limit reached'))
+    const fixture = watchFixture({ watch })
+    const { store } = await watchingStore(
+      {
+        listCollections: list,
+        openCollection: vi
+          .fn()
+          .mockResolvedValue({ handle: 'h2', collection: collectionsFixture().collection }),
+      },
+      fixture,
+    )
+    await store.openFolder('/w/orders-api')
+    expect(store.watchFailed()).toBe('watch limit reached')
+    fixture.changed(COLLECTION_PATH)
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+  })
+
+  it('refresh is the retry: it re-sends an unchanged set and clears the failure', async () => {
+    const watch = vi.fn().mockRejectedValueOnce(new Error('watch limit reached'))
+    watch.mockResolvedValue({ mode: 'watching' })
+    const { store, watch: fixture } = await watchingStore({}, watchFixture({ watch }))
+    expect(store.watchFailed()).toBe('watch limit reached')
+    await store.refresh()
+    expect(fixture.sets()).toEqual([[COLLECTION_PATH], [COLLECTION_PATH]])
+    expect(store.watchFailed()).toBe('')
+    expect(store.watchMode()).toBe('watching')
+  })
+
+  it('a refused files.open says so and never pretends to watch', async () => {
+    const fixture = watchFixture({
+      open: vi.fn().mockRejectedValue(new Error('files not available')),
+    })
+    const { store } = await watchingStore({}, fixture)
+    expect(store.watchFailed()).toBe('files not available')
+    expect(fixture.watch).not.toHaveBeenCalled()
+    expect(store.watchMode()).toBeNull()
+    expect(store.collections().map((c) => c.path)).toEqual([COLLECTION_PATH])
+  })
+
+  it('with no local session there is nothing to open a binding against, and nothing breaks', async () => {
+    const fixture = watchFixture({ localSession: null })
+    const { store } = await watchingStore({}, fixture)
+    expect(fixture.open).not.toHaveBeenCalled()
+    expect(store.watchMode()).toBeNull()
+    expect(store.collections().map((c) => c.path)).toEqual([COLLECTION_PATH])
+  })
+
+  it('with no watch capability at all the store still lists — the button is the whole answer', async () => {
+    const store = createApiStore(servicesFixture())
+    store.startWatching()
+    await store.refresh()
+    expect(store.collections().map((c) => c.path)).toEqual([COLLECTION_PATH])
+    expect(store.watchMode()).toBeNull()
+    expect(store.watchFailed()).toBe('')
+  })
+})
+
+describe('ApiStore — the refresh mode the backend reports', () => {
+  it('carries a degraded reason through, and drops it the instant watching recovers', async () => {
+    const watch = vi
+      .fn()
+      .mockResolvedValueOnce({ mode: 'polling', degradedReason: 'inotify watch limit reached' })
+    watch.mockResolvedValue({ mode: 'watching' })
+    const { store } = await watchingStore({}, watchFixture({ watch }))
+    expect(store.watchMode()).toBe('polling')
+    expect(store.watchDegradedReason()).toBe('inotify watch limit reached')
+    await store.refresh()
+    expect(store.watchMode()).toBe('watching')
+    expect(store.watchDegradedReason()).toBeNull()
+  })
+
+  it('designed-mode polling carries no reason, so there is nothing to warn about', async () => {
+    const { store } = await watchingStore()
+    expect(store.watchMode()).toBe('polling')
+    expect(store.watchDegradedReason()).toBeNull()
+  })
+})
+
+describe('ApiStore — the watch lifecycle, both ends', () => {
+  it('a reconnect re-opens the binding the dead connection minted and re-sends the set', async () => {
+    const { watch } = await watchingStore()
+    expect(watch.open).toHaveBeenCalledTimes(1)
+    watch.reconnect()
+    await vi.waitFor(() => expect(watch.open).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(watch.sets()).toHaveLength(2))
+    expect(watch.lastSet()).toEqual([COLLECTION_PATH])
+  })
+
+  it('dispose releases the binding and stops listening — a change after it changes nothing', async () => {
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const { store, watch } = await watchingStore({ listCollections: list })
+    store.dispose()
+    expect(watch.close).toHaveBeenCalledWith(WATCH_BINDING)
+    watch.changed(COLLECTION_PATH)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(list).toHaveBeenCalledTimes(1)
   })
 })
 

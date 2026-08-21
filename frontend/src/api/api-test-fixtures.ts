@@ -6,7 +6,11 @@
 // The values are the design's own worked example (§9.2, §11): an acme-api
 // collection with a POST that answers 201 in 184ms.
 import { vi } from 'vitest'
-import type { ApiWorkbenchServices } from './api-client'
+import type { ApiWorkbenchServices, CollectionWatchPort } from './api-client'
+import type { FilesChanged } from '../generated/files.changed'
+import type { FilesOpenResult } from '../generated/files.open'
+import type { FilesWatchResult } from '../generated/files.watch'
+import type { FilesCloseResult } from '../generated/files.close'
 import type { ApiExchange, ApiOpenCollection, ApiRequest, ApiResponse } from './api-model'
 import type { ApiRequestSendResult, Raw, Span } from '../generated/api.request.send'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
@@ -29,7 +33,9 @@ export const HANDLE = 'h1'
  *  test pass while the renderer overwrote the wrong row. */
 export const CREATED_HANDLE = 'h9'
 export const CREATED_NAME = 'orders-api'
-const COLLECTION_PATH = '/w/acme-api'
+/** Where the worked example's collection folder sits — the path that goes
+ *  into the watch set. */
+export const COLLECTION_PATH = '/w/acme-api'
 export const CREATE_REL_PATH = 'users/create.json'
 export const LIST_REL_PATH = 'users/list.json'
 
@@ -145,6 +151,95 @@ export function sendFixture(over: Partial<ApiResponse> = {}): ApiRequestSendResu
  */
 export function createdFixture(name = CREATED_NAME): ApiCollectionsCreateResult {
   return { handle: CREATED_HANDLE, collection: { name, requests: [], malformed: [] } }
+}
+
+/** The local session the workbench opens its watch binding against. */
+export const WATCH_SESSION = 'sess-local'
+/** The binding `files.open` mints for that watch. */
+export const WATCH_BINDING = 'bind-1'
+
+/** A collection watch a test can drive: the spies the store calls, plus the
+ *  two things only the BACKEND can do — announce that a folder changed, and
+ *  re-attach after a reconnect. Both are reached through the handlers the
+ *  store itself registered, so a test that fires one is exercising the
+ *  subscription the product uses rather than a method of its own. */
+export interface WatchFixture {
+  port: CollectionWatchPort
+  open: ReturnType<typeof vi.fn>
+  watch: ReturnType<typeof vi.fn>
+  close: ReturnType<typeof vi.fn>
+  /** The backend says one watched directory is dirty. */
+  changed(path: string, bindingId?: string): void
+  /** The transport re-attached (AD-9). */
+  reconnect(): void
+  /** Every path set handed to files.watch, in order — the assertion the
+   *  design asks for, because files.watch REPLACES the set and a count
+   *  cannot tell a removal from an addition. */
+  sets(): string[][]
+  /** The set the backend is holding now — the last one sent, or undefined
+   *  before anything was. */
+  lastSet(): string[] | undefined
+}
+
+export function watchFixture(
+  over: {
+    localSession?: string | null
+    open?: ReturnType<typeof vi.fn>
+    watch?: ReturnType<typeof vi.fn>
+    close?: ReturnType<typeof vi.fn>
+  } = {},
+): WatchFixture {
+  let onChanged: ((p: FilesChanged) => void) | null = null
+  let onConnect: (() => void) | null = null
+  const open =
+    over.open ??
+    vi.fn().mockResolvedValue({
+      bindingId: WATCH_BINDING,
+      endpointId: null,
+      root: { path: '/', display: '/', inferred: false, inferredReason: '' },
+    })
+  // 'polling' with NO reason is what a healthy LOCAL binding answers today —
+  // internal/transport says so in as many words, because a reason there would
+  // light the degrade badge for every user forever. The default fixture is
+  // therefore the case that must NOT warn.
+  const watch = over.watch ?? vi.fn().mockResolvedValue({ mode: 'polling' })
+  const close = over.close ?? vi.fn().mockResolvedValue({})
+  const port: CollectionWatchPort = {
+    localSession: () => (over.localSession === undefined ? WATCH_SESSION : over.localSession),
+    // The casts are the seam between a `vi.fn()` (which answers `any`) and
+    // the port's declared shape. They are HERE, once, rather than at every
+    // call site in every test — and they are what makes a fixture that
+    // answers the wrong shape a type error in this file instead of a
+    // mysterious undefined in a test three files away.
+    open: (sessionId, rootPath) => open(sessionId, rootPath) as Promise<FilesOpenResult>,
+    watch: (bindingId, paths) => watch(bindingId, paths) as Promise<FilesWatchResult>,
+    close: (bindingId) => close(bindingId) as Promise<FilesCloseResult>,
+    subscribeChanged: (handler) => {
+      onChanged = handler
+      return () => {
+        onChanged = null
+      }
+    },
+    onConnect: (handler) => {
+      onConnect = handler
+      return () => {
+        onConnect = null
+      }
+    },
+  }
+  return {
+    port,
+    open,
+    watch,
+    close,
+    changed: (path, bindingId = WATCH_BINDING) => onChanged?.({ bindingId, path }),
+    reconnect: () => onConnect?.(),
+    sets: () => watch.mock.calls.map((c: unknown[]) => c[1] as string[]),
+    lastSet: () => {
+      const all = watch.mock.calls.map((c: unknown[]) => c[1] as string[])
+      return all[all.length - 1]
+    },
+  }
 }
 
 /** A backend that has no collections open — the state a person starts in,

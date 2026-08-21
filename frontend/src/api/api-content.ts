@@ -58,7 +58,26 @@ export class ApiContent extends SolidPaneContent {
     // Aborted while the root was opening: the base class has already
     // returned without mounting, so there is nothing to fill.
     if (this._disposed || this._hostElement === null) return
+    // Subscribe BEFORE the first listing. The subscription costs no round
+    // trip — the watch set is published by the listing that follows — and
+    // registering it afterwards would leave a window in which a change that
+    // arrived during the listing had nobody to tell.
+    this.store.startWatching()
     await this.store.refresh()
+  }
+
+  /**
+   * The tab closed.
+   *
+   * There is still no COLLECTION handle to release — those belong to the
+   * app's opened-folder list (design §6.1) and closing the tab must not close
+   * the user's folders — but there IS now a files binding, minted here and
+   * held by nothing else, so this is the only place it can be given back. The
+   * base class closes the Solid root and removes the host element.
+   */
+  dispose(): void {
+    this.store.dispose()
+    super.dispose()
   }
 
   /**
@@ -89,9 +108,4 @@ export class ApiContent extends SolidPaneContent {
 
   // viewportChanged is inherited as a no-op: the workbench lays itself out in
   // CSS and has nothing to recompute from the pane's pixel size.
-  //
-  // dispose() is inherited too — it closes the Solid root and removes the
-  // host element. There is no binding to release: the collection handles the
-  // store holds belong to the app's opened-folder list (design §6.1), not to
-  // this pane, and closing the tab must not close the user's folders.
 }

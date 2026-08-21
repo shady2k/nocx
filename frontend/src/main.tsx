@@ -390,23 +390,6 @@ async function main() {
     },
   })
 
-  // The API workbench (design §9.1): ONE pane, singleton-keyed, holding the
-  // collection tree, the request form and the runs. Registered through its
-  // own module rather than inline here, because the singleton key and the
-  // activity-bar entry are the surface's decisions and not the shell's — the
-  // file viewer and the notes surface are wired the same way.
-  //
-  // The directory picker comes off the ONE dialog client (AD-8), and comes
-  // off it as a capability that may be absent: `dialog.*` needs a Wails
-  // runtime, and the `make dev-web` harness has none, so the workbench draws
-  // its Browse control only where the picker is real. `directoryPicker`
-  // answers undefined in exactly that case.
-  registerApiSurface(
-    registry,
-    tm,
-    createApiWorkbenchServices(dispatcher, directoryPicker(dialogClient)),
-  )
-
   // Ports (nocx-wzc4.7): a SIDEBAR VIEW, not a tab. The owner's reference
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched
   // while the command that opens it is being typed; a tab replaces the
@@ -431,11 +414,31 @@ async function main() {
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
+  // The most recent LOCAL session this window has seen, for surfaces that
+  // need a filesystem on THIS machine rather than on whichever tab is in
+  // front. `files.open` mints a binding for a session the connection owns and
+  // builds that session's provider, so watching a backend-local folder — an
+  // API collection (design §13.1) — through the ACTIVE origin would watch the
+  // wrong machine the moment an SSH tab came forward, and would detach
+  // entirely when a tab with no origin at all (the workbench's own) did.
+  //
+  // Latched rather than tracked: it is the answer to "is there a local
+  // session here", and the tab in front does not change that answer. Null
+  // until the first local session opens, which is the state a build with no
+  // terminal is honestly in — the surfaces reading it draw no capability then
+  // rather than one that fails when used.
+  const [localSessionId, setLocalSessionId] = createSignal<string | null>(null)
+  const latchLocalSession = (): void => {
+    const origin = tm.activeOrigin()
+    if (origin !== null && origin.kind === 'local') setLocalSessionId(origin.sessionId)
+  }
+  latchLocalSession()
   tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    latchLocalSession()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -493,6 +496,45 @@ async function main() {
     clipboard,
     activeOrigin,
   })
+
+  // The API workbench (design §9.1): ONE pane, singleton-keyed, holding the
+  // collection tree, the request form and the runs. Registered through its
+  // own module rather than inline here, because the singleton key and the
+  // activity-bar entry are the surface's decisions and not the shell's — the
+  // file viewer and the notes surface are wired the same way.
+  //
+  // Two capabilities are handed in, and BOTH may be absent — absence is the
+  // capability, never a stub that fails when pressed.
+  //
+  // The directory picker comes off the ONE dialog client (AD-8): `dialog.*`
+  // needs a Wails runtime and the `make dev-web` harness has none, so the
+  // workbench draws its Browse control only where the picker is real.
+  //
+  // The collection watch comes off the ONE files client, for the same reason
+  // and with a second condition. A collection is a folder on disk that a
+  // `git pull` rewrites underneath the panel, and the product already answers
+  // "how does a surface learn a directory changed" — `files.watch` plus
+  // `files.changed`, which the Files panel above uses. So the workbench is
+  // given that answer rather than a second one (nocx-19rcp). It is wired here
+  // rather than inside the api client because `files.*` is another module's
+  // method: the workbench declares the slice it needs, and the composition
+  // root is what may know both halves.
+  //
+  // It is registered after the files wrapper deliberately — the wrapper is
+  // the composition root's binding-liveness bookkeeping and every binding
+  // this window opens goes through it.
+  registerApiSurface(
+    registry,
+    tm,
+    createApiWorkbenchServices(dispatcher, directoryPicker(dialogClient), {
+      localSession: () => localSessionId(),
+      open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+      watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
+      close: (bindingId) => filesServicesTracked.close(bindingId),
+      subscribeChanged: (handler) => filesServicesTracked.subscribeFilesChanged(handler),
+      onConnect: (handler) => filesServicesTracked.onConnect(handler),
+    }),
+  )
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
   // The panel's backend surface, wrapped so the composition root owns the

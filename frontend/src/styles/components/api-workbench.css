@@ -5,13 +5,29 @@
 .api-workbench {
   display: grid;
   grid-template-columns: minmax(220px, 280px) 1fr;
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  /* The header is `auto`, so it is exactly as tall as the action in it and
+     takes nothing from the two content rows. */
+  grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
   grid-template-areas:
+    'header header'
     'tree request'
     'tree runs';
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+/* The pane's header — the refresh action and the badge that says whether the
+   panel is still following the disk. Placement only: both are kit components
+   and nothing here repaints either. It spans both columns because it speaks
+   for the whole pane, not for the tree column the action used to sit under. */
+.api-workbench__header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
 }
 
 .api-workbench__tree {

@@ -25,6 +25,10 @@ import type { ApiRequestWriteResult } from '../generated/api.request.write'
 import type { ApiRequestSendResult } from '../generated/api.request.send'
 import type { ApiImportPostmanResult } from '../generated/api.import.postman'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
+import type { FilesOpenResult } from '../generated/files.open'
+import type { FilesWatchResult } from '../generated/files.watch'
+import type { FilesCloseResult } from '../generated/files.close'
+import type { FilesChanged } from '../generated/files.changed'
 import type { ApiRequest } from './api-model'
 
 class ApiClient {
@@ -139,6 +143,49 @@ export function directoryPicker(client: object): DirectoryPicker | undefined {
   return () => carrier.openDirectoryDialog()
 }
 
+/**
+ * How the workbench learns that a collection folder changed underneath it.
+ *
+ * IT IS THE FILES PANEL'S MECHANISM, NOT A SECOND ONE. A collection is a
+ * folder on disk that a `git pull`, a neighbouring editor or a colleague's
+ * branch can rewrite while the tree is on screen, and the product already
+ * answers "how does a surface learn a directory changed": `files.watch`, plus
+ * the `files.changed` invalidation it turns on. Answering it again inside
+ * `api.*` would be two owners of one behaviour — they would agree everywhere
+ * anybody looked and disagree the day one of them was edited (AGENTS.md).
+ *
+ * The port is the SLICE of `files.*` the workbench needs, not the Files
+ * panel's client: `files.*` belongs to another module (AD-8), so this
+ * declares what the workbench requires and the composition root binds it off
+ * the one files client. Nothing here decodes a payload — every shape is the
+ * generated contract type.
+ *
+ * `localSession` is why this is a capability and not a guarantee.
+ * `files.open` mints a binding for a SESSION the connection owns, and it
+ * builds that session's provider — so a collection folder, which is
+ * backend-LOCAL (design §13.1), can only be watched through a LOCAL session.
+ * A window with no local session yet has nothing to open a binding against
+ * and answers null; the workbench then simply does not watch, which is the
+ * one case the header's Refresh is still the whole answer for.
+ */
+export interface CollectionWatchPort {
+  /** The local session a watch binding may be opened against, or null when
+   *  this window has none. */
+  localSession(): string | null
+  open(sessionId: string, rootPath?: string): Promise<FilesOpenResult>
+  /** REPLACE the binding's watch set. The backend diffs, so a collection that
+   *  has been closed cannot leak a watch, and the swap is atomic: a newly
+   *  added path that fails to establish does not take the healthy ones down
+   *  with it. */
+  watch(bindingId: string, paths: string[]): Promise<FilesWatchResult>
+  close(bindingId: string): Promise<FilesCloseResult>
+  /** The server-initiated invalidation. Returns the unsubscribe. */
+  subscribeChanged(handler: (params: FilesChanged) => void): () => void
+  /** The transport re-attached (AD-9): the binding the dead connection minted
+   *  is gone with it, so the watch has to be established again. */
+  onConnect(handler: () => void): () => void
+}
+
 /** The workbench's entire backend surface, so a test can substitute a fake. */
 export interface ApiWorkbenchServices {
   listCollections(): Promise<ApiCollectionsListResult>
@@ -162,20 +209,36 @@ export interface ApiWorkbenchServices {
    * ship.
    */
   openDirectory?: DirectoryPicker
+  /**
+   * How the workbench notices a collection folder changed — and ABSENT when
+   * this build cannot watch, for the same reason `openDirectory` is.
+   *
+   * Optionality is the capability again, and here it has two causes rather
+   * than one: a build with no filesystem wired answers `-32601` to every
+   * `files.*` call, and a window with no LOCAL session has nothing to open a
+   * binding against. In both cases the workbench falls back to the thing that
+   * has always worked — the header's Refresh — instead of showing a tree that
+   * quietly stopped following the disk.
+   */
+  watchCollections?: CollectionWatchPort
 }
 
 /** Real implementation over the dispatcher.
  *
  *  `picker` is threaded through rather than built here: `dialog.*` is not an
  *  api.* method and this client does not own it (AD-8). The composition root
- *  binds it off the one dialog client and hands it in. */
+ *  binds it off the one dialog client and hands it in — and `watchCollections`
+ *  arrives the same way, off the one files client, for exactly the same
+ *  reason. */
 export function createApiWorkbenchServices(
   dispatcher: Dispatcher,
   picker?: DirectoryPicker,
+  watchCollections?: CollectionWatchPort,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
     ...(picker ? { openDirectory: picker } : {}),
+    ...(watchCollections ? { watchCollections } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),

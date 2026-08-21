@@ -27,6 +27,7 @@ import { Stack } from '../ui/stack'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
 import { TreeRow } from '../ui/tree-row'
+import { WatchBadge } from '../ui/watch-badge'
 import { showToast } from '../ui/toast'
 import { flattenCollections, type ApiTreeRow } from './api-tree'
 import { CollectionDialog } from './collection-dialog'
@@ -203,6 +204,36 @@ export function ApiPane(props: ApiPaneProps) {
 
   return (
     <div class="api-workbench">
+      {/* THE PANE'S HEADER. The owner asked for the refresh action "наверх,
+          как в других панелях", and the panel it is like is Files, whose
+          Refresh and watch badge sit together in the view's header
+          (files-view.tsx). The sidebar's per-view `actions` slot is not
+          reachable from here and should not be: that slot belongs to sidebar
+          VIEWS, and the workbench is a pane with a header of its own. What
+          is mirrored is the PLACEMENT and the pair — the action, and beside
+          it the one thing that says whether the panel is still following the
+          disk at all. */}
+      <header class="api-workbench__header">
+        <IconButton
+          id="api-refresh"
+          size="sm"
+          title="Re-read the open folders"
+          ariaLabel="Re-read the open folders"
+          onClick={() => void store.refresh()}
+        >
+          <RefreshIcon />
+        </IconButton>
+        {/* The kit's badge, not a second one. `local` is unconditionally
+            true because a collection folder is backend-LOCAL (§13.1) — the
+            watch binding is opened against a local session on purpose, so
+            there is no remote case here whose designed mode is polling. */}
+        <WatchBadge
+          testId="api-polling-badge"
+          mode={store.watchMode()}
+          reason={store.watchDegradedReason()}
+          local
+        />
+      </header>
       <aside class="api-workbench__tree">
         <Stack gap="loose">
           <Section title="Collections">
@@ -257,6 +288,21 @@ export function ApiPane(props: ApiPaneProps) {
                 action={
                   <Button onClick={() => void store.refresh()}>Re-read the open folders</Button>
                 }
+              />
+            </Show>
+            {/* The watch did not come up, so the tree has stopped following
+                the disk. It is a WARNING rather than a danger — everything on
+                screen is still true, it has simply stopped being kept true —
+                and it is a state with the one action for it, which is what
+                StatusCard is. Not a toast: a toast cannot answer "why is this
+                stale?" ten minutes later. Refresh is the retry, because it
+                re-sends the watch set. */}
+            <Show when={store.watchFailed() !== ''}>
+              <StatusCard
+                tone="warning"
+                title="Not watching these folders"
+                description={`${store.watchFailed()} — changes on disk will not appear on their own until this recovers.`}
+                action={<Button onClick={() => void store.refresh()}>Retry</Button>}
               />
             </Show>
           </Section>
@@ -372,15 +418,6 @@ export function ApiPane(props: ApiPaneProps) {
               />
             </Show>
           </Section>
-
-          <IconButton
-            size="sm"
-            title="Re-read the open folders"
-            ariaLabel="Re-read the open folders"
-            onClick={() => void store.refresh()}
-          >
-            <RefreshIcon />
-          </IconButton>
         </Stack>
       </aside>
 

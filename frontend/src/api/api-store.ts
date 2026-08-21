@@ -33,8 +33,9 @@
 // mean opening the raw text of the run you are reading also opens it for the
 // nineteen above it.
 
-import { createSignal } from 'solid-js'
+import { createSignal, untrack } from 'solid-js'
 import type { ApiWorkbenchServices } from './api-client'
+import type { FilesChanged } from '../generated/files.changed'
 import {
   adoptCreatedCollection,
   adoptImportedRequest,
@@ -103,6 +104,30 @@ export interface ApiStore {
   loading(): boolean
   sending(): boolean
 
+  /** The backend's reported refresh mode for the collection watch set, or
+   *  null until the first `files.watch` answers — and for a build that
+   *  cannot watch at all. */
+  watchMode(): 'watching' | 'polling' | null
+  /** Why refresh is degraded: non-null only when a LOCAL watch could not be
+   *  established and the backend fell back to polling. The persistent badge
+   *  renders from this; designed-mode polling carries no reason and warns
+   *  about nothing. */
+  watchDegradedReason(): string | null
+  /** The watch could not be established, in the backend's words, or '' when
+   *  the last attempt worked. Both ends of the interval: it is set from the
+   *  moment a `files.open` or `files.watch` is refused until the next
+   *  successful `files.watch` — which `refresh()` always sends, so the header
+   *  action is the retry. */
+  watchFailed(): string
+
+  /** Subscribe to the change stream and begin watching. Called once, by the
+   *  pane's mount; `dispose()` is the other end. Idempotent. */
+  startWatching(): void
+  /** Release the watch binding and drop the subscriptions. The collection
+   *  handles are NOT released — they belong to the app's opened-folder list
+   *  (design §6.1) and closing the tab must not close the user's folders. */
+  dispose(): void
+
   refresh(): Promise<void>
   openFolder(path: string): Promise<void>
   /** Make a collection under `name` and leave it open, selected and in the
@@ -139,6 +164,179 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   // duplicate id renders one row for two exchanges.
   let nextRunId = 1
 
+  // ── Watching (nocx-19rcp) ───────────────────────────────────────────────
+  //
+  // A collection is a folder on disk, and it changes underneath us. The
+  // product already answers "how does a surface learn a directory changed" —
+  // files.watch plus the files.changed invalidation — so this uses that and
+  // does not invent a second answer inside api.* (AD-8; AGENTS.md's "look for
+  // the existing answer before you write a second one").
+  //
+  // Three properties come from the contract and are kept HERE rather than
+  // hoped for:
+  //
+  //  * files.watch REPLACES the set. So the set is derived from what the
+  //    panel renders and re-published whenever that changes — a collection
+  //    that has been closed leaves the set by construction, and cannot leak a
+  //    watch because nothing has to remember to remove it.
+  //  * The published set is recorded at the moment the paths are READ and is
+  //    NOT rolled back when the call fails. A rejected watch is a sticky
+  //    failure the user retries through the header's Refresh; re-sending the
+  //    identical set on the next listing would erase the message it is meant
+  //    to leave up. refresh() forgets the record first, which is what makes
+  //    that action the retry.
+  //  * A newly added path that fails to establish must not take the healthy
+  //    watches down. Nothing here tears anything down on failure: the binding
+  //    stays, the subscription stays, and a change on a folder that IS still
+  //    watched still re-lists it.
+  const watcher = services.watchCollections
+  const [watchMode, setWatchMode] = createSignal<'watching' | 'polling' | null>(null)
+  const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
+  const [watchFailed, setWatchFailed] = createSignal('')
+
+  /** The binding every watch call carries, or null while there is none. */
+  let bindingId: string | null = null
+  /** The set as last handed to files.watch, or null when the backend's set
+   *  must be treated as unknown (never sent; dropped by a reconnect; a
+   *  refresh deliberately forcing a re-send). */
+  let publishedPaths: readonly string[] | null = null
+  /** The change subscription and the reconnect hook, so dispose has both
+   *  ends of the interval it closes. */
+  let unsubscribes: (() => void)[] = []
+  /** True from dispose() onwards: a response that lands afterwards must not
+   *  paint, and must not re-open a binding nobody is holding. */
+  let disposed = false
+
+  /**
+   * The collection roots the panel currently renders.
+   *
+   * A row minted by `api.collections.create` carries NO path — §13.1 leaves
+   * the location to the backend and the result does not spell it — so it is
+   * not in the set until the next listing fills it in. That is a real gap of
+   * one round trip, and it closes itself: createCollection is followed by the
+   * user's next refresh or by any change on a folder that IS watched.
+   *
+   * Deduplicated, because a set is what the wire wants and two rows can name
+   * one folder; ordered by the list, because comparing against the published
+   * record has to be stable.
+   */
+  const watchPaths = (): string[] =>
+    // Untracked, and it has to be: every caller is an async continuation or a
+    // notification handler, never a tracked scope. A subscription taken here
+    // would belong to whatever computation happened to be running when the
+    // promise resolved — which is nothing at all, so the reads would simply
+    // be ignored while looking like they were watched.
+    untrack(() => {
+      const out: string[] = []
+      for (const c of collections()) {
+        if (c.path !== '' && !out.includes(c.path)) out.push(c.path)
+      }
+      return out
+    })
+
+  /** Open the binding the watch set is carried on, or answer null when there
+   *  is nothing to open one against.
+   *
+   *  ROOTED AT '/', and it is a carrier rather than a view: the panel never
+   *  lists through it, and a collection folder can sit anywhere. `files.open`
+   *  needs a session the connection owns and builds THAT session's provider,
+   *  so the port hands us a LOCAL one — a collection is backend-local (§13.1)
+   *  and an SSH session's binding would watch the wrong machine. */
+  const openBinding = async (): Promise<string | null> => {
+    if (watcher === undefined || disposed) return null
+    if (bindingId !== null) return bindingId
+    const sessionId = watcher.localSession()
+    if (sessionId === null) return null
+    try {
+      const res = await watcher.open(sessionId, '/')
+      if (disposed) {
+        // Disposed while the open was in flight: releasing it here is the
+        // only chance anybody gets — nothing else holds the id.
+        void watcher.close(res.bindingId).catch(() => undefined)
+        return null
+      }
+      bindingId = res.bindingId
+      return bindingId
+    } catch (err) {
+      if (!disposed) setWatchFailed(message(err))
+      return null
+    }
+  }
+
+  /** Publish the watch set iff what the panel renders has drifted from what
+   *  the backend was last told. Every seam that can change the set calls
+   *  this and nothing calls files.watch directly, so a set cannot be sent
+   *  twice for one change and cannot be missed by a path that forgot. */
+  const syncWatchSet = async (): Promise<void> => {
+    if (watcher === undefined || disposed) return
+    const want = watchPaths()
+    if (
+      publishedPaths !== null &&
+      publishedPaths.length === want.length &&
+      publishedPaths.every((path, i) => path === want[i])
+    ) {
+      return
+    }
+    // Nothing open and no binding yet: there is nothing to watch, so no
+    // binding is minted for an empty set. The record still moves, so the
+    // first collection to arrive is a drift and publishes.
+    if (want.length === 0 && bindingId === null) {
+      publishedPaths = want
+      return
+    }
+    const id = await openBinding()
+    if (id === null || disposed) return
+    publishedPaths = want
+    try {
+      const res = await watcher.watch(id, want)
+      if (disposed) return
+      setWatchFailed('')
+      setWatchMode(res.mode)
+      setWatchDegradedReason(res.degradedReason ?? null)
+    } catch (err) {
+      if (disposed) return
+      setWatchFailed(message(err))
+    }
+  }
+
+  /**
+   * The server-initiated invalidation: one dirty path, no entries, so exactly
+   * one code path re-reads a collection.
+   *
+   * Two filters, each for a different defect. A change for a binding this
+   * store does not follow is not its business — the Files panel's binding,
+   * or one from a previous connection. And a path outside every collection
+   * root cannot be a collection of ours changing; the watch set is what
+   * decides, not a guess.
+   */
+  const onCollectionChanged = (p: FilesChanged): void => {
+    if (disposed || bindingId === null || p.bindingId !== bindingId) return
+    const affected = watchPaths().some((root) => p.path === root || p.path.startsWith(`${root}/`))
+    if (!affected) return
+    relist()
+  }
+
+  /** Re-read the open folders because the DISK said so, not because a person
+   *  did. It is the same listing the header's action issues — one code path
+   *  renders a collection — and it does not force the watch set, so a change
+   *  cannot erase a sticky watch failure the user has not retried.
+   *
+   *  Serialised, and at most one queued: a burst on one folder must not put
+   *  five listings on the wire whose responses can land out of order and
+   *  paint an older tree over a newer one. */
+  let listingChain: Promise<void> = Promise.resolve()
+  let relistQueued = false
+  const relist = (): void => {
+    if (relistQueued) return
+    relistQueued = true
+    listingChain = listingChain.then(async () => {
+      relistQueued = false
+      if (disposed) return
+      await readCollections()
+      await syncWatchSet()
+    })
+  }
+
   /** The draft differs from what the file last answered. Compared by value —
    *  the form replaces the object on every keystroke, so identity would say
    *  "dirty" for a field typed into and typed back. */
@@ -149,7 +347,9 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     return JSON.stringify(d) !== JSON.stringify(s)
   }
 
-  const refresh = async (): Promise<void> => {
+  /** Re-read the open folders. The one call that renders the list, whoever
+   *  asked for it — a person, an import, or the disk. */
+  const readCollections = async (): Promise<void> => {
     setLoading(true)
     try {
       const result = await services.listCollections()
@@ -160,6 +360,17 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     } finally {
       setLoading(false)
     }
+  }
+
+  /** The header's action: re-read the folders AND re-establish the watch,
+   *  which is what makes it the retry for a watch that failed. Forgetting the
+   *  published record first is the whole of that — an unchanged set would
+   *  otherwise be suppressed as "already sent", and the sticky failure would
+   *  have no way back. */
+  const refresh = async (): Promise<void> => {
+    await readCollections()
+    publishedPaths = null
+    await syncWatchSet()
   }
 
   const openFolder = async (path: string): Promise<void> => {
@@ -180,6 +391,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     } catch (err) {
       setError(message(err))
     }
+    // Outside the try: a folder that joined the list is watched whether or
+    // not something else in this call went wrong, and a watch that is refused
+    // is reported through watchFailed rather than as the open's failure.
+    await syncWatchSet()
   }
 
   /**
@@ -217,6 +432,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // is what makes a refusal look like a button that does nothing.
       setError(message(err))
     }
+    // A created row carries no path (§13.1), so this publishes nothing new
+    // today — it is here because the SET is derived from the list and every
+    // seam that changes the list republishes it. A seam that decided for
+    // itself whether its change could matter is how a path stops being
+    // watched without anybody noticing.
+    await syncWatchSet()
   }
 
   const closeFolder = async (handle: string): Promise<void> => {
@@ -236,6 +457,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     } catch (err) {
       setError(message(err))
     }
+    // The folder has left the list, so it leaves the watch set — the whole
+    // set is re-sent without it, which is what the contract's REPLACE
+    // semantics turn into "closing a collection cannot leak a watch".
+    await syncWatchSet()
   }
 
   const openRequest = async (handle: string, relPath: string): Promise<void> => {
@@ -342,6 +567,43 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     setRuns((prev) => prev.map((r) => (r.id === id ? { ...r, view } : r)))
   }
 
+  const startWatching = (): void => {
+    if (watcher === undefined || disposed || unsubscribes.length > 0) return
+    unsubscribes.push(watcher.subscribeChanged(onCollectionChanged))
+    unsubscribes.push(
+      watcher.onConnect(() => {
+        // A reconnect is a NEW connection, and a binding is bounded by the
+        // connection that minted it — so the id we hold addresses nothing and
+        // the set the backend was told about is gone with it. Both records
+        // are dropped, which makes the next sync re-open and re-send rather
+        // than suppress an unchanged set and leave the panel detached from
+        // the change stream (AD-9).
+        bindingId = null
+        publishedPaths = null
+        void syncWatchSet()
+      }),
+    )
+    // No sync here: the set is empty until the first listing says what the
+    // open folders are, and files.watch with an empty set is a round trip
+    // that establishes nothing. refresh() — which the pane's mount issues
+    // next — is what publishes.
+  }
+
+  const dispose = (): void => {
+    disposed = true
+    for (const off of unsubscribes) off()
+    unsubscribes = []
+    const id = bindingId
+    bindingId = null
+    publishedPaths = null
+    if (id !== null && watcher !== undefined) {
+      // Its watches go with it (files.close tears them down), so there is no
+      // watch-with-an-empty-set first: one call, and a refusal has nobody
+      // left to tell.
+      void watcher.close(id).catch(() => undefined)
+    }
+  }
+
   return {
     collections,
     activeCollection,
@@ -353,6 +615,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     error,
     loading,
     sending,
+    watchMode,
+    watchDegradedReason,
+    watchFailed,
+    startWatching,
+    dispose,
     refresh,
     openFolder,
     createCollection,

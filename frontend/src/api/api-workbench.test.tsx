@@ -24,6 +24,7 @@ import type { ApiWorkbenchServices } from './api-client'
 import { RpcError } from '../dispatcher'
 import type { PaneHost } from '../pane-content'
 import {
+  COLLECTION_PATH,
   CREATED_HANDLE,
   CREATED_NAME,
   CREATE_REL_PATH,
@@ -38,6 +39,7 @@ import {
   noCollections,
   sendFixture,
   servicesFixture,
+  watchFixture,
 } from './api-test-fixtures'
 import { createSecretChip } from '../ui/secret-chip'
 
@@ -171,6 +173,19 @@ async function openWorkbench(bar: HTMLElement): Promise<void> {
   await vi.waitFor(() => workbench())
 }
 
+/** Wait until `files.watch` has RETURNED.
+ *
+ *  The tree rows say `api.collections.list` came back, which is a different
+ *  call — a check that fires a change before the watch is established races
+ *  the baseline and is testing nothing. The slot's `data-watch-mode` is the
+ *  observable that says the watch is up; that is what it is for. */
+async function watching(): Promise<void> {
+  await vi.waitFor(() => {
+    const slot = workbench().querySelector('[data-testid="api-polling-badge-slot"]')
+    if (slot?.getAttribute('data-watch-mode') === null) throw new Error('not watching yet')
+  })
+}
+
 /** Open the workbench and put the design's worked example in the form. */
 async function openRequest(bar: HTMLElement): Promise<void> {
   await openWorkbench(bar)
@@ -178,6 +193,146 @@ async function openRequest(bar: HTMLElement): Promise<void> {
   fireEvent.click(row(CREATE_REL_PATH))
   await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users'))
 }
+
+// ── The panel notices, instead of asking you to press a button ────────────
+//
+// The owner's question was "зачем там обновить?" — why is there a Refresh at
+// all. The honest answer is that the workbench had no other way to learn a
+// folder had changed, while the Files panel two metres away had one. These
+// checks are about the panel doing the noticing; nothing below presses
+// anything except where the point IS the button.
+
+describe('the workbench notices the folder changed', () => {
+  it('a change on disk puts the new request on screen with nothing pressed', async () => {
+    const watch = watchFixture()
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const { bar } = await mountApp({ listCollections: list, watchCollections: watch.port })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    await watching()
+    expect(workbench().textContent).not.toContain('delete.json')
+
+    // The colleague's `git pull` lands. The backend is the only thing that
+    // says so, through the subscription the store itself registered.
+    list.mockResolvedValue({
+      collections: [
+        collectionsFixture({
+          collection: {
+            name: 'acme-api',
+            requests: [
+              { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
+              { relPath: 'users/delete.json', name: 'delete', method: 'DELETE' },
+            ],
+            malformed: [],
+          },
+        }),
+      ],
+    })
+    watch.changed(COLLECTION_PATH)
+
+    await vi.waitFor(() => row('users/delete.json'))
+  })
+
+  it('the roots it renders are the set it watches, and it watches them from a local session', async () => {
+    const watch = watchFixture()
+    const { bar } = await mountApp({ watchCollections: watch.port })
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(watch.sets()).toEqual([[COLLECTION_PATH]]))
+    expect(watch.open).toHaveBeenCalledTimes(1)
+  })
+
+  it('closing the collection takes its folder out of the set the backend holds', async () => {
+    const watch = watchFixture()
+    const { bar } = await mountApp({ watchCollections: watch.port })
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(watch.sets()).toEqual([[COLLECTION_PATH]]))
+    fireEvent.click(button(`Close ${COLLECTION_PATH}`))
+    await vi.waitFor(() => expect(watch.lastSet()).toEqual([]))
+  })
+})
+
+describe('the header says whether the panel is still following the disk', () => {
+  it('carries the established mode, which is what says files.watch returned', async () => {
+    const watch = watchFixture()
+    const { bar } = await mountApp({ watchCollections: watch.port })
+    await openWorkbench(bar)
+    await vi.waitFor(() =>
+      expect(
+        workbench()
+          .querySelector('[data-testid="api-polling-badge-slot"]')
+          ?.getAttribute('data-watch-mode'),
+      ).toBe('polling'),
+    )
+  })
+
+  it('designed-mode polling warns about nothing', async () => {
+    const watch = watchFixture()
+    const { bar } = await mountApp({ watchCollections: watch.port })
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(watch.sets()).toHaveLength(1))
+    expect(workbench().querySelector('[data-testid="api-polling-badge"]')).toBeNull()
+  })
+
+  it('a degrade with a reason is a persistent badge, and the reason is reachable on it', async () => {
+    const call = vi
+      .fn()
+      .mockResolvedValueOnce({ mode: 'polling', degradedReason: 'inotify watch limit reached' })
+    call.mockResolvedValue({ mode: 'watching' })
+    const watch = watchFixture({ watch: call })
+    const { bar } = await mountApp({ watchCollections: watch.port })
+    await openWorkbench(bar)
+    const badge = await vi.waitFor(() => {
+      const el = workbench().querySelector<HTMLElement>('[data-testid="api-polling-badge"]')
+      if (!el) throw new Error('no badge yet')
+      return el
+    })
+    expect(badge.textContent).toBe('Polling')
+    expect(badge.getAttribute('title')).toBe('inotify watch limit reached')
+
+    // …and it clears the instant watching recovers, which is the other end of
+    // the interval: a warning that outlives its cause teaches the reader to
+    // ignore the next one.
+    fireEvent.click(button('Re-read the open folders'))
+    await vi.waitFor(() =>
+      expect(workbench().querySelector('[data-testid="api-polling-badge"]')).toBeNull(),
+    )
+  })
+
+  it('a watch that could not be established is on the surface, with the retry beside it', async () => {
+    const call = vi.fn().mockRejectedValueOnce(new Error('watch limit reached'))
+    call.mockResolvedValue({ mode: 'watching' })
+    const watch = watchFixture({ watch: call })
+    const { bar } = await mountApp({ watchCollections: watch.port })
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(workbench().textContent).toContain('watch limit reached'))
+    fireEvent.click(button('Retry'))
+    await vi.waitFor(() => expect(workbench().textContent).not.toContain('watch limit reached'))
+  })
+})
+
+describe('the refresh action sits in the pane header', () => {
+  it('is in the header, at the top of the pane, and is still one press away', async () => {
+    const list = vi.fn().mockResolvedValue({ collections: [collectionsFixture()] })
+    const { bar } = await mountApp({ listCollections: list })
+    await openWorkbench(bar)
+    const header = workbench().querySelector<HTMLElement>('.api-workbench__header')
+    expect(header).not.toBeNull()
+    // The owner asked for it "наверх, как в других панелях": the header is
+    // the pane's first child, so the action is above the tree rather than
+    // under the last thing in it.
+    expect(workbench().firstElementChild).toBe(header)
+    const refresh = button('Re-read the open folders')
+    expect(header?.contains(refresh)).toBe(true)
+    fireEvent.click(refresh)
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
+  })
+
+  it('there is exactly one of it — the copy at the foot of the tree is gone', async () => {
+    const { bar } = await mountApp()
+    await openWorkbench(bar)
+    expect(buttonNames().filter((n) => n === 'Re-read the open folders')).toHaveLength(1)
+  })
+})
 
 // ── The entry ─────────────────────────────────────────────────────────────
 

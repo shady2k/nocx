@@ -109,7 +109,8 @@ func (s *sink) Put(ctx context.Context, u Upload, r io.Reader, progress func(tot
 
 	f, err := s.fs.Create(temp)
 	if err != nil {
-		return Outcome{Stranded: s.tryRemove(reserved)}, fmt.Errorf("transfer: create %s: %w", temp, err)
+		left, cleanupErr := s.tryRemove(reserved)
+		return Outcome{Stranded: left}, errors.Join(fmt.Errorf("transfer: create %s: %w", temp, err), cleanupErr)
 	}
 
 	copyErr := s.copy(ctx, f, r, u.Size, progress)
@@ -126,7 +127,19 @@ func (s *sink) Put(ctx context.Context, u Upload, r io.Reader, progress func(tot
 		copyErr = ctx.Err()
 	}
 	if copyErr != nil || closeErr != nil {
-		return Outcome{Stranded: s.tryRemove(temp, reserved)}, errors.Join(copyErr, closeErr)
+		// §6 splits these two. A copy that failed leaves a temp whose state
+		// is known — partial, ours, removable. A Close that failed after
+		// every byte was written is precisely the case where the server did
+		// NOT confirm the file's final state, and removing a file whose
+		// state you do not know is not cleanup, it is a second uncertain
+		// write. So that temp stays and is named; the reservation, an empty
+		// file the sink alone created, goes either way.
+		remove, stranded := []string{temp, reserved}, []string(nil)
+		if copyErr == nil {
+			remove, stranded = []string{reserved}, []string{temp}
+		}
+		left, cleanupErr := s.tryRemove(remove...)
+		return Outcome{Stranded: append(stranded, left...)}, errors.Join(copyErr, closeErr, cleanupErr)
 	}
 
 	out, err := s.promote(dest, temp, nonce)
@@ -136,7 +149,9 @@ func (s *sink) Put(ctx context.Context, u Upload, r io.Reader, progress func(tot
 		// the way the temp does, and if it cannot go it is named. On the
 		// fallback path the reservation has already become bak by the time
 		// a rename fails, so this finds nothing and reports nothing.
-		out.Stranded = append(out.Stranded, s.tryRemove(reserved)...)
+		left, cleanupErr := s.tryRemove(reserved)
+		out.Stranded = append(out.Stranded, left...)
+		err = errors.Join(err, cleanupErr)
 	}
 	return out, err
 }
@@ -146,6 +161,12 @@ func (s *sink) Put(ctx context.Context, u Upload, r io.Reader, progress func(tot
 // Cancellation is checked BETWEEN chunks and never inside one: a chunk is a
 // single lane call on the lease, and abandoning it mid-flight is the shape
 // D2 rejects. A chunk is bounded, so the wait is bounded too.
+//
+// The Read is the exception, and it is the caller's to bound rather than
+// this loop's: an io.Reader has no context, so the check below cannot cover
+// a Read that has already blocked. Sink.Put states the contract that
+// follows — the caller closes the reader on cancellation — and this loop
+// keeps its half by unwinding on whatever error the reader then returns.
 func (s *sink) copy(ctx context.Context, w RemoteFile, r io.Reader, size int64, progress func(int64)) error {
 	buf := make([]byte, s.chunk)
 	var total int64
@@ -193,7 +214,8 @@ func (s *sink) promote(dest, temp, nonce string) (Outcome, error) {
 	case err == nil:
 		return Outcome{State: StateWritten, FinalName: path.Base(dest)}, nil
 	case !errors.Is(err, ErrPosixRenameUnsupported):
-		return Outcome{Stranded: s.tryRemove(temp)}, fmt.Errorf("transfer: promote %s: %w", dest, err)
+		left, cleanupErr := s.tryRemove(temp)
+		return Outcome{Stranded: left}, errors.Join(fmt.Errorf("transfer: promote %s: %w", dest, err), cleanupErr)
 	}
 
 	// SFTP v3 rename refuses an existing destination (nocx-340t), so the
@@ -203,7 +225,8 @@ func (s *sink) promote(dest, temp, nonce string) (Outcome, error) {
 	bak := dest + bakSuffix + nonce
 	if err := s.fs.Rename(dest, bak); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			return Outcome{Stranded: s.tryRemove(temp)}, fmt.Errorf("transfer: back up %s: %w", dest, err)
+			left, cleanupErr := s.tryRemove(temp)
+			return Outcome{Stranded: left}, errors.Join(fmt.Errorf("transfer: back up %s: %w", dest, err), cleanupErr)
 		}
 		// Nothing was there to back up. Not a collision, not a failure.
 		bak = ""
@@ -234,12 +257,18 @@ func (s *sink) promote(dest, temp, nonce string) (Outcome, error) {
 // reserveName claims a free KeepBoth name with O_EXCL and returns it, plus
 // any path it created and could not clean up.
 //
-// Every create refusal advances the suffix, not only a classified EEXIST:
-// SFTP v3 answers EEXIST as a generic SSH_FX_FAILURE (the protocol fact
-// internal/shellintegration/install_remote.go:33 pays for), so a lost race
-// is indistinguishable on the wire from a permission refusal. The bound
-// keeps that cheap and the last refusal travels in the error, so the reason
-// is reported even though it could not be classified.
+// An UNCLASSIFIED create refusal advances the suffix, because SFTP v3
+// answers EEXIST as a generic SSH_FX_FAILURE (the protocol fact
+// internal/shellintegration/install_remote.go:33 pays for) and a lost race
+// is then indistinguishable on the wire from any other refusal. That
+// ambiguity is real and the bound is what keeps it cheap; the last refusal
+// travels in the error so the reason is still reported.
+//
+// A refusal the adapter DID classify stops the search at once and is
+// returned as itself. A read-only directory, a quota, a vanished directory
+// or a dead lease cannot become a free name by trying 31 more of them, and
+// calling that outcome "no free name" is not a weak diagnosis but a false
+// one. See notCollision and RemoteFS.Create's contract.
 func (s *sink) reserveName(destDir, name string) (string, []string, error) {
 	var lastErr error
 	for i := 1; i <= keepBothAttempts; i++ {
@@ -247,31 +276,67 @@ func (s *sink) reserveName(destDir, name string) (string, []string, error) {
 		p := path.Join(destDir, candidate)
 		f, err := s.fs.Create(p)
 		if err != nil {
+			if notCollision(err) {
+				return "", nil, fmt.Errorf("transfer: reserve %s: %w", p, err)
+			}
 			lastErr = err
 			continue
 		}
 		if err := f.Close(); err != nil {
-			return "", s.tryRemove(p), fmt.Errorf("transfer: close reservation %s: %w", p, err)
+			left, cleanupErr := s.tryRemove(p)
+			return "", left, errors.Join(fmt.Errorf("transfer: close reservation %s: %w", p, err), cleanupErr)
 		}
 		return candidate, nil, nil
 	}
 	return "", nil, &NameExhaustedError{Name: name, Attempts: keepBothAttempts, Err: lastErr}
 }
 
-// tryRemove removes paths the sink itself created and returns those it did
-// not manage to remove — the closing half of the temp invariant. A path
-// that is already gone is removed, not stranded.
-func (s *sink) tryRemove(paths ...string) []string {
+// notCollision reports whether a Create refusal is one the sink can tell
+// apart from a lost O_EXCL race. These are the sentinels RemoteFS.Create's
+// contract obliges the adapter to preserve; anything outside the set is
+// treated as the ambiguous SSH_FX_FAILURE it may well be.
+//
+// The rule for admitting one: a refusal belongs here when trying the next
+// suffix cannot possibly change the answer. Permission and quota refusals
+// are a property of the directory, ErrNotExist and ErrInvalid of the
+// directory or the name shape, ErrClosed and a cancelled context of the
+// lease — none of them are a property of the name being taken.
+func notCollision(err error) bool {
+	switch {
+	case errors.Is(err, fs.ErrPermission),
+		errors.Is(err, fs.ErrNotExist),
+		errors.Is(err, fs.ErrInvalid),
+		errors.Is(err, fs.ErrClosed),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		return true
+	}
+	return false
+}
+
+// tryRemove removes paths the sink itself created. It returns those it did
+// not manage to remove — the closing half of the temp invariant — AND why
+// each removal failed. A path that is already gone is removed, not
+// stranded.
+//
+// The reason is returned rather than discarded because §6's row says both:
+// a person shown "disk full" and a stranded path never learns that removing
+// it was refused for permissions, or that the lease had gone by then, which
+// is the only thing that tells them whether the path is theirs to clean up.
+// Callers join it BEHIND the primary failure, which stays primary.
+func (s *sink) tryRemove(paths ...string) ([]string, error) {
 	var stranded []string
+	var reasons []error
 	for _, p := range paths {
 		if p == "" {
 			continue
 		}
 		if err := s.fs.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			stranded = append(stranded, p)
+			reasons = append(reasons, fmt.Errorf("transfer: clean up %s: %w", p, err))
 		}
 	}
-	return stranded
+	return stranded, errors.Join(reasons...)
 }
 
 // nonce is the random suffix shared by the temp and its backup. They share

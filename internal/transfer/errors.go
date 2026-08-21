@@ -42,10 +42,16 @@ func (e *SizeMismatchError) Error() string {
 // bound is deliberate (D5): a directory holding 32 collisions is a person
 // who needs to be told, not a loop that keeps trying.
 //
-// Err is the last refusal seen. It is carried because the SFTP wire cannot
-// distinguish EEXIST from a generic failure on a v3 server, so a permission
-// error and a lost race look alike here and only the reason tells them
-// apart.
+// It is returned ONLY when every one of those attempts was refused with an
+// error the sink could not classify — the ambiguous SSH_FX_FAILURE a v3
+// server answers EEXIST with. A refusal that names itself (a permission, a
+// missing directory, a gone lease; see RemoteFS.Create) stops the search on
+// the spot and is returned as itself, because 31 more names cannot make a
+// read-only directory writable and reporting that as "no free name" would
+// be false rather than merely vague.
+//
+// Err is the last refusal seen, carried so the reason survives even though
+// it could not be classified.
 type NameExhaustedError struct {
 	Name     string
 	Attempts int

@@ -35,6 +35,18 @@ import (
 //     SSH_FX_NO_SUCH_FILE to os.ErrNotExist for exactly this
 //     (client.go:2237), and the fallback needs it to tell "there was no
 //     destination to back up" from "the backup failed".
+//   - A Create refusal the adapter CAN classify is reported so errors.Is
+//     holds against the matching sentinel: fs.ErrPermission (a read-only
+//     directory, a missing write bit, a quota), fs.ErrNotExist (the
+//     directory is gone), fs.ErrInvalid (a name the server will not accept),
+//     fs.ErrClosed (the lease is gone) and context.Canceled /
+//     context.DeadlineExceeded. This is the one contract the sink cannot
+//     derive for itself and the reason it matters is KeepBoth: SFTP v3
+//     answers EEXIST as a generic SSH_FX_FAILURE, so an UNCLASSIFIED
+//     refusal is read as a lost O_EXCL race and advances the suffix. An
+//     adapter that leaves a permission refusal unclassified therefore
+//     spends the whole 32-attempt bound on it and the person is told there
+//     is no free name, which is false.
 type RemoteFS interface {
 	Create(path string) (RemoteFile, error)
 	// PosixRename replaces the destination atomically
@@ -111,5 +123,22 @@ type Sink interface {
 	// byte total after each chunk that reached the server. It returns what
 	// it left behind whether or not it succeeded: an error and a non-empty
 	// Outcome.Stranded are not alternatives.
+	//
+	// Cancellation, and what the CALLER owes. Put observes ctx between
+	// chunks, so cancellation is bounded by one lane call and one source
+	// read — and a source read is where the bound can be lost, because an
+	// io.Reader has no cancellation and Put cannot abandon a Read already
+	// in flight. Cancelling the context while the reader is blocked
+	// therefore does NOT return: Put waits for that Read, and a stalled
+	// HTTP body waits forever.
+	//
+	// So the caller owns unblocking the reader. Whoever supplies a streamed
+	// body must close it when the request is cancelled; the sink's half of
+	// the bargain is that once the reader reports a failure, Put unwinds at
+	// once — the reason reaches the caller, the temp is cleaned up, and
+	// anything that could not be cleaned up is named in Outcome.Stranded.
+	//
+	// A reader that cannot be unblocked at all — one with no Close and no
+	// deadline — must not be handed to Put.
 	Put(ctx context.Context, u Upload, r io.Reader, progress func(total int64)) (Outcome, error)
 }

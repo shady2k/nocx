@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	iofs "io/fs"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/transfer"
@@ -185,6 +187,15 @@ func TestPut_WriteFailsAndRemoveAlsoFails_StrandsTheTemp(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failed write must be an error")
 	}
+	// §6 says BOTH reasons. A person told only "disk full" never learns
+	// that removing the temp was refused, which is the whole reason a path
+	// is sitting on their server.
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("the primary failure must be reported; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("the reason cleanup failed must be reported too; got %v", err)
+	}
 	temps := fs.matching("*.nocx-upload-*")
 	if len(temps) != 1 {
 		t.Fatalf("the temp is still on the server; got %v", temps)
@@ -202,7 +213,12 @@ func TestPut_WriteFailsAndRemoveAlsoFails_StrandsTheTemp(t *testing.T) {
 // A Close that fails is a failed transfer even though every byte was
 // written: the server never confirmed the file, so the temp does not become
 // the destination.
-func TestPut_CloseFailsAfterAllBytes_IsAFailureAndTheTempIsRemoved(t *testing.T) {
+//
+// And the temp is NOT removed. §6's row leaves it and names it, because a
+// failed Close is precisely the case where the server did not confirm the
+// file's final state, and removing a file whose state you do not know is
+// not cleanup — it is a second uncertain write.
+func TestPut_CloseFailsAfterAllBytes_IsAFailureAndTheTempIsStranded(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
 	fs.closeErr = errors.New("quota exceeded on flush")
@@ -219,30 +235,45 @@ func TestPut_CloseFailsAfterAllBytes_IsAFailureAndTheTempIsRemoved(t *testing.T)
 	if got := fs.content("/home/u/a.txt"); got != "old" {
 		t.Fatalf("destination holds %q, want it untouched", got)
 	}
-	if left := fs.matching("*.nocx-upload-*"); len(left) != 0 {
-		t.Fatalf("the temp was removable, so nothing should be left: %v", left)
+	temps := fs.matching("*.nocx-upload-*")
+	if len(temps) != 1 {
+		t.Fatalf("the temp stays on the server; got %v", temps)
 	}
-	if len(out.Stranded) != 0 {
-		t.Fatalf("nothing was left, so nothing is stranded; got %v", out.Stranded)
+	if len(out.Stranded) != 1 || out.Stranded[0] != temps[0] {
+		t.Fatalf("stranded %v must name the temp %v", out.Stranded, temps)
+	}
+	if len(fs.removed) != 0 {
+		t.Fatalf("no Remove may even be ATTEMPTED on a file whose state the server never confirmed; removed %v", fs.removed)
 	}
 }
 
-// The same failure on an unhealthy lease, which is the row as §6 writes it:
-// the Close fails, the Remove cannot succeed either, and the temp is named.
-func TestPut_CloseFailsAndTheTempCannotBeRemoved_StrandsIt(t *testing.T) {
+// The same row with a KeepBoth reservation in play, which is where a Remove
+// IS attempted and can fail: the temp is stranded by policy, the empty
+// reservation is stranded because the removal was refused, and the outcome
+// carries the close reason AND the removal reason.
+func TestPut_CloseFailsAndTheReservationCannotBeRemoved_StrandsBothAndSaysWhy(t *testing.T) {
 	fs := newFakeFS()
-	fs.closeErr = errors.New("quota exceeded on flush")
+	fs.put("/home/u/a.txt", "old")
+	fs.failCloseAt(2, errors.New("quota exceeded on flush")) // 1 is the reservation
 	fs.removeErr = errors.New("permission denied")
 
 	out, err := transfer.NewSink(fs).Put(context.Background(),
-		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
+		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
 		t.Fatal("a failed Close must fail the transfer")
 	}
-	temps := fs.matching("*.nocx-upload-*")
-	if len(temps) != 1 || len(out.Stranded) != 1 || out.Stranded[0] != temps[0] {
-		t.Fatalf("stranded %v must name the temp still on the server %v", out.Stranded, temps)
+	if !strings.Contains(err.Error(), "quota exceeded on flush") {
+		t.Fatalf("the primary failure must be reported; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("the reason cleanup failed must be reported too; got %v", err)
+	}
+	if findStranded(out.Stranded, ".nocx-upload-") == "" {
+		t.Fatalf("the temp must be named; got %v", out.Stranded)
+	}
+	if findStranded(out.Stranded, "a (1).txt") == "" {
+		t.Fatalf("the reservation that could not be removed must be named; got %v", out.Stranded)
 	}
 }
 
@@ -410,6 +441,9 @@ func TestPromote_BackupRenameFailsAndTheTempCannotBeRemoved_StrandsIt(t *testing
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
 		t.Fatal("a failed backup must be an error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("the reason the temp could not be cleaned up must reach the caller; got %v", err)
 	}
 	temps := fs.matching("*.nocx-upload-*")
 	if len(out.Stranded) != 1 || len(temps) != 1 || out.Stranded[0] != temps[0] {
@@ -669,6 +703,9 @@ func TestPut_KeepBothExhaustsItsAttempts_FailsWithATypedError(t *testing.T) {
 	if got := len(fs.paths()); got != before {
 		t.Fatalf("the directory grew from %d to %d files", before, got)
 	}
+	if fs.creates != 32 {
+		t.Fatalf("an unclassifiable refusal is the ONE shape that spends the bound; saw %d creates", fs.creates)
+	}
 }
 
 // The reservation is a file the sink created at a name nobody asked for. A
@@ -870,4 +907,143 @@ func TestPut_KeepBothReservationStrandedWhenThePromoteAndTheRemoveBothFail(t *te
 	if findStranded(out.Stranded, ".nocx-upload-") == "" {
 		t.Fatalf("the temp must be named too; got %v", out.Stranded)
 	}
+}
+
+// --- KeepBoth: a refusal that is not a collision stops the search -----------
+
+// SFTP v3 answers EEXIST as a generic SSH_FX_FAILURE, so "the name was
+// taken" and "the create was refused" genuinely are not distinguishable on
+// the wire — the bound and the ambiguity both stay. What must not happen is
+// that a refusal the sink CAN classify buys 32 more round trips and is then
+// reported as "no free name", which is simply false.
+func TestPut_KeepBothCreateRefusedWithPermission_StopsAtOnceAndReportsTheRefusal(t *testing.T) {
+	fs := newFakeFS()
+	fs.put("/home/u/a.txt", "old")
+	fs.createErr = fmt.Errorf("sftp: open %s: %w", "/home/u/a (1).txt", iofs.ErrPermission)
+
+	out, err := transfer.NewSink(fs).Put(context.Background(),
+		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
+		strings.NewReader("new"), func(int64) {})
+	var exhausted *transfer.NameExhaustedError
+	if errors.As(err, &exhausted) {
+		t.Fatalf("a read-only directory is not a directory full of collisions; got %v", err)
+	}
+	if !errors.Is(err, iofs.ErrPermission) {
+		t.Fatalf("the refusal must reach the caller as itself; got %v", err)
+	}
+	if fs.creates != 1 {
+		t.Fatalf("a classifiable refusal stops the search; saw %d creates", fs.creates)
+	}
+	if len(out.Stranded) != 0 {
+		t.Fatalf("nothing was created; got %v", out.Stranded)
+	}
+	if got := fs.paths(); len(got) != 1 || got[0] != "/home/u/a.txt" {
+		t.Fatalf("only the original should remain; got %v", got)
+	}
+}
+
+// The same rule for a destination directory that is not there: probing 31
+// more names inside a directory that does not exist cannot find one.
+func TestPut_KeepBothCreateRefusedBecauseTheDirectoryIsGone_StopsAtOnce(t *testing.T) {
+	fs := newFakeFS()
+	fs.createErr = notFound("open", "/home/u/a (1).txt")
+
+	_, err := transfer.NewSink(fs).Put(context.Background(),
+		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
+		strings.NewReader("new"), func(int64) {})
+	var exhausted *transfer.NameExhaustedError
+	if errors.As(err, &exhausted) {
+		t.Fatalf("a missing directory is not \"no free name\"; got %v", err)
+	}
+	if !errors.Is(err, iofs.ErrNotExist) {
+		t.Fatalf("the refusal must reach the caller as itself; got %v", err)
+	}
+	if fs.creates != 1 {
+		t.Fatalf("a classifiable refusal stops the search; saw %d creates", fs.creates)
+	}
+}
+
+// A dead lease is classifiable too, and it is the case that costs most: 32
+// round trips onto a connection that is gone, ending in a diagnosis about
+// names.
+func TestPut_KeepBothCreateRefusedByADeadLease_StopsAtOnce(t *testing.T) {
+	fs := newFakeFS()
+	fs.createErr = fmt.Errorf("sftp: %w", iofs.ErrClosed)
+
+	_, err := transfer.NewSink(fs).Put(context.Background(),
+		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
+		strings.NewReader("new"), func(int64) {})
+	var exhausted *transfer.NameExhaustedError
+	if errors.As(err, &exhausted) {
+		t.Fatalf("a gone lease is not a directory full of collisions; got %v", err)
+	}
+	if !errors.Is(err, iofs.ErrClosed) {
+		t.Fatalf("the refusal must reach the caller as itself; got %v", err)
+	}
+	if fs.creates != 1 {
+		t.Fatalf("a classifiable refusal stops the search; saw %d creates", fs.creates)
+	}
+}
+
+// --- cancellation and the source reader -------------------------------------
+
+// Put's contract: the CALLER owns unblocking the reader. An io.Reader has no
+// cancellation, so a Read already in flight cannot be bounded by the
+// context — cancelling without closing the reader hangs, and the transport
+// that supplies a streamed body must close it on cancellation.
+//
+// This is the shape that contract produces, and what Put owes in return:
+// once the reader reports the failure, Put unwinds — the error reaches the
+// caller, the temp is removed and the destination is untouched.
+func TestPut_ReaderErrsOnCancellation_UnwindsAndCleansUp(t *testing.T) {
+	fs := newFakeFS()
+	fs.put("/home/u/a.txt", "old")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bodyClosed := errors.New("http: body closed by the caller on cancel")
+	r := &blockingReader{ctx: ctx, blocked: make(chan struct{}), err: bodyClosed}
+
+	type result struct {
+		out transfer.Outcome
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := transfer.NewSink(fs).Put(ctx,
+			transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
+			r, func(int64) {})
+		done <- result{out, err}
+	}()
+
+	<-r.blocked // the read is in flight; the context check has already passed
+	cancel()
+	got := <-done
+
+	if !errors.Is(got.err, bodyClosed) {
+		t.Fatalf("the reason the source stopped must reach the caller; got %v", got.err)
+	}
+	if c := fs.content("/home/u/a.txt"); c != "old" {
+		t.Fatalf("destination holds %q, want it untouched", c)
+	}
+	if len(got.out.Stranded) != 0 || len(fs.matching("*.nocx-upload-*")) != 0 {
+		t.Fatalf("an unwound transfer cleans up after itself: stranded=%v files=%v", got.out.Stranded, fs.paths())
+	}
+}
+
+// blockingReader is a streamed body: the first Read blocks until the
+// context is done — which is what a stalled HTTP body does — and then
+// reports the failure the caller's own Close produced. It signals that it
+// has entered the blocking read so the test never waits on a duration.
+type blockingReader struct {
+	ctx     context.Context
+	blocked chan struct{}
+	once    sync.Once
+	err     error
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.blocked) })
+	<-r.ctx.Done()
+	return 0, r.err
 }

@@ -51,8 +51,12 @@ type fakeFS struct {
 	// failWriteAfterN bytes have reached the file.
 	writeErr        error
 	failWriteAfterN int
-	// closeErr fails Close on the file handle.
-	closeErr error
+	// closeErr fails Close on a file handle. closeFailAt, when non-zero, is
+	// the 1-based index of the close that fails; zero fails every close. A
+	// KeepBoth transfer closes the reservation handle first and the temp's
+	// second, so the two can be failed independently.
+	closeErr    error
+	closeFailAt int
 	// removeErr fails every Remove.
 	removeErr error
 	// noPosixRename makes PosixRename report the extension as unsupported,
@@ -72,6 +76,11 @@ type fakeFS struct {
 	onRename func(n int)
 
 	renames int
+	closes  int
+	// creates counts every Create call, which is what shows a KeepBoth
+	// search stopping on the first classifiable refusal rather than
+	// spending its whole bound on it.
+	creates int
 	// writeSizes records the length of every Write call in order, which is
 	// what proves the sink chunks rather than handing the lease one call
 	// the size of the file (design D2).
@@ -86,6 +95,7 @@ func newFakeFS() *fakeFS {
 // --- the RemoteFS surface ---------------------------------------------------
 
 func (f *fakeFS) Create(p string) (transfer.RemoteFile, error) {
+	f.creates++
 	if f.dead {
 		return nil, errDisconnected
 	}
@@ -187,8 +197,12 @@ func (h *fakeFile) Close() error {
 		return fmt.Errorf("fake: %s closed twice", h.path)
 	}
 	h.closed = true
+	h.fs.closes++
 	if h.fs.dead {
 		return errDisconnected
+	}
+	if h.fs.closeFailAt != 0 && h.fs.closes != h.fs.closeFailAt {
+		return nil
 	}
 	return h.fs.closeErr
 }
@@ -201,6 +215,11 @@ func (f *fakeFS) put(p, content string) { f.files[p] = content }
 // failWriteAfter fails the first Write issued once n bytes have landed.
 func (f *fakeFS) failWriteAfter(n int, err error) {
 	f.failWriteAfterN, f.writeErr = n, err
+}
+
+// failCloseAt fails the step-th Close; see closeFailAt.
+func (f *fakeFS) failCloseAt(step int, err error) {
+	f.closeFailAt, f.closeErr = step, err
 }
 
 // failRenameAt fails the step-th v3 rename; see renameFailAt.

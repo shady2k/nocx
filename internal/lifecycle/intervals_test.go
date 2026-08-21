@@ -241,13 +241,16 @@ func mustEstablish(t *testing.T, k *Kernel, tid TransportID, lane LaneID, h Doma
 // A domain with no capability authenticates NOBODY.
 //
 // Found while establishing where the validity interval opens, and it is not
-// this package's own work: randomCapability tolerates a failed random read and
-// leaves a zero capability. That tolerance is deliberate for the FENCE — the
-// read model treats zero as "no recovery nonce" and disables the promise,
-// which is the safe direction — and it is the exact opposite for the
-// capability, because `d.capability != env.Capability` compares equal when
-// both are zero. Any candidate sending thirty-two zero bytes would have been
-// authenticated for a domain whose mint failed.
+// this package's own work: randomCapability USED TO tolerate a failed random
+// read and leave a zero capability, and `d.capability != env.Capability`
+// compares equal when both are zero — so any candidate sending thirty-two zero
+// bytes was authenticated for a domain whose mint had failed.
+//
+// The mint is fallible now: a failed read is ErrNoRandomness and no domain is
+// created (nocx-s16k8, mint_failure_test.go). This test is the OTHER guard and
+// deliberately does not depend on it — it writes the zero straight onto a
+// registered domain, so it stays true however a zero got there and goes red on
+// its own if the ingest-side refusal is ever removed.
 //
 // The interval never opens rather than opening to everyone.
 func TestCapabilityValidity_AZeroCapabilityAuthenticatesNobody(t *testing.T) {

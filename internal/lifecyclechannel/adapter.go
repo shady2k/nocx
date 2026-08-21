@@ -165,11 +165,23 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 	parent := os.NewFile(uintptr(fds[0]), "lifecycle-channel-parent")
 	child := os.NewFile(uintptr(fds[1]), "lifecycle-channel-child")
 
+	tptHex, err := randHex(8)
+	if err != nil {
+		_ = parent.Close()
+		_ = child.Close()
+		return nil, nil, err
+	}
+	laneHex, err := randHex(8)
+	if err != nil {
+		_ = parent.Close()
+		_ = child.Close()
+		return nil, nil, err
+	}
 	a := &Adapter{
 		log:          log,
 		kernel:       k,
-		id:           lifecycle.TransportID("tpt-" + randHex(8)),
-		lane:         lifecycle.LaneID("lane-" + randHex(8)),
+		id:           lifecycle.TransportID("tpt-" + tptHex),
+		lane:         lifecycle.LaneID("lane-" + laneHex),
 		conn:         parent,
 		helloTimeout: o.helloTimeout,
 		report:       o.lossReporter,
@@ -412,8 +424,20 @@ func (a *Adapter) endOfStream() {
 	a.lose(LossEndOfStream)
 }
 
-func randHex(n int) string {
+var randReader io.Reader = rand.Reader
+
+// randHex mints this adapter's transport and lane IDENTIFIERS. Neither is an
+// authenticator, so a zero value lets nobody in — but the kernel tells one
+// transport's domains from another's by exactly this value (the binding check
+// is an equality; a mismatch is ErrWrongTransport). With every adapter
+// carrying the same pair, two local sessions share a lane and each
+// authenticates against the other's domains. The identical function in
+// internal/lifecycleremote had the identical hole; both are refusals now
+// (nocx-s16k8).
+func randHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = io.ReadFull(rand.Reader, b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(randReader, b); err != nil {
+		return "", fmt.Errorf("lifecyclechannel: the randomness source failed; no identifier was minted: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

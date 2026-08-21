@@ -38,6 +38,20 @@ var (
 
 	// Handshake (decision 3).
 	ErrHandshakeRateLimited = errors.New("lifecycle: too many failed handshakes on this lane")
+	// ErrNoRandomness is a secret that could not be minted: the randomness
+	// source failed or came up short. No domain is created (nocx-s16k8).
+	//
+	// The mint used to tolerate it and return a ZERO capability, on the
+	// argument that a caller has no useful answer to "this machine has no
+	// randomness". Two things were wrong with that. The authenticator
+	// compares equal to itself, so a domain holding zeros authenticated
+	// anyone who sent the corresponding run of zero bytes — closed at ingest
+	// by refusing a zero capability, and that guard stays. And the caller
+	// does have an answer, the same one it has for every other refusal on
+	// this path: no domain, no integration, a plain shell, a named reason.
+	// A value nobody can distinguish from a valid one is the worst of the
+	// three outcomes.
+	ErrNoRandomness = errors.New("lifecycle: the randomness source failed; no secret was minted")
 
 	// Events.
 	ErrIllegalEvent = errors.New("lifecycle: event kind is not inbound or has no payload")

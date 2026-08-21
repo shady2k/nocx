@@ -304,11 +304,21 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 	}
 	port := portOf(ln.Addr())
 
+	tptHex, err := randHex(8)
+	if err != nil {
+		_ = ln.Close()
+		return nil, Config{}, err
+	}
+	laneHex, err := randHex(8)
+	if err != nil {
+		_ = ln.Close()
+		return nil, Config{}, err
+	}
 	a := &Adapter{
 		log:           log,
 		kernel:        k,
-		id:            lifecycle.TransportID("tpt-" + randHex(8)),
-		lane:          lifecycle.LaneID("lane-" + randHex(8)),
+		id:            lifecycle.TransportID("tpt-" + tptHex),
+		lane:          lifecycle.LaneID("lane-" + laneHex),
 		tc:            tc,
 		ln:            ln,
 		port:          port,
@@ -722,8 +732,19 @@ func (a *Adapter) endOfStream(c net.Conn) {
 	a.lose(LossEndOfStream)
 }
 
-func randHex(n int) string {
+// randHex mints this adapter's transport and lane IDENTIFIERS. Neither is an
+// authenticator, and a zero value lets nobody in — but every adapter would
+// then carry the SAME transport id and the SAME lane id, and the kernel tells
+// one transport's domains from another's by exactly that value
+// (ErrWrongTransport is an equality on it). Two remote sessions would share a
+// lane. So a failed read is an error here too, refused at construction where
+// the caller already has an error to return (nocx-s16k8).
+var randReader io.Reader = rand.Reader
+
+func randHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = io.ReadFull(rand.Reader, b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(randReader, b); err != nil {
+		return "", fmt.Errorf("lifecycleremote: the randomness source failed; no identifier was minted: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

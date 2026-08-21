@@ -1,0 +1,69 @@
+/* Agent policy surface (ADR-0020 §7 as amended, accepted 2026-08-16): the
+   matrix editor. One row per effect class: label, decision select, the row's
+   scopes and an add-scope control, and — only when the row is off the default
+   — the line that says what the standing answer means. Layout only; the kit
+   owns every component's paint. */
+.st-policy__row {
+  display: grid;
+  grid-template-columns: 12rem minmax(8rem, 14rem) 1fr;
+  gap: 0.75rem 1rem;
+  align-items: start;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.st-policy__row:first-of-type {
+  border-top: none;
+}
+
+.st-policy__effect {
+  font-weight: 600;
+}
+
+/* The third column, as ONE cell (nocx-c72pl): every scope of a row plus its
+   add control stack here. Before this wrapper the scopes were direct grid
+   children, so the second one wrapped into the next grid row's first column —
+   the 12rem effect-label column — and rendered squeezed under another
+   effect's name. Column-flex rather than more grid columns: the number of
+   scopes is unbounded and a track count cannot follow it. */
+.st-policy__scopes {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  min-width: 0;
+}
+
+.st-policy__scope {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-block-end: 0.4rem;
+}
+
+/* The standing-answer line spans the whole row. It restates the row's answer
+   in the person's own words, so it belongs under all three columns rather
+   than inside the scope cell — and it renders only for a row that is OFF the
+   default, because a line under every row is the noise the kit's README
+   already names ("Vault is locked", three times, under one page). */
+.st-policy__state {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* The rows no declared tool carries yet, behind ONE disclosure. The surface
+   PLACES the kit's collapsible Section here and paints none of it; this rule
+   is the gap above the group and nothing else. */
+.st-policy__dormant {
+  margin-block-start: 0.5rem;
+}
+
+.st-policy__dormant-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

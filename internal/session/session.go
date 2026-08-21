@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -938,4 +939,24 @@ func (s *realSession) readPump(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// SignalForeground sends sig to the foreground process group of the
+// session's terminal — the execution's own process group, created by the
+// interactive shell's job control — so cancellation reaches the command's
+// children rather than only the shell (ADR-0020 decision 2: cancellation
+// escalates INT → TERM → KILL against the execution's group). The local
+// pty channel implements it; a remote channel (the execution runs on the
+// far host, unreachable from here) and the stub have no local process
+// group and report pty.ErrNoForeground — the lease's escalation treats
+// that as "nothing to cancel" and terminalizes the run without a kill,
+// which is the honest answer for a host this process cannot signal.
+func (s *realSession) SignalForeground(sig syscall.Signal) error {
+	sg, ok := s.ch.(interface {
+		SignalForeground(sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalForeground(sig)
 }

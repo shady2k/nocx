@@ -41,10 +41,12 @@
 @import './styles/components/swatch-picker.css';
 @import './styles/components/badge.css';
 @import './styles/components/secret-chip.css';
+@import './styles/components/mode-indicator.css';
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
 @import './styles/components/status-dot.css';
+@import './styles/components/action-group.css';
 @import './styles/components/toolbar.css';
 @import './styles/components/dialog.css';
 @import './styles/components/prompt.css';
@@ -74,6 +76,7 @@
 @import './styles/components/snippets.css';
 @import './styles/components/notes.css';
 @import './styles/components/overview.css';
+@import './styles/components/roles.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
@@ -86,6 +89,7 @@
 @import './styles/surfaces/ports.css';
 @import './styles/surfaces/files.css';
 @import './styles/surfaces/vault.css';
+@import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
@@ -250,6 +254,40 @@
   color: var(--color-danger);
 }
 
+/* The model chip pair (nocx-rikz5): the endpoint and model that will answer
+   a question, or the one rung of the ladder that has to be climbed first.
+   A control, so it takes the pointer its neighbours do not — .nocx-chip
+   sets `cursor: default` for the chips that are only labels.
+
+   The truncation is the point of the rest. A model id is long
+   ("deepseek/deepseek-v4-flash-0731-preview") and a chip that wraps pushes
+   the chrome row to a second line, which moves the composer and the
+   scrollback hanging from it (the same 2px lesson .nocx-chip's border reset
+   records). One line, ellipsised; the whole value lives in the title and
+   the accessible name, so nothing is only in the ellipsis. */
+.nocx-editor-model {
+  cursor: pointer;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* One deviation from the rest of the row, and the reason is mechanical:
+     .nocx-chip is `inline-flex`, and `text-overflow` applies to a block
+     container's own inline content — inside a flex container the text is an
+     anonymous ITEM, so the id would hard-clip mid-glyph instead of
+     ellipsising. Safe here because the parent .nocx-editor-chrome-left is
+     itself `display: flex; align-items: center`: these chips are flex items,
+     so their display value is blockified either way and nothing about the
+     row's alignment or its single height turns on the difference. */
+  display: inline-block;
+}
+
+/* A rung no page repairs ('unavailable') is not a control: it must not
+   offer the pointer a click would answer with nothing. */
+.nocx-editor-model:disabled {
+  cursor: default;
+}
+
 .nocx-editor-input {
   width: 100%;
   background: transparent;
@@ -401,21 +439,12 @@
    reference chips a selection raises live in their own strip between the
    chrome and the input: "if you ask, this comes with you". */
 
-.nocx-editor-target-indicator {
-  /* A control, never text — and now structurally so: it is not in the
-     document at all. */
-  padding: 1px 7px;
-  font-size: var(--font-size-2xs);
-  line-height: 1.4;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  border: 1px solid var(--color-surface-raised);
-}
-
 /* The gutter the token lives in: a column beside the content, never inside
    it. CM6's default gutter paints a panel and a divider — the chrome of a
    line-number rail — and this one is a sigil in the prompt, so all of it is
-   cleared and only the trailing gap remains. */
+   cleared and only the trailing gap remains. The token itself is the kit's
+   ModeIndicator (ui/mode-indicator.ts, styles/components/mode-indicator.css)
+   — placed here, never repainted. */
 .nocx-editor .cm-gutters {
   background: transparent;
   border-right: none;
@@ -426,16 +455,6 @@
   display: flex;
   align-items: center;
   padding: 0 6px 0 0;
-}
-
-.nocx-editor-target-indicator:hover {
-  color: var(--color-text);
-}
-
-/* The switched state is information, not alarm: the person chose it. */
-.nocx-editor-target-indicator[data-target='agent'] {
-  color: var(--color-accent-secondary);
-  border-color: var(--color-accent-secondary);
 }
 
 .nocx-editor-references {
@@ -866,6 +885,15 @@
     opacity: 1;
     transform: translateY(-2px);
   }
+}
+
+/* The model that answered, under the answer text (nocx-e6kn2): the person
+   must be able to tell which model answered without looking it up. Muted
+   provenance — the answer is the content; this is its caption. */
+.cmd-answer-provenance {
+  margin-top: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
 }
 
 .cmd-output {

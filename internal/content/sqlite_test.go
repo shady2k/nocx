@@ -131,6 +131,96 @@ func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 	}
 }
 
+// The author a command was submitted under is DURABLE — it is the entry's own
+// kind (design §3.1, nocx-iadtt/nocx-e5vsc), so a restart must read back which
+// of the two authors ran each line. Written against the reopened store rather
+// than the live one: an author kept only in memory would satisfy every
+// in-process assertion and lose the fact on the next launch, which is the one
+// state this feature exists for.
+func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
+	db, dir := newTestStore(t)
+	ctx := context.Background()
+
+	for _, rec := range []content.CompletedCommand{
+		{
+			Client: "test-client", Env: content.Environment{ID: "local", Kind: content.EnvLocal},
+			Cwd: "/srv/api", Intent: "agent-cmd", Status: content.EntrySuccess,
+			Author: content.EntryAgent,
+		},
+		{
+			Client: "test-client", Env: content.Environment{ID: "local", Kind: content.EnvLocal},
+			Cwd: "/srv/api", Intent: "shell-cmd", Status: content.EntrySuccess,
+			Author: content.EntryShell,
+		},
+	} {
+		if _, err := db.Ledger().RecordCompleted(ctx, rec); err != nil {
+			t.Fatalf("RecordCompleted %q: %v", rec.Intent, err)
+		}
+	}
+
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	db2, err := content.Open(ctx, content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    testKey(),
+		Budget: testBudget,
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	entries, err := db2.Ledger().ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries after reopen: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries after reopen = %+v, want 2 durable rows", entries)
+	}
+	if entries[0].Kind != content.EntryShell || entries[0].Intent != "shell-cmd" {
+		t.Fatalf("newest ledger entry = %+v, want shell-cmd under the shell author", entries[0])
+	}
+	if entries[1].Kind != content.EntryAgent || entries[1].Intent != "agent-cmd" {
+		t.Fatalf("older ledger entry = %+v, want agent-cmd under the agent author", entries[1])
+	}
+}
+
+// An author outside the two command-bearing kinds is refused rather than
+// written: `action` is a no-block effect and can never be a command's author,
+// and an unknown kind would meet the CHECK constraint halfway through the
+// transaction instead of at the seam that can name the vocabulary.
+func TestRecordCompleted_RefusesAnAuthorThatIsNotACommandKind(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, author := range []content.EntryKind{content.EntryAction, "robot"} {
+		rec := aCompletedCommand("x")
+		rec.Author = author
+		if _, err := db.Ledger().RecordCompleted(ctx, rec); err == nil {
+			t.Fatalf("author %q was accepted; want a refusal naming shell or agent", author)
+		}
+	}
+}
+
+// And the ordinary caller that names no author is the shell path — which is
+// what every caller was before the author existed, so the default must not
+// leave a row with an empty kind.
+func TestRecordCompleted_DefaultsAnUnnamedAuthorToTheShell(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("unnamed")); err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	entries, err := db.Ledger().ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Kind != content.EntryShell {
+		t.Fatalf("entries = %+v, want one row under the shell author", entries)
+	}
+}
+
 // A wrong key fails at Open, leaves the file byte-identical, and creates no
 // second, unencrypted file.
 func TestWrongKeyFailsCleanly(t *testing.T) {
@@ -139,8 +229,8 @@ func TestWrongKeyFailsCleanly(t *testing.T) {
 	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("wrongkey-marker")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 
 	path := filepath.Join(dir, "content.db")
@@ -364,15 +454,15 @@ func TestUnwritableDirectoryProducesError(t *testing.T) {
 func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 	_, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("late"))
 	if !errors.Is(err, content.ErrClosed) {
 		t.Fatalf("Add after Close = %v, want ErrClosed", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("second Close = %v, want nil (idempotent)", err)
+	if secondCloseErr := db.Close(); secondCloseErr != nil {
+		t.Fatalf("second Close = %v, want nil (idempotent)", secondCloseErr)
 	}
 }
 
@@ -384,8 +474,8 @@ func TestAutoVacuumDecidedAtCreation(t *testing.T) {
 	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("av")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 
 	// The test opens its own keyed connection to read the pragma the way a

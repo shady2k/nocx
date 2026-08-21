@@ -281,3 +281,65 @@ describe('composition with Field', () => {
     expect(label?.textContent?.trim()).toBe('Name')
   })
 })
+
+/**
+ * The commit gesture (nocx-gihi6). A field whose value is WRITTEN rather than
+ * merely validated cannot write per keystroke — the Agent policy page's scope
+ * field is checked by `ParseEffectPolicy`, which rejects a non-absolute path,
+ * so a half-typed `/w` would be a refused write and a toast on every character
+ * of `/workspace`. Blur and Enter are the same gesture ("I am done with this
+ * value") and the kit says so once, rather than every caller pairing `onBlur`
+ * with a hand-rolled keydown.
+ */
+describe('TextField commit gesture', () => {
+  it('commits on blur, with the field value', () => {
+    const onCommit = vi.fn()
+    subject({ value: '/workspace', onCommit })
+    fireEvent.blur(screen.getByRole('textbox'))
+    expect(onCommit).toHaveBeenCalledWith('/workspace')
+  })
+
+  it('commits on Enter without waiting for focus to leave', () => {
+    const onCommit = vi.fn()
+    subject({ value: '/workspace', onCommit })
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
+    expect(onCommit).toHaveBeenCalledWith('/workspace')
+  })
+
+  it('does not commit on any other key', () => {
+    const onCommit = vi.fn()
+    subject({ value: '/w', onCommit })
+    const input = screen.getByRole('textbox')
+    fireEvent.keyDown(input, { key: 'w' })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('does not commit per keystroke', () => {
+    const onCommit = vi.fn()
+    const onInput = vi.fn()
+    subject({ value: '', onCommit, onInput })
+    fireEvent.input(screen.getByRole('textbox'), { target: { value: '/w' } })
+    expect(onInput).toHaveBeenCalledTimes(1)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('leaves onBlur alone: a caller using both gets both', () => {
+    const onBlur = vi.fn()
+    const onCommit = vi.fn()
+    subject({ value: 'x', onBlur, onCommit })
+    fireEvent.blur(screen.getByRole('textbox'))
+    expect(onBlur).toHaveBeenCalledWith('x')
+    expect(onCommit).toHaveBeenCalledWith('x')
+  })
+
+  it('commits a multiline value on blur, and never on Enter — Enter is a newline there', () => {
+    const onCommit = vi.fn()
+    subject({ value: 'a note', multiline: true, onCommit })
+    const area = screen.getByRole('textbox')
+    fireEvent.keyDown(area, { key: 'Enter' })
+    expect(onCommit).not.toHaveBeenCalled()
+    fireEvent.blur(area)
+    expect(onCommit).toHaveBeenCalledWith('a note')
+  })
+})

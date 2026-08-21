@@ -44,4 +44,8 @@ export interface AgentAsk {
    * True when this ask was a replay of an earlier ask with the same askId — the response to the first attempt was lost, and this answers the ORIGINAL run id rather than creating a second run.
    */
   replayed: boolean
+  /**
+   * The model id that answered — the answering role's pair, pinned into the run's facts at ask time (RunFacts.Model, bead nocx-e6kn2). Always present on a result: an ask whose role could not resolve is a refusal, never a result. The renderer shows this beside every answer, so a person can always tell which model answered.
+   */
+  model: string
 }

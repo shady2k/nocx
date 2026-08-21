@@ -50,6 +50,20 @@ func TestAgentAsk_EndpointHeadersResolveAtStreamTime(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("endpoints.create: code %d\nraw: %s", env.Error.Code, raw)
 	}
+	// The ask resolves through the ANSWERING ROLE (bead nocx-e6kn2): the
+	// fixture assigns the role to the endpoint it just created.
+	created, code := decodeEndpointResult(t, raw)
+	if code != 0 {
+		t.Fatalf("endpoints.create: code %d", code)
+	}
+	assign := jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
+		"role":       "answering",
+		"endpointId": created.ID,
+		"model":      "qwen3",
+	})
+	if isErrorResponse(t, assign) {
+		t.Fatalf("roles.assign: %s", assign)
+	}
 	sid := openLocalSession(t, h.conn)
 	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-1"), 1)
 	if errObj != nil {

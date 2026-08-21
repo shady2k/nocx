@@ -4563,6 +4563,7 @@ func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	raw, err := json.Marshal(agentAskResponse{
 		RunID: 7, QuestionID: "ask-1", AnswerEntryID: "answer-1",
 		State: string(content.RunPrepared), IngestSeq: 3, Replayed: false,
+		Model: "qwen3",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -4621,6 +4622,195 @@ func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("ask error: %+v", env.Error)
 	}
 	validateJSON(t, schema, env.Result, "agent.ask result")
+}
+
+// ── agent.readScreenRequest / agent.readScreenResolved (nocx-ljfwz) ──────
+
+// The request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId
+// + sessionId, the narrowing already applied) must satisfy the schema the
+// renderer's generated type was declared from.
+func TestAgentReadScreenRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.readScreenRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestScreen(t.Context(), sid, nil)
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.readScreenRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.readScreenRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.readScreenResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not capture the screen") {
+			t.Fatalf("RequestScreen returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestScreen never settled")
+	}
+}
+
+func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.readScreenResolved.schema.json")
+	body, err := json.Marshal(readScreenResolvedParams{
+		Outcome: "frame",
+		Rows: []frameRowWire{{
+			Kind: "cells",
+			Cells: []frameCellWire{
+				{Char: "h", Attrs: frameAttrsWire{}},
+				{Char: "i", Attrs: frameAttrsWire{}},
+			},
+		}},
+		Cursor: &frameCursorWire{Line: 0, Col: 0},
+		Identity: &frameIdentityWire{
+			Buffer: frameBufferWire{Kind: "normal"},
+			Cols:   2, Rows: 1, Generation: 1,
+		},
+		Range: &frameRangeWire{Start: 0, End: 1},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.readScreenResolved DTO")
+}
+
+// ── agent.runRequest / agent.runResolved (nocx-tjppv) ─────────────────────
+
+// The run request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId +
+// sessionId + command) must satisfy the schema the renderer's generated type
+// was declared from.
+func TestAgentRunRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestRun(t.Context(), sid, "ls -la")
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.runRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.runRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.runResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not run the command") {
+			t.Fatalf("RequestRun returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestRun never settled")
+	}
+}
+
+func TestAgentRunResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	body, err := json.Marshal(runResolvedParams{
+		Outcome:  "completed",
+		EntryID:  "entry-7",
+		ExitCode: new(0),
+		Status:   "success",
+		Total:    2,
+		Start:    0,
+		End:      2,
+		Text:     "file1\nfile2",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved DTO")
+}
+
+// The failed outcome's shape: no run body, only the requestId and the
+// failure sentence.
+func TestAgentRunResolved_FailedDTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId": "0123456789abcdef",
+		"outcome":   "failed",
+		"error":     "the agent lane is not prompt-ready",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved failed DTO")
 }
 
 // ── agent.runDelta / agent.runState notifications (nocx-x8s2.2, design §7) ─
@@ -4756,6 +4946,92 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── policy.get / policy.set ──────────────────────────────────────────────
+
+// The DTO's own conformance for policy.get: the matrix's wire form — seven
+// rows, effective decisions for unstated rows, non-null scopes arrays — must
+// satisfy the schema exactly (additionalProperties false on the result AND on
+// every row AND every scope, so nothing extra can ride along).
+func TestPolicyGet_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+
+	askOnMutate := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}
+	raw, err := json.Marshal(policyResult{Policy: askOnMutate})
+	if err != nil {
+		t.Fatalf("marshal ask-on-mutate: %v", err)
+	}
+	validateJSON(t, schema, raw, "policy.get ask-on-mutate DTO")
+
+	var finer content.EffectPolicy
+	finer.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	finer.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	rawFiner, err := json.Marshal(policyResult{Policy: finer})
+	if err != nil {
+		t.Fatalf("marshal finer: %v", err)
+	}
+	validateJSON(t, schema, rawFiner, "policy.get finer-than-presets DTO")
+}
+
+// The real result off the real socket: the handler's response — not a test
+// payload — must satisfy the contract, with the scope and decisions the store
+// actually holds (the third row of the contracts README's table).
+func TestPolicyGet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.Delegate = content.EffectRow{Decision: content.DecisionRefuse}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	resp := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.get: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.get result (real socket)")
+}
+
+// The policy.set result's conformance: {ok: true}, asserted off the real
+// socket after a set the validator accepted.
+func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.set.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	resp := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
+		"policy": map[string]any{
+			"observe": map[string]any{
+				"decision": "permit",
+				"scopes":   []any{map[string]any{"kind": "path", "id": "/workspace"}},
+			},
+		},
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.set: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.set result (real socket)")
 }
 
 // ── ledger.open / ledger.bind / ledger.close ─────────────────────────────

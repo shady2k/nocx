@@ -696,10 +696,21 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 			return err
 		}
 		if in.Grant != nil {
+			// The policy column holds the decision MATRIX as JSON (ADR-0020
+			// §7 as amended 2026-08-16): the recorded grant's rows are what
+			// the decision was, so "what was this allowed to do" is a query
+			// over the record, never a reconstruction. A grant whose
+			// policy the store cannot reproduce is not recorded — writing
+			// a run whose authority cannot be answered later is the hole
+			// ADR-0020 decision 5 exists to close.
+			policyJSON, err := json.Marshal(in.Grant.Policy)
+			if err != nil {
+				return fmt.Errorf("authority grant policy: %w", err)
+			}
 			g, err := tx.ExecContext(ctx, `INSERT INTO authority_grants
 				(execution_id, version, issued_at, expires_at, policy) VALUES (?, ?, ?, ?, ?)`,
 				id, in.Grant.Version, time.Now().UnixMilli(), in.Grant.ExpiresAt,
-				string(in.Grant.Policy))
+				string(policyJSON))
 			if err != nil {
 				return err
 			}
@@ -711,6 +722,13 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 				if _, err := tx.ExecContext(ctx,
 					`INSERT INTO grant_scopes (grant_id, resource_kind, resource_id) VALUES (?, ?, ?)`,
 					grantID, string(sc.Kind), sc.ID); err != nil {
+					return err
+				}
+			}
+			for _, e := range in.Grant.Effects {
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO grant_effects (grant_id, effect) VALUES (?, ?)`,
+					grantID, string(e)); err != nil {
 					return err
 				}
 			}
@@ -1208,14 +1226,24 @@ func (s *sqliteContent) observationByID(ctx context.Context, id int64) (*Observa
 func (s *sqliteContent) grantFor(ctx context.Context, executionID int64) (*Grant, error) {
 	var g Grant
 	var grantID int64
+	var policyJSON string
 	err := s.db.QueryRowContext(ctx, `SELECT id, version, expires_at, policy
 		FROM authority_grants WHERE execution_id = ?`, executionID).Scan(
-		&grantID, &g.Version, &g.ExpiresAt, &g.Policy)
+		&grantID, &g.Version, &g.ExpiresAt, &policyJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	// A stored policy that no longer parses — an older build's shape, a
+	// hand-edited row — degrades to the zero matrix, which decides ask:
+	// the recorded authority is never re-read as "permitted" because it
+	// cannot be read at all.
+	if parsed, perr := ParseEffectPolicy([]byte(policyJSON)); perr != nil {
+		g.Policy = EffectPolicy{}
+	} else {
+		g.Policy = parsed
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT resource_kind, resource_id FROM grant_scopes WHERE grant_id = ? ORDER BY resource_kind, resource_id`,
@@ -1226,12 +1254,29 @@ func (s *sqliteContent) grantFor(ctx context.Context, executionID int64) (*Grant
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var sc GrantScope
-		if err := rows.Scan(&sc.Kind, &sc.ID); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&sc.Kind, &sc.ID); scanErr != nil {
+			return nil, scanErr
 		}
 		g.Scopes = append(g.Scopes, sc)
 	}
-	return &g, rows.Err()
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	erows, err := s.db.QueryContext(ctx,
+		`SELECT effect FROM grant_effects WHERE grant_id = ? ORDER BY effect`,
+		grantID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = erows.Close() }()
+	for erows.Next() {
+		var e Effect
+		if escanErr := erows.Scan(&e); escanErr != nil {
+			return nil, escanErr
+		}
+		g.Effects = append(g.Effects, e)
+	}
+	return &g, erows.Err()
 }
 
 // artifactsFor loads one execution's artifacts, metadata only (no bodies).

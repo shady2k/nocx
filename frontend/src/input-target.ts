@@ -4,6 +4,7 @@
 // editing the editor.
 
 import type { Extension } from '@codemirror/state'
+import type { CommandAuthor } from './command-ledger'
 export interface SubmitContext {
   readonly targetId: string
 }
@@ -11,6 +12,12 @@ export interface SubmitContext {
 export interface InputTarget {
   readonly id: string
   readonly label: string
+  /** The author of the commands this target submits (design §3.1,
+   *  nocx-iadtt): 'shell' is the human, 'agent' is the assistant's lane.
+   *  Minted HERE, at the target — never derived afterwards from what else
+   *  is running. The shell submit orchestration stamps it on the ledger
+   *  record and the block at submit. */
+  readonly author: CommandAuthor
   /** Whether a submission to this target IS a shell command. The
    *  composition root runs the shell submit orchestration — keyboard
    *  handoff, ledger record, running block, lifecycle attempt — only for
@@ -44,6 +51,10 @@ export interface InputTargetRegistry {
 // running shell enabled bracketed paste. Newlines stay in the single document,
 // so multi-line compositions still execute every line (nocx-4ff.14).
 export class ShellInputTarget implements InputTarget {
+  /** The shell IS the human: a command submitted through this target is
+   *  attributed to the person, even while another registered target's
+   *  submission is in flight (design §3.1, nocx-iadtt). */
+  readonly author = 'shell'
   readonly id = 'shell'
   readonly label = 'Shell'
   readonly routesToShell = true

@@ -31,8 +31,10 @@ import (
 // contracts/agent.status.schema.json. lastProbe is required on the wire and
 // null when none has run — a nil pointer marshals to null. credential names
 // which of the credential facts is true (design §7, ADR-0032): one
-// authoritative enum, never a boolean that hides the reason. It is null only
-// when no endpoint is configured (there is nothing to ask about).
+// authoritative enum, never a boolean that hides the reason. It is the fact
+// of the endpoint the ANSWERING ROLE resolved to and of no other, and null
+// whenever the role does not resolve — there is then no endpoint the
+// question is about (nocx-rikz5).
 //
 // The three facts the product distinguishes are 'none' (the endpoint has no
 // reference at all), 'deleted' (the referenced secret is gone) and 'sealed'
@@ -44,7 +46,45 @@ type agentStatusResult struct {
 	EndpointConfigured bool                   `json:"endpointConfigured"`
 	Credential         *string                `json:"credential"`
 	LastProbe          *assistant.ProbeResult `json:"lastProbe"`
+	// Answering is the resolution of the role the ask will use. Ready, or
+	// one of the refusal reasons; never absent, because readiness is the
+	// question the ask surface asks and a status with no answer to it is
+	// what let "an endpoint exists" pass for "the assistant can answer"
+	// (nocx-rikz5).
+	Answering answeringWire `json:"answering"`
 }
+
+// answeringWire is agent.status's answer to "will the assistant answer, and
+// with what". Ready plus the (endpoint, model) that will answer, or Reason
+// naming the rung the person is on. All four fields are required on the
+// wire and null when they do not apply — a field that vanishes is a field
+// the renderer reads as "unknown" and renders as nothing.
+type answeringWire struct {
+	Ready    bool    `json:"ready"`
+	Reason   *string `json:"reason"`
+	Endpoint *string `json:"endpoint"`
+	Model    *string `json:"model"`
+}
+
+// The answering reason enum: the wire's vocabulary for "why the role does
+// not resolve". Six values, not four — `no-models` and `unavailable` are
+// states the real system reaches and that the four-value set answered
+// wrongly: an endpoint offering nothing would have been told to "choose a
+// model" from an empty picker, and a store that could not answer would have
+// been an error toast with no repair path.
+const (
+	reasonNoEndpoints  = "no-endpoints"
+	reasonNoModels     = "no-models"
+	reasonUnassigned   = "unassigned"
+	reasonEndpointGone = "endpoint-gone"
+	reasonModelGone    = "model-gone"
+	reasonUnavailable  = "unavailable"
+)
+
+// reasonPtr is the wire's "present and non-null" for a reason constant.
+// Not named strPtr: ws_effective_test.go already owns that name in this
+// package, and this one only ever wraps a member of the enum above.
+func reasonPtr(s string) *string { return &s }
 
 // The credential enum: the wire's single vocabulary for "can the ask
 // authenticate", and the reason when it cannot.
@@ -112,45 +152,74 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 	if h.probes != nil {
 		res.LastProbe = h.probes.Last()
 	}
+	// The order is the whole change (nocx-rikz5): resolve the ROLE first,
+	// then ask about THAT endpoint's key. The handler used to decide the
+	// credential by scanning every endpoint and returning early when there
+	// were none — which skipped the answering fact in the very case that
+	// most needs a reason, and reported "resolvable" whenever ANY endpoint
+	// resolved, so a healthy endpoint nobody chose vouched for the one that
+	// would actually answer.
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
 		eps, err := svc.ListEndpoints()
 		if err != nil {
-			return err
+			// A store that cannot answer is a rung, not an RPC error: an
+			// error toast leaves a person with nothing to do next, and the
+			// ladder must have a sentence for this.
+			res.Answering = answeringWire{Reason: reasonPtr(reasonUnavailable)}
+			return nil
 		}
 		res.EndpointConfigured = len(eps) > 0
-		if !res.EndpointConfigured {
-			return nil // credential stays null: nothing to ask about
-		}
-		// One resolvable endpoint is enough to ask. When none resolves, the
-		// reason is the most actionable one present: a sealed vault
-		// outranks the rest (the ask surface's whole point is to offer the
-		// unlock), then the first endpoint's own fact.
-		resolved := false
-		sealed := false
-		firstOther := ""
-		for _, ep := range eps {
-			st := h.credentialStateFor(ctx, ep.CredentialRef)
-			switch st {
-			case credResolvable:
-				resolved = true
-			case credSealed:
-				sealed = true
-			default:
-				if firstOther == "" {
-					firstOther = st
-				}
+
+		ep, model, resolveErr := svc.ResolveRole(profile.RoleAnswering)
+		switch {
+		case resolveErr == nil:
+			name := ep.Name
+			res.Answering = answeringWire{Ready: true, Endpoint: &name, Model: &model}
+			// THE CREDENTIAL OF THE ENDPOINT THAT WILL ANSWER, and of no
+			// other. Fleet-wide endpoint health belongs on the Endpoints
+			// page; here the question is about one endpoint.
+			cred := h.credentialStateFor(ctx, ep.CredentialRef)
+			res.Credential = &cred
+			// A probe describes ONE endpoint and one model. Reported only
+			// when it describes this one; otherwise "Last test ok" is about
+			// something the person is not asking.
+			if res.LastProbe != nil && !probeDescribes(res.LastProbe, ep, model) {
+				res.LastProbe = nil
 			}
-		}
-		cred := credResolvable
-		if !resolved {
-			switch {
-			case sealed:
-				cred = credSealed
-			case firstOther != "":
-				cred = firstOther
+		case len(eps) == 0:
+			// Before every other refusal: with no endpoints there is
+			// nothing to assign, nothing to repair and nothing to name, and
+			// sending a person to choose from an empty list is the one
+			// answer worse than saying nothing.
+			res.Answering = answeringWire{Reason: reasonPtr(reasonNoEndpoints)}
+		case errors.Is(resolveErr, profile.ErrRoleEndpointGone):
+			res.Answering = answeringWire{Reason: reasonPtr(reasonEndpointGone)}
+		case errors.Is(resolveErr, profile.ErrRoleModelGone):
+			res.Answering = answeringWire{Reason: reasonPtr(reasonModelGone)}
+		case errors.Is(resolveErr, profile.ErrRoleUnassigned):
+			// `no-models` is a REFINEMENT of "you have not chosen yet", not
+			// a rung competing with the two above it: it is the case where
+			// "choose a model" would open a picker with no options — a
+			// repair the person cannot perform. It is nested here rather
+			// than tested first because a fleet-wide fact must never
+			// outrank a selection the person actually made: a default
+			// naming a deleted endpoint, next to a surviving endpoint that
+			// happens to offer nothing, used to report `no-models` and sent
+			// them to add a model to an endpoint they never chose.
+			if !anyEndpointOffersAModel(eps) {
+				res.Answering = answeringWire{Reason: reasonPtr(reasonNoModels)}
+			} else {
+				res.Answering = answeringWire{Reason: reasonPtr(reasonUnassigned)}
 			}
+		default:
+			// Includes a role-store read failure surfaced through
+			// ResolveRole, and a role name this build does not know.
+			res.Answering = answeringWire{Reason: reasonPtr(reasonUnavailable)}
 		}
-		res.Credential = &cred
+		// credential stays null on every refusal arm: with no resolved
+		// endpoint there is no key the question is about, and the old
+		// "first other endpoint's fact" would be a sentence about an
+		// endpoint nobody chose.
 		return nil
 	})
 	if err != nil {
@@ -193,6 +262,34 @@ func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref str
 		return credDeleted
 	}
 	return credResolvable
+}
+
+// anyEndpointOffersAModel reports whether any stored endpoint offers at
+// least one model. It splits the UNASSIGNED case in two — "you have not
+// chosen yet" from "there is nothing to choose" — and is asked ONLY there:
+// it is a fact about the fleet, and a fact about the fleet must never
+// outrank a selection the person made, which is why a dangling endpoint or
+// a removed model is answered before this is consulted at all.
+// ValidateEndpoint refuses a zero-model record at create and at update, so
+// a false answer here is reachable only from a document written underneath
+// us — and a rung that reads "choose a model" over an empty picker is a
+// repair instruction a person cannot follow.
+func anyEndpointOffersAModel(eps []profile.Endpoint) bool {
+	for _, ep := range eps {
+		if len(ep.Models) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// probeDescribes reports whether a recorded probe is about the endpoint and
+// model the role just resolved to. Both must match: a connection check names
+// no model at all (Model is empty by definition), so it describes the
+// endpoint but never this model, and reporting its verdict as this model's
+// would be the same lie in a quieter voice.
+func probeDescribes(p *assistant.ProbeResult, ep profile.Endpoint, model string) bool {
+	return p.EndpointName == ep.Name && p.Model == model
 }
 
 // assistantProbeHandlers answers endpoints.probe: probe the form's draft

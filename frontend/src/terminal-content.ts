@@ -14,7 +14,7 @@ import {
 import { LifecycleProjections } from './lifecycle/projections'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
-import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
+import { RecallOverlay, queryLedgerHistory, withSessionText, type RecallQuery } from './recall'
 import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
@@ -22,7 +22,10 @@ import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
+import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
+import { AgentReadiness, modelChipState } from './agent-readiness'
+import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
   chipFromSelection,
@@ -53,7 +56,7 @@ import {
 import { mountIntegrationNotice } from './integration/notice'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -61,7 +64,12 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
-import { CommandLedger, type CommandRecord, type CommandStatus } from './command-ledger'
+import {
+  CommandLedger,
+  type CommandAuthor,
+  type CommandRecord,
+  type CommandStatus,
+} from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
 import { blocksForPane, bodyForBlock } from './restore-client'
@@ -80,6 +88,8 @@ import {
   type ContentViewport,
   type ActiveOrigin,
 } from './pane-content'
+import { type CapturedFrame } from './frame/types'
+import { CaptureAbortedError } from './frame/capture-identity'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { NotifyClient } from './notify-client'
@@ -306,8 +316,14 @@ export interface TerminalContentHooks {
 
   /** A question was refused because no endpoint is configured: open the
    *  endpoint editor so the refusal comes with its repair — wired by
-   *  main.tsx to the Settings tab's Endpoints page. */
+   *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
+   *  by the model chip's `endpoints` destination (nocx-rikz5). */
   onCreateEndpoint?: () => void
+  /** The model chip's other destination: the Roles page, where the model
+   *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
+   *  it is the same idea — a state names one page that repairs it — and
+   *  wired by main.tsx to the Settings tab's Roles page. */
+  onOpenRoles?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -389,6 +405,22 @@ export class TerminalContent extends BasePaneContent {
    *  target and sends nothing (nocx-4wtlh). Registration and routing ARE
    *  this slice. */
   private inputTargets: InputTargetRegistry | null = null
+  /** The editor-side per-target store (ADR-0004 §3, nocx-4ff.7): drafts
+   *  and session history keyed by the REGISTRY's target id. The draft
+   *  swap below reads and writes it on every switch; the per-target
+   *  recall corpus serves from it. A third target gets both by
+   *  registering — nothing here names a target. */
+  private targetState = new TargetState()
+  /** Per-target recall queries, keyed by target id — the same keyed-lookup
+   *  seam as the registry, never a branch on the id. The SHELL's corpus is
+   *  the persistent store (with the ledger fallback); a question is not a
+   *  command and never enters the store, so the agent — and any target
+   *  without a registration — recalls its own recorded corpus. */
+  private targetRecall = new Map<string, RecallQuery>()
+  /** The id of the target the editor currently wears — the OUTGOING side
+   *  of a switch, tracked here because the registry's change notification
+   *  names only the incoming target. */
+  private activeTargetId: string | null = null
   private agentTarget: AgentInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
@@ -421,6 +453,20 @@ export class TerminalContent extends BasePaneContent {
    *  line, for the receipt's hover emphasis (chips carry the span; rows
    *  carry the capture id). */
   private readonly receiptChipSpans = new Map<string, { start: number; end: number }>()
+  /** The run tool's pending completions (nocx-tjppv), keyed by the block
+   *  each agent submission opened — the SAME object the freeze mutates in
+   *  place, so a freeze resolves exactly the waiter whose command finished.
+   *  The ledger id is minted at submit by the ordinary path; the waiter
+   *  resolves when the block's VISUAL freeze lands (onBlockFrozen) with
+   *  the completed run body. */
+  private readonly agentRuns = new Map<
+    BlockRecord,
+    {
+      ledgerId: number
+      resolve: (run: AgentRunCompletion) => void
+      reject: (reason: unknown) => void
+    }
+  >()
   /** The prompt's vault surfaces: the '@' picker, the composition-time
    *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
@@ -454,6 +500,16 @@ export class TerminalContent extends BasePaneContent {
   /** Unsubscribe from the reconnect report, which is what gives a restore
    *  that raced a dropped socket its second chance (nocx-m3fqk). */
   private _restoreRetryUnsub: (() => void) | null = null
+  /** The pane's readiness store (nocx-rikz5): the ONE holder of
+   *  agent.status in this renderer (AD-8). The ask target's refusal path
+   *  and the composer's model chip both read it; neither calls the method
+   *  itself. */
+  private readiness: AgentReadiness | null = null
+  private _readinessUnsub: (() => void) | null = null
+  /** Unsubscribe from the reconnect report for the readiness refresh — its
+   *  own registration rather than a second statement inside the restore's,
+   *  so removing either leaves the other alone. */
+  private _readinessRetryUnsub: (() => void) | null = null
   /** The pending restoration episode (ADR-0024 decision 8): the fence the
    *  shell must write to the pty and the generation to acknowledge, captured
    *  from the lost fact. Non-null from the moment the channel is declared
@@ -1125,6 +1181,15 @@ export class TerminalContent extends BasePaneContent {
       // both keyboard paths reach the ONE opener (design §10.1, AD-8).
       renderer.onSnippetChord?.(() => this.handleSnippetChord())
 
+      // The lane's interactivity report (ADR-0020 decision 3): the backend
+      // cannot see the alternate screen (AD-6 — it never sniffs the byte
+      // stream) and the renderer owns the buffer kind, so the renderer
+      // reports every buffer change and the backend decides the lane's
+      // awaiting-takeover transition from it. Before the session opens the
+      // report has no session to name — the open handler re-reports the
+      // current kind (reportLaneBufferKind).
+      renderer.onBufferChange((bufferKind) => this.reportLaneBufferKind(bufferKind))
+
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -1138,6 +1203,10 @@ export class TerminalContent extends BasePaneContent {
         // (AGENTS.md: a soft degrade the UI contradicts is how a feature
         // that does not exist survives a release).
         onClear: () => this.clearReferenceChips(),
+        // A frozen block's output rows are fixed in the DOM: resolve any
+        // pending agent-run completion waits (nocx-tjppv — the run tool
+        // reads the output window from the frozen block).
+        onBlockFrozen: (rec) => this._onBlockFrozen(rec),
       })
 
       log.info('nocx: mounting renderer')
@@ -1236,7 +1305,44 @@ export class TerminalContent extends BasePaneContent {
       // the mode. The agent target is constructed with this tab's seams:
       // the session id is read per submit (a reconnect mints a new
       // session — the target must never capture against a stale one).
+      // The readiness store, built BEFORE the registry that reads it: one
+      // owner for agent.status in this pane (AD-8, nocx-rikz5). What used
+      // to be here was `() => new AgentClient(…).status()` handed to the
+      // ask target — a function called at refusal time, which no surface
+      // can render and nothing can repaint.
+      const readiness = new AgentReadiness(new AgentClient(this.client.dispatcher))
+      this.readiness = readiness
+      this._readinessUnsub = readiness.subscribe(() => this.renderModelChip())
+
       this.inputTargets = createRegistry((target) => {
+        // The per-target draft swap (nocx-4ff.7): snapshot the editor
+        // under the OUTGOING target's id, restore the INCOMING target's
+        // draft — text, selection (anchor/head) and scroll — so a round
+        // trip returns exactly what was being edited and the other mode's
+        // draft survives untouched. The editor stays passive: the host
+        // drives the store, keyed by the registry's id; a third target
+        // gets its own draft by registering.
+        const prevId = this.activeTargetId
+        if (this.editor && prevId !== null && prevId !== target.id) {
+          const sel = this.editor.getSelection()
+          this.targetState.saveDraft(prevId, {
+            text: this.editor.getDoc(),
+            from: sel.from,
+            to: sel.to,
+            scrollTop: this.editor.getScrollTop(),
+          })
+          const draft = this.targetState.draft(target.id)
+          if (draft) {
+            this.editor.replaceDoc(draft.text, draft.from, draft.to)
+            this.editor.setScrollTop(draft.scrollTop)
+          } else {
+            // No draft under the incoming id: the line is genuinely
+            // cleared — the same seam a submit uses, so the vault
+            // surfaces hold no stale findings from the other mode.
+            this.editor.clear()
+          }
+        }
+        this.activeTargetId = target.id
         // The line-start indicator renders the registry's active target
         // and nothing else repaints it: this notification IS its refresh
         // signal (ask-entry.ts). The indicator derives its own WORD from
@@ -1248,6 +1354,12 @@ export class TerminalContent extends BasePaneContent {
         // as a command with an operator in it. One authority decides
         // both — the registry — and the editor stays passive.
         this.editor?.setTargetExtensions(target.editorExtensions?.() ?? [])
+        // Entering Ask is the moment the person asks "what will answer
+        // this?", so it is a moment to ask the backend rather than to
+        // repaint a fact that may be minutes old. Leaving Ask only
+        // repaints — a Run pane pays no readiness call.
+        if (target.id === this.agentTarget?.id) this.refreshReadiness()
+        this.renderModelChip()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -1290,7 +1402,11 @@ export class TerminalContent extends BasePaneContent {
         onRefusal: (message) => showToast({ level: 'warning', message }),
         // The typed readiness fact behind a refusal (agent.status), so the
         // target never has to read the reason out of the message text.
-        status: () => new AgentClient(this.client.dispatcher).status(),
+        // Through the store, not around it: a refusal is exactly when the
+        // facts are freshest and the chip most needs to catch up, and a
+        // second caller of agent.status would be a second owner of the
+        // answer (AD-8).
+        status: () => readiness.refresh(),
         // No endpoint: the toast says what is wrong and this opens where it
         // is fixed. A refusal with nowhere to go is how a person concludes
         // the feature is broken rather than unconfigured.
@@ -1304,6 +1420,10 @@ export class TerminalContent extends BasePaneContent {
         editorExtensions: () => documentLayer,
       })
       this.inputTargets.register(this.agentTarget)
+      // The registry's active target is settled (the first registered —
+      // shell). Track the id the editor wears so the next switch knows the
+      // OUTGOING side of the draft swap.
+      this.activeTargetId = this.inputTargets.active().id
       // The caret indicator + its toggle: the person's one explicit
       // switch. Clicking the chip (or ⌘/Ctrl+Enter) flips the active target;
       // the registry's notification repaints the label. Ordinary use
@@ -1360,6 +1480,18 @@ export class TerminalContent extends BasePaneContent {
             // keys, the flow gains no phantom running block, and no
             // attempt is opened for prose (nocx-x8s2.2).
             const active = this.inputTargets!.active()
+            // The per-target corpus (nocx-4ff.7): every submission is
+            // recorded under the ACTIVE target's id, so the shell's
+            // commands and the agent's questions never interleave. The
+            // shell's recall reads the store, not this; the agent's (and
+            // any future target's) recall serves from it. The id is the
+            // registry's own — the same seam that routed the submit.
+            this.targetState.record(active.id, {
+              doc,
+              cwd: this._cwd,
+              host: this._host,
+              at: Date.now(),
+            })
             if (!active.routesToShell) {
               // The target surfaces its own refusal (onRefusal → the
               // toast); the rethrow is for programmatic callers, so the
@@ -1389,117 +1521,24 @@ export class TerminalContent extends BasePaneContent {
             // reordered one — measured, the letters of the next input
             // arriving at the pty ahead of the command that was going to
             // read them.
-            this.takeKeyboardToGrid()
-            this.holdRawUntilSubmitted()
-            const recordLine = plan?.recordLine ?? doc
-            // Where the command RUNS, captured before anything below can
-            // change it. Entering an environment blanks `_cwd` (we know the
-            // host, not the remote directory), and the ledger and the block
-            // both read it further down — so `ssh pi@…` was recorded with no
-            // directory and vanished from a history scoped to "this
-            // directory". The command ran here, whatever it goes on to do.
-            const submitCwd = this._cwd
-            // An empty line is a bare newline: no execution, no attempt, no
-            // ledger record (CommandLedger.open refuses empty commands) and
-            // no block. The shell still gets its newline — a conventional
-            // terminal stays conventional.
-            const write = (): void => {
-              // Detach the queue BEFORE the command goes out, flush it after.
-              //
-              // Both halves matter and the order is the whole point. The
-              // command is delivered through renderer.paste, and a paste is
-              // itself an onData — so a queue still armed here would swallow
-              // the command and put it BEHIND the keys that were waiting for
-              // it, which is the same reordering with the operands swapped
-              // (measured: a bare `\r` reaching the pty ahead of its own
-              // command line).
-              const held = this.takeHeldRaw()
-              try {
-                submitCommand(doc, {
-                  focusGrid: () => this.takeKeyboardToGrid(),
-                  sendDoc: (d) => {
-                    void active.submit(d, { targetId: active.id })
-                  },
-                })
-              } finally {
-                // In a `finally`, and fail-open: a write that threw sent
-                // nothing, and holding the keys anyway would swallow them
-                // for the rest of the session. Late at a prompt is a line
-                // the user can see and erase; silently gone is not.
-                for (const data of held) this.session?.send(data)
-              }
-            }
-            if (recordLine === '') {
-              write()
-              return
-            }
-            // SEVERED (ADR-0024): the ssh attempt binding (expected passport
-            // id, tagged A→B entry, local-D completion) and the
-            // environment-entry heuristic (docker, su, …) are deleted with
-            // the marker cycle — nothing stream-derived may activate an
-            // environment, and without a completion there is nothing to
-            // restore. The submitted line still opens a ledger record and a
-            // running block (the app-owned ordering ADR-0024 §5 keeps).
-            if (this.ledger) {
-              let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine())
-              const m = renderer.registerMarker()
-              if (m) {
-                markerLine = () => m.line()
-                this._markers.set(rec.id, m)
-                m.onDispose(() => {
-                  this.ledger?.dispose(rec.id)
-                  this._markers.delete(rec.id)
-                })
-              }
-            }
-            // The submitted line is now the running command: recompose
-            // the title immediately. The running fact arrives later over
-            // the wire, and a conventional shell may never send one.
-            this.pushTitle()
-            this.scrollback?.maybeClear(recordLine)
-            // The running block opens at the app-owned submit — before any
-            // bytes and before any fact can arrive — so the published
-            // running fact (which the backend emits BEFORE the RPC response,
-            // inside SubmitAttempt) always finds the block it binds to
-            // (ADR-0024 §5, §7). That ordering is why the block's CREATION
-            // line is the prompt line, and why its OUTPUT range starts one
-            // row later (nocx-4yhi): the bytes go out after this call, and
-            // the shell's echo of the typed command lands on the creation
-            // line itself. The header already shows the command; a body
-            // that repeats it is the defect — so the range and the
-            // creation time are two different things, and the record
-            // carries both.
-            if (this.scrollback && this.renderer) {
-              const startLine = this.renderer.cursorLine()
-              // Not `beginBlock`: this runs inside the settle the editor's
-              // commit opened around the whole transition, and a nested glide
-              // would leave two animations on one element.
-              this.scrollback.beginBlockNow(recordLine, submitCwd, startLine, startLine + 1)
-            }
-            const st = this.lifecycle.state
-            if (st.kind !== 'prompt_ready') {
-              // No live domain: nothing to attach the app-owned text to. The
-              // shell's own start (if any) opens a shell-originated attempt
-              // and the block binds to it — a conventional terminal stays
-              // conventional, and the privacy rule holds either way.
-              write()
-              return
-            }
-            // ADR-0024 decision 5: the app-owned attempt opens BEFORE the
-            // bytes that can cause the shell's own start are written to the
-            // pty; the later authenticated start attaches to it and replaces
-            // nothing. Fail-open: a refused attempt (the domain lost its
-            // prompt mid-typing) must never swallow the command — the bytes
-            // still go out and the session stays conventional.
-            void new LifecycleClient(this.client.dispatcher)
-              .submitAttempt({
-                domain: st.domain.id,
-                command: recordLine,
-                cwd: submitCwd,
-                host: this._host,
-              })
-              .then(write, write)
+            // The ONE shell submit orchestration (submitShellCommand):
+            // the keyboard handoff (a person's submit takes the grid; the
+            // agent's never does — ADR-0020 decision 1), the ledger record,
+            // the running block and the lifecycle attempt all run in one
+            // place, and this call differs from the agent's by exactly the
+            // author, the handoff and the byte route (nocx-tjppv).
+            this.submitShellCommand({
+              doc,
+              recordLine: plan?.recordLine ?? doc,
+              author: active.author,
+              takeKeys: true,
+              // The editor's commit already opened a settle around this
+              // whole transition, so the block must open WITHOUT a glide of
+              // its own — a nested one would leave two animations on one
+              // element (see beginBlockNow).
+              callerOwnsGlide: true,
+              sendLine: (d) => void active.submit(d, { targetId: active.id }),
+            })
           },
           // A bare newline: the shell gets its keystroke and answers with a
           // fresh prompt. Deliberately not routed through the submit path —
@@ -1595,6 +1634,16 @@ export class TerminalContent extends BasePaneContent {
       )
       // The layer of the target Enter goes to right now (shell at start).
       this.editor.setTargetExtensions(this.inputTargets.active().editorExtensions?.() ?? [])
+      // The model chip's two destinations (nocx-rikz5). The endpoints one
+      // is the seam a refusal already uses — one owner for "open where an
+      // endpoint is fixed", reused rather than duplicated.
+      this.editor.onModelChipClick((page) => {
+        if (page === 'endpoints') this.hooks.onCreateEndpoint?.()
+        else this.hooks.onOpenRoles?.()
+      })
+      // Shell is active at start, so this paints the chip's absence — the
+      // state a Run pane is in, and the one the row was built for.
+      this.renderModelChip()
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -1605,7 +1654,6 @@ export class TerminalContent extends BasePaneContent {
         requestCreateSecret: (name) => this.hooks.onCreateSecret?.(name),
       })
       this.promptVault.mount()
-
       // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
       // The history palette above the prompt. Rows are served by the store
       // over the control plane (history.query, source=store); when the
@@ -1617,19 +1665,46 @@ export class TerminalContent extends BasePaneContent {
       // and Enter TAKES the command into the line without running it — the
       // overlay never reaches a submit path (nocx-w7h.5, reversed by the
       // owner 2026-08-19; the reasoning is on the module's header comment).
+      // The SHELL's recall corpus is the persistent store — cross-session,
+      // with rungs and coverage; a question is not a command and never
+      // enters the store, so the agent recalls its own recorded corpus by
+      // default (the lookup below). Registered per target id beside the
+      // registry, exactly as the targets themselves are.
+      this.targetRecall.set('shell', async (scope, text) => {
+        try {
+          const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+          // A command run in THIS session comes back as it was run, not as
+          // the store had to keep it (nocx-xkve.4). Recall only — the
+          // completion provider above keeps reading the store, so ghost
+          // text and candidates stay masked.
+          return withSessionText(page, this.ledger)
+        } catch {
+          return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
+        }
+      })
       this.recall = new RecallOverlay({
         editor: this.editor,
-        query: async (scope, text) => {
-          try {
-            const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
-            // A command run in THIS session comes back as it was run, not as
-            // the store had to keep it (nocx-xkve.4). Recall only — the
-            // completion provider above keeps reading the store, so ghost
-            // text and candidates stay masked.
-            return withSessionText(page, this.ledger)
-          } catch {
-            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
-          }
+        // The recall corpus is the ACTIVE target's (nocx-4ff.7): the
+        // shell's commands and the agent's questions are different corpora
+        // and must not interleave. The shell's is the persistent store
+        // (with the ledger fallback), registered below; a question never
+        // enters the store, so the agent — and any target without a
+        // registration — recalls its own recorded corpus (target-state).
+        // The lookup is keyed by the registry's id, never a branch on it.
+        query: (scope, text) => {
+          const active = this.inputTargets!.active()
+          const corpus = this.targetRecall.get(active.id)
+          return corpus
+            ? corpus(scope, text)
+            : Promise.resolve(
+                queryTargetHistory(
+                  this.targetState.history(active.id),
+                  scope,
+                  this._cwd,
+                  this._host,
+                  text,
+                ),
+              )
         },
         // A recalled masked row cannot run as written (ADR-0021): the
         // overlay reports the row's redaction spans every time it places
@@ -2001,6 +2076,13 @@ export class TerminalContent extends BasePaneContent {
       this._restoreRetryUnsub = this.client.onReconnectResult(() => {
         void this.restorePast()
       })
+      // A returning socket may be a returning BACKEND, whose endpoints and
+      // roles are not the ones this pane last read. The report fires once
+      // per reconnect, after every attach has settled, so the refresh
+      // cannot race a half-open connection.
+      this._readinessRetryUnsub = this.client.onReconnectResult(() => {
+        if (this.inputTargets?.active().id === this.agentTarget?.id) this.refreshReadiness()
+      })
 
       // The kernel starts Native and onChange may not fire for the initial
       // state: present the session with the terminal visible from the first
@@ -2317,6 +2399,13 @@ export class TerminalContent extends BasePaneContent {
         cwd: session.cwd || '',
         workspace: session.workspaceId,
       })
+
+      // Re-report the CURRENT buffer kind now that the session has a
+      // backend id: a buffer change before open had no session to name,
+      // and the backend's lane starts at normal — the report brings a lane
+      // already inside a TUI (an alt screen restored by replay) up to
+      // date (ADR-0020 decision 3).
+      this.reportLaneBufferKind(renderer.activeBufferKind())
 
       // The open ack carries the resolved launch policy and the refusal
       // reason (nocx-4t37.2): the capability control starts from the
@@ -2834,11 +2923,58 @@ export class TerminalContent extends BasePaneContent {
   setVisible(visible: boolean): void {
     super.setVisible(visible)
     if (visible) this.renderer?.refreshAtlas()
+    // The pane coming back to the front is when the facts behind the model
+    // chip can have changed: an endpoint is created, a role assigned and a
+    // default set on the SETTINGS pane, which is a different pane — so the
+    // person cannot see this chip while they do it, and this is the moment
+    // it must catch up. Named triggers per write (endpoints.create,
+    // roles.assign, roles.setDefault) would each have to be installed in a
+    // surface this task does not own, and there is no backend notification
+    // for them; the show is the one seam that covers all of them at once
+    // and is not a poll. Only while Enter goes to the assistant — a Run
+    // pane has no chip to refresh, and pays no call for one.
+    if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
+      this.refreshReadiness()
+    }
     // The pane's past, drawn the first time somebody looks at it
     // (nocx-m3fqk). On first SHOW rather than at boot: eight panes at fifty
     // blocks is four hundred blocks of DOM before the first frame, and a pane
     // nobody has opened has not been read.
     if (visible) void this.restorePast()
+  }
+
+  /**
+   * Ask the readiness store for fresh facts, fire and forget.
+   *
+   * A failed read costs the refresh and never the chip: the store keeps the
+   * last fact, so the composer goes on naming the model it last knew rather
+   * than blanking on a dropped socket. The failure is a log line and not a
+   * toast on purpose — nothing the person did has been refused, and the ask
+   * path raises its own visible refusal when a question actually fails.
+   */
+  private refreshReadiness(): void {
+    const readiness = this.readiness
+    if (!readiness) return
+    void readiness.refresh().catch((err: unknown) => {
+      log.warn('nocx: the assistant readiness could not be read', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+  }
+
+  /**
+   * The model chip's ONE writer in this pane: both facts it needs — which
+   * target Enter goes to, and what the readiness store holds — are read
+   * here, so no other site has to remember to combine them.
+   *
+   * No chip at all unless the assistant is what a submit reaches: a Run
+   * pane names no model, because none answers anything.
+   */
+  private renderModelChip(): void {
+    if (!this.editor) return
+    const active = this.inputTargets?.active()
+    const isAsk = active !== undefined && active.id === this.agentTarget?.id
+    this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
   }
 
   /** One shot. A pane is shown many times — every tab switch — and its past
@@ -3023,6 +3159,34 @@ export class TerminalContent extends BasePaneContent {
     this._noticeDispose()
     this._noticeDispose = null
     this.scheduleLiveResize()
+  }
+
+  /** The session id this content's terminal belongs to — the readScreen
+   *  pull's lookup key (nocx-ljfwz). The renderer answers only requests
+   *  naming ITS session; a request for any other session is answered
+   *  failed by the app-level handler. */
+  sessionId(): string {
+    return this.session?.sessionId ?? ''
+  }
+
+  /** Capture this session's live frame (the readScreen pull): the renderer
+   *  produces the frame because it owns the grid (AD-6). Rejects with
+   *  CaptureAbortedError when no renderer is mounted (yet or anymore). */
+  captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
+    if (!this.renderer) return Promise.reject(new CaptureAbortedError())
+    return this.renderer.captureLiveFrame(region)
+  }
+
+  /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
+   *  ADR-0020 decision 3): the renderer observed the buffer change, the
+   *  backend decides the awaiting-takeover transition from it. Fire-and-
+   *  forget — the backend treats a refused report (a stale session, a
+   *  closed lane) as nothing to transition; a lost report costs only a
+   *  delayed transition, and the next change re-reports. */
+  private reportLaneBufferKind(bufferKind: 'normal' | 'alternate'): void {
+    const sid = this.session?.sessionId
+    if (!sid) return
+    void this.client.call('agent.laneInteractivity', { sessionId: sid, bufferKind }).catch(() => {})
   }
 
   /** Raise the degraded-session card, unless the user has already answered
@@ -3520,6 +3684,11 @@ export class TerminalContent extends BasePaneContent {
     this._titleReconcileUnsub = null
     this._restoreRetryUnsub?.()
     this._restoreRetryUnsub = null
+    this._readinessRetryUnsub?.()
+    this._readinessRetryUnsub = null
+    this._readinessUnsub?.()
+    this._readinessUnsub = null
+    this.readiness = null
     this._projections = null
     this.env?.detach()
     this.env = null
@@ -3549,6 +3718,228 @@ export class TerminalContent extends BasePaneContent {
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
+  }
+
+  // ── the shell submit orchestration (nocx-tjppv) ────────────────────────
+
+  /** The ONE path a command takes to the pty (ADR-0004 §2's atomic handoff,
+   *  ADR-0024 §5's app-owned attempt). A human command and an agent-run
+   *  command differ by exactly three things: the author minted at submit
+   *  (design §3.1), whether the keyboard changes hands (a person's submit
+   *  takes the grid; the agent's never does — ADR-0020 decision 1: the
+   *  agent never takes the user's keys), and how the bytes are sent (the
+   *  active shell target vs the lane's own paste+CR). Everything else —
+   *  the ledger record, the running block, the lifecycle attempt, the
+   *  fail-open write — is one implementation, never two.
+   *
+   *  Returns the block the submission opened (the same object the freeze
+   *  mutates in place) and the ledger record id, both minted at submit by
+   *  the ordinary path — the agent-run wait keys on the block object. */
+  private submitShellCommand(opts: {
+    doc: string
+    recordLine: string
+    author: CommandAuthor
+    takeKeys: boolean
+    /** True when the caller's own glide already owns the whole transition,
+     *  so the running block must open WITHOUT one of its own: the editor's
+     *  commit is that caller, and a nested glide leaves two animations on
+     *  one element (scrollback/controller.ts, beginBlockNow). False for a
+     *  submission that arrives on its own — the agent's — which gets the
+     *  ordinary settle. */
+    callerOwnsGlide: boolean
+    sendLine: (d: string) => void
+  }): { block: BlockRecord | null; ledgerId: number | null } {
+    const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine } = opts
+    if (takeKeys) {
+      this.takeKeyboardToGrid()
+      this.holdRawUntilSubmitted()
+    }
+    // Where the command RUNS, captured before anything below can change it.
+    // Entering an environment blanks `_cwd` (we know the host, not the
+    // remote directory), and the ledger and the block both read it further
+    // down — so `ssh pi@…` was recorded with no directory and vanished from
+    // a history scoped to "this directory". The command ran here, whatever
+    // it goes on to do.
+    const submitCwd = this._cwd
+    // An empty line is a bare newline: no execution, no attempt, no ledger
+    // record (CommandLedger.open refuses empty commands) and no block. The
+    // shell still gets its newline — a conventional terminal stays
+    // conventional.
+    const write = (): void => {
+      // Detach the queue BEFORE the command goes out, flush it after.
+      //
+      // Both halves matter and the order is the whole point. The command is
+      // delivered through renderer.paste, and a paste is itself an onData —
+      // so a queue still armed here would swallow the command and put it
+      // BEHIND the keys that were waiting for it, which is the same
+      // reordering with the operands swapped (measured: a bare `\r`
+      // reaching the pty ahead of its own command line).
+      const held = this.takeHeldRaw()
+      try {
+        submitCommand(doc, {
+          focusGrid: () => this.takeKeyboardToGrid(),
+          sendDoc: sendLine,
+        })
+      } finally {
+        // In a `finally`, and fail-open: a write that threw sent nothing,
+        // and holding the keys anyway would swallow them for the rest of
+        // the session. Late at a prompt is a line the user can see and
+        // erase; silently gone is not.
+        for (const data of held) this.session?.send(data)
+      }
+    }
+    if (recordLine === '') {
+      write()
+      return { block: null, ledgerId: null }
+    }
+    // SEVERED (ADR-0024): the ssh attempt binding (expected passport id,
+    // tagged A→B entry, local-D completion) and the environment-entry
+    // heuristic (docker, su, …) are deleted with the marker cycle — nothing
+    // stream-derived may activate an environment, and without a completion
+    // there is nothing to restore. The submitted line still opens a ledger
+    // record and a running block (the app-owned ordering ADR-0024 §5 keeps).
+    let ledgerId: number | null = null
+    if (this.ledger) {
+      let markerLine: () => number | undefined = () => undefined
+      const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine(), author)
+      ledgerId = rec.id
+      const m = this.renderer?.registerMarker() ?? null
+      if (m) {
+        markerLine = () => m.line()
+        this._markers.set(rec.id, m)
+        m.onDispose(() => {
+          this.ledger?.dispose(rec.id)
+          this._markers.delete(rec.id)
+        })
+      }
+    }
+    // The submitted line is now the running command: recompose the title
+    // immediately (nocx-n8n82 — a pane is named by what runs in it). The
+    // running fact arrives later over the wire, and a conventional shell
+    // may never send one.
+    this.pushTitle()
+    this.scrollback?.maybeClear(recordLine)
+    // The running block opens at the app-owned submit — before any bytes
+    // and before any fact can arrive — so the published running fact (which
+    // the backend emits BEFORE the RPC response, inside SubmitAttempt)
+    // always finds the block it binds to (ADR-0024 §5, §7). That ordering
+    // is why the block's CREATION line is the prompt line, and why its
+    // OUTPUT range starts one row later (nocx-4yhi): the bytes go out after
+    // this call, and the shell's echo of the typed command lands on the
+    // creation line itself. The header already shows the command; a body
+    // that repeats it is the defect — so the range and the creation time
+    // are two different things, and the record carries both.
+    let block: BlockRecord | null = null
+    if (this.scrollback && this.renderer) {
+      const startLine = this.renderer.cursorLine()
+      if (callerOwnsGlide) {
+        this.scrollback.beginBlockNow(recordLine, submitCwd, startLine, startLine + 1, author)
+      } else {
+        this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1, author)
+      }
+      block = this.scrollback.blockManager.runningBlock
+    }
+    const st = this.lifecycle.state
+    if (st.kind !== 'prompt_ready') {
+      // No live domain: nothing to attach the app-owned text to. The
+      // shell's own start (if any) opens a shell-originated attempt and the
+      // block binds to it — a conventional terminal stays conventional, and
+      // the privacy rule holds either way.
+      write()
+      return { block, ledgerId }
+    }
+    // ADR-0024 decision 5: the app-owned attempt opens BEFORE the bytes
+    // that can cause the shell's own start are written to the pty; the
+    // later authenticated start attaches to it and replaces nothing.
+    // Fail-open: a refused attempt (the domain lost its prompt mid-typing)
+    // must never swallow the command — the bytes still go out and the
+    // session stays conventional.
+    void new LifecycleClient(this.client.dispatcher)
+      .submitAttempt({
+        domain: st.domain.id,
+        command: recordLine,
+        cwd: submitCwd,
+        host: this._host,
+      })
+      .then(write, write)
+    return { block, ledgerId }
+  }
+
+  /** The run tool's renderer half (nocx-tjppv): submit a command through
+   *  the SAME orchestration a person's Enter runs — ledger record, running
+   *  block, lifecycle attempt, paste+CR delivery — with the agent's author
+   *  (design §3.1) and WITHOUT the keyboard handoff (ADR-0020 decision 1:
+   *  the agent never takes the user's keys; the lane is a session of its
+   *  own). The backend never writes to the PTY (design §2.1): the bytes go
+   *  out the same route a person's line takes, never a direct
+   *  session.write from the backend. Resolves when the block this
+   *  submission opened freezes, with the completed run body: the entry id
+   *  (the app-owned ledger record id, minted at submit by the ordinary
+   *  path), the exit status and a window of the output. */
+  submitAgentCommand(command: string): Promise<AgentRunCompletion> {
+    if (command === '') {
+      return Promise.reject(new Error('run: an empty command is a bare newline, not an execution'))
+    }
+    // Promise.withResolvers needs ES2024 and this project targets ES2021,
+    // so the resolvers are captured via the executor form (the same trade
+    // host-key-controller.ts makes).
+    let resolve!: (run: AgentRunCompletion) => void
+    let reject!: (reason: unknown) => void
+    const promise = new Promise<AgentRunCompletion>((done, fail) => {
+      resolve = done
+      reject = fail
+    })
+    const { block, ledgerId } = this.submitShellCommand({
+      doc: command,
+      recordLine: command,
+      author: 'agent',
+      takeKeys: false,
+      callerOwnsGlide: false,
+      sendLine: (d) => {
+        this.renderer?.paste(d)
+        this.session?.send('\r')
+      },
+    })
+    if (block === null || ledgerId === null) {
+      reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
+      return promise
+    }
+    this.agentRuns.set(block, { ledgerId, resolve, reject })
+    return promise
+  }
+
+  /** A block's VISUAL freeze landed (onBlockFrozen): its output rows are
+   *  fixed in the DOM. Resolve the agent-run completion wait whose block
+   *  this is — the same object the submission's beginBlock returned, so a
+   *  freeze resolves exactly the waiter whose command finished. The window
+   *  contract (design §4.4): total is the block's output line count, the
+   *  renderer clamps the text to the wire bound and states how much more
+   *  the block holds — never a silent truncation. */
+  private _onBlockFrozen(rec: BlockRecord): void {
+    const waiter = this.agentRuns.get(rec)
+    if (!waiter) return
+    this.agentRuns.delete(rec)
+    const all = blockOutputText(rec.el)
+    const lines = all.split('\n')
+    let end = 0
+    let chars = 0
+    for (; end < lines.length; end++) {
+      const next = chars + lines[end].length + (end > 0 ? 1 : 0)
+      if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
+      chars = next
+    }
+    waiter.resolve({
+      entryId: String(waiter.ledgerId),
+      exitCode: rec.exitCode,
+      // The hook fires on the visual freeze, when the block is logically
+      // frozen too — the type union still admits 'running', which a frozen
+      // block can never be; the honest mapping is 'unknown'.
+      status: rec.status === 'running' ? 'unknown' : rec.status,
+      total: lines.length,
+      start: 0,
+      end,
+      text: lines.slice(0, end).join('\n'),
+    })
   }
 
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────

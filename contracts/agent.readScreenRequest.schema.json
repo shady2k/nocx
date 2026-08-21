@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.readScreenRequest.schema.json",
+  "title": "AgentReadScreenRequest",
+  "description": "Params of the agent.readScreenRequest notification (nocx-ljfwz, design §2.4): the server asks the renderer to capture a session's screen. The renderer owns the grid (AD-6), so the frame is produced here, not in the backend. requestId is the broker-minted correlation id the renderer echoes back in agent.readScreenResolved; sessionId is the session whose screen is read — already narrowed by the run's grant before the request was sent; region, when present, is an absolute buffer row span [start, end); absent means the visible screen.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "sessionId"],
+  "properties": {
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The broker-minted request id; echoed back in the resolution."
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The session whose screen is read (inside the run's grant)."
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "description": "Absolute buffer row span [start, end). Absent: the visible screen.",
+      "properties": {
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "First buffer row of the region, inclusive."
+        },
+        "end": {
+          "type": "integer",
+          "description": "Last buffer row of the region, exclusive. Must be greater than start."
+        }
+      }
+    }
+  }
+}

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -685,8 +686,8 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
-	if err := backupService.Recover(); err != nil {
-		return nil, fmt.Errorf("backup recovery: %w", err)
+	if recoverErr := backupService.Recover(); recoverErr != nil {
+		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
 
 	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
@@ -756,16 +757,16 @@ func New(opts ...Option) (*App, error) {
 			switch k {
 			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
 				settings.HistoryOutputEnabled.Key(), settings.HistoryOutputCapKB.Key():
-				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryEnabled); getErr == nil {
 					historyPolicy.SetEnabled(v)
 				}
-				if v, err := settingsRegistry.GetNumber(settings.HistoryRetentionDays); err == nil {
+				if v, getErr := settingsRegistry.GetNumber(settings.HistoryRetentionDays); getErr == nil {
 					historyPolicy.SetRetentionDays(int(v))
 				}
-				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryOutputEnabled); getErr == nil {
 					historyPolicy.SetOutputEnabled(v)
 				}
-				if v, err := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); err == nil {
+				if v, getErr := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); getErr == nil {
 					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
 			}
@@ -807,6 +808,14 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
+	// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,
+	// accepted): the matrix every run's grant is minted from. Persisted as a
+	// JSON document beside the settings; the run mint and the
+	// policy.get/set RPCs read the same store live, so a
+	// Settings save applies without a restart. An unset or unreadable
+	// store IS a policy — the zero matrix, which asks — never an error.
+	policyStore := assistant.NewGlobalPolicyStore(docStore, "agent-policy.json")
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithBackupService(backupService),
@@ -814,7 +823,17 @@ func New(opts ...Option) (*App, error) {
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
+		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
+		transport.WithAgentPolicy(policyStore),
+		// Which of that policy's seven rows govern anything at all: the
+		// effect classes at least one DECLARED tool carries. Read HERE, off
+		// the tool declaration table, for the same reason WithBuildInfo
+		// reads internal/version here — it is compile-time state, and the
+		// composition root is where state becomes a dependency. The
+		// settings surface needs it so five controls that govern nothing do
+		// not look like the two that do.
+		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
 		transport.WithHistoryStatus(historyStatus),
@@ -969,6 +988,13 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+	// The run lease (ADR-0020 decision 2) every agent run is supervised
+	// under, named here the way the lane capacity is: the wall-clock
+	// deadline, the inactivity deadline, the output budget and the
+	// escalation grace. The transport's default IS the production value —
+	// this line names it, so the seam stays reachable from production and
+	// a future settings surface flips one option here, not a default.
+	tpOpts = append(tpOpts, transport.WithRunLease(transport.DefaultRunLeaseConfig()))
 	// The notification router (ADR-0029): the only holder of "where" a raised
 	// notification goes. Before this line the whole notify package was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
@@ -1039,8 +1065,16 @@ func New(opts ...Option) (*App, error) {
 	// process-lifetime: agent.status's "last probe result" fact, whose
 	// meaning expires with the endpoint that produced it.
 	assistantProbes := assistant.NewProbeStore()
+	// NewClient fails loudly when the tool schemas did not reach the binary
+	// (nocx-jtz3q): an assistant whose registry assembled empty would offer
+	// no tools to any run and fail silently — the composition root refuses
+	// to start with a broken registry instead.
+	assistantClient, err := assistant.NewClient(logger)
+	if err != nil {
+		return nil, err
+	}
 	tpOpts = append(tpOpts,
-		transport.WithAssistantClient(assistant.NewClient(logger)),
+		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
 	tp := transport.NewWSServer(logger, sess, tpOpts...)

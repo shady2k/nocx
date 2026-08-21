@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ type scriptedAssistantClient struct {
 	received       []assistant.Message
 	receivedParams assistant.AskParams
 	aborted        bool // onDelta returned an error and Ask aborted
+	askCalls       int  // how many times Ask ran — the "was the model called" fact
 }
 
 func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
@@ -48,6 +50,7 @@ func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbePa
 func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.askCalls++
 	s.received = append([]assistant.Message(nil), p.Messages...)
 	s.receivedParams = p
 	for _, d := range s.deltas {
@@ -67,10 +70,19 @@ type askHarness struct {
 	db   content.ContentDB
 	ws   *WSServer
 	conn *websocket.Conn
+	// fakeRequests counts provider requests the readScreen failure-path
+	// tests drive (the harness itself never dials a provider).
+	fakeRequests atomic.Int64
 }
 
 func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
-	t.Helper()
+	return newAskHarnessWithOpts(t, client)
+}
+
+// newAskHarnessWithOpts is newAskHarness with additional WSServerOptions —
+// for tests that need a seam named at construction (the policy tests wire
+// WithAgentPolicy here, so the control plane registers the methods wired).
+func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSServerOption) *askHarness {
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
 	reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
@@ -106,10 +118,12 @@ func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
 	opts := []WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultLifecycle(v),
+		WithAgentKnownMaterial(NewVaultKnownMaterial(v)),
 		WithContentDB(db),
 		WithAssistantClient(client),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 	}
+	opts = append(opts, extra...)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
 	ctx := t.Context()
 	if err := ws.Start(ctx); err != nil {
@@ -124,23 +138,26 @@ func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
 // createEndpoint makes one endpoint with a resolvable key.
 func (h *askHarness) createEndpoint() {
 	h.t.Helper()
-	raw := jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
+	e, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
 		"name":    "Local",
 		"baseUrl": "http://127.0.0.1:11434/v1",
 		"schema":  "openai-compatible",
 		"key":     "sk-test-123",
 		"models":  []map[string]any{{"name": "qwen3"}},
+	}))
+	if code != 0 {
+		h.t.Fatalf("endpoints.create: code %d", code)
+	}
+	// The ask now resolves through the ANSWERING ROLE (bead nocx-e6kn2),
+	// so the ordinary path's fixture assigns the role as well: an endpoint
+	// with models but no role assignment is refused, by design.
+	assign := jsonrpcCall(h.t, h.conn, "roles.assign", map[string]any{
+		"role":       "answering",
+		"endpointId": e.ID,
+		"model":      "qwen3",
 	})
-	var env struct {
-		Error *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		h.t.Fatalf("endpoints.create unmarshal: %v", err)
-	}
-	if env.Error != nil {
-		h.t.Fatalf("endpoints.create: code %d\nraw: %s", env.Error.Code, raw)
+	if isErrorResponse(h.t, assign) {
+		h.t.Fatalf("roles.assign: %s", assign)
 	}
 }
 
@@ -179,6 +196,9 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	}
 	if res.AnswerEntryID == "" {
 		t.Fatal("ask result carries no answerEntryId — the renderer cannot place the answer block")
+	}
+	if res.Model != "qwen3" {
+		t.Errorf("ask result model = %q, want qwen3 — the person must be able to tell which model answered (nocx-e6kn2)", res.Model)
 	}
 
 	// The deltas arrive as agent.runDelta with ascending seq, routed by
@@ -323,8 +343,14 @@ func TestAgentAsk_NoEndpointIsARefusal(t *testing.T) {
 	if errObj == nil {
 		t.Fatal("ask with no endpoint succeeded, want a refusal")
 	}
-	if !strings.Contains(errObj.Message, "endpoint") {
-		t.Errorf("refusal message = %q, want it to name the endpoint", errObj.Message)
+	// The refusal names the ANSWERING ROLE and its repair: resolution goes
+	// through the role (bead nocx-e6kn2) — a role with no assignment is a
+	// visible refusal, never a silent fallback to some other model.
+	if !strings.Contains(errObj.Message, "answering role") {
+		t.Errorf("refusal message = %q, want it to name the answering role", errObj.Message)
+	}
+	if !strings.Contains(errObj.Message, "Roles") {
+		t.Errorf("refusal message = %q, want it to name the repair (Settings → Roles)", errObj.Message)
 	}
 }
 
@@ -385,6 +411,12 @@ func (s *scriptedAssistantClient) messages() []assistant.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.received
+}
+
+func (s *scriptedAssistantClient) askCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.askCalls
 }
 
 func (s *scriptedAssistantClient) deltaCount() int {
@@ -667,5 +699,190 @@ func TestSliceFrameText(t *testing.T) {
 				t.Errorf("sliceFrameText(%q, %+v) = %q, want %q", text, c.r, got, c.want)
 			}
 		})
+	}
+}
+
+// ── the answering ROLE is the resolution (bead nocx-e6kn2) ─────────────
+
+// A person assigns a model to the answering role and the ask picks it up —
+// WITHOUT the ask ever naming a model id. The engine receives the ASSIGNED
+// pair, even when another endpoint's model is first in the list.
+func TestAgentAsk_UsesTheAnsweringRoleAssignment(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"x"}}
+	h := newAskHarness(t, client)
+	// TWO endpoints; the FIRST is the one the old eps[0] path would have
+	// picked. The role names the SECOND.
+	firstRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
+		"name": "First", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
+		"key": "sk-1", "models": []map[string]any{{"name": "qwen3"}},
+	})
+	first, _ := decodeEndpointResult(t, firstRaw)
+	secondRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
+		"name": "Second", "baseUrl": "https://api.example.com/v1", "schema": "openai-compatible",
+		"key": "sk-2", "models": []map[string]any{{"name": "gpt-4o"}, {"name": "gpt-4o-mini"}},
+	})
+	second, _ := decodeEndpointResult(t, secondRaw)
+	if err := isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
+		"role": "answering", "endpointId": second.ID, "model": "gpt-4o",
+	})); err {
+		t.Fatal("roles.assign refused")
+	}
+	_ = first
+
+	sid := openLocalSession(t, h.conn)
+	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-1"), 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+	askRes, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-role", "sessionId": sid, "question": "q", "cwd": "/repo",
+		"references": []any{
+			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
+		},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	// The answer carries the model attribution on the wire: a person can
+	// tell WHICH model answered without reading the assignment.
+	if askRes.Model != "gpt-4o" {
+		t.Errorf("ask result model = %q, want the assigned gpt-4o", askRes.Model)
+	}
+	// The stream runs asynchronously; its terminal notification is the
+	// synchronization point before the params are asserted.
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if got := client.receivedParams.BaseURL; got != "https://api.example.com/v1" {
+		t.Errorf("engine base URL = %q, want the ASSIGNED endpoint's", got)
+	}
+	if got := client.receivedParams.Model; got != "gpt-4o" {
+		t.Errorf("engine model = %q, want the ASSIGNED model, not the first endpoint's first model", got)
+	}
+}
+
+// A reassignment is picked up by the NEXT ask: the role resolves from the
+// store on every ask, so "the feature picks up the change" holds with no
+// model id named anywhere but the assignment.
+func TestAgentAsk_ReassignmentIsPickedUp(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"x"}}
+	h := newAskHarness(t, client)
+	h.createEndpoint() // "Local" with model qwen3, answering → qwen3
+	otherRaw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
+		"name": "Other", "baseUrl": "https://api.example.com/v1", "schema": "openai-compatible",
+		"key": "sk", "models": []map[string]any{{"name": "gpt-4o"}},
+	})
+	other, _ := decodeEndpointResult(t, otherRaw)
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
+		"role": "answering", "endpointId": other.ID, "model": "gpt-4o",
+	})) {
+		t.Fatal("reassign refused")
+	}
+	sid := openLocalSession(t, h.conn)
+	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-1"), 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-re", "sessionId": sid, "question": "q", "cwd": "/repo",
+		"references": []any{
+			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
+		},
+	}, 2); errObj != nil {
+		t.Fatalf("agent.ask after reassignment: %+v", errObj)
+	}
+	readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	if got := client.receivedParams.Model; got != "gpt-4o" {
+		t.Errorf("engine model after reassignment = %q, want gpt-4o", got)
+	}
+}
+
+// A deleted endpoint leaves the role unresolvable and the refusal names it
+// — never a hop to the OTHER endpoint that still exists.
+func TestAgentAsk_DeletedEndpointLeavesTheRoleARefusal(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"x"}}
+	h := newAskHarness(t, client)
+	raw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
+		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
+		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}},
+	})
+	created, code := decodeEndpointResult(t, raw)
+	if code != 0 {
+		t.Fatalf("endpoints.create: code %d", code)
+	}
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
+		"role": "answering", "endpointId": created.ID, "model": "qwen3",
+	})) {
+		t.Fatal("assign refused")
+	}
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "endpoints.delete", map[string]any{"id": created.ID})) {
+		t.Fatal("delete refused")
+	}
+	sid := openLocalSession(t, h.conn)
+	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-1"), 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+	_, errObj = askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-d", "sessionId": sid, "question": "q", "cwd": "/repo",
+		"references": []any{
+			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
+		},
+	}, 2)
+	if errObj == nil {
+		t.Fatal("ask after endpoint delete succeeded, want a refusal")
+	}
+	if !strings.Contains(errObj.Message, "no longer exists") {
+		t.Errorf("refusal message = %q, want it to name the deleted endpoint", errObj.Message)
+	}
+	if !strings.Contains(errObj.Message, "answering") {
+		t.Errorf("refusal message = %q, want it to name the role", errObj.Message)
+	}
+	if client.askCount() != 0 {
+		t.Error("the model must never be called when the role cannot resolve")
+	}
+}
+
+// A model removed from the assigned endpoint leaves the role unresolvable
+// and the refusal names the model — never the endpoint's next model.
+func TestAgentAsk_RemovedModelLeavesTheRoleARefusal(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"x"}}
+	h := newAskHarness(t, client)
+	raw := jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
+		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "schema": "openai-compatible",
+		"key": "sk-test-123", "models": []map[string]any{{"name": "qwen3"}, {"name": "gpt-4o"}},
+	})
+	created, _ := decodeEndpointResult(t, raw)
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
+		"role": "answering", "endpointId": created.ID, "model": "gpt-4o",
+	})) {
+		t.Fatal("assign refused")
+	}
+	// The update drops gpt-4o from the model list — "qwen3" remains, and
+	// must NOT be silently substituted.
+	up := jsonrpcCall(t, h.conn, "endpoints.update", map[string]any{
+		"id": created.ID, "name": "Local", "baseUrl": "http://127.0.0.1:11434/v1",
+		"schema": "openai-compatible", "key": "", "models": []map[string]any{{"name": "qwen3"}},
+	})
+	if isErrorResponse(t, up) {
+		t.Fatalf("endpoints.update: %s", up)
+	}
+	sid := openLocalSession(t, h.conn)
+	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-1"), 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+	_, errObj = askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-m", "sessionId": sid, "question": "q", "cwd": "/repo",
+		"references": []any{
+			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
+		},
+	}, 2)
+	if errObj == nil {
+		t.Fatal("ask with a removed model succeeded, want a refusal")
+	}
+	if !strings.Contains(errObj.Message, "gpt-4o") {
+		t.Errorf("refusal message = %q, want it to name the removed model", errObj.Message)
+	}
+	if client.askCount() != 0 {
+		t.Error("the model must never run after the assigned model was removed")
 	}
 }

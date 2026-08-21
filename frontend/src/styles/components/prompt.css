@@ -81,3 +81,15 @@
   gap: var(--space-2);
   margin-top: var(--space-3);
 }
+
+/* A column of action lines rather than one line. The prompt whose answers are
+   two groups of three (approval, nocx-gycwo) cannot fit them side by side, and
+   a wrapped single line would break wherever the labels happened to run out of
+   room rather than between the allowances and the refusals. */
+.ui-prompt__actions[data-layout='stacked'] {
+  flex-direction: column;
+  align-items: stretch;
+  /* Wider than the gap between the buttons inside a group, so the two groups
+     read as two answers rather than as one six-cell grid. */
+  gap: var(--space-3);
+}

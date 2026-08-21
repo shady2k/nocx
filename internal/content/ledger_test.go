@@ -1076,11 +1076,16 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
+	grantPolicy := presetAutonomous()
 	if _, err := led.StartExecution(ctx, content.StartExecution{
 		EntryID: entryID, Lane: strPtr("lane-1"), Executor: strPtr("agent:eino"),
 		Grant: &content.Grant{
 			Version: 2, ExpiresAt: 1_750_000_200_000,
-			Policy: content.GrantAutonomous,
+			Policy: grantPolicy,
+			Effects: []content.Effect{
+				content.EffectObserve,
+				content.EffectMutateReversible,
+			},
 			Scopes: []content.GrantScope{
 				{Kind: content.ResourceEnvironment, ID: "local"},
 				{Kind: content.ResourceSession, ID: "sess-1"},
@@ -1098,8 +1103,20 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 	if g == nil {
 		t.Fatal("grant missing from the run — 'this run held a grant' must be a query, not a reconstruction")
 	}
-	if g.Version != 2 || g.Policy != content.GrantAutonomous || g.ExpiresAt != 1_750_000_200_000 {
-		t.Fatalf("grant = %+v, want version 2 autonomous expiring 1750000200000", g)
+	if g.Version != 2 || g.ExpiresAt != 1_750_000_200_000 {
+		t.Fatalf("grant = %+v, want version 2 expiring 1750000200000", g)
+	}
+	for _, e := range []content.Effect{
+		content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive,
+		content.EffectPrivilegeChange, content.EffectDisclose, content.EffectCrossBoundary,
+		content.EffectDelegate,
+	} {
+		if got, want := g.Policy.DecisionFor(e), grantPolicy.DecisionFor(e); got != want {
+			t.Fatalf("roundtripped policy decides %s = %s, want %s (the autonomous matrix recorded on the run)", e, got, want)
+		}
+	}
+	if len(g.Effects) != 2 || g.Effects[0] != content.EffectMutateReversible || g.Effects[1] != content.EffectObserve {
+		t.Fatalf("grant effects = %v, want [mutate-reversible observe] (stored ORDER BY effect)", g.Effects)
 	}
 	if len(g.Scopes) != 2 || g.Scopes[0].Kind != content.ResourceEnvironment || g.Scopes[1].Kind != content.ResourceSession {
 		t.Fatalf("grant scopes = %+v, want environment + session", g.Scopes)

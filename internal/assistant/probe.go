@@ -50,8 +50,10 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	defer cancel()
 
 	var sb strings.Builder
+	// The probe is the connectivity question, never a run with authority: it
+	// always declares zero tools, which keeps it on the no-tools path.
 	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers,
-		[]*schema.Message{schema.UserMessage(probePrompt)},
+		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil,
 		func(delta string) error { sb.WriteString(delta); return nil })
 
 	res := ProbeResult{

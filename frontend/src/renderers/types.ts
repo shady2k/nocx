@@ -1,10 +1,10 @@
-import type { ITheme } from '@xterm/xterm'
-
-import type { OscNotification } from '../osc-notification'
-
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
 // write PTY output in, emit user input out, and report its grid size.
+import type { ITheme } from '@xterm/xterm'
+import type { CapturedFrame } from '../frame/types'
+import type { OscNotification } from '../osc-notification'
+
 export type DataCallback = (data: string) => void
 export type ResizeCallback = (cols: number, rows: number) => void
 
@@ -302,6 +302,17 @@ export interface TerminalRenderer {
    *  capture fence. The per-write settle is tracked via write()'s callback,
    *  so this is exact even when onWriteParsed fires mid-write. */
   hasUnsettledWrite(): boolean
+
+  /**
+   * Capture the live frame of the current buffer (nocx-ljfwz): the readScreen
+   * pull — the renderer produces the frame because it owns the grid (AD-6).
+   * Fences the parse queue, mints over the requested absolute row span (the
+   * visible screen when region is absent; clamped when the region overlaps
+   * the buffer). Rejects with CaptureAbortedError when the renderer is
+   * disposed mid-capture, and with ReadScreenRangeError when the region is
+   * entirely past the end of the buffer — a frame never lies about gaps.
+   */
+  captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame>
 
   /** The DOM element the renderer mounted into — the gutter overlays it. */
   readonly paneElement: HTMLElement

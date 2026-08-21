@@ -94,7 +94,7 @@ func newEndpointEnv(t *testing.T, secrets *fakeEndpointSecrets) (capability.Conf
 	store := profile.NewJSONStore(filepath.Join(dir, "profiles.json"))
 	configGate, vaultGate, _, _, _, _ := testGates()
 	op := capability.NewConfigOperation(configGate, vaultGate, testLane(),
-		store, store, store, newProfileService(t), nil, secrets, secrets)
+		store, store, store, store, newProfileService(t), nil, secrets, secrets)
 	return op, store, filepath.Join(dir, "profiles.json")
 }
 
@@ -241,7 +241,7 @@ func TestEndpointCreate_StoreWriteFails_LeavesOnlyTheMintedOrphan(t *testing.T) 
 	}
 	configGate, vaultGate, _, _, _, _ := testGates()
 	badOp := capability.NewConfigOperation(configGate, vaultGate, testLane(),
-		badStore, badStore, badStore, newProfileService(t), nil, nil, secrets)
+		badStore, badStore, badStore, badStore, newProfileService(t), nil, nil, secrets)
 
 	if err := runConfig(t, badOp, func(ctx context.Context, svc capability.ConfigService) error {
 		_, err := svc.CreateEndpoint(ctx, testEndpoint(), credential.NewSecret("sk-test"))

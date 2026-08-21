@@ -50,7 +50,8 @@
  * RPC errors, so the wrapper could not tell "the vault needs setup" from a
  * disk error and the save died in a toast. The first test drives the
  * save-first path — the owner's exact repro, a fresh home with no vault and
- * a key typed into the form — and the row must read "Key saved" afterwards.
+ * a key typed into the form — and the endpoint must then actually answer,
+ * which is the only proof the key landed.
  * The connections path asks at the moment a secret is created (nocx-v64o);
  * the endpoints path now does the same.
  * The fake model endpoint (e2e/fake-openai.ts) is scripted and held open by
@@ -174,6 +175,38 @@ async function backToTerminal(page: Page): Promise<void> {
   await expect(input).toBeFocused({ timeout: 10_000 })
 }
 
+/** Assign the answering role to one endpoint's model — Settings → Roles,
+ *  the surface the model-roles epic (nocx-e6kn2) gave the ask path: the
+ *  ask resolves the ANSWERING ROLE to its assigned (endpoint, model) pair,
+ *  so creating an endpoint never makes it askable and an unassigned role
+ *  refuses with "no model assigned" before any request reaches the model.
+ *  The two selects are the kit's native `<select>`s (ADR-0014): the first
+ *  picks the endpoint, the second completes the pair and writes it — a
+ *  half-pair is never written. */
+async function assignAnsweringRole(page: Page, endpointName: string, model: string): Promise<void> {
+  await page.keyboard.press('Meta+,')
+  await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
+  const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
+  await expect(answering).toBeVisible({ timeout: 10_000 })
+  await answering.locator('select').first().selectOption({ label: endpointName })
+  const modelSelect = answering.locator('select').nth(1)
+  await expect(modelSelect).toBeEnabled()
+  await modelSelect.selectOption({ label: model })
+  // The SELECTS are where an explicit assignment is legible, and since
+  // nocx-rikz5 they are the only place. The row's state sentence used to
+  // repeat them — "Answers with openrouter · m-a" directly under two controls
+  // already saying exactly that — and it now stays SILENT when a role
+  // resolves to what the selects show, speaking only when resolution goes
+  // somewhere they cannot show (through the default) or fails. So waiting for
+  // that sentence here waits for a line the product deliberately no longer
+  // draws.
+  await expect(answering.locator('select').first().locator('option:checked')).toHaveText(
+    endpointName,
+    { timeout: 10_000 },
+  )
+  await expect(answering.locator('select').nth(1).locator('option:checked')).toHaveText(model)
+}
+
 /** Run one command and wait for its finished (frozen) block. */
 async function runCommand(
   page: Page,
@@ -230,7 +263,7 @@ async function askFromPrompt(page: Page, question: string): Promise<void> {
   // `:visible` on purpose: CM6 keeps a hidden measurement spacer beside the
   // real marker, carrying an identical button. The visible one is the
   // person's.
-  const indicator = page.locator('.pane.active .nocx-editor-target-indicator:visible')
+  const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   if ((await indicator.getAttribute('data-target')) !== 'agent') {
     await page.keyboard.press('ControlOrMeta+Enter')
     await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
@@ -269,10 +302,17 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // names the problem and the Endpoints page opens with the editor up on
     // a blank endpoint. A sentence with nowhere to go is how a person
     // concludes the feature is broken rather than unconfigured.
+    // The sentence is the answering ROLE's refusal (nocx-e6kn2): the ask
+    // resolves the role to its assigned (endpoint, model) pair, so the
+    // first dev-stand state refuses with "no model assigned" and points at
+    // Settings → Roles, not with the pre-roles "no endpoint configured".
     await askFromPrompt(page, 'What did this print?')
-    await expect(page.locator('.ui-toast')).toContainText('no endpoint configured', {
-      timeout: 15_000,
-    })
+    await expect(page.locator('.ui-toast')).toContainText(
+      'the answering role has no model assigned — assign one in Settings → Roles',
+      {
+        timeout: 15_000,
+      },
+    )
     await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
       timeout: 15_000,
@@ -327,10 +367,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
     await expect(setupSheet).not.toBeVisible({ timeout: 10_000 })
 
-    // The deferred save ran with the vault now existing: the endpoint dialog
-    // closes and the SAVED ROW carries the key — the row's own word for it
-    // (the "Key saved" badge renders exactly when the record's credential
-    // reference is set, endpoints-section.tsx renderRow).
+    // The deferred save ran with the vault now existing: the dialog closes
+    // and the record is in the list. That the KEY landed is not asserted
+    // from any caption — it is proved below, where this same endpoint
+    // answers a real question through the fake.
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
     // The record landed and the row says so. The page deliberately shows no
     // assistant-readiness badge: readiness belongs on the ask chip, where a
@@ -340,7 +380,14 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // root: this file creates a second endpoint later, and a page-wide
     // contains would then pass on the wrong row.
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-    await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+    await expect(savedRow).toBeVisible({ timeout: 10_000 })
+
+    // ── The answering role (nocx-e6kn2): the ask resolves the role to
+    // its assigned (endpoint, model) pair, so the fresh endpoint is not
+    // askable until the role names it — the refusal for an unassigned
+    // role is "no model assigned", and the ask would never reach the
+    // fake. The assignment goes through the surface a person uses.
+    await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
 
     // ── Two finished blocks with output that cannot be confused ──────────
     await backToTerminal(page)
@@ -698,12 +745,14 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(unlockSheet).not.toBeVisible({ timeout: 10_000 })
 
     // The re-sent request carried the key: the save waits for it, so the
-    // dialog closes only after the record exists — and the SAVED ROW says
-    // so. Before the closeDialog fix this closed and toasted "Saved" while
-    // the create was still in flight, leaving no row and no error.
+    // dialog closes only after the record exists. Before the closeDialog fix
+    // this closed and toasted "Saved" while the create was still in flight,
+    // leaving no row and no error — so the row's EXISTENCE is the assertion,
+    // and the key itself is proved two steps down, where the Test resolves
+    // the STORED credential and the fake reports the material it received.
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: name })
-    await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+    await expect(savedRow).toBeVisible({ timeout: 10_000 })
     // The stored material is the key the form was filled with — the Test
     // button resolves the STORED credential and the fake records it.
     await page.getByRole('button', { name: `Edit ${name}` }).click()

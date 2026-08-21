@@ -592,10 +592,15 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 	return out, err
 }
 
-// TransitionRun moves the assistant run to a NON-TERMINAL state. This slice
-// knows exactly one such move — prepared → streaming — and it is the gate
-// deltas may not pass before: a delta persisted before the streaming
-// transition commits would be a delta outside the run's non-terminal span.
+// TransitionRun moves the assistant run to a NON-TERMINAL state. The machine
+// (nocx-z9hj4): prepared → streaming (the ask starts — the gate deltas may
+// not pass before: a delta persisted before the streaming transition commits
+// would be a delta outside the run's non-terminal span), streaming →
+// awaiting_approval (the policy or the egress gate suspended the run before
+// the provider was reached), and awaiting_approval → streaming (the person
+// answered and the run streams again). Terminal moves go through
+// FinishAgentRun; a move not on the machine is refused, never silently
+// applied.
 func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunState) error {
 	if to.IsTerminal() {
 		return fmt.Errorf("content: transition run: %s is terminal — use FinishAgentRun", to)
@@ -620,7 +625,10 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 		if cur == to {
 			return nil // idempotent: the driver may retry after a lost commit
 		}
-		if !(cur == RunPrepared && to == RunStreaming) {
+		legal := (cur == RunPrepared && to == RunStreaming) ||
+			(cur == RunStreaming && to == RunAwaitingApproval) ||
+			(cur == RunAwaitingApproval && to == RunStreaming)
+		if !legal {
 			return fmt.Errorf("content: transition run: illegal move %s → %s", cur, to)
 		}
 		if _, err := s.db.ExecContext(ctx,

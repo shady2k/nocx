@@ -16,12 +16,13 @@
 // carries references, and a shell-originated attempt opens no record at all
 // (the command-text decision of bead nocx-u7uh.7 — an authenticated origin
 // does not make a line the user typed a password into safe to store).
-import type { CommandRecord, CommandStatus } from './command-ledger'
+import type { CommandAuthor, CommandRecord, CommandStatus } from './command-ledger'
 import type { ExecutionAttempt } from './lifecycle/state'
 import type { HistoryQuery } from './generated/history.query'
 import type { HistoryRecord } from './generated/history.record'
 import { HistoryOutbox, payloadBytes } from './history-outbox'
 import type { WSClient } from './ipc'
+import { log } from './log'
 import type { RecallScope } from './recall'
 
 /** The history.record request — the ledger's facts minus what never crosses
@@ -35,6 +36,10 @@ export interface HistoryRecordParams {
   command: string
   cwd: string
   host: string
+  /** Who submitted the command, minted at submit by the submitting target
+   *  (design §3.1, nocx-iadtt) — the entries.kind vocabulary. The store
+   *  side never derives it from anything else. */
+  author: CommandAuthor
   status: CommandStatus
   exitCode: number | null
   startedAt: number | null
@@ -72,6 +77,7 @@ export function recordCommand(
     command: rec.command,
     cwd: rec.cwd,
     host: rec.host,
+    author: rec.author,
     status: rec.status,
     exitCode: rec.exitCode,
     // The ledger clocks wall-clock epoch milliseconds (Date.now()), already
@@ -92,10 +98,27 @@ export function recordCommand(
   // record delivered later reports nothing back, deliberately — by then the
   // block that asked has its answer, and moving a receipt under a person who
   // has stopped looking is worse than not moving it.
-  return historyOutbox.submit<HistoryRecord>({
-    bytes: payloadBytes(params),
-    send: () => client.call<HistoryRecord>('history.record', params),
-  })
+  return historyOutbox
+    .submit<HistoryRecord>({
+      bytes: payloadBytes(params),
+      send: () => client.call<HistoryRecord>('history.record', params),
+    })
+    .then((ack) => {
+      // The ack is trusted only when it confirms the author the record was
+      // minted with (design §3.1, nocx-iadtt): the backend must keep the
+      // fact it was handed, never derive its own from a lane or a run
+      // state. A mismatch means the row was accepted under a different
+      // author than the renderer minted — a wire-integrity failure, not a
+      // recoverable difference. Treated like a dropped record (null:
+      // nothing to show; the masked command and capture offers belong to a
+      // row the renderer cannot vouch for) and logged for the one place
+      // that can act on it.
+      if (ack !== null && ack.author !== rec.author) {
+        log.warn('history.record: ack author mismatch', { sent: rec.author, acked: ack.author })
+        return null
+      }
+      return ack
+    })
 }
 
 /**

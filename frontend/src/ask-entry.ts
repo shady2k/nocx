@@ -16,6 +16,8 @@
 
 import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
+import type { BadgeTone } from './ui/badge'
+import { createModeIndicator } from './ui/mode-indicator'
 
 // ── Reference chips ────────────────────────────────────────────────────────
 
@@ -96,46 +98,45 @@ export function chipFingerprint(
  *  the chip re-read). */
 const refreshIndicator = StateEffect.define<null>()
 
-/** The indicator's OWN word for a target — what the person does, never the
- *  target's internal name. InputTarget.label stays the registry's word
- *  ('Shell'/'Agent' — other consumers may legitimately read it); this map
- *  is the indicator's vocabulary, keyed by target id. Unknown ids fall
- *  back to the label (a future target still gets an honest chip). */
-const TARGET_WORD: Record<string, string> = {
-  shell: 'Run',
-  agent: 'Ask',
+/** The indicator's OWN presentation of a target — the word the person
+ *  reads and the badge tone the state wears, never the target's internal
+ *  name. InputTarget.label stays the registry's word ('Shell'/'Agent' —
+ *  other consumers may legitimately read it); this map is the indicator's
+ *  vocabulary, keyed by target id, and the tone is the badge register the
+ *  running block already uses for the same author (agent = info). Unknown
+ *  ids fall back to the label and the neutral tone (a future target still
+ *  gets an honest chip). */
+const TARGET_PRESENTATION: Record<string, { word: string; tone: BadgeTone }> = {
+  shell: { word: 'Run', tone: 'neutral' },
+  agent: { word: 'Ask', tone: 'info' },
 }
 
-function targetWord(targetId: string, label: string): string {
-  return TARGET_WORD[targetId] ?? label
+function targetPresentation(targetId: string, label: string): { word: string; tone: BadgeTone } {
+  return TARGET_PRESENTATION[targetId] ?? { word: label, tone: 'neutral' }
 }
 
 class TargetMarker extends GutterMarker {
   constructor(
     private readonly word: string,
+    private readonly tone: BadgeTone,
     private readonly targetId: string,
     private readonly onToggle: () => void,
   ) {
     super()
   }
   eq(other: TargetMarker): boolean {
-    return other.word === this.word && other.targetId === this.targetId
+    return other.word === this.word && other.tone === this.tone && other.targetId === this.targetId
   }
   toDOM(): HTMLElement {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = 'nocx-chip nocx-editor-target-indicator'
-    btn.dataset.target = this.targetId
-    btn.setAttribute('aria-label', `Enter goes to ${this.word}. Click to switch.`)
-    btn.textContent = this.word
-    btn.addEventListener('mousedown', (e) => {
-      // The chip is a control, not a caret placement: never let the press
-      // also move the caret or steal the editor's focus.
-      e.preventDefault()
-      e.stopPropagation()
-      this.onToggle()
+    // The kit's ModeIndicator: the badge shape and tone are ui-badge's, the
+    // operable variance is the indicator's own (ui/mode-indicator.ts). The
+    // gutter PLACES it; the component owns its appearance.
+    return createModeIndicator({
+      word: this.word,
+      tone: this.tone,
+      targetId: this.targetId,
+      onClick: this.onToggle,
     })
-    return btn
   }
 }
 
@@ -143,9 +144,9 @@ class TargetMarker extends GutterMarker {
  * The line-start indicator: the token in the prompt rendering what the
  * ACTIVE target does — `Run` for the shell, `Ask` for the assistant — and
  * toggling the target on click. The host wires the registry's active target
- * and pushes every change through set(); the word is this module's own
- * mapping (targetWord), never a rename of the target. The editor stays
- * passive; this is a decoration, never a second input owner.
+ * and pushes every change through set(); the word and tone are this
+ * module's own mapping (targetPresentation), never a rename of the target.
+ * The editor stays passive; this is a decoration, never a second input owner.
  *
  * IT IS A GUTTER, NOT A WIDGET IN THE DOCUMENT, and that is the whole point
  * (nocx-4wtlh, after the widget shipped and was lived with). A widget at
@@ -167,7 +168,9 @@ class TargetMarker extends GutterMarker {
  */
 export class TargetIndicator {
   /** The word currently rendered, for the gutter's marker. */
-  word = targetWord('shell', 'Shell')
+  word = targetPresentation('shell', 'Shell').word
+  /** The badge tone currently rendered — the active state's register. */
+  tone: BadgeTone = targetPresentation('shell', 'Shell').tone
   /** The target id currently rendered (the data-target hook). */
   targetId = 'shell'
   /** The explicit switch (ADR-0004 §3): wired once by the host; the marker
@@ -192,12 +195,14 @@ export class TargetIndicator {
 
   /** Repaint with the registry's active target — called by the host
    *  whenever the registry reports a change, never on any other signal.
-   *  The WORD is derived here (targetWord); the indicator never shows the
-   *  target's internal label. */
+   *  The WORD and TONE are derived here (targetPresentation); the
+   *  indicator never shows the target's internal label. */
   set(targetId: string, label: string): void {
-    const word = targetWord(targetId, label)
-    if (this.word === word && this.targetId === targetId && this.view) return
-    this.word = word
+    const p = targetPresentation(targetId, label)
+    if (this.word === p.word && this.tone === p.tone && this.targetId === targetId && this.view)
+      return
+    this.word = p.word
+    this.tone = p.tone
     this.targetId = targetId
     this.view?.dispatch({ effects: refreshIndicator.of(null) })
   }
@@ -211,7 +216,7 @@ export class TargetIndicator {
  *  renders. */
 function indicatorGutter(indicator: TargetIndicator): Extension {
   const marker = (): TargetMarker =>
-    new TargetMarker(indicator.word, indicator.targetId, indicator.toggle)
+    new TargetMarker(indicator.word, indicator.tone, indicator.targetId, indicator.toggle)
   return [
     ViewPlugin.define((view) => {
       indicator.attachView(view)

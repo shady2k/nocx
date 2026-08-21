@@ -28,6 +28,7 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 
 import type { PaneIdentity } from './terminal-content'
+import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
 import {
   createRendererMock,
@@ -49,6 +50,12 @@ import {
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { CommandLedger } from './command-ledger'
+import {
+  createRegistry,
+  ShellInputTarget,
+  type InputTarget,
+  type InputTargetRegistry,
+} from './input-target'
 import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Pane } from './panes'
@@ -2418,6 +2425,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 1,
           maskedKinds: ['openai'],
           entryId: 'e-ggha',
+          author: 'shell',
           redactions: [],
           maskedCommand: 'echo sk-***',
           captures: [
@@ -2510,6 +2518,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
+          author: 'shell',
           redactions: [],
           captures: [],
           maskedCommand: 'make',
@@ -2595,6 +2604,206 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('submitAgentCommand runs the command through the ordinary path with the agent author and resolves with the completed run body (nocx-tjppv)', async () => {
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          author: 'agent',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'make',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const pending = content.submitAgentCommand('make')
+
+      // The ordinary path ran: the ledger record and the running block were
+      // BOTH minted at submit with the agent's author (design §3.1) — the
+      // command exists as a command, not as bytes (criterion 3: asserted on
+      // the ledger, not the DOM).
+      expect(ledger.records()).toHaveLength(1)
+      expect(ledger.records()[0].author).toBe('agent')
+      expect(ledger.records()[0].command).toBe('make')
+      expect(ledger.records()[0].status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].author).toBe('agent')
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      // The attempt: the app-owned lifecycle submit ran with the agent's
+      // command — the command exists as an attempt, not only as bytes
+      // (criterion 3). The attempt goes through the DISPATCHER (the
+      // LifecycleClient's seam), not the WS client's call.
+      const attemptCall = client.dispatcher.call.mock.calls.find(
+        (c) => c[0] === 'lifecycle.submitAttempt',
+      )
+      expect(attemptCall).toBeTruthy()
+      expect((attemptCall![1] as { command: string }).command).toBe('make')
+
+      // The attempt attaches and completes: the block freezes with the exit
+      // status, exactly as a human command's does.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+
+      const run = await pending
+      expect(run.entryId).toBe(String(ledger.records()[0].id))
+      expect(run.exitCode).toBe(0)
+      expect(run.status).toBe('success')
+      expect(run.total).toBeGreaterThanOrEqual(0)
+      expect(typeof run.text).toBe('string')
+      // The frozen block is the same object the freeze mutated — the wait
+      // resolved on the block's completion, never on a timer.
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('success')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it("submitAgentCommand marks the agent's command in the flow and leaves the human's submissions untouched (nocx-tjppv, criterion 5)", async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      // The agent's command first, completed through the ordinary path.
+      const pendingAgent = content.submitAgentCommand('agent-command')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'agent-command' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      await pendingAgent
+
+      // The human's command, through the same content's editor: still the
+      // human's, in the same ledger, on the same flow.
+      ed.insertText('human-command')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      const records = ledger.records()
+      expect(records[0].author).toBe('agent')
+      expect(records[1].author).toBe('shell')
+      expect(withScrollback.scrollback.blockManager.blocks[0].author).toBe('agent')
+      expect(withScrollback.scrollback.blockManager.blocks[1].author).toBe('shell')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('reports the lane buffer kind to the backend on every buffer change and at session open (ADR-0020 decision 3)', async () => {
+    // The backend cannot see the alternate screen (AD-6 — it never sniffs
+    // the byte stream), so the renderer reports the buffer kind it owns
+    // and the backend decides the awaiting-takeover transition from it:
+    // a program that takes the alternate screen demotes the agent.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const laneCalls = () =>
+        client.call.mock.calls.filter((c) => c[0] === 'agent.laneInteractivity')
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+
+      // The open re-reported the CURRENT kind once the session had a
+      // backend id (a change before open had no session to name).
+      expect(laneCalls().length).toBeGreaterThanOrEqual(1)
+      expect(laneCalls()[0][1]).toEqual({ sessionId: session.sessionId, bufferKind: 'normal' })
+
+      // A program enters the alternate screen: reported as it happens.
+      renderer._fireBufferChange('alternate')
+      await vi.waitFor(() => {
+        expect(laneCalls()[laneCalls().length - 1]?.[1]).toEqual({
+          sessionId: session.sessionId,
+          bufferKind: 'alternate',
+        })
+      })
+      // The TUI exits: the lane leaves awaiting-takeover, reported again.
+      renderer._fireBufferChange('normal')
+      await vi.waitFor(() => {
+        expect(laneCalls()[laneCalls().length - 1]?.[1]).toEqual({
+          sessionId: session.sessionId,
+          bufferKind: 'normal',
+        })
+      })
+    } finally {
+      teardown()
+    }
+  })
+
   it('the whole authenticated cycle: submit attaches, output stays visible, the completion freezes the block, the status persists exactly once, and the next command reaches the shell', async () => {
     // The epic's positive criterion, watched end to end through the real
     // composition root (ADR-0024 §5–§7): in an authenticated session the
@@ -2612,6 +2821,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
+          author: 'shell',
           redactions: [],
           captures: [],
           maskedCommand: 'echo hello',
@@ -4073,6 +4283,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     status: {
       endpointConfigured?: boolean
       credential?: ('resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable') | null
+      answering?: AgentStatusResult['answering']
     } = {},
   ) {
     const client = makeClient()
@@ -4093,10 +4304,21 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         return Promise.resolve({ runId: nextRun, answerEntryId: `entry-${nextRun}` })
       }
       if (method === 'agent.status') {
+        // `answering` is not optional on the wire (nocx-rikz5, Task 3):
+        // readiness is a fact about the ROLE, so every status carries
+        // either a resolution or the reason there is none. This fixture
+        // predated that field and omitted it, which is a payload the
+        // backend cannot send.
         return Promise.resolve({
           endpointConfigured: status.endpointConfigured ?? true,
           credential: status.credential ?? 'resolvable',
           lastProbe: null,
+          answering: status.answering ?? {
+            ready: true,
+            reason: null,
+            endpoint: 'openrouter',
+            model: 'm-a',
+          },
         })
       }
       // lifecycle.submitAttempt and anything else the shell path opens.
@@ -4143,7 +4365,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
    *  deliberately NOT its contentDOM: the token is beside the document and
    *  never in it (see the gutter test below for what that buys). */
   function indicatorOf(ed: CommandEditor): HTMLElement | null {
-    return viewOf(ed).dom.querySelector<HTMLElement>('.nocx-editor-target-indicator')
+    return viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
   }
 
   /** The reference chip strip inside the editor. */
@@ -4162,12 +4384,14 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     )
   }
 
-  /** Ask through the REAL gesture: ⌘Enter flips the active target to Ask
-   *  and sends NOTHING, then plain Enter — the one send key — delivers the
-   *  question. The flip is skipped when Ask is already active, exactly as
-   *  a person experiences it: the target stays where they put it. */
-  function askKey(ed: CommandEditor, content: TerminalContent): void {
+  /** Type a question at Ask through the REAL gestures, in the order a
+   *  person reaches them since per-target drafts landed (nocx-4ff.7): the
+   *  ⌘Enter flip FIRST — it swaps the editor to the Ask draft, so text
+   *  typed before the flip belongs to the mode it was typed in — then the
+   *  typing, then plain Enter, the one send key. */
+  function typeAndAsk(ed: CommandEditor, content: TerminalContent, text: string): void {
     if (activeLabel(content) !== 'Agent') submitKey(ed, { metaKey: true })
+    ed.insertText(text)
     submitKey(ed)
   }
 
@@ -4241,8 +4465,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       expect(indicatorOf(ed)?.textContent).toBe('Run')
       const sentAfterShell = sessionOf(content).send.mock.calls.length
-      ed.insertText('what does docs mean?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what does docs mean?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -4265,6 +4488,159 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(ed.isVisible).toBe(true)
       expect(activeLabel(content)).toBe('Agent')
       expect(indicatorOf(ed)?.textContent).toBe('Ask')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with only the shell target registered, every submit is attributed to the human and nothing regresses (nocx-iadtt)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // Criterion 5's interval endpoint: ONLY the shell target is
+      // registered — the state the product was in before any second target
+      // existed. The registry is replaced wholesale (the escape hatch the
+      // other tests use for private fields), so the old path is driven
+      // through the real orchestration, not a fake of it.
+      const registry = createRegistry()
+      const shellTarget = (content as unknown as { shellTarget: ShellInputTarget }).shellTarget
+      registry.register(shellTarget)
+      ;(content as unknown as { inputTargets: InputTargetRegistry }).inputTargets = registry
+
+      ed.insertText('echo hi')
+      submitKey(ed)
+
+      // The record that opened at submit is the human's — every record is,
+      // with no second target to confuse the mint.
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().length).toBe(1)
+      expect(ledger?.records()[0].author).toBe('shell')
+      // The shell submit still reached the pty: nothing regressed.
+      expect(sessionOf(content).send.mock.calls.length).toBeGreaterThan(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("a command submitted by the shell target while another registered target's submission is in flight is attributed to the shell target (nocx-iadtt)", async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    let releaseAsk: () => void = () => {}
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // A second registered test target (no agent command target exists
+      // yet — this is the stand-in) whose submission hangs: the ask is in
+      // flight for the whole test. The interleaving is the point: the
+      // human's own command arrives while the other target's submission
+      // has not settled, and must be attributed to the shell target — the
+      // author is minted at submit from the submitting target, never
+      // derived from what else is running (design §3.1).
+      const inFlight = new Promise<void>((resolve) => {
+        releaseAsk = resolve
+      })
+      // The spy is held by name, never asserted through
+      // `testTarget.submit` — detaching the method from its object is
+      // exactly the accidental call the unbound-method rule exists to
+      // refuse.
+      const agentSubmit = vi.fn(() => inFlight)
+      const testTarget: InputTarget = {
+        id: 'agent',
+        label: 'Test agent',
+        routesToShell: false,
+        author: 'agent',
+        submit: agentSubmit,
+      }
+      const registry = createRegistry()
+      const shellTarget = (content as unknown as { shellTarget: ShellInputTarget }).shellTarget
+      registry.register(shellTarget)
+      registry.register(testTarget)
+      ;(content as unknown as { inputTargets: InputTargetRegistry }).inputTargets = registry
+
+      // The other target's submission goes out THROUGH THE SEAM A PERSON
+      // REACHES: the editor's ⌘Enter target toggle flips the active target
+      // to it, plain Enter submits the question through the router. The
+      // promise never settles until the test releases it, so the whole
+      // shell submit below happens while it is in flight.
+      submitKey(ed, { metaKey: true })
+      ed.insertText('a question')
+      submitKey(ed)
+      expect(agentSubmit).toHaveBeenCalledTimes(1)
+
+      // The person flips back to the shell (⌘Enter again) and submits
+      // their own command while the question is still pending.
+      submitKey(ed, { metaKey: true })
+      ed.insertText('echo mine')
+      submitKey(ed)
+
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().length).toBe(1)
+      expect(ledger?.records()[0].author).toBe('shell')
+      expect(ledger?.records()[0].command).toBe('echo mine')
+      // The in-flight submission never settled during the shell submit —
+      // its author never leaked onto the shell's record.
+      releaseAsk()
+    } finally {
+      // An assertion failure must not leak the pending submission; release
+      // is idempotent.
+      releaseAsk()
+      teardown()
+    }
+  })
+
+  it('an agent-authored command carries the badge through the real submit path — the closest seam a person will reach (nocx-iadtt)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // No production target can submit a command as the agent today — that
+      // arrives with the agent's own lane (the agent-mode epic). The
+      // closest seam a person will actually reach once it exists is the
+      // shell submit orchestration itself: a routesToShell target whose
+      // author is the agent. Everything below is the REAL chain — the
+      // ⌘Enter target toggle, the registry router, the ledger record, the
+      // running block.
+      const agentTarget: InputTarget = {
+        id: 'agent',
+        label: 'Agent',
+        routesToShell: true,
+        author: 'agent',
+        submit: vi.fn(async () => {}),
+      }
+      const registry = createRegistry()
+      const shellTarget = (content as unknown as { shellTarget: ShellInputTarget }).shellTarget
+      registry.register(shellTarget)
+      registry.register(agentTarget)
+      ;(content as unknown as { inputTargets: InputTargetRegistry }).inputTargets = registry
+
+      submitKey(ed, { metaKey: true })
+      ed.insertText('echo agent-run')
+      submitKey(ed)
+
+      // The record is the agent's — minted at submit from the submitting
+      // target, through the same orchestration a human's command takes.
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().length).toBe(1)
+      expect(ledger?.records()[0].author).toBe('agent')
+      // The block that opened at the same submit carries the badge — the
+      // whole happy path, driven through the real orchestration, never a
+      // manufactured block.
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const running = scrollback.blockManager.runningBlock
+      expect(running?.author).toBe('agent')
+      const mark = running?.el.querySelector('.ui-badge[data-author="agent"]')
+      expect(mark).not.toBeNull()
+      expect(mark?.getAttribute('data-tone')).toBe('info')
+      expect(mark?.textContent).toBe('agent')
     } finally {
       teardown()
     }
@@ -4328,8 +4704,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(chipsIn(ed)).toHaveLength(2)
 
       const sentBefore = sessionOf(content).send.mock.calls.length
-      ed.insertText('how are these related?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'how are these related?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
@@ -4383,8 +4758,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       chipA.querySelector<HTMLButtonElement>('.nocx-editor-reference-chip__drop')?.click()
       expect(chipsIn(ed)).toHaveLength(1)
 
-      ed.insertText('what is left?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what is left?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -4412,8 +4786,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // Question one, through the REAL gesture: ⌘Enter to Ask, then Enter.
       selectRows(blockA, 0, 2)
-      ed.insertText('what does docs mean?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what does docs mean?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
@@ -4422,8 +4795,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // While the first answer streams, point at block B and ask again.
       selectRows(blockB, 0, 1)
-      ed.insertText('what did it fix?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what did it fix?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
       })
@@ -4507,8 +4879,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       selectRows(block, 0, 2)
 
-      ed.insertText('why did it fail?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'why did it fail?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -4539,8 +4910,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // check that reads the prompt got `Run` glued to the command. The
       // gutter is outside the document, so the text is the text.
       const view = viewOf(ed)
-      expect(view.dom.querySelector('.nocx-editor-target-indicator')).not.toBeNull()
-      expect(view.contentDOM.querySelector('.nocx-editor-target-indicator')).toBeNull()
+      expect(view.dom.querySelector('.ui-mode-indicator')).not.toBeNull()
+      expect(view.contentDOM.querySelector('.ui-mode-indicator')).toBeNull()
       expect(view.contentDOM.textContent).toBe('')
 
       ed.insertText('ls -la')
@@ -4548,7 +4919,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(view.state.selection.main.head).toBe('ls -la'.length)
       // Still there while typing, and still outside the text.
       expect(indicatorOf(ed)?.textContent).toBe('Run')
-      expect(view.contentDOM.querySelector('.nocx-editor-target-indicator')).toBeNull()
+      expect(view.contentDOM.querySelector('.ui-mode-indicator')).toBeNull()
 
       // A real selection in the draft does not hide it: a person selecting
       // part of their command still wants to know where Enter goes.
@@ -4580,7 +4951,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // what matters is that the lines have their cells and only the first
       // carries the token.
       expect(cells.length).toBeGreaterThanOrEqual(2)
-      const withToken = cells.filter((c) => c.querySelector('.nocx-editor-target-indicator'))
+      const withToken = cells.filter((c) => c.querySelector('.ui-mode-indicator'))
       expect(withToken.length).toBeGreaterThanOrEqual(1)
       expect(view.contentDOM.textContent).toBe('onetwo')
     } finally {
@@ -4609,6 +4980,107 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Shell')
       expect(indicatorOf(ed)?.textContent).toBe('Run')
+    } finally {
+      teardown()
+    }
+  })
+  it('each mode keeps its own draft — the same text, caret and scroll survive a switch away and back, and the indicator tone follows (nocx-4ff.7)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const view = viewOf(ed)
+
+      // Shell: a half-typed command with the caret mid-line and the
+      // editor scrolled — the state a person is in when they pause.
+      ed.insertText('git status --short')
+      view.dispatch({ selection: { anchor: 4, head: 8 } })
+      view.scrollDOM.scrollTop = 7
+
+      // Flip to Ask: the shell draft is saved, the line is cleared (the
+      // agent has never been edited), and the indicator wears the agent
+      // register — the kit's ModeIndicator, never a hand-rolled token.
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(ed.getDoc()).toBe('')
+      expect(indicatorOf(ed)?.textContent).toBe('Ask')
+      expect(indicatorOf(ed)?.dataset.tone).toBe('info')
+      expect(indicatorOf(ed)?.classList.contains('ui-mode-indicator')).toBe(true)
+
+      // Type a question at Ask, then flip back to the shell.
+      ed.insertText('what does status mean?')
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Shell')
+      // The half-typed command is still there — the same text, the same
+      // caret, the same scroll: nothing shared was disturbed (criterion
+      // 4), and the shell draft survived the round trip (criterion 1).
+      expect(ed.getDoc()).toBe('git status --short')
+      expect(ed.getSelection()).toEqual({ from: 4, to: 8 })
+      expect(ed.getScrollTop()).toBe(7)
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(indicatorOf(ed)?.dataset.tone).toBe('neutral')
+
+      // And the agent's own draft survives the round trip in the other
+      // direction (criterion 1's other end).
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(ed.getDoc()).toBe('what does status mean?')
+      expect(ed.getSelection()).toEqual({
+        from: 'what does status mean?'.length,
+        to: 'what does status mean?'.length,
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('recall in each mode yields only that mode’s corpus — submit in both, walk back in Ask (nocx-4ff.7)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const view = viewOf(ed)
+
+      // A shell command — the shell's corpus (the store), never a
+      // question's.
+      ed.insertText('echo shell-only')
+      submitKey(ed)
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      await vi.waitFor(() => {
+        expect(ledger?.records().some((r) => r.command === 'echo shell-only')).toBe(true)
+      })
+      // The handoff hid the editor; the next prompt re-shows it, as the
+      // lifecycle would.
+      ed.show()
+
+      // A question at Ask — the agent's corpus, recorded editor-side.
+      typeAndAsk(ed, content, 'what is the answer?')
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
+      })
+
+      // Walk back in Ask: Up opens recall, which serves the AGENT's
+      // corpus — the question is there, the shell command is not. The
+      // shell's own Up still walks shell commands (the store path); the
+      // corpora never interleave.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(recallOf(content).isOpen).toBe(true))
+      await vi.waitFor(() => {
+        const rows = Array.from(ed.root.querySelectorAll<HTMLElement>('.ui-floating-panel__row'))
+        const texts = rows.map((r) => r.textContent ?? '')
+        expect(texts.some((t) => t.includes('what is the answer?'))).toBe(true)
+        expect(texts.some((t) => t.includes('echo shell-only'))).toBe(false)
+      })
     } finally {
       teardown()
     }
@@ -5106,6 +5578,10 @@ describe('a frozen block sends what it printed (nocx-2f0f)', () => {
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e-capture',
+          // Required by the contract, and load-bearing: the renderer refuses
+          // an ack whose author is not the one it minted (design §3.1), so a
+          // fixture without it is a backend that dropped the fact.
+          author: 'shell',
           redactions: [],
           maskedCommand: 'echo hello',
           captures: [],
@@ -5486,6 +5962,279 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
       // The pane is alive and usable, which is the property that matters.
       expect(content.shellState).toBeDefined()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// The model chip in the composer (nocx-rikz5). The composer names the model
+// that will answer, and it is the way to change it. The chain here is the
+// real one: real registry, real editor, real AgentReadiness over the fake
+// dispatcher — because the defect this task exists to prevent is a chip
+// that is CORRECT ONCE and then stops moving.
+//
+// The height claim (the chrome row does not grow a second line when a
+// 40-character model id arrives) is deliberately NOT here: jsdom computes
+// no layout, so getBoundingClientRect returns zeroes and the assertion
+// would pass vacuously. It belongs to the Playwright spec.
+describe('the model chip in the composer (nocx-rikz5)', () => {
+  const READY_ANSWERING: AgentStatusResult['answering'] = {
+    ready: true,
+    reason: null,
+    endpoint: 'openrouter',
+    model: 'm-a',
+  }
+  const UNASSIGNED_ANSWERING: AgentStatusResult['answering'] = {
+    ready: false,
+    reason: 'unassigned',
+    endpoint: null,
+    model: null,
+  }
+  const NO_ENDPOINTS_ANSWERING: AgentStatusResult['answering'] = {
+    ready: false,
+    reason: 'no-endpoints',
+    endpoint: null,
+    model: null,
+  }
+
+  /** A client whose agent.status answer is whatever `answering` currently
+   *  holds — so a test can change the FACTS and then make the surface ask
+   *  again, exactly as adding an endpoint does. */
+  function statusClient(initial: AgentStatusResult['answering']) {
+    const client = makeClient()
+    const state = { answering: initial, asks: 0 }
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.status') {
+        state.asks += 1
+        return Promise.resolve({
+          endpointConfigured: state.answering.ready,
+          credential: state.answering.ready ? 'resolvable' : null,
+          lastProbe: null,
+          answering: state.answering,
+        })
+      }
+      return Promise.resolve({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+    })
+    return { client, state }
+  }
+
+  const chipEls = (content: TerminalContent): HTMLElement[] =>
+    Array.from(editorOf(content).root.querySelectorAll<HTMLElement>('.nocx-editor-model')).filter(
+      (el) => el.style.display !== 'none',
+    )
+
+  const chipsOf = (content: TerminalContent): string[] =>
+    chipEls(content).map((el) => el.textContent ?? '')
+
+  const clickChip = (content: TerminalContent, text: string): void => {
+    const el = chipEls(content).find((c) => c.textContent === text)
+    if (!el) throw new Error(`no model chip reading ${JSON.stringify(text)}`)
+    el.click()
+  }
+
+  /** The person's own explicit switch — ⌘Enter, the same gesture the
+   *  indicator's click performs. */
+  const switchToAsk = (content: TerminalContent): void => {
+    const ed = editorOf(content)
+    viewOf(ed).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+        metaKey: true,
+      }),
+    )
+  }
+
+  it('shows no model chip while Enter goes to the shell', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(chipsOf(content)).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the model that will answer once the target is the assistant', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('takes the chip away again when the person switches back to Run', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      switchToAsk(content) // the switch is a toggle
+      expect(chipsOf(content)).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('offers the rung, not the model, when nothing is chosen', async () => {
+    const { client } = statusClient(UNASSIGNED_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('opens the page the rung names', async () => {
+    const opened: string[] = []
+    const { client } = statusClient(NO_ENDPOINTS_ANSWERING)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        hooks: {
+          onCreateEndpoint: () => opened.push('endpoints'),
+          onOpenRoles: () => opened.push('roles'),
+        },
+      },
+      client,
+    )
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
+      clickChip(content, 'Add an endpoint first')
+      expect(opened).toEqual(['endpoints'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('opens Endpoints from the provider and Roles from the model', async () => {
+    const opened: string[] = []
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        hooks: {
+          onCreateEndpoint: () => opened.push('endpoints'),
+          onOpenRoles: () => opened.push('roles'),
+        },
+      },
+      client,
+    )
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      clickChip(content, 'openrouter')
+      clickChip(content, 'm-a')
+      expect(opened).toEqual(['endpoints', 'roles'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('repaints when the facts change, not only on mount', async () => {
+    // Without this the end-to-end path cannot pass: the chip would still
+    // read "Add an endpoint first" after an endpoint had been added. The
+    // pane coming back to the front is the moment the facts can have
+    // changed — the Endpoints form lives in another pane.
+    const { client, state } = statusClient(NO_ENDPOINTS_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
+
+      // An endpoint was added and a model chosen on the Settings pane;
+      // the person comes back to the composer.
+      state.answering = READY_ANSWERING
+      content.setVisible(true)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks again when the socket comes back', async () => {
+    const { client, state } = statusClient(UNASSIGNED_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      state.answering = READY_ANSWERING
+      client._fireReconnect()
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not ask while Enter goes to the shell — a Run pane pays no readiness call', async () => {
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      client._fireReconnect()
+      await Promise.resolve()
+      expect(state.asks).toBe(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('discards a late reply that would repaint an older state', async () => {
+    // Two refreshes racing is the ORDINARY case here: adding an endpoint
+    // and immediately choosing a model is one gesture apart.
+    const client = makeClient()
+    const pending: Array<(v: unknown) => void> = []
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.status') {
+        return new Promise((resolve) => pending.push(resolve))
+      }
+      return Promise.resolve({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content) // ask #0 — the OLD facts
+      content.setVisible(true) // ask #1 — the NEW facts
+      await vi.waitFor(() => expect(pending.length).toBe(2))
+
+      const body = (answering: AgentStatusResult['answering']) => ({
+        endpointConfigured: answering.ready,
+        credential: answering.ready ? 'resolvable' : null,
+        lastProbe: null,
+        answering,
+      })
+      pending[1](body(READY_ANSWERING)) // the newer ask answers FIRST
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      pending[0](body(NO_ENDPOINTS_ANSWERING)) // the older ask answers LAST
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(chipsOf(content)).toEqual(['openrouter', 'm-a'])
     } finally {
       teardown()
     }

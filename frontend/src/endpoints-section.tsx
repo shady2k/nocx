@@ -740,20 +740,46 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     }
   }
 
-  /** The row's Test is refused exactly when the credential cannot resolve:
-   *  the vault is sealed, the referenced secret is gone (no vault, or the
-   *  unsealed vault's inventory no longer lists it), or the store did not
-   *  answer. A no-key endpoint stays testable — the connection check can
-   *  still pass against a public endpoint. */
+  /** The row's Test is refused only when NOTHING can make the check
+   *  meaningful: the referenced secret is gone (no vault, or the unsealed
+   *  vault's inventory no longer lists it), or the store did not answer.
+   *
+   *  A SEALED vault is not one of those. endpoints.probe raises
+   *  vault.ErrVaultSealed for it, the backend's sealedNormalizer rewrites
+   *  that to the canonical -32001, and the renderer's dispatcher raises the
+   *  unlock and re-sends the request verbatim (ADR-0032; the rationale is
+   *  written out at ws_assistant.go resolveProbeCredential, which calls a
+   *  probe RESULT naming the sealed state "the dead end this bead exists to
+   *  delete"). Greying the button out was this surface refusing a path the
+   *  backend had deliberately kept open — so pressing Test on a locked
+   *  vault asks for the passphrase and then runs the check, which is what a
+   *  person means by pressing it.
+   *
+   *  A no-key endpoint stays testable too — the connection check can still
+   *  pass against a public endpoint. */
   function rowTestDisabled(ep: Endpoint): boolean {
     const state = rowCredentialState(
       ep.credential,
       props.vaultController?.status()?.state,
       inventoryFact(),
     )
-    return state === 'sealed' || state === 'deleted' || state === 'unavailable'
+    return state === 'deleted' || state === 'unavailable'
   }
-  function rowStatus(ep: Endpoint): { tone: StatusDotTone; text: string } {
+
+  /** The row's status, or NULL for silence.
+   *
+   *  The row speaks only to REFUSE, or to answer a check the person asked
+   *  for. A resolvable credential is the absence of a problem and says
+   *  nothing; so is a sealed vault, now that Test raises the unlock rather
+   *  than being blocked by it. Both used to render — a green "Key saved"
+   *  under every healthy endpoint and a full sentence about the vault on
+   *  every row of a list the vault is not about — and the owner struck them
+   *  in the same pass that struck the Roles page's green line. The rule the
+   *  two share: a healthy state is silent.
+   *
+   *  The probe outcome is the exception and not one: it is the answer to a
+   *  button, not an unsolicited reassurance. */
+  function rowStatus(ep: Endpoint): { tone: StatusDotTone; text: string } | undefined {
     const probe = rowProbes()[ep.id]
     if (probe) {
       const line = probeOutcomeLine(probe)!
@@ -765,10 +791,10 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       inventoryFact(),
     )
     if (state === 'none') return { tone: 'neutral', text: 'No key' }
-    if (state === 'resolvable') return { tone: 'ok', text: 'Key saved' }
-    // sealed / deleted / unavailable: the sentences agent-status-line owns,
-    // always in the StatusDot's warning — the Badge tone that mapping
-    // speaks (warning) is the same meaning, spelled for the dot.
+    if (state === 'resolvable' || state === 'sealed') return undefined
+    // deleted / unavailable: the sentences agent-status-line owns, always in
+    // the StatusDot's warning — the Badge tone that mapping speaks (warning)
+    // is the same meaning, spelled for the dot.
     return { tone: 'warning', text: credentialLine(state)!.text }
   }
 
@@ -1006,6 +1032,23 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             value={draft().keyRow}
             onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
           />
+          {/* Custom headers belong to the CONNECTION, so they come before the
+              button that checks it: the probe sends them on every request it
+              makes (ws_assistant.go resolveProbeHeaders), and a header typed
+              after a green test was never part of what went green. Models
+              come after, because they are what the connection then offers and
+              the model field discovers them from a successful test. */}
+          <EditableRowList
+            rows={draft().headers}
+            ariaLabel="Custom headers"
+            addLabel="Add header"
+            emptyLabel="No custom headers — requests go out with just the credential."
+            removeLabel={(i) => `Remove header ${i + 1}`}
+            onRemove={removeHeader}
+            onAdd={addHeader}
+            error={validation.error('headers')}
+            renderRow={renderHeaderRow}
+          />
           <div class="ep-test-row">
             <Button
               variant="default"
@@ -1035,17 +1078,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             onAdd={addModel}
             error={validation.error('models')}
             renderRow={renderModelRow}
-          />
-          <EditableRowList
-            rows={draft().headers}
-            ariaLabel="Custom headers"
-            addLabel="Add header"
-            emptyLabel="No custom headers — requests go out with just the credential."
-            removeLabel={(i) => `Remove header ${i + 1}`}
-            onRemove={removeHeader}
-            onAdd={addHeader}
-            error={validation.error('headers')}
-            renderRow={renderHeaderRow}
           />
         </Stack>
       </Dialog>

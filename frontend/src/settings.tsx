@@ -29,6 +29,9 @@ import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import type { SnippetsStore } from './snippets/snippets-store'
+import { RolesSection } from './roles-section'
+import { AgentPolicySection } from './agent-policy-section'
+import type { PolicyClient } from './policy-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -195,6 +198,9 @@ export interface SettingsComponentProps {
    *  rather than reached for, because the platform seam is what a test
    *  substitutes and what refuses in a non-secure context. */
   clipboard?: ClipboardAccess
+  /** The agent policy client (ADR-0020 §7 as amended). Absent in
+   *  embeddings that never configure the agent; the page then says so. */
+  policyClient?: PolicyClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -538,6 +544,48 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+
+    const rolesPage: SettingsPage = {
+      kind: 'component',
+      id: 'roles',
+      title: 'Roles',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      // Registered unconditionally for the same reason endpointsPage is: a
+      // surface that appears only once some other state exists is how a
+      // feature ships unreachable. The guard is the client being absent.
+      renderContent: () => (
+        <Show
+          when={props.endpointsClient}
+          fallback={
+            <PageSection title="Roles">Model roles are not available in this window.</PageSection>
+          }
+        >
+          <RolesSection client={props.endpointsClient} />
+        </Show>
+      ),
+    }
+
+    const policyPage: SettingsPage = {
+      kind: 'component',
+      id: 'policy',
+      title: 'Agent policy',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.policyClient}
+          fallback={
+            <PageSection title="Agent policy">
+              The agent policy is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentPolicySection client={props.policyClient!} />
+        </Show>
+      ),
+    }
+
     // LAST IN THE RAIL, and in the 'application' group with Backup and
     // Snippets. It is the page nobody navigates to on purpose until something
     // has gone wrong, which is exactly why it must be findable in the obvious
@@ -571,6 +619,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      rolesPage,
+      policyPage,
       aboutPage,
     ]
   })

@@ -74,7 +74,9 @@ export interface RendererMock extends TerminalRenderer {
     onCwd?: CwdCallback
     onCommandMarker?: CommandMarkerCallback
     onBell?: () => void
-    onBufferChange?: (type: 'normal' | 'alternate') => void
+    // The real renderer fans out to a list; the mock mirrors it so a
+    // subscriber is never hidden by a later one.
+    onBufferChange?: Array<(type: 'normal' | 'alternate') => void>
     onSelectionChange?: (text: string) => void
     onClipboardWrite?: (text: string) => void
     onWriteParsed?: () => void
@@ -111,6 +113,7 @@ export function createRendererMock(): RendererMock {
   const recoverySubs: Array<(hex: string) => void> = []
   const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
   let snippetChordCb: (() => void) | null = null
+  let activeBuffer: 'normal' | 'alternate' = 'normal'
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -134,9 +137,15 @@ export function createRendererMock(): RendererMock {
     onBell: vi.fn((cb: () => void) => {
       cbs.onBell = cb
     }),
+    // The real renderer fans out to a subscriber list; the mock must too
+    // (the lane interactivity report subscribes beside the presentation
+    // layer — a single-slot mock hides one of them).
     onBufferChange: vi.fn((cb: (type: 'normal' | 'alternate') => void) => {
-      cbs.onBufferChange = cb
+      ;(cbs.onBufferChange ??= []).push(cb)
     }),
+    // The current buffer kind, like the real renderer's (the report the
+    // lane interactivity path reads at session open — ADR-0020 decision 3).
+    activeBufferKind: vi.fn(() => activeBuffer),
     onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
       recoverySubs.push(cb)
     }),
@@ -202,9 +211,9 @@ export function createRendererMock(): RendererMock {
     // per mock, exactly like the per-renderer instance it stands in for —
     // tests that want a snapshot ingest into this one.
     snapshotStore: new CommandSnapshotStore(),
-    _cbs: cbs,
     _fireBufferChange(type: 'normal' | 'alternate') {
-      cbs.onBufferChange?.(type)
+      activeBuffer = type
+      for (const sub of cbs.onBufferChange ?? []) sub(type)
     },
     _fireWriteParsed() {
       cbs.onWriteParsed?.()

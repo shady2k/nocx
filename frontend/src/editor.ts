@@ -23,6 +23,7 @@ import {
   type UnresolvedSpan,
 } from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
+import type { ModelChipState } from './agent-readiness'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -170,6 +171,24 @@ export class CommandEditor {
    *  popover (nocx-atyf.2). */
   private recoveryChip: HTMLButtonElement
   private _recoveryOnClick: (() => void) | null = null
+  /** The model chip pair (nocx-rikz5): the endpoint that will answer and
+   *  the model it will answer with, or — when the answering role does not
+   *  resolve — one chip carrying the rung of the ladder the person is on.
+   *  Buttons, because they are controls: a chip that navigates must be
+   *  reachable by keyboard, and `recoveryChip` above is the precedent.
+   *  Hidden until setModelChip is called with a state, exactly as
+   *  locationChip is, so the row's height never moves (nocx-6c546). */
+  private modelEndpointChip: HTMLButtonElement
+  private modelChip: HTMLButtonElement
+  /** Where each chip goes when clicked. STORED rather than captured in a
+   *  closure: the chips' meaning changes with every state while the
+   *  listeners are permanent. Re-adding a listener per state change is how
+   *  one click ends up firing three times. */
+  private _modelChipTargets: {
+    endpoint: 'endpoints' | 'roles' | null
+    model: 'endpoints' | 'roles' | null
+  } = { endpoint: null, model: null }
+  private _onModelChipClick: ((page: 'endpoints' | 'roles') => void) | null = null
   /** Where the pending command would land: the SAME string the block header
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
@@ -316,7 +335,35 @@ export class CommandEditor {
     this.recoveryChip.style.display = 'none'
     this.recoveryChip.addEventListener('click', () => this._recoveryOnClick?.())
 
-    this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
+    // The model that will answer, and the way to change it (nocx-rikz5).
+    // The same .nocx-chip family as every other chip in this row: the row
+    // has no ui-badge in it and must not grow one — two visual grammars in
+    // one row is worse than one old grammar.
+    this.modelEndpointChip = document.createElement('button')
+    this.modelEndpointChip.type = 'button'
+    this.modelEndpointChip.className = 'nocx-chip nocx-editor-model'
+    this.modelEndpointChip.style.display = 'none'
+    this.modelEndpointChip.addEventListener('click', () => {
+      const page = this._modelChipTargets.endpoint
+      if (page) this._onModelChipClick?.(page)
+    })
+
+    this.modelChip = document.createElement('button')
+    this.modelChip.type = 'button'
+    this.modelChip.className = 'nocx-chip nocx-editor-model'
+    this.modelChip.style.display = 'none'
+    this.modelChip.addEventListener('click', () => {
+      const page = this._modelChipTargets.model
+      if (page) this._onModelChipClick?.(page)
+    })
+
+    this.chromeLeft.append(
+      this.recoveryChip,
+      this.locationChip,
+      this.cwdChip,
+      this.modelEndpointChip,
+      this.modelChip,
+    )
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
 
@@ -452,6 +499,69 @@ export class CommandEditor {
     this.recoveryChip.textContent = label
   }
 
+  /** Where a model chip's click goes. Installed once by the host; the
+   *  chips themselves carry no destination — they read the slot the last
+   *  setModelChip wrote. */
+  onModelChipClick(handler: (page: 'endpoints' | 'roles') => void): void {
+    this._onModelChipClick = handler
+  }
+
+  /**
+   * The model chip's ONE writer (nocx-rikz5). Null hides both chips — the
+   * state a Run target is in, where no model answers anything and a chip
+   * claiming one would be decoration.
+   */
+  setModelChip(state: ModelChipState | null): void {
+    this._modelChipTargets = { endpoint: null, model: null }
+    if (state === null) {
+      this.modelEndpointChip.style.display = 'none'
+      this.modelChip.style.display = 'none'
+      return
+    }
+    if (state.kind === 'ready') {
+      this._modelChipTargets = { endpoint: 'endpoints', model: 'roles' }
+      this.modelEndpointChip.disabled = false
+      this.modelEndpointChip.style.display = ''
+      this.modelEndpointChip.textContent = state.endpoint
+      this.modelEndpointChip.title = state.endpoint
+      this.modelEndpointChip.setAttribute(
+        'aria-label',
+        `Answers with ${state.endpoint}. Open Endpoints.`,
+      )
+      // The id is long and must not wrap: a wrapped chip is the layout
+      // shift the row's single height exists to prevent. The CSS truncates
+      // it; the title and the accessible name carry the whole value, so
+      // nothing a person needs is only in the ellipsis.
+      this.modelChip.disabled = false
+      this.modelChip.style.display = ''
+      this.modelChip.textContent = state.model
+      this.modelChip.title = state.model
+      this.modelChip.setAttribute(
+        'aria-label',
+        `Answers with the model ${state.model}. Open Roles.`,
+      )
+      return
+    }
+    // An action rung. A rung with no destination ('unavailable') is not a
+    // control: a button that leads nowhere invites a click that does
+    // nothing, which reads as the app being broken rather than the store
+    // being unreadable. `disabled` is reset on the way OUT of that state
+    // too (the ready branch above) — a chip that stayed dead after the
+    // store came back would be the same defect with a longer fuse.
+    this._modelChipTargets = { endpoint: null, model: state.page }
+    this.modelEndpointChip.style.display = 'none'
+    this.modelChip.disabled = state.page === null
+    this.modelChip.style.display = ''
+    this.modelChip.textContent = state.text
+    this.modelChip.title = state.text
+    // No "Opens settings." when nothing opens: the accessible name may not
+    // promise an action the chip does not have.
+    this.modelChip.setAttribute(
+      'aria-label',
+      state.page === null ? state.text : `${state.text}. Opens settings.`,
+    )
+  }
+
   /** Update the cwd chip text. Uses the same short directoryLabel shape. */
   setCwd(cwd: string): void {
     const path = cwd.trim().replace(/\/+$/, '') || '~'
@@ -506,6 +616,15 @@ export class CommandEditor {
     // stale findings after a clear; programmatic clears fire no input
     // events, so this is the one seam that tells the host.
     this.actions.onDocCleared?.()
+  }
+
+  /** Clear the document through the same seam a submit uses: programmatic,
+   *  firing no input events, but announcing the clear (onDocCleared) so
+   *  the host's floating surfaces hold no stale findings over the empty
+   *  line. The per-target draft swap uses this for a target with no saved
+   *  draft (nocx-4ff.7) — the incoming mode's line is genuinely empty. */
+  clear(): void {
+    this.clearDoc()
   }
 
   /** True while a beforeSubmit verdict is in flight: a second Enter in that

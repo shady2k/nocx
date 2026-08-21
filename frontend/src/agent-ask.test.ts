@@ -25,6 +25,7 @@ class FakeDispatcher {
         state: 'prepared',
         ingestSeq: 1,
         replayed: false,
+        model: 'qwen3',
       }
       // Each ask is a new run with a new answer entry (two overlapping
       // asks stream concurrently; ids never repeat).
@@ -246,7 +247,7 @@ describe('AgentInputTarget', () => {
     await target.submit('q')
 
     dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
-    expect(handle.close).toHaveBeenCalledWith('success')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
     expect(handle.close).toHaveBeenCalledTimes(1)
 
     await target.submit('q2')
@@ -365,5 +366,97 @@ describe('AgentInputTarget refusal', () => {
     })
     await expect(target.submit('q')).rejects.toThrow('no endpoint configured')
     expect(onRefusal).toHaveBeenCalledWith('no endpoint configured')
+  })
+})
+
+describe('AgentInputTarget approval routing', () => {
+  it('awaiting_approval keeps the block open and routable; the resume closes it (nocx-z9hj4)', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1 // the run the ask minted
+    expect(handle.el.dataset.answerEntryId).toBe('answer-1')
+
+    // The run suspends: the block stays OPEN (nothing closed) and the run
+    // stays routable — the question is being decided elsewhere.
+    dispatcher.emit('agent.runState', { runId, state: 'awaiting_approval' })
+    expect(handle.close).not.toHaveBeenCalled()
+
+    // The person approves; the resumed run streams into the SAME block —
+    // a run deleted at awaiting_approval would drop these deltas.
+    dispatcher.emit('agent.runDelta', {
+      runId,
+      entryId: 'answer-1',
+      seq: 0,
+      text: 'approved answer',
+    })
+    expect(handle.append).toHaveBeenCalledWith('approved answer')
+
+    // The run completes: the block closes once.
+    dispatcher.emit('agent.runState', { runId, state: 'completed' })
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+})
+
+describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
+  it('marks the block when the terminal state names dropped chunks, then closes with the run’s earned state', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will the stream hold?')
+    const runId = dispatcher.next.run - 1 // the run the ask minted
+
+    // Some deltas got through…
+    dispatcher.emit('agent.runDelta', {
+      runId,
+      entryId: 'answer-1',
+      seq: 0,
+      text: 'partial answer',
+    })
+
+    // …and the terminal state names the count. The block marks the gap —
+    // the full answer is saved, the live view is the incomplete part — and
+    // closes SUCCESS: a dropped live delta is a visible bound, never a
+    // reason to fail a run whose durable answer is whole (nocx-dw3.1).
+    dispatcher.emit('agent.runState', { runId, state: 'completed', droppedDeltas: 2 })
+    expect(handle.append).toHaveBeenCalledWith(
+      '— 2 chunks of the answer were dropped while streaming; the full answer was saved —',
+    )
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+
+  it('names a single dropped chunk in the singular, and a clean close marks nothing', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('q')
+    const runId = dispatcher.next.run - 1
+    dispatcher.emit('agent.runState', { runId, state: 'completed', droppedDeltas: 1 })
+    expect(handle.append).toHaveBeenCalledWith(
+      '— part of the answer was dropped while streaming; the full answer was saved —',
+    )
+
+    // A completed run with no drops keeps the happy path's shape: no
+    // marker, no body change — the gap sentence must never appear on an
+    // intact stream.
+    const clean = makeTarget()
+    await clean.target.submit('clean')
+    clean.dispatcher.emit('agent.runState', {
+      runId: clean.dispatcher.next.run - 1,
+      state: 'completed',
+    })
+    expect(clean.handle.append).not.toHaveBeenCalled()
+    expect(clean.handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
+
+  it('marks the gap on a failed run too — the reason and the gap are both facts', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('q')
+    const runId = dispatcher.next.run - 1
+    dispatcher.emit('agent.runState', {
+      runId,
+      state: 'failed',
+      error: 'the model stopped mid-answer',
+      droppedDeltas: 1,
+    })
+    expect(handle.append).toHaveBeenCalledWith(
+      '— part of the answer was dropped while streaming; the full answer was saved —',
+    )
+    expect(handle.close).toHaveBeenCalledWith('failure', 'the model stopped mid-answer')
   })
 })

@@ -1,0 +1,14 @@
+/* ActionGroup — a set of related actions laid out as one line.
+
+   Wraps rather than overflows: an approval prompt's allow group is three
+   buttons whose labels are sentences ("Allow in this session"), and a narrow
+   window must fold them onto a second line rather than push them off the
+   sheet. Alignment follows the container's text direction so the group sits
+   under the group above it. */
+.ui-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-end;
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/readScreen.schema.json",
+  "title": "ReadScreenParams",
+  "description": "Params of the readScreen agent tool (design §4.1): read the screen of a session through the renderer, which owns the grid (AD-6). The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list. The session the tool may read is bounded by the grant's session scopes, enforced by the narrowed capability (ADR-0028 decision 4); the window contract of the return (design §4.4) is the tool's return contract, not a parameter. region, when present, is an absolute buffer row span [start, end); absent means the visible screen. Span ordering (end > start) is enforced by the executor's validation, which refuses a malformed region before any request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The session whose screen is read, inside the grant's session scopes."
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "description": "Absolute buffer row span [start, end), end strictly greater than start. Absent: the visible screen.",
+      "properties": {
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "First buffer row of the region, inclusive."
+        },
+        "end": {
+          "type": "integer",
+          "description": "Last buffer row of the region, exclusive. Must be greater than start."
+        }
+      }
+    }
+  }
+}

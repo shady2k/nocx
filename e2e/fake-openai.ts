@@ -19,6 +19,15 @@
  * single consumer of both, so a drift here would be a second protocol
  * variant with a delay fuse — the whole reason the shapes must match.
  *
+ * AND THE MODEL CAN PROPOSE A TOOL. `toolCalls` scripts one
+ * `delta.tool_calls` frame finishing the response with `tool_calls` — the
+ * shape matched against the two Go fakes that already drive this client
+ * (internal/assistant/policy_test.go streamToolCalls,
+ * internal/transport/ws_readscreen_test.go streamToolCallChunk); see
+ * toolCallFrame below for what each member is for. Without it the fake
+ * could only make the model SPEAK, so the assistant's approval prompt had
+ * no end-to-end coverage at all (nocx-aospw).
+ *
  * SCRIPTED, NOT RANDOM: the test decides the answer, per request, in order.
  * `holdAfter` lets a response write its first N content chunks and then WAIT
  * for an explicit release() — the spec can hold one answer open while a
@@ -50,15 +59,44 @@ export interface FakeRequest {
   chunksSent: number
 }
 
+/** One tool call the scripted model PROPOSES (design §6): the tool by the
+ *  name the registry declares (internal/agenttools/registry.go — files.read,
+ *  readScreen, run, git.status) and the arguments it is called with.
+ *
+ *  `arguments` is an object here and a JSON STRING on the wire, which is
+ *  what OpenAI's shape carries and what the client parses back into the
+ *  object the tool's params schema (contracts/tools/<name>.schema.json) is
+ *  applied to. The spec writes the object; the serialisation is this
+ *  module's business.
+ *
+ *  A resource argument must name the resource EXACTLY as the backend spells
+ *  it — readScreen's `sessionId` is compared for identity against the run's
+ *  grant scope (internal/assistant/policy.go inScope), so an invented id is
+ *  REFUSED before it can ask. A spec that wants the ask must pass the
+ *  session id the product itself used. */
+export interface ScriptedToolCall {
+  /** The tool name the model calls, e.g. 'readScreen'. */
+  name: string
+  /** The call's arguments, serialised to the wire's JSON string. */
+  arguments: Record<string, unknown>
+  /** The call id the approval binding names (default 'call_<n>'). */
+  id?: string
+}
+
 export interface StreamScript {
   /** One string per content delta. The concatenation is the answer. */
   chunks: string[]
   /** Hold the response open after this many content chunks have been
    *  flushed (default: write all chunks without holding). A held response
-   *  stays `streaming` until release(id) lets it finish. */
+   *  stays `streaming` until release(id) lets it finish. The hold is among
+   *  CONTENT chunks only. */
   holdAfter?: number
   /** The model id echoed in the chunk frames (default 'e2e-model'). */
   model?: string
+  /** Tool calls this response PROPOSES, written as one frame after the
+   *  content chunks and finishing the response with `tool_calls` instead of
+   *  `stop`. Absent or empty: a content-only response, exactly as before. */
+  toolCalls?: ScriptedToolCall[]
 }
 
 const CHUNK_ID = 'chatcmpl-e2e'
@@ -72,6 +110,51 @@ function chunkFrame(model: string, content: string, finish: string): string {
     created: 0,
     model,
     choices: [{ index: 0, delta: { role: 'assistant', content }, finish_reason: finish }],
+  })
+}
+
+/** One chat.completion.chunk frame carrying TOOL CALLS — the whole proposal
+ *  in a single frame, finishing the response with `tool_calls`.
+ *
+ *  MATCHED AGAINST, not invented from the OpenAI docs: this is field for
+ *  field `internal/assistant/policy_test.go`'s streamToolCalls and
+ *  `internal/transport/ws_readscreen_test.go`'s streamToolCallChunk — the
+ *  two Go fakes whose frames our own client already parses. Every member is
+ *  there for a reason on the client side: eino's openai adapter decodes the
+ *  delta into `[]openai.ToolCall` and maps it to `schema.ToolCall`
+ *  (eino-ext/libs/acl/openai chat_model.go, toMessageToolCalls), so `id`
+ *  becomes the call id the approval binding names, `type` must be
+ *  "function", and `function.arguments` is a STRING the middleware
+ *  validates against the tool's params schema. `index` is deliberately
+ *  ABSENT: eino concatenates a stream's tool calls by index and a call
+ *  delivered whole in one frame needs no merging (eino schema/message.go,
+ *  concatToolCalls appends an index-less chunk as it stands) — which is
+ *  exactly what both Go fakes do.
+ *
+ *  A REAL provider may split one call's arguments across several frames.
+ *  This fake does not, because nothing in this suite tests eino's
+ *  concatenation; if a spec ever needs that, it is a second frame shape and
+ *  it gets its own matching exercise. */
+function toolCallFrame(model: string, calls: readonly ScriptedToolCall[]): string {
+  return JSON.stringify({
+    id: CHUNK_ID,
+    object: 'chat.completion.chunk',
+    created: 0,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {
+          role: 'assistant',
+          tool_calls: calls.map((c, i) => ({
+            id: c.id ?? `call_${i + 1}`,
+            type: 'function',
+            function: { name: c.name, arguments: JSON.stringify(c.arguments) },
+          })),
+        },
+        finish_reason: 'tool_calls',
+      },
+    ],
   })
 }
 
@@ -231,23 +314,36 @@ export class FakeOpenAI {
     res.flushHeaders()
 
     const chunks = script.chunks
+    const calls = script.toolCalls ?? []
     const model = script.model ?? 'e2e-model'
     const holdAfter = script.holdAfter ?? chunks.length
     let i = 0
 
     const writeNext = (): void => {
       while (i < chunks.length) {
-        const isLast = i === chunks.length - 1
+        // A response that goes on to PROPOSE finishes with `tool_calls` on
+        // the proposal frame, so no content chunk of it may carry `stop`:
+        // the finish reason belongs to the response, and two of them in one
+        // response is a shape no provider sends.
+        const isLast = i === chunks.length - 1 && calls.length === 0
         res.write(`data: ${chunkFrame(model, chunks[i], isLast ? 'stop' : '')}\n\n`)
         record.chunksSent = ++i
         record.state = 'streaming'
-        if (i === holdAfter && !isLast) {
+        // `i < chunks.length` rather than `!isLast`: the same condition for
+        // a content-only script (holdAfter defaults to chunks.length, so the
+        // end of the loop never holds), and the honest one now that `isLast`
+        // also depends on whether a proposal follows.
+        if (i === holdAfter && i < chunks.length) {
           // Held: the stream is genuinely open with partial content. The
           // test observes `streaming` + chunksSent and calls release(id)
           // when it is ready for the rest.
           this.releases.set(record.id, writeNext)
           return
         }
+      }
+      if (calls.length > 0) {
+        res.write(`data: ${toolCallFrame(model, calls)}\n\n`)
+        record.state = 'streaming'
       }
       res.write('data: [DONE]\n\n')
       record.state = 'done'

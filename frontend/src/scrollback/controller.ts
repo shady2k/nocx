@@ -8,8 +8,9 @@
 // authority checks (kernel freezeBlock) run at the composition site; these
 // methods paint the attempt's verdict.
 
+import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
-import { BlockManager, type GetLineFn } from './blocks'
+import { BlockManager, type BlockRecord, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
@@ -36,6 +37,10 @@ export interface ScrollbackControllerOpts {
    *  chip's block went with the blocks, so the mode must close — a chip
    *  whose block no longer exists would be an invisible mode. */
   onClear?: () => void
+  /** Fired at the end of every visual freeze — the block's output rows are
+   *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
+   *  output window from the frozen block). */
+  onBlockFrozen?: (rec: BlockRecord) => void
 }
 
 export class ScrollbackController {
@@ -154,6 +159,7 @@ export class ScrollbackController {
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
       onDeferredFreeze: () => this._settleFrozen(),
+      onBlockFrozen: opts.onBlockFrozen,
       // Read at freeze time rather than captured at construction: a pane is
       // resized, and the provenance must say what the serializer actually
       // saw.
@@ -537,8 +543,18 @@ export class ScrollbackController {
    * startLine + 1 because the shell's echo lands on the creation line
    * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
    */
-  beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
-    this._glide(() => this.beginBlockNow(command, cwd, startLine, outputStart))
+  beginBlock(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart?: number,
+    /** Who submitted the command (design §3.1, nocx-iadtt): the app-owned
+     *  submit passes the minted author; a shell-originated block — the
+     *  shell's own start event, no app-owned submit — is the human's
+     *  shell and defaults to 'shell'. */
+    author: CommandAuthor = 'shell',
+  ): void {
+    this._glide(() => this.beginBlockNow(command, cwd, startLine, outputStart, author))
   }
 
   /**
@@ -555,9 +571,15 @@ export class ScrollbackController {
    * user-visible transition gets one glide, owned by whoever knows every
    * synchronous mutation in it.
    */
-  beginBlockNow(command: string, cwd: string, startLine: number, outputStart?: number): void {
+  beginBlockNow(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart?: number,
+    author: CommandAuthor = 'shell',
+  ): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
+    this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
     this.setRunning()
   }
 

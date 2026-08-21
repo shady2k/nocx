@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.readScreenResolved.schema.json",
+  "title": "AgentReadScreenResolved",
+  "description": "Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer's answer to an agent.readScreenRequest — a closed outcome. outcome=frame carries the captured live frame (cells rows, cursor, capture identity, buffer row range — the same frame vocabulary the agent.captureFrame push uses, per design §2.4's one-frame-shape rule); outcome=failed carries why, so a renderer that cannot produce the frame (a session it does not know, a capture aborted by disposal) answers honestly instead of hanging the run. requestId is the broker-minted id from the request, echoed back.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "outcome"],
+  "properties": {
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The request id from agent.readScreenRequest."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["frame", "failed"],
+      "description": "frame: the capture succeeded and the frame fields follow. failed: the capture could not be produced and error names why."
+    },
+    "error": {
+      "type": "string",
+      "description": "The failure sentence, present only when outcome is failed."
+    },
+    "rows": {
+      "type": "array",
+      "description": "The frame's rows, in order; each is a cells row (live frame shape).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "cells"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["cells"]
+          },
+          "cells": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["char", "attrs"],
+              "properties": {
+                "char": {
+                  "type": "string",
+                  "description": "The cell's character."
+                },
+                "attrs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "The cell's attributes (fg/bg resolved to CSS colors, flags).",
+                  "properties": {
+                    "fg": { "type": ["string", "null"] },
+                    "bg": { "type": ["string", "null"] },
+                    "bold": { "type": "boolean" },
+                    "italic": { "type": "boolean" },
+                    "dim": { "type": "boolean" },
+                    "underline": { "type": "boolean" },
+                    "inverse": { "type": "boolean" },
+                    "blink": { "type": "boolean" },
+                    "strikethrough": { "type": "boolean" },
+                    "overline": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "col"],
+      "description": "The cursor's absolute buffer line and column at capture time.",
+      "properties": {
+        "line": { "type": "integer", "minimum": 0 },
+        "col": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buffer", "cols", "rows", "generation"],
+      "description": "The capture identity: which buffer instance, the geometry, and the content generation the frame belongs to.",
+      "properties": {
+        "buffer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["normal", "alternate"] },
+            "altSession": { "type": ["integer", "null"] }
+          }
+        },
+        "cols": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "description": "The absolute buffer row span the frame's rows cover: [start, end), end - start == rows.length.",
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "frame" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": ["rows", "cursor", "identity", "range"],
+        "properties": { "error": { "type": "null" } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "outcome": { "const": "failed" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": ["error"]
+      }
+    }
+  ]
+}

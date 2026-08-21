@@ -30,6 +30,21 @@ export interface TextFieldProps {
    * a field answered on blur rather than on input. See `ui/validation.ts`.
    */
   onBlur?: (value: string) => void
+  /**
+   * Fires when the person is FINISHED with the value: when focus leaves, and
+   * on Enter in a single-line field.
+   *
+   * For a field whose value is WRITTEN rather than merely validated. The
+   * Agent policy page's scope field is checked by `ParseEffectPolicy`, which
+   * rejects a non-absolute path, so writing per keystroke would be a refused
+   * write and a toast on every character of `/workspace`. Blur and Enter are
+   * one gesture — "done" — and naming it here keeps every caller from pairing
+   * `onBlur` with a hand-rolled keydown of its own.
+   *
+   * Enter does NOT commit a `multiline` field: there it inserts a newline,
+   * and only blur means done.
+   */
+  onCommit?: (value: string) => void
   type?: 'text' | 'number' | 'password'
   placeholder?: string
   min?: number
@@ -89,6 +104,15 @@ export function TextField(props: TextFieldProps) {
   const onBlur = (e: FocusEvent) => {
     const target = e.currentTarget as HTMLInputElement
     props.onBlur?.(target.value)
+    props.onCommit?.(target.value)
+  }
+
+  /** Enter commits a single-line field. Wired to the input only — in a
+   *  textarea Enter is a newline, and stealing it would make the control
+   *  unable to do the one thing multiline exists for. */
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== 'Enter') return
+    props.onCommit?.((e.currentTarget as HTMLInputElement).value)
   }
 
   const inputElement = () => (
@@ -124,6 +148,7 @@ export function TextField(props: TextFieldProps) {
       }}
       onInput={onInput}
       onBlur={onBlur}
+      onKeyDown={onKeyDown}
     />
   )
 

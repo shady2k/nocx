@@ -4,7 +4,7 @@
   "title": "AgentAsk",
   "description": "Result of the agent.ask JSON-RPC method (nocx-f4s5, design §5, §7). The question text plus references to already-captured frames. The backend records the frame reference, the question and a PENDING run in ONE ledger transaction before the model would be called, and answers with the BACKEND-MINTED run id (what agent.cancel/approve/status will address) and the run's state, ON THE WIRE because the renderer draws it. The run is prepared at the response: recorded, and the backend then drives it to streaming and a terminal state asynchronously (agent.runDelta / agent.runState notifications). The same ask retried with the same askId answers the original run id — never a second run (a retry duplicates neither question nor run).",
   "type": "object",
-  "required": ["runId", "questionId", "answerEntryId", "state", "ingestSeq", "replayed"],
+  "required": ["runId", "questionId", "answerEntryId", "state", "ingestSeq", "replayed", "model"],
   "properties": {
     "runId": {
       "description": "The backend-minted run id — the execution row in the one ledger. Opaque to the renderer; a later agent.cancel/agent.approve/agent.status addresses the run by this id.",
@@ -42,6 +42,11 @@
     "replayed": {
       "description": "True when this ask was a replay of an earlier ask with the same askId — the response to the first attempt was lost, and this answers the ORIGINAL run id rather than creating a second run.",
       "type": "boolean"
+    },
+    "model": {
+      "description": "The model id that answered — the answering role's pair, pinned into the run's facts at ask time (RunFacts.Model, bead nocx-e6kn2). Always present on a result: an ask whose role could not resolve is a refusal, never a result. The renderer shows this beside every answer, so a person can always tell which model answered.",
+      "type": "string",
+      "minLength": 1
     }
   },
   "additionalProperties": false

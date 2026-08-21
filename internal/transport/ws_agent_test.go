@@ -100,6 +100,7 @@ type askWireResult struct {
 	State         string `json:"state"`
 	IngestSeq     int64  `json:"ingestSeq"`
 	Replayed      bool   `json:"replayed"`
+	Model         string `json:"model"`
 }
 
 // askOverWire sends agent.ask and decodes the result.

@@ -2245,9 +2245,17 @@ func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) 
 			endpointsRepo = er
 		}
 	}
+	// Role assignments ride the same document (bead nocx-e6kn2): a role
+	// names an endpoint, and the pair shares the endpoints' atomic writes.
+	var rolesRepo profile.RoleRepository
+	if s.profiles != nil {
+		if rr, ok := s.profiles.(profile.RoleRepository); ok {
+			rolesRepo = rr
+		}
+	}
 	return capability.NewConfigOperation(
 		configGate, vaultGate, lane,
-		s.profiles, s.groups, endpointsRepo, s.profileSvc, s.settings,
+		s.profiles, s.groups, endpointsRepo, rolesRepo, s.profileSvc, s.settings,
 		s.vaultRowResolver(), s.vaultEndpointSecrets(),
 	), endpointsRepo != nil
 }
@@ -2317,6 +2325,23 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "endpoints.delete", params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		// The role methods (beads nocx-e6kn2, nocx-rikz5): roles.list,
+		// roles.assign and roles.setDefault ride the same config operation
+		// as the endpoints they reference — one queue, so a default and an
+		// assignment can never be written against two different endpoint
+		// tables.
+		regResponder(configSub, "roles.list", noParams(), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "roles.assign", params(validateRoleAssignRaw), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "roles.setDefault", params(validateRoleSetDefaultRaw), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		// The assistant's methods (nocx-edio): endpoints.probe is the Test

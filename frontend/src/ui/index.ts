@@ -40,6 +40,7 @@ export {
 } from './collection-view'
 export { FileStatusRow, type FileStatusRowProps, type FileStatus } from './file-status-row'
 export { RecordRow, type RecordRowProps } from './record-row'
+export { ActionGroup, type ActionGroupProps } from './action-group'
 export { Prompt, type PromptProps } from './prompt'
 export { Radio, type RadioProps } from './radio'
 export { Stack, type StackProps, type StackGap } from './stack'

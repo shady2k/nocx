@@ -2,32 +2,41 @@ package content
 
 // Schema v1 of the one authoritative ledger (nocx-rtg0.2), per ADR-0019,
 // ADR-0020 and design §5.2. The types here are the public repository seam:
-// ContentDB.Ledger() returns a LedgerRepository, the only writer of the v1
-// tables. The interim command_history table and CommandHistoryRepository are
-// untouched by this surface — they remain the live history path until
-// nocx-rtg0.19 removes them, and nothing may write both (ADR-0019 §4).
+// ContentDB.Ledger() returns a LedgerRepository, and since nocx-rtg0.19 it is
+// the only writer of a command anywhere in nocx — command_history and
+// CommandHistoryRepository are gone, so ADR-0019 §4's "nothing may write
+// both" is now satisfied by there being nothing else to write.
 //
 // The entry lifecycle IS wired as of nocx-rtg0.3: internal/transport's
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun and FinishAgentRun. The READ path is wired
-// as of nocx-rtg0.20: ledger.query drives QueryEntries and ledger.get drives
-// Entry plus Edges (ws_ledger_query.go), and the query's `host` field is
-// what finally asks a resolved environment row for its host — so
-// Environment.Host has a renderer. What is still test-reachable only:
-// CreateSession, DeleteSession, ListEntries, DeleteEntry, AppendArtifact and
-// AddEdge — plus the whole of LayoutRepository (layout.go), which keeps the
-// same statement in its own header.
+// SubmitAgentAsk, TransitionRun, AppendChunk and FinishAgentRun. The READ
+// path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
+// ledger.get drives Entry plus Edges (ws_ledger_query.go), and the query's
+// `host` field is what finally asks a resolved environment row for its host —
+// so Environment.Host has a renderer. history.record drives RecordCompleted
+// (nocx-rtg0.19), which is where a finished command lands now, under the
+// author the renderer minted (nocx-iadtt); ledger.capture drives
+// CaptureOutput.
 //
-// RewriteRedaction is the awkward third case and is written down rather than
-// rounded to one of the other two: it is WIRED — secrets.captureSave reaches
-// it through capability.CaptureSaveService, which routes a link by the id it
-// carries — but no production caller mints a link keyed by an entry id yet.
-// history.record is what mints links, and it writes command_history rows. So
-// the path is live and correct, and in production the router always takes the
-// other arm until nocx-rtg0.19 replaces history.record's writer
-// (nocx-rtg0.24).
+// WHAT IS STILL TEST-REACHABLE ONLY: CreateSession, DeleteSession,
+// ListEntries, DeleteEntry, AppendArtifact, AddEdge and RunState.
+//
+// EvictEntries and Watermark are the third category, and it is written down
+// rather than rounded to either of the other two: no production caller
+// reaches the INTERFACE METHOD, and the behaviour behind it is nonetheless
+// live on every submit — evictOnWrite calls the unexported evictEntries
+// directly (retention.go), and the query path reads the unexported watermark
+// inside its own transaction. So "no caller" here means the seam is untested
+// in production, not that retention is asleep.
+//
+// RewriteRedaction stopped being the awkward case when command_history went
+// (nocx-rtg0.19). It is wired and TAKEN: secrets.captureSave reaches it
+// through capability.CaptureSaveService, the id router that used to choose a
+// store by parsing an integer is gone with the second store, and
+// history.record now mints the entry-keyed links that made the ledger arm
+// unreachable in production before.
 //
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
@@ -161,6 +170,10 @@ const (
 // TerminationReason distinguishes the five outcomes a single status plus
 // exit code cannot (ADR-0020 §4): the command failed, the executor timed
 // out, the transport vanished, the user killed it, the agent declined.
+// The lease (ADR-0020 decision 2) adds the two deadlines a single
+// "timeout" cannot tell apart — silence is a different failure from
+// slowness — and the output budget, so "which bound ended this run" is
+// answerable from the record, never reconstructed.
 type TerminationReason string
 
 const (
@@ -171,15 +184,15 @@ const (
 	TermUserKilled    TerminationReason = "user-killed"
 	TermAgentDeclined TerminationReason = "agent-declined"
 	TermInterrupted   TerminationReason = "interrupted"
-)
-
-// GrantPolicy is the autonomy preset the workspace mints (ADR-0020 §7).
-type GrantPolicy string
-
-const (
-	GrantAskEveryTime GrantPolicy = "ask-every-time"
-	GrantAskOnMutate  GrantPolicy = "ask-on-mutate"
-	GrantAutonomous   GrantPolicy = "autonomous"
+	// TermInactivity is the lease's silence bound: the execution produced
+	// no output for the inactivity deadline and was terminalized for it.
+	// Distinct from TermTimeout because a command can be slow AND alive;
+	// silence is the failure that looks like life.
+	TermInactivity TerminationReason = "inactivity"
+	// TermOutputBudget is the lease's volume bound: the execution produced
+	// more than its output budget allowed and was terminalized for it —
+	// bounded visibly, never truncated silently.
+	TermOutputBudget TerminationReason = "output-budget"
 )
 
 type ResourceKind string
@@ -191,6 +204,28 @@ const (
 	ResourceCredential  ResourceKind = "credential"
 	ResourceDestination ResourceKind = "destination"
 	ResourceTool        ResourceKind = "tool"
+)
+
+// Effect is the ADR-0020 effect lattice — what an execution may do to the
+// world (docs/decisions/0020-the-agent-gets-a-lane-authority-is-granted-per-run.md
+// decision 6): observe | mutate-reversible | mutate-destructive |
+// privilege-change | disclose | cross-boundary | delegate. It lives here
+// beside ResourceKind for the same reason ResourceKind does: the ledger owns
+// the vocabulary the durable grant record stores, and a consumer (the agent
+// tool registry, the policy) consumes it, never duplicates it. A grant names
+// the effect classes it permits; authority_grants persists them
+// (grant_effects), so "forgot to classify a tool" stops compiling in the
+// registry and stops persisting here.
+type Effect string
+
+const (
+	EffectObserve           Effect = "observe"
+	EffectMutateReversible  Effect = "mutate-reversible"
+	EffectMutateDestructive Effect = "mutate-destructive"
+	EffectPrivilegeChange   Effect = "privilege-change"
+	EffectDisclose          Effect = "disclose"
+	EffectCrossBoundary     Effect = "cross-boundary"
+	EffectDelegate          Effect = "delegate"
 )
 
 // CaptureMethod records whether artifact text came from terminal cells, from
@@ -434,6 +469,27 @@ func ShellExitCodeOf(payload string) (*int, error) {
 	return out, nil
 }
 
+// Grant is the authority recorded on a run (ADR-0020 §5): versioned,
+// expiring, immutable once execution starts. It names BOTH dimensions of
+// the authority — the effect classes permitted (what the run may do to the
+// world, decision 6) and the resource scopes it may touch (what exists to
+// be touched, decision 5). A grant over effect classes alone permits
+// nothing in particular and everything in general: "may observe" reaches
+// every path, session and credential unless the scopes say otherwise.
+//
+// Policy is the decision MATRIX of the amended §7 (policy.go): one row per
+// effect class. Effects and Scopes are the matrix's derivations, materialized
+// by EffectPolicy.AsGrant when the run's grant is minted — the matrix is the
+// one source of what a run may do, and a grant built any other way is a
+// hand-rolled authority the consumer cannot have reasoned about.
+type Grant struct {
+	Version   int
+	ExpiresAt int64
+	Policy    EffectPolicy
+	Effects   []Effect
+	Scopes    []GrantScope
+}
+
 // FinishAgentRun is the terminal close of an assistant run (the state
 // machine this slice's driver persists: prepared → streaming → completed |
 // failed | cancelled | interrupted). The run's terminal state and the
@@ -447,19 +503,13 @@ type FinishAgentRun struct {
 	EndedAt           int64
 }
 
-// Grant is the authority recorded on a run (ADR-0020 §5).
-type Grant struct {
-	Version   int
-	ExpiresAt int64
-	Policy    GrantPolicy
-	Scopes    []GrantScope
-}
-
 // GrantScope is one resource the grant touches — what "this run held a grant
 // for these environments and touched these three sessions" is a query over.
+// The json tags are the wire form of a policy row's scope (the settings RPC);
+// the durable record persists kind and id as columns, not JSON.
 type GrantScope struct {
-	Kind ResourceKind
-	ID   string
+	Kind ResourceKind `json:"kind"`
+	ID   string       `json:"id"`
 }
 
 // ── the assistant ask (design §5, §7; bead nocx-f4s5) ────────────────────

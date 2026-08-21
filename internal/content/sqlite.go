@@ -385,7 +385,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -394,7 +394,7 @@ const schemaVersion = 11
 // schema of THIS store and is discarded deliberately; one containing any
 // other table is refused.
 var rebuildDropOrder = []string{
-	"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
+	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
 	"panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
@@ -774,7 +774,7 @@ CREATE TABLE IF NOT EXISTS executions (
   started_at          INTEGER,
   ended_at            INTEGER,
   termination_reason  TEXT CHECK (termination_reason IN
-                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted')),
+                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted','inactivity','output-budget')),
   executor            TEXT,                -- executor identity
   -- state is the ASSISTANT RUN state the renderer draws (design §7):
   -- prepared | streaming | awaiting_approval | completed | cancelled |
@@ -792,7 +792,11 @@ CREATE TABLE IF NOT EXISTS authority_grants (
   version      INTEGER NOT NULL,
   issued_at    INTEGER NOT NULL,           -- backend wall clock
   expires_at   INTEGER NOT NULL,           -- expiring: a grant is not a toggle
-  policy       TEXT NOT NULL CHECK (policy IN ('ask-every-time','ask-on-mutate','autonomous')),
+  -- policy is the decision MATRIX as JSON (ADR-0020 §7 as amended
+  -- 2026-08-16); the CHECK replaced the old preset enum, and the column
+  -- stays SQLite's discipline in a weaker form: a grant whose policy is
+  -- not even JSON cannot be recorded.
+  policy       TEXT NOT NULL CHECK (json_valid(policy)),
   payload      TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
 
@@ -802,6 +806,14 @@ CREATE TABLE IF NOT EXISTS grant_scopes (
                 ('environment','session','path','credential','destination','tool')),
   resource_id   TEXT NOT NULL,
   PRIMARY KEY (grant_id, resource_kind, resource_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS grant_effects (
+  grant_id INTEGER NOT NULL REFERENCES authority_grants(id) ON DELETE CASCADE,
+  effect   TEXT NOT NULL CHECK (effect IN
+            ('observe','mutate-reversible','mutate-destructive','privilege-change',
+             'disclose','cross-boundary','delegate')),
+  PRIMARY KEY (grant_id, effect)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS artifacts (

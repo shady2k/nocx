@@ -145,6 +145,49 @@ type WSServer struct {
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
 
+	// broker is the server→client request broker (nocx-e2j1z): the
+	// mechanism backend code asks the renderer through (readScreen — the
+	// first production request). Constructed in buildControlPlane with the
+	// server's own connection set and per-connection enqueue as its
+	// delivery seams; its resolution RPCs register on the read-loop ingress
+	// and its ConnectionLost signal fires in unregisterConn.
+	broker *Broker
+	// runLeaseCfg bounds one run execution (ADR-0020 decision 2 — the
+	// wall-clock deadline, the inactivity deadline, the output budget and
+	// the escalation grace RequestRun supervises every run under). Zero
+	// means the package default (defaultRunLease); every bound zero
+	// disables the lease and restores the pre-lease broker timeout.
+	runLeaseCfg RunLeaseConfig
+	// lanes is the per-session lane interactivity state (ADR-0020 decision
+	// 3): the awaiting-takeover transition decided in Go from the
+	// renderer's agent.laneInteractivity reports. RequestRun refuses a
+	// lane awaiting takeover (the agent lost write authority); the run
+	// lease suspends its enforcement while a TUI owns the lane.
+	laneInteractivity *laneState
+	// agentPolicy is the ONE global agent policy the ask run grants are
+	// minted from (ADR-0020 §7 as amended 2026-08-16, accepted): the global
+	// default of content.ResolvePolicy, overridden by the workspace grant
+	// source (nocx-mp2vd) when that lands.
+	// Named by the composition root. Unset, ask runs carry no grant and the
+	// model is offered no tools — the state before readScreen (see
+	// runGrantFor).
+	agentPolicy assistant.GlobalPolicy
+	// liveEffects is which of that policy's seven rows govern anything at
+	// all: the effect classes at least one DECLARED tool carries. It is
+	// static, derived at build time from the tool declaration table, and it
+	// arrives from the composition root for the same reason every other
+	// module does (AGENTS.md: interface-first + DI, wired at ONE root) —
+	// reaching into the tool registry from a handler would make this the
+	// single place the transport knows a concrete tools package. Unset, the
+	// settings surface is told no row is live, which is a visible degrade
+	// rather than a silent claim that all seven govern something.
+	liveEffects []content.Effect
+	// sessionPolicy holds each session's "allow in this session" answers —
+	// the overlay content.ResolvePolicy applies on top of the global policy
+	// for a run in that session. Dropped at every session teardown; the
+	// store and the drops are ws_sessionpolicy.go's subject.
+	sessionPolicy *sessionPolicyStore
+
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
 	// snippets is the snippet library service backing the snippets.* JSON-RPC
@@ -241,6 +284,28 @@ type WSServer struct {
 	// probes still run and return their outcome, but agent.status reports
 	// lastProbe null.
 	assistantProbes *assistant.ProbeStore
+	// agentKnownMaterial is the egress gate's vault comparison
+	// (assistant.KnownMaterial, design §7.1): the seam that answers "does
+	// this tool result contain a value the vault holds" — in the backend,
+	// nothing leaving (ADR-0011 §2). When nil, a grant-carrying ask that
+	// may execute tools fails at the middleware's construction, closed:
+	// the gate must see short vault values or a result would leave
+	// unscreened (assistant.newPolicyMiddleware).
+	agentKnownMaterial assistant.KnownMaterial
+	// agentApprovals is the process-lifetime approval store (design §7.2,
+	// nocx-z9hj4): the transport owns ONE per server and passes it on
+	// every Ask, so the run that escalated and the run that resumes consult
+	// the SAME decisions. Process-lifetime like the checkpoint: it does
+	// not survive a restart, which is what the recovery rule says.
+	agentApprovals *assistant.ApprovalStore
+	// pendingRuns holds a suspended run's stream context (question,
+	// references, resolved endpoint material — everything the resume
+	// re-drives) keyed by run id. The approval store is process-lifetime;
+	// so is this: the agent is alive while the renderer is alive (design
+	// §2.4). A run whose renderer never answers holds its context until
+	// the run terminalizes or the process restarts.
+	pendingRuns   map[int64]askRunContext
+	pendingRunsMu sync.Mutex
 	// agentProbeSub admits and runs endpoints.probe probes off the read
 	// loop: a streaming probe can take tens of seconds and must never
 	// freeze the socket that feeds every other tab. Capacity one composed
@@ -673,6 +738,46 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
+// WithRunLease names the lease bounds every run execution is supervised
+// under (ADR-0020 decision 2): the wall-clock deadline, the inactivity
+// deadline, the output budget and the escalation grace. Zero fields mean
+// the corresponding default (defaultRunLease); a config with every bound
+// zero disables the lease and restores the pre-lease broker timeout.
+func WithRunLease(cfg RunLeaseConfig) WSServerOption {
+	return func(s *WSServer) { s.runLeaseCfg = cfg }
+}
+
+// WithAgentKnownMaterial attaches the egress gate's vault comparison — the
+// composition root wires the vault adapter here (NewVaultKnownMaterial).
+// When nil, a run that may execute tools fails closed at the middleware's
+// construction; the rule is not weakened by leaving it unwired.
+func WithAgentKnownMaterial(km assistant.KnownMaterial) WSServerOption {
+	return func(ws *WSServer) { ws.agentKnownMaterial = km }
+}
+
+// WithAgentPolicy attaches the ONE global agent policy the ask run grants
+// are minted from (ADR-0020 §7 as amended — amendment proposed, awaiting
+// owner approval). The run mint resolves it through content.ResolvePolicy —
+// the one place the global-default/workspace-override order is stated. When
+// nil/unset, ask runs carry no grant and the model is offered no tools.
+func WithAgentPolicy(p assistant.GlobalPolicy) WSServerOption {
+	return func(ws *WSServer) { ws.agentPolicy = p }
+}
+
+// WithLiveEffects names which effect classes a declared tool actually
+// carries — policy.get's "live". The value is agenttools.LiveEffects(), read
+// at the composition root beside WithAgentPolicy: the policy says what a run
+// MAY do, this says which of those rows anything can do at all, and the
+// settings surface needs both to avoid drawing five controls that govern
+// nothing as equals to the two that do.
+//
+// Passed in rather than reached for. It is static data off a compile-time
+// table, so the root is where it becomes a dependency — the same reason
+// WithBuildInfo reads internal/version there instead of in a handler.
+func WithLiveEffects(live []content.Effect) WSServerOption {
+	return func(ws *WSServer) { ws.liveEffects = live }
+}
+
 // WithAssistantProbeStore attaches the process-lifetime store of the last
 // endpoints.probe outcome — agent.status's "last probe result" fact. When
 // nil, probes still run and return their outcome, but agent.status reports
@@ -921,8 +1026,14 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		conns:               make(map[*wsConn]struct{}),
 		outboundBudget:      outbound.NewBudget(outboundBudgetBytes),
 		tunnels:             make(map[string]*tunnel.Tunnel),
+		resolver:            &resolverHolder{},
 		ownerTunnels:        make(map[*wsConn]map[string]struct{}),
 		origins:             LoopbackOriginPolicy{},
+		agentApprovals:      assistant.NewApprovalStore(),
+		sessionPolicy:       newSessionPolicyStore(),
+		laneInteractivity:   newLaneState(),
+		satNotify:           newSaturatedNotifyLimiter(time.Second),
+		pendingRuns:         make(map[int64]askRunContext),
 		filesBindings:       make(map[string]*filesBinding),
 		lanes:               make(map[session.ID]*sessionLane),
 		filesBySession:      make(map[session.ID]map[string]struct{}),
@@ -934,8 +1045,6 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		controlDrainTimeout: defaultControlDrainTimeout,
 		gitBindings:         make(map[string]*gitBinding),
 		gitBySession:        make(map[session.ID]map[string]struct{}),
-		resolver:            &resolverHolder{},
-		satNotify:           newSaturatedNotifyLimiter(time.Second),
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -979,11 +1088,19 @@ func (s *WSServer) buildControlPlane() {
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
+	// The request broker is constructed here, once the server's connection
+	// set exists: its delivery seams are this server's own snapshot and
+	// per-connection enqueue, and its resolution methods register on the
+	// ingress-critical set below (the resolution must never wait behind the
+	// lane — a pending requestor blocks on it).
+	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
 	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
+	specs = append(specs, s.laneInteractivitySpec(immediate))
+	specs = append(specs, s.brokerSpecs(immediate)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
@@ -1003,6 +1120,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
+	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
@@ -1131,6 +1249,10 @@ func (s *WSServer) Stop(ctx context.Context) error {
 		// bindings too. No subscriber is attached at shutdown — nobody to
 		// notify, and gitSessionClosed's nil capture is exactly that case.
 		s.gitSessionClosed(sess.ID(), nil)
+		// The session's "allow in this session" answers die with it, on
+		// every path that ends one (ws_sessionpolicy.go). Nothing persists
+		// them, so shutdown is the last of the three.
+		s.sessionPolicy.Drop(sess.ID())
 	}
 
 	// Application shutdown destroys every pending capture (the contract's
@@ -1595,6 +1717,18 @@ func paramsBudgetForMethod(method string) int {
 	switch method {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
+	case "agent.readScreenResolved":
+		// A readScreen resolution carries a live frame — every cell of a
+		// screen with its attributes — bounded by the frame validation
+		// (rows ≤ 10k, cols ≤ 2k, 5M chars) and this wire budget, the
+		// document tier. The broker's own per-kind bound matches.
+		return budgetDocument
+	case "agent.runResolved":
+		// A run resolution carries a command's output window — text
+		// bounded by the renderer's maxRunOutputWindowChars clamp and this
+		// wire budget, the document tier. The broker's own per-kind bound
+		// matches.
+		return budgetDocument
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
 		"profiles.importTabby", "profiles.tabbyPreview":
 		return budgetDocument
@@ -1607,12 +1741,11 @@ func paramsBudgetForMethod(method string) int {
 // not an object.
 var errEnvelopeNotObject = errors.New("not a JSON object")
 
-// errEnvelopeTooLarge reports a control frame whose method does not appear
-// within envelopeScanCap bytes of top-level structure.
-var errEnvelopeTooLarge = errors.New("envelope exceeds scan cap")
+// errEnvelopeTooLarge reports a control frame whose envelope could not be
+// decoded within the scan cap: the method did not appear in time, which is
+// how a huge params value is refused without ever being materialised.
+var errEnvelopeTooLarge = errors.New("envelope exceeds the scan cap")
 
-// errEnvelopeDuplicateMember reports a control frame that repeats a
-// the budget gate and at dispatch. Refusing it keeps one meaning per frame.
 var errEnvelopeDuplicateMember = errors.New("duplicate envelope member")
 
 // decodeEnvelope extracts the JSON-RPC envelope — jsonrpc, id, method —
@@ -2280,6 +2413,13 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		s.filesSessionClosed(sess.ID())
 		s.gitSessionClosed(sess.ID(), wconn)
 	}
+	// The session's "allow in this session" answers die with it
+	// (ws_sessionpolicy.go). Outside the claim: the claim exists because
+	// deleting a git binding is also the one chance to announce it, and
+	// forgetting an overlay announces nothing. Dropping twice costs nothing;
+	// dropping never leaves a permission alive past the session it was
+	// scoped to.
+	s.sessionPolicy.Drop(sess.ID())
 
 	if wconn == nil {
 		return
@@ -2400,7 +2540,11 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// the caller's under main's signature (nocx-292k).
 	s.cancelRecovery(sid)
 	s.filesSessionClosed(sid)
+	s.laneInteractivity.remove(sid)
 	s.gitSessionClosed(sid, wconn)
+	// The session's "allow in this session" answers die with it
+	// (ws_sessionpolicy.go).
+	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
 	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
@@ -2630,6 +2774,15 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 	if s.captures != nil {
 		s.captures.DestroyConnection(connectionID(wc))
 	}
+	// The request broker's lifecycle signal (nocx-e2j1z): a pending request
+	// this connection could answer loses an answerer, and a request with no
+	// surviving recipient terminalizes instead of hanging. Called on EVERY
+	// teardown — this function is the single path out of handleSession, so
+	// a hijacked or stopped connection reaches it the same way a closed
+	// socket does.
+	if s.broker != nil {
+		s.broker.ConnectionLost(wc)
+	}
 	s.stopOwnerTunnels(wc)
 }
 
@@ -2653,4 +2806,32 @@ func (s *WSServer) broadcastSettingsChanged(revision int, keys []string) {
 	for _, wc := range conns {
 		_ = wc.TryNotify("settings.changed", mustMarshal(params))
 	}
+}
+
+// rendererConns is the broker's Conns seam: a snapshot of the renderer
+// connections currently attached. The snapshot is taken at Request time and
+// is that request's recipient set — the only connections that can resolve
+// it.
+func (s *WSServer) rendererConns() []Conn {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	out := make([]Conn, 0, len(s.conns))
+	for wc := range s.conns {
+		out = append(out, wc)
+	}
+	return out
+}
+
+// rendererDeliver is the broker's Deliver seam: one request notification to
+// one connection, through the connection's outbound enqueue — the pump is
+// the sole writer (Responder's rule), so the broker never writes the socket
+// directly. The returned error is the enqueue's real error (a full or
+// closed outbound), which is what lets an undelivered request terminalize
+// rather than wait for a timeout that may not come.
+func (s *WSServer) rendererDeliver(conn Conn, method string, params json.RawMessage) error {
+	wc, ok := conn.(*wsConn)
+	if !ok {
+		return fmt.Errorf("renderer deliver: connection %T is not a *wsConn", conn)
+	}
+	return wc.TryNotify(method, params)
 }

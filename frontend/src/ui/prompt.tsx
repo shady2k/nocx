@@ -24,6 +24,20 @@ export interface PromptProps {
   onSubmit?: () => void
   children: JSX.Element
   actions: JSX.Element
+  /**
+   * How the action slot lays its children out.
+   *
+   * `row` — the default and what every prompt had before: one right-aligned
+   * line, because one question with one yes and one no fits on one.
+   *
+   * `stacked` — a column of lines. Added for the approval prompt (nocx-gycwo),
+   * whose answers stopped being two: allow and deny, each at three widths, is
+   * two groups of three, and six buttons on one line is a wall rather than a
+   * choice. The variance is typed and lives here rather than being painted
+   * from the surface — a surface may place a kit component and may never
+   * repaint it (§3.6).
+   */
+  actionsLayout?: 'row' | 'stacked'
 }
 
 /**
@@ -138,7 +152,9 @@ export function Prompt(props: PromptProps) {
           <h2 class="ui-prompt__title">{props.title}</h2>
         </Show>
         <div class="ui-prompt__body">{props.children}</div>
-        <div class="ui-prompt__actions">{props.actions}</div>
+        <div class="ui-prompt__actions" data-layout={props.actionsLayout ?? 'row'}>
+          {props.actions}
+        </div>
       </section>
     </div>
   )

@@ -323,14 +323,37 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       models: [{ name: 'gpt-4o', alias: 'Flagship' }],
     })
 
-    // The saved row appears in the list, saying the key is saved — but never
-    // the key itself.
+    // The saved row appears in the list — and never the key itself, which is
+    // the whole point: a key crosses to the backend once and never back.
     await waitForRows(container, 1)
     const row = rows(container)[0]
     expect(row.textContent).toContain('My provider')
-    expect(row.textContent).toContain('Key saved')
     expect(row.textContent).not.toContain('sk-live-abc')
     expect(toastMessages()).toContain('Saved "My provider"')
+  })
+
+  it('the dialog is ordered by what Test actually tests: headers before the button, models after', async () => {
+    const { container } = mount()
+    await waitForRows(container, 0)
+    const dialog = openNew(container)
+
+    // Custom headers ride on every request the probe sends
+    // (ws_assistant.go resolveProbeHeaders), so they are part of the
+    // CONNECTION and belong above the button that checks it. Models are
+    // what the connection then offers — and the model field discovers them
+    // from a successful test — so they belong below it. The dialog used to
+    // read name, url, key, TEST, models, headers, which asked a person to
+    // configure half the connection after already testing it.
+    const headers = dialog.querySelector('[aria-label="Custom headers"]')!
+    const testRow = dialog.querySelector('.ep-test-row')!
+    const models = dialog.querySelector('[aria-label="Endpoint models"]')!
+    expect(headers).toBeTruthy()
+    expect(testRow).toBeTruthy()
+    expect(models).toBeTruthy()
+
+    const before = Node.DOCUMENT_POSITION_FOLLOWING
+    expect(headers.compareDocumentPosition(testRow) & before).toBeTruthy()
+    expect(testRow.compareDocumentPosition(models) & before).toBeTruthy()
   })
 
   it('Enter with the model list open takes the option instead of saving; Enter with it closed submits (nocx-0plm6)', async () => {
@@ -1004,8 +1027,11 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     expect(badges.length).toBe(1)
     expect(badges[0].textContent).toBe('OpenAI-compatible')
     expect(row.querySelector('.ui-record-row__meta-text')?.textContent).toBe('1 model')
-    expect(row.querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('ok')
-    expect(row.textContent).toContain('Key saved')
+    // And NOTHING about the credential. A resolvable key is the absence of a
+    // problem; the row speaks only to refuse. "Key saved" was a green
+    // reassurance under every healthy endpoint and the owner struck it.
+    expect(row.querySelector('.ui-record-row__status')).toBeNull()
+    expect(row.textContent).not.toContain('Key saved')
   })
 
   it('a keyless endpoint renders "No key" as the neutral dot + text, and the Test stays enabled', async () => {
@@ -1100,7 +1126,7 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     )
   })
 
-  it('a sealed vault says so on the row and does not run the check (credential cannot resolve)', async () => {
+  it('a sealed vault says nothing on the row and leaves the Test live — pressing it is what raises the unlock', async () => {
     const { container, probeEndpoint, ctrl } = mountWithVault(
       [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
       vaultHarness({ state: 'sealed' as const, hasPassphrase: true }),
@@ -1111,13 +1137,18 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     await waitForRows(container, 1)
 
     const row = rows(container)[0]
-    // The agent.status vocabulary, verbatim: the vault cannot answer right
-    // now, and the row is not the place to raise the unlock prompt.
-    expect(row.textContent).toContain('The vault is locked — unlock it to use the assistant')
+    // A locked vault is the vault's resting state, not this endpoint's
+    // defect: the row does not narrate it, and does not pre-refuse the
+    // check either. endpoints.probe raises vault.ErrVaultSealed, the
+    // dispatcher seam normalizes it and the renderer raises the unlock and
+    // re-sends (ADR-0032, ws_assistant.go resolveProbeCredential) — so the
+    // check completes once the vault answers. Greying the button out was
+    // the frontend refusing a path the backend had kept open.
+    expect(row.querySelector('.ui-record-row__status')).toBeNull()
     const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
-    expect(test.disabled).toBe(true)
+    expect(test.disabled).toBe(false)
     fireEvent.click(test)
-    expect(probeEndpoint).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(probeEndpoint).toHaveBeenCalled())
   })
 
   it('a vanished vault says the key was deleted on the row and does not run the check', async () => {
@@ -1216,8 +1247,10 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     await waitForRows(container, 1)
 
     const row = rows(container)[0]
+    // The unsealed vault lists the row, so the credential resolves — and the
+    // row therefore says nothing about it. The live Test is the assertion.
     await vi.waitFor(() => {
-      expect(row.textContent).toContain('Key saved')
+      expect(row.querySelector('.ui-record-row__status')).toBeNull()
     })
     const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
     expect(test.disabled).toBe(false)

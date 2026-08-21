@@ -26,6 +26,10 @@ export interface HistoryRecord {
    */
   entryId: string
   /**
+   * Who submitted the command, in the ledger's own vocabulary (entries.kind): 'shell' is the human, 'agent' is the assistant's lane. Minted at submit by the submitting InputTarget on the renderer and carried on the request (design §3.1, nocx-iadtt); the ack echoes the author the record was accepted under, so the renderer can verify the backend kept the fact it minted — the two sides never derive the same thing twice. A block whose author is not the human is visibly marked in the flow.
+   */
+  author: 'shell' | 'agent'
+  /**
    * The row's structured redaction segments, in row order. The renderer draws an unresolved chip at each segment and refuses to run the command as written; a segment the user saved to a vault reference is absent here and the reference sits in the command instead. Offsets are UTF-16 code units into maskedCommand. A segment never carries secret material — prefix/suffix are exactly the text already visible in the masked command. Never null: no redaction is [].
    */
   redactions: Redaction[]

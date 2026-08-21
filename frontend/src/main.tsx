@@ -33,6 +33,8 @@ import { EndpointClient } from './endpoints'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
+import { apiSidebarAction, registerApiSurface } from './api'
+import { createApiWorkbenchServices } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
@@ -387,6 +389,13 @@ async function main() {
       defaultTitle: 'Settings',
     },
   })
+
+  // The API workbench (design §9.1): ONE pane, singleton-keyed, holding the
+  // collection tree, the request form and the runs. Registered through its
+  // own module rather than inline here, because the singleton key and the
+  // activity-bar entry are the surface's decisions and not the shell's — the
+  // file viewer and the notes surface are wired the same way.
+  registerApiSurface(registry, tm, createApiWorkbenchServices(dispatcher))
 
   // Ports (nocx-wzc4.7): a SIDEBAR VIEW, not a tab. The owner's reference
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched
@@ -759,6 +768,11 @@ async function main() {
     sidebarPanel,
     sidebarViews,
     /* actions */ [
+      // The bottom zone: an action opens a tab and never touches the panel.
+      // The API workbench belongs here rather than in the view zone for the
+      // reason design §9.2 gives — the tree lives IN the workbench, and a
+      // second tree in the panel would be a second owner of one selection.
+      apiSidebarAction(),
       {
         id: 'settings',
         title: 'Settings',

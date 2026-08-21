@@ -154,7 +154,7 @@ func TestApply_ClearsTheAuthSoTheSenderAccepts(t *testing.T) {
 	if r.Auth.Kind != apicoll.AuthNone || r.Auth.Var != "" {
 		t.Errorf("Auth = %+v after Apply, want it cleared", r.Auth)
 	}
-	if _, _, err := buildRequest(context.Background(), r); err != nil {
+	if _, _, _, err := buildRequest(context.Background(), r); err != nil {
 		t.Errorf("the sender still refuses the request Apply produced: %v", err)
 	}
 }

@@ -73,6 +73,7 @@
 @import './styles/components/endpoints.css';
 @import './styles/components/snippets.css';
 @import './styles/components/notes.css';
+@import './styles/components/api-workbench.css';
 @import './styles/components/overview.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';

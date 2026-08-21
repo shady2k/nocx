@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/apibind"
+	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 
@@ -153,6 +156,16 @@ type WSServer struct {
 	// notes is the notes library service backing the notes.* JSON-RPC
 	// methods. When nil, those methods return -32601.
 	notes *note.Service
+	// The API-testing surface (design §6, §7). Three seams that wire
+	// independently, so each is its own field and each has its own -32601:
+	// apiCollections is the collection folder service backing
+	// api.collections.* and api.request.read/write; apiSender additionally
+	// backs api.request.send; apiBindings is where an import puts a secret
+	// VALUE (design §8.1) and additionally backs api.import.postman.
+	// api.import.curl needs none of them.
+	apiCollections apicoll.Service
+	apiSender      apisend.Sender
+	apiBindings    apibind.Store
 	// uiState owns what the app remembers without being asked (ADR-0033);
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
 	// -32601 and the shell keeps its declared defaults.
@@ -782,6 +795,30 @@ func WithUIState(store *uistate.Store) WSServerOption {
 	return func(s *WSServer) { s.uiState = store }
 }
 
+// WithAPI attaches the API-testing collection service and the sender,
+// enabling api.collections.*, api.request.read/write and api.request.send.
+// With no collection service those methods return -32601; with a collection
+// service but no sender, everything but api.request.send answers — a
+// collection you can read and edit but not fire, which is an honest half of
+// the feature rather than a send that quietly does nothing.
+func WithAPI(collections apicoll.Service, sender apisend.Sender) WSServerOption {
+	return func(s *WSServer) {
+		s.apiCollections = collections
+		s.apiSender = sender
+	}
+}
+
+// WithAPIBindings attaches the binding document — the only thing in the API
+// surface that holds an identifier for stored credential material (design
+// §8.1) — enabling api.import.postman, which writes the secret values a
+// Postman export carries. When nil that method returns -32601: an import
+// that had nowhere to put a token would have to either drop it silently or
+// write it into the collection folder, and the folder being safe to commit
+// BY CONSTRUCTION is the whole security argument.
+func WithAPIBindings(store apibind.Store) WSServerOption {
+	return func(s *WSServer) { s.apiBindings = store }
+}
+
 // WithBuildInfo attaches the running binary's description, which is what
 // app.about answers with. The transport is told rather than reading
 // internal/version itself: that package's vars are link-time state, and a
@@ -991,6 +1028,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
+	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a
@@ -1030,7 +1068,7 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // gate is constructed; operations take them as separate parameters and
 // compose in the canonical order.
 type domainGates struct {
-	config, vault, content, session, git, filesystem control.Admission
+	config, vault, content, session, git, filesystem, api control.Admission
 }
 
 func (s *WSServer) domainGates() domainGates {
@@ -1041,6 +1079,7 @@ func (s *WSServer) domainGates() domainGates {
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		api:        capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
 	}
 }
 

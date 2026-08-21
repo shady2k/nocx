@@ -1,0 +1,932 @@
+package transport
+
+// The api.* control handlers as constructed types: each handler holds its
+// operation and the Responder — never the *WSServer, and never
+// apicoll.Service directly. The service is handed to the callback inside
+// op.Run, guard-bound, so a handler cannot reach the folder outside the
+// operation that gates it (capability.ErrOperationInactive).
+//
+// Two things here are deliberately NOT copied from ws_snippet_handlers.go,
+// which is otherwise the template.
+//
+// The gate. Snippets hold the CONFIG gate because the snippet library is one
+// document under the profile directory that backup/restore also writes
+// (ws_snippet_handlers.go:9). A collection is an arbitrary folder the user
+// chose (design §6.1); backup/restore does not touch it, so that reasoning
+// does not transfer and collections get their own conflict domain
+// (capability.GateAPI). See internal/capability/api.go.
+//
+// The send. api.request.send performs network I/O against a server whose
+// latency is not ours to bound. It snapshots the request under the api gate
+// and dials AFTER Run has returned, so no domain gate is held across the
+// exchange — a global gate behind arbitrary remote latency would block every
+// unrelated settings, vault and backup operation for as long as a hung
+// server cared to wait.
+//
+// And one rule this file enforces rather than remembers: design §13.1 says
+// opening a collection mints a backend-held handle and `root` is never
+// accepted again. "Never accepted" is only a rule if a params object
+// carrying a path is REFUSED — a tolerant decoder would ignore it, which
+// reads identically from the renderer and leaves the property as a habit.
+// Every api.* validator below decodes STRICTLY (decodeAPIParams), and
+// TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath asserts it for the
+// whole surface.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"unicode/utf8"
+
+	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apiimport"
+	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/transport/control"
+)
+
+// ── handlers ─────────────────────────────────────────────────────────────
+
+// apiCollectionHandlers answers api.collections.* and api.request.*. The
+// sender is held beside the operation rather than inside its service on
+// purpose: a service method is called inside Run, and a send inside Run
+// would hold the api gate across the dial.
+type apiCollectionHandlers struct {
+	op     capability.APICollectionOperation
+	sender apisend.Sender
+	r      Responder
+}
+
+func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
+	err := h.op.Run(ctx, func(_ context.Context, svc capability.APICollectionService) error {
+		switch req.Method {
+		case "api.collections.list":
+			open, err := svc.ListOpen()
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(open)))
+		case "api.collections.open":
+			var p apiCollectionsOpenParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			handle, coll, err := svc.Open(p.Path)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiOpenResponse{
+				Handle:     string(handle),
+				Collection: wireCollection(coll),
+			}))
+		case "api.collections.close":
+			var p apiHandleParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			if err := svc.Close(apicoll.HandleID(p.Handle)); err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
+		case "api.request.read":
+			var p apiRequestParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			r, err := svc.ReadRequest(apicoll.HandleID(p.Handle), p.RelPath)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			wire, err := wireRequest(r)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiRequestReadResponse{Request: wire}))
+		case "api.request.write":
+			var p apiRequestWriteParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			if err := svc.WriteRequest(apicoll.HandleID(p.Handle), p.RelPath, storedRequest(p.Request)); err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
+		}
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+	}
+}
+
+// handleSend is api.request.send, and its shape is the point: the gate is
+// held for the snapshot and released before the dial.
+//
+// The interval, both ends: the api gate is acquired before the request file
+// is opened and released when Run returns with the request value in hand;
+// from that moment until the response is captured no domain gate is held at
+// all, so a server that never answers delays this one request and nothing
+// else. The context still bounds the exchange — a cancelled request stops
+// where it is.
+func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcRequest) {
+	var p apiRequestParams
+	var inputs capability.SendInputs
+	snapshotted := false
+
+	err := h.op.Run(ctx, func(_ context.Context, svc capability.APICollectionService) error {
+		if !h.decode(req, &p) {
+			return nil
+		}
+		got, err := svc.Snapshot(apicoll.HandleID(p.Handle), p.RelPath)
+		if err != nil {
+			h.fail(req, err)
+			return nil
+		}
+		inputs = got
+		snapshotted = true
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+		return
+	}
+	if !snapshotted {
+		return // the callback has already answered
+	}
+
+	// No gate from here on. The route is the direct one: an environment
+	// answers "where and how to get there" (§6.5) and lands with the
+	// environment wave, so until then every send goes out from this
+	// machine. The cookie scope is the collection, so two collections
+	// never share a jar.
+	resp, err := h.sender.Send(ctx, inputs.Request, apisend.Key{CookieScope: inputs.CookieScope})
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(apiSendResponse{Response: wireSendResponse(resp)}))
+}
+
+// decode reads the method's params and answers -32602 itself when they will
+// not decode. The registered validator has already checked every field, so
+// reaching this is a shape the validator accepted and the handler could
+// not use; answering here keeps the handler from acting on a zero value.
+func (h apiCollectionHandlers) decode(req jsonrpcRequest, dst any) bool {
+	if msg := decodeAPIParams(req.Params, dst); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
+		return false
+	}
+	return true
+}
+
+func (h apiCollectionHandlers) fail(req jsonrpcRequest, err error) {
+	_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
+}
+
+// apiImportHandlers answers api.import.*. postman writes and holds an
+// operation; curl converts a line into a value, touches nothing, and holds
+// none — giving it one would serialise a pure parse behind whatever the api
+// domain happened to be doing.
+type apiImportHandlers struct {
+	op capability.APIImportOperation
+	r  Responder
+}
+
+func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest) {
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.APIImportService) error {
+		var p apiImportPostmanParams
+		if msg := decodeAPIParams(req.Params, &p); msg != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
+			return nil
+		}
+		unsup, err := svc.ImportPostman(ctx, p.Path, p.Dest)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{Unsupported: wireUnsupported(unsup)}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+	}
+}
+
+func (h apiImportHandlers) handleCurl(_ context.Context, req jsonrpcRequest) {
+	var p apiImportCurlParams
+	if msg := decodeAPIParams(req.Params, &p); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
+		return
+	}
+	r, unsup, err := apiimport.FromCurl(p.Line)
+	if err != nil {
+		// A line this package could not parse is the caller's line, not the
+		// server's fault: refused rather than guessed at (design §10).
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	wire, err := wireRequest(r)
+	if err != nil {
+		// The converter produced a kind this build does not declare, which
+		// is an inconsistency inside the backend rather than anything the
+		// caller can rephrase.
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(apiImportCurlResponse{
+		Request:     wire,
+		Unsupported: wireUnsupported(unsup),
+	}))
+}
+
+// apiMethodErrorCode maps a collection or import error to a JSON-RPC code.
+//
+// The split is about who can act on it. An error that names something the
+// CALLER supplied — a handle nobody minted, a path leaving the folder, a
+// file that is not there, a destination already occupied — is -32602, and
+// the caller's move is to name something else. An error that describes the
+// WORLD — the root replaced under an open handle, a request file that is
+// malformed on disk — is -32603 carrying its own sentence, because the
+// caller cannot fix it by asking differently and the user needs to read
+// what happened.
+func apiMethodErrorCode(err error) int {
+	switch {
+	case errors.Is(err, apicoll.ErrUnknownHandle),
+		errors.Is(err, apicoll.ErrPathOutsideCollection),
+		errors.Is(err, apicoll.ErrNotARequestPath),
+		errors.Is(err, apicoll.ErrRequestNotFound),
+		errors.Is(err, apicoll.ErrNoManifest),
+		errors.Is(err, apicoll.ErrCollectionExists),
+		errors.Is(err, capability.ErrImportNotAFile):
+		return -32602
+	default:
+		return -32603
+	}
+}
+
+// apiSendErrorCode maps a send failure. A body that names a file and an auth
+// that names an unbound variable are both requests the sender REFUSES to
+// send rather than sending something plausible and wrong (§6.5), and both
+// are fixed by editing the request — so they are the caller's error. A
+// transport failure is not.
+func apiSendErrorCode(err error) int {
+	if errors.Is(err, apisend.ErrFileBody) || errors.Is(err, apisend.ErrAuthUnresolved) {
+		return -32602
+	}
+	return -32603
+}
+
+// ── params ───────────────────────────────────────────────────────────────
+
+type apiCollectionsOpenParams struct {
+	Path string `json:"path"`
+}
+
+type apiHandleParams struct {
+	Handle string `json:"handle"`
+}
+
+type apiRequestParams struct {
+	Handle  string `json:"handle"`
+	RelPath string `json:"relPath"`
+}
+
+type apiRequestWriteParams struct {
+	Handle  string         `json:"handle"`
+	RelPath string         `json:"relPath"`
+	Request apiRequestWire `json:"request"`
+}
+
+type apiImportPostmanParams struct {
+	Path string `json:"path"`
+	Dest string `json:"dest"`
+}
+
+type apiImportCurlParams struct {
+	Line string `json:"line"`
+}
+
+// ── wire results ─────────────────────────────────────────────────────────
+//
+// Hand-written wire structs rather than the domain types marshalled
+// directly, and the reason is in each of them: apicoll's own JSON tags carry
+// `omitempty`, which is right for a file on disk — an absent `headers` key
+// is a request with no headers — and wrong on the wire, where the renderer's
+// first .map on an absent list throws. Every list here is forced non-nil.
+
+type apiEmptyResponse struct{}
+
+type apiCollectionsListResponse struct {
+	Collections []apiOpenCollectionWire `json:"collections"`
+}
+
+type apiOpenCollectionWire struct {
+	Handle     string            `json:"handle"`
+	Path       string            `json:"path"`
+	Collection apiCollectionWire `json:"collection"`
+	// Error is why this one folder could not be re-read — a root replaced
+	// or removed since it was opened — and "" when it could. It is on the
+	// entry rather than in an error beside the listing so one dead folder
+	// cannot hide every live one.
+	Error string `json:"error"`
+}
+
+type apiOpenResponse struct {
+	Handle     string            `json:"handle"`
+	Collection apiCollectionWire `json:"collection"`
+}
+
+type apiCollectionWire struct {
+	Name      string                `json:"name"`
+	Requests  []apiRequestRefWire   `json:"requests"`
+	Malformed []apiMalformedRefWire `json:"malformed"`
+}
+
+type apiRequestRefWire struct {
+	RelPath string `json:"relPath"`
+	Name    string `json:"name"`
+	Method  string `json:"method"`
+}
+
+type apiMalformedRefWire struct {
+	RelPath string `json:"relPath"`
+	Reason  string `json:"reason"`
+}
+
+type apiRequestReadResponse struct {
+	Request apiRequestWire `json:"request"`
+}
+
+type apiRequestWire struct {
+	ID      string          `json:"id"`
+	Name    string          `json:"name"`
+	Method  string          `json:"method"`
+	URL     string          `json:"url"`
+	Headers []apiHeaderWire `json:"headers"`
+	Query   []apiParamWire  `json:"query"`
+	Body    apiBodyWire     `json:"body"`
+	Auth    apiAuthWire     `json:"auth"`
+}
+
+type apiHeaderWire struct {
+	Name    string `json:"name"`
+	Value   string `json:"value"`
+	Enabled bool   `json:"enabled"`
+}
+
+type apiParamWire struct {
+	Name    string `json:"name"`
+	Value   string `json:"value"`
+	Enabled bool   `json:"enabled"`
+}
+
+type apiBodyWire struct {
+	Kind    string `json:"kind"`
+	Text    string `json:"text"`
+	FileRef string `json:"fileRef"`
+}
+
+// apiAuthWire names a VARIABLE and never a secret. Var is a variable name in
+// the current environment; there is no field here in which a stored
+// credential's identifier can be spelled, which is the whole of design §8 —
+// the attack is unspellable rather than guarded.
+type apiAuthWire struct {
+	Kind string `json:"kind"`
+	Var  string `json:"var"`
+	User string `json:"user"`
+}
+
+type apiSendResponse struct {
+	Response apiSendResponseWire `json:"response"`
+}
+
+type apiSendResponseWire struct {
+	Status  int             `json:"status"`
+	Headers []apiHeaderWire `json:"headers"`
+	// Text is empty when Binary. Binary, Lossy and Truncated are three
+	// separate facts because they are three separate sentences in the run,
+	// and collapsing any two of them loses one (apisend.Response).
+	Text       string         `json:"text"`
+	Binary     bool           `json:"binary"`
+	Lossy      bool           `json:"lossy"`
+	Truncated  bool           `json:"truncated"`
+	Size       int64          `json:"size"`
+	Timings    apiTimingsWire `json:"timings"`
+	TLSVersion string         `json:"tlsVersion"`
+	RemoteAddr string         `json:"remoteAddr"`
+	// Raw is the diagnostic text of both sides, already segmented. It rides
+	// on the send result rather than on a method of its own because the raw
+	// text belongs to a PARTICULAR run, and a second round trip could only
+	// fetch the raw of a different send (apisend/spans.go).
+	Raw apiRawExchangeWire `json:"raw"`
+}
+
+// apiRawExchangeWire and the two below carry §11's segmented text. A
+// secret's VALUE is in none of them: the bytes are elided by the sender and
+// a placeholder naming the secret takes their place, so this side has
+// nothing to redact and no field in which a value could ride.
+type apiRawExchangeWire struct {
+	Request  apiRawWire `json:"request"`
+	Response apiRawWire `json:"response"`
+}
+
+type apiRawWire struct {
+	Text string `json:"text"`
+	// Spans is never null: a renderer walking null is a crash rather than
+	// an empty view, which is why the schema says [].
+	Spans []apiRawSpanWire `json:"spans"`
+}
+
+type apiRawSpanWire struct {
+	From   int    `json:"from"`
+	To     int    `json:"to"`
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Damage string `json:"damage"`
+}
+
+// apiTimingsWire carries milliseconds. A Go duration has no JSON form, and
+// milliseconds is what the run shows; a float keeps sub-millisecond phases
+// from all reading as zero on a fast loopback exchange.
+type apiTimingsWire struct {
+	DNSMs     float64 `json:"dnsMs"`
+	ConnectMs float64 `json:"connectMs"`
+	TLSMs     float64 `json:"tlsMs"`
+	TTFBMs    float64 `json:"ttfbMs"`
+	TotalMs   float64 `json:"totalMs"`
+}
+
+type apiImportPostmanResponse struct {
+	Unsupported []apiUnsupportedWire `json:"unsupported"`
+}
+
+type apiImportCurlResponse struct {
+	Request     apiRequestWire       `json:"request"`
+	Unsupported []apiUnsupportedWire `json:"unsupported"`
+}
+
+// apiUnsupportedWire is one thing the import did not carry over. What names
+// the feature and NEVER an argument's value — a refused --oauth2-bearer
+// would otherwise itemise the token it refused (apiimport.Unsupported).
+type apiUnsupportedWire struct {
+	What string `json:"what"`
+	Why  string `json:"why"`
+}
+
+// ── domain ⇄ wire ────────────────────────────────────────────────────────
+
+func wireOpenCollections(open []capability.OpenCollection) apiCollectionsListResponse {
+	out := make([]apiOpenCollectionWire, 0, len(open))
+	for _, c := range open {
+		row := apiOpenCollectionWire{
+			Handle:     string(c.Handle),
+			Path:       c.Path,
+			Collection: wireCollection(c.Collection),
+		}
+		if c.Err != nil {
+			row.Error = c.Err.Error()
+		}
+		out = append(out, row)
+	}
+	return apiCollectionsListResponse{Collections: out}
+}
+
+func wireCollection(c apicoll.Collection) apiCollectionWire {
+	reqs := make([]apiRequestRefWire, 0, len(c.Requests))
+	for _, r := range c.Requests {
+		reqs = append(reqs, apiRequestRefWire{RelPath: r.RelPath, Name: r.Name, Method: r.Method})
+	}
+	mal := make([]apiMalformedRefWire, 0, len(c.Malformed))
+	for _, m := range c.Malformed {
+		mal = append(mal, apiMalformedRefWire{RelPath: m.RelPath, Reason: m.Reason})
+	}
+	return apiCollectionWire{Name: c.Name, Requests: reqs, Malformed: mal}
+}
+
+// apiBodyKinds and apiAuthKinds are the closed sets the wire declares, and
+// they are apicoll's own constants rather than a second list of strings
+// beside them.
+var (
+	apiBodyKinds = []string{apicoll.BodyNone, apicoll.BodyRaw, apicoll.BodyForm, apicoll.BodyFile}
+	apiAuthKinds = []string{apicoll.AuthNone, apicoll.AuthBearer, apicoll.AuthBasic, apicoll.AuthAPIKey}
+)
+
+// apiWireKind maps a stored request kind onto the wire's closed set. Named
+// for its domain because ws_files.go already owns a wireKind, and that one
+// maps a filesystem entry kind — a different concept that happens to share
+// the word.
+//
+// The empty string is the ZERO VALUE and means "none". Two producers hand
+// it over: a request file that simply omits the auth object, and
+// apiimport.FromCurl for a line carrying no credential. Spelling that ""
+// on the wire would put two spellings of one state in front of the
+// renderer, which is the shape a closed enum exists to prevent.
+//
+// Anything else is REFUSED rather than mapped onto the nearest thing. A
+// collection folder can arrive from a pull request, and an auth kind of
+// "Bearer" quietly read as "none" would send the request unauthenticated —
+// a plausible-looking request that teaches the wrong lesson about why it
+// was rejected, which is exactly what design §6.5 refuses to do with an
+// unresolved variable.
+func apiWireKind(field, kind, zero string, allowed []string) (string, error) {
+	if kind == "" {
+		return zero, nil
+	}
+	for _, a := range allowed {
+		if kind == a {
+			return kind, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s is %q, which is not a kind this build knows",
+		apicoll.ErrMalformedRequest, field, kind)
+}
+
+func wireRequest(r apicoll.Request) (apiRequestWire, error) {
+	bodyKind, err := apiWireKind("body.kind", r.Body.Kind, apicoll.BodyNone, apiBodyKinds)
+	if err != nil {
+		return apiRequestWire{}, err
+	}
+	authKind, err := apiWireKind("auth.kind", r.Auth.Kind, apicoll.AuthNone, apiAuthKinds)
+	if err != nil {
+		return apiRequestWire{}, err
+	}
+	return apiRequestWire{
+		ID:      r.ID,
+		Name:    r.Name,
+		Method:  r.Method,
+		URL:     r.URL,
+		Headers: wireHeaders(r.Headers),
+		Query:   wireParams(r.Query),
+		Body:    apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		Auth:    apiAuthWire{Kind: authKind, Var: r.Auth.Var, User: r.Auth.User},
+	}, nil
+}
+
+// storedRequest is the other direction: what api.request.write puts on disk.
+func storedRequest(r apiRequestWire) apicoll.Request {
+	headers := make([]apicoll.Header, 0, len(r.Headers))
+	for _, h := range r.Headers {
+		headers = append(headers, apicoll.Header{Name: h.Name, Value: h.Value, Enabled: h.Enabled})
+	}
+	query := make([]apicoll.Param, 0, len(r.Query))
+	for _, q := range r.Query {
+		query = append(query, apicoll.Param{Name: q.Name, Value: q.Value, Enabled: q.Enabled})
+	}
+	return apicoll.Request{
+		ID:      r.ID,
+		Name:    r.Name,
+		Method:  r.Method,
+		URL:     r.URL,
+		Headers: headers,
+		Query:   query,
+		Body:    apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		Auth:    apicoll.Auth{Kind: r.Auth.Kind, Var: r.Auth.Var, User: r.Auth.User},
+	}
+}
+
+func wireHeaders(hs []apicoll.Header) []apiHeaderWire {
+	out := make([]apiHeaderWire, 0, len(hs))
+	for _, h := range hs {
+		out = append(out, apiHeaderWire{Name: h.Name, Value: h.Value, Enabled: h.Enabled})
+	}
+	return out
+}
+
+func wireParams(ps []apicoll.Param) []apiParamWire {
+	out := make([]apiParamWire, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, apiParamWire{Name: p.Name, Value: p.Value, Enabled: p.Enabled})
+	}
+	return out
+}
+
+func wireSendResponse(r apisend.Response) apiSendResponseWire {
+	return apiSendResponseWire{
+		Status:    r.Status,
+		Headers:   wireHeaders(r.Headers),
+		Text:      r.Text,
+		Binary:    r.Binary,
+		Lossy:     r.Lossy,
+		Truncated: r.Truncated,
+		Size:      r.Size,
+		Timings: apiTimingsWire{
+			DNSMs:     float64(r.Timings.DNS.Microseconds()) / 1000,
+			ConnectMs: float64(r.Timings.Connect.Microseconds()) / 1000,
+			TLSMs:     float64(r.Timings.TLS.Microseconds()) / 1000,
+			TTFBMs:    float64(r.Timings.TTFB.Microseconds()) / 1000,
+			TotalMs:   float64(r.Timings.Total.Microseconds()) / 1000,
+		},
+		TLSVersion: r.TLSVersion,
+		RemoteAddr: r.RemoteAddr,
+		Raw: apiRawExchangeWire{
+			Request:  wireRaw(r.Raw.Request),
+			Response: wireRaw(r.Raw.Response),
+		},
+	}
+}
+
+func wireRaw(raw apisend.Raw) apiRawWire {
+	spans := make([]apiRawSpanWire, 0, len(raw.Spans))
+	for _, s := range raw.Spans {
+		spans = append(spans, apiRawSpanWire{
+			From: s.From, To: s.To, Kind: s.Kind, Name: s.Name, Damage: s.Damage,
+		})
+	}
+	return apiRawWire{Text: raw.Text, Spans: spans}
+}
+
+func wireUnsupported(us []apiimport.Unsupported) []apiUnsupportedWire {
+	out := make([]apiUnsupportedWire, 0, len(us))
+	for _, u := range us {
+		out = append(out, apiUnsupportedWire{What: u.What, Why: u.Why})
+	}
+	return out
+}
+
+// ── ingress bounds and validators ────────────────────────────────────────
+
+const (
+	// maxAPIHandleRunes bounds a collection handle before it is looked up.
+	// apicoll mints 32 lowercase hex characters; the shape check is
+	// isLowerHex, which every backend-minted id on this control plane gets
+	// (files.*, git.*), and this is the bound that stops an enormous string
+	// reaching it.
+	maxAPIHandleRunes = 128
+	// maxAPICurlLineRunes bounds a pasted curl line. apiimport is the owner
+	// of the refusal — its tokenizer caps the line at 1 MiB — and this is
+	// the wire-cost ceiling before the parse, at the same order of
+	// magnitude so nothing legitimate sits between them.
+	maxAPICurlLineRunes = 1 << 20
+	// maxAPIBodyTextRunes bounds a request body written back through
+	// api.request.write. A body too large for a line lives in a file that
+	// the request NAMES (§6.4), so an inline body is a phrase a person
+	// typed, generously bounded.
+	maxAPIBodyTextRunes = 1 << 18
+	// maxAPIRequestRows bounds how many header and query rows one request
+	// may carry. Each row is bounded individually; this bounds the count,
+	// which is the other half of the per-call work bound.
+	maxAPIRequestRows = 512
+)
+
+// decodeAPIParams decodes an api.* params object STRICTLY: a field this
+// method does not declare is REFUSED, not ignored.
+//
+// This is what makes design §13.1 enforceable. Opening a collection mints a
+// backend-held handle and `root` is never accepted again — but a tolerant
+// decoder would silently drop a `path` bolted onto api.request.read, which
+// reads identically from the renderer and leaves "never accepted" as a habit
+// somebody has to keep rather than a property of the surface. The strictness
+// is recursive, which is also right: the persisted request format is decoded
+// strictly on disk too (apicoll's decodeStrict), so a request arriving over
+// the wire with a field the format does not declare is refused at both ends.
+func decodeAPIParams(raw json.RawMessage, dst any) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return ""
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return "params must be a JSON object carrying only this method's own fields"
+	}
+	return ""
+}
+
+// validateAPIHandle checks a renderer-supplied collection handle. The
+// service is the authority on whether a handle is still open; this is the
+// wire check before the lookup, and it is the same one every other
+// backend-minted 32-hex id on this control plane gets.
+func validateAPIHandle(handle string) string {
+	if msg := boundedRunes("handle", handle, maxAPIHandleRunes); msg != "" {
+		return msg
+	}
+	if !isLowerHex(handle, 32) {
+		return "handle is required and must be the 32-hex id the backend minted"
+	}
+	return ""
+}
+
+// validateAPIRelPath bounds a path INSIDE a collection. Whether it escapes
+// the root, names a request file, or resolves through a symlink is
+// apicoll's rule and stays there (ErrPathOutsideCollection,
+// ErrNotARequestPath) — it needs the folder, which a wire validator does not
+// have and must not read. A second copy of that rule here would be the two
+// derivations of one fact AGENTS.md is written against.
+func validateAPIRelPath(relPath string) string {
+	if relPath == "" {
+		return "relPath is required"
+	}
+	return boundedRunes("relPath", relPath, maxPathRunes)
+}
+
+// validateAPIFolderPath checks a path the user chose — a collection root or
+// an import destination. Absolute and clean, the same contract the files.*
+// domain applies, because a relative path here would be resolved against
+// whatever directory the backend happened to be started in.
+func validateAPIFolderPath(path, what string) string {
+	return validateFSPath(path, what)
+}
+
+func validateAPICollectionsOpenRaw(raw json.RawMessage) string {
+	var p apiCollectionsOpenParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	return validateAPIFolderPath(p.Path, "path")
+}
+
+func validateAPIHandleRaw(raw json.RawMessage) string {
+	var p apiHandleParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	return validateAPIHandle(p.Handle)
+}
+
+func validateAPIRequestRaw(raw json.RawMessage) string {
+	var p apiRequestParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	return validateAPIRelPath(p.RelPath)
+}
+
+func validateAPIRequestWriteRaw(raw json.RawMessage) string {
+	var p apiRequestWriteParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	if msg := validateAPIRelPath(p.RelPath); msg != "" {
+		return msg
+	}
+	return validateAPIRequestBody(p.Request)
+}
+
+// validateAPIRequestBody bounds every field of a request being written back.
+// Each one reaches something real: the URL is dialled on the next send, the
+// headers ride the request verbatim, the body is the payload.
+func validateAPIRequestBody(r apiRequestWire) string {
+	if msg := boundedRunes("request.id", r.ID, maxConfigIDRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.name", r.Name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.method", r.Method, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.url", r.URL, maxEndpointURLRunes); msg != "" {
+		return msg
+	}
+	if len(r.Headers) > maxAPIRequestRows {
+		return fmt.Sprintf("request.headers exceeds %d rows", maxAPIRequestRows)
+	}
+	for _, h := range r.Headers {
+		if msg := boundedRunes("request.headers.name", h.Name, maxHeaderNameRunes); msg != "" {
+			return msg
+		}
+		if msg := boundedRunes("request.headers.value", h.Value, maxHeaderValueRunes); msg != "" {
+			return msg
+		}
+	}
+	if len(r.Query) > maxAPIRequestRows {
+		return fmt.Sprintf("request.query exceeds %d rows", maxAPIRequestRows)
+	}
+	for _, q := range r.Query {
+		if msg := boundedRunes("request.query.name", q.Name, maxHeaderNameRunes); msg != "" {
+			return msg
+		}
+		if msg := boundedRunes("request.query.value", q.Value, maxHeaderValueRunes); msg != "" {
+			return msg
+		}
+	}
+	if msg := boundedRunes("request.body.kind", r.Body.Kind, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.body.text", r.Body.Text, maxAPIBodyTextRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.body.fileRef", r.Body.FileRef, maxPathRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.auth.kind", r.Auth.Kind, maxEnumRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.auth.var", r.Auth.Var, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	return boundedRunes("request.auth.user", r.Auth.User, maxUserRunes)
+}
+
+func validateAPIImportPostmanRaw(raw json.RawMessage) string {
+	var p apiImportPostmanParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIFolderPath(p.Path, "path"); msg != "" {
+		return msg
+	}
+	return validateAPIFolderPath(p.Dest, "dest")
+}
+
+func validateAPIImportCurlRaw(raw json.RawMessage) string {
+	var p apiImportCurlParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.Line == "" {
+		return "line is required"
+	}
+	if utf8.RuneCountInString(p.Line) > maxAPICurlLineRunes {
+		return fmt.Sprintf("line exceeds %d characters", maxAPICurlLineRunes)
+	}
+	return ""
+}
+
+// ── registration ─────────────────────────────────────────────────────────
+
+// apiSpecs declares the api.* control methods. The two operations are built
+// here from the wired seams (composition root for this domain).
+//
+// Three availability gates, because three things wire independently: the
+// collection service backs api.collections.* and api.request.read/write; the
+// sender additionally backs api.request.send; the binding store additionally
+// backs api.import.postman, and it is the one that is not wired yet —
+// internal/apibind declares the interface ahead of its implementation, so
+// until that lands api.import.postman answers -32601 rather than pretending
+// it can put a secret somewhere. api.import.curl needs none of the three: it
+// converts a line into a value.
+func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.Admission) []methodSpec {
+	collWired := s.apiCollections != nil
+	sendWired := collWired && s.apiSender != nil
+	importWired := s.apiBindings != nil
+
+	var collOp capability.APICollectionOperation
+	if collWired {
+		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections)
+	}
+	var importOp capability.APIImportOperation
+	if importWired {
+		importOp = capability.NewAPIImportOperation(vaultGate, apiGate, lane, apiimport.NewOSFS(), s.apiBindings)
+	}
+
+	sub := s.operationQueue("api")
+	collAvailable := func() bool { return collWired }
+	collHandlers := func(r Responder) apiCollectionHandlers {
+		return apiCollectionHandlers{op: collOp, sender: s.apiSender, r: r}
+	}
+
+	return []methodSpec{
+		whenAvailable(regResponder(sub, "api.collections.list", noParams(), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.collections.open", params(validateAPICollectionsOpenRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.collections.close", params(validateAPIHandleRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.request.read", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.request.write", params(validateAPIRequestWriteRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.request.send", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSend(ctx, req) }
+		}), func() bool { return sendWired }, "api sending not available"),
+		whenAvailable(regResponder(sub, "api.import.postman", params(validateAPIImportPostmanRaw), func(r Responder) handlerFunc {
+			h := apiImportHandlers{op: importOp, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePostman(ctx, req) }
+		}), func() bool { return importWired }, "api collection bindings not available"),
+		regResponder(sub, "api.import.curl", params(validateAPIImportCurlRaw), func(r Responder) handlerFunc {
+			h := apiImportHandlers{r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleCurl(ctx, req) }
+		}),
+	}
+}
+
+// apiCollectionsUnavailable is the sentence a caller gets when no collection
+// service is wired. Each domain keeps its own words rather than flattening
+// to one string: callers read them.
+const apiCollectionsUnavailable = "api collections not available"

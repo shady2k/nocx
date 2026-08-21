@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files/request.schema.json",
+  "title": "RequestFile",
+  "description": "One request, one JSON file inside a collection folder (design §6.2). Not one file per collection: two people editing two requests conflict in two files rather than in one, and the entire \"shared through git\" claim rests on that. The optional keys here are what an RPC result must not have — an absent \"headers\" is a request with no headers, which is right for a file and wrong on the wire, where the renderer's first .map would throw. This is a PERSISTED format; see contracts/files/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "method", "url", "body", "auth"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "method": { "type": "string" },
+    "url": {
+      "description": "May carry {{variable}} spans. They are substituted on send, from the environment, and never at rest.",
+      "type": "string"
+    },
+    "headers": { "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "query": { "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "raw", "form", "file"] },
+        "text": { "type": "string" },
+        "fileRef": {
+          "description": "A path WITHIN the collection. It is resolved on send under the handle's path rules and opened WITHOUT following symlinks: a collection from a pull request may not read ~/.ssh/id_ed25519 by pointing a request file at it (design §13.1).",
+          "type": "string"
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "bearer", "basic", "apikey"] },
+        "var": {
+          "description": "A VARIABLE NAME. This is the load-bearing property of the whole format: there is deliberately no field in which a file can spell an identifier for stored credential material, so a folder arriving in a pull request has no way to reach the password behind an SSH profile (design §8). The binding from a variable name to a stored value lives in internal/apibind, which never enters this folder.",
+          "type": "string"
+        },
+        "user": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "row": {
+      "description": "A header or query row. Enabled is carried because a disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "enabled"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

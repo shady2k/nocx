@@ -38,7 +38,7 @@
 //
 // Every operation that spans domains acquires its gates in one order:
 //
-//	config, vault, content, session, git, filesystem
+//	config, vault, content, session, git, filesystem, api
 //
 // The order is fixed here and enforced by the constructors, which take the
 // domain gates as separate parameters and compose them in this order. Two
@@ -58,6 +58,9 @@
 //     are vault-backed, so ConfigOperation holds [config, vault];
 //   - the vault-secret domain computes its inventory inputs from profile
 //     reads, so SecretOperation holds [config, vault];
+//   - the API-testing import writes secret VALUES through the binding store
+//     (design §8.1), which is vault-backed, so APIImportOperation holds
+//     [vault, api];
 //   - everything else holds its own domain's gate.
 //
 // Grain is a property of the operation implementation, refinable later
@@ -77,6 +80,9 @@
 //   - content, session, git, filesystem: reads participate in their
 //     domain's gate. Each is one store; the conservative posture is one
 //     gate per domain until per-id grain exists.
+//   - api: reads participate in the api gate, and api.request.send holds it
+//     only long enough to snapshot the request — never across the dial
+//     (api.go).
 //
 // # Refinements deliberately deferred
 //
@@ -107,13 +113,19 @@ const (
 	GateSession    = "session"
 	GateGit        = "git"
 	GateFilesystem = "filesystem"
+	// GateAPI is the API-testing collection's own domain (api.go). It is
+	// NOT the config gate: snippets, notes and UI state hold that one
+	// because each is a document under the profile directory that
+	// backup/restore also writes, and a collection is an arbitrary folder
+	// the user chose (design §6.1) which nothing else in the app touches.
+	GateAPI = "api"
 )
 
 // CanonicalOrder is the order every multi-domain operation acquires its
 // gates in. Keep it in sync with the constructors in this package; a
 // constructor that composes gates in a different order is a deadlock
 // waiting for a blocking admission.
-var CanonicalOrder = []string{GateConfig, GateVault, GateContent, GateSession, GateGit, GateFilesystem}
+var CanonicalOrder = []string{GateConfig, GateVault, GateContent, GateSession, GateGit, GateFilesystem, GateAPI}
 
 // Gate returns a fresh domain gate with the given capacity. The composition
 // root builds one gate per domain and passes the same gate to every

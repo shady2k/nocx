@@ -19,6 +19,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,8 +30,16 @@ import (
 
 // Sender sends one request through the route named by k and returns the
 // response as a value.
+//
+// used names the secrets this request carries — their NAMES and their
+// VALUES — and it is variadic because a request with no credential is the
+// ordinary case rather than a special one. It is what makes the raw
+// diagnostic of §11 possible at all: the values were substituted by the
+// caller that resolved them, so this package cannot know which bytes are a
+// credential unless it is told. Nothing here stores them, and nothing here
+// puts one on the wire to the renderer — see spans.go.
 type Sender interface {
-	Send(ctx context.Context, r apicoll.Request, k Key) (Response, error)
+	Send(ctx context.Context, r apicoll.Request, k Key, used ...NamedSecret) (Response, error)
 }
 
 // Response is what the run shows. Text, Binary, Lossy and Truncated are four
@@ -59,6 +68,11 @@ type Response struct {
 	Timings    Timings
 	TLSVersion string
 	RemoteAddr string
+	// Raw is the diagnostic text of both sides, segmented and carrying no
+	// secret value (design §11). It rides on the result of the send that
+	// produced it: the raw text belongs to a PARTICULAR run, so a second
+	// round trip could only fetch the raw of a different one.
+	Raw Exchange
 }
 
 // Timings are the phases of one exchange. On a redirect chain DNS, Connect
@@ -92,11 +106,19 @@ var ErrAuthUnresolved = errors.New(component + ": auth names a variable this pac
 var _ Sender = (*Client)(nil)
 
 // Send performs one request and captures the response.
-func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key) (Response, error) {
-	req, custom, err := buildRequest(ctx, r)
+func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...NamedSecret) (Response, error) {
+	req, custom, bodyText, err := buildRequest(ctx, r)
 	if err != nil {
 		return Response{}, err
 	}
+
+	// The raw request is composed and PLACED before the send, against the
+	// full text; what crosses is bounded afterwards. That order is the
+	// whole mechanism: the placement is what the sender did and the text is
+	// what fitted, so MarkRequest can report the difference as damage
+	// rather than printing the prefix of a live credential (§11.1).
+	composed := composeRequest(req, bodyText)
+	placed := locate(composed, used)
 	cl, err := c.instanceFor(ctx, k)
 	if err != nil {
 		return Response{}, err
@@ -138,28 +160,123 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key) (Response, 
 		out.TLSVersion = tls.VersionName(resp.TLS.Version)
 	}
 	out.RemoteAddr = tr.remote()
+	out.Raw = Exchange{
+		Request: MarkRequest(c.bound(composed), placed),
+		// The response is searched on exactly the text that crosses, so
+		// there is nothing on this side for a bound to damage — which is
+		// the asymmetry §11.3 names: a placement exists independently of
+		// the text, a match does not.
+		Response: SearchResponse(c.bound(composeResponse(out)), used),
+	}
 	return out, nil
+}
+
+// bound is the ceiling applied to what this package puts on the control
+// plane. It is the SAME ceiling as the body capture's, because it answers
+// the same question — how much of an arbitrary remote thing may cross —
+// and a second number here would be a second answer (§12.3).
+//
+// A cut can land inside a rune, so the result is made valid UTF-8 again:
+// invalid bytes in a JSON string are not a diagnostic, they are a payload
+// the renderer cannot decode at all.
+func (c *Client) bound(s string) string {
+	limit := c.limit
+	if limit <= 0 || limit > ceiling {
+		limit = ceiling
+	}
+	if int64(len(s)) <= limit {
+		return s
+	}
+	return strings.ToValidUTF8(s[:limit], "\uFFFD")
+}
+
+// composeRequest renders the request as the text of §11: the request line,
+// the Host, the headers this client set, and the body.
+//
+// It is what the sender COMPOSED rather than a capture of the bytes on the
+// wire, and the difference is worth naming: the headers net/http adds for
+// itself on the way out — Accept-Encoding, User-Agent, Content-Length — are
+// not shown here, because this package did not write them and a diagnostic
+// that invented them would be describing a request the user cannot edit.
+// Line endings are LF: this is text for a person to read, not a frame to
+// replay.
+func composeRequest(req *http.Request, bodyText string) string {
+	var b strings.Builder
+	b.WriteString(req.Method)
+	b.WriteByte(' ')
+	b.WriteString(req.URL.RequestURI())
+	b.WriteString(" HTTP/1.1\n")
+	b.WriteString("Host: ")
+	b.WriteString(req.URL.Host)
+	b.WriteByte('\n')
+	writeHeaderLines(&b, headerRows(req.Header))
+	b.WriteByte('\n')
+	b.WriteString(bodyText)
+	return b.String()
+}
+
+// composeResponse renders what came back. A binary body is the SENTENCE
+// files.read gives and never base64 — base64 here would be exactly the bulk
+// payload in JSON that AD-1 prohibits, arriving through a side door
+// (§12.3).
+func composeResponse(r Response) string {
+	var b strings.Builder
+	// Sized once: a 2 MiB body grown by doubling allocates several copies
+	// of itself, and this runs on every send.
+	b.Grow(len(r.Text) + 64*len(r.Headers) + 64)
+	b.WriteString("HTTP/1.1 ")
+	b.WriteString(strconv.Itoa(r.Status))
+	if text := http.StatusText(r.Status); text != "" {
+		b.WriteByte(' ')
+		b.WriteString(text)
+	}
+	b.WriteByte('\n')
+	writeHeaderLines(&b, r.Headers)
+	b.WriteByte('\n')
+	if r.Binary {
+		fmt.Fprintf(&b, "binary body, %d bytes", r.Size)
+		return b.String()
+	}
+	b.WriteString(r.Text)
+	return b.String()
+}
+
+// headerRows flattens request headers into the model's row shape, sorted,
+// through the one function that already answers this for the response side.
+func headerRows(h http.Header) []apicoll.Header { return responseHeaders(h) }
+
+func writeHeaderLines(b *strings.Builder, rows []apicoll.Header) {
+	for _, h := range rows {
+		b.WriteString(h.Name)
+		b.WriteString(": ")
+		b.WriteString(h.Value)
+		b.WriteByte('\n')
+	}
 }
 
 // buildRequest projects the model onto an http.Request and reports the
 // canonical names of the headers the user set, which the credential rule
 // needs per redirect hop.
-func buildRequest(ctx context.Context, r apicoll.Request) (*http.Request, []string, error) {
+func buildRequest(ctx context.Context, r apicoll.Request) (*http.Request, []string, string, error) {
 	if r.Auth.Kind != "" && r.Auth.Kind != apicoll.AuthNone {
-		return nil, nil, fmt.Errorf("%w (kind %q, variable %q)", ErrAuthUnresolved, r.Auth.Kind, r.Auth.Var)
+		return nil, nil, "", fmt.Errorf("%w (kind %q, variable %q)", ErrAuthUnresolved, r.Auth.Kind, r.Auth.Var)
 	}
 	u, err := url.Parse(strings.TrimSpace(r.URL))
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: parsing URL %q: %w", component, r.URL, err)
+		return nil, nil, "", fmt.Errorf("%s: parsing URL %q: %w", component, r.URL, err)
 	}
 	if !u.IsAbs() || u.Host == "" {
-		return nil, nil, fmt.Errorf("%s: %q is not an absolute URL", component, r.URL)
+		return nil, nil, "", fmt.Errorf("%s: %q is not an absolute URL", component, r.URL)
 	}
 	appendQuery(u, r.Query)
 
-	body, contentType, err := requestBody(r.Body)
+	bodyText, contentType, err := requestBody(r.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
+	}
+	var body io.Reader
+	if bodyText != "" {
+		body = strings.NewReader(bodyText)
 	}
 
 	method := r.Method
@@ -170,7 +287,7 @@ func buildRequest(ctx context.Context, r apicoll.Request) (*http.Request, []stri
 	// *strings.Reader, and GetBody is what lets a 307 replay the body.
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", component, err)
+		return nil, nil, "", fmt.Errorf("%s: %w", component, err)
 	}
 
 	var custom []string
@@ -192,7 +309,7 @@ func buildRequest(ctx context.Context, r apicoll.Request) (*http.Request, []stri
 	if contentType != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	return req, custom, nil
+	return req, custom, bodyText, nil
 }
 
 // appendQuery appends the enabled parameters IN THE USER'S ORDER. Encoding
@@ -216,22 +333,25 @@ func appendQuery(u *url.URL, params []apicoll.Param) {
 	u.RawQuery = b.String()
 }
 
-// requestBody turns the model's body into a reader and the content type the
-// KIND declares. A raw body declares nothing — the user's
+// requestBody turns the model's body into the TEXT that goes out and the
+// content type the KIND declares. A raw body declares nothing — the user's
 // own Content-Type header is the only answer, and guessing one would send a
 // header they did not write.
-func requestBody(b apicoll.Body) (io.Reader, string, error) {
+//
+// The text is returned rather than a reader because the raw diagnostic
+// needs the same bytes the request carries, and a reader can be read once.
+func requestBody(b apicoll.Body) (string, string, error) {
 	switch b.Kind {
 	case "", apicoll.BodyNone:
-		return nil, "", nil
+		return "", "", nil
 	case apicoll.BodyRaw:
-		return strings.NewReader(b.Text), "", nil
+		return b.Text, "", nil
 	case apicoll.BodyForm:
-		return strings.NewReader(b.Text), "application/x-www-form-urlencoded", nil
+		return b.Text, "application/x-www-form-urlencoded", nil
 	case apicoll.BodyFile:
-		return nil, "", fmt.Errorf("%w (fileRef %q)", ErrFileBody, b.FileRef)
+		return "", "", fmt.Errorf("%w (fileRef %q)", ErrFileBody, b.FileRef)
 	default:
-		return nil, "", fmt.Errorf("%s: unknown body kind %q", component, b.Kind)
+		return "", "", fmt.Errorf("%s: unknown body kind %q", component, b.Kind)
 	}
 }
 

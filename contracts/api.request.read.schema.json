@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.read.schema.json",
+  "title": "ApiRequestReadResult",
+  "description": "Result of the api.request.read JSON-RPC method: one request, exactly as its file has it. Nothing is resolved on the way out — a {{variable}} stays a {{variable}} and a body naming a file still names it — because the file is the truth and both the form and the line are projections of it (design §6.4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request"],
+  "properties": {
+    "request": { "$ref": "#/$defs/request" }
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "method", "url", "headers", "query", "body", "auth"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "method": { "type": "string" },
+        "url": { "type": "string" },
+        "headers": {
+          "description": "Never null — a request with no headers is []. The stored form omits the key entirely, which is right for a file and wrong for the renderer's first .map.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/header" }
+        },
+        "query": {
+          "description": "Never null — a request with no query is [].",
+          "type": "array",
+          "items": { "$ref": "#/$defs/param" }
+        },
+        "body": { "$ref": "#/$defs/body" },
+        "auth": { "$ref": "#/$defs/auth" }
+      }
+    },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "enabled"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "enabled": {
+          "description": "A disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.",
+          "type": "boolean"
+        }
+      }
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "enabled"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text", "fileRef"],
+      "properties": {
+        "kind": {
+          "description": "A body too large or too awkward for the line projection is NAMED by a file rather than lost (design §6.4).",
+          "type": "string",
+          "enum": ["none", "raw", "form", "file"]
+        },
+        "text": { "type": "string" },
+        "fileRef": {
+          "description": "A path WITHIN the collection, read on send under the handle's path rules — never a path the renderer supplies (design §13.1).",
+          "type": "string"
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "var", "user"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "bearer", "basic", "apikey"] },
+        "var": {
+          "description": "A VARIABLE NAME, never a secret and never an identifier for one. There is deliberately no field here in which stored credential material can be spelled, which is the whole of design §8: the attack is unspellable rather than guarded. A file that puts a vault identifier here has merely named a variable nobody bound, and the send is blocked as unresolved.",
+          "type": "string"
+        },
+        "user": { "type": "string" }
+      }
+    }
+  }
+}

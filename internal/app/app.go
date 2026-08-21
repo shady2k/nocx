@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -558,6 +560,26 @@ func New(opts ...Option) (*App, error) {
 		return hex.EncodeToString(raw[:])
 	})
 
+	// The API-testing collection (design §6, §7). Both are constructed here
+	// and handed to the transport, which is what makes internal/apicoll and
+	// internal/apisend reachable from main() at all — before this they were
+	// reachable from their own tests and nowhere else (AGENTS.md check 5).
+	//
+	// The collection service holds no state that outlives the process: the
+	// app remembers the LIST of opened folders, never their contents, so
+	// handles are minted fresh each run and every read goes to disk. The
+	// sender sends from this machine on the direct route; the SSH-routed
+	// route arrives with the environment wave (design §6.5, §7.1).
+	//
+	// NOT wired: transport.WithAPIBindings. The binding document is the one
+	// thing in this feature that holds an identifier for stored credential
+	// material (design §8.1), internal/apibind declares its interface ahead
+	// of the implementation, and there is no implementation yet — so
+	// api.import.postman answers -32601 rather than being handed somewhere
+	// to put a token that is not the vault.
+	apiCollections := apicoll.NewService()
+	apiSender := apisend.New(apisend.WithLogger(logger))
+
 	// The UI-state document (ADR-0033): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
 	// never fails to open, because an absent document is an ordinary state
@@ -823,6 +845,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
+		transport.WithAPI(apiCollections, apiSender),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather
 		// than inside the transport: internal/version's vars are link-time
 		// state, and the composition root is where state becomes a

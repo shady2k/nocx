@@ -16,9 +16,20 @@
  *
  * `tabIndex={0}` because a scrollable region that only a mouse wheel can move is
  * unreachable by keyboard once the content overflows.
+ *
+ * `children` is a JSX element rather than a string, so a block may carry an
+ * inline component where the machine output does: the API workbench's raw
+ * request text renders `SecretChip` in place of a secret's bytes (ADR-0021 —
+ * the reference is what is stored, sent and resolved, and only the RENDERING
+ * is a chip). Widened rather than forked: a surface that needed a chip inside
+ * preformatted output would otherwise have hand-rolled a second `<pre>` with
+ * its own background, border, type size and scroll cap — which is the exact
+ * defect this component was extracted to end. Plain strings are unaffected.
  */
+import type { JSX } from 'solid-js'
+
 export interface CodeBlockProps {
-  children: string
+  children: JSX.Element
   /** Accessible name, when the block needs one beyond its surrounding label. */
   ariaLabel?: string
 }

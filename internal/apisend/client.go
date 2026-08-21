@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"sync"
 	"time"
 
@@ -61,8 +60,11 @@ func WithRoutes(r Routes) Option {
 	}
 }
 
-// WithMaxBytes lowers the response ceiling. It can only lower it: a value
-// above the inherited 2 MiB, or at or below zero, means the ceiling.
+// WithMaxBytes lowers the ceiling on what this package puts on the control
+// plane — the captured body and the raw text of both sides, which are the
+// same question asked twice and so take the same answer (§12.3). It can
+// only lower it: a value above the inherited 2 MiB, or at or below zero,
+// means the ceiling.
 func WithMaxBytes(n int64) Option { return func(c *Client) { c.limit = n } }
 
 // WithTLSClientConfig supplies the TLS trust and parameters for every
@@ -107,10 +109,11 @@ func (c *Client) instanceFor(ctx context.Context, k Key) (*http.Client, error) {
 		return nil, fmt.Errorf("%s: route %q resolved to nothing", component, k.RouteID)
 	}
 	// The jar is per instance, which is per CookieScope: that is the whole
-	// reason the scope is in the key.
-	jar, err := cookiejar.New(nil)
+	// reason the scope is in the key. jar.go carries the rest, including
+	// why it does not survive a restart.
+	jar, err := newJar(k.CookieScope)
 	if err != nil {
-		return nil, fmt.Errorf("%s: cookie jar for scope %q: %w", component, k.CookieScope, err)
+		return nil, err
 	}
 	tr := httppolicy.NewTransport(httppolicy.Params{
 		Component:       component,

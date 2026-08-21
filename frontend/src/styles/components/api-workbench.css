@@ -1,0 +1,168 @@
+/* The API workbench (design §9) — the tree, the request form and the run
+   list in one pane. Placement only: every control is a kit component, and
+   this file names none of their identities. */
+
+.api-workbench {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas:
+    'tree request'
+    'tree runs';
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.api-workbench__tree {
+  grid-area: tree;
+  overflow-y: auto;
+  min-height: 0;
+  padding: var(--space-3);
+  border-right: 1px solid var(--color-divider);
+}
+
+.api-workbench__request {
+  grid-area: request;
+  overflow-y: auto;
+  min-height: 0;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.api-workbench__runs {
+  grid-area: runs;
+  overflow-y: auto;
+  min-height: 0;
+  padding: var(--space-3);
+}
+
+/* Why there is no environment picker yet, said where a picker would be. */
+.api-workbench__note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* ── The tree ──────────────────────────────────────────────────────────── */
+
+.api-tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.api-tree__row {
+  cursor: default;
+}
+
+/* A file the format did not recognise, and why. It sits under its row rather
+   than in a tooltip: design §6.2 puts malformed files ON the collection so
+   one bad file cannot hide every good one, and that is only true if the
+   reason is readable without hovering. */
+.api-tree__reason {
+  margin: 0 0 0 var(--space-6);
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+.api-tree__folder {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* ── The request ───────────────────────────────────────────────────────── */
+
+.api-request__line {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.api-request__method {
+  flex: 0 0 auto;
+}
+
+.api-request__url {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.api-request__send {
+  flex: 0 0 auto;
+}
+
+.api-request__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.api-request__idle,
+.api-request__binding {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* ── The runs ──────────────────────────────────────────────────────────── */
+
+.api-runs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.api-run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.api-run__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.api-run__url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.api-run__status,
+.api-run__elapsed,
+.api-run__size {
+  flex: 0 0 auto;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.api-run__view {
+  flex: 0 0 auto;
+}
+
+/* An exchange that never happened. Sticky in the flow, not a toast: it is a
+   property of this run and stays with it while the reader scrolls. */
+.api-run__failure {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+.api-run__body,
+.api-run__raw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}

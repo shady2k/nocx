@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.write.schema.json",
+  "title": "ApiRequestWriteResult",
+  "description": "Result of the api.request.write JSON-RPC method: the request file on disk now holds what was sent. An empty result is still a contract — the file is the truth (design §6.4), so there is nothing for the write to echo back that a read would not answer more honestly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.collections.open.schema.json",
+  "title": "ApiCollectionsOpenResult",
+  "description": "Result of the api.collections.open JSON-RPC method: the backend-minted handle for the opened folder, and the collection as it is on disk. This is the ONLY api.* result carrying a handle the caller did not already have, because api.collections.open is the only method that accepts a root — every later call names this handle and a path relative to it, and a root is never accepted again (design §13.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle", "collection"],
+  "properties": {
+    "handle": {
+      "description": "Opaque, backend-minted, 32 lowercase hex characters. Not a bearer token — the folder is re-validated on every call — but an enumerable one would let a renderer bug reach a folder it never opened.",
+      "type": "string"
+    },
+    "collection": { "$ref": "#/$defs/collection" }
+  },
+  "$defs": {
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "requests", "malformed"],
+      "properties": {
+        "name": { "type": "string" },
+        "requests": {
+          "description": "Every request file in the folder. Never null — an empty collection is [].",
+          "type": "array",
+          "items": { "$ref": "#/$defs/requestRef" }
+        },
+        "malformed": {
+          "description": "The files inside the folder that are not requests: bad JSON, a field the format does not declare, a symlink that was not followed. It is ON the collection rather than in an error beside it, because a caller returning early on an error would let one broken file hide every good one. Never null — a clean collection is [].",
+          "type": "array",
+          "items": { "$ref": "#/$defs/malformedRef" }
+        }
+      }
+    },
+    "requestRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relPath", "name", "method"],
+      "properties": {
+        "relPath": {
+          "description": "The request's path WITHIN the collection. It is what every later call names alongside the handle; it is never a path the renderer chose.",
+          "type": "string"
+        },
+        "name": { "type": "string" },
+        "method": { "type": "string" }
+      }
+    },
+    "malformedRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relPath", "reason"],
+      "properties": {
+        "relPath": { "type": "string" },
+        "reason": {
+          "description": "For a person: which file, and what was wrong with it.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

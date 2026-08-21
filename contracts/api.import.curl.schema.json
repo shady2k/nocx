@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.import.curl.schema.json",
+  "title": "ApiImportCurlResult",
+  "description": "Result of the api.import.curl JSON-RPC method: one pasted curl command line converted into a request, plus what the conversion did not carry over. The line is PARSED, never executed (design §10) — there is no shell, so $(...) and backticks are literal text rather than a substitution that has to be defended against — and an import never fires a request: this returns a request value, and sending it is a separate gesture.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request", "unsupported"],
+  "properties": {
+    "request": {
+      "$ref": "api.request.read.schema.json#/$defs/request"
+    },
+    "unsupported": {
+      "description": "Never null — a line that converted whole is [].",
+      "type": "array",
+      "items": {
+        "$ref": "api.import.postman.schema.json#/$defs/unsupported"
+      }
+    }
+  }
+}

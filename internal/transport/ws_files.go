@@ -311,6 +311,7 @@ type filesMachine interface {
 	filesBaseline(h filesystem.Handle, paths []string) map[string]string
 	// cancelBindingUploads cancels every running transfer of one binding
 	// and waits, bounded, for them to unwind — files.close's half of D8.
+	// It never waits for an upload: the bound expires and the close goes on.
 	cancelBindingUploads(bid string)
 }
 
@@ -807,13 +808,13 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 		if b != nil && b.watcher != nil {
 			h.machine.stopFilesWatcher(b.watcher)
 		}
-		// Cancel this binding's running uploads BEFORE the registry close,
-		// and this ordering is load-bearing rather than tidy (upload design
-		// D8). A transfer holds a use-guard for its lifetime and
-		// Binding.close waits for the guards to drain (binding.go:187), so
-		// without the cancel first, files.close would wait for as long as
-		// the upload runs. The wait after the cancel is bounded and never
-		// waits for the upload itself.
+		// Cancel this binding's running uploads BEFORE the registry close
+		// (upload design D8). Not because the close would otherwise block —
+		// a transfer runs on a detached sink and holds no use-guard for
+		// Binding.close to drain — but because a transfer whose binding has
+		// gone should be told so, and told so before its lease is closed
+		// underneath it. The wait after the cancel is bounded and the close
+		// proceeds either way.
 		h.machine.cancelBindingUploads(params.BindingID)
 		if err := svc.Close(params.BindingID); err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
@@ -1220,8 +1221,9 @@ func (s *WSServer) filesSessionClosed(sid session.ID) {
 	for _, w := range watchers {
 		s.stopFilesWatcher(w)
 	}
-	// Same ordering, same reason as files.close: CloseSession drains every
-	// binding's use-guard, and a running transfer holds one (D8).
+	// Same ordering, same reason as files.close (D8): the cancel tells a
+	// transfer its binding is going before the lease under its sink is
+	// closed. CloseSession does not wait for it either way.
 	s.cancelSessionUploads(sid)
 	if s.filesys != nil {
 		s.filesys.CloseSession(sid)

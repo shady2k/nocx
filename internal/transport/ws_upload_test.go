@@ -10,12 +10,15 @@ package transport
 // transfers instead of waiting for them).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +87,48 @@ func uploadableFactory(sess session.Session, rootPath string) (filesystem.Provid
 	}, nil
 }
 
+// unresponsiveSink is a sink that does NOT honour cancellation: Put blocks
+// until the test releases it, whatever the context says and whatever
+// happens to the body.
+//
+// It is the shape of every provider call that can outlive a cancel — a
+// wedged lane call, a server that has stopped answering, a cleanup mid
+// round trip — and it is the only shape in which D8's teardown claim means
+// anything. A transfer still waiting for its body, or one whose sink checks
+// ctx.Done, unwinds on the cancel alone and would pass whatever the guard
+// did.
+type unresponsiveSink struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *unresponsiveSink) Put(context.Context, transfer.Upload, io.Reader, func(int64)) (transfer.Outcome, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return transfer.Outcome{}, context.Canceled
+}
+
+// withUploadUnwind shortens the teardown's bounded wait (D8). Not an
+// exported option: production has no reason to turn this knob, and a test
+// that must prove a close happens REGARDLESS of the bound should not spend
+// the bound proving it.
+func withUploadUnwind(d time.Duration) WSServerOption {
+	return func(s *WSServer) { s.uploads.unwind = d }
+}
+
+// uploadFactoryWithSink is uploadableFactory with the write half replaced,
+// so one test can decide how the sink behaves.
+func uploadFactoryWithSink(sink transfer.Sink) FilesystemProviderFactory {
+	return func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		p, err := filesLocalFactory(sess, rootPath)
+		if err != nil {
+			return nil, err
+		}
+		return &uploadableProvider{Provider: p, sink: sink}, nil
+	}
+}
+
 // newUploadTestEnv boots a server whose bindings can be written to.
 func newUploadTestEnv(t *testing.T, opts ...WSServerOption) *filesTestEnv {
 	t.Helper()
@@ -94,10 +139,22 @@ func newUploadTestEnv(t *testing.T, opts ...WSServerOption) *filesTestEnv {
 // ticket-never-logged assertion needs to read everything the server said.
 func newUploadTestEnvWithLogger(t *testing.T, logger log.Logger, opts ...WSServerOption) *filesTestEnv {
 	t.Helper()
+	return newUploadTestEnvWith(t, logger, uploadableFactory, opts...)
+}
+
+// newUploadTestEnvWithSink is the same again, with the binding's write half
+// chosen by the test.
+func newUploadTestEnvWithSink(t *testing.T, sink transfer.Sink, opts ...WSServerOption) *filesTestEnv {
+	t.Helper()
+	return newUploadTestEnvWith(t, log.NewSlogAdapter(nil), uploadFactoryWithSink(sink), opts...)
+}
+
+func newUploadTestEnvWith(t *testing.T, logger log.Logger, factory FilesystemProviderFactory, opts ...WSServerOption) *filesTestEnv {
+	t.Helper()
 	reg := newRegWithStub(logger)
 	all := append([]WSServerOption{
 		WithFilesystemRegistry(filesystem.New()),
-		WithFilesystemProviderFactory(uploadableFactory),
+		WithFilesystemProviderFactory(factory),
 	}, opts...)
 	ws := NewWSServer(logger, reg, all...)
 	ws.filesPollInterval = 20 * time.Millisecond
@@ -496,12 +553,11 @@ func TestFilesUpload_SkipNeedsNoBodyAndLeavesTheDestinationAlone(t *testing.T) {
 // is D8 on the wire.
 //
 // The transfer below is waiting for a body that will never arrive, so it
-// would run forever. Binding.close waits for every use-guard to drain and
-// the transfer holds one, so if files.close did NOT cancel first this test
-// would not fail an assertion — it would hang, which is exactly the
-// production symptom: closing a tab blocks for as long as the upload runs.
-// The assertion is therefore that the call returns at all, plus the
-// transfer's terminal state.
+// would run forever if nothing stopped it. What this pins is the cancel
+// half: files.close reaches the transfer and settles it. It does NOT pin
+// the "never waits" half — this transfer is still selecting on rt.body, so
+// it unwinds on the cancel alone; the test that reaches a sink which will
+// not unwind is TeardownClosesTheBindingWhileASinkIgnoresTheCancel below.
 func TestFilesUpload_ClosingTheBindingCancelsTheTransferInsteadOfWaitingForIt(t *testing.T) {
 	e := newUploadTestEnv(t)
 	sid := e.openSession(t, 1)
@@ -528,6 +584,70 @@ func TestFilesUpload_ClosingTheBindingCancelsTheTransferInsteadOfWaitingForIt(t 
 	// The destination was never created.
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Fatalf("directory holds %d entries (%v), want 0", len(entries), err)
+	}
+}
+
+// TestFilesUpload_TeardownClosesTheBindingWhileASinkIgnoresTheCancel is the
+// case the two tests above cannot reach, and the one D8 exists for.
+//
+// They cancel a transfer that has not entered the sink at all: it is still
+// selecting on rt.body, so the cancel is observed by ctx.Done and it unwinds
+// at once. Every arrangement of the guard passes that. Here the transfer is
+// INSIDE a sink call that will not return — the shape of a wedged lane call
+// or a server that stopped answering — so the only thing that can let
+// files.close finish is that the transfer holds no use-guard for
+// Binding.close to drain. Before D8 was honoured this did not fail an
+// assertion; it deadlocked, which is the production symptom: cancelUploadsFor
+// gives up at its bound, logs "closing anyway", and then blocks for ever
+// inside a close that cannot proceed.
+//
+// The unwind bound is shortened through the same option production reads, so
+// the test spends milliseconds proving a close happens REGARDLESS rather
+// than five seconds. It is not what makes the test pass: with the guard held
+// the close blocks after the bound expires, not before it.
+func TestFilesUpload_TeardownClosesTheBindingWhileASinkIgnoresTheCancel(t *testing.T) {
+	sink := &unresponsiveSink{entered: make(chan struct{}), release: make(chan struct{})}
+	e := newUploadTestEnvWithSink(t, sink, withUploadUnwind(50*time.Millisecond))
+	// Registered after the env's own cleanups, so it runs BEFORE them: the
+	// server's Stop would otherwise wait on the same wedged sink.
+	t.Cleanup(func() { close(sink.release) })
+
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	_, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	// The POST hands the body over and then waits for the transfer, so it
+	// cannot run on this goroutine. Its own outcome is not the assertion.
+	go func() {
+		resp, err := uploadHTTPClient.Post(
+			uploadURLFor(e.ws, ticket), "application/octet-stream", bytes.NewReader([]byte("hello")))
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-sink.entered // the transfer is inside the sink and will not come out
+
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(jsonrpcCallWithID(t, e.conn, "files.close", map[string]any{"bindingId": bid}, 4), &env); err != nil {
+		t.Fatalf("files.close: unmarshal: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("files.close: %+v", env.Error)
+	}
+
+	// And it really closed, rather than answering ahead of a close still
+	// waiting: the binding is gone from the registry.
+	var after struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{"bindingId": bid, "path": dir}, 5), &after); err != nil {
+		t.Fatalf("files.list: unmarshal: %v", err)
+	}
+	if after.Error == nil {
+		t.Fatal("the binding still answers after files.close returned; it was never closed")
 	}
 }
 

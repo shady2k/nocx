@@ -86,12 +86,12 @@ func anUpload() transfer.Upload {
 	return transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 1, OnExists: transfer.Overwrite}
 }
 
-// TestHandle_UploadIsRefusedOnALocalBinding is R1 of the upload design: a
+// TestHandle_UploaderIsRefusedOnALocalBinding is R1 of the upload design: a
 // local binding has no sink, so the refusal is a nil field rather than a
 // check somebody performs — and a tab where a person typed `ssh srv-01` by
 // hand is a KindLocal session, so it takes this same refusal by this same
 // route.
-func TestHandle_UploadIsRefusedOnALocalBinding(t *testing.T) {
+func TestHandle_UploaderIsRefusedOnALocalBinding(t *testing.T) {
 	reg := New()
 	id, err := reg.Register(touchyProvider{t: t}, "s1", "", nil) // nil sink = local
 	if err != nil {
@@ -103,7 +103,7 @@ func TestHandle_UploadIsRefusedOnALocalBinding(t *testing.T) {
 	}
 	defer release()
 
-	_, err = h.Upload(context.Background(), anUpload(), strings.NewReader("x"), func(int64) {})
+	_, err = h.Uploader()
 
 	var unsupported *ErrUploadUnsupported
 	if !errors.As(err, &unsupported) {
@@ -114,10 +114,11 @@ func TestHandle_UploadIsRefusedOnALocalBinding(t *testing.T) {
 	}
 }
 
-// TestHandle_UploadReachesTheSinkOnARemoteBinding is the paired success: on
-// an ordinary remote binding the same call goes through, carrying the
-// instruction, the bytes and the progress callback to the sink.
-func TestHandle_UploadReachesTheSinkOnARemoteBinding(t *testing.T) {
+// TestHandle_UploaderReachesTheSinkOnARemoteBinding is the paired success:
+// on an ordinary remote binding the call hands back the very sink the
+// binding was registered with, and a transfer run on it carries the
+// instruction, the bytes and the progress callback through.
+func TestHandle_UploaderReachesTheSinkOnARemoteBinding(t *testing.T) {
 	sink := &stubSink{out: transfer.Outcome{State: transfer.StateWritten, FinalName: "a.txt"}}
 	reg := New()
 	id, err := reg.Register(newStubProvider(), "s1", "v1:abc", sink)
@@ -130,10 +131,14 @@ func TestHandle_UploadReachesTheSinkOnARemoteBinding(t *testing.T) {
 	}
 	defer release()
 
-	var seen int64
-	out, err := h.Upload(context.Background(), anUpload(), strings.NewReader("x"), func(n int64) { seen = n })
+	sk, err := h.Uploader()
 	if err != nil {
-		t.Fatalf("Upload on a remote binding: %v", err)
+		t.Fatalf("Uploader on a remote binding: %v", err)
+	}
+	var seen int64
+	out, err := sk.Put(context.Background(), anUpload(), strings.NewReader("x"), func(n int64) { seen = n })
+	if err != nil {
+		t.Fatalf("Put on a remote binding: %v", err)
 	}
 	if out.State != transfer.StateWritten || out.FinalName != "a.txt" {
 		t.Errorf("outcome %+v, want the sink's answer back verbatim", out)
@@ -150,40 +155,12 @@ func TestHandle_UploadReachesTheSinkOnARemoteBinding(t *testing.T) {
 	}
 }
 
-// TestHandle_UploadReportsWhatAFailedTransferLeft is the failure path of the
-// one external call this method makes: an error and a non-empty Stranded are
-// not alternatives (transfer §6), so the handle must return both rather than
-// dropping the outcome on the error.
-func TestHandle_UploadReportsWhatAFailedTransferLeft(t *testing.T) {
-	boom := errors.New("promote failed")
-	sink := &stubSink{
-		out: transfer.Outcome{Stranded: []string{"/home/u/a.txt.nocx-upload-9f"}},
-		err: boom,
-	}
-	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "", sink)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, release, err := reg.Acquire(id, owner("s1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-
-	out, err := h.Upload(context.Background(), anUpload(), strings.NewReader("x"), nil)
-	if !errors.Is(err, boom) {
-		t.Fatalf("error %v, want the sink's failure unwrapped", err)
-	}
-	if len(out.Stranded) != 1 || out.Stranded[0] != "/home/u/a.txt.nocx-upload-9f" {
-		t.Errorf("outcome %+v, want the stranded path the sink named", out)
-	}
-}
-
-// TestHandle_UploadAfterReleaseIsRefused closes the second end of the
+// TestHandle_UploaderAfterReleaseIsRefused closes the second end of the
 // handle's validity interval: from Acquire until release every method is
-// valid, and after release every method — Upload included — is not.
-func TestHandle_UploadAfterReleaseIsRefused(t *testing.T) {
+// valid, and after release every method — Uploader included — is not. The
+// detached Sink of D8 is what a transfer runs on, and a handle that is over
+// must not be able to hand one out.
+func TestHandle_UploaderAfterReleaseIsRefused(t *testing.T) {
 	sink := &stubSink{}
 	reg := New()
 	id, err := reg.Register(newStubProvider(), "s1", "", sink)
@@ -196,19 +173,19 @@ func TestHandle_UploadAfterReleaseIsRefused(t *testing.T) {
 	}
 	release()
 
-	_, err = h.Upload(context.Background(), anUpload(), strings.NewReader("x"), nil)
+	_, err = h.Uploader()
 	var released *ErrHandleReleased
 	if !errors.As(err, &released) {
-		t.Fatalf("Upload after release: %v, want ErrHandleReleased", err)
+		t.Fatalf("Uploader after release: %v, want ErrHandleReleased", err)
 	}
 	if len(sink.calls()) != 0 {
 		t.Error("a released handle reached the sink")
 	}
 }
 
-// TestHandle_UploadAfterBindingCloseIsRefused is the other way the interval
-// ends: the binding closed underneath a still-unreleased handle.
-func TestHandle_UploadAfterBindingCloseIsRefused(t *testing.T) {
+// TestHandle_UploaderAfterBindingCloseIsRefused is the other way the
+// interval ends: the binding closed underneath a still-unreleased handle.
+func TestHandle_UploaderAfterBindingCloseIsRefused(t *testing.T) {
 	sink := &stubSink{}
 	reg := New()
 	id, err := reg.Register(newStubProvider(), "s1", "", sink)
@@ -224,26 +201,31 @@ func TestHandle_UploadAfterBindingCloseIsRefused(t *testing.T) {
 		t.Fatal(closeErr)
 	}
 
-	_, err = h.Upload(context.Background(), anUpload(), strings.NewReader("x"), nil)
+	_, err = h.Uploader()
 	var released *ErrHandleReleased
 	if !errors.As(err, &released) {
-		t.Fatalf("Upload after the binding closed: %v, want ErrHandleReleased", err)
+		t.Fatalf("Uploader after the binding closed: %v, want ErrHandleReleased", err)
 	}
 	if len(sink.calls()) != 0 {
 		t.Error("a closed binding reached the sink")
 	}
 }
 
-// TestClose_WaitsForAnUploadInFlight states the guard as an interval with
-// both ends: Upload counts itself before it reaches the sink and drops the
-// count only after the sink returns, so Close cannot reach the provider
-// under a running transfer.
+// TestClose_DoesNotWaitForATransferRunningOnTheSink is design D8 at this
+// seam, stated with both ends of the interval.
 //
-// It is deliberately not a statement about how LONG a transfer may hold the
-// binding — design D8 says the running transfer must not hold this guard at
-// all, and the layer that starts one asynchronously is what keeps files.close
-// prompt. What this pins is that the guard, while held, is honoured.
-func TestClose_WaitsForAnUploadInFlight(t *testing.T) {
+// The guard opens at Uploader and closes when Uploader returns — not when
+// the transfer does. So a Put that has not returned, and here one that will
+// not return until the test says so, holds nothing: Close drains, tears the
+// watches down and closes the provider while the sink call is still in
+// flight. That is the property files.close and session teardown stand on,
+// and the version of this test that came before asserted its opposite.
+//
+// What makes closing the provider under a live Put safe is the lease
+// underneath (see Handle.Uploader): closing it unblocks a call already in
+// flight and makes every later one fail. Asserted here as a state — Close
+// returns and the provider records itself closed — never as a duration.
+func TestClose_DoesNotWaitForATransferRunningOnTheSink(t *testing.T) {
 	sink := &stubSink{entered: make(chan struct{}), release: make(chan struct{})}
 	p := newStubProvider()
 	reg := New()
@@ -255,39 +237,28 @@ func TestClose_WaitsForAnUploadInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sk, err := h.Uploader()
+	if err != nil {
+		t.Fatalf("Uploader: %v", err)
+	}
+	release() // the synchronous call is over; the transfer holds no guard
 
-	uploaded := make(chan error, 1)
+	put := make(chan error, 1)
 	go func() {
-		_, err := h.Upload(context.Background(), anUpload(), strings.NewReader("x"), nil)
-		release()
-		uploaded <- err
+		_, err := sk.Put(context.Background(), anUpload(), strings.NewReader("x"), nil)
+		put <- err
 	}()
-	<-sink.entered // the transfer is in flight, holding the guard
+	<-sink.entered // the transfer is in flight and will not return yet
 
-	closed := make(chan error, 1)
-	go func() { closed <- reg.Close(id) }()
-
-	// The provider is not closed while the sink call is in flight. Observed
-	// as a state, not as a duration: the close goroutine cannot report
-	// before we release the sink, and the provider's closed flag is the
-	// thing being asserted.
-	if p.closed.Load() {
-		t.Fatal("the provider closed underneath a running upload")
-	}
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned while the upload held the guard: %v", err)
-	default:
-	}
-
-	close(sink.release)
-	if err := <-uploaded; err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-	if err := <-closed; err != nil {
+	if err := reg.Close(id); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	if !p.closed.Load() {
 		t.Error("the provider was never closed")
+	}
+
+	close(sink.release)
+	if err := <-put; err != nil {
+		t.Fatalf("put: %v", err)
 	}
 }

@@ -91,8 +91,10 @@ func openBindingHarness(t *testing.T, factory capability.ProviderFactory) (
 	}, s
 }
 
-// uploadThrough opens a binding for sess and calls Upload on it, returning
-// what the handle answered.
+// uploadThrough opens a binding for sess, asks its handle for the write half
+// and runs one transfer on it, returning what came back. The two steps are
+// the shape D8 requires: the guard covers obtaining the sink, and the
+// transfer runs unguarded.
 func uploadThrough(t *testing.T, run func(func(context.Context, capability.FilesystemOpenService) error) error, sess session.Session) (transfer.Outcome, error) {
 	t.Helper()
 	var (
@@ -111,7 +113,12 @@ func uploadThrough(t *testing.T, run func(func(context.Context, capability.Files
 			return err
 		}
 		defer release()
-		out, upErr = h.Upload(ctx,
+		sink, sinkErr := h.Uploader()
+		if sinkErr != nil {
+			upErr = sinkErr
+			return nil
+		}
+		out, upErr = sink.Put(ctx,
 			transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 1, OnExists: transfer.Overwrite},
 			strings.NewReader("x"), nil)
 		return nil

@@ -1135,11 +1135,11 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
-	// Cancel every running upload first. A transfer holds a filesystem
-	// use-guard and (over SFTP) a pooled connection reference for its
-	// lifetime, and nothing else in this teardown would ever release
-	// either: the POST that carries its body waits on the transfer, so an
-	// uncancelled one would also hold Shutdown open below.
+	// Cancel every running upload first. A transfer holds (over SFTP) a
+	// pooled connection reference for its lifetime and nothing else in this
+	// teardown would release it, and the POST that carries its body waits
+	// on the transfer — so an uncancelled one would also hold Shutdown open
+	// below. The wait inside is bounded and never waits for the upload.
 	s.cancelAllUploads()
 
 	// Cancel and drain in-flight off-loop control work (probes, dialogs).

@@ -169,7 +169,7 @@ type ErrWatchUnavailable struct{}
 
 func (e *ErrWatchUnavailable) Error() string { return "filesystem: watching is not available yet" }
 
-// ErrUploadUnsupported — Upload was called on a binding with no write seam,
+// ErrUploadUnsupported — Uploader was called on a binding with no write seam,
 // which is a binding whose provider did not implement Uploader. That is the
 // upload design's rule R1 ("a file can only be uploaded to the machine the
 // tab is actually on") arriving as a typed refusal: a local binding cannot

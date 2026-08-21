@@ -10,11 +10,13 @@ package transport
 //
 //	R1 — a file can only be uploaded to the machine the tab is on. A local
 //	binding was registered with no sink (internal/capability/files.go, the
-//	Uploader assertion beside the endpoint attester), so Handle.Upload
+//	Uploader assertion beside the endpoint attester), so Handle.Uploader
 //	refuses with *filesystem.ErrUploadUnsupported. This file asks the
 //	BINDING that question and never re-derives it from the endpoint
-//	attestation: uploadSupported below is the whole of R1's enforcement
-//	here, and it cannot answer anything the binding did not say.
+//	attestation: the one Uploader call in handleUpload is the whole of R1's
+//	enforcement here, it cannot answer anything the binding did not say,
+//	and because the sink it returns is the sink the transfer then runs on,
+//	the capability and the thing it authorises are one answer.
 //
 //	R2 — the renderer may name the destination and may never name the
 //	source. filesUploadParams has no sourcePath and no source field, and
@@ -58,8 +60,8 @@ const (
 	// defaultUploadTicketTTL bounds an UNCLAIMED sink ticket. The renderer
 	// POSTs immediately after files.upload returns, so a minute is two
 	// orders of magnitude of slack; what the bound really buys is that a
-	// renderer which never POSTs cannot hold a transfer, a use-guard and
-	// (once the sftp lease is under it) a pooled SSH reference forever.
+	// renderer which never POSTs cannot hold a transfer and (once the sftp
+	// lease is under it) a pooled SSH reference forever.
 	//
 	// Expiry is NOT one of the four ticket states of §5.4: the mint-side
 	// timer drops the ticket and cancels the transfer it named AT THAT
@@ -110,7 +112,9 @@ const (
 	// wait for a CANCELLED transfer to unwind (D8). It is not a wait for
 	// the upload: the transfer's context is cancelled and its body closed
 	// first, so what is being waited for is one lane call plus the sink's
-	// cleanup. The wait expiring is logged and the close proceeds.
+	// cleanup. The wait expiring is logged and the close proceeds — and it
+	// can proceed, because a running transfer holds no use-guard for the
+	// close to drain (Handle.Uploader).
 	uploadUnwindTimeout = 5 * time.Second
 )
 
@@ -403,6 +407,12 @@ type uploadRegistry struct {
 	// default.
 	stall time.Duration
 
+	// unwind is how long teardown waits for a cancelled transfer; zero
+	// means the default. A test shortens it in place (ws_upload_test.go),
+	// the way filesPollInterval is shortened: an exported option would be
+	// a knob production has no reason to turn.
+	unwind time.Duration
+
 	// now is the clock, injectable for the eviction tests.
 	now func() time.Time
 }
@@ -412,6 +422,13 @@ func (u *uploadRegistry) stallTimeout() time.Duration {
 		return u.stall
 	}
 	return defaultUploadStallTimeout
+}
+
+func (u *uploadRegistry) unwindTimeout() time.Duration {
+	if u.unwind > 0 {
+		return u.unwind
+	}
+	return uploadUnwindTimeout
 }
 
 func (u *uploadRegistry) clock() time.Time {
@@ -675,18 +692,18 @@ func (u *uploadRegistry) pick(match func(*runningTransfer) bool) []*runningTrans
 // cancelUploadsFor cancels a set of transfers and waits, BOUNDED, for them
 // to unwind. It returns whether every one of them ended within the bound.
 //
-// This is D8. A transfer holds the binding's use-guard for its lifetime,
-// because Handle.Upload takes one per call and the sink is reachable no
-// other way (Binding.provider is unexported by design, D7). Binding.close
-// waits for that guard to drain (internal/filesystem/binding.go:187), so
-// the ONLY thing standing between files.close and a wait as long as the
-// upload is that the cancel happens first: the context is cancelled, the
-// body is closed, the sink unwinds within one lane call, the guard drops
-// and the close proceeds.
+// This is D8, and the bound is only honest because of what a running
+// transfer does NOT hold. It holds the binding's sink and no use-guard:
+// Handle.Uploader takes one for the hand-off and drops it there, so
+// Binding.close drains whatever the synchronous calls are holding and never
+// waits on a transfer. The wait below is therefore a courtesy — cancel,
+// give the sink up to the unwind bound to notice, then close regardless —
+// and "regardless" is a thing this code can actually do rather than a
+// comment over an unbounded wait.
 //
-// Which makes the ordering load-bearing rather than tidy, and the bound the
-// honest statement of what is left: cancel, wait up to uploadUnwindTimeout,
-// then close regardless. Nothing here ever waits for an upload to finish.
+// A transfer that outlives the bound is not abandoned to write into a
+// closed binding, either: closing the provider closes the lease under the
+// sink, which unblocks the call in flight and fails every later one.
 func (s *WSServer) cancelUploadsFor(transfers []*runningTransfer) bool {
 	if len(transfers) == 0 {
 		return true
@@ -694,14 +711,15 @@ func (s *WSServer) cancelUploadsFor(transfers []*runningTransfer) bool {
 	for _, rt := range transfers {
 		rt.stop()
 	}
-	deadline := time.NewTimer(uploadUnwindTimeout)
+	bound := s.uploads.unwindTimeout()
+	deadline := time.NewTimer(bound)
 	defer deadline.Stop()
 	for _, rt := range transfers {
 		select {
 		case <-rt.done:
 		case <-deadline.C:
 			s.log.Warn("upload did not unwind within the bound; closing anyway",
-				"transfer_id", rt.id, "binding_id", rt.bindingID, "maxWait", uploadUnwindTimeout)
+				"transfer_id", rt.id, "binding_id", rt.bindingID, "maxWait", bound)
 			return false
 		}
 	}
@@ -720,8 +738,8 @@ func (s *WSServer) cancelSessionUploads(sid session.ID) {
 }
 
 // cancelAllUploads cancels every transfer — server shutdown. Without it a
-// transfer outlives the server that started it, holding a use-guard and a
-// pooled SSH reference nothing will ever release.
+// transfer outlives the server that started it, holding a pooled SSH
+// reference nothing will ever release.
 func (s *WSServer) cancelAllUploads() {
 	s.cancelUploadsFor(s.uploads.pick(func(*runningTransfer) bool { return true }))
 }
@@ -740,9 +758,10 @@ type uploadMachine interface {
 	// upload.
 	bindingSession(bid string) (session.ID, bool)
 	// startUpload registers rt, mints its sink ticket when it needs a body,
-	// and runs it. The goroutine owns h and its release for the transfer's
-	// lifetime; rt.ticket is filled in before it starts.
-	startUpload(rt *runningTransfer, needsBody bool, h filesystem.Handle, release func()) error
+	// and runs it on sink — the binding's write half, taken from the handle
+	// during the synchronous call and detached from its use-guard (D8).
+	// rt.ticket is filled in before the goroutine starts.
+	startUpload(rt *runningTransfer, needsBody bool, sink transfer.Sink) error
 	// uploadFor returns a transfer by id, or nil.
 	uploadFor(transferID string) *runningTransfer
 	// cancelUpload stops one transfer and reports whether it existed.
@@ -774,7 +793,7 @@ func (s *WSServer) uploadURL(ticket string) string { return uploadRoutePrefix + 
 // Registered first, the worst case is a cancel that lands before the
 // goroutine starts — which the goroutine then observes as a cancelled
 // context, which is correct.
-func (s *WSServer) startUpload(rt *runningTransfer, needsBody bool, h filesystem.Handle, release func()) error {
+func (s *WSServer) startUpload(rt *runningTransfer, needsBody bool, sink transfer.Sink) error {
 	if err := s.uploads.add(rt); err != nil {
 		return err
 	}
@@ -786,19 +805,20 @@ func (s *WSServer) startUpload(rt *runningTransfer, needsBody bool, h filesystem
 		}
 		rt.ticket = ticket
 	}
-	go s.runUpload(rt, h, release)
+	go s.runUpload(rt, sink)
 	return nil
 }
 
 // runUpload is the transfer's own goroutine. It waits for a body when one
 // is expected, writes it through the binding's sink, and settles the
 // transfer's terminal state before anything can observe it as over.
-func (s *WSServer) runUpload(rt *runningTransfer, h filesystem.Handle, release func()) {
+//
+// It holds the sink and nothing else. The handle it came from, and the
+// use-guard that handle carried, were both let go when files.upload
+// answered (D8) — which is what makes files.close, session teardown and
+// shutdown able to cancel, wait a bounded moment and then close for real.
+func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 	defer close(rt.done)
-	// The handle's use-guard is released here and only here: it is held for
-	// the transfer, and the teardown paths above cancel before they close
-	// so that holding it can never make files.close wait for an upload.
-	defer release()
 
 	var body io.ReadCloser
 	if rt.ticket != "" {
@@ -811,7 +831,7 @@ func (s *WSServer) runUpload(rt *runningTransfer, h filesystem.Handle, release f
 		}
 	}
 
-	out, err := h.Upload(rt.ctx, rt.upload, body, rt.progress)
+	out, err := sink.Put(rt.ctx, rt.upload, body, rt.progress)
 	if body != nil {
 		_ = body.Close()
 	}
@@ -859,9 +879,10 @@ type uploadHandlers struct {
 // It follows handleList's shape exactly (ws_files.go:539): the op.Run
 // wrapper, Acquire re-checking that THIS connection owns the binding's
 // session (D15) and taking the use-guard, and filesErrorCode for the
-// mapping. The one deliberate difference is the guard's lifetime: on the
-// paths that answer without starting anything it is released here, and on
-// the path that starts a transfer it passes to the transfer's goroutine.
+// mapping. The guard's lifetime is handleList's too, and D8 is why: it ends
+// when this call answers, on every path, including the one that leaves a
+// transfer running. What that transfer runs on is the binding's sink, taken
+// from the handle while the guard was still held.
 func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
@@ -878,16 +899,17 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
 		}
-		started := false
-		defer func() {
-			if !started {
-				release()
-			}
-		}()
+		// The guard covers this call and nothing after it (D8): what the
+		// transfer runs on is the sink, which outlives the handle, so a
+		// running upload is never something a close has to wait for.
+		defer release()
 
-		// R1, asked of the binding and of nothing else.
-		if unsupported := uploadSupported(ctx, handle); unsupported != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(unsupported), Message: unsupported.Error()})
+		// R1, asked of the binding and of nothing else — and the same
+		// call is what the transfer will run on, so the capability and
+		// the thing it authorises can never be two different answers.
+		sink, sinkErr := handle.Uploader()
+		if sinkErr != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(sinkErr), Message: sinkErr.Error()})
 			return nil
 		}
 		if params.SourceTicket != "" {
@@ -963,12 +985,11 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 		// ticket: the transfer exists and is already over. Every other
 		// decision is a stream source, and the ticket is what authorises
 		// the request that carries the bytes (D4).
-		if err := h.machine.startUpload(rt, decision != transfer.Skip, handle, release); err != nil {
+		if err := h.machine.startUpload(rt, decision != transfer.Skip, sink); err != nil {
 			cancel()
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return nil
 		}
-		started = true
 
 		if rt.ticket == "" {
 			// Skip needs no bytes: the transfer exists and is already over.
@@ -1005,28 +1026,6 @@ func (h uploadHandlers) handleUploadCancel(ctx context.Context, state *connState
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
-
-// uploadSupported asks the BINDING whether it can be written to, and this
-// is the whole of R1's enforcement on the wire.
-//
-// The question has exactly one answer-holder. A local binding was
-// registered with no sink, Binding.provider is unexported, and Acquire
-// returns a Handle — so nothing downstream can re-derive the capability
-// from the provider or from the endpoint attestation, which is D7's
-// structural guarantee working as designed. Handle.Upload is therefore the
-// only surface that answers, and the zero Upload is how it is asked without
-// moving anything: the sink's own validate() refuses an empty DestDir
-// before any round trip (internal/transfer/sink.go:381), while a binding
-// with no sink answers *ErrUploadUnsupported without reaching a provider at
-// all. Anything else means the binding CAN write and the probe is done.
-func uploadSupported(ctx context.Context, h filesystem.Handle) error {
-	_, err := h.Upload(ctx, transfer.Upload{}, nil, nil)
-	var unsupported *filesystem.ErrUploadUnsupported
-	if errors.As(err, &unsupported) {
-		return err
-	}
-	return nil
-}
 
 // uploadDestinationTaken reports whether something already occupies the
 // destination name.

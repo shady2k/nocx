@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
 	"sync"
 
@@ -53,21 +52,34 @@ func (b *Binding) EndpointID() string { return b.endpointID }
 // and once the binding's Close has begun — every method errors with
 // ErrHandleReleased. Each method additionally holds its own guard for the
 // duration of the provider call, so close can never reach the provider under
-// a running call.
+// a running call — the one deliberate exception being Uploader, which holds
+// it for the hand-off and not for the transfer that follows (D8, below).
 type Handle interface {
 	Root(ctx context.Context) (Root, error)
 	List(ctx context.Context, path string, page Page) (Listing, error)
 	Read(ctx context.Context, path string, maxBytes int64) (Content, error)
 	Watch(ctx context.Context, paths []string) (WatchMode, error)
-	// Upload writes one file onto the machine this binding views, through
-	// the binding's sink. A binding without one refuses with
-	// *ErrUploadUnsupported (rule R1). progress is called with the running
-	// byte total after each chunk that reached the far side and may be nil.
+	// Uploader returns the binding's write half — the sink one transfer
+	// runs on — or *ErrUploadUnsupported when the binding has none, which
+	// is rule R1 expressed as a missing field rather than as a check
+	// somebody must remember to perform. Like every other method it is
+	// valid from Acquire until release and refuses afterwards.
 	//
-	// The returned Outcome is meaningful even when the error is not nil:
-	// a failed transfer names what it left behind, and an error and a
-	// non-empty Outcome.Stranded are not alternatives.
-	Upload(ctx context.Context, u transfer.Upload, r io.Reader, progress func(int64)) (transfer.Outcome, error)
+	// The Sink it hands back is deliberately DETACHED from the use-guard,
+	// and that is design D8 rather than an oversight. Close waits for every
+	// guard to drain, so a transfer that held one for its length would make
+	// files.close and session teardown wait for as long as the upload runs
+	// — and a teardown that cancels first and then waits, bounded, needs
+	// "close regardless" to be something it can actually do. So the guard
+	// covers obtaining the sink and nothing after it.
+	//
+	// What makes running unguarded safe is the lease underneath rather than
+	// hope: closing the provider closes the SFTP session and client, which
+	// unblocks a call already in flight and makes every later one report a
+	// closed lease (internal/ssh/ssh_fsconn.go, Close). A write racing a
+	// close therefore fails and names what it stranded; it never writes
+	// through a torn-down lease, and it never holds the close open.
+	Uploader() (transfer.Sink, error)
 }
 
 // Caller is who is asking. filesystem declares it and transport satisfies it —
@@ -379,23 +391,27 @@ func (h *handle) Watch(ctx context.Context, paths []string) (WatchMode, error) {
 	return h.b.swapWatches(ctx, paths)
 }
 
-// Upload writes one file through the binding's sink.
+// Uploader hands back the binding's sink.
 //
 // The refusal is the upload design's rule R1 expressed as a nil field rather
 // than as a condition somebody must remember to check: a local binding never
 // received a sink, so there is no check here to forget and no route by which
-// a local tab could be written to. The provider is not touched on that path
-// — a refusal costs no round trip.
-func (h *handle) Upload(ctx context.Context, u transfer.Upload, r io.Reader, progress func(int64)) (transfer.Outcome, error) {
+// a local tab could be written to. The provider is not touched on either
+// path — neither a refusal nor a hand-off costs a round trip.
+//
+// The guard is taken and dropped around the hand-off only, which is the
+// whole of D8 on this side: what the caller then runs on the sink is
+// unguarded, and the interface comment says why that is safe.
+func (h *handle) Uploader() (transfer.Sink, error) {
 	drop, err := h.begin()
 	if err != nil {
-		return transfer.Outcome{}, err
+		return nil, err
 	}
 	defer drop()
 	if h.b.sink == nil {
-		return transfer.Outcome{}, &ErrUploadUnsupported{BindingID: h.b.id}
+		return nil, &ErrUploadUnsupported{BindingID: h.b.id}
 	}
-	return h.b.sink.Put(ctx, u, r, progress)
+	return h.b.sink, nil
 }
 
 // release drops the use-guard. It is idempotent: the second call is a no-op,

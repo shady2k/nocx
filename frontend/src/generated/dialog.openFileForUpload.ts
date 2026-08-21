@@ -1,0 +1,28 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/dialog.openFileForUpload.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Result of the dialog.openFileForUpload JSON-RPC method: the native file picker used as an UPLOAD SOURCE. It is a sibling of dialog.openFile, and the difference between them is the whole reason it exists — dialog.openFile answers with a path, and this one never does. The renderer may name the destination of an upload and may never name the source (design R2): a destination is scoped by a binding the backend issued, while a source path is scoped by nothing, so a renderer that could supply one could ask the backend to read ~/.ssh/id_ed25519 and send it to a host of the renderer's choosing. What comes back instead is an opaque ticket minted backend-side at the moment a human chose the file in the picker, which the renderer echoes into files.upload and could not have authored. The directory the file came from never leaves the backend's address space — not in this result, not in an error message. Like dialog.openFile, the method reports itself unavailable (-32601) where no native runtime exists; the dev-web harness has no Wails at all, and there is deliberately no fallback that would let the renderer name a source instead.
+ */
+export interface DialogOpenFileForUpload {
+  /**
+   * The one-shot source ticket, 32 lowercase hex characters from crypto/rand (128 bits), or "" when the person cancelled the picker — cancel is 'no change', never an error, the way dialog.openFile's empty path already works. The pattern is part of the contract rather than only this sentence, because an unconstrained string lets a regression emit an empty or malformed ticket and still pass conformance. It is a bearer credential: possession names bytes the backend will read, so it is never logged and never appears in an error string. It authorises nothing about the destination — the write is still addressed by a bindingId the backend issued and re-checks against the requesting connection.
+   */
+  sourceTicket: string
+  /**
+   * The chosen file's BASE name, for display and for the default destination name. Never a path and never the directory it came from: this field plus the size is the entire extent of what the renderer learns about the backend's filesystem. Empty when the picker was cancelled.
+   */
+  name: string
+  /**
+   * The chosen file's size in bytes at the moment it was picked. Advisory, like every stat: the transfer's own read is what actually moves, and the sink checks the body it receives against the size declared at mint time. 0 when the picker was cancelled — and also for a genuinely empty file, which is why the ticket, not the size, is what says whether anything was chosen.
+   */
+  size: number
+}

@@ -205,6 +205,16 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/dialog.openFileForUpload.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.dropped.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/ledger.artifact.ts",
       "symbol": ""
     },

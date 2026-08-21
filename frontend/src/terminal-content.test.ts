@@ -198,6 +198,30 @@ async function mountTerminal(
   }
 }
 
+describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
+  // In the Wails window a drop delivers absolute paths on the BACKEND's
+  // machine, and the renderer may never learn one (design R2). The runtime
+  // finds the nearest ancestor carrying data-file-drop-target and hands Go
+  // every attribute of that element, so these two attributes are the whole
+  // renderer half of the native drop: which element takes the drop, and
+  // which session it belongs to. Without data-session-id a drop mints
+  // tickets nothing can route.
+  it('marks the pane with data-file-drop-target and the session it belongs to', async () => {
+    const { content, tab, teardown } = await mountTerminal()
+    expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(true)
+    expect(tab.pane.getAttribute('data-session-id')).toBe(sessionOf(content).sessionId)
+    teardown()
+  })
+
+  it('stops being a drop target when the session is gone', async () => {
+    const { tab, teardown } = await mountTerminal()
+    expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(true)
+    teardown()
+    expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(false)
+    expect(tab.pane.hasAttribute('data-session-id')).toBe(false)
+  })
+})
+
 describe('SSH open host-key recovery', () => {
   const routeEvidence = {
     host: 'db.example.com:22',

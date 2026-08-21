@@ -108,3 +108,59 @@ func (h dialogHandlers) handleDialogOpenFile(ctx context.Context, req jsonrpcReq
 	}{Path: path}
 	_ = h.r.TryResult(req.ID, mustMarshal(resp))
 }
+
+// UploadPicker is the OPTIONAL half of the native dialog seam: a picker
+// that mints a source ticket instead of returning a path (R2). It is a
+// second interface rather than a second method on DialogService because
+// dialog.openFile has existing callers whose whole answer is a path — the
+// key-material input types one into a field — and upload has the opposite
+// requirement: the renderer must never learn where the file came from.
+// One seam, two questions, and the adapter answers whichever it can.
+//
+// A DialogService that does not implement this reports the method
+// unavailable, exactly as a missing service does. That is the honest
+// degrade: no Wails means no native picker, and there is nothing to invent
+// in its place.
+type UploadPicker interface {
+	// OpenFileForUpload opens the platform file picker and returns the
+	// ticket, base name and size of the chosen file, or the zero value
+	// when the user cancelled. The cancellation contract is
+	// DialogService.OpenFile's, unchanged: this call shares the
+	// capacity-one dialog admission with it, so no second picker can stack
+	// over the first.
+	OpenFileForUpload(ctx context.Context) (SourcePick, error)
+}
+
+// handleDialogOpenFileForUpload answers dialog.openFileForUpload: the
+// native picker as an upload source. It is a sibling of
+// handleDialogOpenFile, not a replacement — the two differ in exactly one
+// thing, which is the only thing that matters here: this one never returns
+// a path.
+//
+// The mint happens behind the seam, at the moment the human chose the file.
+// Nothing on the wire reaches it: the method takes no params, and the
+// result carries a ticket the renderer can echo and could not have written.
+func (h dialogHandlers) handleDialogOpenFileForUpload(ctx context.Context, req jsonrpcRequest) {
+	picker, ok := h.dialog.get().(UploadPicker)
+	if !ok {
+		// Both absences land here and mean the same thing to the renderer:
+		// no service at all (dev-web, where the type assertion on a nil
+		// interface fails), or a service whose platform cannot mint.
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "native file picker not available"})
+		return
+	}
+
+	// Off the read loop under the dialog admission, for the reason
+	// handleDialogOpenFile states at length: a native picker can stay open
+	// for minutes and must not freeze the socket, and the held permit is
+	// what stops a second picker stacking over the first.
+	pick, err := picker.OpenFileForUpload(ctx)
+	if err != nil {
+		// rpcErrorFor carries the adapter's own message. The adapter is
+		// contracted not to put the path in it (ws_upload_source.go), and
+		// the store's refusals are worded that way already.
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "dialog.openFileForUpload: ", err))
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(pick))
+}

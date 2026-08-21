@@ -54,7 +54,7 @@
 - `Create` uses `OpenFile` with `os.O_WRONLY|os.O_CREATE|os.O_EXCL` and fails on an existing path — it does **not** truncate.
 - Every `FSFile.Write` and `FSFile.Close` goes through `run`, so none escapes the lane, the watchdog or cancellation.
 - A total write far longer than `fsHardTimeout`, made of short chunks, completes — the watchdog is per call, not per transfer.
-- `PosixRename` against a server without the extension returns an error satisfying `errors.Is(err, ErrPosixRenameUnsupported)`, distinguishable from every other failure.
+- `PosixRename` against a server without the extension returns an error satisfying `errors.Is(err, ErrPosixRenameUnsupported)`, distinguishable from every other failure. **`ssh.ErrPosixRenameUnsupported` must wrap `transfer.ErrPosixRenameUnsupported`** so the sink's fallback keys on its own sentinel and neither package imports the other's error. If `internal/transfer` does not exist in your worktree yet, declare `ssh.ErrPosixRenameUnsupported` as a plain sentinel and leave a one-line `// TODO(<bead>): wrap transfer.ErrPosixRenameUnsupported once both land` — the integrator joins them.
 
 - [ ] **Step 1: Write the failing test for exclusive create**
 
@@ -232,7 +232,31 @@ git commit -m "feat(ssh): the SFTP lease can write, one lane call per chunk (<be
 
 **Interfaces:**
 
-- Consumes: `ssh.FSConn` and `ssh.FSFile` from Task 1; `ssh.ErrPosixRenameUnsupported`.
+- Consumes: **nothing from Task 1.** `internal/transfer` declares the narrow interface it needs and `ssh.FSConn` satisfies it structurally — the direction `internal/filesystem` already established, where `filesystem` declares `Caller` and `transport` satisfies it (`internal/filesystem/binding.go:62`). This is why Tasks 1 and 2 can be built in parallel by two workers who never open the same file:
+
+  ```go
+  // RemoteFS is the write surface this package needs. ssh.FSConn satisfies
+  // it; the dependency points this way so the sink can be built and tested
+  // against a fake without internal/ssh existing yet.
+  type RemoteFS interface {
+      Create(path string) (RemoteFile, error)
+      PosixRename(old, new string) error
+      Rename(old, new string) error
+      Remove(path string) error
+  }
+
+  type RemoteFile interface {
+      Write(p []byte) (int, error)
+      Close() error
+  }
+
+  // ErrPosixRenameUnsupported is what the fallback keys on. internal/ssh
+  // returns an error satisfying errors.Is against THIS sentinel — Task 1's
+  // ssh.ErrPosixRenameUnsupported wraps it — so neither package imports the
+  // other's error.
+  var ErrPosixRenameUnsupported = errors.New("transfer: server does not support posix-rename@openssh.com")
+  ```
+
 - Produces:
   ```go
   type Decision string

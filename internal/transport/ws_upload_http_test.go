@@ -274,6 +274,24 @@ func TestUploadEndpoint_ClaimAfterCompletionIsGone(t *testing.T) {
 	if status, _ := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusGone {
 		t.Fatalf("a finished ticket is gone, not conflicted: got %d", status)
 	}
+
+	// 410 alone does not tell this row of §5.4's table from its neighbour.
+	// Deleting the ticket at completion would answer 410 too, through the
+	// UNKNOWN branch, and every assertion above would pass unchanged — so
+	// one of the four normative rows would have no test of its own. The
+	// branch is what is asserted, and the contrast is what makes it
+	// evidence: the same call on a ticket nothing ever minted answers
+	// differently.
+	rt, claim := e.ws.uploads.claim(ticket, 5)
+	if claim != uploadClaimFinished {
+		t.Fatalf("claim = %d, want uploadClaimFinished (%d): the finished ticket must be RETAINED", claim, uploadClaimFinished)
+	}
+	if rt != nil {
+		t.Fatal("the finished branch handed back a transfer; it names nothing to claim")
+	}
+	if _, other := e.ws.uploads.claim(strings.Repeat("ab", uploadTicketHexLen/2), 5); other != uploadClaimUnknown {
+		t.Fatalf("a never-minted ticket claims as %d, want uploadClaimUnknown (%d)", other, uploadClaimUnknown)
+	}
 }
 
 // TestUploadEndpoint_ExpiredTicketWasAlreadyCancelledAndReadsAsUnknown is
@@ -312,10 +330,13 @@ func TestUploadEndpoint_RequiresContentLength(t *testing.T) {
 	bid := e.openBinding(t, sid, dir, 2)
 	_, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
 
-	// Chunked: no Content-Length at all.
-	status, _ := rawUpload(t, e.ws, ticket, "Transfer-Encoding: chunked\r\n", func(c *net.TCPConn) {
-		_, _ = c.Write([]byte("5\r\nhello\r\n0\r\n\r\n"))
-	})
+	// Chunked: no Content-Length at all — and not one byte of body is ever
+	// sent. That is the assertion, not the empty directory: a handler that
+	// claimed the ticket and drained the body before answering 400 would
+	// leave the directory empty too, and would pass. With nothing on the
+	// wire to read, such a handler blocks and never answers, so the
+	// response arriving at all is what proves the refusal came first.
+	status, _ := rawUpload(t, e.ws, ticket, "Transfer-Encoding: chunked\r\n", nil)
 	if status != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", status)
 	}
@@ -341,9 +362,11 @@ func TestUploadEndpoint_RefusesAContentLengthThatDisagreesWithTheDeclaredSize(t 
 	_, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
 
 	for _, declared := range []int{4, 6} {
-		status, _ := rawUpload(t, e.ws, ticket,
-			fmt.Sprintf("Content-Length: %d\r\n", declared),
-			func(c *net.TCPConn) { _, _ = c.Write(bytes.Repeat([]byte("x"), declared)) })
+		// The headers, and then silence. §5.4 puts this refusal BEFORE the
+		// body is read, so the handler must answer without a byte of body
+		// on the wire; one that read first would block here for ever
+		// instead of leaving an empty directory behind and passing.
+		status, _ := rawUpload(t, e.ws, ticket, fmt.Sprintf("Content-Length: %d\r\n", declared), nil)
 		if status != http.StatusBadRequest {
 			t.Fatalf("Content-Length %d against a declared size of 5: want 400, got %d", declared, status)
 		}

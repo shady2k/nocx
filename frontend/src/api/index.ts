@@ -17,7 +17,7 @@ import type { ContentDescriptor } from '../pane-content'
 import type { PaneManager } from '../panes'
 import type { SidebarAction } from '../sidebar'
 import { SurfaceRegistry, SURFACE_ID_API } from '../surface-registry'
-import { ArrowRightIcon } from '../ui/icons'
+import { ArrowRightLeftIcon } from '../ui/icons'
 import { ApiContent, API_PANE_TITLE, SINGLETON_API, SURFACE_API } from './api-content'
 import type { ApiWorkbenchServices } from './api-client'
 
@@ -79,12 +79,19 @@ export function openApiWorkbench(): ApiContent {
 }
 
 /** The activity bar's bottom-zone entry. Declared here so the shell places it
- *  and decides nothing about it. */
+ *  and decides nothing about it.
+ *
+ *  Its glyph is the kit's `ArrowRightLeftIcon` — a request out and a response
+ *  back. It was `ArrowRightIcon`, chosen with no recorded reason, and a
+ *  single arrow is what every other rail in this product uses to mean "go
+ *  there": the entry read as navigation (nocx-zccer). Its words are
+ *  API_PANE_TITLE, the same constant the pane hands the strip, so the rail
+ *  and the tab cannot drift apart. */
 export function apiSidebarAction(): SidebarAction {
   return {
     id: SURFACE_ID_API,
     title: API_PANE_TITLE,
-    icon: ArrowRightIcon,
+    icon: ArrowRightLeftIcon,
     onActivate: () => {
       openApiWorkbench()
     },

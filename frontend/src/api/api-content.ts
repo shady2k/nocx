@@ -17,26 +17,37 @@ import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import type { SingletonKey, SurfaceType } from '../pane-content'
 import { ApiPane } from './api-pane'
 import { createApiStore, type ApiStore } from './api-store'
-import type { ApiWorkbenchServices } from './api-client'
+import type { ApiWorkbenchServices, DirectoryPicker } from './api-client'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────────
 
 export const SURFACE_API: SurfaceType = 'nocx.api' as SurfaceType
 export const SINGLETON_API: SingletonKey = 'nocx.api' as SingletonKey
 
-/** What the strip calls it. */
-export const API_PANE_TITLE = 'API'
+/** What the strip calls it — and the activity-bar entry with it, which is
+ *  the point of the constant: the pane, its rail entry and the tab strip
+ *  label are one word, spelled once (nocx-zccer). It was 'API', which names
+ *  a protocol rather than what a person came here to do. */
+export const API_PANE_TITLE = 'API testing'
 
 export class ApiContent extends SolidPaneContent {
   private readonly store: ApiStore
+  /** The native directory picker, when this build has one. Held beside the
+   *  store rather than in it: `dialog.*` is another domain's method, and the
+   *  store owns api.* state (AD-8). */
+  private readonly openDirectory?: DirectoryPicker
 
   constructor(services: ApiWorkbenchServices) {
     super()
     this.store = createApiStore(services)
+    this.openDirectory = services.openDirectory
   }
 
   renderContent(root: HTMLElement): () => void {
-    return render(() => createComponent(ApiPane, { store: this.store }), root)
+    return render(
+      () => createComponent(ApiPane, { store: this.store, openDirectory: this.openDirectory }),
+      root,
+    )
   }
 
   async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
@@ -56,11 +67,14 @@ export class ApiContent extends SolidPaneContent {
    *
    * With a request in the form that is the URL — the field edited between one
    * send and the next. With nothing open the URL field is disabled and cannot
-   * take focus at all, so the keyboard goes to the field that opens a folder,
-   * which is the only thing that can be done from the state the workbench
-   * starts in. Focusing a disabled control silently does nothing, and a tab
-   * activation that leaves the caret wherever it happened to be is how a
-   * keyboard user loses their place.
+   * take focus at all, so the keyboard goes to the primary ACTION, which is
+   * the only thing that can be done from the state the workbench starts in.
+   * It used to be the folder field, and that field no longer sits in the
+   * panel: opening a folder is an ask now (nocx-84shs), so the field lives
+   * inside a closed dialog where nothing can focus it. Focusing a disabled
+   * or hidden control silently does nothing, and a tab activation that
+   * leaves the caret wherever it happened to be is how a keyboard user loses
+   * their place.
    */
   focus(): void {
     const host = this._hostElement
@@ -70,7 +84,7 @@ export class ApiContent extends SolidPaneContent {
       url.focus()
       return
     }
-    host.querySelector<HTMLInputElement>('#api-collection-path')?.focus()
+    host.querySelector<HTMLButtonElement>('#api-new-collection')?.focus()
   }
 
   // viewportChanged is inherited as a no-op: the workbench lays itself out in

@@ -305,6 +305,23 @@ chip, label or colour (§4.2). The component carries **no shield, lock or fence
 vocabulary** (§5.5): colour identifies membership and never advertises isolation.
 `workspace-vocabulary.test.ts` guards that vocabulary.
 
+### Icons
+
+Every glyph is a `Component` in `icons/`, one file each, exported from
+`icons/index.ts` — **that barrel is the full list**, and a glyph missing from it
+does not exist as far as a surface is concerned. They are Lucide under ISC,
+redrawn as Solid components so they inherit `currentColor` and carry
+`aria-hidden="true"`: the button around a glyph owns the accessible name, and a
+second one on the `svg` would be read out twice.
+
+A glyph whose SHAPE does not say what it MEANS gets a row here, so the next
+person choosing one does not have to guess from the file name — and so a
+meaning already spoken for is not spoken for twice.
+
+| Icon                   | Lucide             | What it means, and where                                                                                                                                                                                                                                    |
+| ---------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **ArrowRightLeftIcon** | `arrow-right-left` | An exchange: a request going out and a response coming back. The API testing surface's activity-bar entry (nocx-zccer). Deliberately **not** `ArrowRightIcon`, which means "go there" everywhere else in the product and made the entry read as navigation. |
+
 ### Platform primitives (no wrapper needed per ADR-0014)
 
 | Primitive             | Implementation                        | Why                                                                                                                                                                                                                                                                                        |
@@ -315,15 +332,16 @@ vocabulary** (§5.5): colour identifies membership and never advertises isolatio
 
 ### Page primitives (separate ownership — not merged with kit Section)
 
-| Component       | Module              | Notes                                                                                                                                                                       |
-| --------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Page            | `page.tsx`          | Page layout container                                                                                                                                                       |
-| PageHeader      | `page-header.tsx`   | Page header                                                                                                                                                                 |
-| PageBody        | `page-body.tsx`     | Page body                                                                                                                                                                   |
-| PageRail        | `page-rail.tsx`     | Side navigation rail; at the ≤640px breakpoint it stacks above the content, does not scroll, and trims its own chrome to a compact footprint (base.css owns the breakpoint) |
-| PageScroller    | `page-scroller.tsx` | Scroll owner                                                                                                                                                                |
-| **PageSection** | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking; accepts `divided` and one `description` for the whole section                                               |
-| SidebarView     | `sidebar-view.tsx`  | Sidebar view wrapper                                                                                                                                                        |
+| Component        | Module              | Notes                                                                                                                                                                       |
+| ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Page             | `page.tsx`          | Page layout container                                                                                                                                                       |
+| PageHeader       | `page-header.tsx`   | Page header                                                                                                                                                                 |
+| PageBody         | `page-body.tsx`     | Page body                                                                                                                                                                   |
+| PageRail         | `page-rail.tsx`     | Side navigation rail; at the ≤640px breakpoint it stacks above the content, does not scroll, and trims its own chrome to a compact footprint (base.css owns the breakpoint) |
+| PageScroller     | `page-scroller.tsx` | Scroll owner                                                                                                                                                                |
+| **PageSection**  | `page-section.tsx`  | Semantic `<section>` within a Page, with `id` for deep linking; accepts `divided` and one `description` for the whole section                                               |
+| **FolderPicker** | `folder-picker.tsx` | `ui-folder-picker` + `__path/__list/__row/__icon/__label`                                                                                                                   | the dialog that browses directories and answers with an absolute path, so choosing a folder never depends on a native one — `dialog.openDirectory` is Wails, and the dev-web harness and a networked backend have none; the caller supplies `list`, so the component knows nothing about JSON-RPC, bindings or which machine it is reading, and the routing decision stays with the caller; rows carry `data-kind`: dir \| file and `data-selected` on the chosen one — **only a directory can be the answer**, a file lists greyed and inert (`aria-disabled`, no tab stop) so an empty folder and a folder of files do not look alike; the path field IS the answer and stays typeable, so `Choose` resolves its text even when no listing ever succeeded; a failed listing shows its reason in place and leaves the entries on screen; entries are never re-sorted — `files.list` owns the order. `showFolderPicker` is the imperative wrapper, the same shape as `showConfirm` |
+| SidebarView      | `sidebar-view.tsx`  | Sidebar view wrapper                                                                                                                                                        |
 
 ### `Section` vs `PageSection` overlap
 

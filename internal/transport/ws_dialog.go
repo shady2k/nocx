@@ -17,20 +17,31 @@ import (
 //
 // # Cancellation — the platform adapter contract
 //
-// OpenFile receives the connection's context, and an adapter MAY observe
-// ctx.Done and dismiss its dialog where the native API allows it. Where the
-// native API does not allow it (the Wails runtime's OpenFileDialog cannot be
-// cancelled once shown), the adapter MUST return normally, and the transport
-// then keeps the capability busy — refusing every dialog.openFile from any
-// connection — until the adapter actually returns. The transport never
-// assumes a prompt return from a cancelled context, and an adapter must never
-// assume its ctx will be cancelled at all.
+// Every method here receives the connection's context, and an adapter MAY
+// observe ctx.Done and dismiss its dialog where the native API allows it.
+// Where the native API does not allow it (the Wails runtime's OpenFileDialog
+// cannot be cancelled once shown), the adapter MUST return normally, and the
+// transport then keeps the capability busy — refusing every dialog.* method
+// from any connection — until the adapter actually returns. The transport
+// never assumes a prompt return from a cancelled context, and an adapter must
+// never assume its ctx will be cancelled at all.
+//
+// The capability is ONE native dialog, not one per method: the file and the
+// directory picker share a single admission slot, so a directory picker
+// cannot open over a file picker either.
 type DialogService interface {
 	// OpenFile opens the platform file picker and returns the chosen
 	// ABSOLUTE path, or "" when the user cancelled. The runtime's own error
 	// is returned as-is. The context may be cancelled on disconnect; see
 	// the cancellation contract above.
 	OpenFile(ctx context.Context) (string, error)
+
+	// OpenDirectory opens the platform directory picker and returns the
+	// chosen ABSOLUTE path, or "" when the user cancelled. The runtime's own
+	// error is returned as-is. It inherits the cancellation contract above
+	// verbatim — the Wails runtime's directory dialog cannot be cancelled
+	// once shown any more than its file dialog can.
+	OpenDirectory(ctx context.Context) (string, error)
 }
 
 // dialogServiceHolder is the transport's mutable dialog-service seam: the
@@ -61,10 +72,10 @@ func (s *WSServer) SetDialogService(ds DialogService) {
 	s.dialogService = ds
 }
 
-// dialogHandlers answers dialog.openFile. It holds the dialog service holder
-// and its Responder; nothing else. The off-loop machinery (dialog admission
-// composed with the lane, inflight registration) lives in the registration,
-// not in the handler.
+// dialogHandlers answers dialog.openFile and dialog.openDirectory. It holds
+// the dialog service holder and its Responder; nothing else. The off-loop
+// machinery (dialog admission composed with the lane, inflight registration)
+// lives in the registration, not in the handler.
 type dialogHandlers struct {
 	dialog *dialogServiceHolder
 	r      Responder
@@ -98,9 +109,33 @@ func (h dialogHandlers) handleDialogOpenFile(ctx context.Context, req jsonrpcReq
 	// second picker ever stacks over the first. A refused submit (a dialog
 	// already open) was answered by the dispatcher with the control-
 	// saturated error; a dead socket's response is dropped by the Responder.
-	path, err := ds.OpenFile(ctx)
+	h.answerPath(req, "dialog.openFile: ", func() (string, error) { return ds.OpenFile(ctx) })
+}
+
+// handleDialogOpenDirectory answers dialog.openDirectory. It is the file
+// picker's sibling in every respect the transport can see: the same absent-
+// runtime -32601, the same admission (so no second picker stacks over a
+// first, whichever method opened it), and the same result shape. Only the
+// native call underneath differs, which is why the two share answerPath
+// rather than each owning a copy of the reply.
+func (h dialogHandlers) handleDialogOpenDirectory(ctx context.Context, req jsonrpcRequest) {
+	ds := h.dialog.get()
+	if ds == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "dialog not available"})
+		return
+	}
+	h.answerPath(req, "dialog.openDirectory: ", func() (string, error) { return ds.OpenDirectory(ctx) })
+}
+
+// answerPath runs one native picker and writes its single reply: the runtime's
+// own error as -32603 under the method's prefix, or the chosen ABSOLUTE path.
+// A cancelled picker is "" and is therefore a RESULT — a caller can tell a
+// dismissal from a failure by which half of the envelope arrived, never by
+// inspecting the path.
+func (h dialogHandlers) answerPath(req jsonrpcRequest, errPrefix string, open func() (string, error)) {
+	path, err := open()
 	if err != nil {
-		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "dialog.openFile: ", err))
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, errPrefix, err))
 		return
 	}
 	resp := struct {

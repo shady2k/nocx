@@ -234,10 +234,11 @@ func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db con
 	}
 }
 
-// SetDialogService attaches the native dialog capability (dialog.* RPCs). It
-// is wired from main.go's WailsApp.startup — the Wails context it needs only
-// exists there, after the transport was built — and must be called before
-// Start, so no renderer request can observe the unset state.
+// SetDialogService attaches the native dialog capability (dialog.openFile and
+// dialog.openDirectory — one service, because one native dialog is open at a
+// time). It is wired from main.go's WailsApp.startup — the Wails context it
+// needs only exists there, after the transport was built — and must be called
+// before Start, so no renderer request can observe the unset state.
 func (a *App) SetDialogService(ds transport.DialogService) {
 	a.Transport.SetDialogService(ds)
 }

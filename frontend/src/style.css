@@ -75,6 +75,7 @@
 @import './styles/components/notes.css';
 @import './styles/components/api-workbench.css';
 @import './styles/components/overview.css';
+@import './styles/components/folder-picker.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';

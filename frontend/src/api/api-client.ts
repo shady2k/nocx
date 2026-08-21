@@ -101,6 +101,44 @@ class ApiClient {
   }
 }
 
+/**
+ * The native directory picker, as this surface consumes it: the chosen
+ * ABSOLUTE path, or an empty one when the person changed their mind.
+ *
+ * Structural rather than the generated `dialog.openDirectory` type, and
+ * deliberately so — `key-material-input.tsx` states the same shape for
+ * `dialog.openFile` for the same reason. A component prop is not a wire
+ * declaration: the client that OWNS the call (`dialog-client.ts`) is typed
+ * from the contract, and this is the one field of its result that the
+ * workbench uses. Nothing here decodes a payload.
+ *
+ * A function rather than the client itself, because the surface may hold it
+ * detached; `secrets.tsx` and `connections.tsx` bind `openFileDialog` the
+ * same way.
+ */
+export type DirectoryPicker = () => Promise<{ path: string }>
+
+/**
+ * Bind the directory picker off the dialog client, when the build has one.
+ *
+ * `dialog.openDirectory` and its client method are the OTHER half of this
+ * change (nocx-39jek) and land beside it. Until both halves are on one tree
+ * the method is not on `DialogClient`'s type, so the composition root asks
+ * the object rather than the type — which is also the runtime truth it wants
+ * either way: absent means the workbench offers no Browse control, and the
+ * `make dev-web` harness, which has no Wails and answers `-32601`, is
+ * exactly that case.
+ *
+ * ONE cast, in one place, and it comes out the moment both halves are
+ * committed together — after that the client satisfies the shape statically
+ * and this becomes `() => client.openDirectoryDialog()`.
+ */
+export function directoryPicker(client: object): DirectoryPicker | undefined {
+  if (!('openDirectoryDialog' in client)) return undefined
+  const carrier = client as { openDirectoryDialog: DirectoryPicker }
+  return () => carrier.openDirectoryDialog()
+}
+
 /** The workbench's entire backend surface, so a test can substitute a fake. */
 export interface ApiWorkbenchServices {
   listCollections(): Promise<ApiCollectionsListResult>
@@ -112,12 +150,32 @@ export interface ApiWorkbenchServices {
   sendRequest(handle: string, relPath: string): Promise<ApiRequestSendResult>
   importPostman(path: string, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
+  /**
+   * The native directory picker, when the backend offers one — and ABSENT,
+   * not a function that rejects, when it does not.
+   *
+   * Optionality is the capability. The workbench draws a Browse control only
+   * where this exists, so the `make dev-web` harness — no Wails, every
+   * `dialog.*` call answered `-32601` — shows no control rather than one
+   * that fails when pressed. A rejecting stub would put the refusal after
+   * the click, which is the broken-looking fallback design §9 asks us not to
+   * ship.
+   */
+  openDirectory?: DirectoryPicker
 }
 
-/** Real implementation over the dispatcher. */
-export function createApiWorkbenchServices(dispatcher: Dispatcher): ApiWorkbenchServices {
+/** Real implementation over the dispatcher.
+ *
+ *  `picker` is threaded through rather than built here: `dialog.*` is not an
+ *  api.* method and this client does not own it (AD-8). The composition root
+ *  binds it off the one dialog client and hands it in. */
+export function createApiWorkbenchServices(
+  dispatcher: Dispatcher,
+  picker?: DirectoryPicker,
+): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
+    ...(picker ? { openDirectory: picker } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),

@@ -34,7 +34,7 @@ import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { apiSidebarAction, registerApiSurface } from './api'
-import { createApiWorkbenchServices } from './api/api-client'
+import { createApiWorkbenchServices, directoryPicker } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
@@ -395,7 +395,17 @@ async function main() {
   // own module rather than inline here, because the singleton key and the
   // activity-bar entry are the surface's decisions and not the shell's — the
   // file viewer and the notes surface are wired the same way.
-  registerApiSurface(registry, tm, createApiWorkbenchServices(dispatcher))
+  //
+  // The directory picker comes off the ONE dialog client (AD-8), and comes
+  // off it as a capability that may be absent: `dialog.*` needs a Wails
+  // runtime, and the `make dev-web` harness has none, so the workbench draws
+  // its Browse control only where the picker is real. `directoryPicker`
+  // answers undefined in exactly that case.
+  registerApiSurface(
+    registry,
+    tm,
+    createApiWorkbenchServices(dispatcher, directoryPicker(dialogClient)),
+  )
 
   // Ports (nocx-wzc4.7): a SIDEBAR VIEW, not a tab. The owner's reference
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched

@@ -13,13 +13,15 @@
 // between the click and the DOM — sidebar, registry, pane manager, pane
 // lifecycle, Solid root, kit components — is the real code.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { SurfaceRegistry, SURFACE_ID_API } from '../surface-registry'
 import { createRendererMock, makeClient, mountPaneManager } from '../test-support/panes-fixtures'
-import { ApiContent, SINGLETON_API } from './api-content'
+import { API_PANE_TITLE, ApiContent, SINGLETON_API } from './api-content'
+import { ArrowRightIcon, ArrowRightLeftIcon } from '../ui/icons'
 import { apiSidebarAction, openApiWorkbench, registerApiSurface } from './index'
 import type { ApiWorkbenchServices } from './api-client'
+import { RpcError } from '../dispatcher'
 import type { PaneHost } from '../pane-content'
 import {
   CREATED_HANDLE,
@@ -100,12 +102,40 @@ function control(field: string): HTMLSelectElement {
   return el
 }
 
+/** True when the element is not sealed inside a closed `<dialog>`.
+ *
+ *  A closed native dialog keeps its children in the document, so the
+ *  workbench holds the controls of BOTH its asks at all times and a plain
+ *  `querySelectorAll` would answer with a Cancel the person cannot see. This
+ *  is the difference between "rendered" and "reachable", and every helper
+ *  below asks for the second. */
+function reachable(el: Element): boolean {
+  const dialog = el.closest('dialog')
+  return dialog === null || dialog.open
+}
+
 function button(name: string): HTMLButtonElement {
-  const found = [...workbench().querySelectorAll('button')].find(
-    (b) => (b.getAttribute('aria-label') ?? b.textContent ?? '').trim() === name,
-  )
+  const found = [...workbench().querySelectorAll('button')]
+    .filter(reachable)
+    .find((b) => (b.getAttribute('aria-label') ?? b.textContent ?? '').trim() === name)
   if (!found) throw new Error(`no button named ${name}`)
   return found
+}
+
+/** The buttons a person can reach right now, by their words. */
+function buttonNames(): string[] {
+  return [...workbench().querySelectorAll('button')]
+    .filter(reachable)
+    .map((b) => (b.getAttribute('aria-label') ?? b.textContent ?? '').trim())
+}
+
+/** The dialog that owns a field, by that field's id. Two asks live in this
+ *  surface — a name and a folder — so "the dialog" is never a query on its
+ *  own. */
+function dialogFor(fieldId: string): HTMLDialogElement {
+  const el = workbench().querySelector<HTMLInputElement>(`#${fieldId}`)?.closest('dialog')
+  if (!el) throw new Error(`no dialog around #${fieldId}`)
+  return el
 }
 
 function runCards(): HTMLElement[] {
@@ -156,7 +186,34 @@ describe('the API workbench is reachable', () => {
     const { bar } = await mountApp()
     const entry = apiEntry(bar)
     expect(entry.disabled).toBe(false)
-    expect(entry.getAttribute('aria-label')).toBe('API')
+    expect(entry.getAttribute('aria-label')).toBe('API testing')
+  })
+
+  it('the entry and the pane call the surface the same thing: API testing', async () => {
+    const { bar } = await mountApp()
+    // One constant behind all three — the rail's name, the rail's tooltip,
+    // and the title the pane hands the strip — so the tab strip label
+    // follows the entry rather than being spelled a second time (nocx-zccer).
+    expect(apiEntry(bar).getAttribute('aria-label')).toBe('API testing')
+    expect(apiEntry(bar).getAttribute('title')).toBe('API testing')
+    expect(API_PANE_TITLE).toBe('API testing')
+  })
+
+  it('the entry wears the exchange glyph, not the navigation arrow it used to', async () => {
+    const { bar } = await mountApp()
+    // The descriptor names the kit component…
+    expect(apiSidebarAction().icon).toBe(ArrowRightLeftIcon)
+    expect(apiSidebarAction().icon).not.toBe(ArrowRightIcon)
+    // …and the glyph that actually rendered on the bar is that one: a
+    // request out and a response back, four paths, not the single arrow
+    // every other rail uses to mean "go there" (nocx-zccer).
+    const drawn = [...apiEntry(bar).querySelectorAll('path')].map((p) => p.getAttribute('d'))
+    expect(drawn).toHaveLength(4)
+    const navigation = render(() => ArrowRightIcon({}))
+    for (const p of navigation.container.querySelectorAll('path')) {
+      expect(drawn).not.toContain(p.getAttribute('d'))
+    }
+    navigation.unmount()
   })
 
   it('activating it opens the workbench and never touches the side panel', async () => {
@@ -331,9 +388,27 @@ function collectionRow(handle: string): HTMLElement {
 
 /** The New collection dialog's own element. */
 function newCollectionDialog(): HTMLDialogElement {
-  const el = workbench().querySelector<HTMLDialogElement>('dialog.nocx-dialog')
-  if (!el) throw new Error('the New collection dialog is not in the workbench')
-  return el
+  return dialogFor('api-new-collection-name')
+}
+
+/** The Open folder dialog's own element. */
+function openFolderDialog(): HTMLDialogElement {
+  return dialogFor('api-collection-path')
+}
+
+/** Open the workbench with nothing open and ask to open a folder, typing a
+ *  path into the dialog — the whole gesture a person makes. */
+async function typeFolderPath(bar: HTMLElement, path: string): Promise<void> {
+  await openWorkbench(bar)
+  await vi.waitFor(() => button('Open folder…'))
+  fireEvent.click(button('Open folder…'))
+  await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
+  fireEvent.input(field('api-collection-path'), { target: { value: path } })
+}
+
+/** A backend whose native directory picker answers with `path`. */
+function withPicker(path: string): Partial<ApiWorkbenchServices> {
+  return { ...noCollections(), openDirectory: vi.fn().mockResolvedValue({ path }) }
 }
 
 /** Open the workbench with nothing open, ask for a new collection, and type
@@ -436,6 +511,154 @@ describe('a person can make a collection', () => {
     expect(button('Create').disabled).toBe(true)
     fireEvent.click(button('Create'))
     expect(create).not.toHaveBeenCalled()
+  })
+})
+
+// ── Opening one, which is the second door ─────────────────────────────────
+//
+// The panel used to WEAR this: a "Collection folder" text field and an "Open
+// folder" button stacked under "New collection", so the first thing a person
+// with no collections saw was a bare form. It is an action that asks now
+// (nocx-84shs) — the same shape the name ask has, for the reason
+// name-colour-dialog.tsx gives about the workspace create and edit forms:
+// a person who has met one of these has already learnt the other.
+
+describe('a person can open a folder somebody else made', () => {
+  it('the panel wears no form — there are two actions, and each asks', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(workbench().textContent).toContain('No collections open'))
+
+    // Nothing to fill in before a person can act: the path field is inside
+    // the ask, and until the ask is on screen it is not reachable.
+    expect(workbench().querySelector('#api-collection-path')).not.toBeNull()
+    expect(reachable(workbench().querySelector('#api-collection-path')!)).toBe(false)
+    expect(button('New collection').disabled).toBe(false)
+    expect(button('Open folder…').disabled).toBe(false)
+  })
+
+  it('typing a folder and confirming reaches api.collections.open', async () => {
+    const open = vi
+      .fn()
+      .mockResolvedValue({ handle: HANDLE, collection: collectionsFixture().collection })
+    const { bar } = await mountApp({ ...noCollections(), openCollection: open })
+    await typeFolderPath(bar, '/work/acme-api')
+
+    fireEvent.click(button('Open'))
+
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith('/work/acme-api'))
+    // And the ask goes away once the folder is open.
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(false))
+    await vi.waitFor(() => expect(workbench().textContent).toContain('acme-api'))
+  })
+
+  it('a path the backend refuses keeps the ask open, with the reason on screen', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      openCollection: vi.fn().mockRejectedValue(new Error('/work/nope is not a collection')),
+    })
+    await typeFolderPath(bar, '/work/nope')
+
+    fireEvent.click(button('Open'))
+
+    await vi.waitFor(() =>
+      expect(openFolderDialog().textContent).toContain('/work/nope is not a collection'),
+    )
+    expect(openFolderDialog().open).toBe(true)
+    // What was typed survives the refusal — the path is what has to change.
+    expect(field('api-collection-path').value).toBe('/work/nope')
+  })
+
+  it('an empty path is never sent — the ask refuses what the backend would', async () => {
+    const open = vi.fn()
+    const { bar } = await mountApp({ ...noCollections(), openCollection: open })
+    await typeFolderPath(bar, '   ')
+
+    expect(button('Open').disabled).toBe(true)
+    fireEvent.click(button('Open'))
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('asking a second time starts empty, not with the last path', async () => {
+    const { bar } = await mountApp(noCollections())
+    await typeFolderPath(bar, '/work/acme-api')
+    fireEvent.click(button('Open'))
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(false))
+
+    fireEvent.click(button('Open folder…'))
+
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
+    expect(field('api-collection-path').value).toBe('')
+  })
+})
+
+// ── The native directory picker, and its ordinary absence ─────────────────
+//
+// `dialog.openDirectory` answers -32601 wherever there is no Wails runtime,
+// which is EVERY `make dev-web` run — the configuration this feedback came
+// from. So the absent case is the ordinary one and it may not look broken:
+// no Browse control at all, and typing the path is simply how it is done.
+
+describe('the folder ask offers Browse only when there is a picker', () => {
+  it('with no picker there is no Browse control, and typing still works', async () => {
+    // servicesFixture carries no openDirectory — the dev-web shape.
+    const open = vi
+      .fn()
+      .mockResolvedValue({ handle: HANDLE, collection: collectionsFixture().collection })
+    const { bar } = await mountApp({ ...noCollections(), openCollection: open })
+    await typeFolderPath(bar, '/work/acme-api')
+
+    expect(buttonNames()).not.toContain('Browse…')
+    // …and the field is not disabled or waiting on anything.
+    expect(field('api-collection-path').disabled).toBe(false)
+    fireEvent.click(button('Open'))
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith('/work/acme-api'))
+  })
+
+  it('with a picker, Browse fills the field with what was chosen', async () => {
+    const services = withPicker('/chosen/acme-api')
+    const { bar } = await mountApp(services)
+    await typeFolderPath(bar, '')
+
+    fireEvent.click(button('Browse…'))
+
+    await vi.waitFor(() => expect(field('api-collection-path').value).toBe('/chosen/acme-api'))
+    expect(services.openDirectory).toHaveBeenCalled()
+  })
+
+  it('cancelling the picker leaves what was typed untouched', async () => {
+    // A cancelled picker answers an EMPTY path and no error — the contract
+    // dialog.openFile already keeps. Writing it into the field would erase
+    // what the person had typed as the price of changing their mind.
+    const { bar } = await mountApp(withPicker(''))
+    await typeFolderPath(bar, '/work/half-typed')
+
+    fireEvent.click(button('Browse…'))
+
+    await vi.waitFor(() => expect(field('api-collection-path').value).toBe('/work/half-typed'))
+    expect(button('Open').disabled).toBe(false)
+  })
+
+  it('a picker that reports itself unavailable retires the control and says why', async () => {
+    // The interval, both ends: the control is on screen from the moment the
+    // ask opens with a picker wired until the picker answers -32601, and
+    // never returns for the life of the surface — a second click on a
+    // control that has already refused once is the broken-looking fallback
+    // this exists to avoid.
+    const { bar } = await mountApp({
+      ...noCollections(),
+      openDirectory: vi.fn().mockRejectedValue(new RpcError('method not found', -32601)),
+    })
+    await typeFolderPath(bar, '/work/half-typed')
+    expect(buttonNames()).toContain('Browse…')
+
+    fireEvent.click(button('Browse…'))
+
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Browse…'))
+    expect(openFolderDialog().textContent).toContain('method not found')
+    // The refusal costs the person nothing they typed.
+    expect(field('api-collection-path').value).toBe('/work/half-typed')
+    expect(openFolderDialog().open).toBe(true)
   })
 })
 
@@ -681,9 +904,11 @@ describe('ApiContent lifecycle', () => {
     await vi.waitFor(() => expect(target.querySelector('#api-url')).not.toBeNull())
 
     // Nothing open: the URL is disabled and cannot take focus, so the
-    // keyboard goes to the one thing a person can do from here.
+    // keyboard goes to the one thing a person can do from here. That is the
+    // primary ACTION now, not a field — the panel wears no form since
+    // nocx-84shs, and the path field lives inside a dialog that is closed.
     content.focus()
-    expect(document.activeElement).toBe(target.querySelector('#api-collection-path'))
+    expect(document.activeElement).toBe(target.querySelector('#api-new-collection'))
 
     // With a request in the form it is the URL, which is the field edited
     // between one send and the next.
@@ -715,7 +940,7 @@ describe('ApiContent lifecycle', () => {
     const target = document.createElement('div')
     document.body.append(target)
     await content.mount(target, paneHostFake({ setTitle }), new AbortController().signal)
-    expect(setTitle).toHaveBeenCalledWith('API')
+    expect(setTitle).toHaveBeenCalledWith('API testing')
     content.dispose()
   })
 

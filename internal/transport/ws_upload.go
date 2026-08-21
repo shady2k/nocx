@@ -78,6 +78,22 @@ const (
 	maxUploadTickets   = 64
 	maxUploadTransfers = 128
 
+	// maxRetainedUploadDone bounds the files.uploadDone notifications one
+	// session may accumulate while nothing is attached to it. Retention is
+	// what stops a terminal outcome being lost across a reconnect, and a
+	// bound is what stops it becoming an unbounded queue keyed by a session
+	// nobody ever comes back to.
+	//
+	// 64 is maxUploadTickets, and deliberately the same number: a session
+	// can only accumulate a done for a transfer it started, tickets are
+	// what starting one costs, and §4 limits the product to one transfer at
+	// a time per binding — so this is two orders of magnitude above the
+	// behaviour it has to survive and still a hard ceiling. Overflow drops
+	// the OLDEST: the outcomes a returning person is still looking at are
+	// the recent ones, and a queue that discarded the newest would answer
+	// the reconnect with ancient history.
+	maxRetainedUploadDone = 64
+
 	// uploadDoneRetention is how long a finished transfer stays in the
 	// registry after it ends. It is what makes files.uploadCancel
 	// idempotent over a transfer that has already finished, and what lets
@@ -178,6 +194,39 @@ type filesUploadStream struct {
 
 type filesUploadCancelParams struct {
 	TransferID string `json:"transferId"`
+}
+
+// filesUploadProgressParams is the files.uploadProgress notification
+// (contracts/files.uploadProgress.schema.json). It is an INDICATOR and not
+// a ledger: it is addressed to the binding's session's current subscriber,
+// resolved at emit time, and dropped when there is none, so nothing may be
+// derived from having seen one. Total is the size declared at mint time,
+// carried on every frame so a renderer that missed every earlier one can
+// still draw a bar from a single notification.
+type filesUploadProgressParams struct {
+	TransferID string `json:"transferId"`
+	Bytes      int64  `json:"bytes"`
+	Total      int64  `json:"total"`
+}
+
+// filesUploadDoneParams is the files.uploadDone notification
+// (contracts/files.uploadDone.schema.json) — the transfer's terminal
+// account, and the one thing on this surface that may not be lost.
+//
+// Stranded is a LIST and never a single field, because the sink's promote
+// fallback can leave two paths behind at once: the upload temp and the
+// backup it took of the destination it was about to replace. Flattening it
+// to one name would tell a person about one of the two files on their disk
+// and leave the other unmentioned. It is always an array on the wire, empty
+// rather than absent or null — the same defect class as vault.status's
+// `providers` marshalling as null, which would throw on the renderer's
+// first .map.
+type filesUploadDoneParams struct {
+	TransferID string   `json:"transferId"`
+	Outcome    string   `json:"outcome"`
+	FinalName  string   `json:"finalName"`
+	Error      string   `json:"error,omitempty"`
+	Stranded   []string `json:"stranded"`
 }
 
 // ── validators ────────────────────────────────────────────────────────────
@@ -308,6 +357,12 @@ type runningTransfer struct {
 	// so nothing can ever queue behind it.
 	body chan io.ReadCloser
 	done chan struct{}
+	// progressWake is the transfer's progress mailbox: one slot, written
+	// without blocking, read by the transfer's progress emitter. It carries
+	// no value — the emitter reads the LATEST byte count off rt.bytes — so
+	// a burst of chunks collapses into one notification instead of one per
+	// chunk. See progress and emitUploadProgress.
+	progressWake chan struct{}
 
 	mu      sync.Mutex
 	closer  io.Closer // the claimed body, so cancellation can unblock a stalled Read
@@ -351,13 +406,29 @@ func (rt *runningTransfer) attach(body io.ReadCloser) bool {
 	}
 }
 
-// progress records the running byte total. Task 7 turns this into the
-// files.uploadProgress notification; here it is what makes the transfer's
-// advance observable at all.
+// progress records the running byte total and wakes the emitter.
+//
+// This runs on the SINK's copy loop, once per chunk, so it must cost
+// nothing and must never block: a 256 KiB chunk on a fast local link comes
+// round thousands of times a second, and marshalling a frame per chunk
+// would fill the connection's refreshable queue (outbound.DefaultQueueDepth
+// = 256), which does not merely drop frames — it trips the stall notice the
+// renderer treats as a cue to reconnect. So the byte count is stored and a
+// single-slot mailbox is poked without blocking. At most one progress
+// notification per transfer is ever outstanding: while the emitter is
+// building one, every further chunk overwrites rt.bytes and finds the slot
+// already full, and the one notification that eventually goes out carries
+// the newest count rather than the oldest.
 func (rt *runningTransfer) progress(total int64) {
 	rt.mu.Lock()
 	rt.bytes = total
 	rt.mu.Unlock()
+	select {
+	case rt.progressWake <- struct{}{}:
+	default:
+		// A wake is already pending and will read the count just stored.
+		// This is the coalescing, and it is why the copy loop never waits.
+	}
 }
 
 // finish records the terminal state. It is called exactly once, before
@@ -397,6 +468,19 @@ type uploadRegistry struct {
 	mu        sync.Mutex
 	transfers map[string]*runningTransfer
 	tickets   map[string]*uploadTicket
+	// retained holds the files.uploadDone notifications a session could
+	// not be told about because nothing was attached, in the order they
+	// happened, flushed on the next attach and cleared as each one is
+	// delivered. It is the half of the files.changed precedent that
+	// current-subscriber addressing alone does not give (ws_files.go:939),
+	// and the half that loses TERMINAL outcomes: a dropped uploadDone
+	// leaves the UI saying "uploading" for the rest of the session.
+	//
+	// Keyed by session because that is what a reattach names, and because
+	// it is the lifetime that bounds the map: the entries of a session
+	// that ends are dropped with it (forgetDone), so a key can only exist
+	// while something can still attach to it.
+	retained map[session.ID][]filesUploadDoneParams
 
 	// ttl/ttlSet is the unclaimed-ticket TTL. ttlSet exists so that a test
 	// can ask for zero — expire as soon as the timer goroutine can run —
@@ -700,6 +784,74 @@ func (u *uploadRegistry) pick(match func(*runningTransfer) bool) []*runningTrans
 	return out
 }
 
+// ── retained terminal outcomes ───────────────────────────────────────────
+
+// retainDone keeps one files.uploadDone for a session that has nothing
+// attached. It reports whether the bound evicted an older entry, so the
+// caller can say so out loud — a retention that silently forgets is a
+// retention nobody can trust.
+func (u *uploadRegistry) retainDone(sid session.ID, p filesUploadDoneParams) (evicted bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.retained == nil {
+		u.retained = make(map[session.ID][]filesUploadDoneParams)
+	}
+	q := append(u.retained[sid], p)
+	if len(q) > maxRetainedUploadDone {
+		q = q[len(q)-maxRetainedUploadDone:]
+		evicted = true
+	}
+	u.retained[sid] = q
+	return evicted
+}
+
+// popDone takes the OLDEST retained outcome for a session, so the flush
+// delivers them in the order they happened. It is removed by the take, and
+// pushBackDone is what returns it when the delivery failed — "cleared on
+// delivery" is a claim only if nothing is cleared before one.
+func (u *uploadRegistry) popDone(sid session.ID) (filesUploadDoneParams, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	q := u.retained[sid]
+	if len(q) == 0 {
+		return filesUploadDoneParams{}, false
+	}
+	p := q[0]
+	if len(q) == 1 {
+		delete(u.retained, sid)
+	} else {
+		u.retained[sid] = q[1:]
+	}
+	return p, true
+}
+
+// pushBackDone returns an outcome to the FRONT of the session's queue after
+// a delivery that failed, keeping the order the transfers finished in.
+func (u *uploadRegistry) pushBackDone(sid session.ID, p filesUploadDoneParams) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.retained == nil {
+		u.retained = make(map[session.ID][]filesUploadDoneParams)
+	}
+	u.retained[sid] = append([]filesUploadDoneParams{p}, u.retained[sid]...)
+}
+
+// forgetDone drops a session's retained outcomes. Called from the session
+// teardown path: once the session is gone nothing can ever attach to it, so
+// keeping its outcomes is a leak and not a courtesy.
+func (u *uploadRegistry) forgetDone(sid session.ID) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	delete(u.retained, sid)
+}
+
+// forgetAllDone drops every session's retained outcomes — server shutdown.
+func (u *uploadRegistry) forgetAllDone() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.retained = nil
+}
+
 // ── the D8 teardown path ─────────────────────────────────────────────────
 
 // cancelUploadsFor cancels a set of transfers and waits, BOUNDED, for them
@@ -746,8 +898,13 @@ func (s *WSServer) cancelBindingUploads(bid string) {
 
 // cancelSessionUploads cancels every transfer of one session — the terminal
 // closing, which closes its bindings (spec §5.1).
+// The retained outcomes go with the session, and AFTER the cancels: a
+// transfer cancelled here settles and retains its "cancelled" outcome on
+// the way out, and keeping that for a session nobody can attach to again
+// would be a map entry with no reader.
 func (s *WSServer) cancelSessionUploads(sid session.ID) {
 	s.cancelUploadsFor(s.uploads.pick(func(rt *runningTransfer) bool { return rt.sessionID == sid }))
+	s.uploads.forgetDone(sid)
 }
 
 // cancelAllUploads cancels every transfer — server shutdown. Without it a
@@ -755,6 +912,7 @@ func (s *WSServer) cancelSessionUploads(sid session.ID) {
 // reference nothing will ever release.
 func (s *WSServer) cancelAllUploads() {
 	s.cancelUploadsFor(s.uploads.pick(func(*runningTransfer) bool { return true }))
+	s.uploads.forgetAllDone()
 }
 
 // ── running one transfer ─────────────────────────────────────────────────
@@ -818,6 +976,7 @@ func (s *WSServer) startUpload(rt *runningTransfer, needsBody bool, sink transfe
 		}
 		rt.ticket = ticket
 	}
+	go s.emitUploadProgress(rt)
 	go s.runUpload(rt, sink)
 	return nil
 }
@@ -840,6 +999,7 @@ func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 		case <-rt.ctx.Done():
 			rt.finish(uploadStateCancelled, transfer.Outcome{}, rt.ctx.Err(), s.uploads.clock())
 			s.uploads.retireTicket(rt.ticket)
+			s.settleUpload(rt)
 			return
 		}
 	}
@@ -850,6 +1010,11 @@ func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 	}
 	rt.finish(uploadStateOf(out, err, rt.ctx.Err()), out, err, s.uploads.clock())
 	s.uploads.retireTicket(rt.ticket)
+	// Before the deferred close(rt.done), on every path: anything that
+	// observes a transfer as over — the POST handler, the teardown wait, a
+	// test — must find the terminal outcome already delivered or already
+	// retained, never in flight behind it.
+	s.settleUpload(rt)
 	if err != nil {
 		// The reason and the stranded paths reach the person through
 		// files.uploadDone (Task 7); the log is for the operator, and it
@@ -874,6 +1039,187 @@ func uploadStateOf(out transfer.Outcome, err, ctxErr error) string {
 	default:
 		return uploadStateFailed
 	}
+}
+
+// ── the two notifications (spec §5.3) ────────────────────────────────────
+//
+// They are deliberately NOT symmetric, and the asymmetry is the whole of
+// this section. Progress is live and lossy — current subscriber, resolved
+// at emit time, dropped when there is none. The terminal outcome is
+// retained when there is none and flushed on attach, which is what
+// files.changed's dirty set does (ws_files.go:939, :976) and what
+// current-subscriber addressing alone does not: a lost progress frame costs
+// a bar that jumps, and a lost uploadDone leaves the UI saying "uploading"
+// for the rest of the session about a transfer that ended ten minutes ago.
+
+// emitUploadProgress is one transfer's progress emitter: the goroutine that
+// turns the mailbox rt.progress pokes into notifications. It exists so that
+// the sink's copy loop never marshals, never enqueues and never waits — and
+// so that at most ONE progress notification per transfer is outstanding at
+// a time, whatever the link speed. It ends with the transfer.
+//
+// A frame may still be enqueued between the transfer settling and this loop
+// observing rt.done, so a progress notification can arrive after
+// files.uploadDone. That is admissible by construction rather than by luck:
+// §5.5 derives in-flight state from files.upload's result and
+// files.uploadDone and never from having seen a progress notification, so a
+// late indicator cannot contradict a terminal outcome.
+func (s *WSServer) emitUploadProgress(rt *runningTransfer) {
+	for {
+		select {
+		case <-rt.done:
+			return
+		case <-rt.progressWake:
+			s.notifyUploadProgress(rt)
+		}
+	}
+}
+
+// notifyUploadProgress sends one progress frame to whoever is attached to
+// the transfer's session NOW.
+//
+// Everything about it is droppable, and each drop is a decision rather than
+// an oversight: no session (it is being torn down), no subscriber (the
+// laptop is asleep), or an enqueue the connection refused (its queue is
+// full of PTY output, which is the traffic that must win). Nothing is
+// retained, nothing is retried and nothing is logged — an indicator that
+// announced its own losses would be a ledger with extra steps.
+func (s *WSServer) notifyUploadProgress(rt *runningTransfer) {
+	rx := s.getRx(rt.sessionID)
+	if rx == nil {
+		return
+	}
+	wconn, _ := rx.getSubscriber()
+	if wconn == nil {
+		return
+	}
+	_, _, sent, _ := rt.snapshot()
+	_ = wconn.TryNotify("files.uploadProgress", mustMarshal(filesUploadProgressParams{
+		TransferID: rt.id,
+		Bytes:      sent,
+		Total:      rt.upload.Size,
+	}))
+}
+
+// settleUpload is everything a finished transfer owes the person: the
+// terminal account, and — on a written outcome only — the invalidation that
+// makes the new row appear without anybody pressing anything.
+func (s *WSServer) settleUpload(rt *runningTransfer) {
+	state, out, _, err := rt.snapshot()
+	p := filesUploadDoneParams{
+		TransferID: rt.id,
+		Outcome:    state,
+		FinalName:  out.FinalName,
+		// Always an array, never null and never absent: a nil slice
+		// marshals to null, and the renderer's first .map would throw on
+		// it. Empty is the honest answer for "nothing was left behind".
+		Stranded: out.Stranded,
+	}
+	if p.Stranded == nil {
+		p.Stranded = []string{}
+	}
+	// The reason is carried only for a failure. A cancelled transfer's err
+	// is context.Canceled, which is not a fault and must never be shown to
+	// a person as one: they pressed cancel, or the binding went away.
+	if state == uploadStateFailed && err != nil {
+		p.Error = err.Error()
+	}
+	// The invalidation goes FIRST and the order is load-bearing: a renderer
+	// that re-lists on either notification is never told a transfer is done
+	// over a directory it has not yet been told to re-list. Both are
+	// non-blocking enqueues, so nothing is delayed by the order, and the
+	// two accumulation paths flush in the same order on re-attach
+	// (flushFilesChanged, then flushUploadDone).
+	if state == uploadStateWritten {
+		s.invalidateUploadDest(rt)
+	}
+	s.deliverUploadDone(rt.sessionID, p)
+}
+
+// deliverUploadDone sends the terminal outcome to the session's current
+// subscriber, and RETAINS it when there is none or when the send fails —
+// exactly emitFilesChanged's two accumulation paths (ws_files.go:947), for
+// exactly its reason: the connection that started the transfer is the one
+// most likely to be gone by the time it ends.
+//
+// The one case that is dropped rather than retained is a session that no
+// longer exists. Nothing can attach to it again, so a retained outcome for
+// it would be a map entry with no possible reader — the same answer
+// emitFilesChanged gives when its rx is nil.
+func (s *WSServer) deliverUploadDone(sid session.ID, p filesUploadDoneParams) {
+	rx := s.getRx(sid)
+	if rx == nil {
+		s.log.Debug("upload outcome dropped: the session is gone",
+			"transfer_id", p.TransferID, "outcome", p.Outcome)
+		return
+	}
+	if wconn, _ := rx.getSubscriber(); wconn != nil {
+		if err := wconn.TryNotify("files.uploadDone", mustMarshal(p)); err == nil {
+			return
+		}
+		// The subscriber's socket is going down; a terminal outcome must
+		// not go down with it.
+	}
+	if s.uploads.retainDone(sid, p) {
+		s.log.Warn("retained upload outcomes overflowed; the oldest was dropped",
+			"session_id", sid, "max", maxRetainedUploadDone)
+	}
+}
+
+// flushUploadDone delivers the outcomes a session accumulated while nothing
+// was attached, to the connection that just attached. Oldest first, and
+// each one is cleared only once it has been handed to the connection — a
+// failure part-way through puts the undelivered one back and leaves the
+// rest for the next attach, so "cleared on delivery" stays true rather than
+// becoming "cleared on the attempt".
+//
+// Called from handleAttach after setSubscriber, like the files.changed
+// flush, so the notifications resolve to the connection that just arrived.
+func (s *WSServer) flushUploadDone(sid session.ID, wconn Responder) {
+	for {
+		p, ok := s.uploads.popDone(sid)
+		if !ok {
+			return
+		}
+		if err := wconn.TryNotify("files.uploadDone", mustMarshal(p)); err != nil {
+			s.uploads.pushBackDone(sid, p)
+			return // the socket is dying; whatever remains stays retained
+		}
+	}
+}
+
+// invalidateUploadDest marks the destination directory dirty after a
+// written outcome, so the file the person just sent appears in the panel
+// with nobody pressing anything (spec §5.5, "Refresh").
+//
+// It announces through emitFilesChanged rather than inventing a second
+// refresh path, which buys two things beyond one owner for the concept: a
+// renderer re-lists through files.list exactly as it does for every other
+// change, and an upload that completed while nothing was attached leaves
+// the directory in the SAME dirty set the reconnect already flushes.
+//
+// Only a watched directory is announced — a path nobody is looking at has
+// nothing to refresh — and the rev is absent because nothing has been
+// re-listed here: making it present would mean listing a directory in order
+// to say it should be listed. The poll loop may then announce the same
+// directory once more when its digest moves, which costs one extra listing
+// and is the safe direction the watcher already takes deliberately (a false
+// positive re-lists; a false negative hides the change forever). It is also
+// what makes an OVERWRITE visible at all: same name, same size, and a
+// digest that need not move.
+func (s *WSServer) invalidateUploadDest(rt *runningTransfer) {
+	b := s.filesBindingOf(rt.bindingID)
+	if b == nil || b.watcher == nil {
+		return
+	}
+	w := b.watcher
+	w.mu.Lock()
+	_, watched := w.paths[rt.upload.DestDir]
+	w.mu.Unlock()
+	if !watched {
+		return
+	}
+	s.emitFilesChanged(w, rt.upload.DestDir, "")
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────
@@ -993,6 +1339,10 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			cancel: cancel,
 			body:   make(chan io.ReadCloser, 1),
 			done:   make(chan struct{}),
+			// One slot: the emitter reads the latest byte count off the
+			// transfer, so a second pending wake would only ask it to send
+			// the same number twice.
+			progressWake: make(chan struct{}, 1),
 		}
 		// Skip is the one decision that moves no bytes, so it needs no
 		// ticket: the transfer exists and is already over. Every other

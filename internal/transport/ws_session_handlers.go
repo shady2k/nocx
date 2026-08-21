@@ -40,6 +40,12 @@ type sessionMachine interface {
 	closeSession(sid session.ID, sess session.Session)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
+	// flushUploadDone re-emits the upload outcomes that settled while
+	// nothing was attached (upload design §5.3). Separate from the files
+	// flush because it is a terminal fact rather than an invalidation: a
+	// missed files.changed costs a stale listing the next poll corrects,
+	// and a missed uploadDone leaves the UI saying "uploading" forever.
+	flushUploadDone(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
 	// replayLifecycleFacts re-emits the current lifecycle projection of the
 	// session's lanes on reattach (ADR-0024 decision 8 / AD-9). One narrow
@@ -831,6 +837,13 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// at emit time, and a reconnect is exactly when the accumulation was
 		// made).
 		h.machine.flushFilesChanged(sid, wconn)
+
+		// Uploads (upload design §5.3): the same reasoning one step
+		// further. A transfer is bounded by its SESSION, so it runs on
+		// through a WebSocket drop and can settle with nothing attached;
+		// the outcome was retained then, and this is the attach it was
+		// retained for.
+		h.machine.flushUploadDone(sid, wconn)
 
 		// Lifecycle (ADR-0024 decision 8): a reattached frontend must resume
 		// the existing domain, so its current projection is re-emitted to

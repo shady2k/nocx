@@ -215,6 +215,16 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/files.uploadDone.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.uploadProgress.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/ledger.artifact.ts",
       "symbol": ""
     },

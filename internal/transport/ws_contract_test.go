@@ -1,10 +1,12 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -3010,6 +3012,170 @@ func TestFilesUploadCancel_OverTheWireConformsToContract(t *testing.T) {
 	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateCancelled {
 		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
 	}
+}
+
+func TestFilesUploadProgress_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadProgress.schema.json")
+	cases := map[string]filesUploadProgressParams{
+		// Mid-transfer: the ordinary frame.
+		"in flight": {TransferID: strings.Repeat("a1", 16), Bytes: 4096, Total: 1 << 20},
+		// Nothing confirmed yet — the first chunk has not landed.
+		"at zero": {TransferID: strings.Repeat("b2", 16), Bytes: 0, Total: 1 << 20},
+		// An empty file is a file: total 0 must not be an omitempty hole.
+		"an empty file": {TransferID: strings.Repeat("c3", 16), Bytes: 0, Total: 0},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.uploadProgress DTO")
+		})
+	}
+}
+
+// The real progress notification off the real socket. The sink holds inside
+// Put after reporting, so the frame is guaranteed rather than raced: the
+// emitter chooses between the progress mailbox and the transfer's done
+// channel, and a transfer that could settle first would legitimately emit
+// nothing.
+func TestFilesUploadProgress_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadProgress.schema.json")
+	sink := newPausingSink()
+	e := newUploadTestEnvWithSink(t, sink)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	params := uploadParams(bid, dir, "watched.bin", 4096)
+	params["onExists"] = "skip" // the branch that needs no body
+	started := callUpload(t, e.conn, params, 3).mustResult(t)
+
+	<-sink.reported
+	raw := readNotification(t, e.conn, "files.uploadProgress", wantWithin)
+	validateJSON(t, schema, raw, "files.uploadProgress params (real socket)")
+
+	var got filesUploadProgressParams
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TransferID != started.TransferID {
+		t.Errorf("transferId = %q, want %q", got.TransferID, started.TransferID)
+	}
+	if got.Total != 4096 {
+		t.Errorf("total = %d, want the declared size 4096", got.Total)
+	}
+	sink.release()
+	awaitUploadState(t, e.ws, started.TransferID)
+}
+
+func TestFilesUploadDone_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadDone.schema.json")
+	cases := map[string]filesUploadDoneParams{
+		"written": {
+			TransferID: strings.Repeat("a1", 16), Outcome: uploadStateWritten,
+			FinalName: "report.pdf", Stranded: []string{},
+		},
+		// keepBoth renamed it, and the backup unlink failed afterwards: a
+		// success that still stranded a path (§6).
+		"written and stranded": {
+			TransferID: strings.Repeat("b2", 16), Outcome: uploadStateWritten,
+			FinalName: "report (1).pdf", Stranded: []string{"/srv/.report.pdf.nocx-bak"},
+		},
+		"skipped": {
+			TransferID: strings.Repeat("c3", 16), Outcome: uploadStateSkipped, Stranded: []string{},
+		},
+		"cancelled carries no error": {
+			TransferID: strings.Repeat("d4", 16), Outcome: uploadStateCancelled, Stranded: []string{},
+		},
+		// The fallback lost its second rename: BOTH paths, which is why
+		// stranded is a list.
+		"failed": {
+			TransferID: strings.Repeat("e5", 16), Outcome: uploadStateFailed,
+			Error:    "transfer: promote /srv/report.pdf: connection lost",
+			Stranded: []string{"/srv/.report.pdf.nocx-tmp", "/srv/.report.pdf.nocx-bak"},
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.uploadDone DTO")
+			// stranded must be [] and never null: a nil slice marshals to
+			// null and the renderer's first .map would throw on it. The DTO
+			// cases above all pass a non-nil slice, so this is the check
+			// that the SERVER never builds one that does not.
+			if bytes.Contains(raw, []byte(`"stranded":null`)) {
+				t.Errorf("stranded marshalled as null: %s", raw)
+			}
+		})
+	}
+}
+
+// The real terminal notification off the real socket, in both of the ways
+// it can reach a person: delivered live, and RETAINED across a reconnect
+// and flushed on attach. The second is the one an addressing defect hides
+// in — an outcome addressed like progress would be emitted into nothing.
+func TestFilesUploadDone_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadDone.schema.json")
+
+	t.Run("live, failed with stranded paths", func(t *testing.T) {
+		sink := &failingSink{
+			err:      errors.New("transfer: promote /srv/f: connection lost"),
+			stranded: []string{"/srv/.f.nocx-tmp", "/srv/.f.nocx-bak"},
+		}
+		e := newUploadTestEnvWithSink(t, sink)
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		bid := e.openBinding(t, sid, dir, 2)
+		body := []byte("bytes that never land")
+		started := callUpload(t, e.conn, uploadParams(bid, dir, "f", int64(len(body))), 3).mustResult(t)
+		go postUploadAsync(e.ws, started.Ticket, body)
+
+		raw := readNotification(t, e.conn, "files.uploadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.uploadDone params (real socket, live)")
+		var got filesUploadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Outcome != uploadStateFailed || got.Error == "" || len(got.Stranded) != 2 {
+			t.Fatalf("got %+v; want a failed outcome carrying its reason and both stranded paths", got)
+		}
+	})
+
+	t.Run("retained across a reconnect, written", func(t *testing.T) {
+		e := newUploadTestEnv(t)
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		bid := e.openBinding(t, sid, dir, 2)
+		body := []byte("finished while nobody was watching")
+		started := callUpload(t, e.conn, uploadParams(bid, dir, "late.txt", int64(len(body))), 3).mustResult(t)
+
+		dropSubscriber(t, e, sid)
+		if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
+			t.Fatalf("POST /upload = %d %q, want 200", code, resp)
+		}
+		awaitUploadState(t, e.ws, started.TransferID)
+
+		connB := reattach(t, e, sid, 4)
+		raw := readNotification(t, connB, "files.uploadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.uploadDone params (real socket, flushed on attach)")
+		var got filesUploadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.TransferID != started.TransferID || got.Outcome != uploadStateWritten || got.FinalName != "late.txt" {
+			t.Fatalf("got %+v; want the written outcome of %s", got, started.TransferID)
+		}
+		// The empty case of the null check: a transfer that stranded
+		// nothing must still send [].
+		if got.Stranded == nil {
+			t.Error("stranded is null on the wire — the renderer's first .map would throw")
+		}
+	})
 }
 
 func TestFilesChanged_DTOConformsToContract(t *testing.T) {

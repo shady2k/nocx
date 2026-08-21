@@ -146,8 +146,10 @@ var (
 	// from every other failure: replacing a destination without the
 	// extension needs a non-atomic fallback, and a fallback that cannot
 	// tell "the server lacks the extension" from "the rename failed" either
-	// never runs or runs when it must not (design D6).
-	// TODO(nocx-9le.5.1): wrap transfer.ErrPosixRenameUnsupported once both land.
+	// never runs or runs when it must not (design D6). The sink keys on
+	// internal/transfer's own sentinel; the two are joined by the adapter
+	// the composition root builds (internal/app, fsUploadLease), because
+	// neither this package nor internal/transfer may import the other.
 	ErrPosixRenameUnsupported = errors.New("ssh: server does not support posix-rename@openssh.com")
 )
 

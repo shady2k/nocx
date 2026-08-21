@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -50,6 +51,7 @@ import (
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
@@ -1293,18 +1295,91 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			opts = append(opts, sftp.WithRoot(rootPath))
 		}
 		return &endpointAttestedProvider{
-			Provider:   sftp.New(fs, opts...),
-			endpointID: endpointIDFor(sess),
+			remoteProvider: sftp.New(fsUploadLease{FSConn: fs}, opts...),
+			endpointID:     endpointIDFor(sess),
 		}, nil
 	}
+}
+
+// fsUploadLease presents an SFTP lease as the write surface
+// internal/transfer declares. It is the one place the two vocabularies meet,
+// and it exists because neither package may know the other: internal/ssh
+// must not import internal/transfer, and internal/transfer deliberately
+// declares its own RemoteFS rather than importing internal/ssh
+// (transfer.go's package doc). The composition root is where a translation
+// between two module boundaries belongs.
+//
+// It translates two things and forwards everything else untouched.
+//
+// The SHAPE: Create returns ssh.FSFile where RemoteFS asks for
+// transfer.RemoteFile — one shape under two names, and Go matches result
+// types by identity, so the conversion has to be a method rather than an
+// assertion.
+//
+// The VOCABULARY: "this server has no posix-rename@openssh.com" arrives as
+// ssh.ErrPosixRenameUnsupported and the sink's fallback keys on
+// transfer.ErrPosixRenameUnsupported. Untranslated, a server without the
+// extension would read as an ordinary promote failure, the temp would be
+// removed and the upload would fail — on every such server, with both
+// packages' tests green, because each fakes its own sentinel. The
+// translation ADDS the transfer vocabulary and keeps the lease's, so a log
+// still says which lease said it.
+//
+// The contract that needs no translation is worth naming too, because it is
+// the other one RemoteFS documents and the compiler cannot check: a missing
+// path must satisfy errors.Is(err, fs.ErrNotExist), which the sink's
+// "nothing to back up" branch keys on. pkg/sftp normalises
+// SSH_FX_NO_SUCH_FILE to os.ErrNotExist (client.go:2237) and fsConn.classify
+// passes an unclassified error through unchanged, so it already holds; this
+// adapter's job there is not to break it. Both directions are asserted in
+// fs_upload_lease_test.go.
+type fsUploadLease struct {
+	ssh.FSConn
+}
+
+func (l fsUploadLease) Create(path string) (transfer.RemoteFile, error) {
+	f, err := l.FSConn.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (l fsUploadLease) PosixRename(old, new string) error {
+	err := l.FSConn.PosixRename(old, new)
+	if err != nil && errors.Is(err, ssh.ErrPosixRenameUnsupported) {
+		return fmt.Errorf("%w: %w", transfer.ErrPosixRenameUnsupported, err)
+	}
+	return err
+}
+
+// remoteProvider is what the factory builds for a remote session: a
+// filesystem this backend can read AND write. The two halves are named
+// together because on a remote session they are not separable — a tab that
+// can list a host is a tab a file can be uploaded to (upload design R1) —
+// and because naming them together is what makes the day sftp.Provider
+// loses Sink a compile error here rather than a remote tab quietly refusing
+// every upload.
+type remoteProvider interface {
+	filesystem.Provider
+	filesystem.Uploader
 }
 
 // endpointAttestedProvider wraps a remote provider with the endpoint
 // attestation (spec §5.1, D4/D6). The transport reads it through the
 // optional filesystemEndpointAttester seam; a local provider never carries
 // it, which is what makes files.reveal a local-only capability.
+//
+// It embeds remoteProvider rather than filesystem.Provider, and the
+// difference is load-bearing: embedding an interface promotes exactly that
+// interface's methods, so a wrapper embedding filesystem.Provider has no
+// Sink at all however writable the value inside it is. files.open asserts
+// filesystem.Uploader on what the factory returned — this wrapper — so the
+// narrower embedding would drop the write capability there, with every
+// other files.* call still working and the only symptom being uploads
+// refusing on a remote tab.
 type endpointAttestedProvider struct {
-	filesystem.Provider
+	remoteProvider
 	endpointID string
 }
 

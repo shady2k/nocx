@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transfer"
 )
 
 // Binding is opaque outside this package: its provider is unexported, so
@@ -20,6 +22,12 @@ type Binding struct {
 	sessionID  session.ID
 	endpointID string // attestation; empty for local
 	provider   Provider
+	// sink is the binding's write half, or nil. It is nil exactly when the
+	// provider did not implement Uploader, which is what makes rule R1 a
+	// missing field rather than a condition a handler must remember to
+	// check (design D7). Immutable: it is set at Register and read for the
+	// binding's whole life.
+	sink transfer.Sink
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -51,6 +59,15 @@ type Handle interface {
 	List(ctx context.Context, path string, page Page) (Listing, error)
 	Read(ctx context.Context, path string, maxBytes int64) (Content, error)
 	Watch(ctx context.Context, paths []string) (WatchMode, error)
+	// Upload writes one file onto the machine this binding views, through
+	// the binding's sink. A binding without one refuses with
+	// *ErrUploadUnsupported (rule R1). progress is called with the running
+	// byte total after each chunk that reached the far side and may be nil.
+	//
+	// The returned Outcome is meaningful even when the error is not nil:
+	// a failed transfer names what it left behind, and an error and a
+	// non-empty Outcome.Stranded are not alternatives.
+	Upload(ctx context.Context, u transfer.Upload, r io.Reader, progress func(int64)) (transfer.Outcome, error)
 }
 
 // Caller is who is asking. filesystem declares it and transport satisfies it —
@@ -78,7 +95,14 @@ func New() *Registry { return &Registry{bindings: make(map[string]*Binding)} }
 // nocx-hl3): a binding id cannot be guessed or enumerated, and it is not a
 // bearer token — Acquire re-checks ownership on every call. endpointID is
 // the attestation; leave it empty for local. The composition layer
-func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string) (string, error) {
+//
+// sink is the binding's write half and is nil for a binding that cannot be
+// written to — every local one, and any remote provider that did not
+// implement Uploader. It is a parameter rather than something derived here
+// because Register takes a Provider: the assertion belongs where the
+// concrete provider is still in hand, beside the endpoint attestation
+// (design D7).
+func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string, sink transfer.Sink) (string, error) {
 	if p == nil || isNilProvider(p) {
 		return "", errors.New("filesystem: Register with nil provider")
 	}
@@ -91,6 +115,7 @@ func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string)
 		sessionID:  sessionID,
 		endpointID: endpointID,
 		provider:   p,
+		sink:       sink,
 		watches:    make(map[string]Watch),
 	}
 	b.cond = sync.NewCond(&b.mu)
@@ -352,6 +377,25 @@ func (h *handle) Watch(ctx context.Context, paths []string) (WatchMode, error) {
 	}
 	defer drop()
 	return h.b.swapWatches(ctx, paths)
+}
+
+// Upload writes one file through the binding's sink.
+//
+// The refusal is the upload design's rule R1 expressed as a nil field rather
+// than as a condition somebody must remember to check: a local binding never
+// received a sink, so there is no check here to forget and no route by which
+// a local tab could be written to. The provider is not touched on that path
+// — a refusal costs no round trip.
+func (h *handle) Upload(ctx context.Context, u transfer.Upload, r io.Reader, progress func(int64)) (transfer.Outcome, error) {
+	drop, err := h.begin()
+	if err != nil {
+		return transfer.Outcome{}, err
+	}
+	defer drop()
+	if h.b.sink == nil {
+		return transfer.Outcome{}, &ErrUploadUnsupported{BindingID: h.b.id}
+	}
+	return h.b.sink.Put(ctx, u, r, progress)
 }
 
 // release drops the use-guard. It is idempotent: the second call is a no-op,

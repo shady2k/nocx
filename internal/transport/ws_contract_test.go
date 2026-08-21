@@ -2789,6 +2789,46 @@ func TestFilesUpload_DTOConformsToContract(t *testing.T) {
 	}
 }
 
+// TestFilesUpload_ContractRefusesValuesItOnlyUsedToDescribe. The schema
+// described transferId as 32 lowercase hex, ticket as 64 and url as
+// /upload/{ticket}, and typed all three as unrestricted strings — so a
+// regression emitting an empty id, an uppercase ticket or an unrelated URL
+// satisfied every conformance check in this file. additionalProperties:false
+// makes the SHAPE exact; these patterns are what make the security-relevant
+// VALUES exact, and a pattern with nothing asserting it refuses anything is
+// the same theatre as a schema without them.
+func TestFilesUpload_ContractRefusesValuesItOnlyUsedToDescribe(t *testing.T) {
+	schema := loadSchema(t, "files.upload.schema.json")
+	good := strings.Repeat("ab", uploadTicketHexLen/2)
+	cases := map[string]any{
+		"an empty transfer id": filesUploadStarted{TransferID: ""},
+		"a transfer id of the wrong width": filesUploadStarted{
+			TransferID: "0123456789abcdef",
+		},
+		"an uppercase ticket": filesUploadStream{
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     strings.ToUpper(good),
+			URL:        "/upload/" + strings.ToUpper(good),
+		},
+		"a url that is not this route": filesUploadStream{
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     good,
+			URL:        "https://elsewhere.example.com/collect",
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("the contract accepted %s:\n%s", name, raw)
+			}
+		})
+	}
+}
+
 // The one that matters: all three branches taken off the real socket, from
 // the real handler, against the real schema. A payload the test itself
 // built proves the struct is well-formed, not that the server sends it.

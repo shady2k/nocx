@@ -6,13 +6,21 @@
 // tree lives HERE and is not duplicated into a sidebar view, because two
 // trees would be two owners of one selection.
 //
-// The environment is deliberately a statement rather than a control. Design
-// §6.5 has an environment answer both "where" and "how to get there", and the
-// api.* contract carries no environment method yet — `internal/transport`'s
-// send handler says so in as many words: "the route is the direct one … until
-// then every send goes out from this machine". A dropdown over nothing would
-// be a control that governs nothing, which is how a feature that does not
-// exist survives a release. The surface says what is true instead.
+// The environment WAS deliberately a statement rather than a control, on the
+// argument that the api.* contract carried no environment method — "a
+// dropdown over nothing would be a control that governs nothing". The
+// argument was right and the premise was wrong: `api.request.send` has
+// accepted `envRelPath` since it was written, and what was missing was the
+// renderer's half. So the statement was a surface saying "there is no route
+// to choose" while the send path resolved variables against an environment
+// nobody could name, and every collection whose URL is `{{baseUrl}}/…` —
+// nearly every Postman export — failed from the product while working
+// perfectly over the control plane (nocx-pnvnn).
+//
+// It is a control now, over the collection's own environments. It is absent
+// rather than empty for a collection that has none, for the reason the old
+// comment gives: a picker with nothing in it is a control that governs
+// nothing.
 
 import { For, Show, createSignal } from 'solid-js'
 import { Badge } from '../ui/badge'
@@ -23,6 +31,7 @@ import { IconButton } from '../ui/icon-button'
 import { CloseIcon, RefreshIcon } from '../ui/icons'
 import { MarkerList } from '../ui/marker-list'
 import { Section } from '../ui/section'
+import { Select } from '../ui/select'
 import { Stack } from '../ui/stack'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
@@ -61,6 +70,20 @@ export function ApiPane(props: ApiPaneProps) {
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const picker = props.openDirectory
   const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(new Set())
+  // The Import section's disclosure. A REAL signal, because Section's
+  // collapsible variant is CONTROLLED — it renders `open` and calls
+  // `onToggle`, and it owns neither. It was written `open={false}
+  // onToggle={() => undefined}`, which is a disclosure with no state owner:
+  // the button reported "collapsed" for ever and the two fields behind it
+  // were never in the document, so the panel's only Postman entrance could
+  // not be reached at all (nocx-6siis).
+  //
+  // Closed to begin with, and that part was right: the section a person
+  // needs is Collections, and Import is the door they open once per
+  // collection. The state is local rather than in the store because it does
+  // not have to outlive the pane — unlike the Git panel's, which does
+  // (ui/section.tsx says why that one is in a store).
+  const [importOpen, setImportOpen] = createSignal(false)
   const [curlLine, setCurlLine] = createSignal('')
   const [postmanFile, setPostmanFile] = createSignal('')
   const [postmanDest, setPostmanDest] = createSignal('')
@@ -370,14 +393,52 @@ export function ApiPane(props: ApiPaneProps) {
           </For>
 
           <Section title="Environment">
-            <p class="api-workbench__note">
-              An environment answers where a request goes and how to reach it, and the api.* control
-              plane does not carry one yet. Until it does, every send goes out from this machine,
-              direct — there is no route to choose and nothing here pretends otherwise.
-            </p>
+            <Show
+              when={store.environments().length > 0}
+              fallback={
+                <p class="api-workbench__note">
+                  No environments in this collection. A request goes out exactly as its file has it,
+                  from this machine — so a URL written in <code>{'{{variables}}'}</code> has nothing
+                  to resolve against until the folder has an <code>environments/</code> file.
+                </p>
+              }
+            >
+              {/* The kit's Select, in the wrapper request-form.tsx uses for
+                  its own three. The Section's heading is the label: a
+                  <Field> would name it "Environment" a second time, two
+                  metres under an <h2> that already does. */}
+              <div class="api-workbench__environment" data-api-field="environment">
+                <Select
+                  value={store.activeEnvironment()}
+                  onChange={(relPath) => store.setEnvironment(relPath)}
+                  options={store.environments().map((env) => ({
+                    // The VALUE is the path, because that is what addresses
+                    // the file on api.request.send; the LABEL is the name
+                    // inside it, because that is what the person wrote. The
+                    // two are separate facts and neither is derived from the
+                    // other.
+                    value: env.relPath,
+                    label: env.name,
+                  }))}
+                  placeholder="None — send the request as written"
+                  placeholderValue=""
+                />
+              </div>
+              <p class="api-workbench__note">
+                Where the request goes and how it is reached, from one record (§6.5) — so an address
+                cannot drift from its route. The name of the environment a run actually went out
+                under is on the run.
+              </p>
+            </Show>
           </Section>
 
-          <Section title="Import" collapsible open={false} onToggle={() => undefined}>
+          <Section
+            id="api-import"
+            title="Import"
+            collapsible
+            open={importOpen()}
+            onToggle={() => setImportOpen((was) => !was)}
+          >
             <TextField
               id="api-import-curl"
               label="curl command line"

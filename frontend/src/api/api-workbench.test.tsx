@@ -23,16 +23,20 @@ import { apiSidebarAction, openApiWorkbench, registerApiSurface } from './index'
 import type { ApiWorkbenchServices } from './api-client'
 import { RpcError } from '../dispatcher'
 import type { PaneHost } from '../pane-content'
+import type { ApiEnvironmentRef } from './api-model'
 import {
   COLLECTION_PATH,
   CREATED_HANDLE,
   CREATED_NAME,
   CREATE_REL_PATH,
+  DEV_ENV,
   HANDLE,
   LIST_REL_PATH,
+  PROD_ENV,
   REQUEST,
   SECRET_PLACEHOLDER,
   SECRET_VALUE,
+  collectionFixture,
   collectionsFixture,
   createdFixture,
   exchangeFixture,
@@ -217,14 +221,12 @@ describe('the workbench notices the folder changed', () => {
     list.mockResolvedValue({
       collections: [
         collectionsFixture({
-          collection: {
-            name: 'acme-api',
+          collection: collectionFixture({
             requests: [
               { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
               { relPath: 'users/delete.json', name: 'delete', method: 'DELETE' },
             ],
-            malformed: [],
-          },
+          }),
         }),
       ],
     })
@@ -471,7 +473,9 @@ describe('a request goes out from the workbench', () => {
 
     fireEvent.click(button('Send'))
 
-    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH))
+    // No environment: the default fixture's collection declares none, so the
+    // send names none — the request as written, on the direct route.
+    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
     await vi.waitFor(() => expect(runCards()).toHaveLength(1))
   })
 
@@ -1003,6 +1007,166 @@ describe('the raw view and the body', () => {
 
     await vi.waitFor(() => expect(runCards()[1].textContent).toContain('HTTP/1.1 201 Created'))
     expect(runCards()[0].textContent).not.toContain('── request ──')
+  })
+})
+
+// ── The Import section has an entrance ────────────────────────────────────
+//
+// nocx-6siis. The section was written `collapsible open={false} onToggle={()
+// => undefined}` — a literal and a no-op — so the disclosure reported
+// "collapsed" for ever and the body behind it was never in the document at
+// all. Measured in the container: `aria-expanded` stayed "false" across 14
+// polls after a real click, in two runs.
+//
+// WHY NOTHING CAUGHT IT. All four `importPostman` call sites in
+// `frontend/src` drove the CLIENT or the STORE; not one drove the entrance.
+// That is AGENTS.md's first testing rule in its exact shape — every unit
+// correct, the user's task impossible — so these two go through the door.
+
+describe('the Import section is a door a person can open', () => {
+  it('opens on a click, closes on the next, and says which it is', async () => {
+    const { bar } = await mountApp()
+    await openWorkbench(bar)
+
+    // aria-expanded is the disclosure's own account of whether its body is on
+    // screen (ui/section.tsx), so it answers the question directly rather
+    // than being inferred from a field appearing.
+    expect(button('Import').getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() => expect(button('Import').getAttribute('aria-expanded')).toBe('true'))
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() => expect(button('Import').getAttribute('aria-expanded')).toBe('false'))
+  })
+
+  it('a Postman export is imported through it — entrance, fields, confirm', async () => {
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({ importPostman })
+    await openWorkbench(bar)
+
+    // Not merely hidden: a collapsed Section does not render its body, so
+    // there is nothing to type into until the door is opened.
+    expect(workbench().querySelector('#api-import-postman-file')).toBeNull()
+
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() => field('api-import-postman-file'))
+
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
+    fireEvent.click(button('Import Postman export'))
+
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith('/w/acme.json', '/w/acme-api'),
+    )
+  })
+})
+
+// ── The environment a request goes out under ──────────────────────────────
+//
+// nocx-pnvnn. `envRelPath` appeared NOWHERE in frontend/ or contracts/: the
+// send path resolved variables against an environment the renderer had no
+// way to name, so a collection whose URL is `{{baseUrl}}/…` — nearly every
+// Postman export — failed from the product (`-32603 "{{baseUrl}}/users" is
+// not an absolute URL`) while working perfectly over the control plane.
+//
+// So these drive the CHOICE, not the client. A dropdown that exists and
+// cannot be reached is the same defect one layer up, and a test that called
+// `store.send()` with a path it supplied itself would prove the client can
+// spell envRelPath and nothing about whether a person can choose one.
+
+/** The environment picker, as a person reaches it — and it is absent, not
+ *  disabled, for a collection that has no environments at all. */
+function environmentPicker(): HTMLSelectElement | null {
+  return workbench().querySelector<HTMLSelectElement>('[data-api-field="environment"] select')
+}
+
+/** Open the workbench on a collection with the given environments, and put
+ *  the worked example in the form. */
+async function openRequestWithEnvironments(
+  envs: ApiEnvironmentRef[],
+  over: Partial<ApiWorkbenchServices> = {},
+): Promise<{ sendRequest: ReturnType<typeof vi.fn> }> {
+  const sendRequest = vi.fn().mockResolvedValue(sendFixture())
+  const { bar } = await mountApp({
+    listCollections: vi.fn().mockResolvedValue({
+      collections: [collectionsFixture({ collection: collectionFixture({ environments: envs }) })],
+    }),
+    sendRequest,
+    ...over,
+  })
+  await openRequest(bar)
+  return { sendRequest }
+}
+
+describe('the environment a request goes out under', () => {
+  it('one environment needs no choosing — the send carries it', async () => {
+    const { sendRequest } = await openRequestWithEnvironments([DEV_ENV])
+
+    // The picker is there and already on it. A collection with exactly one
+    // environment has no choice in it, and starting on None would make every
+    // imported collection fail its first Send on a variable the folder can
+    // answer.
+    await vi.waitFor(() => expect(environmentPicker()?.value).toBe(DEV_ENV.relPath))
+
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() =>
+      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, DEV_ENV.relPath),
+    )
+  })
+
+  it('a person chooses, and the NEXT send goes out under what they chose', async () => {
+    const { sendRequest } = await openRequestWithEnvironments([DEV_ENV, PROD_ENV])
+
+    const picker = await vi.waitFor(() => {
+      const el = environmentPicker()
+      if (!el) throw new Error('no environment picker')
+      return el
+    })
+    // Several environments and nothing chosen: NONE, deliberately. The first
+    // in a list is not a choice a person made, and one of them is usually
+    // production.
+    expect(picker.value).toBe('')
+    expect([...picker.options].map((o) => o.textContent)).toContain(PROD_ENV.name)
+
+    picker.value = PROD_ENV.relPath
+    fireEvent.change(picker)
+
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() =>
+      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, PROD_ENV.relPath),
+    )
+  })
+
+  it('choosing None again sends the request as written', async () => {
+    const { sendRequest } = await openRequestWithEnvironments([DEV_ENV])
+    await vi.waitFor(() => expect(environmentPicker()?.value).toBe(DEV_ENV.relPath))
+
+    const picker = environmentPicker()
+    if (!picker) throw new Error('no environment picker')
+    picker.value = ''
+    fireEvent.change(picker)
+
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
+  })
+
+  it('a collection with no environments offers no picker and says so', async () => {
+    await openRequestWithEnvironments([])
+    expect(environmentPicker()).toBeNull()
+    expect(workbench().textContent).toContain('No environments in this collection')
+  })
+
+  it('the run says which environment answered, in the words the BACKEND used', async () => {
+    // Not an echo of what the renderer asked for: it names an environment by
+    // its PATH and the name lives inside the file, so only the result can say
+    // which record answered. The fixture's name is deliberately not the
+    // file's stem, so a renderer deriving one from the other fails here.
+    const sendRequest = vi.fn().mockResolvedValue(sendFixture({}, DEV_ENV.name))
+    await openRequestWithEnvironments([DEV_ENV], { sendRequest })
+    await vi.waitFor(() => expect(environmentPicker()?.value).toBe(DEV_ENV.relPath))
+
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+    expect(runCards()[0].textContent).toContain(DEV_ENV.name)
   })
 })
 

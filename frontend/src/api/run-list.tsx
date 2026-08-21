@@ -77,6 +77,16 @@ function Run(props: { run: ApiRun; onView: (id: number, view: ApiRunView) => voi
         <span class="api-run__url" title={run().url}>
           {run().url}
         </span>
+        {/* Which environment answered — in the BACKEND's words, off the send
+            result. Absent when the send named none, which is a request that
+            went out exactly as its file has it; a badge reading "None" would
+            be a label on the ordinary case. It is a Badge and not a second
+            vocabulary for one: the method beside it is one too. */}
+        <Show when={run().environment !== ''}>
+          <span class="api-run__environment">
+            <Badge tone="neutral">{run().environment}</Badge>
+          </span>
+        </Show>
         <Show
           when={response()}
           fallback={

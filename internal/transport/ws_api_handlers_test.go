@@ -11,10 +11,12 @@ package transport
 // unconditionally.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -149,6 +151,58 @@ func TestAPIRequestSend_TheEnvironmentsRouteAndAddressReachTheSender(t *testing.
 	}
 }
 
+// The result SAYS which environment answered, and it says it in the name the
+// FILE declares rather than in the path the caller named. That closes the
+// loop the renderer cannot close on its own: a run list drawn from what the
+// caller believed it asked for would be `vault.status.defaultProvider` in
+// reverse — a value one side writes and the other never reads back.
+//
+// It is asserted off the socket for the same reason. Every case here is a
+// real send through the real method, and the third one is the pair AGENTS.md
+// asks for: for every "answers X when an environment is named" there is the
+// one where none is.
+func TestAPIRequestSend_TheResultNamesTheEnvironmentThatAnswered(t *testing.T) {
+	sender := &recordingSender{}
+	conn := newAPIWSServerWithSender(t, sender)
+	root := apiEnvironmentFolder(t)
+	handle := openAPICollection(t, conn, root, 1)
+
+	environmentOf := func(t *testing.T, params map[string]any, id int) string {
+		t.Helper()
+		resp := vaultCall(t, conn, "api.request.send", params, id)
+		if resp.Error != nil {
+			t.Fatalf("api.request.send: %+v", resp.Error)
+		}
+		var got struct {
+			Environment string `json:"environment"`
+		}
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("decode send: %v", err)
+		}
+		return got.Environment
+	}
+
+	if got := environmentOf(t, map[string]any{
+		"handle": handle, "relPath": "users.json", "envRelPath": "environments/prod.json",
+	}, 2); got != "prod" {
+		t.Errorf("environment = %q, want %q — the name inside the file", got, "prod")
+	}
+	if got := environmentOf(t, map[string]any{
+		"handle": handle, "relPath": "users.json", "envRelPath": "environments/dev.json",
+	}, 3); got != "dev" {
+		t.Errorf("environment = %q, want %q", got, "dev")
+	}
+	// No environment named: "" rather than a guess, which is the request as
+	// written on the direct route and an ordinary state (§6.2).
+	direct := apiCollectionFolder(t, "https://example.test/ping")
+	directHandle := openAPICollection(t, conn, direct, 4)
+	if got := environmentOf(t, map[string]any{
+		"handle": directHandle, "relPath": "ping.json",
+	}, 5); got != "" {
+		t.Errorf("environment = %q, want \"\" — no environment was named", got)
+	}
+}
+
 // No environment named is the direct route and the request as written: the
 // pane sends before anybody has configured anything.
 func TestAPIRequestSend_WithNoEnvironmentIsStillTheDirectRoute(t *testing.T) {
@@ -218,6 +272,214 @@ func TestAPIRequestSend_RefusesAnEnvironmentPathTheCollectionDoesNotOwn(t *testi
 	}
 	if got := sender.count(); got != 0 {
 		t.Errorf("the sender was asked to send %d times, want 0", got)
+	}
+}
+
+// ─── the environments a person can choose between ──────────────────────────
+//
+// nocx-pnvnn. api.request.send has accepted `envRelPath` since it was
+// written, and the renderer had no way to learn that any environment
+// existed: apicoll.ListEnvironments had no caller anywhere outside apicoll's
+// own tests, so every send went out with no environment and a collection
+// whose URL is `{{baseUrl}}/…` — nearly every Postman export — failed from
+// the product while working perfectly over the control plane. These are the
+// wire half; the seam a person reaches is driven in
+// frontend/src/api/api-workbench.test.tsx.
+
+// The listing NAMES the environments, off the real socket. A test that
+// validated a payload it built itself would prove the struct is well formed
+// and say nothing about whether the server sends it — which is the defect
+// this whole check exists for.
+func TestAPICollections_TheWireNamesTheEnvironmentsAPersonCanChooseBetween(t *testing.T) {
+	conn := newAPIWSServerWithSender(t, &recordingSender{})
+	root := apiEnvironmentFolder(t)
+
+	openResp := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 1)
+	if openResp.Error != nil {
+		t.Fatalf("api.collections.open: %+v", openResp.Error)
+	}
+	var opened struct {
+		Handle     string `json:"handle"`
+		Collection struct {
+			Environments []struct {
+				RelPath string `json:"relPath"`
+				Name    string `json:"name"`
+			} `json:"environments"`
+		} `json:"collection"`
+	}
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	got := map[string]string{}
+	for _, e := range opened.Collection.Environments {
+		got[e.RelPath] = e.Name
+	}
+	want := map[string]string{
+		"environments/dev.json":    "dev",
+		"environments/nobase.json": "nobase",
+		"environments/prod.json":   "prod",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("environments = %+v, want %+v", got, want)
+	}
+
+	// And the SAME folder answers the same way through the listing, because
+	// the panel re-lists after every change on disk and a picker that emptied
+	// on the next refresh would be a control that governs nothing.
+	listResp := vaultCall(t, conn, "api.collections.list", map[string]any{}, 2)
+	if listResp.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listResp.Error)
+	}
+	var listed struct {
+		Collections []struct {
+			Collection struct {
+				Environments []struct {
+					RelPath string `json:"relPath"`
+					Name    string `json:"name"`
+				} `json:"environments"`
+			} `json:"collection"`
+		} `json:"collections"`
+	}
+	if err := json.Unmarshal(listResp.Result, &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.Collections) != 1 || len(listed.Collections[0].Collection.Environments) != 3 {
+		t.Fatalf("listing carried %+v, want the same three environments", listed.Collections)
+	}
+}
+
+// The environment's VALUES are not on the wire, and the assertion is on the
+// serialised bytes rather than on a decoded struct: a field nobody names is
+// a field whose presence nobody notices, and apicoll.EnvironmentRef embeds
+// the whole Environment — values included — so marshalling the domain type
+// by accident is one line away at all times.
+func TestAPICollections_TheWireCarriesNoEnvironmentValues(t *testing.T) {
+	conn := newAPIWSServerWithSender(t, &recordingSender{})
+	root := apiEnvironmentFolder(t)
+
+	resp := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.open: %+v", resp.Error)
+	}
+	for _, leaked := range []string{"https://api.internal", "http://localhost:3000", "baseUrl", "ssh:bastion:1"} {
+		if bytes.Contains(resp.Result, []byte(leaked)) {
+			t.Errorf("the open result carries %q — an environment's contents reached the renderer", leaked)
+		}
+	}
+}
+
+// A brand-new collection answers [] rather than null. Both lists have always
+// had to; this is the third, and a renderer's first .map on a null is a
+// crash rather than an empty picker.
+func TestAPICollectionsCreate_ANewCollectionHasAnEmptyEnvironmentList(t *testing.T) {
+	conn := newAPIWSServerWithSender(t, &recordingSender{})
+
+	resp := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.create: %+v", resp.Error)
+	}
+	if !bytes.Contains(resp.Result, []byte(`"environments":[]`)) {
+		t.Fatalf("create answered %s, want an empty environments list", resp.Result)
+	}
+}
+
+// A malformed environment file is NAMED beside the good ones rather than
+// hiding them — apicoll's rule, carried through to the wire, and it lands in
+// the collection's own malformed list because "a file in here that cannot be
+// read" is one question.
+func TestAPICollections_AMalformedEnvironmentIsNamedAndHidesNothing(t *testing.T) {
+	conn := newAPIWSServerWithSender(t, &recordingSender{})
+	root := apiEnvironmentFolder(t)
+	if err := os.WriteFile(filepath.Join(root, "environments", "broken.json"), []byte(`{`), 0o600); err != nil {
+		t.Fatalf("write a broken environment: %v", err)
+	}
+
+	resp := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.open: %+v", resp.Error)
+	}
+	var opened struct {
+		Collection struct {
+			Malformed []struct {
+				RelPath string `json:"relPath"`
+				Reason  string `json:"reason"`
+			} `json:"malformed"`
+			Environments []struct {
+				RelPath string `json:"relPath"`
+			} `json:"environments"`
+		} `json:"collection"`
+	}
+	if err := json.Unmarshal(resp.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	if len(opened.Collection.Environments) != 3 {
+		t.Errorf("environments = %+v, want the three good ones", opened.Collection.Environments)
+	}
+	named := false
+	for _, m := range opened.Collection.Malformed {
+		if m.RelPath == "environments/broken.json" && m.Reason != "" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("malformed = %+v, want the broken environment named with a reason", opened.Collection.Malformed)
+	}
+}
+
+// The paired failure (AGENTS.md rule 3): the one external call this read
+// makes is reading the directory, and when it fails the LISTING still
+// answers — the reason lands on that one folder's error, where the panel
+// renders it. A folder that quietly listed as having no environments would
+// offer "None" as the whole truth and send {{baseUrl}} unresolved.
+func TestAPICollectionsList_AnUnreadableEnvironmentsFolderIsOnTheEntryNotTheListing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode bits do not deny a read")
+	}
+	conn := newAPIWSServerWithSender(t, &recordingSender{})
+	root := apiEnvironmentFolder(t)
+	openAPICollection(t, conn, root, 1)
+
+	dir := filepath.Join(root, "environments")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	//nolint:gosec // G302: a DIRECTORY restored to the mode a collection folder uses; 0600 has no execute bit and would leave it unenterable for the cleanup
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	resp := vaultCall(t, conn, "api.collections.list", map[string]any{}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.list refused the whole listing: %+v", resp.Error)
+	}
+	var listed struct {
+		Collections []struct {
+			Error      string `json:"error"`
+			Collection struct {
+				Requests []struct {
+					RelPath string `json:"relPath"`
+				} `json:"requests"`
+				Environments []struct {
+					RelPath string `json:"relPath"`
+				} `json:"environments"`
+			} `json:"collection"`
+		} `json:"collections"`
+	}
+	if err := json.Unmarshal(resp.Result, &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.Collections) != 1 {
+		t.Fatalf("collections = %+v, want the one folder still listed", listed.Collections)
+	}
+	row := listed.Collections[0]
+	if row.Error == "" {
+		t.Error("the entry says nothing — an environments folder that will not read is a degrade the panel must be able to show")
+	}
+	// …and the half that DID read is still rendered: the requests are there.
+	// Both ends of the interval — the folder is degraded, not gone.
+	if len(row.Collection.Requests) == 0 {
+		t.Error("the requests went with the environments — one unreadable directory emptied the folder")
+	}
+	if len(row.Collection.Environments) != 0 {
+		t.Errorf("environments = %+v, want [] — nothing could be read", row.Collection.Environments)
 	}
 }
 

@@ -40,6 +40,7 @@ import {
   adoptCreatedCollection,
   adoptImportedRequest,
   adoptOpenedCollection,
+  type ApiEnvironmentRef,
   type ApiImportNote,
   type ApiOpenCollection,
   type ApiRequest,
@@ -67,6 +68,17 @@ export interface ApiRun {
    *  repo has shipped before. */
   readonly method: string
   readonly url: string
+  /** The NAME of the environment this exchange went out under, in the
+   *  BACKEND's words — read off the send result rather than off what the
+   *  form was pointed at, because the renderer names an environment by its
+   *  path and the name lives inside the file. '' is a send that named none.
+   *
+   *  A run recording what the renderer BELIEVED it asked for would be
+   *  `vault.status.defaultProvider` in reverse: a value one side writes and
+   *  the other never reads back. It is on the run rather than on the panel
+   *  because the panel's picker says what the NEXT send will do, and a
+   *  scrollback of twenty runs is asking what a past one did. */
+  readonly environment: string
   readonly response: ApiResponse | null
   readonly error: string | null
   readonly view: ApiRunView
@@ -90,6 +102,17 @@ export interface ApiStore {
    *  signal answering both would have to be read as "a request, unless it is
    *  a collection", and Send is gated on it. */
   activeCollection(): string
+  /** The environments of the collection the workbench is pointed at, as the
+   *  last listing had them. [] when that collection has none, and [] when
+   *  nothing is open — a collection with no environments is a collection
+   *  (§6.2), so this is an ordinary state and not a degraded one. */
+  environments(): readonly ApiEnvironmentRef[]
+  /** Which environment the next send from the ACTIVE collection goes out
+   *  under: the environment's path within that collection, or '' for none.
+   *
+   *  Per collection, because it addresses one: a path from another folder is
+   *  a path this handle does not own, and the backend refuses it. */
+  activeEnvironment(): string
   selected(): ApiSelection | null
   draft(): ApiRequest | null
   /** True while the draft differs from what the file last answered. */
@@ -137,6 +160,12 @@ export interface ApiStore {
   closeFolder(handle: string): Promise<void>
   openRequest(handle: string, relPath: string): Promise<void>
   editDraft(next: ApiRequest): void
+  /** Point the active collection at one of its environments, or at none
+   *  ('' ). A person's choice is remembered for as long as the workbench
+   *  lives and is never overwritten by a later listing — including a choice
+   *  of NONE, which is why "chosen nothing" and "chosen none" are two
+   *  states here rather than one. */
+  setEnvironment(relPath: string): void
   send(): Promise<void>
   importCurl(line: string): Promise<void>
   importPostman(path: string, dest: string): Promise<void>
@@ -150,6 +179,28 @@ function message(err: unknown): string {
 export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const [collections, setCollections] = createSignal<readonly ApiOpenCollection[]>([])
   const [activeCollection, setActiveCollection] = createSignal('')
+  // ── Which environment a send goes out under (nocx-pnvnn) ────────────────
+  //
+  // Keyed by the collection HANDLE, and the absence of a key is a state of
+  // its own: "nobody has chosen for this folder yet" is not "None was
+  // chosen", and only the first may be filled in by a default. Collapsing
+  // them would make a person's deliberate None revert to an environment on
+  // the next listing — a control whose answer the panel quietly replaces.
+  //
+  // The default is applied ONLY when a collection has exactly ONE
+  // environment. That is the whole rule, and both halves are bought:
+  //
+  //  * With one, there is no choice to make. Nearly every Postman export is
+  //    this case, and starting on None would make its first Send fail on
+  //    `{{baseUrl}}` — a variable the folder can answer — which is the
+  //    product contradicting itself.
+  //  * With several, the first in a list is not a choice anybody made, and
+  //    one of them is usually production. A request fired at a live system
+  //    because a panel picked alphabetically is not a mistake a message can
+  //    undo, so the panel picks nothing and says so.
+  const [chosenEnvironments, setChosenEnvironments] = createSignal<ReadonlyMap<string, string>>(
+    new Map(),
+  )
   const [selected, setSelected] = createSignal<ApiSelection | null>(null)
   const [draft, setDraft] = createSignal<ApiRequest | null>(null)
   const [saved, setSaved] = createSignal<ApiRequest | null>(null)
@@ -337,6 +388,32 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     })
   }
 
+  /** The environments of whatever collection the workbench is pointed at.
+   *  Reading through the ONE list rather than caching a second copy: the
+   *  listing is what a change on disk re-reads, so a picker drawn from it
+   *  gains an environment a colleague added without anything being told. */
+  const environmentsOf = (handle: string): readonly ApiEnvironmentRef[] =>
+    collections().find((c) => c.handle === handle)?.collection.environments ?? []
+
+  /** Which environment a send from ONE collection goes out under. The
+   *  picker and the send read the same function, so the control cannot say
+   *  one thing while the wire carries another. */
+  const environmentFor = (handle: string): string => {
+    const chosen = chosenEnvironments().get(handle)
+    if (chosen !== undefined) return chosen
+    const envs = environmentsOf(handle)
+    return envs.length === 1 ? envs[0].relPath : ''
+  }
+
+  const environments = (): readonly ApiEnvironmentRef[] => environmentsOf(activeCollection())
+  const activeEnvironment = (): string => environmentFor(activeCollection())
+
+  const setEnvironment = (relPath: string): void => {
+    const handle = untrack(activeCollection)
+    if (handle === '') return
+    setChosenEnvironments((prev) => new Map(prev).set(handle, relPath))
+  }
+
   /** The draft differs from what the file last answered. Compared by value —
    *  the form replaces the object on every keystroke, so identity would say
    *  "dirty" for a field typed into and typed back. */
@@ -354,6 +431,20 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     try {
       const result = await services.listCollections()
       setCollections(result.collections)
+      // THE WORKBENCH POINTS AT SOMETHING WHENEVER SOMETHING IS OPEN, and
+      // the interval closes when the last folder does. Without this a pane
+      // mounted onto folders opened in an earlier session was pointed at
+      // nothing until the person clicked a row — and everything hanging off
+      // the pointer, the environment picker included, reported the state of
+      // no collection at all while a collection was plainly on screen.
+      //
+      // It also covers the folder that LEAVES underneath the pointer: a
+      // handle that is no longer listed cannot be re-validated, so pointing
+      // at it is pointing at nothing.
+      const listed = result.collections
+      if (!listed.some((c) => c.handle === untrack(activeCollection))) {
+        setActiveCollection(listed.length > 0 ? listed[0].handle : '')
+      }
       setError('')
     } catch (err) {
       setError(message(err))
@@ -444,7 +535,16 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     try {
       await services.closeCollection(handle)
       setCollections((prev) => prev.filter((c) => c.handle !== handle))
-      // Nothing is pointed at a folder that has left.
+      // Nothing is pointed at a folder that has left — and the environment
+      // chosen for it goes with it, which is the closing end of that
+      // choice's interval. A handle is minted fresh every open, so a
+      // remembered row could never be read again; it would only be a map
+      // that grows for the life of the window.
+      setChosenEnvironments((prev) => {
+        const next = new Map(prev)
+        next.delete(handle)
+        return next
+      })
       if (activeCollection() === handle) setActiveCollection('')
       // The form was showing a request in the folder that just left. Keeping
       // it would leave a Send pointed at a handle that no longer resolves.
@@ -495,12 +595,25 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         await services.writeRequest(target.handle, target.relPath, request)
         setSaved(request)
       }
-      const result = await services.sendRequest(target.handle, target.relPath)
+      // The environment of the collection the FILE is in, not of whatever
+      // the tree happens to be pointed at: `activeCollection` follows a
+      // request the moment it is opened (openRequest sets it), so the two
+      // agree — but naming the target's handle here is what keeps them
+      // agreeing if that ever stops being true, because an environment path
+      // is only meaningful inside the collection that owns it.
+      const result = await services.sendRequest(
+        target.handle,
+        target.relPath,
+        environmentFor(target.handle),
+      )
       setRuns((prev) => [
         {
           id: nextRunId++,
           method: request.method,
           url: request.url,
+          // The backend's account of which record answered, never an echo
+          // of the path we sent.
+          environment: result.environment,
           response: result.response,
           error: null,
           view: 'pretty',
@@ -520,6 +633,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
             id: nextRunId++,
             method: request.method,
             url: request.url,
+            // Nothing came back, so nothing said which environment answered.
+            // The panel's own choice is not written here instead: a run that
+            // reported an environment the backend never confirmed would be
+            // the guess this field exists to avoid.
+            environment: '',
             response: null,
             error: reason,
             view: 'pretty',
@@ -607,6 +725,8 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   return {
     collections,
     activeCollection,
+    environments,
+    activeEnvironment,
     selected,
     draft,
     dirty,
@@ -626,6 +746,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     closeFolder,
     openRequest,
     editDraft,
+    setEnvironment,
     send,
     importCurl,
     importPostman,

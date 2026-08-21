@@ -85,12 +85,32 @@ describe('ApiClient — one method per contract', () => {
     })
   })
 
-  it('sends the request the FILE holds — the handle and the path, nothing else', async () => {
+  it('sends the request the FILE holds — the handle, the path and the environment, nothing else', async () => {
     const { dispatcher, call } = fakeDispatcher({ response: {} })
-    await createApiWorkbenchServices(dispatcher).sendRequest('h1', 'users/create.json')
+    await createApiWorkbenchServices(dispatcher).sendRequest(
+      'h1',
+      'users/create.json',
+      'environments/prod.json',
+    )
+    // The environment is named by its PATH inside the collection, exactly as
+    // the request is. There is no field here for its NAME, and that is the
+    // point: the backend reads that off the file in the same breath as the
+    // address and the route, and a second answer to "which environment is
+    // this" is what the send path must not be given.
     expect(call).toHaveBeenCalledWith('api.request.send', {
       handle: 'h1',
       relPath: 'users/create.json',
+      envRelPath: 'environments/prod.json',
+    })
+  })
+
+  it('no environment is an empty envRelPath, not an absent one', async () => {
+    const { dispatcher, call } = fakeDispatcher({ response: {} })
+    await createApiWorkbenchServices(dispatcher).sendRequest('h1', 'users/create.json', '')
+    expect(call).toHaveBeenCalledWith('api.request.send', {
+      handle: 'h1',
+      relPath: 'users/create.json',
+      envRelPath: '',
     })
   })
 
@@ -117,7 +137,7 @@ describe('ApiClient — one method per contract', () => {
     await s.closeCollection('h1')
     await s.readRequest('h1', 'a.json')
     await s.writeRequest('h1', 'a.json', REQUEST)
-    await s.sendRequest('h1', 'a.json')
+    await s.sendRequest('h1', 'a.json', 'environments/dev.json')
     for (const [, params] of call.mock.calls) {
       expect(Object.keys(params as object)).not.toContain('path')
       expect(Object.keys(params as object)).not.toContain('root')
@@ -135,7 +155,7 @@ describe('ApiClient — every call has a test where it fails', () => {
     ['closeCollection', (s) => s.closeCollection('h1')],
     ['readRequest', (s) => s.readRequest('h1', 'a.json')],
     ['writeRequest', (s) => s.writeRequest('h1', 'a.json', REQUEST)],
-    ['sendRequest', (s) => s.sendRequest('h1', 'a.json')],
+    ['sendRequest', (s) => s.sendRequest('h1', 'a.json', 'environments/dev.json')],
     ['importPostman', (s) => s.importPostman('/w/a.json', '/w/b')],
     ['importCurl', (s) => s.importCurl('curl https://a')],
   ]

@@ -153,6 +153,18 @@ type APICollectionService interface {
 	// Close removes a folder from the list. Every later call naming that
 	// handle is refused.
 	Close(h apicoll.HandleID) error
+	// ListEnvironments reads every environment in one open folder, the
+	// malformed files NAMED alongside the good ones rather than replacing
+	// them with an error — apicoll's own rule, and it holds for the same
+	// reason it does for requests: one bad file must not hide the rest.
+	//
+	// It is here rather than folded into ListOpen because the two are read
+	// by different methods for different results, and every api.collections.*
+	// method needs it: a renderer cannot offer a choice of environment
+	// without knowing which ones exist, and before this the only caller of
+	// apicoll.ListEnvironments anywhere in the tree was apicoll's own tests
+	// — a read path that existed and was reachable from nothing (nocx-pnvnn).
+	ListEnvironments(h apicoll.HandleID) ([]apicoll.EnvironmentRef, []apicoll.MalformedRef, error)
 	// ReadRequest reads one request by its path within the collection.
 	ReadRequest(h apicoll.HandleID, relPath string) (apicoll.Request, error)
 	// WriteRequest writes one request back.
@@ -299,6 +311,20 @@ func (s *apiCollectionService) Close(h apicoll.HandleID) error {
 		}
 	}
 	return fmt.Errorf("%w: %q", apicoll.ErrUnknownHandle, h)
+}
+
+// ListEnvironments answers out of a folder the user still has open, and
+// refuses one they have closed for the same reason ReadRequest does: this
+// registry is the authority on whether a handle is still live, and apicoll's
+// own table would go on resolving it.
+func (s *apiCollectionService) ListEnvironments(h apicoll.HandleID) ([]apicoll.EnvironmentRef, []apicoll.MalformedRef, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, nil, err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return nil, nil, err
+	}
+	return s.svc.ListEnvironments(h)
 }
 
 func (s *apiCollectionService) ReadRequest(h apicoll.HandleID, relPath string) (apicoll.Request, error) {

@@ -37,16 +37,19 @@ import type {
   Collection as ListedCollection,
   RequestRef as ListedRequestRef,
   MalformedRef as ListedMalformedRef,
+  EnvironmentRef as ListedEnvironmentRef,
 } from '../generated/api.collections.list'
 import type {
   Collection as OpenedCollection,
   RequestRef as OpenedRequestRef,
   MalformedRef as OpenedMalformedRef,
+  EnvironmentRef as OpenedEnvironmentRef,
 } from '../generated/api.collections.open'
 import type {
   Collection as CreatedCollection,
   RequestRef as CreatedRequestRef,
   MalformedRef as CreatedMalformedRef,
+  EnvironmentRef as CreatedEnvironmentRef,
 } from '../generated/api.collections.create'
 import type {
   Response as SendResponse,
@@ -67,6 +70,11 @@ type ApiAuth = ReadAuth
 export type ApiCollection = ListedCollection
 type ApiRequestRef = ListedRequestRef
 type ApiMalformedRef = ListedMalformedRef
+/** One environment a person can send under: the path that names it on
+ *  `api.request.send`, and the name the FILE declares. There is no third
+ *  field, and the contract says why — the values and the route stay in the
+ *  file (§6.4), so the renderer names an environment and never holds one. */
+export type ApiEnvironmentRef = ListedEnvironmentRef
 export type ApiOpenCollection = OpenCollection
 
 export type ApiResponse = SendResponse
@@ -135,7 +143,8 @@ export function adoptImportedRequest(imported: CurlRequest): ApiRequest {
 export function adoptOpenedCollection(opened: OpenedCollection): ApiCollection {
   const requests: ApiRequestRef[] = opened.requests satisfies OpenedRequestRef[]
   const malformed: ApiMalformedRef[] = opened.malformed satisfies OpenedMalformedRef[]
-  return { name: opened.name, requests, malformed }
+  const environments: ApiEnvironmentRef[] = opened.environments satisfies OpenedEnvironmentRef[]
+  return { name: opened.name, requests, malformed, environments }
 }
 
 /**
@@ -156,7 +165,8 @@ export function adoptOpenedCollection(opened: OpenedCollection): ApiCollection {
 export function adoptCreatedCollection(created: CreatedCollection): ApiCollection {
   const requests: ApiRequestRef[] = created.requests satisfies CreatedRequestRef[]
   const malformed: ApiMalformedRef[] = created.malformed satisfies CreatedMalformedRef[]
-  return { name: created.name, requests, malformed }
+  const environments: ApiEnvironmentRef[] = created.environments satisfies CreatedEnvironmentRef[]
+  return { name: created.name, requests, malformed, environments }
 }
 
 // ── Reading a response, in the product's words ────────────────────────────

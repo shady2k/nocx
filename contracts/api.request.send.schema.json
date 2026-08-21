@@ -5,9 +5,13 @@
   "description": "Result of the api.request.send JSON-RPC method: what came back from one exchange, bounded. The body is captured behind the 2 MiB ceiling files.read already uses (design §12.3), so a response larger than that arrives truncated rather than not at all.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["response"],
+  "required": ["response", "environment"],
   "properties": {
-    "response": { "$ref": "#/$defs/response" }
+    "response": { "$ref": "#/$defs/response" },
+    "environment": {
+      "description": "The NAME of the environment this exchange actually went out under, as the environment FILE declares it — and \"\" when the send named none, which is the request as written on the direct route. It is the backend's own account rather than an echo of the caller's `envRelPath`: the renderer names an environment by its path and the name is read out of the file at the moment the address and the route are (capability.SendInputs), so this is the one field that says which record answered. A run list drawn from what the renderer BELIEVED it asked for is the vault.status defect in reverse — a value written by one side and never read back from the other.",
+      "type": "string"
+    }
   },
   "$defs": {
     "response": {

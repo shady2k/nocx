@@ -74,7 +74,7 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				h.fail(req, err)
 				return nil
 			}
-			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(open)))
+			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(svc, open)))
 		case "api.collections.open":
 			var p apiCollectionsOpenParams
 			if !h.decode(req, &p) {
@@ -85,9 +85,22 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				h.fail(req, err)
 				return nil
 			}
+			wire, envErr := wireCollectionOf(svc, handle, coll)
+			if envErr != nil {
+				// The folder opened and its environments did not read. That
+				// is the folder being unusable rather than a partial answer
+				// worth rendering: a panel handed environments:[] for a
+				// collection that HAS them would offer "None" as the whole
+				// truth and send {{baseUrl}} unresolved (§6.5). The open is
+				// refused with the reason instead — and the handle stays
+				// registered, so a retry after the permission is fixed needs
+				// no second Open.
+				h.fail(req, envErr)
+				return nil
+			}
 			_ = h.r.TryResult(req.ID, mustMarshal(apiOpenResponse{
 				Handle:     string(handle),
-				Collection: wireCollection(coll),
+				Collection: wire,
 			}))
 		case "api.collections.create":
 			var p apiCollectionsCreateParams
@@ -102,9 +115,14 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			// The SAME result shape api.collections.open answers with, and
 			// deliberately so: a create leaves the collection open, so the
 			// renderer has one thing to do afterwards rather than two.
+			wire, envErr := wireCollectionOf(svc, made.Handle, made.Collection)
+			if envErr != nil {
+				h.fail(req, envErr)
+				return nil
+			}
 			_ = h.r.TryResult(req.ID, mustMarshal(apiOpenResponse{
 				Handle:     string(made.Handle),
-				Collection: wireCollection(made.Collection),
+				Collection: wire,
 			}))
 		case "api.collections.close":
 			var p apiHandleParams
@@ -226,7 +244,10 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(apiSendResponse{Response: wireSendResponse(resp)}))
+	_ = h.r.TryResult(req.ID, mustMarshal(apiSendResponse{
+		Response:    wireSendResponse(resp),
+		Environment: inputs.Environment,
+	}))
 }
 
 // decode reads the method's params and answers -32602 itself when they will
@@ -433,9 +454,40 @@ type apiOpenResponse struct {
 }
 
 type apiCollectionWire struct {
-	Name      string                `json:"name"`
-	Requests  []apiRequestRefWire   `json:"requests"`
+	Name     string              `json:"name"`
+	Requests []apiRequestRefWire `json:"requests"`
+	// Malformed carries the unreadable files from BOTH halves of the folder
+	// — requests and environments — in one list, because "a file in here
+	// that cannot be read" is one concept and a second list would be a
+	// second owner of it. Never nil: the renderer's first .map on a null
+	// throws.
 	Malformed []apiMalformedRefWire `json:"malformed"`
+	// Environments is every environment in `environments/` (§6.2). It rides
+	// on the collection because it is part of what the folder IS; a second
+	// method answering "which environments does this folder have" would be
+	// two accounts of one folder, read a round trip apart.
+	Environments []apiEnvironmentRefWire `json:"environments"`
+}
+
+// apiEnvironmentRefWire is one environment, and it carries NO VALUES and no
+// route — deliberately, and it is the field list that enforces it rather
+// than a redaction step.
+//
+// apicoll.EnvironmentRef embeds the whole Environment, values included, so
+// marshalling the domain type here would put every environment's addresses
+// on the wire for a panel whose entire need is to NAME one. Beyond the size
+// of that, §6.4 says the file is the truth and every surface is a projection
+// of it: a copy of the values in the renderer would be a second truth that
+// drifts the moment somebody edits the file on disk.
+//
+// RelPath is what api.request.send's envRelPath names; Name is the name the
+// FILE declares, which is a label here and is never sent back — the binding
+// key's environment is read out of the file at send time (capability.
+// SendInputs), and a renderer that supplied it would be the second answer to
+// "which environment is this" that this path must not have.
+type apiEnvironmentRefWire struct {
+	RelPath string `json:"relPath"`
+	Name    string `json:"name"`
 }
 
 type apiRequestRefWire struct {
@@ -494,6 +546,14 @@ type apiAuthWire struct {
 
 type apiSendResponse struct {
 	Response apiSendResponseWire `json:"response"`
+	// Environment is the NAME of the environment the exchange went out
+	// under, as the file declares it, and "" when none was named. It is the
+	// backend's own account rather than an echo of the caller's envRelPath:
+	// the snapshot reads the name off the same record it took the address
+	// and the route from, so this is what says WHICH record answered. A run
+	// list drawn from what the renderer believed it asked for would be the
+	// vault.status defect in reverse.
+	Environment string `json:"environment"`
 }
 
 type apiSendResponseWire struct {
@@ -571,32 +631,93 @@ type apiUnsupportedWire struct {
 
 // ── domain ⇄ wire ────────────────────────────────────────────────────────
 
-func wireOpenCollections(open []capability.OpenCollection) apiCollectionsListResponse {
+// wireOpenCollections renders the opened-folder list, reading each folder's
+// environments as it goes.
+//
+// A folder whose environments will not read does NOT take the listing down,
+// and it does not silently list as a collection with no environments either:
+// the reason joins that one entry's Error, which is the field this listing
+// already has for "this one folder is in trouble" (capability.OpenCollection).
+// A dead folder hiding every live one is the defect that field exists to
+// prevent, and a soft degrade the UI cannot see is the one AGENTS.md names.
+func wireOpenCollections(svc capability.APICollectionService, open []capability.OpenCollection) apiCollectionsListResponse {
 	out := make([]apiOpenCollectionWire, 0, len(open))
 	for _, c := range open {
 		row := apiOpenCollectionWire{
-			Handle:     string(c.Handle),
-			Path:       c.Path,
-			Collection: wireCollection(c.Collection),
+			Handle: string(c.Handle),
+			Path:   c.Path,
 		}
 		if c.Err != nil {
 			row.Error = c.Err.Error()
 		}
+		wire, err := wireCollectionOf(svc, c.Handle, c.Collection)
+		if err != nil {
+			// The requests half may still have read; render what there is
+			// and say what did not. joinReasons keeps both sentences when
+			// the folder had already reported one.
+			wire = wireCollection(c.Collection, nil, nil)
+			row.Error = joinReasons(row.Error, err.Error())
+		}
+		row.Collection = wire
 		out = append(out, row)
 	}
 	return apiCollectionsListResponse{Collections: out}
 }
 
-func wireCollection(c apicoll.Collection) apiCollectionWire {
+// joinReasons puts two failures in one sentence, and answers the one that
+// exists when only one does. A folder can be in trouble twice.
+func joinReasons(first, second string) string {
+	switch {
+	case first == "":
+		return second
+	case second == "":
+		return first
+	default:
+		return first + "; " + second
+	}
+}
+
+// wireCollectionOf is the ONE assembler every api.collections.* result goes
+// through: it reads the folder's environments and hands the whole collection
+// to wireCollection. list, open and create all call it, so the three results
+// cannot disagree about what a collection is — which is exactly what the
+// create schema means by "the shape is api.collections.open's on purpose".
+//
+// The read happens inside the operation's callback, so it is under the same
+// api-gate hold as the listing or the open it belongs to: one folder, one
+// moment, one answer.
+func wireCollectionOf(svc capability.APICollectionService, h apicoll.HandleID, c apicoll.Collection) (apiCollectionWire, error) {
+	envs, bad, err := svc.ListEnvironments(h)
+	if err != nil {
+		return apiCollectionWire{}, err
+	}
+	return wireCollection(c, envs, bad), nil
+}
+
+// wireCollection turns one collection plus its environments into the wire
+// shape. badEnvs joins the collection's own malformed list rather than
+// getting a list of its own: the renderer's question is "which files in this
+// folder could not be read", and it is one question.
+func wireCollection(c apicoll.Collection, envs []apicoll.EnvironmentRef, badEnvs []apicoll.MalformedRef) apiCollectionWire {
 	reqs := make([]apiRequestRefWire, 0, len(c.Requests))
 	for _, r := range c.Requests {
 		reqs = append(reqs, apiRequestRefWire{RelPath: r.RelPath, Name: r.Name, Method: r.Method})
 	}
-	mal := make([]apiMalformedRefWire, 0, len(c.Malformed))
+	mal := make([]apiMalformedRefWire, 0, len(c.Malformed)+len(badEnvs))
 	for _, m := range c.Malformed {
 		mal = append(mal, apiMalformedRefWire{RelPath: m.RelPath, Reason: m.Reason})
 	}
-	return apiCollectionWire{Name: c.Name, Requests: reqs, Malformed: mal}
+	for _, m := range badEnvs {
+		mal = append(mal, apiMalformedRefWire{RelPath: m.RelPath, Reason: m.Reason})
+	}
+	// The NAME off the file and the path that addresses it — and nothing
+	// else off EnvironmentRef, which also holds every value the environment
+	// declares.
+	out := make([]apiEnvironmentRefWire, 0, len(envs))
+	for _, e := range envs {
+		out = append(out, apiEnvironmentRefWire{RelPath: e.RelPath, Name: e.Environment.Name})
+	}
+	return apiCollectionWire{Name: c.Name, Requests: reqs, Malformed: mal, Environments: out}
 }
 
 // apiBodyKinds and apiAuthKinds are the closed sets the wire declares, and

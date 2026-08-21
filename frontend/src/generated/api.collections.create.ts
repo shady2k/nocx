@@ -26,9 +26,13 @@ export interface Collection {
    */
   requests: RequestRef[]
   /**
-   * The files inside the folder that are not requests. A collection that has just been created has none, so this is []. Never null — a renderer walking null is a crash rather than an empty view.
+   * The files inside the folder that are not requests or not environments. A collection that has just been created has none, so this is []. Never null — a renderer walking null is a crash rather than an empty view.
    */
   malformed: MalformedRef[]
+  /**
+   * Every environment in `environments/` (design §6.2). Create makes the directory and leaves it EMPTY, so this is [] for a collection that has just been minted — a collection nobody has configured yet, not a broken one. It is declared here because this result is api.collections.open's shape and the two must not drift: a create answering a collection without the field would reach the renderer as a row with a list nobody filled in.
+   */
+  environments: EnvironmentRef[]
 }
 export interface RequestRef {
   /**
@@ -44,4 +48,17 @@ export interface MalformedRef {
    * For a person: which file, and what was wrong with it.
    */
   reason: string
+}
+/**
+ * One environment, as the panel needs it and no further — api.collections.open.schema.json declares the same two fields and says why the values and the route are not among them.
+ */
+export interface EnvironmentRef {
+  /**
+   * The environment's path WITHIN the collection — `environments/<name>.json`. It is what api.request.send's `envRelPath` names alongside the handle.
+   */
+  relPath: string
+  /**
+   * The name the FILE declares, which is not derivable from relPath. A LABEL for the renderer; it is never sent back.
+   */
+  name: string
 }

@@ -37,9 +37,13 @@ export interface Collection {
    */
   requests: RequestRef[]
   /**
-   * The files inside the folder that are not requests: bad JSON, a field the format does not declare, a symlink that was not followed. It is ON the collection rather than in an error beside it, because a caller returning early on an error would let one broken file hide every good one. Never null — a clean collection is [].
+   * The files inside the folder that are not requests OR not environments: bad JSON, a field the format does not declare, a symlink that was not followed. It is ON the collection rather than in an error beside it, because a caller returning early on an error would let one broken file hide every good one. ONE list for both halves of the folder on purpose — "a file in here that cannot be read" is one concept, and a second list would be a second owner of it. Never null — a clean collection is [].
    */
   malformed: MalformedRef[]
+  /**
+   * Every environment in `environments/` (design §6.2). It is on the collection because it is part of what the folder IS: a renderer that had to ask a second method which environments exist would have two accounts of one folder, read a round trip apart. Never null — a collection with no environments is [], which is an ordinary collection and not a degraded one.
+   */
+  environments: EnvironmentRef[]
 }
 export interface RequestRef {
   /**
@@ -55,4 +59,17 @@ export interface MalformedRef {
    * For a person: which file, and what was wrong with it.
    */
   reason: string
+}
+/**
+ * One environment, as the panel needs it and no further. TWO FIELDS, and the absence of the rest is the point: an environment file also holds VALUES and a route (§6.5), and neither may ride here. The file is the truth and every surface is a projection of it (§6.4), so a copy of the values in the renderer would be a second truth that drifts the moment somebody edits the file — and a `values` field would additionally put the resolved address of every environment on the wire for a panel that only has to name one.
+ */
+export interface EnvironmentRef {
+  /**
+   * The environment's path WITHIN the collection — `environments/<name>.json`. It is what api.request.send's `envRelPath` names alongside the handle, exactly as a request is named (§13.1), and it is the value a picker carries.
+   */
+  relPath: string
+  /**
+   * The name the FILE declares, which is not derivable from relPath: the backend keys a secret binding by (collection, environment, variable) using this name, so the two can legitimately differ and only the file knows. It is a LABEL here — the renderer never sends it back, because a second answer to "which environment is this" is what the send path must not be given.
+   */
+  name: string
 }

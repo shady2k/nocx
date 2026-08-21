@@ -83,11 +83,27 @@ class ApiClient {
     })
   }
 
-  /** Perform the exchange the FILE describes. It takes no request value:
-   *  what goes out is what is on disk, which is why the store writes an
-   *  edited draft before it sends. */
-  sendRequest(handle: string, relPath: string): Promise<ApiRequestSendResult> {
-    return this.dispatcher.call<ApiRequestSendResult>('api.request.send', { handle, relPath })
+  /** Perform the exchange the FILE describes, under the environment the
+   *  caller names.
+   *
+   *  It takes no request value: what goes out is what is on disk, which is
+   *  why the store writes an edited draft before it sends.
+   *
+   *  `envRelPath` is a PATH inside the collection, addressed exactly as the
+   *  request is (§13.1) — and never the environment's name, although the
+   *  binding key the backend builds is keyed by that name. The name lives
+   *  inside the file and the backend reads it there, in the same breath as
+   *  the address and the route (capability.SendInputs); a renderer that sent
+   *  the name as well would be a second answer to "which environment is
+   *  this", and the two would agree until somebody renamed an environment
+   *  without renaming its file. '' is no environment, which is the request
+   *  as written on the direct route. */
+  sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult> {
+    return this.dispatcher.call<ApiRequestSendResult>('api.request.send', {
+      handle,
+      relPath,
+      envRelPath,
+    })
   }
 
   /** Convert a Postman v2.1 export into a collection folder at `dest`, and
@@ -194,7 +210,7 @@ export interface ApiWorkbenchServices {
   closeCollection(handle: string): Promise<ApiCollectionsCloseResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
-  sendRequest(handle: string, relPath: string): Promise<ApiRequestSendResult>
+  sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult>
   importPostman(path: string, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
@@ -245,7 +261,7 @@ export function createApiWorkbenchServices(
     closeCollection: (handle) => client.closeCollection(handle),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),
-    sendRequest: (handle, relPath) => client.sendRequest(handle, relPath),
+    sendRequest: (handle, relPath, envRelPath) => client.sendRequest(handle, relPath, envRelPath),
     importPostman: (path, dest) => client.importPostman(path, dest),
     importCurl: (line) => client.importCurl(line),
   }

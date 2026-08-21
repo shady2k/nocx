@@ -14,6 +14,10 @@
  */
 export interface ApiRequestSendResult {
   response: Response
+  /**
+   * The NAME of the environment this exchange actually went out under, as the environment FILE declares it — and "" when the send named none, which is the request as written on the direct route. It is the backend's own account rather than an echo of the caller's `envRelPath`: the renderer names an environment by its path and the name is read out of the file at the moment the address and the route are (capability.SendInputs), so this is the one field that says which record answered. A run list drawn from what the renderer BELIEVED it asked for is the vault.status defect in reverse — a value written by one side and never read back from the other.
+   */
+  environment: string
 }
 export interface Response {
   status: number

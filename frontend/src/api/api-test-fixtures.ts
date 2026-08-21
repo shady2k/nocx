@@ -11,7 +11,14 @@ import type { FilesChanged } from '../generated/files.changed'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesWatchResult } from '../generated/files.watch'
 import type { FilesCloseResult } from '../generated/files.close'
-import type { ApiExchange, ApiOpenCollection, ApiRequest, ApiResponse } from './api-model'
+import type {
+  ApiCollection,
+  ApiEnvironmentRef,
+  ApiExchange,
+  ApiOpenCollection,
+  ApiRequest,
+  ApiResponse,
+} from './api-model'
 import type { ApiRequestSendResult, Raw, Span } from '../generated/api.request.send'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
 
@@ -38,6 +45,15 @@ export const CREATED_NAME = 'orders-api'
 export const COLLECTION_PATH = '/w/acme-api'
 export const CREATE_REL_PATH = 'users/create.json'
 export const LIST_REL_PATH = 'users/list.json'
+
+/** The worked example's two environments. The NAME is deliberately not the
+ *  file's stem: the two are separate facts and only the file knows the
+ *  first — a fixture whose names were derivable from its paths would let a
+ *  renderer that derived one from the other pass every test here, and that
+ *  derivation is the second answer to "which environment is this" the send
+ *  path must not be given. */
+export const DEV_ENV: ApiEnvironmentRef = { relPath: 'environments/default.json', name: 'dev' }
+export const PROD_ENV: ApiEnvironmentRef = { relPath: 'environments/prod.json', name: 'production' }
 
 export const REQUEST: ApiRequest = {
   id: 'req-create',
@@ -99,19 +115,29 @@ export function exchangeFixture(damage = ''): ApiExchange {
   }
 }
 
+/** The folder's CONTENTS, so a test about one field of them names that field
+ *  rather than restating the whole collection. No environments by default,
+ *  because that is the ordinary state — §6.2 says a collection with none is
+ *  a collection — and the tests that are about the picker say so.  */
+export function collectionFixture(over: Partial<ApiCollection> = {}): ApiCollection {
+  return {
+    name: 'acme-api',
+    requests: [
+      { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
+      { relPath: LIST_REL_PATH, name: 'list', method: 'GET' },
+    ],
+    malformed: [],
+    environments: [],
+    ...over,
+  }
+}
+
 export function collectionsFixture(over: Partial<ApiOpenCollection> = {}): ApiOpenCollection {
   return {
     handle: HANDLE,
     path: COLLECTION_PATH,
     error: '',
-    collection: {
-      name: 'acme-api',
-      requests: [
-        { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
-        { relPath: LIST_REL_PATH, name: 'list', method: 'GET' },
-      ],
-      malformed: [],
-    },
+    collection: collectionFixture(),
     ...over,
   }
 }
@@ -139,8 +165,14 @@ function responseFixture(over: Partial<ApiResponse> = {}): ApiResponse {
   }
 }
 
-export function sendFixture(over: Partial<ApiResponse> = {}): ApiRequestSendResult {
-  return { response: responseFixture(over) }
+/** What `api.request.send` answers. `environment` is the NAME the backend
+ *  read out of the environment file — never an echo of the path the caller
+ *  named — and '' is the send that named none. */
+export function sendFixture(
+  over: Partial<ApiResponse> = {},
+  environment = '',
+): ApiRequestSendResult {
+  return { response: responseFixture(over), environment }
 }
 
 /**
@@ -150,7 +182,10 @@ export function sendFixture(over: Partial<ApiResponse> = {}): ApiRequestSendResu
  * and there is no path, because the backend decided where it lives (§13.1).
  */
 export function createdFixture(name = CREATED_NAME): ApiCollectionsCreateResult {
-  return { handle: CREATED_HANDLE, collection: { name, requests: [], malformed: [] } }
+  return {
+    handle: CREATED_HANDLE,
+    collection: { name, requests: [], malformed: [], environments: [] },
+  }
 }
 
 /** The local session the workbench opens its watch binding against. */

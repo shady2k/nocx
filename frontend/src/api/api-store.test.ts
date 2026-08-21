@@ -7,15 +7,18 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApiStore } from './api-store'
 import type { ApiWorkbenchServices } from './api-client'
-import type { ApiRequest } from './api-model'
+import type { ApiEnvironmentRef, ApiRequest } from './api-model'
 import {
   COLLECTION_PATH,
   CREATED_HANDLE,
   CREATED_NAME,
+  DEV_ENV,
   HANDLE,
+  PROD_ENV,
   REQUEST,
   WATCH_BINDING,
   WATCH_SESSION,
+  collectionFixture,
   collectionsFixture,
   createdFixture,
   sendFixture,
@@ -102,7 +105,9 @@ describe('ApiStore — the collections', () => {
   it('the collection just created is the one the workbench is pointed at', async () => {
     const { store } = storeWith()
     await store.refresh()
-    expect(store.activeCollection()).toBe('')
+    // A listing points at what it listed — a pane mounted onto folders from
+    // an earlier session is pointed at one of them rather than at nothing.
+    expect(store.activeCollection()).toBe(HANDLE)
     await store.createCollection(CREATED_NAME)
     expect(store.activeCollection()).toBe(CREATED_HANDLE)
   })
@@ -118,7 +123,9 @@ describe('ApiStore — the collections', () => {
 
     expect(store.collections()).toEqual(before)
     expect(store.error()).toBe('a folder called orders-api exists')
-    expect(store.activeCollection()).toBe('')
+    // The pointer did not move: a create that was refused made no collection
+    // for it to move to.
+    expect(store.activeCollection()).toBe(HANDLE)
   })
 
   it('closing the collection that was created stops pointing at it', async () => {
@@ -171,7 +178,10 @@ describe('ApiStore — sending', () => {
     store.editDraft(edited)
     await store.send()
     expect(write).toHaveBeenCalledWith('h1', 'users/create.json', edited)
-    expect(send).toHaveBeenCalledWith('h1', 'users/create.json')
+    // The third argument is the environment, and '' is the right one here:
+    // the fixture's collection declares none, so the request goes out
+    // exactly as its file has it (§6.2).
+    expect(send).toHaveBeenCalledWith('h1', 'users/create.json', '')
   })
 
   it('does not write a draft nobody edited', async () => {
@@ -495,6 +505,101 @@ describe('ApiStore — the watch lifecycle, both ends', () => {
   })
 })
 
+// ── Which environment a send goes out under (nocx-pnvnn) ──────────────────
+//
+// The workbench tests drive the picker a person reaches. These are the two
+// properties that outlive one gesture and cannot be seen from a single
+// click: a choice must survive the panel re-listing the folder, and it
+// belongs to ONE collection.
+
+describe('ApiStore — the environment', () => {
+  /** A backend whose one collection declares the given environments. */
+  function withEnvironments(envs: ApiEnvironmentRef[]) {
+    return {
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({ collection: collectionFixture({ environments: envs }) }),
+        ],
+      }),
+    }
+  }
+
+  it("a person's choice of NONE survives the next listing", async () => {
+    // The interval, both ends. It opens the moment setEnvironment is called
+    // and closes when the collection is closed — not when the panel re-reads
+    // the folder, which it does on every change on disk. A default that
+    // re-applied itself on a refresh would silently put an environment back
+    // under a person who deliberately took it off, and they would find out
+    // by watching a request reach it.
+    const send = vi.fn().mockResolvedValue(sendFixture())
+    const { store } = storeWith({ ...withEnvironments([DEV_ENV]), sendRequest: send })
+    await store.refresh()
+    expect(store.activeEnvironment()).toBe(DEV_ENV.relPath)
+
+    store.setEnvironment('')
+    await store.refresh()
+    expect(store.activeEnvironment()).toBe('')
+
+    await store.openRequest(HANDLE, 'users/create.json')
+    await store.send()
+    expect(send).toHaveBeenCalledWith(HANDLE, 'users/create.json', '')
+  })
+
+  it('several environments choose nothing until somebody does', async () => {
+    const { store } = storeWith(withEnvironments([DEV_ENV, PROD_ENV]))
+    await store.refresh()
+    expect(store.activeEnvironment()).toBe('')
+    expect(store.environments().map((e) => e.name)).toEqual([DEV_ENV.name, PROD_ENV.name])
+
+    store.setEnvironment(PROD_ENV.relPath)
+    expect(store.activeEnvironment()).toBe(PROD_ENV.relPath)
+  })
+
+  it('the choice belongs to one collection, and leaves with it', async () => {
+    const { store } = storeWith(withEnvironments([DEV_ENV, PROD_ENV]))
+    await store.refresh()
+    store.setEnvironment(PROD_ENV.relPath)
+
+    // A second folder, freshly made: it has no environments of its own, and
+    // it must not inherit a path that names a file inside somebody else's
+    // collection — the backend would refuse it, and the panel would have
+    // shown an environment that was never there.
+    await store.createCollection(CREATED_NAME)
+    expect(store.activeCollection()).toBe(CREATED_HANDLE)
+    expect(store.environments()).toEqual([])
+    expect(store.activeEnvironment()).toBe('')
+
+    // Closing the first folder forgets its choice: nothing can address that
+    // handle again, so a remembered row could only be a map that grows.
+    await store.closeFolder(HANDLE)
+    expect(store.collections().map((c) => c.handle)).toEqual([CREATED_HANDLE])
+  })
+
+  it('a run says which environment ANSWERED, not which one was asked for', async () => {
+    // The fixture's name is deliberately not its file's stem, so a store
+    // that recorded the path it sent — or derived a name from it — fails
+    // here. Only the result can say which record answered.
+    const send = vi.fn().mockResolvedValue(sendFixture({}, DEV_ENV.name))
+    const { store } = storeWith({ ...withEnvironments([DEV_ENV]), sendRequest: send })
+    await store.refresh()
+    await store.openRequest(HANDLE, 'users/create.json')
+    await store.send()
+    expect(store.runs()[0].environment).toBe(DEV_ENV.name)
+  })
+
+  it('a send that failed records no environment at all', async () => {
+    const send = vi.fn().mockRejectedValue(new Error('connection refused'))
+    const { store } = storeWith({ ...withEnvironments([DEV_ENV]), sendRequest: send })
+    await store.refresh()
+    await store.openRequest(HANDLE, 'users/create.json')
+    await store.send()
+    // The run is there and says why (rule 2), and it does NOT claim an
+    // environment: nothing came back, so nothing confirmed one.
+    expect(store.runs()[0].error).toContain('connection refused')
+    expect(store.runs()[0].environment).toBe('')
+  })
+})
+
 function emptyCollection() {
-  return { name: 'gone', requests: [], malformed: [] }
+  return { name: 'gone', requests: [], malformed: [], environments: [] }
 }

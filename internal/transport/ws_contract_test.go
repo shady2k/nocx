@@ -5187,14 +5187,26 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 				},
 				Malformed: []apiMalformedRefWire{
 					{RelPath: "broken.json", Reason: "invalid JSON"},
+					{RelPath: "environments/bad.json", Reason: "not a regular file; symlinks are not followed"},
+				},
+				Environments: []apiEnvironmentRefWire{
+					// The NAME differs from the file's stem on purpose: the
+					// two are separate facts and only the file knows the
+					// first, which is why the ref carries both.
+					{RelPath: "environments/default.json", Name: "prod"},
 				},
 			},
 		},
-		// The empty folder: both lists are [] and never null — the
+		// The empty folder: every list is [] and never null — the
 		// renderer's first .map assumes it (nocx-25k9.14 class).
 		"empty": {
-			Handle:     "0123456789abcdef0123456789abcdef",
-			Collection: apiCollectionWire{Name: "acme", Requests: []apiRequestRefWire{}, Malformed: []apiMalformedRefWire{}},
+			Handle: "0123456789abcdef0123456789abcdef",
+			Collection: apiCollectionWire{
+				Name:         "acme",
+				Requests:     []apiRequestRefWire{},
+				Malformed:    []apiMalformedRefWire{},
+				Environments: []apiEnvironmentRefWire{},
+			},
 		},
 	}
 	for name, resp := range cases {
@@ -5218,8 +5230,15 @@ func TestAPICollectionsCreate_DTOConformsToContract(t *testing.T) {
 
 	cases := map[string]apiOpenResponse{
 		"a collection just made": {
-			Handle:     "0123456789abcdef0123456789abcdef",
-			Collection: apiCollectionWire{Name: "acme", Requests: []apiRequestRefWire{}, Malformed: []apiMalformedRefWire{}},
+			Handle: "0123456789abcdef0123456789abcdef",
+			Collection: apiCollectionWire{
+				Name:      "acme",
+				Requests:  []apiRequestRefWire{},
+				Malformed: []apiMalformedRefWire{},
+				// Create makes `environments/` and leaves it empty, so a
+				// freshly minted collection carries [] rather than null.
+				Environments: []apiEnvironmentRefWire{},
+			},
 		},
 	}
 	for name, resp := range cases {

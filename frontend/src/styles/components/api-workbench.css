@@ -53,7 +53,20 @@
   padding: var(--space-3);
 }
 
-/* Why there is no environment picker yet, said where a picker would be. */
+/* The environment picker. Placement only: the control is the kit's Select
+   and nothing here repaints it — the width is the surface's business, the
+   look is the component's. */
+.api-workbench__environment {
+  display: flex;
+}
+
+.api-workbench__environment .ui-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* What the picker governs, or — for a collection with no environments — why
+   there is no picker. */
 .api-workbench__note {
   margin: 0;
   color: var(--color-text-muted);
@@ -175,6 +188,10 @@
   white-space: nowrap;
   font-family: var(--font-family-mono);
   font-size: var(--font-size-sm);
+}
+
+.api-run__environment {
+  flex: 0 0 auto;
 }
 
 .api-run__status,

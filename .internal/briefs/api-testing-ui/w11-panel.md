@@ -72,6 +72,37 @@ care.
 - The dialog **stays open** when the backend refuses, showing the reason — that behaviour
   already exists in the current dialog, keep it.
 
+## 1b. Do not ask for a collection at all on a first run (`nocx-utrzp`)
+
+The owner's second thought, and it is the better default: a person opening this pane for
+the first time should have somewhere to type a request, not a form asking them to make one.
+
+Postman removed its Scratch Pad and that is part of the complaint this whole feature
+answers — there is now nowhere to try a request without an account. So we ship the
+opposite.
+
+**On the first open of the pane, when nothing is open and we have never seeded before,
+create a collection in the default location and open it.** Then the empty state is not
+"make one" but a collection ready to take a request.
+
+Four rules, and the first is the one that keeps this from becoming a second concept:
+
+- **It is an ORDINARY collection in every respect.** It can be renamed, committed,
+  deleted, and opened from another machine. Nothing anywhere may branch on "is this the
+  built-in one" — if you find yourself writing that condition, the design is wrong and you
+  should stop and say so.
+- **Seeded lazily, on first open of the pane** — never at install and never at app start.
+  Somebody who never opens this pane gets no directory written on their disk.
+- **Seeded once.** Record that it happened. If the person deletes it, it does not grow
+  back: resurrecting something a person deleted is its own bug, and a worse one than an
+  empty pane.
+- The default location is the same one the create dialog pre-fills. One answer to "where do
+  collections live", not two.
+
+A test asserts: first open with nothing seeded leaves exactly one collection open and no
+dialog on screen; second open creates nothing further; and a delete followed by a reopen
+leaves it deleted.
+
 ## 2. The icon and the name (`nocx-zccer`)
 
 `ArrowRightIcon` was picked with no recorded reason and reads as navigation.

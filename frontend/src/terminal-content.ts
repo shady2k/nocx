@@ -2334,6 +2334,19 @@ export class TerminalContent extends BasePaneContent {
 
       this.session = session
       lifecycleSubscription.bindSession(session.sessionId)
+      // THE PANE IS THE DROP TARGET, and this is where it can say so: the
+      // session is what the drop has to be routed to, and it does not exist
+      // until now. Wails' runtime looks for the nearest ancestor carrying
+      // data-file-drop-target and hands Go every attribute of that element,
+      // so data-session-id is how a native drop knows which tab it landed
+      // on. Nothing here reads a file and nothing here names a destination
+      // — Go mints source tickets (design R2) and the renderer then calls
+      // files.upload with its own bindingId.
+      //
+      // In a browser (dev-web) these attributes cost nothing and mean
+      // nothing: there is no Wails runtime to read them, and a drop yields
+      // File objects the renderer streams itself.
+      this.markAsFileDropTarget(session.sessionId)
       // The workspace is READ here, not assumed: the renderer named a pane
       // and the backend walked pane -> tab -> workspace itself, so this is
       // where a session's placement is learnt at all. It is recorded as
@@ -3584,7 +3597,29 @@ export class TerminalContent extends BasePaneContent {
     this.completion = null
     this._disposeAllMarkers()
     this.ledger = null
+    // The pane stops being a drop target the moment its session is gone: a
+    // stale data-session-id would route a drop to a tab that no longer
+    // exists, and the ticket minted for it would sit out its TTL for
+    // nobody.
+    this.clearFileDropTarget()
     this.host = null
+  }
+
+  /** Mark the pane element as the native file-drop target for this session
+   *  (see the call site in mount for why both attributes are needed). */
+  private markAsFileDropTarget(sessionId: string): void {
+    const pane = this._paneTarget
+    if (!pane) return
+    pane.setAttribute('data-file-drop-target', '')
+    pane.setAttribute('data-session-id', sessionId)
+  }
+
+  /** Stop being a drop target — the session behind it is gone. */
+  private clearFileDropTarget(): void {
+    const pane = this._paneTarget
+    if (!pane) return
+    pane.removeAttribute('data-file-drop-target')
+    pane.removeAttribute('data-session-id')
   }
 
   private _disposeAllMarkers(): void {

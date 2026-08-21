@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
+	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/version"
@@ -102,6 +104,21 @@ func main() {
 		MinWidth:                   uistate.MinWindowWidth,
 		MinHeight:                  uistate.MinWindowHeight,
 		DefaultContextMenuDisabled: true,
+		// FILES DROPPED ON THE WINDOW REACH GO, NOT THE RENDERER. In the
+		// desktop shell a drop delivers absolute paths on this machine, and
+		// R2 says the renderer may never learn one — so Go takes the drop,
+		// mints a source ticket per file and tells the renderer only a name
+		// and a size (handleFilesDropped, below).
+		//
+		// The tab strip is unaffected, and that is checked rather than
+		// hoped: v3's runtime installs document-level listeners that return
+		// immediately unless the drag's `types` contain `Files`
+		// (window.ts:712 in v3.0.0-beta.9), while a tab row's drag carries
+		// application/x-nocx-tab (frontend/src/layout/strip-drag.ts). The
+		// regression test is frontend/src/tab.test.tsx — "a tab drag is not
+		// a files drag", written so a future runtime bump that widened that
+		// check cannot break reordering silently.
+		EnableFileDrop: true,
 		// DevTools/Inspector, opened on startup when NOCX_DEVTOOLS=1.
 		//
 		// There is no other way into a console here, and that is deliberate on
@@ -121,6 +138,12 @@ func main() {
 	})
 	window.Show()
 	wailsApp.window = window
+
+	// The window drop is the second of the upload feature's two gestures
+	// (the first is the native picker, behind dialog.openFileForUpload).
+	// Registered here because this is where the window exists; the handler
+	// itself resolves no destination — see handleFilesDropped.
+	window.OnWindowEvent(events.Common.WindowFilesDropped, wailsApp.handleFilesDropped)
 	wailsApp.screens = shell.Screen.GetAll
 
 	if err := shell.Run(); err != nil {
@@ -223,7 +246,13 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	// Wired before Start so no renderer request can observe the unset
 	// state. The dev-web harness never runs this — the method then reports
 	// itself unavailable and the surfaces fall back to typing paths.
-	w.backend.SetDialogService(&wailsDialogService{app: application.Get()})
+	w.backend.SetDialogService(&wailsDialogService{
+		app: application.Get(),
+		// The upload half of the picker mints into the backend's own store,
+		// which is the SAME store the window drop mints into and the same
+		// one a later files.upload claims from. One mint, one owner.
+		sources: w.backend.UploadSources,
+	})
 
 	// The native browser-open is the same control-plane shape as the file
 	// dialog: the renderer reaches the Wails runtime through shell.openUrl
@@ -486,6 +515,10 @@ func (p wailsWindowProbe) Geometry() (uistate.Window, []uistate.Display, bool) {
 // reconnect never stacks a second picker over this one.
 type wailsDialogService struct {
 	app *application.App
+	// sources is the mint for upload source tickets. OpenFileForUpload is
+	// the only method that touches it, and it is what makes this adapter a
+	// transport.UploadPicker as well as a transport.DialogService.
+	sources *transport.SourceTicketStore
 }
 
 func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
@@ -494,6 +527,57 @@ func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
 		SetTitle("Choose a private key").
 		AddFilter("All files", "*").
 		PromptForSingleSelection()
+}
+
+// OpenFileForUpload is the same native picker asked a different question,
+// and it answers with a TICKET rather than a path (transport.UploadPicker,
+// design R2). The path the runtime returns is handed straight to the mint
+// and never leaves this function: what goes back over the wire is an opaque
+// id, a base name and a size.
+//
+// The runtime's own error is returned as-is — the picker has not chosen a
+// file yet, so there is no path in it to leak. The mint's refusals are
+// worded without the path by contract (internal/transport/ws_upload_source.go).
+func (d *wailsDialogService) OpenFileForUpload(_ context.Context) (transport.SourcePick, error) {
+	path, err := d.app.Dialog.OpenFile().
+		CanChooseFiles(true).
+		SetTitle("Choose a file to upload").
+		AddFilter("All files", "*").
+		PromptForSingleSelection()
+	if err != nil {
+		return transport.SourcePick{}, err
+	}
+	if path == "" {
+		// Cancelled. An empty ticket, not an error — the renderer reads it
+		// as "no change", the way dialog.openFile's empty path already works.
+		return transport.SourcePick{}, nil
+	}
+	return d.sources.Mint(path)
+}
+
+// handleFilesDropped is the window-drop mint site: Wails hands over the
+// dropped absolute paths and every attribute of the element that carried
+// data-file-drop-target, and the backend turns them into source tickets the
+// renderer can use but could not have authored.
+//
+// IT RESOLVES NO DESTINATION. The renderer reads data-session-id off the
+// notification, finds its own binding and calls files.upload like any other
+// caller, so the native gesture goes through the same authorised route
+// rather than becoming a second addressing scheme that skips the
+// connection's session set (design §5.5).
+func (w *WailsApp) handleFilesDropped(event *application.WindowEvent) {
+	ctx := event.Context()
+	files := ctx.DroppedFiles()
+	attrs := map[string]string{}
+	if details := ctx.DropTargetDetails(); details != nil && details.Attributes != nil {
+		attrs = details.Attributes
+	}
+	// The COUNT, never the names: a filename is a path here, and the log is
+	// a file on disk. The store's own errors are worded the same way.
+	if err := w.backend.UploadSources.Dropped(files, attrs); err != nil {
+		w.backend.Logger.Warn("dropped files were not offered for upload",
+			"error", err, "count", len(files))
+	}
 }
 
 // wailsUrlOpener opens a URL in the system browser through the Wails

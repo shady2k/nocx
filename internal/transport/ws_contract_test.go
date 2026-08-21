@@ -612,6 +612,104 @@ func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
 }
 
+// ── dialog.openFileForUpload ────────────────────────────────────────────
+
+// The DTO's own conformance. Both branches: a picked file, and a cancelled
+// picker — where the ticket is the empty string and the pattern has to
+// accept it, because cancel is "no change" and not an error.
+func TestDialogOpenFileForUpload_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFileForUpload.schema.json")
+	raw, err := json.Marshal(SourcePick{
+		Ticket: "0123456789abcdef0123456789abcdef",
+		Name:   "report.pdf",
+		Size:   4096,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "dialog.openFileForUpload DTO")
+
+	rawCancel, err := json.Marshal(SourcePick{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawCancel, "dialog.openFileForUpload cancelled DTO")
+}
+
+// The ticket's PATTERN is load-bearing, not decoration: an unconstrained
+// string lets a regression emit a malformed or truncated ticket and still
+// pass conformance. This is the assertion that the schema would reject one.
+func TestDialogOpenFileForUpload_ContractRefusesAMalformedTicket(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFileForUpload.schema.json")
+	for _, bad := range []string{"not-a-ticket", "ABCDEF0123456789ABCDEF0123456789", "0123456789abcdef"} {
+		raw, err := json.Marshal(SourcePick{Ticket: bad, Name: "x", Size: 1})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := validateJSONErr(schema, raw); err == nil {
+			t.Errorf("the contract accepted %q as a source ticket", bad)
+		}
+	}
+}
+
+// The real method through the real socket, with a picker standing in for
+// the Wails runtime and a real file standing in for the human's choice.
+func TestDialogOpenFileForUpload_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFileForUpload.schema.json")
+	h := newInventoryHarness(t)
+	picker := &fakeUploadPicker{path: seedFile(t, "over-the-wire.bin", 9), store: NewSourceTicketStore(nil)}
+	h.ws.SetDialogService(picker)
+
+	resp := jsonrpcCall(t, h.conn, "dialog.openFileForUpload", map[string]any{})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("dialog.openFileForUpload: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "dialog.openFileForUpload result")
+}
+
+// ── files.dropped ───────────────────────────────────────────────────────
+
+// The DTO's own conformance: the notification params as the emitter builds
+// them, key set exact.
+func TestFilesDropped_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.dropped.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"sessionId": "0123456789abcdef0123456789abcdef",
+		"sources": []SourcePick{
+			{Ticket: "abcdef0123456789abcdef0123456789", Name: "a.txt", Size: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.dropped DTO")
+}
+
+// The real notification off the real socket — the row that matters, because
+// a payload the test itself built proves the struct is well-formed and not
+// that the server sends it. The drop is driven through the store the window
+// drop calls, so this is the whole native path minus the OS.
+func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.dropped.schema.json")
+	h := newInventoryHarness(t)
+	st := NewSourceTicketStore(h.ws)
+	if err := st.Dropped(
+		[]string{seedFile(t, "dropped-over-the-wire.bin", 3)},
+		map[string]string{"data-session-id": "0123456789abcdef0123456789abcdef"},
+	); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	params := readNotification(t, h.conn, "files.dropped", 5*time.Second)
+	validateJSON(t, schema, params, "files.dropped notification")
+}
+
 // ── shell.openUrl (brief, nocx-hc0m) ────────────────────────────────────
 
 // The DTO's own conformance: the result is the empty object, exactly like

@@ -123,6 +123,15 @@ type App struct {
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
 
+	// UploadSources is the mint for upload SOURCE tickets (design R2): a
+	// file that lives on THIS machine is named to the renderer by an opaque
+	// backend-minted id, never by a path. Exported for the same reason
+	// UIState is — the two gestures that mint one (the native picker and a
+	// drop on the window) only exist where a Wails context does, which is
+	// main.go. A host with no Wails never mints, and dialog.openFileForUpload
+	// then reports itself unavailable.
+	UploadSources *transport.SourceTicketStore
+
 	// UIState owns what the app must remember without being asked
 	// (ADR-0033) — window geometry and the shell's layout. Exported because
 	// main.go is the only place a Wails context exists, and the window half
@@ -1210,6 +1219,7 @@ func New(opts ...Option) (*App, error) {
 		Pty:              ptf,
 		Session:          sess,
 		Transport:        tp,
+		UploadSources:    transport.NewSourceTicketStore(tp),
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,

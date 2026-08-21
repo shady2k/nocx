@@ -65,6 +65,13 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := dialogHandlers{dialog: dialog, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
 		}),
+		// dialog.openFileForUpload rides the SAME capacity-one dialog
+		// admission: it opens the same native picker, and two pickers must
+		// never stack whichever method asked for them.
+		regResponder(s.dialogSub, "dialog.openFileForUpload", noParams(), func(r Responder) handlerFunc {
+			h := dialogHandlers{dialog: dialog, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFileForUpload(ctx, req) }
+		}),
 		regResponder(s.lane, "sshConfig.aliases", noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigAliases(ctx, req) }

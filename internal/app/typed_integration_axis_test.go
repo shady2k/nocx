@@ -21,7 +21,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -206,7 +205,7 @@ func typedAxisDelivery(t *testing.T, s *typedAxisStack) (*typedDelivery, *harnes
 	bindTypedIntegrationAxis(runner, s.ws)
 	runner.dial = func(string) (TypedMaster, error) { return refusingMaster{}, nil }
 	win := newHarnessWindow()
-	win.attach(os.NewFile(uintptr(devNullFD(t)), "devnull"))
+	win.attach(devNull(t))
 	runner.sessions = &countingTerminals{win: win}
 
 	opts := shellintegration.LaunchOptions{

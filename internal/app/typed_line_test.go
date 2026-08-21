@@ -291,7 +291,7 @@ func TestTypedLine_NothingIsPublishedBeforeOwnershipIsProven(t *testing.T) {
 	if !ok {
 		t.Fatalf("window is %T, want *harnessWindow", d.window)
 	}
-	win.attach(os.NewFile(uintptr(devNullFD(t)), "devnull"))
+	win.attach(devNull(t))
 
 	// The dialer never succeeds, so ownership is never proven.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -306,14 +306,36 @@ func TestTypedLine_NothingIsPublishedBeforeOwnershipIsProven(t *testing.T) {
 	}
 }
 
-func devNullFD(t *testing.T) int {
+// devNull is the discard terminal the harness window writes its frames to,
+// and it hands out the *os.File itself — ONE owner of the descriptor, whose
+// single close is this cleanup.
+//
+// It used to hand out the raw number (`devNullFD(t) int`) and both callers
+// wrapped it in a SECOND os.File. That is two owners of one descriptor, and
+// the second one closes it at a time nobody chose: every *os.File carries a
+// finalizer that closes its fd, so when the wrapper became unreachable at the
+// end of its test, the GC closed the descriptor somewhere inside a LATER
+// test — by which time the number had been handed to whatever that test
+// opened next. The harness then wrote a bootstrap frame to a descriptor that
+// was no longer its own, the write failed with EBADF, and the delivery did
+// exactly the right thing with a genuinely broken window: it reported
+// bootstrap-interrupted. THE PRODUCT WAS NEVER WRONG (nocx-m8jwn.4; CI run
+// 32479199321).
+//
+// Measured over 500 runs of the test that caught it: 27 failures, every one
+// of them carrying the EBADF; 0 when the wrapper was merely kept alive, which
+// is what names the finalizer rather than anything in the delivery; 0 with
+// this one-owner form. And the blast radius was never this test — a
+// descriptor closed under its owner is whatever the package opened next, a
+// websocket or a database file just as easily as this.
+func devNull(t *testing.T) *os.File {
 	t.Helper()
 	f, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatalf("open %s: %v", os.DevNull, err)
 	}
 	t.Cleanup(func() { _ = f.Close() })
-	return int(f.Fd())
+	return f
 }
 
 // ---------------------------------------------------------------------------

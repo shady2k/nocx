@@ -134,8 +134,13 @@ type sessionFeed struct {
 func newSessionFeed(r io.Reader) *sessionFeed {
 	f := &sessionFeed{chunks: make(chan []byte, 8), ended: make(chan struct{}), after: time.After}
 	go func() {
-		defer close(f.ended)
+		// `ended` closes BEFORE `chunks`, so a consumer unblocked by the
+		// end of `chunks` is ordered after it and cannot read a stale
+		// "not ended" — the question farSideEnded asks on exactly that
+		// wakeup. Closed the other way round the two are concurrent and
+		// the answer would be the scheduler's.
 		defer close(f.chunks)
+		defer close(f.ended)
 		for {
 			buf := make([]byte, 32*1024)
 			n, err := r.Read(buf)
@@ -152,8 +157,9 @@ func newSessionFeed(r io.Reader) *sessionFeed {
 }
 
 // Ended reports whether the session's output stream has ended. The pump
-// closes `ended` after it has recorded why it stopped, so a true answer is
-// ordered after everything the pump wrote.
+// closes `ended` after it has recorded why it stopped and before it closes
+// `chunks`, so a true answer is ordered after everything the pump wrote, and
+// every consumer the stream's end woke sees it.
 func (f *sessionFeed) Ended() bool {
 	select {
 	case <-f.ended:
@@ -161,6 +167,47 @@ func (f *sessionFeed) Ended() bool {
 	default:
 		return false
 	}
+}
+
+// farSideEnded answers "is the far side's session over" at the moment the
+// bootstrap gave up, and answers it so that the answer does not depend on
+// which of two goroutines was scheduled first.
+//
+// ONE far-side event — the exit status and the channel close that follow a
+// substituted `exec` — reaches the bootstrap down two independent chains, and
+// the bootstrap gives up on whichever arrives first:
+//
+//	the pump    the channel read returns io.EOF, the feed's `ended` closes,
+//	            and ReadLine returns that error;
+//	the watcher session.Wait returns, RealChannel.recordWait records it,
+//	            Close closes `done`, the bootstrap context is cancelled, and
+//	            ReadLine returns context.Canceled.
+//
+// Nothing orders those two against each other. Session.Wait does not wait for
+// the pump — the session's output is a StdoutPipe, for which x/crypto/ssh
+// registers no copy goroutine, so Wait returns on the exit status alone while
+// the pump is still blocked in Read. So asking only the feed answered "no"
+// whenever the watcher's chain won a race the pump had not already finished,
+// and §6.4's sixth row — accepted-and-substituted, which must never be
+// collapsed into the recoverable refused row — was reported as ReasonUnknown
+// instead.
+//
+// Each chain leaves its OWN fact behind, ordered before the wakeup it caused:
+// the pump closes `ended` before `chunks` (newSessionFeed), and the watcher
+// records the wait before Close closes `done` (RealChannel.recordWait, the
+// same ordering nocx-ictcq bought for the exit monitor). Whichever chain woke
+// the bootstrap, its fact is already visible, so the disjunction is definite
+// and both orders give the same answer.
+//
+// remoteSessionEnded is the watcher's fact — the `ok` of RealChannel.WaitErr —
+// and deliberately not the `done` channel: `done` also closes when the tab is
+// closed locally, which is not the far side ending and is not this row.
+//
+// A bootstrap that gave up on its own DEADLINE has neither fact, and false is
+// the right answer there: the session is still live, and that is a timeout
+// rather than a substitution.
+func farSideEnded(feed *sessionFeed, remoteSessionEnded bool) bool {
+	return feed.Ended() || remoteSessionEnded
 }
 
 // Read implements io.Reader for the terminal side.

@@ -331,3 +331,63 @@ func waitUntil(t *testing.T, cond func() bool) {
 		}
 	}
 }
+
+// TestFarSideEnded_IsYesWhicheverChainReportedIt is §6.4's sixth row's
+// discriminator, and the reason it consults two signals rather than one.
+//
+// One far-side event — the exit status and the channel close that follow a
+// substituted `exec` — reaches the bootstrap goroutine down two chains with
+// no ordering between them, and the bootstrap gives up on whichever arrives
+// first. Asking only the pump therefore answered "no" whenever the watcher's
+// chain won a race the pump had not already finished, and the row was
+// reported as ReasonUnknown. Each chain leaves its own
+// fact behind, ordered before the wakeup it caused, so the answer is the
+// disjunction and is the same either way.
+//
+// The fourth case is the one that keeps the row honest: a bootstrap that gave
+// up on its own DEADLINE has neither fact, the session is still live, and
+// that is a timeout rather than a substitution.
+func TestFarSideEnded_IsYesWhicheverChainReportedIt(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pumpEnded   bool
+		remoteEnded bool
+		want        bool
+	}{
+		{"the pump saw the stream end", true, false, true},
+		{"the watcher saw session.Wait return", false, true, true},
+		{"both chains arrived before the question", true, true, true},
+		{"neither did, which is a deadline on a live session", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr, pw := io.Pipe()
+			t.Cleanup(func() { _ = pw.Close() })
+			f := newSessionFeed(pr)
+			if tc.pumpEnded {
+				_ = pw.Close()
+				waitUntil(t, f.Ended)
+			}
+			if got := farSideEnded(f, tc.remoteEnded); got != tc.want {
+				t.Errorf("farSideEnded = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionFeed_TheStreamsEndIsVisibleToWhoeverItWoke guards the ordering
+// farSideEnded's first signal rests on: the pump closes `ended` BEFORE
+// `chunks`, so a consumer unblocked by the end of `chunks` is ordered after
+// it and cannot read a stale "no". Closed the other way round the two are
+// concurrent, and the consumer's answer would depend on the scheduler.
+func TestSessionFeed_TheStreamsEndIsVisibleToWhoeverItWoke(t *testing.T) {
+	pr, pw := io.Pipe()
+	f := newSessionFeed(pr)
+	_ = pw.Close()
+
+	if _, err := f.ReadLine(context.Background(), time.Hour); !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadLine err = %v, want io.EOF from the stream's end", err)
+	}
+	if !f.Ended() {
+		t.Fatal("the reader the stream's end woke was told the stream had not ended")
+	}
+}

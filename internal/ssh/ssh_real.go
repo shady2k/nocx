@@ -1080,7 +1080,15 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 				// before the loader spoke reaches the same state. What it
 				// names is the OUTCOME, which is the same either way — the
 				// user has no prompt here.
-				if execAccepted && feed.Ended() {
+				//
+				// "The channel is already gone" is asked through
+				// farSideEnded rather than of the feed alone: the far
+				// side's end reaches this goroutine down two unordered
+				// chains, and reading only the pump's reported the row
+				// as ReasonUnknown whenever the watcher's chain won a
+				// race the pump had not already finished.
+				_, remoteSessionEnded := ch.WaitErr()
+				if execAccepted && farSideEnded(feed, remoteSessionEnded) {
 					bootReason = ReasonExecSubstituted
 				}
 				ch.setShellIntegrationReason(bootReason)

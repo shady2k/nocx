@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -334,6 +335,33 @@ func execProbeWaitFor(t *testing.T, out *lockedBuffer, want, what string) {
 	t.Fatalf("%s: never saw %q; channel output was:\n%s", what, want, out.String())
 }
 
+// ptyDeviceName is what `tty(1)` prints when its standard input IS a
+// pseudo-terminal, on either platform this suite runs on: Linux's devpts
+// names a slave /dev/pts/N, and macOS (BSD) names it /dev/ttysNNN. Both are
+// the same fact — the shell's stdin is the slave side of a pty — spelled by
+// two different kernels, so the assertion matches the fact rather than one
+// kernel's spelling of it.
+//
+// It stays a specific claim: a real device path, minted by the pty layer.
+// `tty` prints "not a tty" for anything else, /dev/console and /dev/ttyN
+// (a Linux virtual console) do not match, and neither does empty output —
+// which is why this is not softened to "the shell said something".
+var ptyDeviceName = regexp.MustCompile(`/dev/(pts/[0-9]+|ttys[0-9]+)`)
+
+// execProbeWaitForPTYName blocks until the buffer carries such a name.
+func execProbeWaitForPTYName(t *testing.T, out *lockedBuffer, what string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if ptyDeviceName.MatchString(out.String()) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s: `tty` never named a pty device (%s); channel output was:\n%s",
+		what, ptyDeviceName, out.String())
+}
+
 // execProbeProveInteractive proves the channel carries a real interactive
 // shell on a real pty: the shell executes a line we type and its OUTPUT
 // comes back (the marker is written split so the pty's echo of the typed
@@ -344,7 +372,7 @@ func execProbeProveInteractive(t *testing.T, ch gossh.Channel, out *lockedBuffer
 		t.Fatalf("%s: write to shell: %v", what, err)
 	}
 	execProbeWaitFor(t, out, "NOCXPROBE_ALIVE", what+": shell executed a typed line")
-	execProbeWaitFor(t, out, "/dev/pts/", what+": the shell is on a pty")
+	execProbeWaitForPTYName(t, out, what+": the shell is on a pty")
 }
 
 // ---------------------------------------------------------------------------

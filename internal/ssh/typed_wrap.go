@@ -73,6 +73,15 @@ const (
 	// socket another user could plant is a socket that could answer for a
 	// destination it was not created for.
 	controlSocketMode os.FileMode = 0o700
+
+	// expandedSocketNameLen is what ssh appends to the root once %C is
+	// expanded: the separator, our prefix, and the hash — 40 hexadecimal
+	// characters, measured against OpenSSH rather than assumed
+	// (TestTypedWrapLive_TheOracleExpandsTheSocketPathPerDestination pins
+	// the shape, `/m-[0-9a-f]{40}$`). It is the budget the ROOT does not
+	// have: a root longer than maxControlPathLen-expandedSocketNameLen
+	// cannot hold a socket ssh will open, whatever else is right about it.
+	expandedSocketNameLen = 1 + len(controlSocketPrefix) + 40
 )
 
 // New refusal classes for the typed path (design §4.4). Each is decided
@@ -161,8 +170,42 @@ func NewTypedWrapper(lg log.Logger, resolver ConfigResolver, controlRoot string)
 // the expanded path has a hard bound, and per-uid, because the control socket
 // is the trust boundary and a directory another user could own is a socket
 // another user could plant.
+//
+// SHORT IS A MEASUREMENT, NOT AN ADJECTIVE, and this returned os.TempDir()
+// alone until macOS measured it. A macOS per-user confinement directory —
+// /var/folders/<2>/<30>/T, which is what $TMPDIR names for a logged-in user
+// and for a GUI-launched app alike — is 48 characters before we add
+// anything; `nocx-mux-501` makes 61; ssh's expansion adds 43. That is 104 —
+// past the bound here, and past the kernel's too: macOS's sun_path is 104
+// BYTES, which a 104-character path cannot fit because the terminator needs
+// one of them. So the wrapper refused every typed ssh with
+// ReasonNoControlPath and the whole
+// typed path was dead on the platform nocx ships first. Nothing was wrong
+// with the refusal — it is the honest answer to a socket that cannot be
+// bound — and nothing was wrong with the bound. What was wrong was choosing
+// a base without asking whether a socket fits in it.
+//
+// So the base is chosen rather than assumed, and $TMPDIR keeps its
+// precedence where it fits: it is private per-user, and it is what a test,
+// a sandbox or a service manager redirects. /tmp is the fallback because it
+// is the one short directory every unix has. It is SHARED, which the per-uid
+// name and ensureControlRoot answer between them: a directory some other
+// user owns cannot be chmod'ed to 0700 by us, so the wrapper refuses it and
+// the line runs as plain ssh — a name another user can squat costs the
+// integration and can never yield them our socket.
+//
+// If neither base fits — a uid long enough to push even /tmp past the
+// budget — this still returns a root, and Wrap's bound is still the last
+// word: the answer is a named refusal, never an unbindable socket.
 func DefaultControlRoot() string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("nocx-mux-%d", os.Getuid()))
+	name := fmt.Sprintf("nocx-mux-%d", os.Getuid())
+	for _, base := range []string{os.TempDir(), "/tmp"} {
+		root := filepath.Join(base, name)
+		if len(root)+expandedSocketNameLen <= maxControlPathLen {
+			return root
+		}
+	}
+	return filepath.Join("/tmp", name)
 }
 
 // muxPolicyOptions are the option spellings that mean "the user has expressed

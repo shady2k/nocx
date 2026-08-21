@@ -443,7 +443,16 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	// ControlPath does not degrade to no-multiplexing, it kills the
 	// connection, so the product refuses to build one and a test must not
 	// hand it one either.
-	sockRoot, err := os.MkdirTemp("", "nx")
+	//
+	// SHORT is asked of the product, not assumed of $TMPDIR. This minted
+	// the directory in os.TempDir(), which on macOS is a 48-character
+	// per-user confinement directory — the expansion landed 4 bytes past
+	// the bound, the wrapper refused with ReasonNoControlPath, and these
+	// tests read that refusal as a broken grant on the macOS runner while
+	// passing here. DefaultControlRoot now picks a base a socket fits in;
+	// its directory is that base, so the disposable root inherits the one
+	// answer instead of re-deriving it (and would inherit the next fix too).
+	sockRoot, err := os.MkdirTemp(filepath.Dir(ssh.DefaultControlRoot()), "nx")
 	if err != nil {
 		t.Fatalf("socket root: %v", err)
 	}

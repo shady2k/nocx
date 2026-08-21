@@ -47,7 +47,12 @@ var liveWrapSocketRE = regexp.MustCompile(`/m-[0-9a-f]{40}$`)
 
 func TestTypedWrapLive_TheOracleExpandsTheSocketPathPerDestination(t *testing.T) {
 	res := realOracleOrSkip(t)
-	root, err := os.MkdirTemp("", "nx")
+	// Under the base DefaultControlRoot chose, never under $TMPDIR
+	// directly: on macOS $TMPDIR is a 48-character per-user confinement
+	// directory and a socket under it expands past the bound, so a test
+	// that mints its own root there measures the runner's temp directory
+	// rather than the wrapper.
+	root, err := os.MkdirTemp(filepath.Dir(DefaultControlRoot()), "nx")
 	if err != nil {
 		t.Fatalf("socket root: %v", err)
 	}
@@ -118,7 +123,7 @@ func TestTypedWrapLive_EachRefusalClassIsProducedByARealConfiguration(t *testing
 			root := tc.root
 			if root == "" {
 				var err error
-				root, err = os.MkdirTemp("", "nx")
+				root, err = os.MkdirTemp(filepath.Dir(DefaultControlRoot()), "nx")
 				if err != nil {
 					t.Fatalf("socket root: %v", err)
 				}

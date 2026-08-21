@@ -204,6 +204,48 @@ func TestTypedWrap_RefusesWhenNoSafeShortSocketPathCanBeBuilt(t *testing.T) {
 	assertNoSocketResidue(t, root)
 }
 
+// And the paired assertion the refusal above never made: on an ORDINARY
+// machine the root we ship actually holds a socket. Every test around it
+// hands the wrapper a root of its own, so all of them passed on a platform
+// where DefaultControlRoot could not be used at all — macOS, where $TMPDIR
+// is a 48-character per-user confinement directory and the expansion put
+// the socket 4 bytes past the bound. Five internal/app tests failed on the
+// macOS runner and none of them named the cause, because the product's
+// answer to "where do our sockets live" was the one thing under test that
+// nothing tested.
+//
+// The macOS shape is exercised BY LENGTH rather than by GOOS: what breaks a
+// socket path is how long $TMPDIR is, and that is reproducible anywhere.
+func TestDefaultControlRoot_LeavesRoomForTheExpansion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tmpdir string
+	}{
+		{"linux /tmp", "/tmp"},
+		// /var/folders/<2>/<30>/T, character for character.
+		{"macOS per-user confinement dir", "/var/folders/df/" + strings.Repeat("z", 30) + "/T"},
+		// A base with no room at all: the fallback is what keeps the
+		// product working, not the length of the base it was handed.
+		{"a base far past the budget", "/" + strings.Repeat("d", 120)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMPDIR", tc.tmpdir)
+			root := DefaultControlRoot()
+			if got := len(root) + expandedSocketNameLen; got > maxControlPathLen {
+				t.Errorf("a socket under %s expands to %d bytes, past the %d-byte bound: "+
+					"ssh refuses to start rather than degrade, so the typed path is dead on this machine",
+					root, got, maxControlPathLen)
+			}
+			if !filepath.IsAbs(root) {
+				t.Errorf("control root %q is not absolute", root)
+			}
+			if !strings.Contains(root, "nocx-mux-") {
+				t.Errorf("control root %q does not carry the per-uid name the ownership check depends on", root)
+			}
+		})
+	}
+}
+
 // The same class, arriving as a directory we cannot own: a socket directory
 // that is missing or unwritable makes ssh exit with `unix_listener: cannot
 // bind`, which is worse than losing integration.

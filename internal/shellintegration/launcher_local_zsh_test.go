@@ -466,15 +466,35 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	// 4. The capability is usable BY the shell and absent FROM its
 	//    environment — the property the whole text-substitution design exists
 	//    for (ADR-0024 decision 2), asked of the real process the user's own
-	//    commands are children of rather than of the rendered text. The
-	//    verdict words carry none of the capability, so finding one in the pty
-	//    is never the echoed command line answering for itself.
-	if _, err := ptmx.Write([]byte("env | grep -q " + testCap[:16] + " && echo CAP_IN_ENVIRON || echo CAP_TEXT_ONLY\n")); err != nil {
+	//    commands are children of rather than of the rendered text.
+	//
+	//    Both verdict words are SPLIT across two quoted strings, the idiom
+	//    the two tests below already use and for the same reason: zsh's line
+	//    editor redraws the typed line in pieces, so a reader sampling the
+	//    pty sees a PREFIX of the echo, and this command's echo carries
+	//    "CAP_IN_ENVIRON" a whole clause before it carries "CAP_TEXT_ONLY".
+	//    Whole words here let the echo answer for the shell: sampled in that
+	//    window, the leak verdict wins on a session that never leaked. It
+	//    won on `ci-backend` (run 32470670241) and reproduces 10 times in 10
+	//    on a bare zsh outside this suite. The old comment reasoned that the
+	//    verdict words carry none of the CAPABILITY, which is true and is
+	//    not the hazard — the hazard is the verdict words themselves.
+	//
+	//    The shell-variable half is asserted with it, in the same command:
+	//    "absent from the environment" is satisfied vacuously by a session
+	//    that never received a capability at all, and this is a security
+	//    assertion, so it may not be able to pass for the wrong reason.
+	probe := `echo "CAP_VAR""=${__nocx_cap:+yes}"; ` +
+		`env | grep -q ` + testCap[:16] + ` && echo "CAP_IN""_ENVIRON" || echo "CAP_TEXT""_ONLY"`
+	if _, err := ptmx.Write([]byte(probe + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	verdict := waitForEither(t, s, "CAP_TEXT_ONLY", "CAP_IN_ENVIRON")
 	if verdict != "CAP_TEXT_ONLY" {
-		t.Errorf("the capability reached the session environment, where every child of the user's shell can read it")
+		t.Errorf("the capability reached the session environment, where every child of the user's shell can read it: %q", s.output())
+	}
+	if !strings.Contains(s.output(), "CAP_VAR=yes") {
+		t.Errorf("the shell does not hold the capability in its non-exported variable, so the check above passed on a session that had none: %q", s.output())
 	}
 }
 
@@ -482,6 +502,13 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 // reports which. Anchoring on the shell's own answer rather than on a duration
 // is what keeps this assertion from passing because the command had not run
 // yet — the shape AGENTS.md's "wait on an observable state change" asks for.
+//
+// NEITHER word may appear in the command that is typed to produce it. The pty
+// carries the echo of that line, zsh's editor redraws it in pieces, and a
+// caller sampling mid-redraw reads a prefix — so a typed line containing both
+// words answers its own question, in whichever order it spells them. Callers
+// split the word across two quoted strings ("CAP_IN""_ENVIRON") or keep it out
+// of the typed text entirely.
 func waitForEither(t *testing.T, s *channelShell, a, b string) string {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)

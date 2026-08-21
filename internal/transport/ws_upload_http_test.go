@@ -400,10 +400,15 @@ func TestUploadEndpoint_AShortBodyFailsTheTransferAndLeavesTheDestinationAlone(t
 }
 
 // A body that sends MORE than its own Content-Length is cut at that bound
-// by net/http, and because Content-Length was already required to equal the
-// declared size, the excess never reaches the sink and never reaches the
-// disk.
-func TestUploadEndpoint_ABodyLongerThanContentLengthIsCutAtTheBound(t *testing.T) {
+// and FAILS there (§5.4), leaving the destination untouched.
+//
+// Nothing above the handler can see this. Content-Length was already
+// required to equal the declared size, so net/http hands the sink exactly
+// the declared number of bytes and reports a clean EOF; the excess is left
+// on the connection to be misparsed as the next request, and the transfer
+// reports itself written. The connection guard is what sees it, because it
+// counts what the socket delivered and knows where the header block ended.
+func TestUploadEndpoint_ABodyLongerThanContentLengthFailsAtTheBound(t *testing.T) {
 	e := newUploadTestEnv(t)
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
@@ -414,16 +419,46 @@ func TestUploadEndpoint_ABodyLongerThanContentLengthIsCutAtTheBound(t *testing.T
 		_, _ = c.Write([]byte("helloAND MORE THAN IT SAID"))
 		_ = c.CloseWrite()
 	})
+	if state := awaitUploadState(t, e.ws, tid); state != uploadStateFailed {
+		t.Fatalf("state = %q, want %q", state, uploadStateFailed)
+	}
+	// Nothing at the destination and no temp: a body that overran its own
+	// framing is not a partial upload to be kept, it is a request whose
+	// bytes cannot be trusted to be the ones that were declared.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("directory holds %d entries, want 0", len(entries))
+	}
+	rt := e.ws.uploads.get(tid)
+	if _, out, _, _ := rt.snapshot(); len(out.Stranded) != 0 {
+		t.Errorf("stranded = %v, want none: the temp was removable", out.Stranded)
+	}
+}
+
+// The paired success, on the same shape: a body that ends exactly at its
+// Content-Length is not an overrun. Without it the rule above is satisfied
+// by a handler that fails every streamed upload.
+func TestUploadEndpoint_ABodyThatEndsExactlyAtTheBoundIsNotAnOverrun(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	tid, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	rawUpload(t, e.ws, ticket, "Content-Length: 5\r\n", func(c *net.TCPConn) {
+		_, _ = c.Write([]byte("hello"))
+		_ = c.CloseWrite()
+	})
 	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
 	body, err := os.ReadFile(filepath.Join(dir, "a.txt")) //nolint:gosec // see above
-	if err != nil {
-		t.Fatalf("read destination: %v", err)
-	}
-	if string(body) != "hello" {
-		t.Fatalf("destination = %q, want %q — the excess must never reach the disk", body, "hello")
+	if err != nil || string(body) != "hello" {
+		t.Fatalf("destination = %q, %v", body, err)
 	}
 }
 

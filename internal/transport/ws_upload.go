@@ -1279,6 +1279,38 @@ func (c *uploadGuardConn) bytesRead() int64 {
 	return c.read
 }
 
+// uploadGuardKey addresses the guard in a request's context. ConnContext is
+// what puts it there: it runs with the net.Conn the listener returned, which
+// is the guard itself.
+type uploadGuardKey struct{}
+
+// uploadOverran reports whether the connection carrying r delivered more
+// bytes than r's own framing accounts for — the §5.4 rule that a body
+// exceeding the bound is cut there and fails.
+//
+// headerEnd plus Content-Length is exactly how long the request is, and the
+// guard counts what the socket handed over, so anything past that sum is
+// bytes the client sent after its own body. It answers false when the guard
+// never scanned this request's header block (nothing was armed, or the bytes
+// were pipelined past it): an unknown offset is not evidence of an overrun,
+// and a check that guessed would fail honest uploads.
+//
+// What it cannot see is excess that has not arrived yet. That is not a hole
+// worth closing: bytes the sink never read cannot have reached the
+// destination, and the route answers Connection: close, so they are
+// discarded with the connection rather than framed as another request.
+func uploadOverran(r *http.Request) bool {
+	g, _ := r.Context().Value(uploadGuardKey{}).(*uploadGuardConn)
+	if g == nil || r.ContentLength < 0 {
+		return false
+	}
+	end := g.headerBlockEnd()
+	if end < 0 {
+		return false
+	}
+	return g.bytesRead() > end+r.ContentLength
+}
+
 // uploadRequestLine reports whether a request line names this route. The
 // method is part of the answer: the mux answers 405 for anything else, and a
 // GET of an upload URL has no header block worth bounding.
@@ -1308,14 +1340,26 @@ type uploadBody struct {
 	r       io.ReadCloser
 	setRead func(time.Time) error
 	stall   time.Duration
+	// overran is asked once, at the EOF net/http reports at the declared
+	// length, and is what turns "the body ended" into "the body ended and
+	// the client kept talking" (§5.4). It is checked HERE rather than after
+	// the transfer because the sink promotes the temp the moment the copy
+	// succeeds: an overrun found afterwards would be found after the
+	// destination had already been replaced.
+	overran func() bool
 
 	mu     sync.Mutex
 	closed bool
 }
 
-// errUploadBodyClosed is what a Read after Close reports. It never carries
-// the ticket, because it reaches the person through files.uploadDone.
-var errUploadBodyClosed = errors.New("upload: the request body was closed")
+// errUploadBodyClosed is what a Read after Close reports, and
+// errUploadBodyOverran what a body longer than its own framing reports.
+// Neither carries the ticket; both reach the person through
+// files.uploadDone.
+var (
+	errUploadBodyClosed  = errors.New("upload: the request body was closed")
+	errUploadBodyOverran = errors.New("upload: the body sent more than its declared length")
+)
 
 func (b *uploadBody) Read(p []byte) (int, error) {
 	b.mu.Lock()
@@ -1327,7 +1371,11 @@ func (b *uploadBody) Read(p []byte) (int, error) {
 	// Re-armed before EVERY read, so the bound is "no progress for stall",
 	// never "the whole transfer within stall" (D2).
 	_ = b.setRead(time.Now().Add(b.stall))
-	return b.r.Read(p)
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) && b.overran != nil && b.overran() {
+		return n, errUploadBodyOverran
+	}
+	return n, err
 }
 
 func (b *uploadBody) Close() error {
@@ -1430,7 +1478,12 @@ func (s *WSServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	case uploadClaimOK:
 	}
 
-	body := &uploadBody{r: r.Body, setRead: rc.SetReadDeadline, stall: s.uploads.stallTimeout()}
+	body := &uploadBody{
+		r:       r.Body,
+		setRead: rc.SetReadDeadline,
+		stall:   s.uploads.stallTimeout(),
+		overran: func() bool { return uploadOverran(r) },
+	}
 	if !rt.attach(body) {
 		// The transfer ended between the claim and the hand-off.
 		http.Error(w, "gone", http.StatusGone)

@@ -1123,6 +1123,16 @@ func (s *WSServer) Start(ctx context.Context) error {
 		// apart before the parse finishes because it reads the request
 		// line itself (ws_upload.go, §5.4).
 		ReadHeaderTimeout: 0,
+		// The guard is the net.Conn the listener returned, so this is
+		// where a handler gets hold of the one watching its own request —
+		// which is how the upload route sees a body that overran its own
+		// Content-Length (§5.4), something net/http hides by design.
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if g, ok := c.(*uploadGuardConn); ok {
+				return context.WithValue(ctx, uploadGuardKey{}, g)
+			}
+			return ctx
+		},
 		// StateIdle is the only moment net/http says "that request is
 		// over and the next has not started", which is exactly the
 		// interval the guard needs to re-open on a reused connection.

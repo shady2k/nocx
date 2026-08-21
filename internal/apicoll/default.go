@@ -69,10 +69,7 @@ func NewDefaultCollection(p storage.Paths, name string) (string, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", fmt.Errorf("apicoll: create collection %s: %w", root, err)
 	}
-	if err := storage.NewDocumentStore(root).Write(ManifestName, manifest{
-		SchemaVersion: Module.Current,
-		Name:          name,
-	}); err != nil {
+	if err := storage.NewDocumentStore(root).Write(ManifestName, newManifest(name)); err != nil {
 		return "", fmt.Errorf("apicoll: write manifest for %s: %w", root, err)
 	}
 	return root, nil

@@ -36,6 +36,39 @@ type manifest struct {
 	Name          string                `json:"name"`
 }
 
+// newManifest is the ONE place a manifest is built, so the version a file
+// is written at cannot drift from the version readManifest accepts.
+func newManifest(name string) manifest {
+	return manifest{SchemaVersion: Module.Current, Name: name}
+}
+
+// MarshalManifest renders the manifest for a collection called name, in the
+// form readManifest reads it: this build's schemaVersion, the name, and
+// nothing else.
+//
+// It exists because a collection folder is not always assembled by this
+// package. internal/apiimport builds a whole folder in a staging directory
+// and moves it into place as ONE atomic arrival (design §12.2), so it cannot
+// hand the manifest to a storage.DocumentStore, which writes one document,
+// in place, now — the manifest has to be one of the bytes-and-a-path files
+// that arrive with the rename. What the importer can do, and what this is,
+// is ask the reader for those bytes instead of spelling the format a second
+// time. The field names, the "name and the version and nothing else" rule
+// and the version itself stay here, next to the code that reads them back.
+//
+// The bytes are the document store's own: json.MarshalIndent with two
+// spaces and no trailing newline, so a manifest is the same file whoever
+// wrote it — NewDefaultCollection through the store, or an importer through
+// this. Indented because a collection is shared through a pull request
+// (§6.1) and a one-line file has no diff worth reading.
+func MarshalManifest(name string) ([]byte, error) {
+	raw, err := json.MarshalIndent(newManifest(name), "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("apicoll: marshal manifest for %q: %w", name, err)
+	}
+	return raw, nil
+}
+
 // readManifest applies the document protocol in the order the protocol
 // requires: probe the version, refuse anything newer than this build, and
 // only then decode. The order is the point — a manifest from a newer build

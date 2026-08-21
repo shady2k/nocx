@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/apibind"
+	"github.com/shady2k/nocx/internal/apicoll"
 )
 
 // ---- the injected seams ----
@@ -205,8 +206,10 @@ func TestImportIntoPostmanWritesTheFolder(t *testing.T) {
 	}
 
 	files := walkFiles(t, dest)
-	if _, ok := files["collection.json"]; !ok {
-		t.Fatalf("no collection.json; have %v", keysOf(files))
+	// The manifest the READER looks for, under the name it looks for it
+	// under: apicoll.ManifestName, not a name this package chose.
+	if _, ok := files[apicoll.ManifestName]; !ok {
+		t.Fatalf("no %s; have %v", apicoll.ManifestName, keysOf(files))
 	}
 	if _, ok := files["environments/default.json"]; !ok {
 		t.Fatalf("no environments/default.json; have %v", keysOf(files))
@@ -265,6 +268,14 @@ func TestImportIntoPostmanWritesTheFolder(t *testing.T) {
 			t.Fatalf("binding key environment = %q", k.Environment)
 		}
 	}
+}
+
+func keysOfAny(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func keysOf(m map[string]string) []string {
@@ -725,24 +736,23 @@ func TestImportIntoWritesReadableJSON(t *testing.T) {
 	coll, reqs, envs := converted.Collection, converted.Requests, converted.Environments
 	files := walkFiles(t, dest)
 
-	var gotColl struct {
-		Name     string `json:"name"`
-		Requests []struct {
-			RelPath string `json:"relPath"`
-			Name    string `json:"name"`
-			Method  string `json:"method"`
-		} `json:"requests"`
+	// The manifest carries the name and the version and nothing else: the
+	// list of requests IS the folder (§6.2), so what the import wrote is
+	// checked against the folder below rather than against a field.
+	var gotManifest map[string]any
+	if err := json.Unmarshal([]byte(files[apicoll.ManifestName]), &gotManifest); err != nil {
+		t.Fatalf("%s: %v", apicoll.ManifestName, err)
 	}
-	if err := json.Unmarshal([]byte(files["collection.json"]), &gotColl); err != nil {
-		t.Fatalf("collection.json: %v", err)
+	if gotManifest["name"] != coll.Name {
+		t.Fatalf("%s names %v, want %q", apicoll.ManifestName, gotManifest["name"], coll.Name)
 	}
-	if gotColl.Name != coll.Name || len(gotColl.Requests) != len(coll.Requests) {
-		t.Fatalf("collection.json = %+v", gotColl)
+	if v, ok := gotManifest["schemaVersion"].(float64); !ok || int(v) != int(apicoll.Module.Current) {
+		t.Fatalf("%s says schemaVersion %v, want %d", apicoll.ManifestName, gotManifest["schemaVersion"], apicoll.Module.Current)
 	}
-	for i, ref := range gotColl.Requests {
-		if ref.RelPath != coll.Requests[i].RelPath {
-			t.Fatalf("ref %d relPath = %q, want %q", i, ref.RelPath, coll.Requests[i].RelPath)
-		}
+	if len(gotManifest) != 2 {
+		t.Fatalf("%s carries %v; it carries the name and the version and nothing else", apicoll.ManifestName, keysOfAny(gotManifest))
+	}
+	for i, ref := range coll.Requests {
 		body, ok := files[ref.RelPath]
 		if !ok {
 			t.Fatalf("the collection names %q and no such file was written", ref.RelPath)

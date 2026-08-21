@@ -24,9 +24,8 @@ const (
 	collectionFileMode = 0o600
 	collectionDirMode  = 0o700
 
-	collectionFileName = "collection.json"
-	environmentsDir    = "environments"
-	stagingPattern     = ".apiimport-*"
+	environmentsDir = "environments"
+	stagingPattern  = ".apiimport-*"
 )
 
 // ImportInto converts an import document and writes it to dest as ONE
@@ -290,11 +289,25 @@ func layout(res postmanResult) ([]plannedFile, error) {
 	}
 	files := make([]plannedFile, 0, len(res.Requests)+len(res.Environments)+1)
 
-	body, err := marshal(res.Collection)
+	// The manifest is spelled by the package that reads it. apicoll owns
+	// the file's name, its fields and the schemaVersion this build writes;
+	// this package knows only that a collection needs one and what it is
+	// called. A second serialisation here is precisely the two-owners
+	// defect that shipped an import nothing could open (nocx-1qtef): this
+	// package wrote `collection.json` holding an apicoll.Collection while
+	// the reader looked for `nocx-collection.json` holding
+	// {schemaVersion, name}, and both packages were green.
+	//
+	// The list of requests is deliberately NOT written anywhere: the
+	// folder IS the list (§6.2), and res.Collection.Requests survives as
+	// the layout's own plan for where each request file goes. A file
+	// restating it would be a second answer to "what is in this
+	// collection", and the one that goes stale.
+	body, err := apicoll.MarshalManifest(res.Collection.Name)
 	if err != nil {
 		return nil, err
 	}
-	files = append(files, plannedFile{collectionFileName, body})
+	files = append(files, plannedFile{apicoll.ManifestName, body})
 
 	for i, req := range res.Requests {
 		rel := res.Collection.Requests[i].RelPath

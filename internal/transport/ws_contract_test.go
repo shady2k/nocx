@@ -5728,6 +5728,15 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, resp.Result, "api.import.postman result")
 
+	// AND THE IMPORTED FOLDER OPENS. Restored here per the instruction left by
+	// TestAPIImportPostman_ImportedFolderCannotBeOpened_DEFECT, which recorded
+	// the manifest mismatch as a test so it could not evaporate between rounds
+	// and went red the moment nocx-1qtef fixed it. Import and open are one
+	// user gesture in two halves — you import a Postman export in order to
+	// work in it — so the assertion that they agree belongs on the happy path
+	// rather than in a test of its own.
+	openAPICollection(t, conn, dest, 2)
+
 	// The secret value went to the binding store and NOT into the folder.
 	if bindings.count() != 1 {
 		t.Errorf("bound values = %d, want 1 — the secret must reach the binding store", bindings.count())
@@ -5747,65 +5756,6 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	})
 	if walkErr != nil {
 		t.Fatalf("walk %s: %v", dest, walkErr)
-	}
-}
-
-// THE IMPORT WRITES A FOLDER apicoll CANNOT OPEN. This test asserts the
-// DEFECT, so that it cannot evaporate between rounds, and it goes red the
-// moment the defect is fixed.
-//
-// api.import.postman and api.collections.open are one user gesture in two
-// halves — you import a Postman export in order to work in it — and the two
-// halves disagree about the manifest, in two independent ways:
-//
-//	apiimport writes   collection.json       {"name":…, "requests":[…]}
-//	apicoll  requires  nocx-collection.json  {"schemaVersion":1, "name":…}
-//
-// Different file name, and different contents: apicoll decodes the manifest
-// STRICTLY and probes schemaVersion before decoding, so even renamed the
-// document would be refused for a field the format does not declare and a
-// version it does not carry. Both packages are green in their own suites,
-// because neither suite ever asked the other one anything — which is the
-// exact shape AGENTS.md's "every unit correct, the user's task impossible"
-// is written about, and the reason the wiring task exists.
-//
-// The fix belongs in internal/apiimport (write.go's collectionFileName and
-// layout), which is the package that got the format wrong; internal/apicoll
-// owns the manifest and there must not be a second answer to what one is.
-// A workaround in the transport would be a THIRD answer.
-//
-// WHEN THIS TEST FAILS: the defect is fixed. Delete this test and put the
-// happy path back into TestAPIImportPostman_OverTheWireConformsToContract,
-// where it belongs:
-//
-//	handle := openAPICollection(t, conn, dest, 2)
-func TestAPIImportPostman_ImportedFolderCannotBeOpened_DEFECT(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
-
-	doc := filepath.Join(t.TempDir(), "export.json")
-	if err := os.WriteFile(doc, []byte(`{
-      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
-      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
-    }`), 0o600); err != nil {
-		t.Fatalf("write export: %v", err)
-	}
-	dest := filepath.Join(t.TempDir(), "imported")
-
-	if resp := vaultCall(t, conn, "api.import.postman",
-		map[string]any{"path": doc, "dest": dest}, 1); resp.Error != nil {
-		t.Fatalf("api.import.postman: %+v", resp.Error)
-	}
-
-	resp := vaultCall(t, conn, "api.collections.open", map[string]any{"path": dest}, 2)
-	if resp.Error == nil {
-		t.Fatal("api.collections.open now OPENS an imported folder — the defect this test " +
-			"records is fixed. Delete this test and restore the happy-path assertion in " +
-			"TestAPIImportPostman_OverTheWireConformsToContract.")
-	}
-	if !strings.Contains(resp.Error.Message, "no collection manifest") {
-		t.Fatalf("the import/open mismatch changed shape: %s\n"+
-			"Re-read internal/apiimport/write.go against internal/apicoll/version.go "+
-			"before adjusting this test.", resp.Error.Message)
 	}
 }
 

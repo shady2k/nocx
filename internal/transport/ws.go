@@ -1179,6 +1179,11 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// on the transfer — so an uncancelled one would also hold Shutdown open
 	// below. The wait inside is bounded and never waits for the upload.
 	s.cancelAllUploads()
+	// And let go of every unredeemed source ticket. Each holds an open
+	// descriptor on a file a person chose (ws_upload_source.go), and a
+	// stopped server is the last of the three events that end that
+	// interval — the other two being the claim and the TTL.
+	s.sources.Close()
 
 	// Cancel and drain in-flight off-loop control work (probes, dialogs).
 	// Cancellation makes cooperative tasks return promptly; waitDrained

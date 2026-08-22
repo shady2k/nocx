@@ -1352,16 +1352,12 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sourceTicket"})
 				return nil
 			}
-			reader, openErr := src.Open()
-			if openErr != nil {
-				// Worded without the path, like every refusal the mint
-				// makes: the caller never learned where the file was and
-				// must not learn it from a failure either.
-				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: openErr.Error()})
-				return nil
-			}
+			// The ticket carries the OPEN handle, so there is nothing to
+			// resolve here and no name this handler could resolve it from.
+			// Ownership passes with the claim: from this line the reader
+			// has exactly one owner and every path below closes it.
 			source = &src
-			sourceReader = reader
+			sourceReader = src.File
 		}
 
 		id, err := newUploadID()

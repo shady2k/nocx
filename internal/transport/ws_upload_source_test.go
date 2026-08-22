@@ -1,8 +1,11 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,8 +87,19 @@ func TestSourceTicketStore_ClaimIsOneShot(t *testing.T) {
 	if !ok {
 		t.Fatalf("first Claim failed")
 	}
-	if src.Path != path {
-		t.Errorf("claimed path = %q, want %q", src.Path, path)
+	// What a claim answers with is the OPEN FILE, never a name somebody
+	// else would have to resolve — see SourceFile. So the assertion is on
+	// the bytes it reads.
+	defer src.File.Close() //nolint:errcheck // the test owns it from here
+	got, err := io.ReadAll(src.File)
+	if err != nil {
+		t.Fatalf("read the claimed handle: %v", err)
+	}
+	if len(got) != 4 {
+		t.Errorf("claimed handle read %d bytes, want the 4 the file holds", len(got))
+	}
+	if src.Name != filepath.Base(path) || src.Size != 4 {
+		t.Errorf("claimed %+v, want name %q and size 4", src, filepath.Base(path))
 	}
 	if _, ok := st.Claim(pick.Ticket); ok {
 		t.Errorf("second Claim succeeded; the ticket must be one-shot")
@@ -252,14 +266,20 @@ func TestFilesDropped_MintsPerFileAndNamesNoDestination(t *testing.T) {
 			t.Errorf("size = %d, want 2", p.Size)
 		}
 	}
-	// The tickets are real: each claims back to the file it was minted for.
+	// The tickets are real: each claims back an open handle on the bytes it
+	// was minted for.
 	for _, p := range got {
 		src, ok := st.Claim(p.Ticket)
 		if !ok {
 			t.Fatalf("ticket %q claimed nothing", p.Ticket)
 		}
-		if filepath.Dir(src.Path) != dir {
-			t.Errorf("claimed %q, want a file in %q", src.Path, dir)
+		body, err := io.ReadAll(src.File)
+		_ = src.File.Close()
+		if err != nil {
+			t.Fatalf("read the claimed handle: %v", err)
+		}
+		if string(body) != "hi" {
+			t.Errorf("claimed handle read %q, want the dropped file's bytes", body)
 		}
 	}
 }
@@ -413,8 +433,9 @@ func TestSourceTicket_CannotBeMintedFromTheWire(t *testing.T) {
 		if !ok {
 			t.Fatalf("the minted ticket claimed nothing")
 		}
-		if filepath.Base(src.Path) != "chosen.bin" {
-			t.Errorf("the ticket names %q; the wire chose the file", src.Path)
+		_ = src.File.Close()
+		if src.Name != "chosen.bin" {
+			t.Errorf("the ticket names %q; the wire chose the file", src.Name)
 		}
 	}
 }
@@ -617,5 +638,170 @@ func TestFilesDropped_WithNoRendererMintsNothing(t *testing.T) {
 	}
 	if st.Len() != 0 {
 		t.Errorf("Len = %d, want 0 — undeliverable tickets must not accumulate", st.Len())
+	}
+}
+
+// ── the ticket names bytes, not a name ────────────────────────────────────
+
+// THE POINT OF A TICKET. Between a human choosing a file and the upload
+// reading it, a name can be renamed, replaced, or be a symlink whose target
+// moved. A ticket that stored the PATHNAME and handed it back for somebody
+// else to open would then name different bytes from the ones the person
+// chose — and on a machine where the renderer is not trusted with paths at
+// all, which is the whole premise of R2, a re-resolvable name gives back
+// most of what the rule took away.
+//
+// So the ticket carries the open handle, and this is the test that can tell
+// the two designs apart: the file is REPLACED at the same path after the
+// mint, and what the ticket reads is still what the person chose.
+func TestSourceTicketStore_ATicketNamesBytesNotAName(t *testing.T) {
+	chosen := []byte("the bytes the person chose")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chosen.bin")
+	if err := os.WriteFile(path, chosen, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	st := NewSourceTicketStore(nil)
+	pick, err := st.Mint(path)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	// The classic replace: unlink and write a new file at the same name.
+	// A rename() over the top is the same shape and the same defect.
+	if rmErr := os.Remove(path); rmErr != nil {
+		t.Fatalf("remove: %v", rmErr)
+	}
+	if wErr := os.WriteFile(path, []byte("bytes nobody chose, from somewhere else entirely"), 0o600); wErr != nil {
+		t.Fatalf("replace: %v", wErr)
+	}
+
+	src, ok := st.Claim(pick.Ticket)
+	if !ok {
+		t.Fatalf("Claim: the ticket named nothing")
+	}
+	defer src.File.Close() //nolint:errcheck // the test owns it from here
+	got, err := io.ReadAll(src.File)
+	if err != nil {
+		t.Fatalf("read the claimed handle: %v", err)
+	}
+	if !bytes.Equal(got, chosen) {
+		t.Fatalf("the ticket read %q; it must read the bytes the person chose, %q", got, chosen)
+	}
+	// And the size it declared is the size of THOSE bytes.
+	if pick.Size != int64(len(chosen)) {
+		t.Errorf("size = %d, want %d", pick.Size, len(chosen))
+	}
+}
+
+// The same rule from the wire, which is where it matters: a file replaced
+// between the human's gesture and the transfer uploads the bytes that were
+// chosen, not whatever now answers to that name.
+func TestFilesUpload_ARedeemedTicketUploadsTheBytesThatWereChosen(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	destDir := t.TempDir()
+	bid := e.openBinding(t, sid, destDir, 2)
+
+	chosen := []byte("chosen at the picker")
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "doc.txt")
+	if err := os.WriteFile(src, chosen, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, err := e.ws.UploadSources().Mint(src)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if rmErr := os.Remove(src); rmErr != nil {
+		t.Fatalf("remove: %v", rmErr)
+	}
+	if wErr := os.WriteFile(src, []byte("swapped in afterwards"), 0o600); wErr != nil {
+		t.Fatalf("replace: %v", wErr)
+	}
+
+	p := uploadParams(bid, destDir, "doc.txt", pick.Size)
+	p["sourceTicket"] = pick.Ticket
+	got := callUpload(t, e.conn, p, 3).mustResult(t)
+	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	landed, err := os.ReadFile(filepath.Join(destDir, "doc.txt")) //nolint:gosec // see above
+	if err != nil {
+		t.Fatalf("destination: %v", err)
+	}
+	if !bytes.Equal(landed, chosen) {
+		t.Fatalf("uploaded %q; the ticket must name the bytes the person chose, %q", landed, chosen)
+	}
+}
+
+// An open handle is a resource, so its interval has to close at every end.
+// A ticket that times out has no claimant to hand the fd to, so the sweep
+// that forgets it is what must let it go.
+func TestSourceTicketStore_ExpiryClosesTheOpenHandle(t *testing.T) {
+	st := NewSourceTicketStore(nil)
+	base := time.Now()
+	st.now = func() time.Time { return base }
+	pick, err := st.Mint(seedFile(t, "expiring.bin", 4))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	st.mu.Lock()
+	held := st.entries[pick.Ticket].file
+	st.mu.Unlock()
+
+	st.now = func() time.Time { return base.Add(2 * sourceTicketTTL) }
+	// Any mint runs the sweep; this one is the ordinary path to it.
+	if _, err := st.Mint(seedFile(t, "later.bin", 1)); err != nil {
+		t.Fatalf("Mint after expiry: %v", err)
+	}
+	if err := held.Close(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("closing the evicted handle returned %v; the sweep must have closed it already", err)
+	}
+}
+
+// failingEmitter is the renderer that was not there. It grabs the handles
+// the mint just opened, out of the store, at the one instant they exist —
+// then refuses the delivery, so the test can ask whether the take-back let
+// them go.
+type failingEmitter struct {
+	st   *SourceTicketStore
+	held []*os.File
+}
+
+func (f *failingEmitter) EmitFilesDropped(_ string, picks []SourcePick) error {
+	f.st.mu.Lock()
+	for _, p := range picks {
+		if e := f.st.entries[p.Ticket]; e != nil {
+			f.held = append(f.held, e.file)
+		}
+	}
+	f.st.mu.Unlock()
+	return errDropNoRenderer
+}
+
+// The same at the other undelivered end: a drop whose notification does not
+// reach a renderer takes its tickets back, and the fds with them.
+func TestFilesDropped_AnUndeliveredDropClosesItsHandles(t *testing.T) {
+	em := &failingEmitter{}
+	st := NewSourceTicketStore(em)
+	em.st = st
+	err := st.Dropped([]string{seedFile(t, "undelivered.bin", 3)},
+		map[string]string{"data-session-id": dropSessionID})
+	if err == nil {
+		t.Fatal("a drop whose emit failed reported success")
+	}
+	if st.Len() != 0 {
+		t.Fatalf("Len = %d, want 0", st.Len())
+	}
+	if len(em.held) != 1 {
+		t.Fatalf("the emitter saw %d handles, want 1", len(em.held))
+	}
+	for _, f := range em.held {
+		if err := f.Close(); !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("an undelivered ticket's handle is still open (Close: %v)", err)
+		}
 	}
 }

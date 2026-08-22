@@ -66,25 +66,38 @@ type SourcePick struct {
 	Size int64 `json:"size"`
 }
 
-// SourceFile is what a claimed ticket resolves to, inside the backend. It
+// SourceFile is what a claimed ticket resolves to, inside the backend: an
+// ALREADY-OPEN handle on the bytes a human chose, and never a pathname. It
 // never crosses the wire.
+//
+// The handle rather than the name, because a name is not an identity.
+// Between a person choosing a file and the transfer reading it, the name
+// can be renamed, replaced, or be a symlink whose target moved, and a
+// ticket that handed a string back for somebody else to open would then
+// name different bytes from the ones the person chose. On a machine where
+// the renderer is not trusted with paths at all — the whole premise of R2 —
+// a re-resolvable name gives back most of what the rule took away.
+//
+// An open handle cannot be raced at all: the inode is pinned from the
+// moment of the gesture. The alternative the review offered, re-attesting
+// device+inode with os.SameFile at redemption, narrows the window and does
+// not close it — the file can be swapped back and forth around the check,
+// and it costs a second stat and a refusal path a person cannot act on.
+//
+// What it costs instead: one file descriptor per outstanding ticket, at
+// most maxSourceTickets of them, held for at most sourceTicketTTL; and, if
+// the person deletes the file inside that window, its blocks stay allocated
+// until the ticket is claimed, expires or the server stops. Those three are
+// the closing events, and every one of them closes the handle.
+//
+// CLAIMING TRANSFERS OWNERSHIP. Once Claim has answered, the store no
+// longer knows about the handle and the caller closes it on every path.
 type SourceFile struct {
-	Path string
+	// File is the open, read-only handle. Never nil in a SourceFile the
+	// store returned.
+	File *os.File
 	Name string
 	Size int64
-}
-
-// Open opens the file the ticket names, for the transfer to read. The error
-// is DISCARDED and replaced, for the reason Mint discards its stat's: an
-// *os.PathError prints the path, and this error reaches the renderer.
-func (f SourceFile) Open() (*os.File, error) {
-	// #nosec G304 — Path came from the platform picker or the window drop,
-	// never from the wire; that is the whole of R2.
-	h, err := os.Open(f.Path) //nolint:gosec // see above
-	if err != nil {
-		return nil, errSourceUnreadable
-	}
-	return h, nil
 }
 
 const (
@@ -126,9 +139,17 @@ type DropEmitter interface {
 }
 
 type sourceTicketEntry struct {
-	file     SourceFile
+	file     *os.File
+	name     string
+	size     int64
 	mintedAt time.Time
 }
+
+// close lets go of the entry's handle. Every path that removes an entry
+// without handing it to a claimant goes through here, and that is the whole
+// list: the TTL sweep, the check inside Claim, and the take-back for a drop
+// nobody heard.
+func (e *sourceTicketEntry) close() { _ = e.file.Close() }
 
 // SourceTicketStore is the mint. It is created once by the composition root
 // and shared by the two mint sites; the transport reaches it through the
@@ -160,19 +181,46 @@ func (s *SourceTicketStore) Mint(path string) (SourcePick, error) {
 	if !filepath.IsAbs(path) {
 		return SourcePick{}, errSourceNotAbsolute
 	}
-	// Stat before taking the lock: the filesystem call is the slow part and
-	// it needs nothing the lock guards. The error is DISCARDED rather than
-	// wrapped — an *os.PathError prints the path, and this error travels to
-	// the renderer.
-	info, err := os.Stat(path)
+	// The pre-check is not the authority — the fstat below is — but it has
+	// to happen first all the same, because opening is not a harmless
+	// question to ask of every path: os.Open on a fifo with no writer
+	// BLOCKS, and a drop must not be able to wedge the handler that took
+	// it. So the kind is asked by name first, cheaply, and then asked again
+	// of the thing actually opened. A path that becomes a fifo between the
+	// two is the one shape this ordering does not cover, and it is a race a
+	// person would have to run against their own picker.
+	//
+	// The error is DISCARDED rather than wrapped — an *os.PathError prints
+	// the path, and this error travels to the renderer.
+	if info, err := os.Stat(path); err != nil {
+		return SourcePick{}, errSourceUnreadable
+	} else if !info.Mode().IsRegular() {
+		return SourcePick{}, errSourceNotRegular
+	}
+
+	// Open before taking the lock: the filesystem call is the slow part and
+	// it needs nothing the lock guards.
+	// #nosec G304 — path came from the platform picker or the window drop,
+	// never from the wire; that is the whole of R2.
+	f, err := os.Open(path) //nolint:gosec // see above
 	if err != nil {
 		return SourcePick{}, errSourceUnreadable
 	}
-	// Directories are out of scope (design §4): a recursive walk, mkdir,
-	// partial failure mid-tree, symlinks and modes are a materially larger
-	// problem on the same mechanism. Anything that is not a regular file
-	// (a device, a socket, a fifo) has no size a transfer can honour.
+	// And now the authoritative question, asked of the OPEN FILE rather
+	// than of a name: this is the identity the ticket will carry, so it is
+	// the one that has to answer. Directories are out of scope (design §4)
+	// — a recursive walk, mkdir, partial failure mid-tree, symlinks and
+	// modes are a materially larger problem on the same mechanism — and
+	// anything that is not a regular file has no size a transfer can
+	// honour. The size comes from here too: it measures the bytes we are
+	// holding, not the bytes some name resolved to a moment ago.
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return SourcePick{}, errSourceUnreadable
+	}
 	if !info.Mode().IsRegular() {
+		_ = f.Close()
 		return SourcePick{}, errSourceNotRegular
 	}
 
@@ -180,6 +228,7 @@ func (s *SourceTicketStore) Mint(path string) (SourcePick, error) {
 	defer s.mu.Unlock()
 	s.evictExpiredLocked()
 	if len(s.entries) >= maxSourceTickets {
+		_ = f.Close()
 		return SourcePick{}, errSourceStoreFull
 	}
 
@@ -187,12 +236,15 @@ func (s *SourceTicketStore) Mint(path string) (SourcePick, error) {
 	if _, err := rand.Read(buf[:]); err != nil {
 		// crypto/rand failing is an external call failing, and the honest
 		// answer is a refusal — never a weaker id.
+		_ = f.Close()
 		return SourcePick{}, errors.New("cannot mint an upload ticket")
 	}
 	ticket := hex.EncodeToString(buf[:])
-	file := SourceFile{Path: path, Name: filepath.Base(path), Size: info.Size()}
-	s.entries[ticket] = &sourceTicketEntry{file: file, mintedAt: s.now()}
-	return SourcePick{Ticket: ticket, Name: file.Name, Size: file.Size}, nil
+	name := filepath.Base(path)
+	s.entries[ticket] = &sourceTicketEntry{
+		file: f, name: name, size: info.Size(), mintedAt: s.now(),
+	}
+	return SourcePick{Ticket: ticket, Name: name, Size: info.Size()}, nil
 }
 
 // Claim resolves a ticket to the file it names and forgets it. One-shot:
@@ -218,9 +270,12 @@ func (s *SourceTicketStore) Claim(ticket string) (SourceFile, bool) {
 	}
 	delete(s.entries, ticket)
 	if s.now().Sub(e.mintedAt) > sourceTicketTTL {
+		// Expired between the mint and here: nobody receives the handle, so
+		// this is one of the ends the interval closes at.
+		e.close()
 		return SourceFile{}, false
 	}
-	return e.file, true
+	return SourceFile{File: e.file, Name: e.name, Size: e.size}, true
 }
 
 // Len is how many tickets are outstanding. It exists for the tests that
@@ -231,16 +286,34 @@ func (s *SourceTicketStore) Len() int {
 	return len(s.entries)
 }
 
-// evictExpiredLocked drops tickets past their TTL. There is no timer and no
-// goroutine: a source ticket names no running transfer, so nothing has to
-// be cancelled at the moment it expires, and the sweep on the next mint
-// plus the check in Claim close the interval from both ends.
+// evictExpiredLocked drops tickets past their TTL and closes their handles.
+// There is no timer and no goroutine: a source ticket names no running
+// transfer, so nothing has to be cancelled at the moment it expires, and
+// the sweep on the next mint plus the check in Claim close the interval
+// from both ends. What a ticket now holds — an open descriptor — is the
+// same shape of thing: bounded by maxSourceTickets whether or not a sweep
+// has run, so a late sweep costs at most that many descriptors and never
+// unboundedly many.
 func (s *SourceTicketStore) evictExpiredLocked() {
 	now := s.now()
 	for k, e := range s.entries {
 		if now.Sub(e.mintedAt) > sourceTicketTTL {
 			delete(s.entries, k)
+			e.close()
 		}
+	}
+}
+
+// Close forgets every outstanding ticket and closes the handles they hold.
+// It is the last of the three events that end a ticket's interval — claim,
+// expiry, and the server going away — and it exists so a stopped server
+// leaves no descriptor behind for a gesture nobody will ever finish.
+func (s *SourceTicketStore) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, e := range s.entries {
+		delete(s.entries, k)
+		e.close()
 	}
 }
 
@@ -314,7 +387,10 @@ func (s *SourceTicketStore) forget(picks []SourcePick) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, p := range picks {
-		delete(s.entries, p.Ticket)
+		if e := s.entries[p.Ticket]; e != nil {
+			delete(s.entries, p.Ticket)
+			e.close()
+		}
 	}
 }
 

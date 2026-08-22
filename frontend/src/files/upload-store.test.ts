@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   createUploadStore,
+  isTerminalPhase,
   type TransferPhase,
   type UploadStore,
   type UploadTransfer,
@@ -134,7 +135,10 @@ describe('the row a result seeds', () => {
       services.emitDone({ transferId: 't1', outcome, finalName: '', stranded: [] })
       const phase: TransferPhase | undefined = store.transfer('t1')?.phase
       expect(phase).toBe(outcome)
+      // The two non-terminal values, named: a row the wire has settled is
+      // neither still moving nor still unknown.
       expect(phase).not.toBe('running')
+      expect(phase).not.toBe('unsettled')
     }
   })
 })
@@ -267,17 +271,73 @@ describe('the terminal account', () => {
   })
 
   it('lets the wire overrule a failure the renderer recorded', () => {
-    // The renderer's POST is only its half of the transfer. A 409 means
-    // somebody else claimed the ticket and the transfer is running — so
-    // uploadDone, the account that may not be lost, is the authority.
+    // The renderer's POST is only its half of the transfer, and uploadDone
+    // — the account that may not be lost — is the authority over both.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
     seeded(store)
-    store.failLocally('t1', 'the body was refused: 409')
+    store.failLocally('t1', 'the file changed size while it was being sent')
     expect(store.transfer('t1')?.phase).toBe('failed')
     services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
     expect(store.transfer('t1')?.phase).toBe('written')
     expect(store.transfer('t1')?.error).toBeNull()
+  })
+})
+
+describe('the row the renderer cannot account for', () => {
+  // A 409 means another claimant's body is running for this ticket, and a
+  // dropped connection means the backend may be writing the file right
+  // now. Neither is a failure and neither is over; only uploadDone says.
+
+  it('is not terminal, so nothing about it is settled yet', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    seeded(store)
+    store.unsettle('t1', 'the upload was already claimed by another request')
+    const t = store.transfer('t1')
+    expect(t?.phase).toBe('unsettled')
+    expect(isTerminalPhase(t!.phase)).toBe(false)
+    expect(t?.error).toContain('already claimed')
+    // The rate is arithmetic over samples this renderer can no longer
+    // vouch for, so it stops rather than freezing at its last value.
+    expect(t?.speedBytesPerSecond).toBeNull()
+  })
+
+  it('still takes progress, because a 409 transfer is genuinely running', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    seeded(store, 400)
+    store.unsettle('t1', 'the upload was already claimed by another request')
+    services.emitProgress({ transferId: 't1', bytes: 200, total: 400 })
+    const t = store.transfer('t1')
+    expect(t?.bytes).toBe(200)
+    // And a sample still does not decide the phase — that is the store's
+    // one property, and it holds for this state as much as for `running`.
+    expect(t?.phase).toBe('unsettled')
+  })
+
+  it('settles in either direction the moment uploadDone arrives', () => {
+    for (const outcome of ['written', 'failed', 'cancelled', 'skipped'] as const) {
+      const services = fakeUploadServices()
+      const store = createUploadStore({ services, now: fakeClock().now })
+      seeded(store)
+      store.unsettle('t1', 'the connection dropped')
+      services.emitDone({ transferId: 't1', outcome, finalName: '', stranded: [] })
+      const t = store.transfer('t1')
+      expect(t?.phase).toBe(outcome)
+      // Whatever the renderer recorded about its own half is replaced, so
+      // no settled row carries a reason the wire did not give it.
+      expect(t?.error).toBeNull()
+    }
+  })
+
+  it('cannot reopen a transfer the wire already settled', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    seeded(store)
+    services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
+    store.unsettle('t1', 'the connection dropped')
+    expect(store.transfer('t1')?.phase).toBe('written')
   })
 })
 

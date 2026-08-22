@@ -84,35 +84,69 @@ export interface UploadFlowDeps {
 export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
   const { services, store, ask, report } = deps
 
+  /** What one unsuccessful body send means for the row. `settled` is the
+   *  question the phase turns on, and it is NOT "did this go wrong" — it
+   *  is "does the renderer now know how the transfer ended". */
+  interface BodyAccount {
+    why: string
+    settled: boolean
+  }
+
   /** The body half of a stream upload. A failure here is the RENDERER's
    *  half of the transfer, recorded as such: the backend's uploadDone is
-   *  still the terminal account and overrules it. The wording distinguishes
-   *  the statuses because they mean different things — 409 says another
-   *  claimant has the ticket and that transfer is alive, 410 says the
-   *  ticket names nothing at all. */
+   *  still the terminal account and overrules it.
+   *
+   *  Two of these results are not failures at all, and calling them one is
+   *  the defect this table exists to spell out. A 409 says another
+   *  claimant's body is ALREADY RUNNING for this ticket — that transfer is
+   *  alive, files.uploadCancel still reaches it, and a row that said
+   *  "failed" would announce it dead and take away the only control that
+   *  can stop it. A network failure says the request never got an answer,
+   *  so the backend may be writing the file successfully this moment. The
+   *  rest are the renderer's own half ending for good: the file could not
+   *  be read at the declared size, the ticket names nothing, or the sink
+   *  read the body and refused it. */
   async function sendBody(transferId: string, url: string, source: UploadSource): Promise<void> {
     const body = source.blob
     if (body === undefined) {
       // The sink is waiting for bytes and the caller has none. It cannot
       // happen through either gesture — a ticket source never gets this
-      // branch back — and if it ever does, saying so beats hanging.
+      // branch back — and if it ever does, saying so beats hanging. No
+      // bytes are going to leave this machine, so it is settled.
       store.failLocally(transferId, 'the sink asked for a body and there is none to send')
       return
     }
     const outcome = await services.sendBody(url, body, source.size)
     if (outcome.ok) return
-    const why =
+    const account: BodyAccount =
       outcome.kind === 'status'
         ? outcome.status === 409
-          ? `${source.name}: the upload was already claimed by another request`
+          ? {
+              why: `${source.name}: the upload was already claimed by another request — waiting for the server to say how it ended`,
+              settled: false,
+            }
           : outcome.status === 410
-            ? `${source.name}: the upload had already ended`
-            : `${source.name}: the server refused the body (${outcome.status})`
+            ? { why: `${source.name}: the upload had already ended`, settled: true }
+            : {
+                why: `${source.name}: the server refused the body (${outcome.status})`,
+                settled: true,
+              }
         : outcome.kind === 'size'
-          ? `${source.name}: the file changed size while it was being sent`
-          : `${source.name}: ${outcome.message}`
-    store.failLocally(transferId, why)
-    report(why, 'danger')
+          ? { why: `${source.name}: the file changed size while it was being sent`, settled: true }
+          : {
+              why: `${source.name}: ${outcome.message} — waiting for the server to say how it ended`,
+              settled: false,
+            }
+    if (account.settled) {
+      store.failLocally(transferId, account.why)
+      report(account.why, 'danger')
+      return
+    }
+    // A warning and not a danger: nothing has gone wrong that anybody can
+    // act on yet, and a person who is told "failed" about a transfer that
+    // then succeeds has been lied to twice.
+    store.unsettle(transferId, account.why)
+    report(account.why, 'warning')
   }
 
   async function sendOne(

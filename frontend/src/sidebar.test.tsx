@@ -693,3 +693,51 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
     expect(panelTitle(panel)).toBe('Alpha')
   })
 })
+
+// ── The pinned filter slot (nocx-708q.3) ─────────────────────────────────
+//
+// `SidebarViewDescriptor.filter` is how a panel says WHICH of its children
+// is the filter, and the shell pins it between the header and the scrolling
+// body. Two things have to hold for that to be one shape rather than a
+// fourth arrangement: a view that declares one gets it OUT of the scroller,
+// and a view that declares none gets no row at all.
+
+describe('the filter slot', () => {
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  it('pins a declared filter between the header and the scrolling body', () => {
+    const { bar, panel } = mount()
+    const withFilter: SidebarViewDescriptor = {
+      ...TWO_VIEWS[0],
+      filter: () => <input data-testid="probe-filter" />,
+    }
+    mountSidebar(bar, panel, [withFilter], [])
+
+    const field = panel.querySelector<HTMLElement>('[data-testid="probe-filter"]')
+    expect(field).not.toBeNull()
+    // Pinned means exactly this: it is inside the filter row and outside the
+    // scroller, so it cannot scroll away with the list it filters.
+    expect(field!.closest('.ui-sidebar-view__filter')).not.toBeNull()
+    expect(field!.closest('.ui-sidebar-view__body')).toBeNull()
+  })
+
+  it('draws NO filter row for a view that declares none', () => {
+    // The row was drawn for every view: `ActiveView` handed SidebarView a
+    // `<Show>` element, and a Show element is truthy whether or not its
+    // condition holds — so the shell's own `<Show when={props.filter}>` was
+    // always taken. It cost nothing while the row had no box; it costs a
+    // strip of dead panel the moment the row carries the shell's inset,
+    // which is the same 8px the header and the body carry (nocx-708q.3).
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [])
+    expect(panel.querySelector('.ui-sidebar-view__filter')).toBeNull()
+  })
+
+  it('draws no actions row for a view that declares none, for the same reason', () => {
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [])
+    expect(panel.querySelector('.ui-sidebar-view__actions')).toBeNull()
+  })
+})

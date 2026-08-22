@@ -388,8 +388,22 @@ select:focus-visible {
   line-height: 1.2;
 }
 
+/* The pinned filter row — the slot `SidebarViewDescriptor.filter` lands in.
+   It carries the SAME horizontal inset as the header above it and the body
+   below it, because the three are one column and a control that starts 8px
+   left of the list it narrows reads as a broken layout. That was the state:
+   the row had no box at all, so the one control a user aims at was the one
+   thing out of column, and each panel was left to remember the inset for
+   itself — which is how `.files-filter` came to add 16px and end up 48px
+   narrower than the panel around it (nocx-708q.2).
+
+   The vertical padding is the kit's too, for the same reason the header's
+   is: the header deliberately has NO room below it, so the space between
+   the panel's name and its filter has to come from somewhere, and one
+   answer here beats the same rule written in four surfaces. */
 .ui-sidebar-view__filter {
   flex: 0 0 auto;
+  padding: var(--space-2);
 }
 
 /* The body carries the SAME horizontal padding as the header. Content running

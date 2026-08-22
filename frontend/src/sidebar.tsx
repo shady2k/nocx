@@ -239,13 +239,21 @@ function ActiveView(props: {
   // expanded state — a collapsed sidebar is a hidden view (nocx-wzc4.7).
   const visible = () => !props.collapsed()
 
+  // A TERNARY, never `<Show>`. `<Show when={props.desc.filter}>` looks like
+  // the guard and is not one: the JSX evaluates to Show's memo whether or
+  // not its condition holds, and a memo is truthy — so the shell's own
+  // `<Show when={props.filter}>` was always taken and EVERY panel carried an
+  // empty filter row and an empty actions row. It cost nothing while those
+  // rows had no box of their own; it costs a strip of dead panel the moment
+  // the filter row carries the shell's inset (nocx-708q.3). The read stays
+  // reactive because a JSX attribute expression compiles to a getter, so
+  // switching views re-evaluates it — which is the property the `Dynamic`
+  // below exists for in the first place.
   return (
     <SidebarView
       title={props.desc.title}
-      actions={
-        <Show when={props.desc.actions}>{(Actions) => <Dynamic component={Actions()} />}</Show>
-      }
-      filter={<Show when={props.desc.filter}>{(Filter) => <Dynamic component={Filter()} />}</Show>}
+      actions={props.desc.actions ? <Dynamic component={props.desc.actions} /> : undefined}
+      filter={props.desc.filter ? <Dynamic component={props.desc.filter} /> : undefined}
     >
       <Dynamic
         component={props.desc.view}

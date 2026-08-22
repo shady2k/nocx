@@ -39,11 +39,11 @@
  */
 import { Show, type Component } from 'solid-js'
 import { Badge, type BadgeTone } from './badge'
-import { Button } from './button'
+import { IconButton } from './icon-button'
 import { CollectionRow } from './collection-view'
 import { formatFinished, formatProgress } from './format-bytes'
 import { formatTimestamp } from './format-time'
-import { ArrowDownIcon, ArrowUpIcon } from './icons'
+import { ArrowDownIcon, ArrowUpIcon, CloseIcon } from './icons'
 import { ProgressBar } from './progress-bar'
 import {
   isTerminalPhase,
@@ -139,8 +139,16 @@ export function OperationRow(props: OperationRowProps) {
   /** WHERE IT LANDED, as one fact. The machine first because it is the
    *  coarser half and the half that cannot be ellipsised away — the list is
    *  global, so `/var/www` with three connections open names nowhere. */
-  const where = () =>
-    [props.machine ?? '', props.destination ?? ''].filter((p) => p !== '').join(' · ')
+  /** The one number a person actually wants, and the one the row used to
+   *  make them compute: "99.1 MB of 328.3 MB" is a third, and nothing said
+   *  so (owner, 2026-08-22). Null when there is no total to be a fraction
+   *  OF — an adopted operation — because a percentage of nothing is a lie
+   *  rather than a zero. */
+  const percent = () => {
+    const total = props.total
+    if (total === null || total <= 0) return null
+    return Math.min(100, Math.max(0, Math.round(fraction() * 100)))
+  }
   /** What a finished row says about itself: size, when, how long. Composed
    *  by format-bytes.ts, never here — two callers wording a duration is how
    *  two vocabularies for one concept start. */
@@ -173,7 +181,21 @@ export function OperationRow(props: OperationRowProps) {
               <span class="ui-operation-row__title" title={props.title}>
                 {props.title}
               </span>
-              <Show when={isTerminalPhase(props.phase)}>
+              {/* THE PERCENTAGE IS THE ANCHOR of a running row. It sits on
+                  the title line rather than under it because that line has
+                  the room a badge used to take, and because a number the eye
+                  lands on first is what the row was missing — everything in
+                  it was the same size, so nothing led (nocx-hbdw4.5). */}
+              <Show when={running() && percent() !== null}>
+                <span class="ui-operation-row__percent">{percent()}%</span>
+              </Show>
+              {/* AN OUTCOME IS MARKED ONLY WHEN IT IS NEWS. `written` carries
+                  no badge: the list groups finished work under its own
+                  heading, so a "Done" pill repeated down every row said what
+                  the heading had already said, in the space the file name
+                  wanted. Everything else differs from the expected end and
+                  keeps its mark. */}
+              <Show when={isTerminalPhase(props.phase) && props.phase !== 'written'}>
                 <Badge tone={PHASE_TONE[props.phase as TerminalOperationPhase]}>
                   {PHASE_LABEL[props.phase as TerminalOperationPhase]}
                 </Badge>
@@ -219,8 +241,13 @@ export function OperationRow(props: OperationRowProps) {
                 </>
               }
             >
-              <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} />
-              <span class="ui-operation-row__detail">
+              <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} size="md" />
+              {/* Its OWN class, not `__detail`. The two shared one, and they
+                  want opposite things: a failure reason is a sentence and
+                  must wrap, while these numbers must never — they change
+                  several times a second, and a wrap made the row's height
+                  twitch as the digits changed width (owner, 2026-08-22). */}
+              <span class="ui-operation-row__progress">
                 {formatProgress({
                   done: props.done,
                   total: props.total,
@@ -237,19 +264,53 @@ export function OperationRow(props: OperationRowProps) {
                 because what is on screen is an ellipsis of it. Empty draws
                 nothing — an adopted transfer knows neither, and says so by
                 carrying nothing. */}
-            <Show when={where() !== ''}>
-              <span class="ui-operation-row__destination" title={where()}>
-                {where()}
+            <Show when={(props.machine ?? '') !== '' || (props.destination ?? '') !== ''}>
+              <span
+                class="ui-operation-row__destination"
+                title={[props.machine ?? '', props.destination ?? '']
+                  .filter((p) => p !== '')
+                  .join(' · ')}
+              >
+                <Show when={(props.machine ?? '') !== ''}>
+                  <span class="ui-operation-row__machine">{props.machine}</span>
+                </Show>
+                <Show when={(props.machine ?? '') !== '' && (props.destination ?? '') !== ''}>
+                  <span class="ui-operation-row__where-sep" aria-hidden="true">
+                    {' · '}
+                  </span>
+                </Show>
+                {/* THE PATH KEEPS ITS LEAF. Ellipsised from the end it read
+                    `/home/...`, which hides the only part that identifies
+                    the directory — the head of a path is the part you can
+                    guess (owner, 2026-08-22). The span reverses its base
+                    direction so the overflow falls off the FRONT, and
+                    `unicode-bidi: plaintext` keeps the characters themselves
+                    in logical order, which is what stops a leading slash
+                    migrating to the other end. */}
+                <Show when={(props.destination ?? '') !== ''}>
+                  <span class="ui-operation-row__path">{props.destination}</span>
+                </Show>
               </span>
             </Show>
           </span>
         </span>
       }
       actions={
+        /* AN ICON, NOT A LABELLED BUTTON. "Cancel" took about a third of a
+           rail-width row for something wanted rarely, and the content that is
+           wanted always ellipsised to pay for it (owner, 2026-08-22). It stays
+           a real <button> with an accessible name, so it is reachable by
+           keyboard and announced by a screen reader; it is NOT hover-only,
+           because an action that appears on hover is one a keyboard user and
+           a toucher never find. */
         <Show when={props.onCancel}>
-          <Button size="sm" onClick={() => props.onCancel?.()}>
-            Cancel
-          </Button>
+          <IconButton
+            size="sm"
+            ariaLabel={`Cancel ${props.title}`}
+            onClick={() => props.onCancel?.()}
+          >
+            <CloseIcon />
+          </IconButton>
         </Show>
       }
     />

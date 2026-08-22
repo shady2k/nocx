@@ -9,12 +9,28 @@
 
 .ui-progress-bar {
   /* The track takes the room its placement gives it and keeps its height:
-     a surface says how wide, never how tall. */
+     a surface says how wide, never how tall — it says which SIZE, and the
+     two heights live here. */
   width: 100%;
-  height: 3px;
   overflow: hidden;
   border-radius: var(--control-radius-sm);
   background: var(--color-surface-hover);
+}
+
+/* The quiet line, and the default: a fraction reported beside something
+   that is already saying what it is. */
+.ui-progress-bar[data-size='sm'] {
+  height: 3px;
+}
+
+/* Where the progress IS the point. A 3 px bar between a title and a line of
+   numbers reads as a rule separating them rather than as the row's main
+   fact, which is what the operations row shipped with and what the owner
+   read as "too small to take in" (nocx-hbdw4.5). Twice the height is enough
+   to become the thing the eye lands on first; more would make a panel of a
+   list of bars. */
+.ui-progress-bar[data-size='md'] {
+  height: 6px;
 }
 
 .ui-progress-bar__fill {

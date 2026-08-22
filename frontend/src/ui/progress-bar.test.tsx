@@ -60,4 +60,17 @@ describe('ProgressBar', () => {
     expect(fill(container).style.width).toBe('0%')
     expect(bar(container).getAttribute('aria-valuenow')).toBe('0')
   })
+
+  it('takes a size, and defaults to the quiet one', () => {
+    // The variance exists because a 3 px bar between a title and a line of
+    // numbers reads as a rule separating them rather than as the row's main
+    // fact (nocx-hbdw4.5). The DEFAULT is unchanged, which is what makes it
+    // safe for the callers that predate it.
+    const { container, unmount } = render(() => <ProgressBar value={0.5} ariaLabel="x" />)
+    expect(container.querySelector('.ui-progress-bar')?.getAttribute('data-size')).toBe('sm')
+    unmount()
+
+    const wide = render(() => <ProgressBar value={0.5} ariaLabel="x" size="md" />)
+    expect(wide.container.querySelector('.ui-progress-bar')?.getAttribute('data-size')).toBe('md')
+  })
 })

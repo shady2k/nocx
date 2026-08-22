@@ -90,7 +90,10 @@ function cancelIn(row: HTMLElement): HTMLElement | undefined {
   // span.
   const collection = row.closest('.ui-collection-row') ?? row.parentElement
   return [...(collection?.querySelectorAll<HTMLElement>('button') ?? [])].find((b) =>
-    (b.textContent ?? '').includes('Cancel'),
+    // BY ITS ACCESSIBLE NAME. Cancel became an icon button so it would stop
+    // taking a third of a rail-width row from the content (nocx-hbdw4.5),
+    // and an icon button has no text content at all.
+    (b.getAttribute('aria-label') ?? '').startsWith('Cancel'),
   )
 }
 

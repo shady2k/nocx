@@ -18,6 +18,17 @@
  * it.
  */
 
+/** How much presence the bar has. `sm` is the quiet line the kit shipped
+ *  with — a fraction reported beside something already saying what it is.
+ *  `md` is for a surface where the progress IS the point and the bar is the
+ *  thing the eye should land on first; the operations row asked for it after
+ *  a 3 px bar between two text blocks read as a divider rather than as
+ *  progress (nocx-hbdw4.5). Sizes the TRACK only — nothing else about the
+ *  bar varies, so there is one bar and two heights, not two bars. */
+/* Not exported: a caller writes `size="md"` and never needs the name, and an
+   exported type nobody imports is what the dead-export ratchet is for. */
+type ProgressBarSize = 'sm' | 'md'
+
 export interface ProgressBarProps {
   /** How far along, 0..1. Values outside the range are clamped rather than
    *  refused: a byte count that briefly overshoots its declared total is a
@@ -26,6 +37,9 @@ export interface ProgressBarProps {
   /** Required — a bar with no accessible name announces a number about
    *  nothing. */
   ariaLabel: string
+  /** Defaults to `sm`, so every caller that predates the variance is
+   *  unchanged by it. */
+  size?: ProgressBarSize
 }
 
 /** 0..1 clamped, NaN folded to 0. Exported for nobody: the component is the
@@ -41,6 +55,7 @@ export function ProgressBar(props: ProgressBarProps) {
   return (
     <div
       class="ui-progress-bar"
+      data-size={props.size ?? 'sm'}
       role="progressbar"
       aria-label={props.ariaLabel}
       aria-valuemin={0}

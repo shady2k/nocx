@@ -326,7 +326,14 @@ select:focus-visible {
      together, because the invariant below is that they match. */
   padding: 12px var(--space-2);
   font-weight: 600;
-  font-size: var(--font-size-sm);
+  /* BODY SIZE, and it is shared by every panel — Files, Git, Ports,
+     Operations — so they stay one family. It was --font-size-sm, which left
+     a panel's own name SMALLER than the content inside it once the
+     operations row took its title to body size: an inverted hierarchy, where
+     the quietest thing on screen was the one that says where you are
+     (owner, 2026-08-22). Uppercase at 600 with the tracking below carries a
+     title at this size without shouting. */
+  font-size: var(--font-size-md);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   display: flex;

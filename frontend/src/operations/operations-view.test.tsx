@@ -67,7 +67,14 @@ const icon = () => document.querySelector<HTMLElement>(`button[data-view="${OPER
 const badge = () => document.querySelector<HTMLElement>(`[data-view-badge="${OPERATIONS_VIEW_ID}"]`)
 const progress = () =>
   document.querySelector<HTMLElement>(`[data-view-progress="${OPERATIONS_VIEW_ID}"]`)
-const list = () => document.querySelector<HTMLElement>('[data-testid="ops-list"]')
+// TWO LISTS NOW, one per state (nocx-hbdw4.5). A helper that looked at
+// `[data-testid="ops-list"]` alone stopped seeing finished rows the moment
+// they moved under their own heading — so these span both deliberately.
+const anyList = () => [
+  ...document.querySelectorAll<HTMLElement>(
+    '[data-testid="ops-list"], [data-testid="ops-list-finished"]',
+  ),
+]
 const rows = () => [...document.querySelectorAll<HTMLElement>('.ui-operation-row')]
 
 function openTheList(): void {
@@ -75,8 +82,17 @@ function openTheList(): void {
 }
 
 function cancelButton(): HTMLElement {
-  const el = [...document.querySelectorAll<HTMLElement>('[data-testid="ops-list"] button')].find(
-    (b) => (b.textContent ?? '').includes('Cancel'),
+  const el = [
+    ...document.querySelectorAll<HTMLElement>(
+      '[data-testid="ops-list"] button, [data-testid="ops-list-finished"] button',
+    ),
+  ].find((b) =>
+    // BY ITS ACCESSIBLE NAME, not its text. Cancel became an icon button so
+    // it would stop taking a third of a rail-width row from the content
+    // (nocx-hbdw4.5), and an icon button has no text content at all — a
+    // helper matching on textContent silently found nothing and every test
+    // through it failed as "no cancel in the operations list".
+    (b.getAttribute('aria-label') ?? '').startsWith('Cancel'),
   )
   if (!el) throw new Error('no cancel in the operations list')
   return el
@@ -237,7 +253,11 @@ describe('the list itself', () => {
     expect(rows()).toHaveLength(1)
     expect(rows()[0].getAttribute('data-phase')).toBe('written')
     // And there is no × to press: nothing asks the person to tidy up.
-    expect(list()?.textContent).not.toContain('Dismiss')
+    expect(
+      anyList()
+        .map((l) => l.textContent)
+        .join(''),
+    ).not.toContain('Dismiss')
   })
 
   it('marks a failure among the finished ones, and offers it no cancel', () => {
@@ -254,7 +274,11 @@ describe('the list itself', () => {
     expect(rows()[0].getAttribute('data-phase')).toBe('failed')
     expect(rows()[0].textContent).toContain('Failed')
     expect(rows()[0].textContent).toContain('permission denied')
-    expect(list()?.textContent).not.toContain('Cancel')
+    expect(
+      anyList()
+        .map((l) => l.textContent)
+        .join(''),
+    ).not.toContain('Cancel')
   })
 
   it('puts the live ones above the finished ones', () => {
@@ -418,7 +442,7 @@ describe('the list repaints a few times a second, whatever the wire does', () =>
   }
 
   const detail = (): string =>
-    document.querySelector('.ui-operation-row__detail')?.textContent ?? ''
+    document.querySelector('.ui-operation-row__progress')?.textContent ?? ''
 
   it('holds a byte count that moves inside the window, and lands it after', () => {
     const c = ticking()
@@ -458,7 +482,15 @@ describe('the list repaints a few times a second, whatever the wire does', () =>
 
     services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
     expect(rows()[0].getAttribute('data-phase')).toBe('written')
-    expect(rows()[0].textContent).toContain('Done')
+    // NOT a "Done" badge any more: the list groups finished work under its
+    // own heading, so a pill repeating that on every row said what the
+    // heading says once, in the space the file name wanted (nocx-hbdw4.5).
+    // What the outcome moves is which LIST the row is in — assert that, and
+    // that nothing re-added the redundant word.
+    expect(document.querySelector('[data-testid="ops-list-finished"]')?.contains(rows()[0])).toBe(
+      true,
+    )
+    expect(rows()[0].textContent).not.toContain('Done')
     // No bar and no held progress line left behind it.
     expect(document.querySelector('[role="progressbar"]')).toBeNull()
   })

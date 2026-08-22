@@ -42,7 +42,8 @@ import type { SidebarViewDescriptor, SidebarViewStatus } from '../sidebar'
 import { EmptyState } from '../ui/empty-state'
 import { ArrowDownUpIcon } from '../ui/icons'
 import { OperationRow } from '../ui/operation-row'
-import type { OperationsModel } from './operations'
+import { isTerminalPhase } from '../ui/operation'
+import type { Operation, OperationsModel } from './operations'
 import { createThrottledOperations, type RenderThrottleDeps } from './render-throttle'
 
 /** The view's registry id, and the sidebar's persisted `activeViewId` for it. */
@@ -117,10 +118,69 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
   /** The clock the finished rows' "when" is read against. The panel owns it
    *  because the panel is what has to repaint when it moves, and one clock
    *  serves every row — a timer per row would be N timers for one tick. */
+  /* GROUPED BY STATE, and the heading is what says the state. Every finished
+     row used to carry a "Done" pill, which repeated down the list what one
+     heading can say once, in the space the file name wanted — and a badge on
+     every row is also a badge nobody reads. The row still marks an outcome
+     that is NEWS (failed, cancelled, skipped); `written` is the expected end
+     and the heading covers it (owner, 2026-08-22).
+
+     Order is deliberate: running first, because it is the only part that
+     changes while you look at it. */
+  const runningOps = () => operations().filter((o) => !isTerminalPhase(o.phase))
+  const finishedOps = () => operations().filter((o) => isTerminalPhase(o.phase))
+
   const clock = deps.now ?? ((): number => Date.now())
   const [now, setNow] = createSignal(clock())
   const tick = setInterval(() => setNow(clock()), deps.tickMs ?? RELATIVE_TIME_TICK_MS)
   onCleanup(() => clearInterval(tick))
+
+  /** One group's rows. A function rather than a component so the two groups
+   *  cannot drift apart, and so the keying below is written once.
+   *
+   *  KEYED BY THE OPERATION'S ID, and that is not a tidiness preference — it
+   *  is the fix for nocx-hbdw4.1's cancel defect. `For` matches items by
+   *  REFERENCE, and every source of operations is a projection that mints
+   *  fresh objects on every read (see files/upload-operations.ts), so
+   *  `each={ops()}` disposed and rebuilt every row on every store change —
+   *  which is every progress frame, several times a second, for as long as a
+   *  transfer runs. A person pressing Cancel then had the button replaced
+   *  under their finger between mousedown and mouseup, and the browser fires
+   *  `click` on the nearest common ancestor of the two: the list, never the
+   *  button. The press was lost, and cancel — the single affordance this
+   *  surface exists to offer — did nothing.
+   *
+   *  Keying on the id is what makes a row OUTLIVE the projection: the ids are
+   *  strings, so `For` matches them by value, the DOM node stays put across a
+   *  store change and only its props update. */
+  const renderRows = (ops: () => Operation[]) => (
+    <For each={ops().map((o) => o.id)}>
+      {(id) => (
+        <Show when={ops().find((o) => o.id === id)}>
+          {(op) => (
+            <OperationRow
+              kind={op().kind}
+              title={op().title}
+              destination={op().destination}
+              machine={op().machine}
+              phase={op().phase}
+              done={op().done}
+              total={op().total}
+              speedBytesPerSecond={op().speedBytesPerSecond}
+              error={op().error}
+              startedAt={op().startedAt}
+              endedAt={op().endedAt}
+              now={now()}
+              // Whether there is a cancel at all is the operation's own
+              // judgement, carried on the item. This surface never switches
+              // on kind or phase to work it out.
+              onCancel={op().cancel ?? undefined}
+            />
+          )}
+        </Show>
+      )}
+    </For>
+  )
 
   return (
     <div class="ops-panel" data-testid="operations-panel">
@@ -134,54 +194,29 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
           />
         }
       >
-        {/* role="list" is the surface's, because the kit's row carries
-            role="listitem" and a listitem must be owned by a list — see
-            ui/collection-view.tsx. */}
-        <div class="ops-list" role="list" aria-label={TITLE} data-testid="ops-list">
-          {/* KEYED BY THE OPERATION'S ID, and that is not a tidiness
-              preference — it is the fix for nocx-hbdw4.1's cancel defect.
-              `For` matches items by REFERENCE, and every source of operations
-              is a projection that mints fresh objects on every read (see
-              files/upload-operations.ts), so `each={operations()}` disposed
-              and rebuilt every row on every store change — which is every
-              progress frame, several times a second, for as long as a
-              transfer runs. A person pressing Cancel then had the button
-              replaced under their finger between mousedown and mouseup, and
-              the browser fires `click` on the nearest common ancestor of the
-              two: the list, never the button. The press was lost, and cancel
-              — the single affordance this surface exists to offer — did
-              nothing.
-
-              Keying on the id is what makes a row OUTLIVE the projection: the
-              ids are strings, so `For` matches them by value, the DOM node
-              stays put across a store change and only its props update. */}
-          <For each={operations().map((o) => o.id)}>
-            {(id) => (
-              <Show when={operations().find((o) => o.id === id)}>
-                {(op) => (
-                  <OperationRow
-                    kind={op().kind}
-                    title={op().title}
-                    destination={op().destination}
-                    machine={op().machine}
-                    phase={op().phase}
-                    done={op().done}
-                    total={op().total}
-                    speedBytesPerSecond={op().speedBytesPerSecond}
-                    error={op().error}
-                    startedAt={op().startedAt}
-                    endedAt={op().endedAt}
-                    now={now()}
-                    // Whether there is a cancel at all is the operation's own
-                    // judgement, carried on the item. This surface never
-                    // switches on kind or phase to work it out.
-                    onCancel={op().cancel ?? undefined}
-                  />
-                )}
-              </Show>
-            )}
-          </For>
-        </div>
+        {/* TWO LISTS, ONE PER STATE, each with its own role="list" — the
+            kit's row carries role="listitem" and a listitem must be owned by
+            a list, so a single list spanning both headings would put a
+            heading inside a list where no listitem explains it. An empty
+            group draws nothing at all rather than an empty heading. */}
+        <Show when={runningOps().length > 0}>
+          <h3 class="ops-group__heading">
+            In progress
+            <span class="ops-group__count">{runningOps().length}</span>
+          </h3>
+          <div class="ops-list" role="list" aria-label="In progress" data-testid="ops-list">
+            {renderRows(runningOps)}
+          </div>
+        </Show>
+        <Show when={finishedOps().length > 0}>
+          <h3 class="ops-group__heading">
+            Finished
+            <span class="ops-group__count">{finishedOps().length}</span>
+          </h3>
+          <div class="ops-list" role="list" aria-label="Finished" data-testid="ops-list-finished">
+            {renderRows(finishedOps)}
+          </div>
+        </Show>
       </Show>
     </div>
   )

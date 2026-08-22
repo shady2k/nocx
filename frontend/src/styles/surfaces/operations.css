@@ -23,3 +23,28 @@
   min-height: 0;
   overflow-y: auto;
 }
+
+/* THE HEADING SAYS THE STATE, so the rows do not have to. Every finished row
+   carried a "Done" pill before this: one heading says once what a pill
+   repeated down the list, and it says it in space the file name wanted
+   (nocx-hbdw4.5). A row still marks an outcome that is NEWS — failed,
+   cancelled, skipped — because those differ from the expected end. */
+.ops-group__heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-3) var(--space-4) var(--space-1);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+
+/* The count, so a collapsed glance answers "how many" without counting
+   rows. Tabular so it does not shift the heading as it changes. */
+.ops-group__count {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}

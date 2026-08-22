@@ -28,7 +28,7 @@ describe('OperationRow while the work is live', () => {
     const { container } = render(() => <OperationRow {...RUNNING} />)
     expect(row(container).textContent).toContain('notes.txt')
     expect(row(container).textContent).toContain('/srv/data')
-    expect(container.querySelector('.ui-operation-row__detail')?.textContent).toBe(
+    expect(container.querySelector('.ui-operation-row__progress')?.textContent).toBe(
       '1.0 MB of 4.0 MB · 500.0 kB/s',
     )
   })
@@ -49,7 +49,7 @@ describe('OperationRow while the work is live', () => {
     const { container } = render(() => (
       <OperationRow {...RUNNING} done={null} speedBytesPerSecond={null} />
     ))
-    expect(container.querySelector('.ui-operation-row__detail')?.textContent).toBe('4.0 MB')
+    expect(container.querySelector('.ui-operation-row__progress')?.textContent).toBe('4.0 MB')
     expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('0')
   })
 
@@ -63,7 +63,7 @@ describe('OperationRow while the work is live', () => {
   it('offers the cancel the caller supplied, and calls it', () => {
     const onCancel = vi.fn()
     const view = render(() => <OperationRow {...RUNNING} onCancel={onCancel} />)
-    fireEvent.click(view.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(view.getByRole('button', { name: /^Cancel / }))
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
 
@@ -71,13 +71,13 @@ describe('OperationRow while the work is live', () => {
     // Whether stopping still means anything is the model's judgement about
     // that operation, never a rendering rule this component derives.
     const view = render(() => <OperationRow {...RUNNING} onCancel={undefined} />)
-    expect(view.queryByRole('button', { name: 'Cancel' })).toBeNull()
+    expect(view.queryByRole('button', { name: /^Cancel / })).toBeNull()
   })
 
   it('follows its props — the reads are reactive, not a first render', () => {
     const [done, setDone] = createSignal<number | null>(null)
     const { container } = render(() => <OperationRow {...RUNNING} done={done()} />)
-    expect(container.querySelector('.ui-operation-row__detail')?.textContent).toContain('4.0 MB')
+    expect(container.querySelector('.ui-operation-row__progress')?.textContent).toContain('4.0 MB')
     setDone(2_000_000)
     expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe(
       '50',
@@ -101,7 +101,7 @@ describe('OperationRow on the unsettled phase', () => {
     ))
     expect(row(view.container).textContent).toContain('Waiting for the server')
     expect(row(view.container).textContent).not.toContain('Failed')
-    expect(view.queryByRole('button', { name: 'Cancel' })).not.toBeNull()
+    expect(view.queryByRole('button', { name: /^Cancel / })).not.toBeNull()
     expect(view.container.querySelector('[role="progressbar"]')).not.toBeNull()
     // The reason is hover detail, not a sentence in the row.
     expect(view.container.querySelector('.ui-badge')?.getAttribute('title')).toBe(
@@ -115,8 +115,10 @@ describe('OperationRow owns the outcome vocabulary', () => {
   // same rule FileStatusRow follows for the git status letters. All four
   // terminal phases, because a phase nothing renders is a phase that
   // renders as nothing.
+  // `written` is NOT here, and its absence is the rule: the list groups
+  // finished work under its own heading, so the expected outcome needs no
+  // pill repeated down every row (nocx-hbdw4.5). Its own test is below.
   const cases: Array<{ phase: OperationPhase; label: string; tone: string }> = [
-    { phase: 'written', label: 'Done', tone: 'success' },
     { phase: 'skipped', label: 'Skipped', tone: 'neutral' },
     { phase: 'cancelled', label: 'Cancelled', tone: 'neutral' },
     { phase: 'failed', label: 'Failed', tone: 'danger' },
@@ -133,6 +135,18 @@ describe('OperationRow owns the outcome vocabulary', () => {
       expect(container.querySelector('[role="progressbar"]')).toBeNull()
     })
   }
+
+  it('marks nothing on a plain success, because the heading already said it', () => {
+    // The one outcome that is not news. Everything else differs from the
+    // expected end and keeps its mark; a badge on every row is also a badge
+    // nobody reads.
+    const { container } = render(() => <OperationRow {...RUNNING} phase="written" />)
+    expect(container.querySelector('.ui-badge')).toBeNull()
+    expect(container.textContent).not.toContain('Done')
+    // Still finished, and still says so the ways that carry information.
+    expect(container.querySelector('.ui-operation-row')?.getAttribute('data-phase')).toBe('written')
+    expect(container.querySelector('[role="progressbar"]')).toBeNull()
+  })
 
   it('reads a cancellation as neutral and never as danger', () => {
     // A cancelled transfer's underlying error is a context cancellation,
@@ -166,8 +180,11 @@ describe('OperationRow owns the outcome vocabulary', () => {
 // the STRUCTURE the widths then follow from; the paint itself is measured in
 // e2e/ops-indicator.spec.ts.
 describe('OperationRow — what shares a line with what', () => {
-  it('gives the name its own line, with only the badge beside it', () => {
-    const { container } = render(() => <OperationRow {...RUNNING} phase="written" />)
+  it('gives the name its own line, with only its mark beside it', () => {
+    // A FINISHED row that IS news keeps a badge there; a running one carries
+    // the percentage instead, which is the number the eye should land on
+    // (nocx-hbdw4.5). Either way the line holds the name and one short mark.
+    const { container } = render(() => <OperationRow {...RUNNING} phase="failed" />)
     const line = container.querySelector('.ui-operation-row__line')
     expect(line?.querySelector('.ui-operation-row__title')).not.toBeNull()
     expect(line?.querySelector('.ui-badge')).not.toBeNull()
@@ -292,7 +309,13 @@ describe('OperationRow says which machine', () => {
       <OperationRow {...RUNNING} machine="deploy@srv-01" destination="/var/www" />
     ))
     const line = container.querySelector('.ui-operation-row__line')
-    expect(line?.textContent).toBe('notes.txt')
+    // The name and the percentage, and nothing about WHERE. Asserted by
+    // absence rather than by the whole string, so adding a mark to the line
+    // later does not fail a test about the machine.
+    expect(line?.querySelector('.ui-operation-row__machine')).toBeNull()
+    expect(line?.querySelector('.ui-operation-row__path')).toBeNull()
+    expect(line?.textContent).toContain('notes.txt')
+    expect(line?.textContent).not.toContain('deploy@srv-01')
   })
 
   it('says the machine even where there is no path to say it beside', () => {

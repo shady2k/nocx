@@ -3,6 +3,7 @@
 # that the nocx/no-raw-controls and nocx/no-color-literals rules fire,
 # that the AST kit-identity scanner matches fixture expectations,
 # that the CSS colour grammar checker catches violation patterns,
+# that the menu-icons checker catches a context-menu row built with no mark,
 # and that the CSS integrity checker catches every one of its violation classes —
 # ten as of nocx-pp3y.2, each asserted by name below, several in both directions.
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
@@ -75,6 +76,49 @@ done
 
 if echo "$row_grammar_check" | grep -q 'ui-record-row__title\|plain-widget'; then
   echo "ROW-GRAMMAR GATE FAILED — reported the kit's own composite part or an unrelated class"
+  exit 1
+fi
+
+# ── Menu-icons fixture check (nocx-inbw1) ────────────────────────────────
+# The kit's ContextMenu reserves the icon column whether or not an icon is
+# passed, so an unmarked row compiles, renders, passes its unit tests and
+# reaches a person as a menu with an empty gutter — three of the four call
+# sites shipped exactly that. The fixture's three intentional omissions must
+# fire; the marked row and the option object that is not a menu row must stay
+# silent, because a rule that reported those would be turned off.
+menu_icons_check=$(node "${fixture_dir}/check-menu-icons.mjs" \
+  "${fixture_dir}/menu-icons-fixture/menu.tsx" 2>&1 || true)
+
+for row in bare-row pushed-row undefined-row; do
+  if ! echo "$menu_icons_check" | grep -q "$row"; then
+    echo "MENU-ICONS GATE FAILED — row '${row}' did not fire on the fixture"
+    exit 1
+  fi
+done
+
+if echo "$menu_icons_check" | grep -q 'marked-row\|not-a-menu-row'; then
+  echo "MENU-ICONS GATE FAILED — reported a marked row or an object that is not a menu row"
+  exit 1
+fi
+
+# Exactly three, and no PARSE violation: the fixture is a real .tsx the
+# checker read, not a file it failed closed on and counted as a hit.
+menu_icons_hits=$(echo "$menu_icons_check" | grep -c '^lint-fixtures/menu-icons-fixture' || true)
+if [ "$menu_icons_hits" -ne 3 ]; then
+  echo "MENU-ICONS GATE FAILED — expected exactly 3 unmarked rows, got ${menu_icons_hits}"
+  exit 1
+fi
+
+if echo "$menu_icons_check" | grep -q 'PARSE ERROR'; then
+  echo "MENU-ICONS GATE FAILED — the fixture did not parse; the hits above came from failing closed"
+  exit 1
+fi
+
+# The other direction, on the REAL tree: the rule must be silent where the
+# call sites are correct. A gate that only ever ran against a file built to
+# fail cannot tell a working rule from one that reports everything.
+if ! node "${fixture_dir}/check-menu-icons.mjs" >/dev/null 2>&1; then
+  echo "MENU-ICONS GATE FAILED — the rule reports un-baselined rows on the real tree"
   exit 1
 fi
 
@@ -288,5 +332,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar verified (11 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + menu-icons verified (11 integrity rules)"
 exit 0

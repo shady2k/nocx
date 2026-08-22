@@ -695,6 +695,37 @@ describe('files sidebar view', () => {
     expect(document.querySelector('[data-testid="files-context-menu"]')).toBeNull()
   })
 
+  it('every row in the menu carries its mark, not an empty reserved column', async () => {
+    // The kit RESERVES the icon column whether or not an icon is passed, so
+    // an unmarked menu renders perfectly and reads as a list of words —
+    // which is how three of the four call sites shipped with no marks at all
+    // and nothing said so (nocx-inbw1). The lint rule catches the literal;
+    // this catches what a person actually sees, and neither can substitute
+    // for the other: the rule cannot see a row assembled some other way, and
+    // a test naming three labels cannot see the fourth row somebody adds.
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
+        ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 40, clientY: 60 })
+
+    const items = [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-testid="files-context-menu"] [role="menuitem"]',
+      ),
+    ]
+    expect(items.length).toBeGreaterThan(0)
+    for (const item of items) {
+      expect(item.querySelector('.ui-context-menu__icon svg')).not.toBeNull()
+    }
+  })
+
   it('copying the relative path puts the path as spelled from the root on the clipboard', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     const list = vi
@@ -1116,5 +1147,164 @@ describe('uploading from the panel', () => {
     })
     await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
     expect(row()?.textContent).toContain('Uploaded')
+  })
+})
+
+// ── Upload from a ROW (nocx-9le.5.21) ────────────────────────────────────
+//
+// AGENTS.md rule 1: a user right-clicks a folder in the tree, picks Upload,
+// chooses files, and they arrive in THAT folder — not in the folder the panel
+// happens to be showing, which is the header action's derivation and the one
+// the panel keeps.
+//
+// This is not the drop-on-a-folder-row design §4 refuses: that refused a
+// GESTURE, where the folder under a dragged pointer is a guess about what the
+// person meant. A row they right-clicked is an explicit choice.
+describe('uploading into the row you right-clicked', () => {
+  function uploadFixture() {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services })
+    const flow = createUploadFlow({
+      services,
+      store,
+      ask: () => Promise.resolve({ answer: 'skip', applyToAll: false }),
+      report: () => {},
+    })
+    const surface: UploadSurface = { services, store, flow }
+    return { services, store, flow, surface }
+  }
+
+  /** A tree with TWO folders: the one the panel reveals (/srv) and another
+   *  (/opt). The pair is the whole point — a test whose only folder is the
+   *  revealed one cannot tell "the row" from "the panel's folder", which is
+   *  exactly the confusion this item must not have. */
+  const twoFolders = () =>
+    fakeServices({
+      list: vi
+        .fn()
+        .mockImplementation((_b: string, path: string) =>
+          Promise.resolve(
+            path === '/'
+              ? listFixture('C:/', [
+                  entryFixture({ name: 'opt', path: '/opt', kind: 'dir' }),
+                  entryFixture({ name: 'srv', path: '/srv', kind: 'dir' }),
+                  entryFixture({ name: 'notes.md', path: '/notes.md' }),
+                ])
+              : listFixture(`C:${path}`, []),
+          ),
+        ),
+    })
+
+  const rowMenuItems = () =>
+    [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-testid="files-context-menu"] [role="menuitem"]',
+      ),
+    ].map((i) => i.textContent)
+
+  function rowMenuItem(label: string): HTMLElement {
+    const items = document.querySelectorAll<HTMLElement>(
+      '[data-testid="files-context-menu"] [role="menuitem"]',
+    )
+    for (const item of items) if ((item.textContent ?? '').includes(label)) return item
+    throw new Error(`no menu item named ${label}`)
+  }
+
+  async function mountOnRemote(over: { pickSources?: () => Promise<UploadSource[]> } = {}) {
+    const u = uploadFixture()
+    const app = await mountApp(twoFolders(), undefined, {
+      upload: u.surface,
+      pickSources: over.pickSources,
+    })
+    app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
+    // Wait for the RESCOPE and the reveal both: the panel's own folder is
+    // /srv, and the assertions below are about a row that is not it.
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'opt')).not.toBeUndefined())
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-selected="true"]')?.textContent).toContain('srv'),
+    )
+    return { ...app, ...u }
+  }
+
+  it('sends the chosen files into THAT directory, not the one the panel is showing', async () => {
+    const app = await mountOnRemote({
+      pickSources: () =>
+        Promise.resolve([{ name: 'notes.txt', size: 5, blob: new Blob([new Uint8Array(5)]) }]),
+    })
+    app.services.nextResult = [{ transferId: 't1' }]
+
+    // The panel is showing /srv. The row is /opt.
+    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
+    rowMenuItem('Upload').click()
+
+    await vi.waitFor(() => expect(app.services.uploads).toHaveLength(1))
+    expect(app.services.uploads[0]).toEqual({
+      bindingId: 'b1',
+      destDir: '/opt',
+      name: 'notes.txt',
+      size: 5,
+    })
+  })
+
+  it('is present on a remote tab and ABSENT on a local one', async () => {
+    // R1 as ABSENCE, and the absence is the security property: a local
+    // binding has no uploader at all, so an item that reached one would be
+    // a promise the product cannot keep. An untested absence is not one —
+    // a test that only checks presence cannot catch the row leaking onto a
+    // local tab, which is the direction that matters.
+    const u = uploadFixture()
+    const app = await mountApp(twoFolders(), undefined, { upload: u.surface })
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'opt')).not.toBeUndefined())
+
+    // Local (the initial tab's origin): absent.
+    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
+    expect(rowMenuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path', 'Show in Finder'])
+    expect(rowMenuItems().some((l) => (l ?? '').includes('Upload'))).toBe(false)
+    fireEvent.pointerDown(document.body)
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="files-context-menu"]')).toBeNull(),
+    )
+
+    // Remote: present.
+    app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-selected="true"]')?.textContent).toContain('srv'),
+    )
+    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
+    expect(rowMenuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path', 'Upload…'])
+  })
+
+  it('offers nothing on a FILE row — a file is not a place to put a file', async () => {
+    const app = await mountOnRemote()
+    fireEvent.contextMenu(rowNamed(app.panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    expect(rowMenuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path'])
+  })
+
+  it('offers nothing where no upload surface was injected', async () => {
+    // A row that reached nothing is worse than no row: the panel degrades by
+    // not offering the action, never by offering one that goes nowhere.
+    const app = await mountApp(twoFolders())
+    app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'opt')).not.toBeUndefined())
+    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
+    expect(rowMenuItems().some((l) => (l ?? '').includes('Upload'))).toBe(false)
+  })
+
+  it('carries no Download row — nocx-9le.8 has not started', async () => {
+    // A menu item that does nothing, or says "coming soon", is a feature
+    // that does not exist surviving a release. Download joins this menu with
+    // its own epic or not at all.
+    const app = await mountOnRemote()
+    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
+    expect(rowMenuItems().some((l) => /download/i.test(l ?? ''))).toBe(false)
+  })
+
+  it('picking nothing sends nothing', async () => {
+    // A cancelled picker is an answer, and the answer is "no files".
+    const app = await mountOnRemote({ pickSources: () => Promise.resolve([]) })
+    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
+    rowMenuItem('Upload').click()
+    await Promise.resolve()
+    expect(app.services.uploads).toHaveLength(0)
   })
 })

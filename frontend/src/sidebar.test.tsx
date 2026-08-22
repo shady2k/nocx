@@ -568,3 +568,65 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
     expect(panelTitle(panel)).toBe('Alpha')
   })
 })
+
+describe('sidebar — a view may carry a badge count (nocx-708q.1)', () => {
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  function mountWithCount(count: () => number): HTMLElement {
+    const { bar, panel } = mount()
+    const views: SidebarViewDescriptor[] = [
+      { id: 'alpha', title: 'Alpha', icon: TestIcon, view: TestView('alpha'), order: 0 },
+      {
+        id: 'bell',
+        title: 'Notifications',
+        icon: TestIcon,
+        view: TestView('bell'),
+        badgeCount: count,
+        testId: 'activity-bell',
+        order: 1,
+      },
+    ]
+    mountSidebar(bar, panel, views, [SETTINGS_ACTION])
+    return bar
+  }
+
+  it('renders NO badge element at zero — a quiet entry point, not a dead grey nought', () => {
+    const bar = mountWithCount(() => 0)
+    expect(viewBtn(bar, 'bell').querySelector('.ui-badge')).toBeNull()
+  })
+
+  it('renders the count once there is something to say', () => {
+    const bar = mountWithCount(() => 3)
+    expect(viewBtn(bar, 'bell').querySelector('.ui-badge')?.textContent).toBe('3')
+  })
+
+  it('appears and disappears with the count, without a remount', async () => {
+    const [count, setCount] = createSignal(0)
+    /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes the
+       accessor reactively: the descriptor's badgeCount is read inside the rail
+       button's tracked scope, and the gate cannot see across the call
+       boundary. main.tsx disables the same rule at the same seam. */
+    const bar = mountWithCount(count)
+    expect(viewBtn(bar, 'bell').querySelector('.ui-badge')).toBeNull()
+
+    setCount(2)
+    await vi.waitFor(() =>
+      expect(viewBtn(bar, 'bell').querySelector('.ui-badge')?.textContent).toBe('2'),
+    )
+
+    setCount(0)
+    await vi.waitFor(() => expect(viewBtn(bar, 'bell').querySelector('.ui-badge')).toBeNull())
+  })
+
+  it('a view without a badgeCount renders no badge at all', () => {
+    const bar = mountWithCount(() => 5)
+    expect(viewBtn(bar, 'alpha').querySelector('.ui-badge')).toBeNull()
+  })
+
+  it('carries the testId Task 9 targets onto the activity-bar button', () => {
+    const bar = mountWithCount(() => 0)
+    expect(bar.querySelector('[data-testid="activity-bell"]')).toBe(viewBtn(bar, 'bell'))
+  })
+})

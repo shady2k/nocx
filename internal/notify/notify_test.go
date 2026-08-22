@@ -214,8 +214,12 @@ func TestHeuristic_ReachesLocalOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	before := time.Now()
-	out := r.Raise(context.Background(), eventFor(notify.KindPaneWorkFinished, notify.TrustHeuristic))
+	// The caller stamps At now: ingress is the first nocx-owned stage and the
+	// router no longer touches it (ingress.go). What is asserted below is
+	// therefore carry-through, not stamping.
+	ev := eventFor(notify.KindPaneWorkFinished, notify.TrustHeuristic)
+	ev.At = time.Now()
+	out := r.Raise(context.Background(), ev)
 	if len(out.Resolved) != 1 {
 		t.Fatalf("resolved %d routes, want 1", len(out.Resolved))
 	}
@@ -232,8 +236,8 @@ func TestHeuristic_ReachesLocalOnly(t *testing.T) {
 	if got.Event.SessionID != "s1" {
 		t.Fatalf("sink received session %q, want s1", got.Event.SessionID)
 	}
-	if got.Event.At.Before(before) {
-		t.Fatalf("router did not stamp At: %v", got.Event.At)
+	if !got.Event.At.Equal(ev.At) {
+		t.Fatalf("router delivered At %v, want the caller's %v carried through unchanged", got.Event.At, ev.At)
 	}
 }
 

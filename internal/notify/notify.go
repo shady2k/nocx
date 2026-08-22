@@ -76,6 +76,13 @@ const (
 // host and session it came from. Stamped by nocx from its session registry
 // — never carried on the wire (ADR-0029 §2.2, §4.6).
 type Attribution struct {
+	// Backend names which backend raised this — "local" for this machine,
+	// the same vocabulary internal/commandnames.LocalRoute already uses for
+	// the same idea. nocx-if6 phase A makes session identity
+	// (backendId, sessionId); carrying it from the first commit is what stops
+	// every feed row needing a retrofit when the relay lands.
+	Backend string
+
 	// Tab keeps the old word on purpose (nocx-ehkvy). Everything else that
 	// held the shell-bearing object is now a pane, but this field is not
 	// filled with one: ws_notify.go stamps it from the WebSocket connection
@@ -114,7 +121,10 @@ type Event struct {
 	// Attribution is stamped by nocx from the authenticated session context.
 	Attribution Attribution
 
-	// At is stamped by nocx (the router) at raise time.
+	// At is stamped by nocx at ingress, which is the first nocx-owned stage
+	// (ingress.go). It was the router's job until the feed arrived; the stamp
+	// moved so that a relay replaying a buffered batch keeps its own instants
+	// instead of having them rewritten to the moment it reconnected.
 	At time.Time
 }
 
@@ -312,10 +322,13 @@ func (r *Router) Resolve(kind Kind, trust Trust, route RouteKind) []Route {
 // invokes every resolved sink synchronously. It returns when every
 // invocation has returned or admission refused the event; a queued wait is
 // bounded by ctx, and a caller that cancels while queued is removed from
-// the queue (the router stops retaining its data) and gets ctx.Err(). At is
-// stamped here — the router is the first nocx-owned stage of the pipeline.
+// the queue (the router stops retaining its data) and gets ctx.Err().
+//
+// At is NOT stamped here any more. Ingress is the first nocx-owned stage and
+// stamps it once (ingress.go); a second stamp here would overwrite the instant
+// a replayed batch carries. A zero At reaching this point means something
+// bypassed ingress, which is a wiring defect rather than a value to repair.
 func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
-	ev.At = time.Now()
 	routes := r.Resolve(ev.Kind, ev.Trust, RouteRaise)
 	if len(routes) == 0 {
 		return Outcome{}

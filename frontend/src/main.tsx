@@ -36,7 +36,14 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
+import {
+  BellIcon,
+  CheckCircleIcon,
+  PlugIcon,
+  RefreshIcon,
+  SettingsIcon,
+  TextQuoteIcon,
+} from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -84,6 +91,9 @@ import { NotesStore } from './notes/notes-store'
 import { NotesPanel } from './notes/notes-panel'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
+import { NotifyFeedClient } from './notify/feed-client'
+import { createFeedStore } from './notify/feed-store'
+import { NotificationsPanel } from './notify/notifications-panel'
 import { createOverviewController } from './overview/overview-controller'
 import { askFields } from './snippets/resolve'
 
@@ -743,7 +753,51 @@ async function main() {
     order: 1,
   }
 
-  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW].sort(
+  // ── Notifications (nocx-p0xhg) ───────────────────────────────────────
+  // The store is created HERE, at the composition root, because two surfaces
+  // consume it: the panel body and the activity-bar badge. Creating it inside
+  // the view would leave the badge with nothing to read until the panel was
+  // first opened — a bell that only starts counting once you look at it.
+  const feedStore = createFeedStore(new NotifyFeedClient(dispatcher), dispatcher)
+  const NOTIFICATIONS_VIEW: SidebarViewDescriptor = {
+    id: 'notifications',
+    title: 'Notifications',
+    icon: BellIcon,
+    testId: 'activity-bell',
+    // Quiet where there is nothing to show (nocx-708q.1): at zero the sidebar
+    // renders no badge element at all, not a grey nought.
+    badgeCount: () => feedStore.unreadCount(),
+    actions: () => (
+      <IconButton
+        data-testid="notifications-mark-read"
+        size="sm"
+        ariaLabel="Mark all notifications read"
+        title="Mark all read"
+        disabled={feedStore.unreadCount() === 0}
+        onClick={() => feedStore.markRead()}
+      >
+        <CheckCircleIcon />
+      </IconButton>
+    ),
+    view: () => (
+      <NotificationsPanel
+        store={feedStore}
+        // Resolution is the RENDERER's: it already owns session -> tab, and
+        // the backend cannot do it at all (Attribution.Tab is a WebSocket
+        // connection id). Focusing a tab does NOT mark anything read — that
+        // is the deliberate act on the header action above, and the two are
+        // different facts.
+        onActivate={(backendId, sessionId) => {
+          const pane = tm.findBySession(backendId, sessionId)
+          if (pane) void tm.activate(pane)
+        }}
+        canActivate={(backendId, sessionId) => tm.findBySession(backendId, sessionId) !== undefined}
+      />
+    ),
+    order: 2,
+  }
+
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW, NOTIFICATIONS_VIEW].sort(
     (a, b) => a.order - b.order,
   )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {

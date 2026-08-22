@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -152,6 +153,14 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 		Trust:     notify.TrustProgramRequest,
 		Level:     notify.LevelInfo,
 		Attribution: notify.Attribution{
+			// The backend this session runs on. Stamped with the same value
+			// the session.ended source uses, because it is the same fact:
+			// every session this build opens is on this machine (nocx-2gfh6).
+			// Left empty, the renderer could not resolve the occurrence to a
+			// tab at all — its lookup COMPARES the backend id, so that a
+			// relay's sessions stay distinguishable once one lands — and a
+			// program notification raised from a live tab rendered inert.
+			Backend: commandnames.LocalRoute,
 			Tab:     h.tab,
 			Host:    sess.Host(),
 			Session: string(sess.ID()),

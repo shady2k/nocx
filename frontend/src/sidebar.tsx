@@ -29,6 +29,7 @@ import { SidebarView } from './ui/sidebar-view'
 import { ResizeHandle } from './ui/resize-handle'
 import { createAppStore, type AppActions, type AppState } from './state'
 import { IconButton } from './ui/icon-button'
+import { Badge } from './ui/badge'
 import type { ActiveOrigin } from './pane-content'
 import {
   SIDEBAR_WIDTH_MAX,
@@ -66,6 +67,20 @@ export interface SidebarViewDescriptor {
   readonly icon: Component // activity-bar icon — a component, never markup
   readonly view: Component<SidebarViewProps> // panel body, receives view props
   readonly actions?: Component // per-view header actions (…, refresh, collapse-all)
+  /** How many things this view is holding for you, on its rail button.
+   *
+   *  Reactive, and read inside the button's tracked scope so it follows the
+   *  view's own state without a remount. AT ZERO THERE IS NO BADGE ELEMENT
+   *  AT ALL (nocx-708q.1): an entry point with nothing to show is quiet, not
+   *  a dead grey nought — a badge that is always there stops meaning
+   *  anything, and the count it shows when it does mean something is then
+   *  read as decoration. A view that never counts anything omits this and
+   *  renders exactly what it rendered before. */
+  readonly badgeCount?: () => number
+  /** A stable hook for an end-to-end spec, on the rail button. The e2e suite
+   *  cannot target a kit component's internals, and `data-view` is the
+   *  sidebar's own vocabulary — this is the seam a spec names. */
+  readonly testId?: string
   readonly order: number
 }
 
@@ -392,6 +407,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                 view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
               }
               data-view={view.id}
+              data-testid={view.testId}
               title={view.title}
               ariaLabel={view.title}
               tabIndex={view.id === tabbableId() ? 0 : -1}
@@ -399,6 +415,12 @@ function SidebarSolid(props: SidebarSolidProps) {
               onClick={() => handleViewClick(view)}
             >
               <view.icon />
+              {/* Nothing to show, nothing rendered — see badgeCount. */}
+              <Show when={(view.badgeCount?.() ?? 0) > 0}>
+                <span class="activity-bar__badge">
+                  <Badge tone="info">{String(view.badgeCount?.() ?? 0)}</Badge>
+                </span>
+              </Show>
             </IconButton>
           )}
         </For>

@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notify.feed.read.schema.json",
+  "title": "NotifyFeedRead",
+  "description": "Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0029 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["revision", "unreadCount", "occurrences", "dropped"],
+  "properties": {
+    "revision": {
+      "description": "Monotonic, in-memory, bumped on every feed mutation — an add, a mark-read, or an eviction. Never persisted and never reset except by process restart, which the renderer sees as a reconnect.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "unreadCount": {
+      "description": "Occurrences whose read flag is false. This is the ONE number the bell badge and the dock badge both read (design §6); the tab activity dot answers a different question and keeps reading hasActivity.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "occurrences": {
+      "description": "The feed, newest first.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/occurrence" }
+    },
+    "dropped": {
+      "description": "The visible half of eviction. It lives outside the occurrence budget and is never itself evicted: a soft degrade must be visible in the product, not only in a log.",
+      "$ref": "#/$defs/dropped"
+    }
+  },
+  "$defs": {
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "at",
+        "title",
+        "body",
+        "kind",
+        "level",
+        "count",
+        "read",
+        "backendId",
+        "sessionId",
+        "host"
+      ],
+      "properties": {
+        "id": {
+          "description": "Stable identity of one occurrence, minted by ingress. Opaque to the renderer and monotonic within the backend process.",
+          "type": "string"
+        },
+        "at": { "description": "RFC 3339 instant, stamped once by ingress.", "type": "string" },
+        "title": {
+          "description": "Untrusted presentation data (ADR-0029 §2.3). Rendered as text, never as markup.",
+          "type": "string"
+        },
+        "body": {
+          "description": "Untrusted presentation data, same guarantees as title. Empty when the source had none.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The event kind, stamped by the source adapter from the method invoked — never carried on the wire inbound.",
+          "type": "string",
+          "enum": ["block.finished", "session.ended", "program.notify", "bell", "pane.workFinished"]
+        },
+        "level": {
+          "description": "Severity, stamped by nocx: a program cannot forge danger.",
+          "type": "string",
+          "enum": ["info", "success", "warning", "danger"]
+        },
+        "count": {
+          "description": "How many occurrences this row collapsed. 1 for a lone occurrence. A row's count rises only while consecutive repeats of its collapse key arrive inside the collapse window.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "read": {
+          "description": "True once the user marked the feed read. A row whose count rises becomes unread again — the count changed, so there is something new to see.",
+          "type": "boolean"
+        },
+        "backendId": {
+          "description": "Which backend raised this — \"local\" for this machine, the same vocabulary internal/commandnames.LocalRoute uses. Present from the first commit because nocx-if6 phase A makes session identity (backendId, sessionId).",
+          "type": "string"
+        },
+        "sessionId": {
+          "description": "Addressing: which session this came from. The renderer resolves it to a tab; the backend cannot, and does not try.",
+          "type": "string"
+        },
+        "host": {
+          "description": "The host the session speaks for, stamped from the registry.",
+          "type": "string"
+        }
+      }
+    },
+    "dropped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "oldest", "newest"],
+      "properties": {
+        "count": {
+          "description": "Occurrences evicted since the process started. Zero means nothing has been lost.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "oldest": {
+          "description": "RFC 3339 instant of the oldest evicted occurrence, or the empty string when count is 0.",
+          "type": "string"
+        },
+        "newest": {
+          "description": "RFC 3339 instant of the newest evicted occurrence, or the empty string when count is 0.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

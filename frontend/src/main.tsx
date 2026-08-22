@@ -13,7 +13,7 @@ import { installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
-import { PaneManager } from './panes'
+import { LOCAL_BACKEND_ID, PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { AboutClient } from './about-client'
@@ -93,6 +93,8 @@ import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
 import { NotifyFeedClient } from './notify/feed-client'
 import { createFeedStore } from './notify/feed-store'
+import { subscribeSessionFocus } from './notify/focus-request'
+import { subscribeNotifyToast } from './notify/toast-bridge'
 import { NotificationsPanel } from './notify/notifications-panel'
 import { createOverviewController } from './overview/overview-controller'
 import { askFields } from './snippets/resolve'
@@ -759,6 +761,24 @@ async function main() {
   // the view would leave the badge with nothing to read until the panel was
   // first opened — a bell that only starts counting once you look at it.
   const feedStore = createFeedStore(new NotifyFeedClient(dispatcher), dispatcher)
+  // The two backend-initiated halves of the same pipeline, wired HERE for the
+  // same reason the store is: both need something only the composition root
+  // holds — the pane manager for one, and for the other nothing at all beyond
+  // being installed before the first push can arrive.
+  //
+  // A banner clicked while nocx was in the background asks for the pane
+  // holding a session (nocx-jiwq.1). Resolution is the RENDERER's and it is
+  // the same lookup the panel's row activation uses above — one answer to
+  // "which tab holds this session", not two. The backend id is this backend:
+  // the push carries a session id and nothing else, because the socket it
+  // arrived on is what says which machine it is about.
+  subscribeSessionFocus(dispatcher, (sessionId) => {
+    const pane = tm.findBySession(LOCAL_BACKEND_ID, sessionId)
+    if (pane) void tm.activate(pane)
+  })
+  // And the toast sink's other end (nocx-c6ef): the router decided a toast
+  // was the destination, and this presents it with the kit's own toast.
+  subscribeNotifyToast(dispatcher)
   const NOTIFICATIONS_VIEW: SidebarViewDescriptor = {
     id: 'notifications',
     title: 'Notifications',

@@ -122,6 +122,13 @@ type App struct {
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
 
+	// notifyToast is the late-bound implementation behind the notify
+	// router's toast route (ADR-0029, plan D2). Same shape as attentionHost
+	// and for the same reason: the route was decided when the table was
+	// built, and only the surface it reaches arrives later — here, the
+	// WebSocket server, which New constructs after the router.
+	notifyToast *notify.ToastHolder
+
 	// notifyFeed and notifyIngress are the notification centre: ingress is
 	// the pipeline's one entry point (it stamps, records, then submits) and
 	// the feed is the bounded in-memory record the bell reads. Held here so
@@ -271,6 +278,21 @@ func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 // deliveries rather than silent drops.
 func (a *App) SetAttentionHost(host notify.AttentionHost) {
 	a.attentionHost.Set(host)
+}
+
+// FocusSession asks the renderer to bring the pane holding sessionID to the
+// front (nocx-jiwq.1, plan D1). It is the composition root's half of a banner
+// click: the desktop shell raises the window, and the tab is the part only the
+// renderer can do.
+//
+// It carries a SESSION and nothing else. The renderer owns session -> tab
+// (PaneManager.findBySession) and the backend cannot do it at all — a tab id
+// here would be a second addressing identity no part of the backend can own
+// (nocx-wyp3p). Nothing is returned because there is nothing a caller could do
+// with a failure: with no renderer attached the push is dropped, and stalling
+// the click callback to report that would be worse than dropping it.
+func (a *App) FocusSession(sessionID string) {
+	a.Transport.FocusSession(sessionID)
 }
 
 // Log logs a message from the frontend.
@@ -437,6 +459,12 @@ const (
 // delivery repeats it to say which channel failed — two spellings of one
 // surface would be two answers to one question (AD-8).
 const notifyBannerTarget = "banner"
+
+// notifyToastTarget is the resolved Destination.Target of the toast route,
+// named here for the same reason the banner's is: the router carries it into
+// every outcome and a failed delivery repeats it to say which channel failed.
+// Two spellings of one surface would be two answers to one question (AD-8).
+const notifyToastTarget = "toast"
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -1064,6 +1092,18 @@ func New(opts ...Option) (*App, error) {
 	// run — keep UnavailableHost, and a raise there is a visible failed
 	// delivery rather than a silent drop.
 	attentionHost := &notify.HostHolder{}
+	// The toast is the second attention surface and it is a SINK, not a
+	// special case in the renderer (plan D2): the router resolves it here,
+	// once, and the sink hands the event to a port the transport satisfies.
+	// A toast that the renderer chose for itself would put "where" somewhere
+	// other than the router, which is the one thing ADR-0029 §2.3 forbids.
+	//
+	// Its holder binds late for the same ordering reason the host's does, and
+	// the late half is nearer than it looks: the implementation is the
+	// WebSocket server, which is constructed BELOW this line because it is
+	// built with the pipeline already wired into it. The route is decided
+	// here; the surface arrives a few lines later.
+	notifyToast := &notify.ToastHolder{}
 	// Both rows name their destination, which is what makes a failed delivery
 	// able to say WHICH channel failed: Destination.Target is a local sink's
 	// own name (notify.Destination), the router is the only thing that holds
@@ -1072,6 +1112,7 @@ func New(opts ...Option) (*App, error) {
 	notifyRouter, routerErr := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
 			{Sink: notify.HostSink{Host: attentionHost}, Destination: notify.Destination{Target: notifyBannerTarget}},
+			{Sink: notify.ToastSink{Presenter: notifyToast}, Destination: notify.Destination{Target: notifyToastTarget}},
 		},
 		// A session that ended is a registry fact, so it is attested and may
 		// reach every sink (ADR-0029 §3). It gets the banner for the same
@@ -1079,6 +1120,7 @@ func New(opts ...Option) (*App, error) {
 		// the tab, which is the only moment either event matters.
 		{Kind: notify.KindSessionEnded, Trust: notify.TrustAttested}: {
 			{Sink: notify.HostSink{Host: attentionHost}, Destination: notify.Destination{Target: notifyBannerTarget}},
+			{Sink: notify.ToastSink{Presenter: notifyToast}, Destination: notify.Destination{Target: notifyToastTarget}},
 		},
 	}, notify.Limits{
 		MaxInFlight:     4,
@@ -1207,6 +1249,11 @@ func New(opts ...Option) (*App, error) {
 	// the revision only, so it rides the refreshable outbound queue and a
 	// dropped one costs one refetch rather than a row nobody learns about.
 	notifyFeed.OnChange(tp.BroadcastFeedChanged)
+	// The toast route's implementation, bound now that the server exists. The
+	// route itself was decided above and is not reachable from here — this
+	// binds an implementation, never a destination. The window before this
+	// line is empty: nothing can raise before the transport is listening.
+	notifyToast.Set(tp)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the
 	// server is built above; the window before this line is empty (no
@@ -1340,6 +1387,7 @@ func New(opts ...Option) (*App, error) {
 		logFile:          logFile,
 		procs:            procs,
 		attentionHost:    attentionHost,
+		notifyToast:      notifyToast,
 		notifyFeed:       notifyFeed,
 		notifyIngress:    notifyIngress,
 		UIState:          uiStateStore,

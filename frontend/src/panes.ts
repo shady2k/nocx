@@ -555,8 +555,13 @@ function insertionIndex(from: number, to: number, before: boolean): number {
  * because that constant answers a different question — which target the
  * ports methods scope to — and one of the two will change when the relay
  * lands.
+ *
+ * Exported because the composition root needs it too: a session.focus push
+ * carries a session id and nothing else (nocx-jiwq.1), so the backend id it
+ * resolves against is THIS backend — and spelling 'local' a second time at
+ * that call site would be a second answer to which machine a tab is on.
  */
-const LOCAL_BACKEND_ID = 'local'
+export const LOCAL_BACKEND_ID = 'local'
 
 export class PaneManager {
   private readonly panes: Pane[] = []

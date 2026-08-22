@@ -28,14 +28,6 @@ var assets embed.FS
 // manager — the notification click path below is the first such caller.
 const mainWindowName = "main"
 
-// errFocusSessionUnrouted is the half of a notification click the backend
-// cannot yet deliver. The click reaches the shell, which raises the window;
-// activating the tab that holds the named session is the renderer's job and
-// the backend has no channel to ask for it (nocx-jiwq.1). Reported as an
-// error for the same reason ErrBadgeBounce is: an absence that says so beats
-// a call that returns nil and delivers half of what it promised.
-var errFocusSessionUnrouted = errors.New("notification click raised the window, but the tab holding the session was not activated: the backend has no control-plane channel to ask the renderer (nocx-jiwq.1)")
-
 func main() {
 	// Checked before any backend or window exists so CI's release smoke check
 	// (distribution design §5) and a user's `nocx --version` print the linked
@@ -254,16 +246,16 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 		w.backend.Logger.Warn("notification service unavailable; banners will fail per raise", "error", err)
 	}
 	//
-	// Focus is the composition root's half of a banner click: the adapter
-	// decodes the sessionId the banner carried and hands it here. Raising
-	// the window is the part the shell owns and can do now; activating the
-	// tab that holds that session is the renderer's, and the backend has no
-	// channel to ask for it yet (nocx-jiwq.1 — a control-plane notification
-	// naming the session, which the renderer resolves to a tab, AD-1 and
-	// AD-7). Until that lands the click lands on the window and the unrouted
-	// session is named in the log, rather than every click being discarded
-	// because no seam could be supplied at all. No surface offers
-	// click-to-focus until the renderer half exists.
+	// Focus is the composition root's half of a banner click, and it is two
+	// halves under one seam. Raising the window is the SHELL's: only main()
+	// has a window manager. Activating the tab that holds the session is the
+	// RENDERER's, because the renderer owns session -> tab and the backend
+	// cannot do it at all — Attribution.Tab is a WebSocket connection id
+	// rather than a tab (nocx-wyp3p). So the backend asks for a session and
+	// nothing more, over the existing control plane (AD-1, AD-7), and the
+	// renderer resolves it with the one lookup it already owns
+	// (nocx-jiwq.1). A click on a session no pane holds moves the window and
+	// nothing else, which is the honest outcome rather than an error.
 	host := wailsadapter.New(wailsadapter.Deps{
 		Service: ns,
 		Log:     w.backend.Slog(),
@@ -293,7 +285,8 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 				return fmt.Errorf("notification click: window %q is gone", mainWindowName)
 			}
 			win.Focus()
-			return fmt.Errorf("%w (sessionId %s)", errFocusSessionUnrouted, sessionID)
+			w.backend.FocusSession(sessionID)
+			return nil
 		},
 	})
 	w.backend.SetAttentionHost(host)

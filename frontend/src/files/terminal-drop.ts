@@ -8,8 +8,9 @@
 // a DOM event we act on — v3's runtime hands the absolute paths to Go,
 // which mints a source ticket per file and sends them back as a
 // `files.dropped` notification carrying a name, a size and a ticket, and no
-// path at all (R2). So this module listens in both places and converges on
-// the same flow; `hasWailsWebview()` is what decides which half is live,
+// path at all (R2) — except on a local tab, which mints nothing and where
+// the path IS what the gesture is for (D9, below). So this module listens
+// in both places and converges on the same flow; `hasWailsWebview()` is what decides which half is live,
 // and it is asked rather than re-derived (there is one owner of "are we
 // inside the webview", in wails-runtime.ts).
 //
@@ -20,10 +21,20 @@
 // current folder is the panel's target and the tab's cwd is the terminal's.
 //
 // **A local tab does not copy (D9).** Every terminal inserts the dropped
-// file's name at the prompt, and copying a file onto the machine it is
+// file's PATH at the prompt, and copying a file onto the machine it is
 // already on is not a thing anybody asked for. This is one surface giving
 // one input the meaning its context gives it — not two surfaces owning one
 // gesture: there is exactly one drop handler and it reads the tab's kind.
+//
+// Which build the drop arrives through decides whether D9 can be honoured
+// at all, and only one of them can. The Wails drop carries the path: Go
+// took it from the runtime and, for a local tab alone, sends it back in
+// `files.dropped` (`localPath`). A browser drop carries a `File`, which has
+// a name and no location — that is the web platform and not a gap here — so
+// there is no path to insert and the honest answer is to say so. Inserting
+// the base name instead is worse than doing nothing: it looks like it
+// worked, and then the command runs against whatever `report.pdf` resolves
+// to in the shell's cwd, or against no file at all.
 //
 // ## The tab strip still reorders
 //
@@ -45,6 +56,17 @@ export interface DropOrigin {
   cwd: string | null
   cwdVerified: boolean
 }
+
+/** One dropped file as this module sees it, before the tab's kind decides
+ *  what the drop means. It is an UploadSource plus the one thing an upload
+ *  never needs and the prompt insert cannot do without.
+ *
+ *  `localPath` is present only where two things hold at once: the drop came
+ *  through the Wails runtime, and it landed on a local tab. A browser `File`
+ *  has no location to report, and a drop on a remote tab is deliberately
+ *  told nothing but a name and a size (R2) — so its absence is the question
+ *  "can this gesture honour D9", already answered by whoever built it. */
+type DroppedFile = UploadSource & { localPath?: string }
 
 export interface TerminalDropDeps {
   /** The pane element the drop lands on. */
@@ -101,7 +123,7 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
   // did not. What this module owns is `data-drop-active`, which says a files
   // drag is over the pane right now.
 
-  async function handle(sources: UploadSource[]): Promise<void> {
+  async function handle(sources: DroppedFile[]): Promise<void> {
     if (sources.length === 0) return
     const o = origin()
     if (o === null) {
@@ -113,7 +135,19 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
     }
     if (o.kind === 'local') {
       // D9. NO upload method is called on this path, and that is the point.
-      insert(sources.map((s) => shellQuote(s.name)).join(' '))
+      const paths = sources.map((s) => s.localPath).filter((p) => p !== undefined)
+      if (paths.length !== sources.length) {
+        // Only the browser half gets here, and it gets here every time: a
+        // `File` names itself and never says where it is. Refusing is the
+        // honest answer, because the name on its own is not the path D9
+        // promises and would run against a different file or none.
+        report(
+          'A browser cannot tell nocx where a dropped file is, so it cannot put its path on the command line.',
+          'warning',
+        )
+        return
+      }
+      insert(paths.map(shellQuote).join(' '))
       return
     }
     // The destination is the tab's cwd — the same verified OSC 7 value the
@@ -166,7 +200,12 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
   const unsubDropped = deps.services.subscribeDropped((p) => {
     if (p.sessionId !== origin()?.sessionId) return
     void handle(
-      p.sources.map((s) => ({ name: s.name, size: s.size, sourceTicket: s.sourceTicket })),
+      p.sources.map((s) => ({
+        name: s.name,
+        size: s.size,
+        sourceTicket: s.sourceTicket,
+        localPath: s.localPath,
+      })),
     )
   })
 

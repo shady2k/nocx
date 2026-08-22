@@ -692,6 +692,19 @@ func TestFilesDropped_DTOConformsToContract(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, schema, raw, "files.dropped DTO")
+
+	// And the local tab's shape, which is the other one this struct has: no
+	// ticket, and the absolute path the prompt insert needs (D9).
+	rawLocal, err := json.Marshal(map[string]any{
+		"sessionId": "0123456789abcdef0123456789abcdef",
+		"sources": []SourcePick{
+			{Name: "a.txt", Size: 2, LocalPath: "/home/dev/Downloads/a.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawLocal, "files.dropped DTO (local tab)")
 }
 
 // The real notification off the real socket — the row that matters, because
@@ -709,6 +722,14 @@ func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
 	}
 	params := readNotification(t, e.conn, "files.dropped", 5*time.Second)
 	validateJSON(t, schema, params, "files.dropped notification")
+	// The regression that would matter, asserted on the bytes rather than on
+	// a decoded struct: a REMOTE tab is where a credential exists and bytes
+	// will move, and it learns a name and a size and nothing else about the
+	// backend's filesystem. The KEY is what is checked, so an empty path
+	// cannot pass for an absent one.
+	if bytes.Contains(params, []byte("localPath")) {
+		t.Fatalf("a remote tab's files.dropped carries a path: %s", params)
+	}
 }
 
 // And the same notification for the tab that mints nothing: a drop on a
@@ -720,8 +741,9 @@ func TestFilesDropped_ALocalTabsNotificationConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.dropped.schema.json")
 	e := newFilesTestEnv(t)
 	sid := e.openSession(t, 1) // the `open` method opens a LOCAL session
+	path := seedFile(t, "local-drop.bin", 3)
 	if err := e.ws.UploadSources().Dropped(
-		[]string{seedFile(t, "local-drop.bin", 3)},
+		[]string{path},
 		map[string]string{"data-session-id": sid},
 	); err != nil {
 		t.Fatalf("Dropped: %v", err)
@@ -736,6 +758,12 @@ func TestFilesDropped_ALocalTabsNotificationConformsToContract(t *testing.T) {
 	}
 	if len(got.Sources) != 1 || got.Sources[0].Ticket != "" {
 		t.Fatalf("sources = %+v, want one entry with no ticket", got.Sources)
+	}
+	// The half D9 promised and the wire did not keep until now: the prompt
+	// insert needs the PATH, and a base name that looks like one resolves
+	// against whatever the shell's cwd happens to be.
+	if got.Sources[0].LocalPath != path {
+		t.Fatalf("localPath = %q off the socket, want %q", got.Sources[0].LocalPath, path)
 	}
 }
 

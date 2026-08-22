@@ -226,7 +226,16 @@ describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
   // routing; this one covers that the pane is WIRED to it — a handler
   // nothing attached is a gesture that does nothing, and no unit test of
   // the handler can say so.
-  it('a drop on a LOCAL tab puts the name in the command line and uploads nothing', async () => {
+  //
+  // This is the BROWSER half, and it is the half that cannot honour D9: a
+  // `File` has a name and no location, so there is no path to insert and
+  // the module refuses and says why (its own tests assert the message). The
+  // draft therefore stays empty — inserting the base name would look like
+  // it worked and then run the command against a different file or none.
+  // What says the pane is wired at all is that the drop was CLAIMED:
+  // preventDefault is the handler's first act on a files drag, and an
+  // unattached one leaves the event untouched.
+  it('a drop on a LOCAL tab is claimed, inserts no bare name, and uploads nothing', async () => {
     const client = makeClient()
     const { content, view, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -239,7 +248,8 @@ describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
       Object.defineProperty(drop, 'dataTransfer', { value: transfer })
       tab.pane.dispatchEvent(drop)
 
-      await vi.waitFor(() => expect(view.state.doc.toString()).toBe('notes.txt'))
+      expect(drop.defaultPrevented).toBe(true)
+      await vi.waitFor(() => expect(view.state.doc.toString()).toBe(''))
       // Copying a file onto the machine it is already on is not a thing
       // anybody asked for: no upload method is called at all.
       expect(client.dispatcher.call).not.toHaveBeenCalledWith('files.upload', expect.anything())

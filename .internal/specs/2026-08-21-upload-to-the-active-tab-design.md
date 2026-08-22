@@ -187,7 +187,22 @@ losing the connection **cancels** that set and waits for it to unwind, bounded �
 on it. A cancelled transfer takes the cleanup path in `§6`.
 
 **D9 — A local tab's drop inserts the path; it does not copy.** Every terminal does this, and
-copying a file onto the machine it is already on is not a thing anybody asked for.
+copying a file onto the machine it is already on is not a thing anybody asked for. **Only the
+desktop build can keep this promise**, and the reason is the source, not the rule: the Wails
+drop hands Go the absolute path, and for a local tab — which mints nothing and uploads nothing
+— Go sends it back to the renderer to insert. A browser drop hands the renderer a `File`,
+which has a name and no location; that is the web platform, not a gap we intend to close. So
+`dev-web` and a browser against a networked backend refuse the gesture and say why. They do
+not insert the base name: it looks like a path, resolves against whatever the shell's cwd
+happens to be, and so runs the command against a different file or none.
+
+Sending the path outward does not weaken `R2`, which is a rule about **direction**. `R2`'s
+threat is a renderer that can NAME a source inbound — a path it can spell is a file it can ask
+the backend to read and send to a host of its choosing — and the defence is structural:
+`files.upload` has no `sourcePath` and no `source`, and its decoder refuses unknown fields, so
+the request cannot express one. That shape is unchanged. This path runs the other way, to the
+same human who just chose the file, for their own command line on the machine the file is
+already on, and no wire field takes it back.
 
 ## 4. Scope
 

@@ -36,6 +36,18 @@ package transport
 // because "the file /home/dev/.ssh/id_ed25519 is not readable" hands back
 // exactly what the ticket exists to withhold. The caller has the path and
 // may log it; this store never does.
+//
+// The LOCAL tab is the one branch that does send a path, and it is the
+// branch that mints nothing: a drop there uploads no bytes, it puts the
+// dropped file's path at the person's own prompt (D9), which is what every
+// terminal does and what a bare base name only looks like. Read the
+// direction rather than the noun — R2's threat is a renderer that can NAME
+// a source inbound, because a path it can spell is a file it can ask this
+// process to read and send to a host of its choosing. files.upload has no
+// such parameter and its decoder refuses unknown fields, so the request
+// cannot express one. Handing a path outward, to the same human who chose
+// the file, for their own command line on the machine the file is already
+// on, is the opposite motion and there is no wire field that takes it back.
 
 import (
 	"crypto/rand"
@@ -61,11 +73,23 @@ type SourcePick struct {
 	// way dialog.openFile's empty path already does; or the drop landed on
 	// a LOCAL tab, where nothing is minted because nothing may be uploaded
 	// onto the machine the file is already on (D9) and the renderer is
-	// being told the name for the prompt insert and nothing else.
+	// being told the path for the prompt insert and nothing else.
 	Ticket string `json:"sourceTicket"`
 	// Name is the file's BASE name — never a path, and never the directory
 	// it came from.
 	Name string `json:"name"`
+	// LocalPath is the absolute path of a file dropped on a LOCAL tab, and
+	// nothing else ever sets it: not the picker, not a drop on a remote tab.
+	// It is what D9 promised and Name could not keep — the renderer inserts
+	// it, shell-quoted, at the prompt, and `report.pdf` is not a path, it is
+	// a string that resolves against whatever the shell's cwd happens to be.
+	//
+	// omitempty is load-bearing rather than tidy: a pick that carries no
+	// path marshals without the KEY, so the one shape R2 cares about — the
+	// tab where a credential exists and bytes will move — cannot be misread
+	// as an empty path, and dialog.openFileForUpload's contract, which
+	// forbids additional properties, keeps rejecting one outright.
+	LocalPath string `json:"localPath,omitempty"`
 	// Size is the file's size in bytes at mint time. Advisory, like every
 	// stat: the transfer's own read is what actually moves.
 	Size int64 `json:"size"`
@@ -153,8 +177,9 @@ var (
 // answer and the renderer's answer is not binding: the drop target's
 // session id is renderer-authored DOM, and what it names is a session this
 // process opened. A local tab does not copy (design D9) — every terminal
-// inserts the dropped name at the prompt instead — so it needs no upload
-// credential, and one minted for it would be a credential nobody redeems.
+// inserts the dropped file's path at the prompt instead — so it needs no
+// upload credential, and one minted for it would be a credential nobody
+// redeems.
 type DropHost interface {
 	// TabKind is the kind of the session a drop target named, and whether
 	// that session is open at all. False refuses the drop whole.
@@ -289,11 +314,15 @@ func (s *SourceTicketStore) mint(path string, sid session.ID) (SourcePick, error
 }
 
 // describeSource is what the renderer may learn about a chosen file when
-// nothing is being minted for it: the base name and the size, and no
-// ticket. It is the local tab's answer (D9 — the name goes to the prompt,
-// no bytes move) and it is also Mint's pre-check, so the two agree about
-// what is choosable by construction rather than by two lists staying in
-// step.
+// nothing is being minted for it: the base name, the size, the absolute
+// path, and no ticket. It is the local tab's answer (D9 — the PATH goes to
+// the prompt, no bytes move) and it is also Mint's pre-check, so the two
+// agree about what is choosable by construction rather than by two lists
+// staying in step.
+//
+// Mint takes the pre-check and discards this result, which is what keeps
+// the path on the one branch entitled to it: a minted pick is built from
+// scratch above, with a ticket and no path.
 //
 // The error is DISCARDED rather than wrapped — an *os.PathError prints the
 // path, and these errors travel to the renderer.
@@ -312,7 +341,7 @@ func describeSource(path string) (SourcePick, error) {
 	if !info.Mode().IsRegular() {
 		return SourcePick{}, errSourceNotRegular
 	}
-	return SourcePick{Name: filepath.Base(path), Size: info.Size()}, nil
+	return SourcePick{Name: filepath.Base(path), Size: info.Size(), LocalPath: path}, nil
 }
 
 // Claim resolves a ticket to the file it names and forgets it. One-shot:
@@ -400,12 +429,13 @@ func (s *SourceTicketStore) Close() {
 // connection happens to own.
 //
 // A LOCAL TAB MINTS NOTHING. A local tab does not copy (D9): the terminal
-// inserts the dropped name at the prompt, and copying a file onto the
-// machine it is already on is not a thing anybody asked for. The renderer
-// is still told what was dropped — that is what the prompt insert reads,
-// and in the Wails window the drop never becomes a DOM event it could read
-// instead — but the picks carry no ticket, because a credential nobody
-// redeems is still a credential that exists.
+// inserts the dropped file's path at the prompt, and copying a file onto
+// the machine it is already on is not a thing anybody asked for. The
+// renderer is still told what was dropped — that is what the prompt insert
+// reads, and in the Wails window the drop never becomes a DOM event it
+// could read instead — but the picks carry no ticket, because a credential
+// nobody redeems is still a credential that exists. What they carry
+// instead is the path, which is the only branch that does.
 //
 // Nothing is minted unless something will be emitted: a drop with no
 // session, a hostile session attribute, a session that is not open, or no

@@ -118,13 +118,12 @@ describe('a drop on a remote tab uploads into that tab’s cwd', () => {
   })
 })
 
-describe('a drop on a LOCAL tab inserts the name and starts no transfer (D9)', () => {
+describe('a BROWSER drop on a LOCAL tab has no path to insert, and says so', () => {
   it('calls no upload method at all', async () => {
     const h = harness(LOCAL)
     fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
     await settle()
 
-    expect(h.inserted).toEqual(['notes.txt'])
     // The whole of D9: copying a file onto the machine it is already on is
     // not a thing anybody asked for.
     expect(h.services.uploads).toEqual([])
@@ -133,7 +132,7 @@ describe('a drop on a LOCAL tab inserts the name and starts no transfer (D9)', (
     expect(h.bindings).toEqual([])
   })
 
-  it('quotes a name a shell would otherwise split', async () => {
+  it('says why a browser drop cannot put a path on the command line', async () => {
     const h = harness(LOCAL)
     fire(
       h.element,
@@ -141,7 +140,60 @@ describe('a drop on a LOCAL tab inserts the name and starts no transfer (D9)', (
       filesTransfer([new File(['a'], 'my report.txt'), new File(['b'], 'plain.txt')]),
     )
     await settle()
-    expect(h.inserted).toEqual([`'my report.txt' plain.txt`])
+    // A bare base name is worse than nothing: it LOOKS like it worked, and
+    // then the command runs against whatever `my report.txt` resolves to in
+    // the shell's cwd, or against no file at all.
+    expect(h.inserted).toEqual([])
+    expect(h.said[0].message).toContain('browser')
+    expect(h.said[0].level).toBe('warning')
+  })
+})
+
+describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
+  it('inserts the absolute path, not the base name', async () => {
+    const h = harness(LOCAL, { native: true })
+    h.services.emitDropped({
+      sessionId: LOCAL.sessionId,
+      sources: [
+        {
+          sourceTicket: '',
+          name: 'report.pdf',
+          size: 12,
+          localPath: '/home/dev/Downloads/report.pdf',
+        },
+      ],
+    })
+    await settle()
+
+    expect(h.inserted).toEqual(['/home/dev/Downloads/report.pdf'])
+    // Still the whole of D9: no bytes move onto the machine they are on.
+    expect(h.services.uploads).toEqual([])
+    expect(h.services.bodies).toEqual([])
+    expect(h.bindings).toEqual([])
+  })
+
+  it('quotes a path a shell would otherwise split', async () => {
+    const h = harness(LOCAL, { native: true })
+    h.services.emitDropped({
+      sessionId: LOCAL.sessionId,
+      sources: [
+        { sourceTicket: '', name: 'my report.txt', size: 1, localPath: '/home/dev/my report.txt' },
+        { sourceTicket: '', name: 'plain.txt', size: 1, localPath: '/home/dev/plain.txt' },
+      ],
+    })
+    await settle()
+    expect(h.inserted).toEqual([`'/home/dev/my report.txt' /home/dev/plain.txt`])
+  })
+
+  it('refuses rather than inserting a name when the path did not arrive', async () => {
+    const h = harness(LOCAL, { native: true })
+    h.services.emitDropped({
+      sessionId: LOCAL.sessionId,
+      sources: [{ sourceTicket: '', name: 'report.pdf', size: 12 }],
+    })
+    await settle()
+    expect(h.inserted).toEqual([])
+    expect(h.said).toHaveLength(1)
   })
 })
 
@@ -178,6 +230,21 @@ describe('the native drop, which never becomes a DOM event we act on', () => {
     await settle()
     expect(h.services.uploads[0].sourceTicket).toBe('c'.repeat(32))
     expect(h.services.bodies).toEqual([])
+  })
+
+  it('uploads a remote drop and inserts nothing — no path reaches the prompt', async () => {
+    const h = harness(REMOTE, { native: true })
+    h.services.nextResult = [{ transferId: 't1' }]
+    h.services.emitDropped({
+      sessionId: REMOTE.sessionId,
+      sources: [{ sourceTicket: 'c'.repeat(32), name: 'notes.txt', size: 500 }],
+    })
+    await settle()
+    // The regression that would matter: a remote tab is where a credential
+    // exists and bytes move, and it learns a name and a size and nothing
+    // else about the backend's filesystem (R2).
+    expect(h.services.uploads).toHaveLength(1)
+    expect(h.inserted).toEqual([])
   })
 
   it('ignores a drop that landed on another tab', async () => {

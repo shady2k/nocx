@@ -414,9 +414,12 @@ func TestSourceTicket_CannotBeMintedFromTheWire(t *testing.T) {
 	}
 
 	// Sweep one: every method, asked for a file on the backend's disk under
-	// each of the three names such a parameter would plausibly have. If a
+	// each of the four names such a parameter would plausibly have. If a
 	// source path were reachable from the wire at all, this is the shape
-	// that would reach it.
+	// that would reach it. `localPath` is in the list because it is a name
+	// the wire already uses — outbound, on a local tab's files.dropped — and
+	// a field a renderer has SEEN is the likeliest one for it to try
+	// sending back.
 	id := 0
 	for _, name := range names {
 		id++
@@ -424,6 +427,7 @@ func TestSourceTicket_CannotBeMintedFromTheWire(t *testing.T) {
 			"sourcePath": "/home/dev/.ssh/id_ed25519",
 			"source":     "/home/dev/.ssh/id_ed25519",
 			"path":       "/home/dev/.ssh/id_ed25519",
+			"localPath":  "/home/dev/.ssh/id_ed25519",
 		}, id)
 	}
 	if picker.opens != 0 {
@@ -956,6 +960,119 @@ func TestFilesDropped_ALocalTabMintsNoTicket(t *testing.T) {
 	}
 	if got.Name != "typed.txt" || got.Size != 3 {
 		t.Errorf("got %+v, want typed.txt of 3 bytes — the prompt insert needs the name", got)
+	}
+}
+
+// D9's other half, and the defect that reopened it: a local tab's drop
+// inserts the PATH at the prompt, and the renderer was being handed a bare
+// base name that looks like one and is not. `report.pdf` at a prompt runs
+// against whatever `report.pdf` means in the shell's cwd, which is a
+// different file or no file at all.
+//
+// So the local branch carries the absolute path in a field of its own. This
+// does NOT weaken R2. R2's threat is the renderer NAMING a source inbound —
+// files.upload has no such parameter and its decoder refuses unknown fields,
+// so the request cannot express one, and that shape is untouched. Telling
+// the renderer a path outbound, for the same human's own command line, runs
+// the other way: they just chose the file, and there is no wire field that
+// takes it back.
+func TestFilesDropped_ALocalTabCarriesTheAbsolutePath(t *testing.T) {
+	em := &recordingEmitter{kind: session.KindLocal}
+	st := NewSourceTicketStore(em)
+	path := seedFile(t, "typed.txt", 3)
+	if err := st.Dropped([]string{path},
+		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	if len(em.picks) != 1 || len(em.picks[0]) != 1 {
+		t.Fatalf("emitted %v, want the one dropped file", em.picks)
+	}
+	got := em.picks[0][0]
+	if got.LocalPath != path {
+		t.Errorf("the prompt insert is offered %q, want the absolute path %q", got.LocalPath, path)
+	}
+	// And the name is still the base name, because the two are different
+	// questions and the panel row asks the other one.
+	if got.Name != "typed.txt" {
+		t.Errorf("name = %q, want the base name", got.Name)
+	}
+}
+
+// The regression that would matter. A REMOTE tab is where a credential is
+// minted and where an upload actually happens, and it learns nothing about
+// the backend's filesystem beyond a base name and a size — the whole of R2's
+// outbound half. The local branch's new field must not follow the ticket out
+// onto the tab that has one.
+func TestFilesDropped_ARemoteTabCarriesNoPath(t *testing.T) {
+	em := remoteEmitter()
+	st := NewSourceTicketStore(em)
+	path := seedFile(t, "secret.pem", 5)
+	if err := st.Dropped([]string{path},
+		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	if len(em.picks) != 1 || len(em.picks[0]) != 1 {
+		t.Fatalf("emitted %v, want the one dropped file", em.picks)
+	}
+	if got := em.picks[0][0]; got.LocalPath != "" {
+		t.Errorf("a remote tab's drop carries path %q; it may learn a name and a size and nothing else", got.LocalPath)
+	}
+	// Marshalled, the key is absent rather than empty: what a remote pick
+	// cannot spell, a reader of the wire cannot mistake for a path.
+	raw, err := json.Marshal(em.picks[0][0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(raw, []byte("localPath")) {
+		t.Errorf("a remote pick marshals to %s; the key itself has no business being there", raw)
+	}
+}
+
+// The picker mints, so it is the same branch as a remote drop and answers
+// the same way: a ticket, a name, a size, and no path. dialog.openFileForUpload's
+// contract says additionalProperties:false, so a path here would fail the
+// conformance test too — this one says it in the mint itself.
+func TestSourceTicket_AMintedPickCarriesNoPath(t *testing.T) {
+	st := NewSourceTicketStore(nil)
+	pick, err := st.Mint(seedFile(t, "picked.bin", 4))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if pick.LocalPath != "" {
+		t.Errorf("a minted pick carries path %q, want none", pick.LocalPath)
+	}
+}
+
+// The other direction, which is the one R2 is about. The field the local
+// branch now sends OUTBOUND is not a field files.upload will accept INBOUND:
+// the params decoder runs DisallowUnknownFields, so a request naming a path
+// under the new field's own name is refused before any of it is read.
+//
+// The params are otherwise well formed — a bindingId this connection owns
+// and a real destination — so the refusal is the unknown field and nothing
+// else about the call.
+func TestFilesUpload_RefusesAPathUnderTheOutboundFieldsName(t *testing.T) {
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bindingID := e.openBinding(t, sid, dir, 2)
+
+	resp := jsonrpcCall(t, e.conn, "files.upload", map[string]any{
+		"bindingId": bindingID,
+		"destDir":   dir,
+		"name":      "innocent.txt",
+		"size":      1,
+		"localPath": "/home/dev/.ssh/id_ed25519",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("files.upload accepted a source path under the outbound field's name: %s", resp)
 	}
 }
 

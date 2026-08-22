@@ -695,6 +695,37 @@ describe('files sidebar view', () => {
     expect(document.querySelector('[data-testid="files-context-menu"]')).toBeNull()
   })
 
+  it('every row in the menu carries its mark, not an empty reserved column', async () => {
+    // The kit RESERVES the icon column whether or not an icon is passed, so
+    // an unmarked menu renders perfectly and reads as a list of words —
+    // which is how three of the four call sites shipped with no marks at all
+    // and nothing said so (nocx-inbw1). The lint rule catches the literal;
+    // this catches what a person actually sees, and neither can substitute
+    // for the other: the rule cannot see a row assembled some other way, and
+    // a test naming three labels cannot see the fourth row somebody adds.
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
+        ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 40, clientY: 60 })
+
+    const items = [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-testid="files-context-menu"] [role="menuitem"]',
+      ),
+    ]
+    expect(items.length).toBeGreaterThan(0)
+    for (const item of items) {
+      expect(item.querySelector('.ui-context-menu__icon svg')).not.toBeNull()
+    }
+  })
+
   it('copying the relative path puts the path as spelled from the root on the clipboard', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     const list = vi

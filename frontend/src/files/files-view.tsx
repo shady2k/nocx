@@ -25,7 +25,7 @@ import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
-import { ArrowUpIcon, CloseIcon, RefreshIcon } from '../ui/icons'
+import { ArrowUpIcon, CloseIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -278,7 +278,17 @@ function FilesPanel(props: FilesPanelProps) {
 
   /** The menu's items for the row it is open on. The two copy entries are
    *  always there — they are two different answers, and both were asked
-   *  for. Show in Finder joins only on a LOCAL origin. */
+   *  for. Show in Finder joins only on a LOCAL origin.
+   *
+   *  EVERY ROW CARRIES ITS MARK, from the kit's set and nowhere else
+   *  (nocx-inbw1). The column is reserved whether or not one is passed, so
+   *  three unmarked rows shipped as three empty columns and a menu that has
+   *  to be read word by word every time. Both copies wear the SAME copy
+   *  glyph deliberately: they are one verb with two objects, and the label
+   *  is what separates them — a second glyph invented to tell them apart
+   *  would be a mark that means "relative", which nothing else in the
+   *  product would honour. Show in Finder wears the external-link mark
+   *  because the action leaves nocx entirely. */
   const menuItems = (): ContextMenuItem[] => {
     const m = menu()
     if (m === null) return []
@@ -286,11 +296,13 @@ function FilesPanel(props: FilesPanelProps) {
       {
         id: 'copy-relative',
         label: 'Copy Relative Path',
+        icon: CopyIcon,
         onSelect: () => void copyPath(m.node, 'relative'),
       },
       {
         id: 'copy-absolute',
         label: 'Copy Absolute Path',
+        icon: CopyIcon,
         onSelect: () => void copyPath(m.node, 'absolute'),
       },
     ]
@@ -299,6 +311,7 @@ function FilesPanel(props: FilesPanelProps) {
       items.push({
         id: 'reveal',
         label: 'Show in Finder',
+        icon: ExternalLinkIcon,
         onSelect: () => void revealInFinder(m.node),
       })
     }

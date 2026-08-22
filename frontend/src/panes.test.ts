@@ -2960,3 +2960,23 @@ describe('newSandboxedTab (ADR-0036)', () => {
     expect(tab.sandboxed).toBe(true)
   })
 })
+
+describe('newLocalPaneAt', () => {
+  it('creates an ordinary replacement in the verified sandbox cwd', async () => {
+    const { manager, client, backend } = await mountPaneManager()
+
+    const made = manager.newLocalPaneAt('/verified/project')
+
+    await expect(made.created).resolves.toBe(true)
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    expect(client.openSession).toHaveBeenLastCalledWith(
+      expect.any(Number),
+      expect.any(Number),
+      expect.objectContaining({ paneId: made.pane.wireId, cwd: '/verified/project' }),
+    )
+    expect(backend.rows().panes.find((row) => row.id === made.pane.wireId)?.cwd).toBe(
+      '/verified/project',
+    )
+    expect(made.pane.sandboxed).toBe(false)
+  })
+})

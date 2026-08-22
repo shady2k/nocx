@@ -17,11 +17,13 @@ Non-restorability is derived. At backend startup, every open pane named by `sand
 
 Schema version remains 12. The previous v12 shape existed only on this unmerged branch, and the documented discard mechanism already rebuilds files whose version differs. Creating v13 would preserve no released data.
 
-The only launch entry is the shield in the activity bar's top zone beside the Files view icon; it is not part of the Files panel header. It is hidden while `sandbox.enabled` is false. It is disabled when the backend is unavailable, the active surface is not a local terminal, or OSC 7 has not verified a cwd. Quick Connect, the tab-strip More menu, `+`, and Cmd/Ctrl+T contain no sandbox action.
+The only launch entry is the shield in the activity bar's top zone beside the Files view icon; it is not part of the Files panel header. It is hidden while `sandbox.enabled` is false unless the active tab is already sandboxed. It is disabled when the active surface is not a local terminal or OSC 7 has not verified a cwd; applying sandbox additionally requires an available backend. Quick Connect, the tab-strip More menu, `+`, and Cmd/Ctrl+T contain no sandbox action.
 
-After native readiness confirms the sandbox, the replacement tab's title line is prefixed with the shield icon. The shield is the first name-line element, before pin, warning, activity, program title, cwd, or other status.
+After native readiness confirms the sandbox, the activity-bar shield stays selected and the replacement tab's title line is prefixed with the shield icon. The title shield is the first name-line element, before pin, warning, activity, program title, cwd, or other status.
 
-Conversion creates a new sandbox pane using the source cwd, waits for its durable create acknowledgement, moves the new tab to the source tab's strip position, and then closes the source. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
+Pressing the selected shield removes sandbox by replacement, never by widening the running process: create an ordinary local pane in the verified current cwd, wait for its durable create acknowledgement, place it at the sandbox tab's strip position, then close the sandbox pane. The old pane's immutable grant remains historical and the closed pane is not restorable. A failed ordinary create leaves the sandbox tab untouched.
+
+Applying sandbox follows the symmetric replacement sequence. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
 
 Generalizing `authority_grants` to multiple subject kinds is deferred. Reopening a grant or changing a running pane's grant is also deferred; both require explicit user consent and a restart design.
 

@@ -109,8 +109,9 @@ func New() *Registry { return &Registry{bindings: make(map[string]*Binding)} }
 // the attestation; leave it empty for local. The composition layer
 //
 // sink is the binding's write half and is nil for a binding that cannot be
-// written to — every local one, and any remote provider that did not
-// implement Uploader. It is a parameter rather than something derived here
+// written to — one whose provider did not implement Uploader. Both shipped
+// providers do (D7, as corrected), so a nil sink is the seam's shape rather
+// than a case in production. It is a parameter rather than something derived here
 // because Register takes a Provider: the assertion belongs where the
 // concrete provider is still in hand, beside the endpoint attestation
 // (design D7).
@@ -394,10 +395,11 @@ func (h *handle) Watch(ctx context.Context, paths []string) (WatchMode, error) {
 // Uploader hands back the binding's sink.
 //
 // The refusal is the upload design's rule R1 expressed as a nil field rather
-// than as a condition somebody must remember to check: a local binding never
-// received a sink, so there is no check here to forget and no route by which
-// a local tab could be written to. The provider is not touched on either
-// path — neither a refusal nor a hand-off costs a round trip.
+// than as a condition somebody must remember to check: a binding whose
+// provider cannot write never received a sink, so there is no check here to
+// forget and no route by which such a tab could be written to. The provider
+// is not touched on either path — neither a refusal nor a hand-off costs a
+// round trip.
 //
 // The guard is taken and dropped around the hand-off only, which is the
 // whole of D8 on this side: what the caller then runs on the sink is

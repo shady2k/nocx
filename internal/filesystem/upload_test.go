@@ -49,8 +49,8 @@ func (s *stubSink) calls() []transfer.Upload {
 }
 
 // touchyProvider fails the test if any provider method is reached. It is how
-// "the refusal costs no round trip" is asserted: a local binding's Upload
-// must answer from the nil sink alone.
+// "the refusal costs no round trip" is asserted: the Upload of a binding
+// with no write half must answer from the nil sink alone.
 type touchyProvider struct {
 	t *testing.T
 }
@@ -86,14 +86,19 @@ func anUpload() transfer.Upload {
 	return transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 1, OnExists: transfer.Overwrite}
 }
 
-// TestHandle_UploaderIsRefusedOnALocalBinding is R1 of the upload design: a
-// local binding has no sink, so the refusal is a nil field rather than a
-// check somebody performs — and a tab where a person typed `ssh srv-01` by
-// hand is a KindLocal session, so it takes this same refusal by this same
-// route.
-func TestHandle_UploaderIsRefusedOnALocalBinding(t *testing.T) {
+// TestHandle_UploaderIsRefusedOnABindingWithNoWriteHalf is R1 of the upload
+// design at this seam: a binding registered with no sink refuses, and the
+// refusal is that nil field rather than a check somebody performs.
+//
+// It said "a local binding" until D7 was corrected. Both shipped providers
+// can write now — a browser drop on a local tab has bytes and no path, so
+// it uploads onto the backend's own machine, which is the machine that
+// tab's shell is on — so "local" is no longer what makes a binding refuse.
+// What makes one refuse is having nothing to write through, which is what
+// this asserts and what the next provider that cannot write will inherit.
+func TestHandle_UploaderIsRefusedOnABindingWithNoWriteHalf(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(touchyProvider{t: t}, "s1", "", nil) // nil sink = local
+	id, err := reg.Register(touchyProvider{t: t}, "s1", "", nil) // nil sink = no write half
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +112,7 @@ func TestHandle_UploaderIsRefusedOnALocalBinding(t *testing.T) {
 
 	var unsupported *ErrUploadUnsupported
 	if !errors.As(err, &unsupported) {
-		t.Fatalf("R1: a local binding has no write seam, so the refusal is structural; got %v", err)
+		t.Fatalf("R1: a binding with no write seam refuses structurally; got %v", err)
 	}
 	if unsupported.BindingID != id {
 		t.Errorf("the refusal names binding %q, want %q", unsupported.BindingID, id)

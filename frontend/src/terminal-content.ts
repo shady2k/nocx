@@ -3639,10 +3639,12 @@ export class TerminalContent extends BasePaneContent {
    * Wire the drop gesture onto this pane (design §4, §5.5).
    *
    * Everything about WHAT a drop means lives in files/terminal-drop.ts —
-   * including D9, that a local tab inserts the name and starts no transfer.
-   * What lives here is the three things only the pane can answer: which
-   * machine it is on, where text goes when it is typed at, and which
-   * binding a write is addressed by.
+   * including D9, that whoever has the dropped file's path inserts it and
+   * whoever has only its bytes uploads them, so a desktop drop on a local
+   * tab inserts and starts no transfer while a browser drop on the same tab
+   * uploads into its cwd. What lives here is the three things only the pane
+   * can answer: which machine it is on, where text goes when it is typed
+   * at, and which binding a write is addressed by.
    *
    * The upload surface is resolved from the dispatcher this pane already
    * holds, which is how the terminal and the Files panel end up sharing ONE

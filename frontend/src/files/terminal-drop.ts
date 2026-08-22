@@ -14,27 +14,43 @@
 // and it is asked rather than re-derived (there is one owner of "are we
 // inside the webview", in wails-runtime.ts).
 //
+// ## Whoever has the path inserts it; whoever has only the bytes uploads
+//
+// That is D9, and it is the whole rule. It appeals to nothing about which
+// machine anything is on, which is why every case falls out of it instead
+// of needing an exception:
+//
+// - The Wails drop yields an ABSOLUTE PATH. Go took it from the runtime
+//   and, for a local tab alone, sends it back in `files.dropped`
+//   (`localPath`). There is a path, so it is inserted at the prompt and no
+//   byte moves — copying a file onto the machine it is already on is not
+//   what anybody asked for.
+// - A browser drop yields a `File`: a name, a size and no location. There
+//   is nothing to insert, so the bytes are uploaded into the tab's cwd,
+//   through the same call a remote drop makes.
+//
+// D9 first said a local tab NEVER copies and a browser drop must refuse.
+// That was reasoned from the desktop build, where the renderer and the
+// tab's shell are provably one machine. In a browser they are not: a local
+// tab is a shell on the BACKEND's machine and the file is on the
+// BROWSER's, and the two coincide only under `make dev-web`. Refusing was
+// never a defence — R1 forbids sending a file to the WRONG host, and the
+// backend's own machine is exactly the host that tab is on.
+//
+// What has NOT changed is that a base name is never inserted in place of a
+// path. It looks like it worked, and then the command runs against whatever
+// `report.pdf` resolves to in the shell's cwd, or against no file at all.
+//
 // ## What is deliberately NOT here
 //
 // **Dropping onto an individual folder row.** Out, in `§4` and in `§5.5`:
 // it is a third target rule for a gesture nobody asked for. The panel's
 // current folder is the panel's target and the tab's cwd is the terminal's.
 //
-// **A local tab does not copy (D9).** Every terminal inserts the dropped
-// file's PATH at the prompt, and copying a file onto the machine it is
-// already on is not a thing anybody asked for. This is one surface giving
-// one input the meaning its context gives it — not two surfaces owning one
-// gesture: there is exactly one drop handler and it reads the tab's kind.
-//
-// Which build the drop arrives through decides whether D9 can be honoured
-// at all, and only one of them can. The Wails drop carries the path: Go
-// took it from the runtime and, for a local tab alone, sends it back in
-// `files.dropped` (`localPath`). A browser drop carries a `File`, which has
-// a name and no location — that is the web platform and not a gap here — so
-// there is no path to insert and the honest answer is to say so. Inserting
-// the base name instead is worse than doing nothing: it looks like it
-// worked, and then the command runs against whatever `report.pdf` resolves
-// to in the shell's cwd, or against no file at all.
+// **A second upload path for local tabs.** The collision question,
+// progress, cancellation and the unsettled phase are transport-agnostic and
+// are REUSED: both branches below end at the same `flow.send`. Two would be
+// two owners of one behaviour, agreeing until the day they did not.
 //
 // ## The tab strip still reorders
 //
@@ -57,15 +73,16 @@ export interface DropOrigin {
   cwdVerified: boolean
 }
 
-/** One dropped file as this module sees it, before the tab's kind decides
- *  what the drop means. It is an UploadSource plus the one thing an upload
- *  never needs and the prompt insert cannot do without.
+/** One dropped file as this module sees it, before the drop's meaning is
+ *  decided. It is an UploadSource plus the one thing an upload never needs
+ *  and the prompt insert cannot do without.
  *
  *  `localPath` is present only where two things hold at once: the drop came
  *  through the Wails runtime, and it landed on a local tab. A browser `File`
  *  has no location to report, and a drop on a remote tab is deliberately
- *  told nothing but a name and a size (R2) — so its absence is the question
- *  "can this gesture honour D9", already answered by whoever built it. */
+ *  told nothing but a name and a size (R2) — so its presence IS the D9
+ *  question "is there a path to insert", already answered by whoever built
+ *  it. */
 type DroppedFile = UploadSource & { localPath?: string }
 
 export interface TerminalDropDeps {
@@ -80,7 +97,8 @@ export interface TerminalDropDeps {
    *  when one could not be had. */
   bindingFor: (sessionId: string) => Promise<string | null>
   /** Put text where the person is typing (D9). The terminal owns which
-   *  surface that is — the draft at a prompt, the pty at a password. */
+   *  surface that is — the draft at a prompt, the pty at a password.
+   *  Reached only when the drop carried paths. */
   insert: (text: string) => void
   report: UploadReport
   /** Injected so a test can drive both halves; production asks the one
@@ -134,27 +152,41 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
       return
     }
     if (o.kind === 'local') {
-      // D9. NO upload method is called on this path, and that is the point.
+      // D9's insert half, and the ONE condition that selects it: every
+      // dropped file arrived with a path. NO upload method is called here,
+      // and that is the point.
+      //
+      // The test is on the sources rather than on the tab's kind because a
+      // path is what the branch needs. A `File` names itself and never says
+      // where it is, so the browser half falls through to the upload below
+      // — which is the same call a remote drop makes, into a directory on
+      // the backend's own machine, which is the machine this tab's shell is
+      // on (R1).
       const paths = sources.map((s) => s.localPath).filter((p) => p !== undefined)
-      if (paths.length !== sources.length) {
-        // Only the browser half gets here, and it gets here every time: a
-        // `File` names itself and never says where it is. Refusing is the
-        // honest answer, because the name on its own is not the path D9
-        // promises and would run against a different file or none.
-        report(
-          'A browser cannot tell nocx where a dropped file is, so it cannot put its path on the command line.',
-          'warning',
-        )
+      if (paths.length === sources.length) {
+        insert(paths.map(shellQuote).join(' '))
         return
       }
-      insert(paths.map(shellQuote).join(' '))
+    }
+    // Neither half of the rule applies: no path to insert AND nothing to
+    // upload. A source carries bytes as a `blob` (the browser) or names
+    // them with a `sourceTicket` (the Wails runtime); one with neither
+    // would start a transfer whose body can never arrive, and the person
+    // would watch "uploading" forever. Refusing says so instead.
+    //
+    // An EMPTY ticket is no ticket, not a ticket that is empty: the backend
+    // sends `sourceTicket: ""` for a drop it minted nothing for, which is
+    // every drop on a local tab (ws_upload_source.go, SourcePick.Ticket).
+    if (sources.some((s) => s.blob === undefined && !s.sourceTicket)) {
+      report('nocx was not told where that file is, so it could not be sent.', 'warning')
       return
     }
     // The destination is the tab's cwd — the same verified OSC 7 value the
     // Files panel follows. An UNVERIFIED cwd is the provider's fallback
     // answer to "where are we" and not a claim (AD-5), and an upload is a
-    // write: putting a file into a guessed directory on somebody's server
-    // is the one outcome worth refusing a gesture over.
+    // write: putting a file into a guessed directory is the one outcome
+    // worth refusing a gesture over, on this machine as much as on
+    // anybody else's.
     if (o.cwd === null || !o.cwdVerified) {
       report('nocx does not know this tab’s directory yet, so it cannot upload into it.', 'warning')
       return

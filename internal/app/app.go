@@ -1290,7 +1290,12 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			if rootPath != "" {
 				localOpts = append(localOpts, local.WithRoot(rootPath))
 			}
-			return local.New(localOpts...), nil
+			// Declared as writableProvider for the same reason the remote
+			// half is: the day local.Provider loses Sink must be a compile
+			// error here rather than a local tab quietly refusing every
+			// upload while every other files.* call still works.
+			var p writableProvider = local.New(localOpts...)
+			return p, nil
 		}
 		fs, err := client.FSConn(context.Background(), sess.Host(), sess.SSHOptions()...)
 		if err != nil {
@@ -1305,8 +1310,8 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			opts = append(opts, sftp.WithRoot(rootPath))
 		}
 		return &endpointAttestedProvider{
-			remoteProvider: sftp.New(fsUploadLease{FSConn: fs}, opts...),
-			endpointID:     endpointIDFor(sess),
+			writableProvider: sftp.New(fsUploadLease{FSConn: fs}, opts...),
+			endpointID:       endpointIDFor(sess),
 		}, nil
 	}
 }
@@ -1363,14 +1368,22 @@ func (l fsUploadLease) PosixRename(old, new string) error {
 	return err
 }
 
-// remoteProvider is what the factory builds for a remote session: a
-// filesystem this backend can read AND write. The two halves are named
-// together because on a remote session they are not separable — a tab that
-// can list a host is a tab a file can be uploaded to (upload design R1) —
-// and because naming them together is what makes the day sftp.Provider
-// loses Sink a compile error here rather than a remote tab quietly refusing
-// every upload.
-type remoteProvider interface {
+// writableProvider is what the factory builds for EITHER kind of session: a
+// filesystem this backend can read and write. The two halves are named
+// together because they are not separable in the product — a tab whose files
+// this backend can list is a tab a file can be uploaded to (upload design
+// R1) — and because naming them together is what makes the day either
+// provider loses Sink a compile error here rather than a tab quietly
+// refusing every upload.
+//
+// One interface, not one per side. D7 first gave the local provider no write
+// half at all, reasoning from the desktop build where a drop on a local tab
+// yields an absolute path to insert. A browser drop yields bytes and no path,
+// and the machine those bytes must land on is the backend's own — the machine
+// that tab's shell is on, which is what R1 asks. So both sides are writable
+// and one name says so; a second identical interface would be two owners of
+// one idea.
+type writableProvider interface {
 	filesystem.Provider
 	filesystem.Uploader
 }
@@ -1380,7 +1393,7 @@ type remoteProvider interface {
 // optional filesystemEndpointAttester seam; a local provider never carries
 // it, which is what makes files.reveal a local-only capability.
 //
-// It embeds remoteProvider rather than filesystem.Provider, and the
+// It embeds writableProvider rather than filesystem.Provider, and the
 // difference is load-bearing: embedding an interface promotes exactly that
 // interface's methods, so a wrapper embedding filesystem.Provider has no
 // Sink at all however writable the value inside it is. files.open asserts
@@ -1389,7 +1402,7 @@ type remoteProvider interface {
 // other files.* call still working and the only symptom being uploads
 // refusing on a remote tab.
 type endpointAttestedProvider struct {
-	remoteProvider
+	writableProvider
 	endpointID string
 }
 

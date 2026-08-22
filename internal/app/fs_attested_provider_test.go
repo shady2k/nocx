@@ -56,8 +56,8 @@ func (nopSink) Put(context.Context, transfer.Upload, io.Reader, func(int64)) (tr
 func TestEndpointAttestedProviderCarriesTheWriteSeam(t *testing.T) {
 	sink := nopSink{}
 	wrapped := &endpointAttestedProvider{
-		remoteProvider: &stubRemoteProvider{sink: sink},
-		endpointID:     "v1:abc",
+		writableProvider: &stubRemoteProvider{sink: sink},
+		endpointID:       "v1:abc",
 	}
 
 	up, ok := any(wrapped).(filesystem.Uploader)

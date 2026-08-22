@@ -152,6 +152,81 @@ func TestUploadEndpoint_UnknownTicketIsGone(t *testing.T) {
 	}
 }
 
+// TestFilesUpload_ALocalBindingWritesOntoTheBackendsOwnMachine is what
+// nocx-9le.5.22 exists for, watched end to end over the real wire: a
+// browser drop on a LOCAL tab uploads into that tab's directory.
+//
+// The factory here is filesLocalFactory — the composition root's own local
+// branch, unwrapped and with no test sink in the way — so what this
+// exercises is the provider the product builds, its transfer.Sink over os,
+// the collision probe, the streamed POST and the promote. The remote path's
+// round trip is asserted a few tests above through uploadableFactory; the
+// two now differ only in which filesystem the sink writes to, which is D1
+// ("one sink, two sources") holding at the other end as well.
+//
+// R1 is satisfied rather than bent: the bytes land on the backend's own
+// machine, which is the machine that tab's shell is on.
+func TestFilesUpload_ALocalBindingWritesOntoTheBackendsOwnMachine(t *testing.T) {
+	e := newUploadTestEnvWith(t, log.NewSlogAdapter(nil), filesLocalFactory)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	payload := bytes.Repeat([]byte("nocx"), 4096)
+
+	tid, ticket := startStreamUpload(t, e, bid, dir, "dropped.txt", int64(len(payload)), 3)
+	if status, body := postUpload(t, e.ws, ticket, payload); status != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", status, body)
+	}
+
+	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	got, err := os.ReadFile(filepath.Join(dir, "dropped.txt")) //nolint:gosec // see above
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("destination holds %d bytes, want %d", len(got), len(payload))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("directory holds %d entries, want 1 (no temp left behind)", len(entries))
+	}
+}
+
+// TestFilesUpload_ALocalUploadAsksTheSameCollisionQuestion: the collision
+// decision is transport-agnostic and is REUSED on this path rather than
+// re-implemented — a destination that is already taken stops the upload
+// before a byte moves and before a ticket is minted, exactly as on a remote
+// tab, and the file the person already had is untouched.
+func TestFilesUpload_ALocalUploadAsksTheSameCollisionQuestion(t *testing.T) {
+	e := newUploadTestEnvWith(t, log.NewSlogAdapter(nil), filesLocalFactory)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "taken.txt")
+	if err := os.WriteFile(dest, []byte("mine"), 0o600); err != nil {
+		t.Fatalf("seed the destination: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	got := callUpload(t, e.conn, uploadParams(bid, dir, "taken.txt", 5), 3).mustResult(t)
+
+	if got.Collision != "exists" {
+		t.Fatalf("collision = %q, want %q — the question is asked before a byte moves", got.Collision, "exists")
+	}
+	if got.TransferID != "" || got.Ticket != "" {
+		t.Errorf("result %+v, want nothing started until the person answers", got)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	if b, err := os.ReadFile(dest); err != nil || string(b) != "mine" {
+		t.Errorf("the existing file is now %q (%v), want it untouched", b, err)
+	}
+}
+
 // A malformed ticket is the same state as one that was never minted:
 // answering it differently would tell a caller whether a well-formed guess
 // existed.

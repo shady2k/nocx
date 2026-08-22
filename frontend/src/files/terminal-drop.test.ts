@@ -118,34 +118,76 @@ describe('a drop on a remote tab uploads into that tab’s cwd', () => {
   })
 })
 
-describe('a BROWSER drop on a LOCAL tab has no path to insert, and says so', () => {
-  it('calls no upload method at all', async () => {
+describe('a BROWSER drop on a LOCAL tab has no path, so it uploads', () => {
+  it('sends the file into the tab’s verified cwd, like any other drop', async () => {
     const h = harness(LOCAL)
+    h.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
     fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
     await settle()
 
-    // The whole of D9: copying a file onto the machine it is already on is
-    // not a thing anybody asked for.
-    expect(h.services.uploads).toEqual([])
-    expect(h.services.bodies).toEqual([])
-    expect(h.store.transfers()).toEqual([])
-    expect(h.bindings).toEqual([])
+    // The corrected D9: whoever has the path inserts it, whoever has only
+    // the bytes uploads them. A browser `File` is bytes and a name, so the
+    // bytes go onto the backend's machine — which is the machine this tab's
+    // shell is on, so R1 is satisfied rather than bent.
+    expect(h.bindings).toEqual([LOCAL.sessionId])
+    expect(h.services.uploads).toEqual([
+      { bindingId: 'f'.repeat(32), destDir: '/Users/me', name: 'notes.txt', size: 5 },
+    ])
+    expect(h.services.bodies).toEqual([{ url: '/upload/tk', size: 5 }])
+    expect(h.store.transfer('t1')?.phase).toBe('running')
+    // And no path was made up for the prompt.
+    expect(h.inserted).toEqual([])
   })
 
-  it('says why a browser drop cannot put a path on the command line', async () => {
+  it('sends every file of a multi-file drop, and says nothing about browsers', async () => {
     const h = harness(LOCAL)
+    h.services.nextResult = [{ transferId: 't1' }, { transferId: 't2' }]
     fire(
       h.element,
       'drop',
       filesTransfer([new File(['a'], 'my report.txt'), new File(['b'], 'plain.txt')]),
     )
     await settle()
-    // A bare base name is worse than nothing: it LOOKS like it worked, and
-    // then the command runs against whatever `my report.txt` resolves to in
-    // the shell's cwd, or against no file at all.
-    expect(h.inserted).toEqual([])
-    expect(h.said[0].message).toContain('browser')
+
+    expect(h.services.uploads.map((u) => u.name)).toEqual(['my report.txt', 'plain.txt'])
+    expect(h.said).toEqual([])
+  })
+
+  it('takes the SAME collision question and cancellation a remote drop takes', async () => {
+    // Nothing about the collision path is per-transport, and this is what
+    // says so: the flow the local branch reaches is the flow the remote one
+    // reaches, so the ask the harness wires (answer: skip) governs both.
+    const h = harness(LOCAL)
+    h.services.nextResult = [{ collision: 'exists' }]
+    fire(h.element, 'drop', filesTransfer([new File(['hello'], 'notes.txt')]))
+    await settle()
+
+    // Asked, answered "skip", and the answer went back on a second call —
+    // and no body was ever sent, because a skip moves nothing.
+    expect(h.services.uploads).toHaveLength(2)
+    expect(h.services.uploads[1]).toMatchObject({ name: 'notes.txt', onExists: 'skip' })
+    expect(h.services.bodies).toEqual([])
+  })
+
+  it('refuses an unverified cwd rather than guessing a directory on this machine', async () => {
+    // The same refusal a remote tab already gets. An upload is a write, and
+    // nocx does not write into a directory it only guessed — on its own
+    // machine as much as on anybody else's.
+    const h = harness({ ...LOCAL, cwdVerified: false })
+    fire(h.element, 'drop', filesTransfer([new File(['a'], 'a.txt')]))
+    await settle()
+
+    expect(h.services.uploads).toEqual([])
+    expect(h.said[0].message).toContain('directory')
     expect(h.said[0].level).toBe('warning')
+  })
+
+  it('refuses a local tab that has no cwd at all', async () => {
+    const h = harness({ ...LOCAL, cwd: null })
+    fire(h.element, 'drop', filesTransfer([new File(['a'], 'a.txt')]))
+    await settle()
+    expect(h.services.uploads).toEqual([])
+    expect(h.said[0].message).toContain('directory')
   })
 })
 
@@ -186,6 +228,11 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
   })
 
   it('refuses rather than inserting a name when the path did not arrive', async () => {
+    // Neither half of the rule applies: no path, and a native local drop
+    // mints no source ticket (ws_upload_source.go: nothing is minted for a
+    // local tab), so there are no bytes to upload either. Starting a
+    // transfer whose body can never arrive would leave the person watching
+    // "uploading" forever.
     const h = harness(LOCAL, { native: true })
     h.services.emitDropped({
       sessionId: LOCAL.sessionId,
@@ -193,7 +240,30 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
     })
     await settle()
     expect(h.inserted).toEqual([])
+    expect(h.services.uploads).toEqual([])
     expect(h.said).toHaveLength(1)
+  })
+
+  it('still inserts, and starts no transfer, now that the browser half uploads', async () => {
+    // The half that already worked and would break silently: the desktop
+    // drop must keep inserting the absolute path, not fall through to the
+    // upload the browser half now takes.
+    const h = harness(LOCAL, { native: true })
+    h.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
+    h.services.emitDropped({
+      sessionId: LOCAL.sessionId,
+      sources: [
+        { sourceTicket: '', name: 'a.pdf', size: 1, localPath: '/home/dev/a.pdf' },
+        { sourceTicket: '', name: 'b.pdf', size: 2, localPath: '/home/dev/b.pdf' },
+      ],
+    })
+    await settle()
+
+    expect(h.inserted).toEqual(['/home/dev/a.pdf /home/dev/b.pdf'])
+    expect(h.services.uploads).toEqual([])
+    expect(h.services.bodies).toEqual([])
+    expect(h.bindings).toEqual([])
+    expect(h.store.transfers()).toEqual([])
   })
 })
 

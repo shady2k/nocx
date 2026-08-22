@@ -30,8 +30,10 @@ func (s *recordingSink) Put(_ context.Context, u transfer.Upload, r io.Reader, p
 	return transfer.Outcome{State: transfer.StateWritten, FinalName: u.Name}, nil
 }
 
-// readOnlyProvider is a provider with no write half — the shape of every
-// local provider, and of any remote one that has not implemented Uploader.
+// readOnlyProvider is a provider with no write half — the shape of any
+// provider that has not implemented Uploader. Neither shipped provider is
+// one any more (D7, as corrected: the local provider writes through os), so
+// this stub is what keeps R1's refusal testable at the seam that decides it.
 type readOnlyProvider struct{}
 
 func (readOnlyProvider) Root(context.Context) (filesystem.Root, error) {
@@ -52,8 +54,9 @@ func (readOnlyProvider) Watch(context.Context, string) (filesystem.Watch, error)
 func (readOnlyProvider) Canonical(_ context.Context, p string) (string, error) { return p, nil }
 func (readOnlyProvider) Close() error                                          { return nil }
 
-// writableProvider is a provider that carries one — the shape of the sftp
-// provider the composition root builds for a remote session.
+// writableProvider is a provider that carries one — the shape of both
+// providers the composition root builds, and the same name the composition
+// root gives the pair of halves (internal/app/app.go).
 type writableProvider struct {
 	readOnlyProvider
 	sink transfer.Sink
@@ -131,11 +134,11 @@ func uploadThrough(t *testing.T, run func(func(context.Context, capability.Files
 	return out, upErr
 }
 
-// TestOpenBinding_RemoteProviderContributesASink is the wiring the whole
+// TestOpenBinding_AWritableProviderContributesASink is the wiring the whole
 // upload feature stands on: the write seam is asserted where the endpoint
 // attester's already is, so the sink a remote provider carries reaches the
 // binding and Upload goes through.
-func TestOpenBinding_RemoteProviderContributesASink(t *testing.T) {
+func TestOpenBinding_AWritableProviderContributesASink(t *testing.T) {
 	sink := &recordingSink{}
 	run, sess := openBindingHarness(t, func(session.Session, string) (filesystem.Provider, error) {
 		return writableProvider{sink: sink}, nil

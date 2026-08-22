@@ -76,11 +76,31 @@ func decodeNotifyRaiseParams(raw []byte) (notifyRaiseParams, error) {
 // errTrailingJSON reports a params object followed by a second JSON value.
 var errTrailingJSON = errors.New("notify: trailing JSON after params")
 
-// maxNotifyTextRunes bounds title and body. Both are untrusted presentation
-// data written by whatever the user ran (ADR-0029 §2.3), and a banner shows a
-// line or two — generous for anything a program legitimately announces, and
-// far below a payload that costs anything to carry through the pipeline.
-const maxNotifyTextRunes = 4096
+// maxNotifyTextCodePoints bounds title and body. Both are untrusted
+// presentation data written by whatever the user ran (ADR-0029 §2.3), and a
+// banner shows a line or two — generous for anything a program legitimately
+// announces, and far below a payload that costs anything to carry through the
+// pipeline.
+//
+// The bound is DECLARED in contracts/notify.raise.schema.json as maxLength on
+// title and body (AGENTS.md rule 5: the wire is a party to the contract), and
+// this constant is the Go side of that one declaration. It is a constant
+// rather than a read of the schema because the schema cannot be reached from
+// here at run time: //go:embed cannot escape the package directory, and
+// contracts/ deliberately belongs to neither party (ws_contract_test.go), so
+// it is not in the shipped binary at all. What closes the gap is
+// TestNotifyRaise_BoundIsTheContract, which reads the schema and fails if the
+// two numbers ever differ — they cannot drift apart silently.
+//
+// The UNIT is Unicode code points, and it is the same unit on both sides on
+// purpose. JSON Schema counts a string's length in characters as RFC 8259
+// defines them — code points — and utf8.RuneCountInString counts runes, which
+// are the same thing; an astral-plane character (one code point, two UTF-16
+// code units) therefore costs one against the bound whichever side is
+// counting. A bound that means two different things on two sides of the wire
+// is the defect rule 5 exists to prevent, so the refusal below names the unit
+// it counted.
+const maxNotifyTextCodePoints = 4096
 
 // validateNotifyRaiseRaw is notify.raise's declared params validator
 // (registration.go: a control method without one does not build). It delegates
@@ -100,11 +120,11 @@ func validateNotifyRaiseRaw(raw json.RawMessage) string {
 	if p.SessionID == "" {
 		return "sessionId is required"
 	}
-	if utf8.RuneCountInString(p.Title) > maxNotifyTextRunes {
-		return fmt.Sprintf("title exceeds %d characters", maxNotifyTextRunes)
+	if utf8.RuneCountInString(p.Title) > maxNotifyTextCodePoints {
+		return fmt.Sprintf("title exceeds %d Unicode code points", maxNotifyTextCodePoints)
 	}
-	if utf8.RuneCountInString(p.Body) > maxNotifyTextRunes {
-		return fmt.Sprintf("body exceeds %d characters", maxNotifyTextRunes)
+	if utf8.RuneCountInString(p.Body) > maxNotifyTextCodePoints {
+		return fmt.Sprintf("body exceeds %d Unicode code points", maxNotifyTextCodePoints)
 	}
 	return ""
 }

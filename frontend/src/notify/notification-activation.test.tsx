@@ -49,6 +49,16 @@ function occurrence(sessionId: string): Occurrence {
     backendId: 'local',
     sessionId,
     host: '',
+    // A lone occurrence is a run of itself (see the feed's Count invariant).
+    run: [
+      {
+        id: 'occ-1',
+        at: '2026-08-22T10:00:00Z',
+        title: 'Local session was interrupted',
+        read: false,
+      },
+    ],
+    runDropped: 0,
   }
 }
 

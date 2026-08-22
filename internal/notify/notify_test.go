@@ -735,3 +735,82 @@ func TestUnavailableHost_ReportsUnavailable(t *testing.T) {
 		t.Fatalf("Bounce: %v, want ErrUnavailable", err)
 	}
 }
+
+// TestResultOutcomeNamesTheEventItReportsOn: every outcome the router can
+// return names the event it is about (nocx-r6pxp).
+//
+// The reason is the failure surface, not tidiness. A delivery that fails
+// after notify.raise has already answered has no caller left to fail to — it
+// reaches a result handler, which receives an Outcome and nothing else. If
+// the outcome cannot say which event failed, the handler cannot attribute
+// the failure, and the only other way to know is somewhere remembering "the
+// event I just submitted", which is two owners of one fact (AD-8).
+//
+// All three return paths are checked, because the one that matters most is
+// the refusal: it never reaches a sink at all, so nothing downstream ever
+// saw the event.
+func TestResultOutcomeNamesTheEventItReportsOn(t *testing.T) {
+	held := &unlockSink{called: make(chan struct{}, 1), release: make(chan struct{})}
+	failing := &errSink{err: errPolicySink}
+	r, err := notify.NewRouter(notify.Table{
+		{Kind: kindA, Trust: notify.TrustProgramRequest}: {
+			{Sink: failing, Destination: notify.Destination{Target: "banner"}},
+		},
+		{Kind: kindB, Trust: notify.TrustProgramRequest}: {
+			{Sink: held, Destination: notify.Destination{Target: "held"}},
+		},
+	}, notify.Limits{MaxInFlight: 1, MaxQueued: 0, MaxRetained: 1 << 20, DeliveryTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+
+	attributed := func(kind notify.Kind) notify.Event {
+		ev := event(kind)
+		ev.Attribution = notify.Attribution{Backend: "local", Tab: "7", Host: "build-01", Session: "s1"}
+		return ev
+	}
+
+	// 1. A sink that failed: the delivery happened and lost.
+	ev := attributed(kindA)
+	out := r.Raise(context.Background(), ev)
+	if !errors.Is(out.Results[0].Err, errPolicySink) {
+		t.Fatalf("route result err = %v, want the sink's error", out.Results[0].Err)
+	}
+	if out.Event.Attribution != ev.Attribution || out.Event.Title != ev.Title || out.Event.SessionID != ev.SessionID {
+		t.Fatalf("failed delivery outcome names %+v, want the raised event %+v", out.Event, ev)
+	}
+
+	// 2. Default-deny: no row, no delivery, and still the event.
+	denied := attributed(kindC)
+	out = r.Raise(context.Background(), denied)
+	if len(out.Resolved) != 0 || out.Err != nil {
+		t.Fatalf("default-deny outcome: resolved %d, err %v", len(out.Resolved), out.Err)
+	}
+	if out.Event.SessionID != denied.SessionID || out.Event.Kind != kindC {
+		t.Fatalf("default-deny outcome names %+v, want the raised event", out.Event)
+	}
+
+	// 3. Refused at admission: the single in-flight slot is held and the
+	// queue bound is zero, so the next raise is refused without ever
+	// reaching a sink — the path where nothing else ever saw the event.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.Raise(context.Background(), attributed(kindB))
+	}()
+	<-held.called
+
+	refusedEv := attributed(kindA)
+	refusedEv.Title = "the refused one"
+	out = r.Raise(context.Background(), refusedEv)
+	var refused *notify.RefusedError
+	if !errors.As(out.Err, &refused) {
+		t.Fatalf("outcome err = %v, want a refusal", out.Err)
+	}
+	if out.Event.Title != "the refused one" || out.Event.Attribution != refusedEv.Attribution {
+		t.Fatalf("refused outcome names %+v, want the refused event %+v", out.Event, refusedEv)
+	}
+
+	close(held.release)
+	<-done
+}

@@ -16,6 +16,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -486,5 +489,148 @@ func TestNotifyRaise_StampsProgramRequestProvenance(t *testing.T) {
 	// a program notification raised from a live tab rendered unactivatable.
 	if ev.Attribution.Backend != commandnames.LocalRoute {
 		t.Errorf("attribution.backend = %q, want %q", ev.Attribution.Backend, commandnames.LocalRoute)
+	}
+}
+
+// ── the bound on title and body (nocx-jiwq.3) ──────────────────────────
+
+// TestNotifyRaise_BoundIsTheContract is what stops the two enforcers of one
+// bound drifting apart. The bound is DECLARED in the schema and the Go
+// validator carries a constant, because contracts/ cannot be reached from the
+// shipped binary (//go:embed cannot escape a package directory, and the
+// directory deliberately belongs to neither party). So the declaration is
+// read here and compared: a number changed on one side and not the other
+// fails, rather than shipping a wire contract and a validator that disagree —
+// which is the whole of AGENTS.md rule 5.
+//
+// It also pins that the schema NAMES the unit. A bound stated without its
+// unit is the defect wearing a new coat: both sides can say "4096" and mean
+// different payloads.
+func TestNotifyRaise_BoundIsTheContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(contractDir, "notify.raise.schema.json")) //nolint:gosec // test-only path under contracts/
+	if err != nil {
+		t.Fatalf("read contract: %v", err)
+	}
+	var doc struct {
+		Properties map[string]struct {
+			MaxLength   *int   `json:"maxLength"`
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse contract: %v", err)
+	}
+	for _, field := range []string{"title", "body"} {
+		prop, ok := doc.Properties[field]
+		if !ok {
+			t.Fatalf("contract declares no %q property", field)
+		}
+		if prop.MaxLength == nil {
+			t.Fatalf("contract declares no maxLength on %q: the bound would exist in the Go validator and nowhere on the wire", field)
+		}
+		if *prop.MaxLength != maxNotifyTextCodePoints {
+			t.Errorf("%s: contract maxLength = %d, Go validator bound = %d — one bound, declared once", field, *prop.MaxLength, maxNotifyTextCodePoints)
+		}
+		if !strings.Contains(prop.Description, "code points") {
+			t.Errorf("%s: the contract's description does not name the unit it counts; the Go refusal says %q", field, fmt.Sprintf("exceeds %d Unicode code points", maxNotifyTextCodePoints))
+		}
+	}
+}
+
+// TestNotifyRaise_TextBound_SameUnitOnBothSides drives a payload exactly at
+// the bound and one code point over it through the real socket, and puts the
+// SAME bytes past the schema. Four rows, and the astral ones are the reason
+// the unit had to be chosen rather than assumed: "😀" is one code point and
+// TWO UTF-16 code units, so 4096 of them are 4096 against a code-point bound
+// and 8192 against a code-unit one. A side counting code units would refuse a
+// payload the other accepts, which is a wire contract that means two things.
+//
+// The schema assertion and the socket assertion are made on the same bytes on
+// purpose: agreeing about a payload the test constructed twice would prove
+// only that the test is consistent.
+func TestNotifyRaise_TextBound_SameUnitOnBothSides(t *testing.T) {
+	schema := loadSchema(t, "notify.raise.schema.json")
+
+	cases := []struct {
+		name    string
+		char    string
+		count   int
+		refused bool
+	}{
+		{"ascii at the bound", "a", maxNotifyTextCodePoints, false},
+		{"ascii one code point over", "a", maxNotifyTextCodePoints + 1, true},
+		{"astral at the bound", "😀", maxNotifyTextCodePoints, false},
+		{"astral one code point over", "😀", maxNotifyTextCodePoints + 1, true},
+	}
+	for _, tc := range cases {
+		for _, field := range []string{"title", "body"} {
+			t.Run(tc.name+"/"+field, func(t *testing.T) {
+				// One server per row: assertRaiseError proves nothing was
+				// raised by counting the raiser's events from zero, and the
+				// accepted rows raise.
+				raiser := &fakeNotifyRaiser{}
+				_, _, conn := newNotifyRaiserWS(t, raiser)
+				sid := openSession(t, conn)
+
+				text := strings.Repeat(tc.char, tc.count)
+				params := notifyRaiseParams{SessionID: sid, Title: "ok", Body: "ok"}
+				if field == "title" {
+					params.Title = text
+				} else {
+					params.Body = text
+				}
+				rawParams, err := json.Marshal(params)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+
+				schemaErr := validateJSONErr(schema, rawParams)
+				if tc.refused && schemaErr == nil {
+					t.Errorf("the contract accepts %d code points of %q in %s; the bound is %d", tc.count, tc.char, field, maxNotifyTextCodePoints)
+				}
+				if !tc.refused && schemaErr != nil {
+					t.Errorf("the contract refuses %d code points of %q in %s, which is exactly the bound:\n%v", tc.count, tc.char, field, schemaErr)
+				}
+
+				if tc.refused {
+					assertRaiseError(t, conn, raiser, string(rawParams), -32602)
+					// The refusal names the unit it counted, so the two
+					// sides cannot be read as bounding different things.
+					resp := notifyRaiseCallRaw(t, conn, 43, string(rawParams))
+					var envelope notifyRaiseResp
+					if err := json.Unmarshal(resp, &envelope); err != nil {
+						t.Fatalf("unmarshal: %v", err)
+					}
+					if envelope.Error == nil {
+						t.Fatal("second refusal succeeded")
+					}
+					want := fmt.Sprintf("%s exceeds %d Unicode code points", field, maxNotifyTextCodePoints)
+					if !strings.Contains(envelope.Error.Message, want) {
+						t.Errorf("refusal = %q, want it to contain %q", envelope.Error.Message, want)
+					}
+					return
+				}
+
+				resp := notifyRaiseCallRaw(t, conn, 44, string(rawParams))
+				var envelope notifyRaiseResp
+				if err := json.Unmarshal(resp, &envelope); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if envelope.Error != nil {
+					t.Fatalf("a payload exactly at the bound was refused: %+v", envelope.Error)
+				}
+				evs := raiser.captured()
+				if len(evs) != 1 {
+					t.Fatalf("raiser captured %d events, want 1", len(evs))
+				}
+				got := evs[0].Title
+				if field == "body" {
+					got = evs[0].Body
+				}
+				if got != text {
+					t.Errorf("%s reached the pipeline as %d code points, want the %d that were sent", field, len([]rune(got)), tc.count)
+				}
+			})
+		}
 	}
 }

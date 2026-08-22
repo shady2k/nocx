@@ -25,7 +25,7 @@ func TestIngressRecordsASuppressedEvent(t *testing.T) {
 	// would be indistinguishable from one never stamped. Move it first, and
 	// the assertion below has something to be false about.
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, CollapseWindow: 30 * time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestIngressRecordsWhenTheSinkRefuses(t *testing.T) {
 		t.Fatalf("NewPolicy: %v", err)
 	}
 
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, CollapseWindow: 30 * time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestIngressRecordsWhenTheSinkRefuses(t *testing.T) {
 func TestIngressUnderAFullFeed(t *testing.T) {
 	clk := NewManualClock()
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 1, MaxRetainedBytes: 1 << 20, CollapseWindow: 30 * time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 1, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestMarkAllReadRacingAdmit(t *testing.T) {
 
 	clk := NewManualClock()
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 32, MaxRetainedBytes: 1 << 20, CollapseWindow: 30 * time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 32, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -294,7 +294,7 @@ func (s *observingSubmitter) Submit(ev Event) Disposition {
 func TestOccurrenceIntervalHasBothEnds(t *testing.T) {
 	clk := NewManualClock()
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 2, MaxRetainedBytes: 1 << 20, CollapseWindow: 30 * time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 2, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -383,7 +383,7 @@ func (s *panickingSubmitter) Submit(ev Event) Disposition {
 func TestIngressKeepsTheRecordWhenDeliveryPanics(t *testing.T) {
 	clk := NewManualClock()
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, CollapseWindow: 30 * time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestIngressKeepsTheRecordWhenDeliveryPanics(t *testing.T) {
 // a nil dereference at the first event.
 func TestIngressRejectsAMissingDependency(t *testing.T) {
 	clk := NewManualClock()
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, CollapseWindow: time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestIngressRejectsAMissingDependency(t *testing.T) {
 func TestAdmitHonoursACancelledContext(t *testing.T) {
 	clk := NewManualClock()
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, CollapseWindow: time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestAdmitHonoursACancelledContext(t *testing.T) {
 func TestIngressLeavesANonZeroAtAlone(t *testing.T) {
 	clk := NewManualClock()
 	clk.Advance(24 * time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, CollapseWindow: time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestIngressLeavesANonZeroAtAlone(t *testing.T) {
 func TestIngressCarriesAttributionBackendToTheFeed(t *testing.T) {
 	clk := NewManualClock()
 	clk.Advance(time.Hour)
-	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, CollapseWindow: time.Second}, clk)
+	feed, err := NewFeed(FeedLimits{MaxOccurrences: 4, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: time.Second}, clk)
 	if err != nil {
 		t.Fatalf("NewFeed: %v", err)
 	}

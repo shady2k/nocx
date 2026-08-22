@@ -12,6 +12,7 @@ package transport
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,9 +46,18 @@ func newNotifyFeedWS(t *testing.T, f NotifyFeed) (*WSServer, *websocket.Conn) {
 // breaks here too.
 func newTestFeed(t *testing.T) *notify.Feed {
 	t.Helper()
+	return newTestFeedWithTail(t, 20)
+}
+
+// newTestFeedWithTail is the same feed with the run tail as the one knob, so
+// a test that wants runDropped > 0 says so in one number instead of adding
+// twenty occurrences to provoke it.
+func newTestFeedWithTail(t *testing.T, retained int) *notify.Feed {
+	t.Helper()
 	feed, err := notify.NewFeed(notify.FeedLimits{
 		MaxOccurrences:   10,
 		MaxRetainedBytes: 1 << 20,
+		MaxRunRetained:   retained,
 		CollapseWindow:   30 * time.Second,
 	}, notify.RealClock{})
 	if err != nil {
@@ -149,13 +159,24 @@ func TestNotifyFeedRead_CarriesTheFeedsOwnValues(t *testing.T) {
 		t.Fatalf("occurrences = %d, want the two adds collapsed into 1", len(got.Occurrences))
 	}
 	o := got.Occurrences[0]
+	if len(o.Run) != 2 {
+		t.Fatalf("run = %+v, want the two adds as two members", o.Run)
+	}
 	want := feedOccurrenceDTO{
 		ID: string(id), At: o.At, Title: "deploy failed", Body: "exit status 1",
 		Kind: "session.ended", Level: "warning", Count: 2, Read: false,
 		BackendID: "local", SessionID: "s1", Host: "prod-1",
+		Run: []feedRunMemberDTO{
+			{ID: o.Run[0].ID, At: o.Run[0].At, Title: "deploy failed", Read: false},
+			{ID: o.Run[1].ID, At: o.Run[1].At, Title: "deploy failed", Read: false},
+		},
+		RunDropped: 0,
 	}
-	if o != want {
+	if !reflect.DeepEqual(o, want) {
 		t.Errorf("occurrence = %+v, want %+v", o, want)
+	}
+	if o.Run[0].ID == string(id) && o.Run[1].ID == string(id) {
+		t.Errorf("both members carry the row's id %q; a join mints its own", id)
 	}
 	if o.At == "" {
 		t.Error("at is empty; ingress stamps it and the wire must carry it")
@@ -187,6 +208,157 @@ func TestNotifyFeedRead_EmptyFeedSendsAnArray(t *testing.T) {
 	validateJSON(t, schema, raw, "notify.feed.read result (empty feed)")
 	if !strings.Contains(string(raw), `"occurrences":[]`) {
 		t.Errorf("empty feed sent %s, want occurrences as []", raw)
+	}
+}
+
+// The run, off the REAL socket, with a tail that has overflowed. This is the
+// case the whole of D2 exists for: the row says it collapsed five, holds the
+// newest two, and admits the three it no longer has — so an expansion can say
+// "2 of 5" rather than presenting a truncation as the whole.
+//
+// It is driven through the real method rather than through snapshotToResult
+// because a test that builds its own payload proves the struct is
+// well-formed, not that the server sends it.
+func TestNotifyFeedRead_OverTheWireCarriesTheRunTail(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.read.schema.json")
+	feed := newTestFeedWithTail(t, 2)
+
+	base := time.Now()
+	titles := []string{"step 1", "step 2", "step 3", "step 4", "step 5"}
+	for i, title := range titles {
+		feed.Add(notify.Event{
+			SessionID: "s1", Title: title,
+			Kind: notify.KindBlockFinished, Trust: notify.TrustAttested, Level: notify.LevelSuccess,
+			At:          base.Add(time.Duration(i) * time.Second),
+			Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
+		})
+	}
+
+	_, conn := newNotifyFeedWS(t, feed)
+	raw := rawFeedRead(t, conn, 1)
+	validateJSON(t, schema, raw, "notify.feed.read result (an overflowed tail)")
+
+	var got feedReadResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Occurrences) != 1 {
+		t.Fatalf("occurrences = %d, want the five adds collapsed into 1", len(got.Occurrences))
+	}
+	o := got.Occurrences[0]
+	if o.Count != 5 {
+		t.Errorf("count = %d, want 5", o.Count)
+	}
+	if o.RunDropped != 3 {
+		t.Errorf("runDropped = %d, want 3", o.RunDropped)
+	}
+	if o.Count != len(o.Run)+o.RunDropped {
+		t.Errorf("count %d != run %d + runDropped %d — the invariant an expansion counts on", o.Count, len(o.Run), o.RunDropped)
+	}
+	// Newest first, the same direction as occurrences: the schema says so
+	// and the renderer draws the expansion in the order it arrives.
+	wantTitles := []string{"step 5", "step 4"}
+	for i, m := range o.Run {
+		if m.Title != wantTitles[i] {
+			t.Errorf("member %d title = %q, want %q — the tail is the NEWEST members, newest first", i, m.Title, wantTitles[i])
+		}
+		if m.At == "" {
+			t.Errorf("member %d carries no instant; an expansion whose rows share one timestamp is not worth opening", i)
+		}
+	}
+	if len(o.Run) == 2 && o.Run[0].At == o.Run[1].At {
+		t.Errorf("both members carry the instant %q; each keeps its own arrival", o.Run[0].At)
+	}
+}
+
+// A member carries exactly four keys. No trust, no level and no body: the ROW
+// owns severity and detail, and a member that could disagree with its row
+// would be a second answer to one question. Read off the raw bytes, because
+// `additionalProperties: false` in the schema and the absence of a struct
+// field are two claims and this asserts the one that reaches the renderer.
+func TestNotifyFeedRead_AMemberCarriesNoSeverityAndNoDetail(t *testing.T) {
+	feed := newTestFeed(t)
+	feed.Add(notify.Event{
+		SessionID: "s1", Title: "deploy failed", Body: "exit status 1",
+		Kind: notify.KindSessionEnded, Trust: notify.TrustAttested, Level: notify.LevelDanger,
+		At:          time.Now(),
+		Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
+	})
+
+	_, conn := newNotifyFeedWS(t, feed)
+	var loose map[string]any
+	if err := json.Unmarshal(rawFeedRead(t, conn, 1), &loose); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	occs, _ := loose["occurrences"].([]any)
+	if len(occs) != 1 {
+		t.Fatalf("occurrences = %v", loose["occurrences"])
+	}
+	row, _ := occs[0].(map[string]any)
+	members, _ := row["run"].([]any)
+	if len(members) != 1 {
+		t.Fatalf("run = %v, want the fresh row holding itself", row["run"])
+	}
+	member, _ := members[0].(map[string]any)
+	want := map[string]bool{"id": true, "at": true, "title": true, "read": true}
+	for key := range member {
+		if !want[key] {
+			t.Errorf("a member carries %q; the row owns severity and detail, and a member that could disagree with its row would be a second answer to one question", key)
+		}
+	}
+	for key := range want {
+		if _, present := member[key]; !present {
+			t.Errorf("a member is missing %q, which the schema requires", key)
+		}
+	}
+}
+
+// Marking the feed read marks the row AND every member it holds; a later join
+// clears only the row's. That asymmetry is the whole reason an expansion
+// shows individual marks, and this is it arriving at the renderer.
+func TestNotifyFeedRead_MemberReadMarksSurviveAJoin(t *testing.T) {
+	feed := newTestFeed(t)
+	base := time.Now()
+	add := func(title string, i int) {
+		feed.Add(notify.Event{
+			SessionID: "s1", Title: title,
+			Kind: notify.KindBlockFinished, Trust: notify.TrustAttested, Level: notify.LevelSuccess,
+			At:          base.Add(time.Duration(i) * time.Second),
+			Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
+		})
+	}
+	add("seen 1", 0)
+	add("seen 2", 1)
+
+	_, conn := newNotifyFeedWS(t, feed)
+	_ = callResult(t, conn, "notify.feed.markRead", 1)
+
+	marked := feedRead(t, conn, 2)
+	for i, m := range marked.Occurrences[0].Run {
+		if !m.Read {
+			t.Fatalf("member %d (%q) is unread after markRead", i, m.Title)
+		}
+	}
+
+	add("unseen", 2)
+
+	after := feedRead(t, conn, 3)
+	o := after.Occurrences[0]
+	if o.Read {
+		t.Error("the row stayed read after a join; the count rose, so there is something new to see")
+	}
+	if len(o.Run) != 3 {
+		t.Fatalf("run = %+v, want three members", o.Run)
+	}
+	// Newest first: the new arrival leads, the two seen ones follow with
+	// their marks intact.
+	if o.Run[0].Title != "unseen" || o.Run[0].Read {
+		t.Errorf("newest member = %+v, want the unread arrival", o.Run[0])
+	}
+	for _, m := range o.Run[1:] {
+		if !m.Read {
+			t.Errorf("the join cleared %q's mark; it was seen and the new arrival was not", m.Title)
+		}
 	}
 }
 

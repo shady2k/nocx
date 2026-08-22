@@ -28,18 +28,31 @@ func WithNotifyFeed(f NotifyFeed) WSServerOption {
 	return func(s *WSServer) { s.notifyFeed = f }
 }
 
+// feedRunMemberDTO is one constituent of a collapsed row. Four fields, and
+// the absence of the others is the design: no trust, no level and no body,
+// because the ROW owns severity and detail and a member that could disagree
+// with its row would be a second answer to one question (AD-8).
+type feedRunMemberDTO struct {
+	ID    string `json:"id"`
+	At    string `json:"at"`
+	Title string `json:"title"`
+	Read  bool   `json:"read"`
+}
+
 type feedOccurrenceDTO struct {
-	ID        string `json:"id"`
-	At        string `json:"at"`
-	Title     string `json:"title"`
-	Body      string `json:"body"`
-	Kind      string `json:"kind"`
-	Level     string `json:"level"`
-	Count     int    `json:"count"`
-	Read      bool   `json:"read"`
-	BackendID string `json:"backendId"`
-	SessionID string `json:"sessionId"`
-	Host      string `json:"host"`
+	ID         string             `json:"id"`
+	At         string             `json:"at"`
+	Title      string             `json:"title"`
+	Body       string             `json:"body"`
+	Kind       string             `json:"kind"`
+	Level      string             `json:"level"`
+	Count      int                `json:"count"`
+	Read       bool               `json:"read"`
+	BackendID  string             `json:"backendId"`
+	SessionID  string             `json:"sessionId"`
+	Host       string             `json:"host"`
+	Run        []feedRunMemberDTO `json:"run"`
+	RunDropped int                `json:"runDropped"`
 }
 
 type feedDroppedDTO struct {
@@ -83,17 +96,19 @@ func snapshotToResult(snap notify.FeedSnapshot) feedReadResult {
 	occ := make([]feedOccurrenceDTO, 0, len(snap.Occurrences))
 	for _, o := range snap.Occurrences {
 		occ = append(occ, feedOccurrenceDTO{
-			ID:        string(o.ID),
-			At:        stampOrEmpty(o.Event.At),
-			Title:     o.Event.Title,
-			Body:      o.Event.Body,
-			Kind:      string(o.Event.Kind),
-			Level:     string(o.Event.Level),
-			Count:     o.Count,
-			Read:      o.ReadAt != nil,
-			BackendID: o.Event.Attribution.Backend,
-			SessionID: o.Event.SessionID,
-			Host:      o.Event.Attribution.Host,
+			ID:         string(o.ID),
+			At:         stampOrEmpty(o.Event.At),
+			Title:      o.Event.Title,
+			Body:       o.Event.Body,
+			Kind:       string(o.Event.Kind),
+			Level:      string(o.Event.Level),
+			Count:      o.Count,
+			Read:       o.ReadAt != nil,
+			BackendID:  o.Event.Attribution.Backend,
+			SessionID:  o.Event.SessionID,
+			Host:       o.Event.Attribution.Host,
+			Run:        runToDTO(o.Run),
+			RunDropped: o.RunDropped,
 		})
 	}
 	return feedReadResult{
@@ -106,6 +121,26 @@ func snapshotToResult(snap notify.FeedSnapshot) feedReadResult {
 			Newest: stampOrEmpty(snap.Dropped.Newest),
 		},
 	}
+}
+
+// runToDTO reverses the feed's tail onto the wire: the feed holds members
+// oldest first and the schema declares them NEWEST first, the same direction
+// as occurrences, so the renderer draws an expansion in the order it
+// receives it rather than owning a second opinion about ordering.
+//
+// make, never nil, for the same reason occurrences is: the schema says
+// `type: array` and a nil slice marshals to null.
+func runToDTO(run []notify.RunMember) []feedRunMemberDTO {
+	out := make([]feedRunMemberDTO, 0, len(run))
+	for i := len(run) - 1; i >= 0; i-- {
+		out = append(out, feedRunMemberDTO{
+			ID:    string(run[i].ID),
+			At:    stampOrEmpty(run[i].At),
+			Title: run[i].Title,
+			Read:  run[i].ReadAt != nil,
+		})
+	}
+	return out
 }
 
 // notifyFeedHandlers answers both feed methods. A constructed type holding

@@ -1142,3 +1142,67 @@ func (deadlineSink) Deliver(ctx context.Context, d notify.Delivery) error {
 }
 
 func (deadlineSink) LeavesMachine() bool { return false }
+
+// TestPolicy_ResultHandler_NamesTheEventThatFailed: the outcome the handler
+// observes names the event whose delivery failed, with the ORIGINAL
+// attribution — for the leading-edge delivery and for the window-closing
+// summary alike (nocx-r6pxp, D3).
+//
+// The summary is the case that matters. It is delivered when the window
+// closes, which is a whole debounce window after notify.raise answered {},
+// so there is no caller left to fail to and no request context to read the
+// session off. If the outcome did not carry the event, a failure there could
+// not be filed beside the notification it is about.
+func TestPolicy_ResultHandler_NamesTheEventThatFailed(t *testing.T) {
+	failing := &errSink{err: errPolicySink}
+	router, err := notify.NewRouter(notify.Table{
+		{Kind: kindA, Trust: notify.TrustProgramRequest}: {
+			{Sink: failing, Destination: notify.Destination{Target: "banner"}},
+		},
+	}, testLimits())
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	results := make(chan notify.Outcome, 4)
+	clock := notify.NewManualClock()
+	policy, err := notify.NewPolicy(context.Background(), router, 8*time.Second,
+		&fakeFocus{}, clock,
+		notify.WithResultHandler(func(out notify.Outcome) { results <- out }))
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+
+	attribution := notify.Attribution{Backend: "local", Tab: "7", Host: "build-01", Session: "s1"}
+	first := event(kindA)
+	first.Title = "build finished"
+	first.Attribution = attribution
+	second := event(kindA)
+	second.Title = "tests failed"
+	second.Attribution = attribution
+
+	policy.Submit(first)  // the leading edge: delivered at once
+	policy.Submit(second) // held back inside the window
+	clock.Advance(8 * time.Second)
+
+	leading := <-results
+	if !errors.Is(leading.Results[0].Err, errPolicySink) {
+		t.Fatalf("leading delivery err = %v, want the sink's error", leading.Results[0].Err)
+	}
+	if leading.Event.Title != "build finished" || leading.Event.Attribution != attribution {
+		t.Fatalf("leading outcome names %+v, want the submitted event", leading.Event)
+	}
+
+	summary := <-results
+	if !errors.Is(summary.Results[0].Err, errPolicySink) {
+		t.Fatalf("summary delivery err = %v, want the sink's error", summary.Results[0].Err)
+	}
+	if summary.Event.Attribution != attribution || summary.Event.SessionID != first.SessionID {
+		t.Fatalf("summary outcome attribution %+v/%q, want the original %+v/%q",
+			summary.Event.Attribution, summary.Event.SessionID, attribution, first.SessionID)
+	}
+	// It is the summary that failed, not the leading event again: the row a
+	// handler writes must say which delivery was lost.
+	if !strings.Contains(summary.Event.Title, "1 more notification") {
+		t.Fatalf("summary outcome title = %q, want the window's summary", summary.Event.Title)
+	}
+}

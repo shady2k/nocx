@@ -240,6 +240,23 @@ var ErrTrustCapability = errors.New("notify: table row exceeds its trust class c
 
 // Outcome is the result of raising one event.
 type Outcome struct {
+	// Event is the event this outcome reports on. The router copies it onto
+	// every outcome it can return through, because the handler that observes
+	// a failure receives an Outcome and nothing else.
+	//
+	// It is here for the failure surface (D3, nocx-r6pxp): a delivery that
+	// fails AFTER notify.raise answered has no caller left to tell, and the
+	// feed row that records it must carry the ORIGINAL event's attribution
+	// so it lands beside the notification it is about. Without this the
+	// handler cannot name the event that failed, and the only alternative is
+	// somewhere else remembering "the event I just submitted" — two owners
+	// of one fact, which is what AD-8 is about.
+	//
+	// It never goes on the wire. Outcome is a Go value the transport reads
+	// Err from and never marshals, and the fields this carries are exactly
+	// the ones ADR-0029 §2.2 keeps off the wire.
+	Event Event
+
 	// Resolved is the route set resolution produced, in table order, before
 	// any invocation. Empty means default-deny: no row for the (kind,
 	// trust) pair, or the route kind refused the trust class.
@@ -331,7 +348,7 @@ func (r *Router) Resolve(kind Kind, trust Trust, route RouteKind) []Route {
 func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 	routes := r.Resolve(ev.Kind, ev.Trust, RouteRaise)
 	if len(routes) == 0 {
-		return Outcome{}
+		return Outcome{Event: ev}
 	}
 
 	p := &pending{
@@ -349,10 +366,10 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 		return r.deliver(ctx, p)
 	case len(r.queue) >= r.limits.MaxQueued:
 		r.mu.Unlock()
-		return Outcome{Resolved: routes, Err: &RefusedError{Limit: LimitQueued}}
+		return Outcome{Event: ev, Resolved: routes, Err: &RefusedError{Limit: LimitQueued}}
 	case r.retained+p.bytes > r.limits.MaxRetained:
 		r.mu.Unlock()
-		return Outcome{Resolved: routes, Err: &RefusedError{Limit: LimitRetained}}
+		return Outcome{Event: ev, Resolved: routes, Err: &RefusedError{Limit: LimitRetained}}
 	default:
 		r.queue = append(r.queue, p)
 		r.retained += p.bytes
@@ -374,7 +391,7 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 		default:
 			r.removeQueued(p)
 			r.mu.Unlock()
-			return Outcome{Resolved: routes, Err: ctx.Err()}
+			return Outcome{Event: ev, Resolved: routes, Err: ctx.Err()}
 		}
 	}
 }
@@ -387,6 +404,7 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 // handle left to reach.
 func (r *Router) deliver(ctx context.Context, p *pending) (out Outcome) {
 	defer r.release()
+	out.Event = p.ev
 	out.Resolved = p.routes
 	for _, route := range p.routes {
 		func() {

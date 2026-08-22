@@ -20,15 +20,50 @@ import (
 // an ordinal costs no lookup.
 type OccurrenceID string
 
+// RunMember is one constituent of a collapsed row, retained so an expansion
+// can show what the row compacted (D2). It carries four fields and no more:
+// At, because an expansion whose rows share one timestamp is not worth
+// opening; Title, because a run's titles differ, which is why collapse keeps
+// the newest one; and ReadAt, because each constituent keeps its own unread
+// mark.
+//
+// It deliberately carries no Level, no Trust and no Body. The ROW owns
+// severity and detail — a member that could disagree with its row would be a
+// second answer to one question, which is what AD-8 is about.
+type RunMember struct {
+	ID     OccurrenceID
+	At     time.Time
+	Title  string
+	ReadAt *time.Time
+}
+
 // Occurrence is one raised event as the feed remembers it. Count and LastAt
-// are the collapse fields (Task 2); a lone occurrence has Count 1 and LastAt
-// equal to its event's At.
+// are the collapse fields; a lone occurrence has Count 1 and LastAt equal to
+// its event's At.
+//
+// Run and RunDropped are the bounded tail (D2), and the invariant binding
+// them to Count holds for EVERY occurrence at ALL times, from the add that
+// creates it onwards:
+//
+//	Count == len(Run) + RunDropped
+//
+// A fresh occurrence therefore holds itself, so an expansion never has to
+// special-case a run of one. RunDropped is what makes the expansion able to
+// say "20 of 4310" rather than presenting a truncation as the whole.
 type Occurrence struct {
 	ID     OccurrenceID
 	Event  Event
 	ReadAt *time.Time
 	Count  int
 	LastAt time.Time
+
+	// Run holds the newest MaxRunRetained constituents, OLDEST FIRST —
+	// the same direction as items, and the renderer reverses it the same
+	// way Snapshot does. Never nil.
+	Run []RunMember
+
+	// RunDropped counts the constituents this row no longer holds.
+	RunDropped int
 }
 
 // DroppedRecord is the visible half of eviction. It lives OUTSIDE the
@@ -65,6 +100,17 @@ type FeedLimits struct {
 	// sharing a CollapseKey with the newest matching occurrence, within this
 	// long of that occurrence's LastAt, compacts into it.
 	CollapseWindow time.Duration
+
+	// MaxRunRetained bounds the tail a collapsed row keeps (D2). Both ends
+	// of the retention interval: a constituent is held from the Add that
+	// created it until either the tail overflows or the row is evicted.
+	//
+	// Retaining ALL of them is not available — the flood case admits
+	// 10 000 occurrences from one session, and keeping every one restores
+	// exactly the unbounded growth collapse exists to prevent. Their
+	// titles count against MaxRetainedBytes like every other byte: a bound
+	// that excludes the thing that grows is not a bound.
+	MaxRunRetained int
 }
 
 // CollapseKey identifies one run of repeats. It reads no Title and no Body:
@@ -137,6 +183,11 @@ func NewFeed(limits FeedLimits, clock Clock) (*Feed, error) {
 	if limits.CollapseWindow <= 0 {
 		return nil, errors.New("notify: CollapseWindow must be positive")
 	}
+	// A row always holds itself, so a tail of zero is not "keep no tail" —
+	// it is a feed whose Count invariant cannot hold on the first add.
+	if limits.MaxRunRetained < 1 {
+		return nil, errors.New("notify: MaxRunRetained must be at least 1")
+	}
 	if clock == nil {
 		return nil, errors.New("notify: feed needs a clock")
 	}
@@ -170,6 +221,11 @@ func (f *Feed) Add(ev Event) OccurrenceID {
 		f.items[i].Event = ev
 		f.items[i].ReadAt = nil // the count changed: there is something new to see
 		f.bytes += eventBytes(ev)
+		// The join gets an identity of its own even though Add returns the
+		// ROW's id: the row is the thing the user reads once, the member is
+		// the thing an expansion addresses.
+		f.seq++
+		f.appendRunMemberLocked(i, OccurrenceID(fmt.Sprintf("occ-%d", f.seq)), ev)
 		id := f.items[i].ID
 		f.enforceLocked()
 		f.revision++
@@ -182,8 +238,13 @@ func (f *Feed) Add(ev Event) OccurrenceID {
 	}
 	f.seq++
 	id := OccurrenceID(fmt.Sprintf("occ-%d", f.seq))
-	f.items = append(f.items, Occurrence{ID: id, Event: ev, Count: 1, LastAt: ev.At})
-	f.bytes += eventBytes(ev)
+	// Run holds the row ITSELF, so Count == len(Run) + RunDropped from the
+	// first add and an expansion never special-cases a run of one.
+	f.items = append(f.items, Occurrence{
+		ID: id, Event: ev, Count: 1, LastAt: ev.At,
+		Run: []RunMember{{ID: id, At: ev.At, Title: ev.Title}},
+	})
+	f.bytes += eventBytes(ev) + int64(len(ev.Title))
 	f.enforceLocked()
 	f.revision++
 	rev := f.revision
@@ -193,6 +254,84 @@ func (f *Feed) Add(ev Event) OccurrenceID {
 		fn(rev)
 	}
 	return id
+}
+
+// ChannelPipeline names the "channel" of a delivery that never reached a
+// sink at all: admission refused the event under the router's global limits,
+// so what failed is the pipeline itself rather than any one surface. Route
+// failures name their route's resolved Target instead — the router is the
+// only holder of "where", and its own word for the destination is the one
+// the row repeats.
+const ChannelPipeline = "the notification pipeline"
+
+// RecordDeliveryFailure records ONE occurrence naming a delivery that failed
+// after the raise was already answered, and returns its id (D3, nocx-r6pxp).
+//
+// notify.raise answers {} the moment the event is ACCEPTED. Under the policy
+// the delivery may then happen when a debounce window closes, seconds later,
+// with no caller left to fail to — so a failure past that point used to reach
+// a logger.Warn and nothing else, which is the soft degrade visible only in a
+// log that AGENTS.md condemns. This is where it becomes visible in the
+// product: the centre already exists to remember what happened while you were
+// not looking, and a notification that was accepted and never arrived is
+// exactly that.
+//
+// It is admitted DIRECTLY, through Add, and never raised back through the
+// pipeline that just failed. That is the constraint that bites: a failure row
+// carried by the sink that is broken would fail the same way and produce a
+// second failure row, and one broken sink would become an unbounded feed of
+// complaints about being broken. Going through Add makes the recursion
+// impossible by construction rather than by a caller remembering not to —
+// nothing here resolves a route, so nothing here can fail a delivery.
+//
+// The row keeps the FAILED event's attribution and kind, so it lands beside
+// the notification it is about and the renderer's kind-shaped presentation
+// stays true. Kind is not a new value: it is a closed enum on the wire
+// (contracts/notify.feed.read.schema.json), and a "delivery failed" kind is a
+// wire-contract change (AGENTS.md rule 5) rather than something to smuggle
+// past the schema from here.
+//
+// WHICH failures earn a row is the caller's decision, not this method's: the
+// composition root binds the hosts, so it is where the one exemption lives
+// (an ErrUnavailable channel does not exist on this host — internal/app/app.go,
+// the result handler). This method builds and admits the row for whatever it
+// is handed.
+//
+// Level is WARNING, not danger. Nothing was lost: the occurrence this row is
+// about is in the feed one row below it, which is the whole point of the
+// centre, and what degraded is a channel of nocx's own rather than the user's
+// work. Danger is for a fact the user must act on now; a banner that did not
+// appear while its message survived is a fact they should see and can act on
+// at leisure — turning the permission back on, say, which is the commonest
+// reason this row exists at all. And a run of them collapses into one counted
+// row like any other run, so a channel that is broken rather than unlucky
+// costs one row per burst.
+//
+// Trust is ATTESTED for the same reason the level is nocx's to set: this is a
+// fact nocx observed about its own delivery, not something the program asked
+// for.
+func (f *Feed) RecordDeliveryFailure(ev Event, channel string, cause error) OccurrenceID {
+	if channel == "" {
+		// A table row may leave Destination.Target empty; the row still has
+		// to say something rather than open with ": ".
+		channel = "an unnamed channel"
+	}
+	title := "Not delivered"
+	if ev.Title != "" {
+		title += ": " + ev.Title
+	}
+	return f.Add(Event{
+		SessionID: ev.SessionID,
+		Title:     title,
+		Body:      fmt.Sprintf("%s could not deliver it: %v", channel, cause),
+		Kind:      ev.Kind,
+		Trust:     TrustAttested,
+		Level:     LevelWarning,
+		// The instant is the FAILURE's, not the event's: the delivery it
+		// reports on may have been accepted a whole debounce window earlier.
+		At:          f.clock.Now(),
+		Attribution: ev.Attribution,
+	})
 }
 
 // MarkAllRead marks every unread occurrence read and returns the new revision.
@@ -205,6 +344,16 @@ func (f *Feed) MarkAllRead() uint64 {
 		if f.items[i].ReadAt == nil {
 			t := now
 			f.items[i].ReadAt = &t
+		}
+		// Every RETAINED member too, and this is the asymmetry the design
+		// turns on: a later join clears the ROW's mark and leaves these
+		// alone. They were seen; the new one was not, and that difference
+		// is the whole reason an expansion shows individual marks.
+		for j := range f.items[i].Run {
+			if f.items[i].Run[j].ReadAt == nil {
+				t := now
+				f.items[i].Run[j].ReadAt = &t
+			}
 		}
 	}
 	f.revision++
@@ -224,7 +373,15 @@ func (f *Feed) Snapshot() FeedSnapshot {
 	out := make([]Occurrence, 0, len(f.items))
 	unread := 0
 	for i := len(f.items) - 1; i >= 0; i-- {
-		out = append(out, f.items[i])
+		// The run is COPIED, not shared: the feed goes on mutating members
+		// in place — the tail slides on every join, MarkAllRead stamps
+		// them — and a returned snapshot must be a value, not a window
+		// onto state that keeps moving. Without this it is also a data
+		// race between a transport reading a snapshot and the next Add.
+		o := f.items[i]
+		o.Run = make([]RunMember, len(f.items[i].Run))
+		copy(o.Run, f.items[i].Run)
+		out = append(out, o)
 		if f.items[i].ReadAt == nil {
 			unread++
 		}
@@ -269,7 +426,7 @@ func (f *Feed) enforceLocked() {
 			return
 		}
 		victim := f.items[idx]
-		f.bytes -= eventBytes(victim.Event)
+		f.bytes -= eventBytes(victim.Event) + runBytes(victim.Run)
 		f.items = append(f.items[:idx], f.items[idx+1:]...)
 		f.recordDroppedLocked(victim)
 	}
@@ -304,3 +461,34 @@ func (f *Feed) recordDroppedLocked(o Occurrence) {
 }
 
 func eventBytes(ev Event) int64 { return int64(len(ev.Title) + len(ev.Body)) }
+
+// runBytes is what a row's retained tail costs the byte budget. Titles only:
+// a member carries no body, and its id and instant are fixed-width.
+func runBytes(run []RunMember) int64 {
+	var n int64
+	for _, m := range run {
+		n += int64(len(m.Title))
+	}
+	return n
+}
+
+// appendRunMemberLocked adds one constituent to the row at idx and keeps the
+// tail inside MaxRunRetained, dropping the OLDEST and recording that it did.
+// Both halves of the accounting happen here so they cannot drift apart:
+// every byte admitted is admitted on the line that admits the member, and
+// every byte released is released on the line that drops it. Caller holds mu.
+func (f *Feed) appendRunMemberLocked(idx int, id OccurrenceID, ev Event) {
+	o := &f.items[idx]
+	o.Run = append(o.Run, RunMember{ID: id, At: ev.At, Title: ev.Title})
+	f.bytes += int64(len(ev.Title))
+	for len(o.Run) > f.limits.MaxRunRetained {
+		f.bytes -= int64(len(o.Run[0].Title))
+		// Slide rather than reslice from the front: the backing array
+		// stays put and its capacity stays usable, so a run of ten
+		// thousand joins reallocates a bounded number of times. Safe
+		// because Snapshot hands out copies.
+		copy(o.Run, o.Run[1:])
+		o.Run = o.Run[:len(o.Run)-1]
+		o.RunDropped++
+	}
+}

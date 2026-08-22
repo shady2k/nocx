@@ -81,3 +81,109 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── The composite's own element ─────────────────────────────────────────
+   The base class the kit asks every component for, on the element that
+   carries the composite's layout — inside CollectionRow's info slot, which
+   still owns the frame. Two columns: the leading slot (present only on a row
+   that is part of a disclosing list) and the body, which is the title, meta,
+   detail and expansion stack this file has always described. Flex with one
+   child lays out exactly as the block did, which is what "renders exactly as
+   it does today" means for every row that never heard of the disclosure. */
+.ui-record-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.ui-record-row__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── Leading slot ────────────────────────────────────────────────────────
+   The disclosure's own width, reserved whether or not this row expands, so
+   every title in a list that discloses forms one column — TreeRow's leading
+   slot, the same width token and the same reason. A row that is not part of
+   such a list renders no slot at all (record-row.tsx): reserving a column
+   for a control none of Connections' rows can offer would indent every one
+   of them for nothing. Top-aligned, at the height of one title line, so the
+   chevron sits on the record's name rather than floating in the middle of a
+   row whose height its detail lines decided. */
+.ui-record-row__leading {
+  flex: 0 0 var(--space-4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height-sm);
+}
+
+/* ── Disclosure ──────────────────────────────────────────────────────────
+   A native button: natively focusable and keyboard-operable (Enter/Space),
+   with aria-expanded and an action label naming the row it opens. Present
+   only on an expandable row. The shape is tree-row's disclosure to the
+   declaration — one gesture in the kit, not one per component. */
+.ui-record-row__disclosure {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-4);
+  height: var(--control-height-sm);
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--control-radius-sm);
+  background: transparent;
+  color: var(--color-text-dim);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.ui-record-row__disclosure:hover {
+  color: var(--color-text);
+}
+
+.ui-record-row__disclosure:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.ui-record-row__disclosure-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  transition: transform 0.12s ease;
+}
+
+.ui-record-row__disclosure-icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* The kit's chevron points down; a collapsed row turns it right. The
+   rotation lives on the icon wrapper, never on the button, so the hit area
+   and hover stay square. */
+.ui-record-row[data-disclosure='collapsed'] .ui-record-row__disclosure-icon {
+  transform: rotate(-90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-record-row__disclosure-icon {
+    transition: none;
+  }
+}
+
+/* ── What the row discloses ──────────────────────────────────────────────
+   The caller's, verbatim. This rule is geometry only — where the expansion
+   sits and how far it is held off the record's text — and says nothing
+   about what is inside it: the kit decides the geometry and never the
+   content. It aligns with the title rather than the row's left edge, so an
+   expansion reads as belonging to the record above it. */
+.ui-record-row__disclosed {
+  margin-top: var(--space-1);
+  min-width: 0;
+}

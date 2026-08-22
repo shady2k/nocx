@@ -5181,7 +5181,8 @@ func TestNotifyFeedRead_DTOConformsToContract(t *testing.T) {
 	read := at.Add(time.Minute)
 
 	cases := map[string]notify.FeedSnapshot{
-		// Everything populated, including a collapsed row and a read one.
+		// Everything populated, including a collapsed row carrying a full
+		// tail (one member read, one not) and a lone row holding itself.
 		"populated": {
 			Revision:    12,
 			UnreadCount: 1,
@@ -5194,6 +5195,11 @@ func TestNotifyFeedRead_DTOConformsToContract(t *testing.T) {
 						Level: notify.LevelSuccess, At: at,
 						Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s2"},
 					},
+					Run: []notify.RunMember{
+						{ID: "occ-2", At: at, Title: "build started", ReadAt: &read},
+						{ID: "occ-3", At: at.Add(time.Second), Title: "build halfway"},
+						{ID: "occ-4", At: at.Add(2 * time.Second), Title: "build finished"},
+					},
 				},
 				{
 					ID: "occ-1", Count: 1, LastAt: at, ReadAt: &read,
@@ -5203,8 +5209,47 @@ func TestNotifyFeedRead_DTOConformsToContract(t *testing.T) {
 						Level: notify.LevelWarning, At: at,
 						Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
 					},
+					Run: []notify.RunMember{{ID: "occ-1", At: at, Title: "deploy failed", ReadAt: &read}},
 				},
 			},
+		},
+		// A tail that has overflowed: the row counted 4310 and holds two.
+		// runDropped is what stops the expansion presenting a truncation
+		// as the whole.
+		"an overflowed tail": {
+			Revision:    99,
+			UnreadCount: 1,
+			Occurrences: []notify.Occurrence{{
+				ID: "occ-9", Count: 4310, LastAt: at, RunDropped: 4308,
+				Event: notify.Event{
+					SessionID: "s-runaway", Title: "ding", Body: "",
+					Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest,
+					Level: notify.LevelInfo, At: at,
+					Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s-runaway"},
+				},
+				Run: []notify.RunMember{
+					{ID: "occ-4309", At: at, Title: "ding"},
+					{ID: "occ-4310", At: at.Add(time.Second), Title: "ding"},
+				},
+			}},
+		},
+		// A row whose tail is empty. The feed never produces one — a row
+		// always holds itself — but the DTO must still marshal run as []
+		// and never null, which is the exact defect the contracts' first
+		// run caught on vault.status.
+		"an empty tail": {
+			Revision:    3,
+			UnreadCount: 1,
+			Occurrences: []notify.Occurrence{{
+				ID: "occ-7", Count: 1, LastAt: at,
+				Event: notify.Event{
+					SessionID: "s3", Title: "bell", Body: "",
+					Kind: notify.KindBell, Trust: notify.TrustProgramRequest,
+					Level: notify.LevelInfo, At: at,
+					Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s3"},
+				},
+				Run: nil,
+			}},
 		},
 		// The state a fresh process is in. occurrences must be [] and never
 		// null — the schema's `type: array` rejects null, which is the
@@ -5228,6 +5273,12 @@ func TestNotifyFeedRead_DTOConformsToContract(t *testing.T) {
 			validateJSON(t, schema, raw, "notify.feed.read DTO ("+name+")")
 			if !strings.Contains(string(raw), `"occurrences":[`) {
 				t.Errorf("occurrences did not marshal as an array: %s", raw)
+			}
+			// Same statement for the tail, and it is the one that would
+			// actually bite: a nil Run marshals to null, which the
+			// schema's `type: array` rejects.
+			if strings.Contains(string(raw), `"run":null`) {
+				t.Errorf("run marshalled as null: %s", raw)
 			}
 		})
 	}

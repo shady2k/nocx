@@ -16,6 +16,18 @@ const OCC: Occurrence = {
   backendId: 'local',
   sessionId: 'sess-1',
   host: 'localhost',
+  // A lone occurrence is a run of itself: Count == len(Run) + RunDropped
+  // holds for every occurrence, which is what lets the panel treat a row of
+  // one and a collapsed run as the same shape.
+  run: [
+    {
+      id: 'occ-1',
+      at: '2026-08-22T10:00:00Z',
+      title: 'build finished',
+      read: false,
+    },
+  ],
+  runDropped: 0,
 }
 
 /** Every fixture is typed with the GENERATED declaration for its method:

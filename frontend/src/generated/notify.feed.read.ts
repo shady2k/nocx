@@ -72,6 +72,37 @@ export interface Occurrence {
    * The host the session speaks for, stamped from the registry.
    */
   host: string
+  /**
+   * The constituents this row still holds, NEWEST FIRST — the same direction as occurrences, so the renderer draws an expansion in the order it receives it. A row that collapsed nothing holds exactly one member: itself, so an expansion never has to special-case a run of one. Bounded: the feed retains the newest MaxRunRetained constituents and counts the rest in runDropped, because retaining all of them would restore exactly the unbounded growth collapse exists to prevent.
+   */
+  run: RunMember[]
+  /**
+   * How many constituents this row no longer holds. count == run.length + runDropped for every occurrence at all times, which is what lets an expansion say "20 of 4310 shown" rather than presenting a truncation as the whole. Zero when nothing has fallen off the tail.
+   */
+  runDropped: number
+}
+/**
+ * One constituent of a collapsed row. It carries an instant because an expansion whose rows share one timestamp is not worth opening, a title because a run's titles differ (which is why the row keeps the newest one), and its own read flag because each constituent keeps its own unread mark: marking the feed read marks the row and every member it holds, and a later join clears only the ROW's mark.
+ *
+ * It deliberately carries no trust, no level and no body. The row owns severity and detail; a member that could disagree with its row would be a second answer to one question.
+ */
+export interface RunMember {
+  /**
+   * This constituent's own identity, minted by the feed on the add that created it — distinct from the row's id, which the join does not take.
+   */
+  id: string
+  /**
+   * RFC 3339 instant of this constituent's own arrival, not the row's.
+   */
+  at: string
+  /**
+   * The title this constituent arrived with. Untrusted presentation data (ADR-0029 §2.3), same guarantees as the row's: rendered as text, never as markup.
+   */
+  title: string
+  /**
+   * True once the user marked the feed read while this constituent was held. A join into the row does NOT clear it — it was seen and the new arrival was not, and that difference is the whole reason an expansion shows individual marks.
+   */
+  read: boolean
 }
 /**
  * The visible half of eviction. It lives outside the occurrence budget and is never itself evicted: a soft degrade must be visible in the product, not only in a log.

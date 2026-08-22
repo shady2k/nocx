@@ -110,3 +110,171 @@ describe("RecordRow — the kit's record grammar", () => {
     expect(onActivate).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('RecordRow — the disclosure (nocx-ctl6q task 3)', () => {
+  const actions = <></>
+
+  it('a row given no disclosure props is a leaf and reserves nothing', () => {
+    // "Renders exactly as it does today": Connections, Endpoints, Footprint,
+    // Notes and the Notifications panel never heard of the disclosure, and a
+    // column reserved for a control none of their rows can offer would indent
+    // every one of them for nothing. The leading slot appears when a caller
+    // says the row is part of a list that discloses — see the next test.
+    const { container } = render(() => <RecordRow title="provider" actions={actions} />)
+    const row = container.querySelector('.ui-record-row')
+    expect(row?.getAttribute('data-disclosure')).toBe('leaf')
+    expect(container.querySelector('.ui-record-row__leading')).toBeNull()
+    expect(container.querySelector('.ui-record-row__disclosure')).toBeNull()
+    expect(container.querySelector('.ui-record-row__disclosed')).toBeNull()
+  })
+
+  it('a row told it is not expandable is still a leaf, and reserves the width', () => {
+    // A feed where some rows expand and some do not: the leaf holds the
+    // disclosure's width open so every title in the list forms one column —
+    // TreeRow's leading slot, the same words and the same reason.
+    const { container } = render(() => (
+      <RecordRow title="one occurrence" expandable={false} actions={actions} />
+    ))
+    const row = container.querySelector('.ui-record-row')
+    expect(row?.getAttribute('data-disclosure')).toBe('leaf')
+    expect(container.querySelector('.ui-record-row__leading')).not.toBeNull()
+    expect(container.querySelector('.ui-record-row__disclosure')).toBeNull()
+  })
+
+  it('an expandable row offers a native button carrying the expanded state', () => {
+    const onToggle = vi.fn()
+    const { container } = render(() => (
+      <RecordRow title="deploy ×12" expandable onToggle={onToggle} actions={actions} />
+    ))
+    const row = container.querySelector('.ui-record-row')
+    expect(row?.getAttribute('data-disclosure')).toBe('collapsed')
+    const disclosure = container.querySelector('.ui-record-row__disclosure')
+    // A native button is what makes Enter and Space work without the kit
+    // re-implementing activation — the half of "keyboard operable" a test
+    // cannot fire in jsdom, which synthesises no click from a keydown.
+    expect(disclosure?.tagName).toBe('BUTTON')
+    expect(disclosure?.getAttribute('type')).toBe('button')
+    expect(disclosure?.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(disclosure!)
+    expect(onToggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('an expanded row announces it and turns the same chevron', () => {
+    const { container } = render(() => (
+      <RecordRow title="deploy ×12" expandable expanded onToggle={vi.fn()} actions={actions} />
+    ))
+    expect(container.querySelector('.ui-record-row')?.getAttribute('data-disclosure')).toBe(
+      'expanded',
+    )
+    expect(
+      container.querySelector('.ui-record-row__disclosure')?.getAttribute('aria-expanded'),
+    ).toBe('true')
+    // The gesture is the kit's one chevron, rotated by the row's state —
+    // never a second glyph for the same concept.
+    expect(container.querySelector('.ui-record-row__disclosure-icon svg')).not.toBeNull()
+  })
+
+  it('activating the disclosure does not activate the row', () => {
+    // Expanding is not opening. A click that did both would make expansion
+    // unreachable with a mouse: the row would open under the pointer every
+    // time you tried to see inside it.
+    const onActivate = vi.fn()
+    const onToggle = vi.fn()
+    const { container } = render(() => (
+      <RecordRow
+        title="deploy ×12"
+        expandable
+        onToggle={onToggle}
+        onActivate={onActivate}
+        actions={actions}
+      />
+    ))
+    const disclosure = container.querySelector('.ui-record-row__disclosure') as HTMLElement
+    fireEvent.click(disclosure)
+    expect(onToggle).toHaveBeenCalledTimes(1)
+    expect(onActivate).not.toHaveBeenCalled()
+
+    // The keyboard half: the row listens for Enter and Space, and the button
+    // is inside it. Without the disclosure keeping its own keys, pressing
+    // Enter on the chevron would expand the row AND open it.
+    fireEvent.keyDown(disclosure, { key: 'Enter' })
+    fireEvent.keyDown(disclosure, { key: ' ' })
+    expect(onActivate).not.toHaveBeenCalled()
+
+    // And the row itself still activates from its own body.
+    fireEvent.click(container.querySelector('.ui-record-row__title')!)
+    expect(onActivate).toHaveBeenCalledTimes(1)
+    expect(onToggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('discloses the caller’s own children, and only while expanded', () => {
+    // The kit decides the geometry and never what goes inside: the slot is
+    // rendered verbatim.
+    const collapsed = render(() => (
+      <RecordRow title="deploy ×12" expandable onToggle={vi.fn()} actions={actions}>
+        <ul class="run-members">
+          <li>09:41 build finished</li>
+        </ul>
+      </RecordRow>
+    ))
+    expect(collapsed.container.querySelector('.ui-record-row__disclosed')).toBeNull()
+    expect(collapsed.container.querySelector('.run-members')).toBeNull()
+    cleanup()
+
+    const { container } = render(() => (
+      <RecordRow title="deploy ×12" expandable expanded onToggle={vi.fn()} actions={actions}>
+        <ul class="run-members">
+          <li>09:41 build finished</li>
+        </ul>
+      </RecordRow>
+    ))
+    const disclosed = container.querySelector('.ui-record-row__disclosed')
+    expect(disclosed).not.toBeNull()
+    expect(disclosed?.querySelector('.run-members')?.textContent).toBe('09:41 build finished')
+  })
+
+  it('a click inside the disclosed children does not activate the row', () => {
+    // What is inside the expansion is the caller's, including its clicks: a
+    // row that opened itself when you clicked one of its occurrences would
+    // take the pointer away from the thing you aimed at.
+    const onActivate = vi.fn()
+    const onOccurrence = vi.fn()
+    const { container } = render(() => (
+      <RecordRow
+        title="deploy ×12"
+        expandable
+        expanded
+        onToggle={vi.fn()}
+        onActivate={onActivate}
+        actions={actions}
+      >
+        <button type="button" class="run-member" onClick={onOccurrence}>
+          09:41 build finished
+        </button>
+      </RecordRow>
+    ))
+    fireEvent.click(container.querySelector('.run-member')!)
+    expect(onOccurrence).toHaveBeenCalledTimes(1)
+    expect(onActivate).not.toHaveBeenCalled()
+    fireEvent.keyDown(container.querySelector('.run-member')!, { key: 'Enter' })
+    expect(onActivate).not.toHaveBeenCalled()
+  })
+
+  it('names the disclosure by what it discloses', () => {
+    // One accessible name per control, and it says which row it opens — the
+    // same "Expand <name>" / "Collapse <name>" TreeRow uses.
+    const collapsed = render(() => (
+      <RecordRow title="deploy ×12" expandable onToggle={vi.fn()} actions={actions} />
+    ))
+    expect(
+      collapsed.container.querySelector('.ui-record-row__disclosure')?.getAttribute('aria-label'),
+    ).toBe('Expand deploy ×12')
+    cleanup()
+    const { container } = render(() => (
+      <RecordRow title="deploy ×12" expandable expanded onToggle={vi.fn()} actions={actions} />
+    ))
+    expect(container.querySelector('.ui-record-row__disclosure')?.getAttribute('aria-label')).toBe(
+      'Collapse deploy ×12',
+    )
+  })
+})

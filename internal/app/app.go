@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -423,7 +424,19 @@ const (
 	notifyFeedMaxOccurrences   = 200
 	notifyFeedMaxRetainedBytes = 1 << 20
 	notifyFeedCollapseWindow   = 30 * time.Second
+	// The tail a collapsed row retains so the panel can expand it (D2).
+	// Twenty: enough that an expansion is worth opening, small enough that
+	// a runaway session's row costs a bounded amount — the rest are
+	// counted and the expansion says so.
+	notifyFeedMaxRunRetained = 20
 )
+
+// notifyBannerTarget is the resolved Destination.Target of the banner route:
+// a local sink's target is its own name (notify.Destination). It is named
+// once, here, because the router carries it into every outcome and a failed
+// delivery repeats it to say which channel failed — two spellings of one
+// surface would be two answers to one question (AD-8).
+const notifyBannerTarget = "banner"
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -1051,16 +1064,21 @@ func New(opts ...Option) (*App, error) {
 	// run — keep UnavailableHost, and a raise there is a visible failed
 	// delivery rather than a silent drop.
 	attentionHost := &notify.HostHolder{}
+	// Both rows name their destination, which is what makes a failed delivery
+	// able to say WHICH channel failed: Destination.Target is a local sink's
+	// own name (notify.Destination), the router is the only thing that holds
+	// it, and the feed row for a failure repeats that word rather than
+	// inventing a second vocabulary for the same surface (AD-8).
 	notifyRouter, routerErr := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: notify.HostSink{Host: attentionHost}},
+			{Sink: notify.HostSink{Host: attentionHost}, Destination: notify.Destination{Target: notifyBannerTarget}},
 		},
 		// A session that ended is a registry fact, so it is attested and may
 		// reach every sink (ADR-0029 §3). It gets the banner for the same
 		// reason the program's own request does: the user is not looking at
 		// the tab, which is the only moment either event matters.
 		{Kind: notify.KindSessionEnded, Trust: notify.TrustAttested}: {
-			{Sink: notify.HostSink{Host: attentionHost}},
+			{Sink: notify.HostSink{Host: attentionHost}, Destination: notify.Destination{Target: notifyBannerTarget}},
 		},
 	}, notify.Limits{
 		MaxInFlight:     4,
@@ -1070,6 +1088,18 @@ func New(opts ...Option) (*App, error) {
 	})
 	if routerErr != nil {
 		return nil, fmt.Errorf("notify router: %w", routerErr)
+	}
+
+	// The feed: the centre's memory, built BEFORE the policy because the
+	// policy's result handler records into it (see below).
+	notifyFeed, feedErr := notify.NewFeed(notify.FeedLimits{
+		MaxOccurrences:   notifyFeedMaxOccurrences,
+		MaxRetainedBytes: notifyFeedMaxRetainedBytes,
+		CollapseWindow:   notifyFeedCollapseWindow,
+		MaxRunRetained:   notifyFeedMaxRunRetained,
+	}, notify.RealClock{})
+	if feedErr != nil {
+		return nil, fmt.Errorf("notify feed: %w", feedErr)
 	}
 
 	// The attention policy sits IN FRONT of the router, so notify.raise
@@ -1087,14 +1117,57 @@ func New(opts ...Option) (*App, error) {
 	notifyFocus := &notify.FocusHolder{}
 	notifyPolicy, policyErr := notify.NewPolicy(
 		context.Background(), notifyRouter, notifyDebounceWindow, notifyFocus, notify.RealClock{},
+		// The failure surface (nocx-r6pxp). notify.raise answers {} at
+		// ACCEPTANCE: under the policy the delivery can happen a debounce
+		// window later, with no caller left to fail to, so a failure past
+		// that point reached this logger.Warn and nothing else — the soft
+		// degrade visible only in a log that AGENTS.md condemns.
+		//
+		// It becomes a row in the feed, which is the thing whose whole
+		// purpose is remembering what happened while you were not looking.
+		// The row is admitted DIRECTLY through the feed and never raised
+		// back through the router that just failed: a complaint carried by
+		// the broken sink would fail the same way and produce another, and
+		// one broken sink would become an unbounded feed of complaints
+		// about being broken (RecordDeliveryFailure says the same at the
+		// seam that enforces it). The log stays: a headless host with no
+		// panel still has to be diagnosable.
 		notify.WithResultHandler(func(out notify.Outcome) {
+			// ErrUnavailable is the ONE failure that gets no row, and the
+			// line is between a channel that lost the message and a channel
+			// that does not exist on this host. UnavailableHost reports it
+			// for every raise on a build with no desktop attention surface
+			// (cmd/devharness, the dev-web harness, an e2e run), so a row
+			// per notification would say "this build has no banner" once per
+			// notification, forever, beside a notification that IS in the
+			// feed — nothing was lost, and nothing the user does can change
+			// it. That is noise, and it is the same argument the debounce
+			// makes when it refuses to put "1 notification" behind every
+			// notification.
+			//
+			// Every other host failure earns its row, and the ones that
+			// matter most are exactly the ones this keeps: the wails host
+			// returns ErrNotRequested and ErrDenied for a permission the
+			// user CAN act on (notify/wailsadapter/host.go), and a denied
+			// banner that says so in the centre is the whole point. The
+			// router still records unavailability in its outcome and the
+			// log still names it, so it stays visible where it is a fact
+			// about the host rather than about a notification.
+			record := func(channel string, err error) {
+				if errors.Is(err, notify.ErrUnavailable) {
+					return
+				}
+				notifyFeed.RecordDeliveryFailure(out.Event, channel, err)
+			}
 			if out.Err != nil {
 				logger.Warn("notification refused", "error", out.Err)
+				record(notify.ChannelPipeline, out.Err)
 				return
 			}
 			for _, r := range out.Results {
 				if r.Err != nil {
 					logger.Warn("notification delivery failed", "target", r.Route.Destination.Target, "error", r.Err)
+					record(r.Route.Destination.Target, r.Err)
 				}
 			}
 		}),
@@ -1108,14 +1181,6 @@ func New(opts ...Option) (*App, error) {
 	// is the whole inversion — before this, a suppressed notification was
 	// destroyed, so the events most worth seeing were exactly the ones
 	// nothing remembered.
-	notifyFeed, feedErr := notify.NewFeed(notify.FeedLimits{
-		MaxOccurrences:   notifyFeedMaxOccurrences,
-		MaxRetainedBytes: notifyFeedMaxRetainedBytes,
-		CollapseWindow:   notifyFeedCollapseWindow,
-	}, notify.RealClock{})
-	if feedErr != nil {
-		return nil, fmt.Errorf("notify feed: %w", feedErr)
-	}
 	notifyIngress, ingressErr := notify.NewIngress(notifyFeed, notifyPolicy, notify.RealClock{})
 	if ingressErr != nil {
 		return nil, fmt.Errorf("notify ingress: %w", ingressErr)

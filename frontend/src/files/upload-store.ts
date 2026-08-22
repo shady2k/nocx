@@ -50,36 +50,27 @@
 import { createSignal, untrack } from 'solid-js'
 import type { FilesUploadDone } from '../generated/files.uploadDone'
 import type { FilesUploadProgress } from '../generated/files.uploadProgress'
+import { isTerminalPhase, type OperationPhase } from '../ui/operation'
 import type { UploadServices } from './upload-client'
 
 /**
- * Where a transfer is. The four terminal values are the wire's own outcome
- * vocabulary — told to a person in four different ways, so they are four
- * values and not a boolean plus an error string — and TWO values are not
- * terminal.
+ * How many FINISHED transfers this store remembers.
  *
- * `unsettled` is the renderer saying it does not know. Its own half of the
- * transfer is over and the answer never came back: a `409` means another
- * claimant's body is running for this ticket and the transfer is very much
- * alive, and a dropped connection means the backend may be writing the
- * file successfully right now. Only files.uploadDone settles a transfer,
- * and it is retained per session and flushed on reattach precisely so a
- * dropped connection cannot lose a terminal outcome — so a renderer that
- * minted `failed` here would not merely be early, it would be overriding
- * the one mechanism built to answer this exact question.
+ * A finished transfer does not vanish — somebody who goes to look at the
+ * operations indicator can see that it really landed — and it does not
+ * accumulate either. It used to do the second thing: a row stayed above the
+ * Files tree until a person clicked its `×`, which is a chore the product
+ * invented for itself and a list that grows for as long as the app is open.
+ *
+ * The bound lives HERE, in the store, because remembering is what a store
+ * does; the operations model that reads it only orders what it is given. A
+ * second source of operations bounds its own memory the same way, for the
+ * same reason.
+ *
+ * Nothing is persisted: this is session memory, and history across restarts
+ * is a separate conversation the notification design defers on purpose.
  */
-export type TransferPhase = 'running' | 'unsettled' | 'written' | 'skipped' | 'cancelled' | 'failed'
-
-/** The values that mean the transfer is over. Exported because a surface
- *  that labels an outcome needs the closed set of outcomes, and a second
- *  spelling of it in a view is how a new phase renders as nothing. */
-export type TerminalPhase = Exclude<TransferPhase, 'running' | 'unsettled'>
-
-/** Whether anything more can happen to this transfer. The one owner of the
- *  question: `running` and `unsettled` both still have an outcome coming. */
-export function isTerminalPhase(phase: TransferPhase): phase is TerminalPhase {
-  return phase !== 'running' && phase !== 'unsettled'
-}
+export const FINISHED_TRANSFERS_RETAINED = 20
 
 export interface UploadTransfer {
   /** The backend's opaque id — the address of every later frame. */
@@ -96,7 +87,13 @@ export interface UploadTransfer {
   bytes: number | null
   /** Derived, never on the wire. Null until two samples exist. */
   speedBytesPerSecond: number | null
-  phase: TransferPhase
+  phase: OperationPhase
+  /** When the transfer reached a terminal phase, on the store's own clock;
+   *  null while it is still live. It is what orders the finished half of
+   *  the operations list and what decides which one falls off the end —
+   *  the ARRAY's order is start order, and a transfer that started first
+   *  does not finish first. */
+  endedAt: number | null
   /** The name actually written; empty for every outcome but `written`. */
   finalName: string
   /** Why the row says what it says: the wire's reason on `failed`, and
@@ -143,8 +140,6 @@ export interface UploadStore {
    *  actually happened arrives as `uploadDone` with outcome `cancelled`
    *  when the cancel landed and `written` when it did not. */
   cancel(transferId: string): void
-  /** Forget a row the person has finished reading. */
-  dismiss(transferId: string): void
   /** Drop the wire subscriptions. */
   dispose(): void
 }
@@ -191,6 +186,27 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
   const currentOf = (transferId: string): UploadTransfer | undefined =>
     untrack(transfers).find((t) => t.transferId === transferId)
 
+  /**
+   * Drop the oldest FINISHED transfers past the bound, and nothing else.
+   *
+   * Oldest by `endedAt`, never by position: the array is in START order and
+   * a transfer that started first does not finish first. A live transfer is
+   * never dropped whatever the count — the bound is about how long an
+   * outcome is worth reading, and a running one has no outcome yet.
+   */
+  const retain = (list: UploadTransfer[]): UploadTransfer[] => {
+    const finished = list.filter((t) => t.endedAt !== null)
+    if (finished.length <= FINISHED_TRANSFERS_RETAINED) return list
+    const keep = new Set(
+      [...finished]
+        .sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
+        .slice(0, FINISHED_TRANSFERS_RETAINED)
+        .map((t) => t.transferId),
+    )
+    for (const t of finished) if (!keep.has(t.transferId)) samples.delete(t.transferId)
+    return list.filter((t) => t.endedAt === null || keep.has(t.transferId))
+  }
+
   /** Replace one record in place; a no-op when there is no row for the id.
    *  Immutable replacement, so a Solid surface sees the change. */
   const patch = (transferId: string, change: (t: UploadTransfer) => UploadTransfer): void => {
@@ -199,7 +215,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
       if (i === -1) return list
       const next = [...list]
       next[i] = change(list[i])
-      return next
+      return retain(next)
     })
   }
 
@@ -219,6 +235,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
           bytes: null,
           speedBytesPerSecond: null,
           phase: 'running',
+          endedAt: null,
           finalName: '',
           error: null,
           stranded: [],
@@ -256,13 +273,14 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
 
   function applyDone(p: FilesUploadDone): void {
     if (disposed) return
-    const phase: TransferPhase = p.outcome
+    const phase: OperationPhase = p.outcome
+    const endedAt = now()
     samples.delete(p.transferId)
     setTransfers((list) => {
       const i = list.findIndex((t) => t.transferId === p.transferId)
       // Rule 3: adopt a transfer this renderer never saw start.
       if (i === -1) {
-        return [
+        return retain([
           ...list,
           {
             transferId: p.transferId,
@@ -272,17 +290,22 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
             bytes: null,
             speedBytesPerSecond: null,
             phase,
+            endedAt,
             finalName: p.finalName,
             error: p.outcome === 'failed' ? (p.error ?? null) : null,
             stranded: p.stranded,
             adopted: true,
           },
-        ]
+        ])
       }
       const next = [...list]
       next[i] = {
         ...list[i],
         phase,
+        // Set once, by whoever moved the record to a terminal phase — a
+        // second uploadDone for the same transfer cannot rewrite when it
+        // ended, and the retention order stays stable.
+        endedAt: list[i].endedAt ?? endedAt,
         finalName: p.finalName,
         // Only a failure carries a reason, and it replaces whatever the
         // renderer recorded about its own half of the transfer.
@@ -290,13 +313,15 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
         stranded: p.stranded,
         speedBytesPerSecond: null,
       }
-      return next
+      return retain(next)
     })
   }
 
   function failLocally(transferId: string, error: string): void {
     patch(transferId, (t) =>
-      isTerminalPhase(t.phase) ? t : { ...t, phase: 'failed', error, speedBytesPerSecond: null },
+      isTerminalPhase(t.phase)
+        ? t
+        : { ...t, phase: 'failed', endedAt: now(), error, speedBytesPerSecond: null },
     )
   }
 
@@ -320,11 +345,6 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     void services.cancel(transferId).catch(() => {})
   }
 
-  function dismiss(transferId: string): void {
-    samples.delete(transferId)
-    setTransfers((list) => list.filter((t) => t.transferId !== transferId))
-  }
-
   const unsubProgress = services.subscribeProgress(applyProgress)
   const unsubDone = services.subscribeDone(applyDone)
 
@@ -336,5 +356,5 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     setTransfers([])
   }
 
-  return { transfers, transfer: find, begin, failLocally, unsettle, cancel, dismiss, dispose }
+  return { transfers, transfer: find, begin, failLocally, unsettle, cancel, dispose }
 }

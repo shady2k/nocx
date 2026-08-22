@@ -72,39 +72,6 @@
   padding: var(--space-2) var(--space-3);
 }
 
-/* The transfers list (design §5.5): the rows the upload store holds, above
-   the tree. Placement only — the Badge, the Button and the IconButton in
-   each row are the kit's and are not repainted here; what this file owns is
-   where they sit and how the row's own text is laid out. */
-.files-uploads {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin: var(--space-2) var(--space-4) 0;
-}
-
-.files-upload-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-/* The name takes the room and the numbers keep theirs: a long name
-   ellipsizes rather than pushing the cancel out of the panel. */
-.files-upload-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.files-upload-detail {
-  flex: 0 0 auto;
-  color: var(--color-text-muted);
-}
-
 /* The drop target while a files drag is over it (terminal-drop.ts sets the
    attribute). An outline rather than a background: the terminal underneath
    is a live grid and tinting it would repaint somebody's output. */

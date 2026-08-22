@@ -57,6 +57,9 @@ import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
 import { uploadSurfaceFor } from './files/upload-surface'
+import { uploadOperations } from './files/upload-operations'
+import { createOperationsModel } from './operations/operations'
+import { createOperationsIndicator } from './operations/operations-indicator'
 import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
@@ -473,13 +476,21 @@ async function main() {
   // SAME instance the terminal panes resolve, because a transfer has one
   // state and two stores would each mint a row for every transfer the other
   // started. Without this the panel's Upload action would be dead code.
+  const uploadSurface = uploadSurfaceFor(dispatcher)
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
     clipboard,
     activeOrigin,
-    upload: uploadSurfaceFor(dispatcher),
+    upload: uploadSurface,
   })
+
+  // Everything running on somebody's behalf, in one list (nocx-hbdw4). The
+  // upload store is read as operations rather than being the list itself:
+  // download has no panel of its own and joins by adding a source here, and
+  // nothing else in the indicator changes when it does.
+  const operations = createOperationsModel([uploadOperations(uploadSurface.store)])
+  const operationsIndicator = createOperationsIndicator(operations)
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -797,6 +808,7 @@ async function main() {
     () => activeOrigin(),
     sidebarWidthCtrl,
     () => activeSurfaceType() === SURFACE_SETTINGS,
+    /* indicators */ [operationsIndicator],
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.

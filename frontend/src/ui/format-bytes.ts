@@ -3,6 +3,12 @@
 // surface that needs it, and then two places disagree about what a
 // megabyte is.
 //
+// It lives in the kit rather than beside the upload store because that is
+// where the surfaces that render it are: OperationRow draws the line, and a
+// kit component cannot reach into a feature module for its own wording.
+// Moved here whole rather than copied — the reason above is the reason a
+// second copy would have been the defect.
+//
 // Decimal units, not binary: the wire counts bytes and a person comparing
 // nocx's number against the file's size in Finder or `ls -lh --si` should
 // see the same one. The binary form is right for memory and wrong for a
@@ -31,17 +37,17 @@ export function formatSpeed(bytesPerSecond: number | null): string {
   return `${formatBytes(bytesPerSecond)}/s`
 }
 
-/** One transfer's progress line: what has arrived, out of what, and how
+/** One operation's progress line: what has arrived, out of what, and how
  *  fast — each part present only when it is known. An unobserved byte
  *  count renders the size alone, because "0 B of 400 MB" is a claim that
  *  nothing has happened and the truth is that nothing has been SEEN. */
 export function formatProgress(t: {
-  bytes: number | null
-  size: number
+  done: number | null
+  total: number
   speedBytesPerSecond: number | null
 }): string {
-  const total = formatBytes(t.size)
-  const head = t.bytes === null ? total : `${formatBytes(t.bytes)} of ${total}`
+  const total = formatBytes(t.total)
+  const head = t.done === null ? total : `${formatBytes(t.done)} of ${total}`
   const speed = formatSpeed(t.speedBytesPerSecond)
   return speed === '' ? head : `${head} · ${speed}`
 }

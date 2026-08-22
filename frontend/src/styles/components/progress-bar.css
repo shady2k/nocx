@@ -1,0 +1,34 @@
+/* ProgressBar — the kit's determinate progress bar (ui/README table). One
+   identity family: ui-progress-bar + __fill. The WIDTH of the fill is set
+   by the component (it is the value); everything the bar looks like is
+   here, and nothing else may paint it.
+
+   Thin and quiet by design. It reports a fraction beside something that is
+   already saying what it is — a file name in a row, an icon in the rail —
+   so it is a line and not a panel. */
+
+.ui-progress-bar {
+  /* The track takes the room its placement gives it and keeps its height:
+     a surface says how wide, never how tall. */
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--control-radius-sm);
+  background: var(--color-surface-hover);
+}
+
+.ui-progress-bar__fill {
+  height: 100%;
+  background: var(--color-accent);
+  /* The fill moves rather than jumping between samples, which arrive
+     coalesced and can skip a long way. Motion here is bounded by the
+     transfer's own end, not a loop — see the module doc for why there is no
+     indeterminate mode at all. */
+  transition: width 120ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-progress-bar__fill {
+    transition: none;
+  }
+}

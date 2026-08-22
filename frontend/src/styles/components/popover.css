@@ -1,0 +1,34 @@
+/* Popover — the kit's anchored panel (ui/README table). One identity:
+   ui-popover. The position is set imperatively by the component (left/top
+   from the anchor, clamped to the viewport); this file owns everything the
+   panel looks like, and nothing else may paint it.
+
+   The same raised surface as the context menu — hairline border, soft
+   shadow — because a panel and a menu floating over the same surface must
+   read as chrome of one app and not of two. */
+
+.ui-popover {
+  position: fixed;
+  z-index: 30;
+  min-width: 16rem;
+  max-width: 26rem;
+  /* The panel never grows past the window: the clamp keeps its top-left on
+     screen and this keeps its bottom-right there too, whatever it holds.
+     Its content owns its own scrolling. */
+  max-height: calc(100vh - 2 * var(--space-4));
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-2);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  box-shadow: 0 12px 40px color-mix(in srgb, black, transparent 22%);
+  --wails-draggable: no-drag;
+}
+
+/* The panel holds the keyboard while it is up (tabIndex -1), and a focus
+   ring drawn around the whole surface would read as a selection rather than
+   as a place. The ring belongs to the controls inside it. */
+.ui-popover:focus {
+  outline: none;
+}

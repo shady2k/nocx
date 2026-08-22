@@ -22,6 +22,7 @@
  */
 import { For, Show, createEffect, onCleanup, type Component } from 'solid-js'
 import { Portal } from 'solid-js/web'
+import { attachTransientDismiss, clampToViewport } from './overlay/anchored'
 
 export interface ContextMenuItem {
   /** Stable identity for the item — keying and data-testid. */
@@ -56,9 +57,6 @@ export interface ContextMenuProps {
   onClose: () => void
   'data-testid'?: string
 }
-
-/** Clearance from the viewport edge when clamping the menu on screen. */
-const EDGE_MARGIN_PX = 8
 
 export function ContextMenu(props: ContextMenuProps) {
   let element: HTMLDivElement | undefined
@@ -102,39 +100,49 @@ export function ContextMenu(props: ContextMenuProps) {
     const el = element
     if (!el) return
     // The rect is the laid-out size; the position is clamped so a menu
-    // near the bottom or right edge flips inward instead of overflowing.
+    // near the bottom or right edge is pulled inward instead of
+    // overflowing. The clamp is overlay/anchored.ts's — the Popover does
+    // exactly this and a second copy would drift over the edge margin.
     const rect = el.getBoundingClientRect()
-    const x = Math.min(
-      Math.max(props.x, EDGE_MARGIN_PX),
-      Math.max(EDGE_MARGIN_PX, window.innerWidth - rect.width - EDGE_MARGIN_PX),
+    const at = clampToViewport(
+      { width: rect.width, height: rect.height },
+      { x: props.x, y: props.y },
+      { width: window.innerWidth, height: window.innerHeight },
     )
-    const y = Math.min(
-      Math.max(props.y, EDGE_MARGIN_PX),
-      Math.max(EDGE_MARGIN_PX, window.innerHeight - rect.height - EDGE_MARGIN_PX),
-    )
-    el.style.left = `${x}px`
-    el.style.top = `${y}px`
+    el.style.left = `${at.x}px`
+    el.style.top = `${at.y}px`
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     el.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
   })
 
-  // Document-level dismissal, attached only while open: an outside
-  // pointerdown (the pointer that will click somewhere else) and Escape
-  // both close the menu. The item buttons are inside the menu, so their
-  // pointerdowns are contained and the subsequent click activates them.
+  // Document-level dismissal, attached only while open. The outside
+  // pointerdown and the Escape are overlay/anchored.ts's — every transient
+  // anchored overlay dismisses the same two ways, and this component owns
+  // only what it does on the way out (hand the keyboard back) and the
+  // roving that Escape is NOT part of.
   createEffect(() => {
     if (!props.open) return
-    const onPointerDown = (e: PointerEvent): void => {
-      const el = element
-      if (el && e.target instanceof Node && !el.contains(e.target)) props.onClose()
-    }
+    onCleanup(
+      attachTransientDismiss({
+        element: () => element,
+        onOutside: () => props.onClose(),
+        onEscape: (e) => {
+          // Swallowed: a menu floats over surfaces that act on Escape
+          // themselves — the terminal is one — and the keystroke that
+          // closed the menu must not also reach them.
+          e.stopPropagation()
+          releaseFocus()
+          props.onClose()
+        },
+      }),
+    )
+  })
+
+  // The roving keyboard, which is this component's own and not any
+  // overlay's: arrows and Home/End walk the item buttons.
+  createEffect(() => {
+    if (!props.open) return
     const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        releaseFocus()
-        props.onClose()
-        return
-      }
       const items = [...(element?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
       if (items.length === 0) return
       const current = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -149,12 +157,8 @@ export function ContextMenu(props: ContextMenuProps) {
         items[next]?.focus()
       }
     }
-    document.addEventListener('pointerdown', onPointerDown)
     document.addEventListener('keydown', onKeyDown)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    })
+    onCleanup(() => document.removeEventListener('keydown', onKeyDown))
   })
 
   return (

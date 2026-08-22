@@ -20,12 +20,13 @@ import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
+import { hasWailsWebview } from '../wails-runtime'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
-import { ArrowUpIcon, CloseIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
+import { ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -36,11 +37,10 @@ import {
   type FilesNode,
   type FilesTreeStore,
 } from './files-store'
-import { formatProgress } from './upload-format'
+import { uploadMovesTheFile } from './upload-eligibility'
 import { pickUploadSources } from './upload-picker'
 import type { UploadDestination, UploadSource } from './upload-flow'
 import type { UploadSurface } from './upload-surface'
-import { isTerminalPhase, type TerminalPhase, type UploadTransfer } from './upload-store'
 
 // ── The opener seam ────────────────────────────────────────────────────────
 
@@ -110,26 +110,6 @@ const MoreIcon: Component = () => (
   </svg>
 )
 
-// ── Transfers ─────────────────────────────────────────────────────────────
-
-/** How a finished transfer reads. `cancelled` and `skipped` are NOT
- *  failures — a cancelled transfer's underlying error is a context
- *  cancellation, and a skipped one is the person's own decision — so
- *  neither is danger. */
-const PHASE_TONE: Record<TerminalPhase, 'success' | 'neutral' | 'danger'> = {
-  written: 'success',
-  skipped: 'neutral',
-  cancelled: 'neutral',
-  failed: 'danger',
-}
-
-const PHASE_LABEL: Record<TerminalPhase, string> = {
-  written: 'Uploaded',
-  skipped: 'Skipped',
-  cancelled: 'Cancelled',
-  failed: 'Failed',
-}
-
 // ── Panel ─────────────────────────────────────────────────────────────────
 
 export const FILES_VIEW_ID = 'files'
@@ -160,6 +140,10 @@ interface FilesPanelProps {
    *  to differ, and they would differ first over which services the picker
    *  asks, which is the half a test substitutes. */
   pickSources: () => Promise<UploadSource[]>
+  /** "Are we inside the Wails webview" — half of the upload rule
+   *  (upload-eligibility.ts), handed down rather than asked here so the
+   *  panel's two menus and a test see the same answer. */
+  native: () => boolean
 }
 
 function FilesPanel(props: FilesPanelProps) {
@@ -337,12 +321,18 @@ function FilesPanel(props: FilesPanelProps) {
       },
     ]
     const o = props.store.origin()
-    // Upload joins only on a REMOTE origin (R1), expressed as ABSENCE — the
-    // same mechanism "Show in Finder" uses below in the opposite direction,
-    // and for the same reason: a local binding has no uploader at all, so
-    // the capability does not apply to that machine and a greyed-out row
-    // would be a promise the product cannot keep. It also joins only on a
-    // folder, because a file is not a place to put a file.
+    // Upload joins where an upload would actually MOVE the file, expressed
+    // as ABSENCE — the same mechanism "Show in Finder" uses below in the
+    // opposite direction, and for the same reason: where the capability does
+    // not apply to that machine, a greyed-out row would be a promise the
+    // product cannot keep. It also joins only on a folder, because a file is
+    // not a place to put a file.
+    //
+    // The rule is D9's and it is `uploadMovesTheFile`'s, not this file's
+    // (nocx-9le.5.24). It used to read `o.kind === 'ssh'` here, which is a
+    // second answer to the question the drop handler already answers — and
+    // the two disagreed about a browser on a local tab, where the drop
+    // uploads and this menu said there was no uploader.
     //
     // This is NOT the drop-on-a-folder-row that design §4 refuses. That
     // refused a GESTURE — a third target rule for a drag, where the folder
@@ -358,7 +348,7 @@ function FilesPanel(props: FilesPanelProps) {
     if (
       props.upload !== null &&
       o !== null &&
-      o.kind === 'ssh' &&
+      uploadMovesTheFile({ native: props.native(), kind: o.kind }) &&
       isExpandable(m.node.kind, m.node.linkKind, m.node.cyclic)
     ) {
       items.push({
@@ -504,78 +494,21 @@ function FilesPanel(props: FilesPanelProps) {
   // central state, and something has to be able to say WHICH machine and
   // directory this tree is: a check that waits on "a row appeared" cannot
   // tell a correct tree from a wrong machine's.
-  /** One transfer's row. A transfer that has not ended says how far and how
-   *  fast and offers the cancel; a finished one says how it ended and
-   *  offers to be forgotten. The progress line renders the SIZE alone
-   *  until a sample has arrived — a transfer that produced none is not at
-   *  zero, it is unobserved.
-   *
-   *  `unsettled` sits on the live side of that split and not the finished
-   *  side, which is the whole of what the state is for: the renderer lost
-   *  sight of the transfer, the backend may still be writing it, and
-   *  files.uploadCancel still reaches it — so the cancel stays and the
-   *  badge says we are waiting rather than that it failed. The reason we
-   *  are waiting is the badge's hover detail; the person was already told
-   *  it as a toast at the moment it happened. */
-  const renderTransfer = (t: UploadTransfer) => (
-    <div
-      class="files-upload-row"
-      data-testid="files-upload-row"
-      data-transfer-id={t.transferId}
-      data-phase={t.phase}
-    >
-      <span class="files-upload-name">{t.finalName !== '' ? t.finalName : t.name}</span>
-      <Show
-        when={!isTerminalPhase(t.phase)}
-        fallback={
-          <>
-            <Badge tone={PHASE_TONE[t.phase as TerminalPhase]}>
-              {PHASE_LABEL[t.phase as TerminalPhase]}
-            </Badge>
-            <Show when={t.error !== null}>
-              <span class="files-upload-detail">{t.error}</span>
-            </Show>
-            <IconButton
-              size="sm"
-              ariaLabel={`Dismiss ${t.name}`}
-              data-testid="files-upload-dismiss"
-              onClick={() => props.upload?.store.dismiss(t.transferId)}
-            >
-              <CloseIcon />
-            </IconButton>
-          </>
-        }
-      >
-        <Show when={t.phase === 'unsettled'}>
-          <Badge tone="warning" title={t.error ?? undefined} data-testid="files-upload-unsettled">
-            Waiting for the server
-          </Badge>
-        </Show>
-        <span class="files-upload-detail" data-testid="files-upload-progress">
-          {formatProgress(t)}
-        </span>
-        <Button
-          size="sm"
-          data-testid="files-upload-cancel"
-          onClick={() => props.upload?.store.cancel(t.transferId)}
-        >
-          Cancel
-        </Button>
-      </Show>
-    </div>
-  )
-
+  // THE TRANSFERS ARE NOT DRAWN HERE ANY MORE (nocx-hbdw4). They were, above
+  // the tree, and the panel was the only place a running transfer could be
+  // seen: switching sidebar view or collapsing the panel made a 2 GB upload
+  // invisible and uncancellable while it went on running on its own SSH
+  // lease. The list belongs to the activity bar's operations indicator,
+  // which is on screen whatever the panel is doing.
+  //
+  // The panel keeps NO contextual copy, and that is a decision rather than
+  // an omission. A copy would have to answer "which transfers belong to
+  // this panel", which is a second rule about where an operation appears —
+  // and the store deliberately has no bindingId to answer it with. It would
+  // also bring back exactly what the owner asked to be rid of: a finished
+  // transfer sitting above the tree until somebody dismissed it.
   return (
     <div class="files-panel" data-testid="files-panel" data-root={props.store.root()?.path}>
-      {/* The transfers this renderer knows about, above the tree and
-          outside the phase switch: a transfer outlives a re-scope, and an
-          upload that vanished because the panel changed tab would be an
-          upload nobody could account for. */}
-      <Show when={(props.upload?.store.transfers().length ?? 0) > 0}>
-        <div class="files-uploads" data-testid="files-uploads">
-          <For each={props.upload?.store.transfers() ?? []}>{(t) => renderTransfer(t)}</For>
-        </div>
-      </Show>
       <Show when={props.store.phase() === 'no-origin'}>
         <EmptyState
           icon={<FilesIcon />}
@@ -651,6 +584,11 @@ export interface FilesViewDeps {
    *  a test cannot perform, and a gesture whose middle step cannot be
    *  driven is a gesture no test can watch a user complete. */
   pickSources?: () => Promise<UploadSource[]>
+  /** "Are we inside the Wails webview" — half of the upload rule
+   *  (upload-eligibility.ts). Defaults to the one owner of that question;
+   *  a parameter because a test cannot be in two environments at once and
+   *  the rule has four combinations that all have to be watched. */
+  native?: () => boolean
 }
 
 /** Build the Files view descriptor. The store is created once, per
@@ -661,6 +599,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
   const upload = deps.upload ?? null
+  const native = deps.native ?? hasWailsWebview
   /** Who asks the person for files. The default is the real picker; a
    *  test substitutes its own, because raising a picker is the one step a
    *  test cannot perform. */
@@ -714,17 +653,21 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
    * over-full and how it overflows belongs to nocx-a8cz. A seventh button
    * in a header that cannot hold six is the thing that bead exists to stop.
    *
-   * The item is absent on a LOCAL tab. That is not a greyed-out row: a
-   * local binding has no uploader at all (R1), so the capability does not
-   * apply to that machine, and absence is what says so — the same rule
-   * "Show in Finder" follows in the opposite direction.
+   * The item is absent where an upload would move nothing — inside the
+   * Wails window on a local tab, and only there (upload-eligibility.ts).
+   * That is not a greyed-out row: the capability does not apply to that
+   * machine, and absence is what says so — the same rule "Show in Finder"
+   * follows in the opposite direction. The predicate is shared with the row
+   * menu and with the terminal drop, so all three give one answer about one
+   * tab (nocx-9le.5.24).
    */
   const FilesHeaderActions: Component = () => {
     const [overflowAt, setOverflowAt] = createSignal<{ x: number; y: number } | null>(null)
 
     const overflowItems = (): ContextMenuItem[] => {
       const items: ContextMenuItem[] = []
-      if (upload !== null && store.origin()?.kind === 'ssh') {
+      const o = store.origin()
+      if (upload !== null && o !== null && uploadMovesTheFile({ native: native(), kind: o.kind })) {
         items.push({
           id: 'upload',
           label: 'Upload File…',
@@ -835,6 +778,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         activeOrigin={props.activeOrigin}
         upload={upload}
         pickSources={pick}
+        native={native}
       />
     ),
     order: FILES_VIEW_ORDER,

@@ -7,6 +7,7 @@ import {
   type SidebarHandle,
   type SidebarViewDescriptor,
   type SidebarAction,
+  type SidebarIndicator,
   type SidebarViewProps,
 } from './sidebar'
 import { createSidebarWidthController } from './sidebar-width'
@@ -324,6 +325,147 @@ describe('sidebar', () => {
     fireEvent.keyDown(sep, { key: 'Home' })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('200px')
     expect(persist).toHaveBeenLastCalledWith(200)
+  })
+})
+
+// ── The bottom zone's second kind of entry (nocx-hbdw4) ──────────────────
+//
+// An INDICATOR reports a state that outlives whatever view is on screen and
+// opens its own popover: it touches neither the panel nor the tabs, which
+// is what makes it neither a view nor an action. What the sidebar owns
+// about one is only where it sits and whether it is the toolbar's tab stop;
+// everything else is the registrant's, and that is asserted here as much as
+// the placement is.
+describe('sidebar — bottom-zone indicators', () => {
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  /** An indicator that records the tabIndex it was handed and draws one
+   *  button, which is the whole of the contract. */
+  function testIndicator(id = 'ops'): { entry: SidebarIndicator; seen: number[] } {
+    const seen: number[] = []
+    const entry: SidebarIndicator = {
+      id,
+      render: (props) => {
+        createEffect(() => seen.push(props.tabIndex))
+        return (
+          <button type="button" data-indicator={id} tabIndex={props.tabIndex}>
+            {id}
+          </button>
+        )
+      },
+    }
+    return { entry, seen }
+  }
+
+  it('renders an indicator in the bottom zone, before the actions', () => {
+    // The gear stays bottom-most: a fixed position it already had must not
+    // move because something new arrived.
+    const { bar, panel } = mount()
+    const ops = testIndicator()
+    mountSidebar(
+      bar,
+      panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [ops.entry],
+    )
+    const bottom = bar.querySelector('.activity-bar-bottom')
+    expect([...(bottom?.querySelectorAll('button') ?? [])].map((b) => b.textContent)).toEqual([
+      'ops',
+      '',
+    ])
+    // And it is not in the top zone, which is for views.
+    expect(bar.querySelector('.activity-bar-top [data-indicator]')).toBeNull()
+  })
+
+  it('opens no panel and switches no view when it is activated', () => {
+    // The distinguishing property. A view opens the panel, an action opens
+    // a tab; an indicator does neither, and its own popover is its own.
+    const { bar, panel } = mount()
+    const ops = testIndicator()
+    mountSidebar(
+      bar,
+      panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [ops.entry],
+    )
+    const before = panelTitle(panel)
+    bar.querySelector<HTMLElement>('[data-indicator="ops"]')!.click()
+    expect(panelTitle(panel)).toBe(before)
+    expect(panel.classList.contains('collapsed')).toBe(false)
+  })
+
+  it('takes part in the toolbar’s roving tabindex rather than minting its own', () => {
+    const { bar, panel } = mount()
+    const ops = testIndicator()
+    mountSidebar(
+      bar,
+      panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [ops.entry],
+    )
+    // The active view holds the tab stop, so the indicator is handed -1 —
+    // and it is HANDED it, which is the contract: an entry that minted its
+    // own would take the toolbar's keyboard away from it.
+    expect(ops.seen[ops.seen.length - 1]).toBe(-1)
+
+    // End walks to the last button in the toolbar, which is the gear, and
+    // the arrows reach the indicator on the way.
+    const alpha = viewBtn(bar, 'alpha')
+    alpha.focus()
+    fireEvent.keyDown(alpha, { key: 'End' })
+    expect(document.activeElement).toBe(actionBtn(bar, 'settings'))
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(bar.querySelector('[data-indicator="ops"]'))
+  })
+
+  it('is the toolbar’s tab stop when there are no views at all', () => {
+    // The fallback order is views, then the bottom zone as it renders. A
+    // shell with no views must still be keyboard-reachable.
+    const { bar, panel } = mount()
+    const ops = testIndicator()
+    mountSidebar(
+      bar,
+      panel,
+      [],
+      [SETTINGS_ACTION],
+      null,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [ops.entry],
+    )
+    expect(ops.seen[ops.seen.length - 1]).toBe(0)
+    expect(actionBtn(bar, 'settings').getAttribute('tabindex')).toBe('-1')
+  })
+
+  it('registers none by default, and the bar is unchanged', () => {
+    // Every existing caller passes none, and a shell without an indicator
+    // is a shell with nothing running to report.
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+    const bottom = bar.querySelector('.activity-bar-bottom')
+    expect(bottom?.querySelectorAll('button')).toHaveLength(1)
   })
 })
 

@@ -140,6 +140,9 @@ async function mountApp(
   uploadDeps?: {
     upload: UploadSurface
     pickSources?: () => Promise<UploadSource[]>
+    /** "Are we inside the Wails webview" — jsdom is a browser, so the
+     *  default is false and a desktop case must say so (nocx-9le.5.24). */
+    native?: () => boolean
   },
 ) {
   const client = makeClient()
@@ -169,6 +172,7 @@ async function mountApp(
     clipboard,
     upload: uploadDeps?.upload,
     pickSources: uploadDeps?.pickSources,
+    native: uploadDeps?.native,
   })
   // Ports stands in at order 0 (main.tsx registers it there); the views
   // reach mountSidebar in order-sorted arrangement, which is what makes
@@ -991,7 +995,9 @@ describe('uploading from the panel', () => {
 
   /** An ssh tab whose cwd is verified — the panel reveals it, and the
    *  revealed folder is what the action uploads into. */
-  async function mountOnRemote(over: { pickSources?: () => Promise<UploadSource[]> } = {}) {
+  async function mountOnRemote(
+    over: { pickSources?: () => Promise<UploadSource[]>; native?: () => boolean } = {},
+  ) {
     const u = uploadFixture()
     const services = fakeServices({
       list: vi
@@ -1007,6 +1013,7 @@ describe('uploading from the panel', () => {
     const app = await mountApp(services, undefined, {
       upload: u.surface,
       pickSources: over.pickSources,
+      native: over.native,
     })
     app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
     await vi.waitFor(() =>
@@ -1033,15 +1040,51 @@ describe('uploading from the panel', () => {
     expect(menu?.textContent).toContain('Upload File')
   })
 
-  it('offers no Upload on a LOCAL tab, because a local binding has no uploader', async () => {
-    // R1 stated as absence, not as a greyed-out row — the same rule "Show
-    // in Finder" follows in the opposite direction.
+  // ── The four combinations of the upload rule (nocx-9le.5.24) ───────────
+  // The overflow draws nothing when it would open empty, so on a local tab
+  // the BUTTON's presence is the item's presence — which makes the two
+  // local cases the sharpest statement of the rule this header follows.
+  it('offers Upload on a LOCAL tab in a BROWSER, because the bytes are here and the shell is not', async () => {
+    // The defect this replaces: the header said "no uploader" while a drop
+    // on the same tab uploaded. A `File` is bytes on the browser's machine
+    // and the tab's shell is on the backend's, so there is somewhere to
+    // send it.
     const u = uploadFixture()
-    const { panel } = await mountApp(fakeServices(), undefined, { upload: u.surface })
+    const { panel } = await mountApp(fakeServices(), undefined, {
+      upload: u.surface,
+      native: () => false,
+    })
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-overflow"]')).not.toBeNull(),
+    )
+    panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    expect(document.querySelector('[data-testid="files-overflow-menu"]')?.textContent).toContain(
+      'Upload File',
+    )
+  })
+
+  it('offers no Upload on a LOCAL tab in the WAILS WINDOW, where the file is already there', async () => {
+    // The one absence, stated as absence and not as a greyed-out row — the
+    // same rule "Show in Finder" follows in the opposite direction.
+    const u = uploadFixture()
+    const { panel } = await mountApp(fakeServices(), undefined, {
+      upload: u.surface,
+      native: () => true,
+    })
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-panel"]')).not.toBeNull(),
     )
     expect(panel.querySelector('[data-testid="files-overflow"]')).toBeNull()
+  })
+
+  it('offers Upload on a REMOTE tab in the WAILS WINDOW too', async () => {
+    // The ticket names a file on the backend's machine and the shell is
+    // elsewhere: the transfer is real, so the item belongs.
+    const app = await mountOnRemote({ native: () => true })
+    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    expect(document.querySelector('[data-testid="files-overflow-menu"]')?.textContent).toContain(
+      'Upload File',
+    )
   })
 
   it('sends the chosen files into the folder the panel is showing', async () => {
@@ -1063,7 +1106,14 @@ describe('uploading from the panel', () => {
     })
   })
 
-  it('shows the transfer it started, and what it knows about it', async () => {
+  it('draws no transfer rows at all — the operations indicator owns that list', async () => {
+    // The deliberate absence, and an untested absence is not one. The panel
+    // used to be the ONLY place a running transfer could be seen, which is
+    // the defect nocx-hbdw4 exists to fix: switch sidebar view or collapse
+    // the panel and a 2 GB upload was invisible and uncancellable. A
+    // contextual copy here would also have to answer "which transfers
+    // belong to this panel", and the store has no bindingId to answer it
+    // with.
     const app = await mountOnRemote({
       pickSources: () =>
         Promise.resolve([{ name: 'big.iso', size: 400, blob: new Blob([new Uint8Array(400)]) }]),
@@ -1072,81 +1122,12 @@ describe('uploading from the panel', () => {
     app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
     menuItem('Upload File').click()
 
-    const row = () => app.panel.querySelector('[data-testid="files-upload-row"]')
-    await vi.waitFor(() => expect(row()).not.toBeNull())
-    expect(row()?.getAttribute('data-phase')).toBe('running')
-    // No sample has arrived, so the line says the size and NOT "0 B of
-    // 400 B", which would claim the transfer had stalled at zero.
-    expect(app.panel.querySelector('[data-testid="files-upload-progress"]')?.textContent).toBe(
-      '400 B',
-    )
-
-    app.services.emitDone({
-      transferId: 't1',
-      outcome: 'written',
-      finalName: 'big.iso',
-      stranded: [],
-    })
-    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
-    expect(row()?.textContent).toContain('Uploaded')
-
-    // And the person can put it away.
-    app.panel.querySelector<HTMLElement>('[data-testid="files-upload-dismiss"]')!.click()
-    await vi.waitFor(() => expect(row()).toBeNull())
-  })
-
-  it('cancels a running transfer through the wire, not by deciding locally', async () => {
-    const app = await mountOnRemote({
-      pickSources: () =>
-        Promise.resolve([{ name: 'a.txt', size: 1, sourceTicket: 'c'.repeat(32) }]),
-    })
-    app.services.nextResult = [{ transferId: 't1' }]
-    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
-    menuItem('Upload File').click()
-    await vi.waitFor(() =>
-      expect(app.panel.querySelector('[data-testid="files-upload-cancel"]')).not.toBeNull(),
-    )
-
-    app.panel.querySelector<HTMLElement>('[data-testid="files-upload-cancel"]')!.click()
-    expect(app.services.cancels).toEqual(['t1'])
-    // Still running: the cancel races the transfer's own completion, and
-    // uploadDone is what says which won.
-    expect(
-      app.panel.querySelector('[data-testid="files-upload-row"]')?.getAttribute('data-phase'),
-    ).toBe('running')
-  })
-
-  it('does not call a 409 a failure — the row says it is waiting and still offers the cancel', async () => {
-    // The transfer is ALIVE: another claimant's body is running for this
-    // ticket. A row that said "Failed" would announce it dead and take
-    // away the only control that can still stop it.
-    const app = await mountOnRemote({
-      pickSources: () =>
-        Promise.resolve([{ name: 'big.iso', size: 400, blob: new Blob([new Uint8Array(400)]) }]),
-    })
-    app.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
-    app.services.nextSendBody = [{ ok: false, kind: 'status', status: 409 }]
-    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
-    menuItem('Upload File').click()
-
-    const row = () => app.panel.querySelector('[data-testid="files-upload-row"]')
-    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('unsettled'))
-    expect(row()?.textContent).toContain('Waiting for the server')
-    expect(row()?.textContent).not.toContain('Failed')
-
-    const cancel = () => app.panel.querySelector<HTMLElement>('[data-testid="files-upload-cancel"]')
-    expect(cancel()).not.toBeNull()
-    cancel()!.click()
-    expect(app.services.cancels).toEqual(['t1'])
-
-    app.services.emitDone({
-      transferId: 't1',
-      outcome: 'written',
-      finalName: 'big.iso',
-      stranded: [],
-    })
-    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
-    expect(row()?.textContent).toContain('Uploaded')
+    // The transfer really started — the panel's action still reaches the
+    // flow — and the panel still draws nothing about it.
+    await vi.waitFor(() => expect(app.services.uploads).toHaveLength(1))
+    expect(app.store.transfers()).toHaveLength(1)
+    expect(app.panel.querySelector('.ui-operation-row')).toBeNull()
+    expect(app.panel.textContent).not.toContain('big.iso')
   })
 })
 
@@ -1210,11 +1191,14 @@ describe('uploading into the row you right-clicked', () => {
     throw new Error(`no menu item named ${label}`)
   }
 
-  async function mountOnRemote(over: { pickSources?: () => Promise<UploadSource[]> } = {}) {
+  async function mountOnRemote(
+    over: { pickSources?: () => Promise<UploadSource[]>; native?: () => boolean } = {},
+  ) {
     const u = uploadFixture()
     const app = await mountApp(twoFolders(), undefined, {
       upload: u.surface,
       pickSources: over.pickSources,
+      native: over.native,
     })
     app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
     // Wait for the RESCOPE and the reveal both: the panel's own folder is
@@ -1246,32 +1230,78 @@ describe('uploading into the row you right-clicked', () => {
     })
   })
 
-  it('is present on a remote tab and ABSENT on a local one', async () => {
-    // R1 as ABSENCE, and the absence is the security property: a local
-    // binding has no uploader at all, so an item that reached one would be
-    // a promise the product cannot keep. An untested absence is not one —
-    // a test that only checks presence cannot catch the row leaking onto a
-    // local tab, which is the direction that matters.
+  // ── The four combinations of the upload rule (nocx-9le.5.24) ───────────
+  //
+  // The rule is `uploadMovesTheFile` and it has exactly one `false`. An
+  // untested absence is not an absence — a test that only checks presence
+  // cannot catch the row leaking onto the tab where it must not be — and an
+  // untested PRESENCE is what shipped the defect this replaces: the menu
+  // read `kind === 'ssh'`, which is a second answer to the question the
+  // drop handler already answers, and the two disagreed about exactly the
+  // browser-on-a-local-tab case below.
+  //
+  // The menu is walked with the environment fixed and the tab's origin
+  // moved, because that is the pair the rule turns on.
+  async function mountBoth(native: boolean) {
     const u = uploadFixture()
-    const app = await mountApp(twoFolders(), undefined, { upload: u.surface })
+    const app = await mountApp(twoFolders(), undefined, {
+      upload: u.surface,
+      native: () => native,
+    })
     await vi.waitFor(() => expect(rowNamed(app.panel, 'opt')).not.toBeUndefined())
+    return app
+  }
 
-    // Local (the initial tab's origin): absent.
+  /** Open the row menu on /opt, read it, and close it again. */
+  async function itemsOnOpt(
+    app: Awaited<ReturnType<typeof mountBoth>>,
+  ): Promise<(string | null)[]> {
     fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
-    expect(rowMenuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path', 'Show in Finder'])
-    expect(rowMenuItems().some((l) => (l ?? '').includes('Upload'))).toBe(false)
+    const items = rowMenuItems()
     fireEvent.pointerDown(document.body)
     await vi.waitFor(() =>
       expect(document.querySelector('[data-testid="files-context-menu"]')).toBeNull(),
     )
+    return items
+  }
 
-    // Remote: present.
+  /** Move the panel onto the ssh tab and wait for the reveal to land. */
+  async function goRemote(app: Awaited<ReturnType<typeof mountBoth>>): Promise<void> {
     app.setActiveOrigin({ ...SSH_ORIGIN, cwd: '/srv', cwdVerified: true })
     await vi.waitFor(() =>
       expect(app.panel.querySelector('[data-selected="true"]')?.textContent).toContain('srv'),
     )
-    fireEvent.contextMenu(rowNamed(app.panel, 'opt'), { clientX: 10, clientY: 10 })
-    expect(rowMenuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path', 'Upload…'])
+  }
+
+  it('in a BROWSER is present on a local tab and on a remote one', async () => {
+    // Local first, and it is the case that was wrong: a `File` is bytes on
+    // the browser's machine, the tab's shell is on the backend's, and the
+    // drop on this very tab uploads.
+    const app = await mountBoth(false)
+    expect(await itemsOnOpt(app)).toEqual([
+      'Copy Relative Path',
+      'Copy Absolute Path',
+      'Upload…',
+      'Show in Finder',
+    ])
+
+    await goRemote(app)
+    expect(await itemsOnOpt(app)).toEqual(['Copy Relative Path', 'Copy Absolute Path', 'Upload…'])
+  })
+
+  it('in the WAILS WINDOW is absent on a local tab and present on a remote one', async () => {
+    // The one absence: the runtime hands Go a path for a file already on
+    // that machine, so there is nowhere to send it and the drop inserts the
+    // path instead.
+    const app = await mountBoth(true)
+    expect(await itemsOnOpt(app)).toEqual([
+      'Copy Relative Path',
+      'Copy Absolute Path',
+      'Show in Finder',
+    ])
+
+    await goRemote(app)
+    expect(await itemsOnOpt(app)).toEqual(['Copy Relative Path', 'Copy Absolute Path', 'Upload…'])
   })
 
   it('offers nothing on a FILE row — a file is not a place to put a file', async () => {

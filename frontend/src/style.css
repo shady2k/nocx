@@ -61,6 +61,9 @@
 @import './styles/components/spinner.css';
 @import './styles/components/collection-view.css';
 @import './styles/components/file-status-row.css';
+@import './styles/components/operation-row.css';
+@import './styles/components/popover.css';
+@import './styles/components/progress-bar.css';
 @import './styles/components/record-row.css';
 @import './styles/components/resize-handle.css';
 @import './styles/components/tab-strip.css';
@@ -85,6 +88,7 @@
 @import './styles/surfaces/secrets.css';
 @import './styles/surfaces/ports.css';
 @import './styles/surfaces/files.css';
+@import './styles/surfaces/operations.css';
 @import './styles/surfaces/vault.css';
 @import './styles/surfaces/git.css';
 

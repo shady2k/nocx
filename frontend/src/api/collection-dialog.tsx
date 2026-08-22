@@ -32,9 +32,10 @@
 // ask — the same rule, in the place that can also honour it when a picker
 // answers.
 
-import { Show } from 'solid-js'
 import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
+import { IconButton } from '../ui/icon-button'
+import { FolderOpenIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
 
 export interface CollectionDialogProps {
@@ -107,32 +108,35 @@ export function CollectionDialog(props: CollectionDialogProps) {
         </>
       }
     >
-      {/* The field and its picker read as one control, so they sit on one
-          row — placement, which is a surface's business; the field and the
-          button are the kit's own and nothing here repaints them. */}
-      <div class="api-path-row">
-        <TextField
-          id={props.fieldId}
-          label={props.fieldLabel}
-          description={props.fieldDescription}
-          placeholder={props.placeholder}
-          value={props.value}
-          error={refusal()}
-          onInput={props.onInput}
-          autoFocus
-          required
-        />
-        <Show when={props.onBrowse}>
-          <Button
-            variant="default"
-            onClick={() => props.onBrowse?.()}
-            ariaLabel="Browse…"
-            title="Choose a folder with the system picker"
-          >
-            Browse…
-          </Button>
-        </Show>
-      </div>
+      {/* The field and its picker are ONE control, so the picker sits in the
+          kit's trailing slot rather than beside the field. Beside it, the
+          button was aligned to the input by a hand-measured top margin that
+          assumed a label and nothing under it; this field also carries a
+          description, so the button floated up beside the sentence. The kit
+          positions the slot, and the path keeps the panel's whole width. */}
+      <TextField
+        id={props.fieldId}
+        label={props.fieldLabel}
+        description={props.fieldDescription}
+        placeholder={props.placeholder}
+        value={props.value}
+        error={refusal()}
+        onInput={props.onInput}
+        autoFocus
+        required
+        trailing={
+          props.onBrowse ? (
+            <IconButton
+              size="sm"
+              ariaLabel="Browse…"
+              title="Choose a folder with the system picker"
+              onClick={() => props.onBrowse?.()}
+            >
+              <FolderOpenIcon />
+            </IconButton>
+          ) : undefined
+        }
+      />
     </Dialog>
   )
 }

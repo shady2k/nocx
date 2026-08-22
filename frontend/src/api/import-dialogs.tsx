@@ -20,9 +20,10 @@
 // and every test — addresses these fields, and moving a field is not
 // renaming it.
 
-import { Show } from 'solid-js'
 import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
+import { IconButton } from '../ui/icon-button'
+import { FolderOpenIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
 
 export interface PostmanImportDialogProps {
@@ -71,38 +72,42 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
       <TextField
         id="api-import-postman-file"
         label="Postman v2.1 export"
-        description="Read, never executed. What the format cannot carry is named afterwards rather than dropped."
+        description="Read, never executed."
         placeholder="/work/acme.postman_collection.json"
         value={props.file}
         onInput={props.onFile}
         autoFocus
         required
       />
-      {/* The field and its picker read as one control, so they sit on one
-          row — placement, which is a surface's business; both are the kit's
-          own and nothing here repaints them. */}
-      <div class="api-path-row">
-        <TextField
-          id="api-import-postman-dest"
-          label="New collection folder"
-          description="A folder that does not exist yet. The import arrives whole or not at all."
-          placeholder="/work/acme-api"
-          value={props.dest}
-          error={refusal()}
-          onInput={props.onDest}
-          required
-        />
-        <Show when={props.onBrowse}>
-          <Button
-            variant="default"
-            onClick={() => props.onBrowse?.()}
-            ariaLabel="Browse…"
-            title="Choose a folder with the system picker"
-          >
-            Browse…
-          </Button>
-        </Show>
-      </div>
+      {/* The picker sits INSIDE the field, in the kit's trailing slot, because
+          the field and its picker are one control. Beside it, they were two:
+          the button was aligned to the input by a hand-measured margin that
+          assumed a label and nothing else, so a field that also carries a
+          description — this one — floated its button up beside the sentence
+          instead. A slot the kit positions cannot come apart that way, and on
+          a 480px panel it gives the path the whole width. */}
+      <TextField
+        id="api-import-postman-dest"
+        label="New collection folder"
+        description="Must not exist yet — the import arrives whole or not at all."
+        placeholder="/work/acme-api"
+        value={props.dest}
+        error={refusal()}
+        onInput={props.onDest}
+        required
+        trailing={
+          props.onBrowse ? (
+            <IconButton
+              size="sm"
+              ariaLabel="Browse…"
+              title="Choose a folder with the system picker"
+              onClick={() => props.onBrowse?.()}
+            >
+              <FolderOpenIcon />
+            </IconButton>
+          ) : undefined
+        }
+      />
     </Dialog>
   )
 }

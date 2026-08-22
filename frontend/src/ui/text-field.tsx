@@ -18,7 +18,8 @@ export interface TextFieldMark {
   to: number
   /**
    * What the mark says about the span — `reference` (the default) is "this
-   * is a reference", `unknown` is "and nothing answers it".
+   * is a reference", `secret` is "and what it stands for is not readable
+   * here", `unknown` is "and nothing answers it".
    *
    * Two tones and not a boolean because the third state is real and must not
    * be drawn as either: a surface that does not yet KNOW whether a name is
@@ -26,7 +27,7 @@ export interface TextFieldMark {
    * somebody can say it is warranted. Crying wolf while a listing is in
    * flight is how a person learns to ignore the colour.
    */
-  tone?: 'reference' | 'unknown'
+  tone?: 'reference' | 'secret' | 'unknown'
 }
 
 export interface TextFieldProps {
@@ -234,14 +235,14 @@ export function TextField(props: TextFieldProps) {
   const runs = (): Array<{
     text: string
     marked: boolean
-    tone?: 'reference' | 'unknown'
+    tone?: 'reference' | 'secret' | 'unknown'
     mark?: TextFieldMark
   }> => {
     const text = String(props.value)
     const out: Array<{
       text: string
       marked: boolean
-      tone?: 'reference' | 'unknown'
+      tone?: 'reference' | 'secret' | 'unknown'
       mark?: TextFieldMark
     }> = []
     let at = 0

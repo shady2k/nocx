@@ -1830,6 +1830,35 @@ describe('a variable in the address says whether anything answers it', () => {
     expect(variableMenu()?.textContent).toContain('https://api.example.test')
   })
 
+  it("a secret reference wears the vault's colour and never a value", async () => {
+    // The panel does not hold a secret's value and must not learn to want
+    // one: what it can say is that the name stands for something the vault
+    // holds, and where.
+    const { bar } = await mountApp({
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({ collection: collectionFixture({ environments: [DEV_ENV] }) }),
+        ],
+        defaultRoot: '/data/collections',
+      }),
+      readEnvironment: vi.fn().mockResolvedValue({
+        environment: {
+          name: 'dev',
+          values: {},
+          secretVars: ['baseUrl'],
+          route: { kind: 'direct' as const, profileId: '', insecureTls: false },
+        },
+      }),
+    })
+    await openRequest(bar)
+
+    await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('secret'))
+
+    fireEvent.click(marks()[0])
+    await vi.waitFor(() => expect(variableMenu()).toBeTruthy())
+    expect(variableMenu()?.textContent).toContain('from the vault')
+  })
+
   it('a name nothing answers is marked, and the menu offers to define it', async () => {
     // An environment that answers something ELSE: the state a person is in
     // when they have typed a variable and not yet said what it is.

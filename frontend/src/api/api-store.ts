@@ -264,6 +264,15 @@ export interface ApiStore {
    */
   knownVariables(): ReadonlySet<string> | null
 
+  /** Whether the active environment declares this name secret. The address
+   *  field paints such a reference differently: what it stands for is not
+   *  readable here and is not meant to be. */
+  isSecretVariable(name: string): boolean
+
+  /** Give a secret variable its value — the one call that carries a
+   *  credential. Answers whether it landed; the value is never kept. */
+  bindSecret(variable: string, value: string): Promise<boolean>
+
   /** What a PLAIN variable answers in the active environment — null for a
    *  secret one (its value is the vault's and never the renderer's), for a
    *  name nothing answers, and for an environment nobody has read yet. */
@@ -697,6 +706,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     if (known === null) return null
     return new Set([...Object.keys(known.values), ...known.secretVars])
   }
+
+  /** Whether the active environment declares this name SECRET — its value
+   *  lives in the vault and the renderer will never hold it. False for a
+   *  plain one, for an unbound one, and while nothing has been read. */
+  const isSecretVariable = (name: string): boolean =>
+    environmentKnowledge()?.secretVars.includes(name) ?? false
 
   /** What a PLAIN variable answers, and null for one that is secret, one
    *  nothing answers, and one nobody has read yet. Never a secret's value:
@@ -1184,6 +1199,37 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
   }
 
+  /**
+   * Give a secret variable its value.
+   *
+   * THE ONE CALL IN THIS STORE THAT CARRIES A CREDENTIAL, and it carries it
+   * one way: the value goes out and nothing about it comes back. Nothing here
+   * keeps it, no signal holds it, and the environment the editor is showing
+   * is re-read afterwards from the FILE — which holds the name and never the
+   * value (§6.3), so the re-read cannot bring it back either.
+   *
+   * The refusal is the store's ordinary one (`error`), because that is what
+   * every surface in this panel already reads. A sealed vault is not refused
+   * here at all: it travels as the canonical sealed error and the dispatcher
+   * raises the unlock, exactly as a send does (nocx-pgp9c.7).
+   */
+  const bindSecret = async (variable: string, value: string): Promise<boolean> => {
+    const handle = untrack(activeCollection)
+    const relPath = untrack(() => environmentFor(handle))
+    if (handle === '' || relPath === '' || variable === '') return false
+    try {
+      await services.bindSecret(handle, relPath, variable, value)
+      setError('')
+      // What the environment ANSWERS has changed — the name is bound now,
+      // so a reference to it stops being unanswered in the address field.
+      await refreshVariables()
+      return true
+    } catch (err) {
+      setError(message(err))
+      return false
+    }
+  }
+
   const readEnvironment = async (relPath: string): Promise<ApiEnvironment | null> => {
     const handle = untrack(activeCollection)
     if (handle === '') return null
@@ -1304,6 +1350,8 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     watchFailed,
     knownVariables,
     variableValue,
+    isSecretVariable,
+    bindSecret,
     startWatching,
     dispose,
     refresh,

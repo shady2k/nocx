@@ -135,7 +135,7 @@ export interface RequestLineProps {
    * holds is the store's, and a form that fetched it would be a second
    * answer to a question that already has one.
    */
-  variableState?: (name: string) => 'bound' | 'unbound' | 'unknown'
+  variableState?: (name: string) => 'bound' | 'secret' | 'unbound' | 'unknown'
   /** Somebody clicked a variable in the address. The surface decides what to
    *  say about it — this line only knows where it was and what it is
    *  called. */
@@ -197,9 +197,18 @@ export function RequestLine(props: RequestLineProps) {
       // is used ONLY when somebody can say so: an environment that has not
       // been read yet leaves every mark in the ordinary tone rather than
       // painting the address as broken while a listing is in flight.
-      tone:
-        props.variableState?.(name) === 'unbound' ? ('unknown' as const) : ('reference' as const),
+      tone: markTone(props.variableState?.(name)),
     }))
+
+  /** The kit's word for what this reference is. `unknown` is used ONLY when
+   *  somebody can say so: an environment that has not been read yet leaves
+   *  every mark in the ordinary tone rather than painting the address as
+   *  broken while a listing is in flight. */
+  const markTone = (state?: 'bound' | 'secret' | 'unbound' | 'unknown'): TextFieldMark['tone'] => {
+    if (state === 'unbound') return 'unknown'
+    if (state === 'secret') return 'secret'
+    return 'reference'
+  }
 
   /** Which variable a marked span is, by where it starts. The scan is the
    *  same one that produced the marks, so the two cannot disagree. */

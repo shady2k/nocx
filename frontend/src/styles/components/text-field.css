@@ -84,6 +84,18 @@
   color: var(--color-accent);
 }
 
+/* A reference to a SECRET wears the vault's own colour — the one the secret
+   chip uses everywhere else in the product — so "this stands for something I
+   cannot read here" is the same colour wherever a person meets it. It cannot
+   wear the chip's LOCK: the ink layer holds the same characters as the input
+   in the same places, and a glyph would put every character after it
+   somewhere the caret is not. Colour is the whole of what this layer may
+   change. */
+.ui-text-field__mark[data-tone='secret'] {
+  background: color-mix(in srgb, var(--color-accent-secondary), transparent 78%);
+  color: var(--color-accent-secondary);
+}
+
 /* And a reference NOTHING ANSWERS is the warning tone — the same one a badge
    uses to say "this will not do what it looks like". It is a different colour
    AND, through the field's own title, a different sentence: a reader who

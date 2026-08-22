@@ -37,6 +37,7 @@ const REQUEST: ApiRequest = {
   url: '{{baseUrl}}/users',
   headers: [{ name: 'Content-Type', value: 'application/json', enabled: true }],
   query: [],
+  variables: [],
   body: { kind: 'raw', text: '{"email":"a@b.c"}', fileRef: '' },
   auth: { kind: 'bearer', var: 'API_TOKEN', user: '' },
 }

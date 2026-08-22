@@ -28,6 +28,18 @@ export interface Request {
    * Never null — a request with no query is [].
    */
   query: Param[]
+  /**
+   * The request's OWN variables — rows of name, value and enabled, the shape `query` and `headers` already have, because the model grows by one more list of the same thing rather than by a new idea.
+   *
+   * WHY A REQUEST HAS ANY. A variable could only live in an environment, and that is the wrong home for half of them: `id` in `/users/{{id}}` belongs to the REQUEST, since two requests legitimately want different ones and an environment carrying both would be a place to keep other people's values. The environment's are INHERITED — a name the request answers wins, everything else falls through — so nothing that resolves today resolves differently.
+   *
+   * ONE GRAMMAR, `{{name}}`. Postman spells a path variable `:id`, and what it gets right is the SCOPE and not the syntax; a second spelling would be two owners of "a hole in the address", agreeing until the day somebody wrote both. The importer rewrites `:id` into this grammar and says it did.
+   *
+   * Never null — a request with none is []. The file is allowed to omit the key, which is what `omitempty` is right for on disk; the wire is not, because the renderer's first .map on a null throws.
+   *
+   * A row whose name the environment declares SECRET is refused at send time rather than resolved: a credential belongs in the vault and a request file goes into git (design §8).
+   */
+  variables: Param[]
   body: Body
   auth: Auth
 }

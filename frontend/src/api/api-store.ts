@@ -1012,6 +1012,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         url: '',
         headers: [],
         query: [],
+        variables: [],
         body: { kind: 'none', text: '', fileRef: '' },
         auth: { kind: 'none', var: '', user: '' },
       })

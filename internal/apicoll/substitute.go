@@ -76,6 +76,64 @@ func (e *UnresolvedError) Error() string {
 // enumerate the variables.
 func (e *UnresolvedError) Unwrap() error { return ErrUnresolvedVariable }
 
+// ErrSecretShadowed is a request-scope variable whose name the environment
+// declares SECRET.
+//
+// It is a refusal rather than a precedence rule, and the difference is §8.
+// A credential belongs in the vault; a request file goes into git. Letting a
+// row in that file answer a name the environment reserved for a stored value
+// would let a collection arriving in a pull request choose what a reader's
+// request sends — with the reader's own environment saying the value is
+// secret and the file quietly supplying a different one. The request's
+// variables win over the environment's PLAIN values, which is the whole
+// point of them; they do not win over the vault, and the one case where the
+// two meet is refused by name instead of being decided silently either way.
+//
+// Refused rather than ignored, because ignoring it is the same shape read
+// from the other side: a person editing the request would see their value in
+// the table and something else on the wire.
+var ErrSecretShadowed = errors.New("apicoll: a request variable would shadow a name this environment declares secret")
+
+// RequestLookup answers a request's OWN variables, and refuses one that
+// would shadow a secret.
+//
+// Disabled rows answer nothing, exactly as a disabled header sends nothing:
+// a row the user keeps and has switched off takes no part in a send, so it
+// cannot resolve a reference and cannot shadow anything either.
+//
+// env is the environment the send goes out under, and the zero value is the
+// honest argument for a send that names none — it declares nothing secret,
+// so nothing is refused and the request's own variables resolve as they
+// would anywhere else.
+func RequestLookup(r Request, env Environment) (Lookup, error) {
+	values := make(map[string]string, len(r.Variables))
+	for _, v := range r.Variables {
+		name := strings.TrimSpace(v.Name)
+		if !v.Enabled || name == "" {
+			continue
+		}
+		if env.IsSecret(name) {
+			return nil, fmt.Errorf("%w: %q", ErrSecretShadowed, name)
+		}
+		// FIRST ROW WINS, so a duplicate name is the one nearer the top of
+		// the table — which is the one a person reading it would expect,
+		// and the same answer whichever machine the file is opened on.
+		if _, already := values[name]; !already {
+			values[name] = v.Value
+		}
+	}
+	if len(values) == 0 {
+		// Nothing to answer: a nil Lookup, which Chain skips. A closure
+		// that always answered "not found" would be the same thing at the
+		// cost of a call per reference.
+		return nil, nil
+	}
+	return func(name string) (string, bool, error) {
+		v, ok := values[name]
+		return v, ok, nil
+	}, nil
+}
+
 // Lookup answers what a variable is worth. Three returns, and the middle
 // one is the point: "not bound" is a NORMAL state that blocks the send,
 // while an error is the lookup itself failing — a sealed vault, an

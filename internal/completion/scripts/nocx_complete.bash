@@ -78,6 +78,15 @@ if [[ "$WORD" == */* ]] || [[ "$WORD" == .* ]] || [[ "$WORD" == ~* ]] || [[ $is_
   # The membership test quotes "$entry" INSIDE the pattern so a filename
   # holding *, ? or [ is compared literally rather than glob-matched. The list
   # is bounded by LIMIT, so the linear scan is bounded too.
+  #
+  # The `name` column is the LAST PATH SEGMENT, never compgen's word. compgen
+  # answers with the whole replacement for the token — `repos/tabby` for the
+  # token `repos/t` — while `Candidate.Name` and shell.complete's schema both
+  # declare name to be the last segment, which is what LocalCompleter emits and
+  # what the renderer's shell adapter assumes: it inserts the token's own
+  # prefix plus the name. Handing it the word inserted `repos/` twice, so
+  # `cd repos/t` completed to `cd repos/repos/tabby/` (nocx-yqoy5). `$entry`
+  # stays whole for the dedup and for `$abs`; only the printed name is cut.
   seen_paths=""
   # compgen -f: files + dirs (always a bash builtin).
   while IFS= read -r entry; do
@@ -90,7 +99,7 @@ if [[ "$WORD" == */* ]] || [[ "$WORD" == .* ]] || [[ "$WORD" == ~* ]] || [[ $is_
       else abs="$PWD/$entry"; fi
       isd=0
       if [[ -d "$entry" ]]; then isd=1; fi
-      printf '%s\t%s\t%s\t%d\n' "path" "$entry" "$abs" "$isd"
+      printf '%s\t%s\t%s\t%d\n' "path" "${entry##*/}" "$abs" "$isd"
       n=$((n+1))
       if [[ $n -ge $LIMIT ]]; then break 2; fi
     fi
@@ -104,7 +113,7 @@ if [[ "$WORD" == */* ]] || [[ "$WORD" == .* ]] || [[ "$WORD" == ~* ]] || [[ $is_
       if [[ "$entry" == /* ]]; then abs="$entry"
       elif [[ "$entry" == ~* ]]; then abs="${entry/#\~/$HOME}"
       else abs="$PWD/$entry"; fi
-      printf '%s\t%s\t%s\t%d\n' "path" "$entry" "$abs" 1
+      printf '%s\t%s\t%s\t%d\n' "path" "${entry##*/}" "$abs" 1
       n=$((n+1))
       if [[ $n -ge $LIMIT ]]; then break 2; fi
     fi

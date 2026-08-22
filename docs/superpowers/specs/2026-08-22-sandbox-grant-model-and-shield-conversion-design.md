@@ -24,6 +24,8 @@ The shield is hidden when `sandbox.enabled` is false. When enabled it is disable
 
 The activity bar's top zone owns action buttons that sit beside view icons without activating a view. The shield renders there immediately after Files; it is not part of the Files panel header. It uses the UI kit `IconButton` and existing `ShieldIcon`.
 
+A confirmed sandbox tab prefixes its title line with `ShieldIcon`. The marker is the first element of the name line; pin, warning, activity, title, cwd, and status follow it.
+
 ## Conversion
 
 Clicking a ready shield opens the existing permission dialog with the verified cwd supplied as the workspace; the initial native picker is skipped, while the dialog's per-grant folder pickers remain native. Confirmation creates a new sandbox pane. The source pane is captured before creation. On create acknowledgement the new durable tab replaces the source tab id in the workspace's cached order, then the source pane closes. On create failure the existing toast is shown and the source remains unchanged.

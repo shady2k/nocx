@@ -182,8 +182,25 @@ export interface FilesTreeStore {
   binding(): FilesBinding | null
   origin(): ActiveOrigin | null
   root(): FilesRoot | null
-  /** The visible rows in display order (the flatten of the expanded tree). */
+  /** The visible rows in display order (the flatten of the expanded tree).
+   *  The NAME FILTER IS NOT APPLIED HERE — narrowing is the view's, over
+   *  `files-filter.ts`, because a filter that reached into the flatten
+   *  would be a store deciding what is on screen, and the store's rows are
+   *  also what the reveal walk and the watch-set reconciliation reason
+   *  about. Both must go on seeing the whole tree. */
   rows(): FilesFlatRow[]
+  /** The panel's name filter (nocx-708q.2), and its residence is the same
+   *  choice Git's made: in the store, so it survives the view being
+   *  swapped out and back — the panel is unmounted whenever another
+   *  sidebar view is in front, and a filter that evaporated on a glance at
+   *  Ports would be a control nobody could rely on.
+   *
+   *  It is NOT cleared on a re-scope. A name is a stable vocabulary across
+   *  machines in a way a session id is not: somebody filtering for
+   *  "nginx.conf" while comparing two hosts is doing exactly what the
+   *  control is for. */
+  filter(): string
+  setFilter(value: string): void
   /** Walk from the root down to `path`, listing and expanding each level
    *  that is not already expanded, then select the target (revealTarget)
    *  and expand it too — arriving somewhere shows you what is there, so
@@ -264,6 +281,12 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   const [watchMode, setWatchMode] = createSignal<'watching' | 'polling' | null>(null)
   const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
   const [watchFailed, setWatchFailed] = createSignal<string | null>(null)
+  /** The panel's name filter (nocx-708q.2): the one string that narrows the
+   *  tree. Renderer-side over the rows the store already holds — typing
+   *  issues no request, so it can neither churn the watch set nor race a
+   *  reveal walk. Deliberately NOT reset by `dispose`, which is what makes
+   *  it survive a sidebar view switch. */
+  const [filter, setFilter] = createSignal('')
   /** The path the last completed reveal selected (see the interface doc).
    *  Reset on every re-scope and dispose — a selection from a previous
    *  machine must not linger. */
@@ -1282,6 +1305,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     origin,
     root,
     rows,
+    filter,
+    setFilter,
     rescope,
     toggle,
     revealPath,

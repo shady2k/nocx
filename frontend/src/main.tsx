@@ -58,6 +58,8 @@ import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
+import { downloadSurfaceFor } from './files/download-surface'
+import { downloadOperations } from './files/download-operations'
 import { createOperationsModel } from './operations/operations'
 import { createOperationsView } from './operations/operations-view'
 import { createGitView } from './git/git-view'
@@ -477,19 +479,28 @@ async function main() {
   // state and two stores would each mint a row for every transfer the other
   // started. Without this the panel's Upload action would be dead code.
   const uploadSurface = uploadSurfaceFor(dispatcher)
+  // The download surface (nocx-9le.8.3), resolved the same way and for the
+  // same reason: one store per dispatcher, because a transfer has one state.
+  // Without this the panel's Download item would be dead code.
+  const downloadSurface = downloadSurfaceFor(dispatcher)
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
     clipboard,
     activeOrigin,
     upload: uploadSurface,
+    download: downloadSurface,
   })
 
-  // Everything running on somebody's behalf, in one list (nocx-hbdw4). The
-  // upload store is read as operations rather than being the list itself:
-  // download has no panel of its own and joins by adding a source here, and
-  // nothing else in the view changes when it does.
-  const operations = createOperationsModel([uploadOperations(uploadSurface.store)])
+  // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
+  // store is read as operations rather than being the list itself, which is
+  // what made download a one-line ADDITION here: it has no panel of its own,
+  // it joins as a second source, and nothing in the model, the indicator or
+  // the row changed to receive it.
+  const operations = createOperationsModel([
+    uploadOperations(uploadSurface.store),
+    downloadOperations(downloadSurface.store),
+  ])
   const operationsView = createOperationsView(operations)
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────

@@ -31,6 +31,10 @@ import { createUploadFlow, type UploadSource } from './upload-flow'
 import { createUploadStore } from './upload-store'
 import { fakeUploadServices } from './upload-fixtures'
 import type { UploadSurface } from './upload-surface'
+import { createDownloadFlow } from './download-flow'
+import { createDownloadStore } from './download-store'
+import { downloadResultFixture, fakeDownloadServices, fakeSaver } from './download-fixtures'
+import type { DownloadSurface } from './download-surface'
 
 /** A clipboard fake: the seam's contract is writeText rejects when the
  *  platform refused — tests that assert failure override it. */
@@ -130,6 +134,10 @@ const SSH_ORIGIN: ActiveOrigin = {
   cwdVerified: false,
   cwdFollow: true,
   host: 'srv-01',
+  // What terminal-content answers the activeOrigin capability with — the
+  // machine-name.ts string, derived once in the composition root so no
+  // surface builds a second spelling of one machine.
+  machine: 'alice@srv-01',
 }
 
 const liveHandles: SidebarHandle[] = []
@@ -138,7 +146,11 @@ async function mountApp(
   services: FilesPanelServices,
   clipboard?: ClipboardAccess,
   uploadDeps?: {
-    upload: UploadSurface
+    upload?: UploadSurface
+    /** The download surface, when the test is about the Download item.
+     *  Absent means the panel is not offered one, which is its own case:
+     *  no item, whatever the tab. */
+    download?: DownloadSurface
     pickSources?: () => Promise<UploadSource[]>
     /** "Are we inside the Wails webview" — jsdom is a browser, so the
      *  default is false and a desktop case must say so (nocx-9le.5.24). */
@@ -171,6 +183,7 @@ async function mountApp(
     activeOrigin,
     clipboard,
     upload: uploadDeps?.upload,
+    download: uploadDeps?.download,
     pickSources: uploadDeps?.pickSources,
     native: uploadDeps?.native,
   })
@@ -1336,5 +1349,340 @@ describe('uploading into the row you right-clicked', () => {
     rowMenuItem('Upload').click()
     await Promise.resolve()
     expect(app.services.uploads).toHaveLength(0)
+  })
+})
+
+// ── The Download item (nocx-9le.8.3) ──────────────────────────────────────
+//
+// What a person can do that they could not before: right-click a file on
+// the machine their tab is on, pick Download, and get the file — with the
+// transfer showing in the operations list, cancellable, wherever they are.
+// The backend and the wire landed in nocx-9le.8.1 and nothing reached them;
+// this is the half that does.
+//
+// THE ABSENCES ARE THE OTHER HALF, and they are tested in all four
+// combinations of tab kind and build rather than in the one that is easy to
+// reach. Absence is how the panel says a capability does not apply to a
+// machine — never a greyed-out row — and an untested absence is not a rule,
+// it is a coincidence that currently holds.
+describe('downloading a file from the tree', () => {
+  function downloadFixture() {
+    const services = fakeDownloadServices()
+    const store = createDownloadStore({ services })
+    const saver = fakeSaver()
+    const said: string[] = []
+    const flow = createDownloadFlow({
+      services,
+      store,
+      saver,
+      report: (m) => said.push(m),
+    })
+    const surface: DownloadSurface = { services, store, flow }
+    return { services, store, flow, saver, surface, said }
+  }
+
+  /** A root holding one file and one folder, so "only on a file" has
+   *  something to be false about. */
+  const oneFileOneFolder = () =>
+    fakeServices({
+      list: vi
+        .fn()
+        .mockImplementation((_b: string, path: string) =>
+          Promise.resolve(
+            path === '/'
+              ? listFixture('C:/', [
+                  entryFixture({ name: 'srv', path: '/srv', kind: 'dir' }),
+                  entryFixture({ name: 'notes.md', path: '/notes.md' }),
+                ])
+              : listFixture(`C:${path}`, []),
+          ),
+        ),
+    })
+
+  const menuLabels = () =>
+    [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-testid="files-context-menu"] [role="menuitem"]',
+      ),
+    ].map((i) => i.textContent ?? '')
+
+  function menuRow(label: string): HTMLElement {
+    const items = document.querySelectorAll<HTMLElement>(
+      '[data-testid="files-context-menu"] [role="menuitem"]',
+    )
+    for (const item of items) if ((item.textContent ?? '').includes(label)) return item
+    throw new Error(`no menu item named ${label}`)
+  }
+
+  /** Mount on a tab of the given kind, inside or outside the Wails window,
+   *  and open the menu on `notes.md`. Returns the fixture so a test can ask
+   *  what reached the wire. */
+  async function openMenuOn(
+    kind: 'local' | 'ssh',
+    native: boolean,
+    row = 'notes.md',
+    over: { download?: DownloadSurface } = {},
+  ) {
+    const d = over.download === undefined ? downloadFixture() : null
+    const surface = over.download ?? d!.surface
+    const app = await mountApp(oneFileOneFolder(), undefined, {
+      download: surface,
+      native: () => native,
+    })
+    if (kind === 'ssh') app.setActiveOrigin(SSH_ORIGIN)
+    await vi.waitFor(() => expect(rowNamed(app.panel, row)).not.toBeUndefined())
+    fireEvent.contextMenu(rowNamed(app.panel, row), { clientX: 10, clientY: 10 })
+    return { ...app, ...(d ?? {}) }
+  }
+
+  it('offers Download in a browser on an SSH tab', async () => {
+    await openMenuOn('ssh', false)
+    expect(menuLabels().some((l) => l.includes('Download'))).toBe(true)
+  })
+
+  it('offers Download in a browser on a LOCAL tab — the file is on the backend`s machine', async () => {
+    // The row that is easy to get wrong. "Local" names the BACKEND's
+    // machine; the person is in a browser somewhere else and cannot reach
+    // those bytes any other way. Getting this wrong is what the upload rule
+    // did before nocx-9le.5.24 corrected it.
+    await openMenuOn('local', false)
+    expect(menuLabels().some((l) => l.includes('Download'))).toBe(true)
+  })
+
+  it('offers Download in the Wails window on an SSH tab', async () => {
+    await openMenuOn('ssh', true)
+    expect(menuLabels().some((l) => l.includes('Download'))).toBe(true)
+  })
+
+  it('offers NO Download in the Wails window on a local tab, and Show in Finder instead', async () => {
+    // The one combination where the file is already on the disk the window
+    // is running from. The item is ABSENT, not disabled: a greyed-out
+    // Download would be a promise the product cannot keep, and the action
+    // that DOES apply to that machine is in the same menu.
+    await openMenuOn('local', true)
+    expect(menuLabels().some((l) => l.includes('Download'))).toBe(false)
+    expect(menuLabels().some((l) => l.includes('Show in Finder'))).toBe(true)
+  })
+
+  it('offers no Download on a FOLDER, on a tab where a file would have one', async () => {
+    // A directory download is a second thing nobody has specified — an
+    // archive, a recursive walk, a question about symlinks.
+    await openMenuOn('ssh', false, 'srv')
+    expect(menuLabels().some((l) => l.includes('Download'))).toBe(false)
+  })
+
+  it('offers no Download when the panel was given no download surface', async () => {
+    // An item that reaches nothing is worse than no item.
+    const app = await mountApp(oneFileOneFolder(), undefined, { native: () => false })
+    app.setActiveOrigin(SSH_ORIGIN)
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'notes.md')).not.toBeUndefined())
+    fireEvent.contextMenu(rowNamed(app.panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    expect(menuLabels().some((l) => l.includes('Download'))).toBe(false)
+  })
+
+  it('picking it names the file on the wire and hands the browser the URL', async () => {
+    const app = await openMenuOn('ssh', false)
+    app.services!.nextResult.push(downloadResultFixture({ name: 'notes.md', size: 12 }))
+    menuRow('Download').click()
+
+    await vi.waitFor(() => expect(app.services!.downloads).toHaveLength(1))
+    expect(app.services!.downloads[0]).toEqual({ bindingId: 'b1', path: '/notes.md' })
+    // The renderer named no destination — it could not, and the saver was
+    // handed the URL the backend minted.
+    await vi.waitFor(() => expect(app.saver!.saved).toHaveLength(1))
+    expect(app.saver!.saved[0]).toContain('/download/')
+  })
+
+  it('records WHICH MACHINE the file came from, off the origin the panel follows', async () => {
+    // The operations list is global, so the row is read out of the context
+    // of the tab that started the work. The panel does not derive the
+    // string — machine-name.ts already answered it in the composition root
+    // and it rides the origin — and it must not reach the WIRE, which
+    // already knows which host a binding names.
+    const app = await openMenuOn('ssh', false)
+    app.services!.nextResult.push(downloadResultFixture({ name: 'notes.md', size: 12 }))
+    menuRow('Download').click()
+
+    await vi.waitFor(() => expect(app.store!.transfers()).toHaveLength(1))
+    expect(app.store!.transfers()[0].machine).toBe('alice@srv-01')
+    expect(app.services!.downloads[0]).toEqual({ bindingId: 'b1', path: '/notes.md' })
+  })
+
+  it('the transfer appears in the download store, which is what the operations list reads', async () => {
+    const app = await openMenuOn('ssh', false)
+    app.services!.nextResult.push(downloadResultFixture({ name: 'notes.md', size: 12 }))
+    menuRow('Download').click()
+
+    await vi.waitFor(() => expect(app.store!.transfers()).toHaveLength(1))
+    expect(app.store!.transfers()[0]).toMatchObject({
+      name: 'notes.md',
+      sourcePath: '/notes.md',
+      size: 12,
+      phase: 'running',
+    })
+  })
+
+  it('a refused download is reported and leaves no half-started row', async () => {
+    const app = await openMenuOn('ssh', false)
+    // Nothing queued: the fake rejects, the way a closed binding does.
+    menuRow('Download').click()
+    await vi.waitFor(() => expect(app.said!).toHaveLength(1))
+    expect(app.said![0]).toContain('Could not download /notes.md')
+    expect(app.store!.transfers()).toEqual([])
+  })
+})
+
+// ── The filter (nocx-708q.2) ──────────────────────────────────────────────
+//
+// The Files panel had no filter while Ports, Git, Settings and quick-connect
+// all had one, and the file-manager design put a name filter in scope. This
+// is the second panel to ship without the filter its design promised
+// (nocx-52by was the first), so what these assert is not only that it
+// filters but that it filters the way Git's does — and the one property
+// that separates a filter from a new listing.
+describe('filtering the tree by name', () => {
+  /** A root with two folders and a file, where each folder holds a file. It
+   *  takes a nested match to tell "narrows" from "collapses". */
+  const nestedTree = () =>
+    fakeServices({
+      list: vi
+        .fn()
+        .mockImplementation((_b: string, path: string) =>
+          Promise.resolve(
+            path === '/'
+              ? listFixture('C:/', [
+                  entryFixture({ name: 'src', path: '/src', kind: 'dir' }),
+                  entryFixture({ name: 'docs', path: '/docs', kind: 'dir' }),
+                  entryFixture({ name: 'notes.md', path: '/notes.md' }),
+                ])
+              : path === '/src'
+                ? listFixture('C:/src', [
+                    entryFixture({ name: 'button.tsx', path: '/src/button.tsx' }),
+                  ])
+                : listFixture(`C:${path}`, []),
+          ),
+        ),
+    })
+
+  const box = (panel: HTMLElement): HTMLInputElement => {
+    const el = panel.querySelector<HTMLInputElement>(
+      '[data-testid="files-filter"] .ui-search-field__input',
+    )
+    if (!el) throw new Error('no filter field')
+    return el
+  }
+
+  const shown = (panel: HTMLElement): string[] =>
+    rowsOf(panel).map((r) => r.textContent?.trim() ?? '')
+
+  async function mountWithTree() {
+    const app = await mountApp(nestedTree())
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'notes.md')).not.toBeUndefined())
+    return app
+  }
+
+  it('is the kit`s SearchField, not a hand-rolled input', () => {
+    // A surface may place a kit component and may never draw its own. The
+    // identity class is what says which one is here.
+    return mountWithTree().then(({ panel }) => {
+      const field = panel.querySelector('[data-testid="files-filter"] .ui-search-field')
+      expect(field).not.toBeNull()
+      expect(box(panel).getAttribute('aria-label')).toBe('Filter files by name')
+    })
+  })
+
+  it('narrows the rows to the names that match', async () => {
+    const { panel } = await mountWithTree()
+    expect(shown(panel)).toHaveLength(3)
+    fireEvent.input(box(panel), { target: { value: 'notes' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(1))
+    expect(shown(panel)[0]).toContain('notes.md')
+  })
+
+  it('DOES NOT COLLAPSE what the person expanded, and shows the match under it', async () => {
+    // The property that makes this a filter. A filter that collapsed the
+    // tree and re-expanded the matches would throw away the person's own
+    // work of opening four levels.
+    const { panel } = await mountWithTree()
+    rowNamed(panel, 'src').click()
+    await vi.waitFor(() => expect(rowNamed(panel, 'button.tsx')).not.toBeUndefined())
+
+    fireEvent.input(box(panel), { target: { value: 'button' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(2))
+    // The match, and the folder it is in — an indented row with no parent
+    // above it is a lie about where the file lives.
+    expect(shown(panel)[0]).toContain('src')
+    expect(shown(panel)[1]).toContain('button.tsx')
+    // Still expanded, because nothing wrote to the store.
+    expect(
+      rowNamed(panel, 'src').querySelector('[aria-expanded]')?.getAttribute('aria-expanded'),
+    ).toBe('true')
+  })
+
+  it('clearing RESTORES the view rather than resetting it', async () => {
+    const { panel } = await mountWithTree()
+    rowNamed(panel, 'src').click()
+    await vi.waitFor(() => expect(rowNamed(panel, 'button.tsx')).not.toBeUndefined())
+    const before = shown(panel)
+
+    fireEvent.input(box(panel), { target: { value: 'button' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(2))
+    fireEvent.input(box(panel), { target: { value: '' } })
+
+    // Exactly what was there: the same rows, in the same order, with src
+    // still open. A re-listing would have to re-fetch and would lose it.
+    await vi.waitFor(() => expect(shown(panel)).toEqual(before))
+  })
+
+  it('Escape drops the filter, the way the Git panel`s does', async () => {
+    const { panel } = await mountWithTree()
+    fireEvent.input(box(panel), { target: { value: 'notes' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(1))
+    fireEvent.keyDown(box(panel), { key: 'Escape' })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(3))
+  })
+
+  it('a filter that matches nothing is a state with a way out, never a blank tree', async () => {
+    const { panel } = await mountWithTree()
+    fireEvent.input(box(panel), { target: { value: 'zzzz' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(0))
+
+    const clear = panel.querySelector<HTMLElement>('[data-testid="files-filter-clear"]')
+    expect(clear).not.toBeNull()
+    clear!.click()
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(3))
+  })
+
+  it('the Names/Contents toggle offers Contents disabled AND says why', async () => {
+    // A disabled control that does not say why is a dead control, and it
+    // teaches people the panel is broken. The design allows Contents to
+    // ship unbuilt; it does not allow it to ship mute.
+    const { panel } = await mountWithTree()
+    const segments = [
+      ...panel.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="files-filter"] .ui-segmented-control__option',
+      ),
+    ]
+    expect(segments.map((s) => s.textContent)).toEqual(['Names', 'Contents'])
+    const [names, contents] = segments
+    expect(names.disabled).toBe(false)
+    expect(names.getAttribute('aria-checked')).toBe('true')
+    expect(contents.disabled).toBe(true)
+    expect(contents.title).toContain('not built yet')
+  })
+
+  it('the filter survives the panel being swapped out and back', async () => {
+    // It lives in the store, the way the Git panel's does: the panel
+    // unmounts whenever another sidebar view is in front, and a filter that
+    // evaporated on a glance at Ports would be a control nobody can rely on.
+    const { panel, bar } = await mountWithTree()
+    fireEvent.input(box(panel), { target: { value: 'notes' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(1))
+
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    await vi.waitFor(() => expect(box(panel).value).toBe('notes'))
   })
 })

@@ -10,26 +10,29 @@
  *
  * The words are the WIRE's, not a second spelling of them. `written`,
  * `skipped`, `cancelled` and `failed` are files.uploadDone's own outcome
- * enum, and `running`/`unsettled` are the two states a transfer can be in
- * before one of those arrives. Passing them through untranslated is what
- * keeps a mapping layer — and the defects that live in one — from existing
- * at all.
+ * enum; `sent` is files.downloadDone's word for the same success, and it is
+ * carried rather than folded into `written` for the reason the whole rule
+ * exists — the moment one of these is translated on the way in, there are
+ * two vocabularies and a table between them to get wrong. `cancelled` and
+ * `failed` are spelt identically by both directions and so are ONE member
+ * each, not a coincidence to be split. `running`/`unsettled` are the two
+ * states a transfer can be in before an outcome arrives.
  */
 
 /**
  * What kind of work this is.
  *
- * One member today, and the type exists so the second is an ADDITION.
- * Download (nocx-9le.8) joins by adding a member here and a glyph in
- * `operation-row.tsx`'s table; nothing else in the indicator, the model or
- * the row switches on kind, so nothing else has to change. What is
+ * Two members, and the second cost exactly what the first one's comment
+ * predicted: download (nocx-9le.8.3) joined by adding a member here and a
+ * glyph in `operation-row.tsx`'s table, and nothing in the indicator, the
+ * model or the row switches on kind, so nothing else changed. What is
  * deliberately NOT here is a framework for operations that do not exist —
  * no priorities, no queues, no retry policy.
  */
-export type OperationKind = 'upload'
+export type OperationKind = 'upload' | 'download'
 
 /**
- * Where an operation is. Four of the six values are terminal, and two are
+ * Where an operation is. Five of the seven values are terminal, and two are
  * not.
  *
  * `unsettled` is the renderer saying it does not know: its own half of the
@@ -41,7 +44,7 @@ export type OperationKind = 'upload'
  * costs something).
  */
 export type OperationPhase =
-  'running' | 'unsettled' | 'written' | 'skipped' | 'cancelled' | 'failed'
+  'running' | 'unsettled' | 'written' | 'sent' | 'skipped' | 'cancelled' | 'failed'
 
 /** The values that mean nothing more can happen. Exported because a surface
  *  that labels an outcome needs the CLOSED set of outcomes; a second

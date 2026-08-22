@@ -185,6 +185,16 @@ func TestOpenParamsRejectsEnhanced(t *testing.T) {
 	}
 }
 
+func TestOpenParamsAcceptsOrdinaryLocalCwd(t *testing.T) {
+	params, err := decodeOpenParams([]byte(`{"cols":80,"rows":24,"cwd":"/workspace"}`))
+	if err != nil {
+		t.Fatalf("decodeOpenParams cwd: %v", err)
+	}
+	if params.Cwd != "/workspace" {
+		t.Fatalf("cwd = %q, want /workspace", params.Cwd)
+	}
+}
+
 func TestWSServer_StartStop(t *testing.T) {
 	sess := newRegWithStub(log.NewSlogAdapter(nil))
 	ws := NewWSServer(log.NewSlogAdapter(nil), sess)

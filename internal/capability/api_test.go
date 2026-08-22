@@ -38,6 +38,9 @@ func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
+		// No binding store: a secret variable resolves to nothing, which is
+		// what a build wired without one does.
+		nil,
 	)
 }
 
@@ -52,6 +55,7 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
+		nil,
 	)
 
 	var got string
@@ -87,6 +91,7 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(nil),
+		nil,
 	)
 	if err := none.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
 		where, err := svc.DefaultRoot()
@@ -155,7 +160,7 @@ func TestAPICollectionService_IsUselessOutsideItsOperation(t *testing.T) {
 	if err := escaped.WriteRequest(handle, "ping.json", apicoll.Request{}); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("WriteRequest outside the operation = %v, want ErrOperationInactive", err)
 	}
-	if _, err := escaped.Snapshot(handle, "ping.json", ""); !errors.Is(err, capability.ErrOperationInactive) {
+	if _, err := escaped.Snapshot(context.Background(), handle, "ping.json", ""); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("Snapshot outside the operation = %v, want ErrOperationInactive", err)
 	}
 	if _, err := escaped.Create("later"); !errors.Is(err, capability.ErrOperationInactive) {
@@ -211,7 +216,7 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 		if err := svc.WriteRequest(h, "ping.json", apicoll.Request{}); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("WriteRequest after Close = %v, want ErrUnknownHandle", err)
 		}
-		if _, err := svc.Snapshot(h, "ping.json", ""); !errors.Is(err, apicoll.ErrUnknownHandle) {
+		if _, err := svc.Snapshot(context.Background(), h, "ping.json", ""); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("Snapshot after Close = %v, want ErrUnknownHandle", err)
 		}
 		if err := svc.Close(h); !errors.Is(err, apicoll.ErrUnknownHandle) {
@@ -497,7 +502,7 @@ func TestAPICollectionService_SnapshotMovesTheAddressAndTheRouteTogether(t *test
 				if err != nil {
 					return err
 				}
-				in, err := svc.Snapshot(h, "users.json", tc.env)
+				in, err := svc.Snapshot(context.Background(), h, "users.json", tc.env)
 				if err != nil {
 					return err
 				}
@@ -530,7 +535,7 @@ func TestAPICollectionService_SnapshotWithNoEnvironmentIsTheDirectRoute(t *testi
 		if err != nil {
 			return err
 		}
-		in, err := svc.Snapshot(h, "ping.json", "")
+		in, err := svc.Snapshot(context.Background(), h, "ping.json", "")
 		if err != nil {
 			return err
 		}
@@ -558,7 +563,7 @@ func TestAPICollectionService_SnapshotBlocksOnAnUnresolvedVariable(t *testing.T)
 		if err != nil {
 			return err
 		}
-		in, snapErr := svc.Snapshot(h, "users.json", "environments/broken.json")
+		in, snapErr := svc.Snapshot(context.Background(), h, "users.json", "environments/broken.json")
 		if !errors.Is(snapErr, apicoll.ErrUnresolvedVariable) {
 			t.Fatalf("Snapshot = (%+v, %v), want ErrUnresolvedVariable", in, snapErr)
 		}
@@ -593,7 +598,7 @@ func TestAPICollectionService_SnapshotRefusesAnEnvironmentPathOutsideTheCollecti
 				if err != nil {
 					return err
 				}
-				if in, snapErr := svc.Snapshot(h, "users.json", rel); snapErr == nil {
+				if in, snapErr := svc.Snapshot(context.Background(), h, "users.json", rel); snapErr == nil {
 					t.Fatalf("Snapshot with envRelPath %q succeeded: %+v", rel, in)
 				}
 				return nil

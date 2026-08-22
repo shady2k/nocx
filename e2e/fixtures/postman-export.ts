@@ -70,3 +70,68 @@ export function postmanExport(baseUrl: string): string {
     2,
   )
 }
+
+// ── The Telegram shape: a token in the PATH (epic nocx-ew3uv) ─────────────
+
+/**
+ * The bot token this export carries as a SECRET COLLECTION VARIABLE.
+ *
+ * Distinct from POSTMAN_BEARER_TOKEN above so a spec asserting the absence
+ * of one cannot pass because the other is missing. Long and distinctive for
+ * the same reason: a substring search must not match it by accident, and a
+ * partial leak is still a hit.
+ */
+export const TELEGRAM_BOT_TOKEN = 'e2e-telegram-bot-token-77a1c39fbe0284d5619c'
+
+/** What the collection is called, and therefore the folder. */
+export const TELEGRAM_COLLECTION_NAME = 'telegram-api'
+
+/** The item name — the row a person clicks in the tree. */
+export const TELEGRAM_REQUEST_NAME = 'send message'
+
+/**
+ * A Postman export whose URL puts a variable in the PATH.
+ *
+ * `{{baseUrl}}/bot{{token}}/sendMessage` is Telegram's own shape and the one
+ * that names the gap this epic closes: the token is a path segment, so it
+ * cannot ride a header, cannot be stripped on a redirect, and — before the
+ * second lookup existed — could only be sent by typing it into a file that
+ * goes into git.
+ *
+ * `type: "secret"` on the collection variable is what makes the importer put
+ * the VALUE in the vault and leave the NAME in the environment file. That is
+ * a product path a person takes, which is why this spec mints its binding
+ * through it rather than seeding one over the control plane.
+ */
+export function telegramExport(baseUrl: string): string {
+  return JSON.stringify(
+    {
+      info: {
+        _postman_id: 'd41f9c02-5b7a-4e88-91cf-2a6b7e5d0c31',
+        name: TELEGRAM_COLLECTION_NAME,
+        schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+      },
+      variable: [
+        { key: 'baseUrl', value: baseUrl, type: 'string' },
+        { key: 'token', value: TELEGRAM_BOT_TOKEN, type: 'secret' },
+      ],
+      item: [
+        {
+          name: TELEGRAM_REQUEST_NAME,
+          request: {
+            method: 'GET',
+            header: [],
+            url: {
+              raw: '{{baseUrl}}/bot{{token}}/sendMessage',
+              host: ['{{baseUrl}}'],
+              path: ['bot{{token}}', 'sendMessage'],
+            },
+          },
+          response: [],
+        },
+      ],
+    },
+    null,
+    2,
+  )
+}

@@ -22,7 +22,7 @@
 // `secretVars`, the value field goes away with the value, and the row says
 // where the value has to come from instead of pretending it can be typed.
 
-import { For, Show } from 'solid-js'
+import { For, Show, createSignal } from 'solid-js'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Caption } from '../ui/caption'
@@ -127,6 +127,87 @@ export interface EnvironmentViewProps {
    *  profile store, and then the choice is not offered: a picker over
    *  nothing is a control that governs nothing. */
   connections: readonly ApiConnection[]
+  /**
+   * GIVE A SECRET VARIABLE ITS VALUE — the write that did not exist.
+   *
+   * A row marked secret says its value lives outside the file, and until
+   * this there was no way to put one there: only an IMPORT could mint a
+   * binding, so a variable a person declared secret in this editor stayed
+   * unresolved for ever and the send it belonged to could never go out.
+   *
+   * The value goes straight out and is never held here: it is typed, sent
+   * and dropped, so this surface never has a signal a credential sits in.
+   *
+   * ABSENT rather than rejecting where this build has no binding store —
+   * the same rule the folder pickers keep, and the same reason: a control
+   * that fails when pressed is worse than one that was never drawn.
+   */
+  onBindSecret?: (variable: string, value: string) => Promise<void>
+}
+
+/**
+ * The one field in this product a collection's secret value is typed into.
+ *
+ * IT KEEPS NOTHING. The value lives in a signal for exactly as long as the
+ * person is typing it and is cleared the moment the write is accepted —
+ * there is no draft of it, nothing writes it to the environment rows, and
+ * the environment save path never sees it. That is what makes "no field in
+ * this file it could be typed into" still true: this field is not part of
+ * the file.
+ *
+ * `type="password"` because the value is a credential on a screen somebody
+ * else may be looking at, and it clears on success rather than showing what
+ * was stored: the backend answers nothing back, and a field still holding
+ * the value afterwards would be this surface keeping a copy the backend
+ * deliberately did not return.
+ */
+function SecretValueField(props: {
+  index: number
+  variable: string
+  onBind: (value: string) => Promise<void> | undefined
+}) {
+  const [value, setValue] = createSignal('')
+  const [busy, setBusy] = createSignal(false)
+  const [refused, setRefused] = createSignal('')
+
+  const bind = (): void => {
+    const typed = value()
+    if (typed === '' || busy()) return
+    setBusy(true)
+    setRefused('')
+    void Promise.resolve(props.onBind(typed))
+      .then(() => {
+        // Cleared on success, and only on success: a refusal that emptied
+        // the field would cost the person what they typed.
+        setValue('')
+      })
+      .catch((err: unknown) => {
+        setRefused(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <div class="api-environments__secret">
+      <TextField
+        id={`api-environment-var-secret-${props.index}`}
+        ariaLabel={`Variable ${props.index + 1} value, stored in the vault`}
+        type="password"
+        placeholder="Paste the value — it goes to the vault, not to the file"
+        value={value()}
+        error={refused() !== '' ? refused() : undefined}
+        onInput={setValue}
+      />
+      <Button
+        variant="default"
+        disabled={value() === '' || busy() || props.variable === ''}
+        title={`Store the value for ${props.variable} in the vault`}
+        onClick={bind}
+      >
+        Store
+      </Button>
+    </div>
+  )
 }
 
 export function EnvironmentView(props: EnvironmentViewProps) {
@@ -328,10 +409,21 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                     <Show
                       when={!row().secret}
                       fallback={
-                        <p class="api-environments__note">
-                          Bound in the vault — there is no field in this file it could be typed
-                          into.
-                        </p>
+                        <Show
+                          when={props.onBindSecret && row().name.trim() !== ''}
+                          fallback={
+                            <p class="api-environments__note">
+                              Bound in the vault — there is no field in this file it could be typed
+                              into.
+                            </p>
+                          }
+                        >
+                          <SecretValueField
+                            index={i}
+                            variable={row().name.trim()}
+                            onBind={(value) => props.onBindSecret?.(row().name.trim(), value)}
+                          />
+                        </Show>
                       }
                     >
                       <TextField

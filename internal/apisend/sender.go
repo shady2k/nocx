@@ -369,6 +369,19 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 	// drop exactly those names on an origin change, and the tracer rides it
 	// so the route can report the phases httptrace cannot see.
 	ctx = httppolicy.WithCustomHeaderNames(req.Context(), custom)
+	// AND WHETHER A SECRET IS IN THE ADDRESS ITSELF, which the same rule
+	// answers differently: a header can be dropped on a crossing, a path
+	// segment cannot, so the hop is refused instead (httppolicy's
+	// CheckRedirect says the rest). This package is the only one that can
+	// know — it is the only one that substitutes a vault-held value into an
+	// address — so it is the one that marks the request.
+	//
+	// The test is `elide` itself rather than a second search: one owner of
+	// "where in this text are the placed values", asked here for whether
+	// there are any at all.
+	if raw := req.URL.String(); elide(raw, used) != raw {
+		ctx = httppolicy.WithSecretInURL(ctx)
+	}
 	ctx = context.WithValue(ctx, traceKey{}, tr)
 	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.hooks()))
 
@@ -376,7 +389,7 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 	resp, err := cl.Do(req)
 	if err != nil {
 		return settled(sent, tr, time.Since(start),
-			phaseOf(err, tr, PhaseExchange), sendError(req.Method, req.URL, err)), nil
+			phaseOf(err, tr, PhaseExchange), sendError(req.Method, req.URL, used, err)), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -387,7 +400,7 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 		// phaseOf is the one place that decides which.
 		return settled(sent, tr, time.Since(start), phaseOf(err, tr, PhaseExchange),
 			fmt.Errorf("%s: reading the response body of %s %s: %w",
-				component, req.Method, redact(req.URL), err)), nil
+				component, req.Method, redact(req.URL, used), err)), nil
 	}
 	total := time.Since(start)
 
@@ -806,24 +819,67 @@ func responseHeaders(h http.Header) []apicoll.Header {
 // undo the redaction; the cause is unwrapped and re-wrapped instead, which
 // keeps errors.Is reaching the real reason (a net.OpError, a TLS failure, a
 // cancelled context) and loses only the layer that leaked.
-func sendError(method string, u *url.URL, err error) error {
+func sendError(method string, u *url.URL, used []NamedSecret, err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) && ue.Err != nil {
 		err = ue.Err
 	}
-	return fmt.Errorf("%s: %s %s: %w", component, method, redact(u), err)
+	return fmt.Errorf("%s: %s %s: %w", component, method, redact(u, used), err)
 }
 
 // redact keeps a failure message from becoming the place a credential leaks:
 // userinfo and the query string are where a token most often rides a URL,
 // and an error is written to a log the user did not choose.
-func redact(u *url.URL) string {
+//
+// THE PATH IS NOT SAFE EITHER, and that is what `used` is for. A secret can
+// now be substituted anywhere text is sent, and the shape that names the gap
+// is Telegram's: the bot token IS a path segment, `/bot<TOKEN>/sendMessage`.
+// Clearing the query alone left that token in every failure message —
+// measured, not supposed: a send to a closed port produced
+// `apisend: GET http://…/botsk-live-…/sendMessage?…: connect: connection
+// refused`, and that string becomes Failure.Reason, crosses to the renderer
+// and reaches any log that prints it. So every placed value is elided by
+// name, with the same `⟦name⟧` placeholder the raw diagnostic uses (§11.2),
+// and one vocabulary spells an elided secret wherever one is elided.
+//
+// The query is STILL cleared wholesale on top of that. Eliding by value
+// covers what this package was told about; a query string can carry a
+// credential nobody declared — an API key a person typed straight into the
+// address — and that one was never ours to know about.
+func redact(u *url.URL, used []NamedSecret) string {
 	c := *u
 	c.User = nil
 	if c.RawQuery != "" {
 		c.RawQuery = "…"
 	}
-	return c.String()
+	return elide(c.String(), used)
+}
+
+// elide replaces every occurrence of a placed value with the placeholder
+// naming it. It is the same substitution segment() performs for the raw
+// text, done to a plain string: there are no offsets to keep here, only a
+// message that must not carry a credential.
+//
+// A value that has been percent-encoded on its way into the URL is NOT
+// found by this — url.URL.String() re-encodes what needs encoding — so the
+// escaped form is elided too, and both are looked for. A token that is
+// bytes-identical either way is elided once; the empty value matches
+// nothing, exactly as locate refuses it.
+func elide(s string, used []NamedSecret) string {
+	for _, secret := range used {
+		if secret.Value == "" {
+			continue
+		}
+		placeholder := "⟦" + secret.Name + "⟧"
+		s = strings.ReplaceAll(s, secret.Value, placeholder)
+		if escaped := url.QueryEscape(secret.Value); escaped != secret.Value {
+			s = strings.ReplaceAll(s, escaped, placeholder)
+		}
+		if escaped := url.PathEscape(secret.Value); escaped != secret.Value {
+			s = strings.ReplaceAll(s, escaped, placeholder)
+		}
+	}
+	return s
 }
 
 // traceKey carries the tracer on the request context.

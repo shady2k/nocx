@@ -22,6 +22,7 @@ import type { ApiCollectionsCreateResult } from '../generated/api.collections.cr
 import type { ApiCollectionsCloseResult } from '../generated/api.collections.close'
 import type { ApiEnvironmentReadResult } from '../generated/api.environment.read'
 import type { ApiEnvironmentWriteResult } from '../generated/api.environment.write'
+import type { ApiEnvironmentBindSecretResult } from '../generated/api.environment.bindSecret'
 import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
@@ -89,6 +90,33 @@ class ApiClient {
       handle,
       relPath,
       environment,
+    })
+  }
+
+  /** Give a secret variable its VALUE.
+   *
+   *  THE ONE METHOD ON THIS CLIENT THAT SENDS A CREDENTIAL. It goes one way:
+   *  the value into the vault, under the binding this collection and
+   *  environment own, while the environment FILE keeps only the name — there
+   *  is no field in that format a value could be written into (design §8).
+   *  Nothing echoes it back: the result is empty because the identifier for
+   *  stored credential material never leaves the backend (ADR-0011) and the
+   *  value came from here, so returning either would hand back the one thing
+   *  this method exists to take away.
+   *
+   *  Until this, only an IMPORT could mint a binding, so a variable a person
+   *  declared secret in the editor had no way to be given a value at all. */
+  bindSecret(
+    handle: string,
+    relPath: string,
+    variable: string,
+    value: string,
+  ): Promise<ApiEnvironmentBindSecretResult> {
+    return this.dispatcher.call<ApiEnvironmentBindSecretResult>('api.environment.bindSecret', {
+      handle,
+      relPath,
+      variable,
+      value,
     })
   }
 
@@ -314,6 +342,14 @@ export interface ApiWorkbenchServices {
     relPath: string,
     environment: ApiEnvironment,
   ): Promise<ApiEnvironmentWriteResult>
+  /** Give a secret variable its value — the one call that carries a
+   *  credential, and it carries it one way (ApiClient.bindSecret). */
+  bindSecret(
+    handle: string,
+    relPath: string,
+    variable: string,
+    value: string,
+  ): Promise<ApiEnvironmentBindSecretResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
   deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult>
@@ -412,6 +448,8 @@ export function createApiWorkbenchServices(
     readEnvironment: (handle, relPath) => client.readEnvironment(handle, relPath),
     writeEnvironment: (handle, relPath, environment) =>
       client.writeEnvironment(handle, relPath, environment),
+    bindSecret: (handle, relPath, variable, value) =>
+      client.bindSecret(handle, relPath, variable, value),
     deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),

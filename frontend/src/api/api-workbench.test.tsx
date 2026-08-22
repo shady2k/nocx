@@ -611,6 +611,31 @@ describe('a request goes out from the workbench', () => {
     expect(() => optionIn(runCards()[0], 'Body')).toThrow()
   })
 
+  it('a variable nothing bound is a run naming the variable, not a complaint about a URL', async () => {
+    // nocx-pgp9c.6, at the surface: the backend answers the unresolved
+    // reason at phase `compose`, and what a person reads is that sentence
+    // beside the request they wrote — never `"{{baseUrl}}/zen" is not an
+    // absolute URL`, which named neither the variable nor where to bind it.
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockResolvedValue(
+        failedSendFixture({
+          phase: 'compose',
+          reason: 'apicoll: the request uses a variable with no value: baseUrl (in the URL)',
+        }),
+      ),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('failed')
+    expect(card.textContent).toContain('the request could not be built')
+    expect(card.textContent).toContain('baseUrl')
+    expect(card.textContent).toContain('in the URL')
+    expect(card.textContent).not.toContain('is not an absolute URL')
+  })
+
   it('a stopped run is neither worded nor toned as a failure', async () => {
     const { bar } = await mountApp({
       sendRequest: vi.fn().mockResolvedValue(stoppedSendFixture()),

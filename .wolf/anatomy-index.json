@@ -1,0 +1,5191 @@
+{
+  "version": 1,
+  "meta": {
+    "lastScanned": "2026-08-22T19:13:57.359Z",
+    "fileCount": 526,
+    "hits": 0,
+    "misses": 0,
+    "renderedHash": "0dfe2545b1e6796cddfc1fdc31f102d04000091ebd04f23df8266db257d4d32b",
+    "storeUpdatedAt": "2026-08-22T19:13:57.362Z",
+    "rootHash": "9debf6c61355d7e2"
+  },
+  "files": {
+    "_bmad/_config/bmad-help.csv": {
+      "description": "",
+      "tokens": 2604,
+      "hash": "8e9eb34ad46f7f55",
+      "size": 9776,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.448Z",
+      "source": "scan"
+    },
+    "_bmad/_config/files-manifest.csv": {
+      "description": "",
+      "tokens": 10018,
+      "hash": "9d3f28161048c5b5",
+      "size": 37567,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.449Z",
+      "source": "scan"
+    },
+    "_bmad/_config/manifest.yaml": {
+      "description": "",
+      "tokens": 150,
+      "hash": "b0dbd98d57651ff7",
+      "size": 523,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.450Z",
+      "source": "scan"
+    },
+    "_bmad/_config/skill-manifest.csv": {
+      "description": "",
+      "tokens": 3190,
+      "hash": "201998503aa8b865",
+      "size": 11971,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.450Z",
+      "source": "scan"
+    },
+    "_bmad/bmm/module-help.csv": {
+      "description": "",
+      "tokens": 1863,
+      "hash": "ad4373d7e58a31aa",
+      "size": 6989,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.451Z",
+      "source": "scan"
+    },
+    "_bmad/config.toml": {
+      "description": "─────────────────────────────────────────────────────────────────",
+      "tokens": 940,
+      "hash": "efc2f4680dd6b473",
+      "size": 3568,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.451Z",
+      "source": "scan"
+    },
+    "_bmad/core/module-help.csv": {
+      "description": "",
+      "tokens": 775,
+      "hash": "e801caeb1bf64842",
+      "size": 2911,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.452Z",
+      "source": "scan"
+    },
+    "_bmad/custom/.gitignore": {
+      "description": "Git ignore rules",
+      "tokens": 4,
+      "hash": "973b03a33f142c22",
+      "size": 12,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.452Z",
+      "source": "scan"
+    },
+    "_bmad/custom/config.toml": {
+      "description": "Team / enterprise overrides for _bmad/config.toml.",
+      "tokens": 99,
+      "hash": "d00d0bb7e0e03a7e",
+      "size": 348,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.452Z",
+      "source": "scan"
+    },
+    "_bmad/scripts/memlog.py": {
+      "description": "memlog — an append-only memory log: LLM-optimal working memory for a skill.",
+      "tokens": 2619,
+      "hash": "3b00f82ca33dc422",
+      "size": 9187,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.453Z",
+      "source": "scan",
+      "symbols": [
+        {
+          "name": "now",
+          "kind": "fn",
+          "startLine": 81,
+          "endLine": 82,
+          "tokens": 20
+        },
+        {
+          "name": "resolve",
+          "kind": "fn",
+          "startLine": 85,
+          "endLine": 87,
+          "tokens": 58
+        },
+        {
+          "name": "split",
+          "kind": "fn",
+          "startLine": 90,
+          "endLine": 107,
+          "tokens": 235
+        },
+        {
+          "name": "render",
+          "kind": "fn",
+          "startLine": 110,
+          "endLine": 113,
+          "tokens": 81
+        },
+        {
+          "name": "touch",
+          "kind": "fn",
+          "startLine": 116,
+          "endLine": 119,
+          "tokens": 49
+        },
+        {
+          "name": "write_atomic",
+          "kind": "fn",
+          "startLine": 122,
+          "endLine": 129,
+          "tokens": 94
+        },
+        {
+          "name": "entry_count",
+          "kind": "fn",
+          "startLine": 132,
+          "endLine": 133,
+          "tokens": 30
+        },
+        {
+          "name": "ack",
+          "kind": "fn",
+          "startLine": 136,
+          "endLine": 142,
+          "tokens": 70
+        },
+        {
+          "name": "cmd_init",
+          "kind": "fn",
+          "startLine": 145,
+          "endLine": 161,
+          "tokens": 169
+        },
+        {
+          "name": "cmd_append",
+          "kind": "fn",
+          "startLine": 164,
+          "endLine": 177,
+          "tokens": 173
+        },
+        {
+          "name": "cmd_set",
+          "kind": "fn",
+          "startLine": 180,
+          "endLine": 187,
+          "tokens": 66
+        },
+        {
+          "name": "add_target",
+          "kind": "fn",
+          "startLine": 190,
+          "endLine": 194,
+          "tokens": 103
+        },
+        {
+          "name": "main",
+          "kind": "fn",
+          "startLine": 197,
+          "endLine": 220,
+          "tokens": 305
+        }
+      ],
+      "symbolSource": "ts",
+      "skeleton": "def now() -> str:\ndef resolve(args) -> Path:\ndef split(text: str) -> tuple[dict, str]:\ndef render(meta: dict, body: str) -> str:\ndef touch(meta: dict) -> None:\ndef write_atomic(path: Path, text: str) -> None:\ndef entry_count(body: str) -> int:\ndef ack(path: Path, body: str) -> None:\ndef cmd_init(args) -> int:\ndef cmd_append(args) -> int:\ndef cmd_set(args) -> int:\ndef add_target(sp) -> None:\ndef main(argv: list[str] | None = None) -> int:"
+    },
+    "_bmad/scripts/resolve_config.py": {
+      "description": "load_toml, deep_merge, extract_key, main",
+      "tokens": 1635,
+      "hash": "f41149160898aea8",
+      "size": 5722,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.454Z",
+      "source": "scan",
+      "symbols": [
+        {
+          "name": "load_toml",
+          "kind": "fn",
+          "startLine": 47,
+          "endLine": 70,
+          "tokens": 249
+        },
+        {
+          "name": "_detect_keyed_merge_field",
+          "kind": "fn",
+          "startLine": 73,
+          "endLine": 79,
+          "tokens": 81
+        },
+        {
+          "name": "_merge_by_key",
+          "kind": "fn",
+          "startLine": 82,
+          "endLine": 102,
+          "tokens": 200
+        },
+        {
+          "name": "_merge_arrays",
+          "kind": "fn",
+          "startLine": 105,
+          "endLine": 111,
+          "tokens": 99
+        },
+        {
+          "name": "deep_merge",
+          "kind": "fn",
+          "startLine": 114,
+          "endLine": 125,
+          "tokens": 134
+        },
+        {
+          "name": "extract_key",
+          "kind": "fn",
+          "startLine": 128,
+          "endLine": 136,
+          "tokens": 78
+        },
+        {
+          "name": "main",
+          "kind": "fn",
+          "startLine": 139,
+          "endLine": 174,
+          "tokens": 361
+        }
+      ],
+      "symbolSource": "ts"
+    },
+    "_bmad/scripts/resolve_customization.py": {
+      "description": "find_project_root, load_toml, deep_merge, extract_key + 2 more",
+      "tokens": 2371,
+      "hash": "23fb9040b08c7eb9",
+      "size": 8310,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:56.455Z",
+      "source": "scan",
+      "symbols": [
+        {
+          "name": "find_project_root",
+          "kind": "fn",
+          "startLine": 58,
+          "endLine": 66,
+          "tokens": 84
+        },
+        {
+          "name": "load_toml",
+          "kind": "fn",
+          "startLine": 69,
+          "endLine": 95,
+          "tokens": 290
+        },
+        {
+          "name": "_detect_keyed_merge_field",
+          "kind": "fn",
+          "startLine": 98,
+          "endLine": 112,
+          "tokens": 205
+        },
+        {
+          "name": "_merge_by_key",
+          "kind": "fn",
+          "startLine": 115,
+          "endLine": 138,
+          "tokens": 201
+        },
+        {
+          "name": "_merge_arrays",
+          "kind": "fn",
+          "startLine": 141,
+          "endLine": 149,
+          "tokens": 141
+        },
+        {
+          "name": "deep_merge",
+          "kind": "fn",
+          "startLine": 152,
+          "endLine": 168,
+          "tokens": 200
+        },
+        {
+          "name": "extract_key",
+          "kind": "fn",
+          "startLine": 171,
+          "endLine": 179,
+          "tokens": 78
+        },
+        {
+          "name": "write_json_stdout",
+          "kind": "fn",
+          "startLine": 182,
+          "endLine": 187,
+          "tokens": 90
+        },
+        {
+          "name": "main",
+          "kind": "fn",
+          "startLine": 190,
+          "endLine": 236,
+          "tokens": 472
+        }
+      ],
+      "symbolSource": "ts",
+      "skeleton": "def find_project_root(start: Path):\ndef load_toml(file_path: Path, required: bool = False) -> dict:\ndef _detect_keyed_merge_field(items):\ndef _merge_by_key(base, override, key_name):\ndef _merge_arrays(base, override):\ndef deep_merge(base, override):\ndef extract_key(data, dotted_key: str):\ndef write_json_stdout(output):\ndef main():"
+    },
+    ".beads/.gitignore": {
+      "description": "Git ignore rules",
+      "tokens": 609,
+      "hash": "0f30fc50e5edecc1",
+      "size": 2287,
+      "mtimeMs": 1786035911404.0454,
+      "updatedAt": "2026-08-22T19:13:56.455Z",
+      "source": "scan"
+    },
+    ".beads/.local_version": {
+      "description": "",
+      "tokens": 2,
+      "hash": "1575e1af4a95f12f",
+      "size": 6,
+      "mtimeMs": 1784817853000,
+      "updatedAt": "2026-08-22T19:13:56.456Z",
+      "source": "scan"
+    },
+    ".beads/backup/0331ebd4iui96h904bb9gff7qf9ouduf.darc": {
+      "description": "",
+      "tokens": 157591,
+      "hash": "030d22dafa87c1dd",
+      "size": 599089,
+      "mtimeMs": 1787084546412.3242,
+      "updatedAt": "2026-08-22T19:13:56.468Z",
+      "source": "scan"
+    },
+    ".beads/backup/0b702flnojsl5t2k5vaa34jtlum2qp08.darc": {
+      "description": "",
+      "tokens": 10725,
+      "hash": "e030ce74858aad87",
+      "size": 40856,
+      "mtimeMs": 1787324244771.7793,
+      "updatedAt": "2026-08-22T19:13:56.469Z",
+      "source": "scan"
+    },
+    ".beads/backup/0hbcp3kdnbme0ib5i1e08or1ivkktkg6.darc": {
+      "description": "",
+      "tokens": 133645,
+      "hash": "bb0239a9c8dcc8d7",
+      "size": 505654,
+      "mtimeMs": 1787066876938.981,
+      "updatedAt": "2026-08-22T19:13:56.476Z",
+      "source": "scan"
+    },
+    ".beads/backup/0lhssqv4i82usv0uj41b9jjtkea5jo8a.darc": {
+      "description": "",
+      "tokens": 27997,
+      "hash": "892c107efd99aef2",
+      "size": 106945,
+      "mtimeMs": 1787175161653.881,
+      "updatedAt": "2026-08-22T19:13:56.478Z",
+      "source": "scan"
+    },
+    ".beads/backup/0ontq0o0buv14e6svmaq4qsl9n50ms46.darc": {
+      "description": "",
+      "tokens": 134415,
+      "hash": "e85801b39336cefa",
+      "size": 507855,
+      "mtimeMs": 1787305592473.4202,
+      "updatedAt": "2026-08-22T19:13:56.481Z",
+      "source": "scan"
+    },
+    ".beads/backup/0qo786u1p32hqg0j2rmu5bpsikjnlg22.darc": {
+      "description": "",
+      "tokens": 10217,
+      "hash": "ddc6e44524696950",
+      "size": 38844,
+      "mtimeMs": 1787298931789.9753,
+      "updatedAt": "2026-08-22T19:13:56.482Z",
+      "source": "scan"
+    },
+    ".beads/backup/13q6g7lp6jt1e0ggi4e2s0ep5225vnuc.darc": {
+      "description": "",
+      "tokens": 28875,
+      "hash": "ccd2d3da79b0ecf8",
+      "size": 109763,
+      "mtimeMs": 1787172822881.0603,
+      "updatedAt": "2026-08-22T19:13:56.485Z",
+      "source": "scan"
+    },
+    ".beads/backup/15vj1se7f6saes04gt7g0it49guudoqv.darc": {
+      "description": "",
+      "tokens": 21312,
+      "hash": "a9604ac07869f140",
+      "size": 81094,
+      "mtimeMs": 1787423040830.6016,
+      "updatedAt": "2026-08-22T19:13:56.486Z",
+      "source": "scan"
+    },
+    ".beads/backup/17ri5n9kbt3js082aa3bj4jm2eo21ji4.darc": {
+      "description": "",
+      "tokens": 17963,
+      "hash": "451bf49fa51b1f37",
+      "size": 68175,
+      "mtimeMs": 1787269897931.5876,
+      "updatedAt": "2026-08-22T19:13:56.487Z",
+      "source": "scan"
+    },
+    ".beads/backup/1bdvk7g1kr237jm8c9dmr93qeeat4j6g.darc": {
+      "description": "",
+      "tokens": 12777,
+      "hash": "4437c9a476fdc7ae",
+      "size": 48450,
+      "mtimeMs": 1787241418342.2646,
+      "updatedAt": "2026-08-22T19:13:56.488Z",
+      "source": "scan"
+    },
+    ".beads/backup/1k71qi67fpg28t6d3rgum4e9d4r0epc0.darc": {
+      "description": "",
+      "tokens": 27905,
+      "hash": "0146ee337a523b2f",
+      "size": 106484,
+      "mtimeMs": 1787161561305.1384,
+      "updatedAt": "2026-08-22T19:13:56.490Z",
+      "source": "scan"
+    },
+    ".beads/backup/217u8epu3vmnffv8knhe6kietrrma37s.darc": {
+      "description": "",
+      "tokens": 107632,
+      "hash": "64f906164fc2af8e",
+      "size": 407727,
+      "mtimeMs": 1787382513103.5168,
+      "updatedAt": "2026-08-22T19:13:56.493Z",
+      "source": "scan"
+    },
+    ".beads/backup/2a4ag0s9pfu31b6a6e5uth5m8ul474kr.darc": {
+      "description": "",
+      "tokens": 160905,
+      "hash": "40f116d441ccc903",
+      "size": 611373,
+      "mtimeMs": 1787319709088.4133,
+      "updatedAt": "2026-08-22T19:13:56.498Z",
+      "source": "scan"
+    },
+    ".beads/backup/2gbc4f4vmkp7kh0d0ed9545oj8t0srdj.darc": {
+      "description": "",
+      "tokens": 43304,
+      "hash": "78a9015ebdbd6466",
+      "size": 164751,
+      "mtimeMs": 1787258189332.883,
+      "updatedAt": "2026-08-22T19:13:56.500Z",
+      "source": "scan"
+    },
+    ".beads/backup/2npdhcfhu25b27ojtase2hrppmnuecbl.darc": {
+      "description": "",
+      "tokens": 129865,
+      "hash": "b3c77a5d7522b45f",
+      "size": 494129,
+      "mtimeMs": 1787415558394.758,
+      "updatedAt": "2026-08-22T19:13:56.504Z",
+      "source": "scan"
+    },
+    ".beads/backup/2osncht64imfmkvu620843ipo2r3rtku.darc": {
+      "description": "",
+      "tokens": 152940,
+      "hash": "4a66513f10ece72d",
+      "size": 579992,
+      "mtimeMs": 1787395522472.0508,
+      "updatedAt": "2026-08-22T19:13:56.508Z",
+      "source": "scan"
+    },
+    ".beads/backup/2rn235lfc6vmf0ljepha179gmrqqabcp.darc": {
+      "description": "",
+      "tokens": 80246,
+      "hash": "bb4bf80857c55e5c",
+      "size": 305419,
+      "mtimeMs": 1787263267650.546,
+      "updatedAt": "2026-08-22T19:13:56.511Z",
+      "source": "scan"
+    },
+    ".beads/backup/3750msep4kq0r8ud6dt52dnq7bhtu8n2.darc": {
+      "description": "",
+      "tokens": 18343,
+      "hash": "65f8e9e53c7ab53c",
+      "size": 69719,
+      "mtimeMs": 1787304406565.263,
+      "updatedAt": "2026-08-22T19:13:56.513Z",
+      "source": "scan"
+    },
+    ".beads/backup/3kttqt1rdqojdm4tgrjpb222agvp0vg3.darc": {
+      "description": "",
+      "tokens": 78261,
+      "hash": "e303ed8276c20aba",
+      "size": 296394,
+      "mtimeMs": 1787387718927.138,
+      "updatedAt": "2026-08-22T19:13:56.516Z",
+      "source": "scan"
+    },
+    ".beads/backup/3pklnndokuht633v8ba2gf9ftgs4ctfb.darc": {
+      "description": "",
+      "tokens": 30061,
+      "hash": "2fba5987da0a3e00",
+      "size": 113765,
+      "mtimeMs": 1787085928244.1597,
+      "updatedAt": "2026-08-22T19:13:56.517Z",
+      "source": "scan"
+    },
+    ".beads/backup/3udc130ml3dge6hpuippns8jdmi5o91i.darc": {
+      "description": "",
+      "tokens": 9453,
+      "hash": "70c755543882c030",
+      "size": 35951,
+      "mtimeMs": 1787249494914.4695,
+      "updatedAt": "2026-08-22T19:13:56.518Z",
+      "source": "scan"
+    },
+    ".beads/backup/400am2uk6elhcevn247ne8jl23clgnve.darc": {
+      "description": "",
+      "tokens": 123789,
+      "hash": "a76c6a0fa725f302",
+      "size": 468882,
+      "mtimeMs": 1787335337542.873,
+      "updatedAt": "2026-08-22T19:13:56.524Z",
+      "source": "scan"
+    },
+    ".beads/backup/4d8of34788l00v2sui74sa5u9kmavd03.darc": {
+      "description": "",
+      "tokens": 259134,
+      "hash": "6c01c92044de0076",
+      "size": 982139,
+      "mtimeMs": 1787265436591.132,
+      "updatedAt": "2026-08-22T19:13:56.531Z",
+      "source": "scan"
+    },
+    ".beads/backup/4gr8p61o5eu9c29df09esbn7q2cn19fl.darc": {
+      "description": "",
+      "tokens": 10056,
+      "hash": "0a876304eb92040b",
+      "size": 38364,
+      "mtimeMs": 1787287035548.366,
+      "updatedAt": "2026-08-22T19:13:56.532Z",
+      "source": "scan"
+    },
+    ".beads/backup/4n7n03k920bt95jesk9g3pa7d97uhb2a.darc": {
+      "description": "",
+      "tokens": 18285,
+      "hash": "a91966305c83f421",
+      "size": 69316,
+      "mtimeMs": 1787317240801.9827,
+      "updatedAt": "2026-08-22T19:13:56.534Z",
+      "source": "scan"
+    },
+    ".beads/backup/4siu9hfsg9pfr4sq00ppbs10mjhg5hh0.darc": {
+      "description": "",
+      "tokens": 261583,
+      "hash": "2eefe11911e61c8e",
+      "size": 988017,
+      "mtimeMs": 1787418076901.0012,
+      "updatedAt": "2026-08-22T19:13:56.547Z",
+      "source": "scan"
+    },
+    ".beads/backup/521c02ehb8n6080ku96cvk26dng2mfcq.darc": {
+      "description": "",
+      "tokens": 32983,
+      "hash": "28308162932e9221",
+      "size": 125617,
+      "mtimeMs": 1787156679044.2544,
+      "updatedAt": "2026-08-22T19:13:56.550Z",
+      "source": "scan"
+    },
+    ".beads/backup/59h94bpriucrcjh6amomos6i1lpqqnj7.darc": {
+      "description": "",
+      "tokens": 129092,
+      "hash": "a5764bfc79c3009a",
+      "size": 489941,
+      "mtimeMs": 1787134826652.0476,
+      "updatedAt": "2026-08-22T19:13:56.558Z",
+      "source": "scan"
+    },
+    ".beads/backup/59iltbq8hagjhf8et4akv4ienn5e99bt.darc": {
+      "description": "",
+      "tokens": 19921,
+      "hash": "7606e211c9032a44",
+      "size": 75847,
+      "mtimeMs": 1787392161699.2786,
+      "updatedAt": "2026-08-22T19:13:56.560Z",
+      "source": "scan"
+    },
+    ".beads/backup/5jjisu2l5ubb450ndbtldtlnbmv22vi3.darc": {
+      "description": "",
+      "tokens": 7748,
+      "hash": "0eee7e56ec72b60d",
+      "size": 29538,
+      "mtimeMs": 1787145234511.1865,
+      "updatedAt": "2026-08-22T19:13:56.560Z",
+      "source": "scan"
+    },
+    ".beads/backup/5nfjurnmapch9cgbbu4bdkkcj87orkpr.darc": {
+      "description": "",
+      "tokens": 58354,
+      "hash": "21bd7ef4b5c8376b",
+      "size": 222523,
+      "mtimeMs": 1787119975481.1794,
+      "updatedAt": "2026-08-22T19:13:56.563Z",
+      "source": "scan"
+    },
+    ".beads/backup/65ktsgm3975ouvvng90jn596e1pu1h18.darc": {
+      "description": "",
+      "tokens": 77966,
+      "hash": "9ff62140228a82d0",
+      "size": 295220,
+      "mtimeMs": 1787254009815.0493,
+      "updatedAt": "2026-08-22T19:13:56.565Z",
+      "source": "scan"
+    },
+    ".beads/backup/6aq5tqif3r35e24lijqsmndfe2cihksv.darc": {
+      "description": "",
+      "tokens": 148277,
+      "hash": "771d1f17fda61c3d",
+      "size": 559875,
+      "mtimeMs": 1787312954272.966,
+      "updatedAt": "2026-08-22T19:13:56.569Z",
+      "source": "scan"
+    },
+    ".beads/backup/6skqn20o1u5dim006inl8k21j4o8cb8m.darc": {
+      "description": "",
+      "tokens": 49942,
+      "hash": "7736c1470237890f",
+      "size": 189305,
+      "mtimeMs": 1787120891997.793,
+      "updatedAt": "2026-08-22T19:13:56.571Z",
+      "source": "scan"
+    },
+    ".beads/backup/6u84libnobke2plqlc2srumoduuhhjmv.darc": {
+      "description": "",
+      "tokens": 183,
+      "hash": "2d1578adaacfa312",
+      "size": 690,
+      "mtimeMs": 1787120929431.4653,
+      "updatedAt": "2026-08-22T19:13:56.572Z",
+      "source": "scan"
+    },
+    ".beads/backup/70sc8v2nvauq1tn5l0h5aet4iovspirn.darc": {
+      "description": "",
+      "tokens": 15440,
+      "hash": "ceed53f189e48259",
+      "size": 58624,
+      "mtimeMs": 1787152189653.9556,
+      "updatedAt": "2026-08-22T19:13:56.573Z",
+      "source": "scan"
+    },
+    ".beads/backup/75vaebkknbnn8rjaplgvmvpcn0ar04qi.darc": {
+      "description": "",
+      "tokens": 101296,
+      "hash": "13aef27e138e48ba",
+      "size": 384857,
+      "mtimeMs": 1787410950534.342,
+      "updatedAt": "2026-08-22T19:13:56.577Z",
+      "source": "scan"
+    },
+    ".beads/backup/79jqh75lt7t12tspiinsi03l2cnlp071.darc": {
+      "description": "",
+      "tokens": 92932,
+      "hash": "62cba01998a190fb",
+      "size": 353922,
+      "mtimeMs": 1787157730774.9802,
+      "updatedAt": "2026-08-22T19:13:56.583Z",
+      "source": "scan"
+    },
+    ".beads/backup/7a2m5sraksda4d6cklstmblqnjumm86q.darc": {
+      "description": "",
+      "tokens": 15126,
+      "hash": "e3237032cdf60c0a",
+      "size": 57351,
+      "mtimeMs": 1787250631790.6687,
+      "updatedAt": "2026-08-22T19:13:56.584Z",
+      "source": "scan"
+    },
+    ".beads/backup/7fttmo3bdcofekih1cv7rughjeobufhf.darc": {
+      "description": "",
+      "tokens": 32250,
+      "hash": "7a6d30c31c9699e8",
+      "size": 122652,
+      "mtimeMs": 1787321740072.6128,
+      "updatedAt": "2026-08-22T19:13:56.588Z",
+      "source": "scan"
+    },
+    ".beads/backup/7gliitibrs5cepkpjg2qvdjkkdm7ovjk.darc": {
+      "description": "",
+      "tokens": 32953,
+      "hash": "bbc8184a3d8c72b8",
+      "size": 124834,
+      "mtimeMs": 1787246778282.3096,
+      "updatedAt": "2026-08-22T19:13:56.590Z",
+      "source": "scan"
+    },
+    ".beads/backup/7gp3nqhrcp7hb25a3po9pk7et4q1djge.darc": {
+      "description": "",
+      "tokens": 2180,
+      "hash": "d9c8754d999baf20",
+      "size": 8380,
+      "mtimeMs": 1787120939597.6477,
+      "updatedAt": "2026-08-22T19:13:56.591Z",
+      "source": "scan"
+    },
+    ".beads/backup/8u91d2di0cnm9qodhifvqdrjl1hetrou.darc": {
+      "description": "",
+      "tokens": 14300,
+      "hash": "7fc4e9184ab79ab5",
+      "size": 54293,
+      "mtimeMs": 1787327590077.1938,
+      "updatedAt": "2026-08-22T19:13:56.592Z",
+      "source": "scan"
+    },
+    ".beads/backup/91p7mag8j94tep9fqnnv0jfr8ntgviq9.darc": {
+      "description": "",
+      "tokens": 38314,
+      "hash": "41d620dc1c330286",
+      "size": 146051,
+      "mtimeMs": 1787160627247.0947,
+      "updatedAt": "2026-08-22T19:13:56.594Z",
+      "source": "scan"
+    },
+    ".beads/backup/9dm9cupdudml5f4eg92immjein9tqroc.darc": {
+      "description": "",
+      "tokens": 186435,
+      "hash": "dc2f1b8d69da0487",
+      "size": 706952,
+      "mtimeMs": 1787343421696.616,
+      "updatedAt": "2026-08-22T19:13:56.600Z",
+      "source": "scan"
+    },
+    ".beads/backup/9fis2jee5virpdecd0sd7tn216sk6i6j.darc": {
+      "description": "",
+      "tokens": 38588,
+      "hash": "c359c330e1d04aa7",
+      "size": 146872,
+      "mtimeMs": 1787256723836.8542,
+      "updatedAt": "2026-08-22T19:13:56.602Z",
+      "source": "scan"
+    },
+    ".beads/backup/9ih9fqkokshmier1p11q20rdp29avn77.darc": {
+      "description": "",
+      "tokens": 85698,
+      "hash": "4802b6534b8b7a56",
+      "size": 325367,
+      "mtimeMs": 1787407524074.6326,
+      "updatedAt": "2026-08-22T19:13:56.606Z",
+      "source": "scan"
+    },
+    ".beads/backup/a3rfuepsa5o7v20l77vn4953lqufpl7e.darc": {
+      "description": "",
+      "tokens": 43632,
+      "hash": "a8b571904cf2ba07",
+      "size": 166386,
+      "mtimeMs": 1787325668837.3896,
+      "updatedAt": "2026-08-22T19:13:56.608Z",
+      "source": "scan"
+    },
+    ".beads/backup/ac4ii4duc99r3q3mk085s8pk6rgj2551.darc": {
+      "description": "",
+      "tokens": 191862,
+      "hash": "8cc53a16392d7d84",
+      "size": 726730,
+      "mtimeMs": 1787411863565.968,
+      "updatedAt": "2026-08-22T19:13:56.614Z",
+      "source": "scan"
+    },
+    ".beads/backup/aemrkh3pgj9kfut98ucurfoeej7fu2qh.darc": {
+      "description": "",
+      "tokens": 30692,
+      "hash": "36c0f5922282f13a",
+      "size": 116515,
+      "mtimeMs": 1787240384421.336,
+      "updatedAt": "2026-08-22T19:13:56.617Z",
+      "source": "scan"
+    },
+    ".beads/backup/arclvaio3q9g151cpqmi67vkpq6qnuiv.darc": {
+      "description": "",
+      "tokens": 30381,
+      "hash": "27abffd25a85700b",
+      "size": 115591,
+      "mtimeMs": 1787311746278.8752,
+      "updatedAt": "2026-08-22T19:13:56.620Z",
+      "source": "scan"
+    },
+    ".beads/backup/backup_state.json": {
+      "description": "",
+      "tokens": 32,
+      "hash": "efeb783e46ecf769",
+      "size": 109,
+      "mtimeMs": 1787426006960.4856,
+      "updatedAt": "2026-08-22T19:13:56.620Z",
+      "source": "scan"
+    },
+    ".beads/backup/bpieticts8gbu56kb9qs3a5t36r6banu.darc": {
+      "description": "",
+      "tokens": 14873,
+      "hash": "11d20fcb37269a1e",
+      "size": 56592,
+      "mtimeMs": 1787195472202.2888,
+      "updatedAt": "2026-08-22T19:13:56.621Z",
+      "source": "scan"
+    },
+    ".beads/backup/bsuf2r9mkhtoo9tlqh8l8r9a1tlgqrfr.darc": {
+      "description": "",
+      "tokens": 35927,
+      "hash": "1aa4aacbc514a9e7",
+      "size": 136587,
+      "mtimeMs": 1787266589889.7434,
+      "updatedAt": "2026-08-22T19:13:56.623Z",
+      "source": "scan"
+    },
+    ".beads/backup/c29m8elk6ups0fphguo8jid0vr2mpuiv.darc": {
+      "description": "",
+      "tokens": 230674,
+      "hash": "f948176064086d17",
+      "size": 874308,
+      "mtimeMs": 1787402213872.364,
+      "updatedAt": "2026-08-22T19:13:56.628Z",
+      "source": "scan"
+    },
+    ".beads/backup/c2g5dsbd1lm9os9137tfb2mlfj5i6qli.darc": {
+      "description": "",
+      "tokens": 15558,
+      "hash": "7d25fb53a2ebff60",
+      "size": 59138,
+      "mtimeMs": 1787224891219.8423,
+      "updatedAt": "2026-08-22T19:13:56.629Z",
+      "source": "scan"
+    },
+    ".beads/backup/c7tu24rqc5k5kpgqkce7o3nv3ii6i3i5.darc": {
+      "description": "",
+      "tokens": 264116,
+      "hash": "221887089393b04a",
+      "size": 1000977,
+      "mtimeMs": 1787328508766.1116,
+      "updatedAt": "2026-08-22T19:13:56.636Z",
+      "source": "scan"
+    },
+    ".beads/backup/cgflt9oisc6uvrq8oriqj7dmnaakvaia.darc": {
+      "description": "",
+      "tokens": 9538,
+      "hash": "728fb570880cbe5f",
+      "size": 36383,
+      "mtimeMs": 1787085910409.7886,
+      "updatedAt": "2026-08-22T19:13:56.637Z",
+      "source": "scan"
+    },
+    ".beads/backup/cpb245mqk8sl4cjhcbia5lit6967fumc.darc": {
+      "description": "",
+      "tokens": 88772,
+      "hash": "43f940b6a79211b2",
+      "size": 336719,
+      "mtimeMs": 1787390638280.3147,
+      "updatedAt": "2026-08-22T19:13:56.640Z",
+      "source": "scan"
+    },
+    ".beads/backup/cr6hqn0hl7iqnk76ipfc79048rb769b2.darc": {
+      "description": "",
+      "tokens": 103474,
+      "hash": "f5d14b6f174e9312",
+      "size": 393422,
+      "mtimeMs": 1787169653149.5918,
+      "updatedAt": "2026-08-22T19:13:56.645Z",
+      "source": "scan"
+    },
+    ".beads/backup/crm4v6qv8iucu80c94d27nh31138l6hl.darc": {
+      "description": "",
+      "tokens": 78892,
+      "hash": "c4c9ee8c324934e7",
+      "size": 300231,
+      "mtimeMs": 1787419614373.1892,
+      "updatedAt": "2026-08-22T19:13:56.648Z",
+      "source": "scan"
+    },
+    ".beads/backup/cvqclcrvqi8vq4up8rp0t8n30dt3tl2a.darc": {
+      "description": "",
+      "tokens": 18666,
+      "hash": "c51c3ce3d4fc25ff",
+      "size": 71341,
+      "mtimeMs": 1787180324437.023,
+      "updatedAt": "2026-08-22T19:13:56.649Z",
+      "source": "scan"
+    },
+    ".beads/backup/dehfllcuetc4utsg3ue530cqr925kvnm.darc": {
+      "description": "",
+      "tokens": 53175,
+      "hash": "2bb0edf71719f1ed",
+      "size": 202211,
+      "mtimeMs": 1787356566714.204,
+      "updatedAt": "2026-08-22T19:13:56.651Z",
+      "source": "scan"
+    },
+    ".beads/backup/dqupsm8eeu9e267d2ms0cmlq0os3pto9.darc": {
+      "description": "",
+      "tokens": 16041,
+      "hash": "2e285de6b5767426",
+      "size": 60898,
+      "mtimeMs": 1787260504698.2246,
+      "updatedAt": "2026-08-22T19:13:56.654Z",
+      "source": "scan"
+    },
+    ".beads/backup/e6kgi1ob6kervmintmi1s6jegjspj522.darc": {
+      "description": "",
+      "tokens": 85402,
+      "hash": "cc05d02f89787e95",
+      "size": 323973,
+      "mtimeMs": 1787340661138.0344,
+      "updatedAt": "2026-08-22T19:13:56.657Z",
+      "source": "scan"
+    },
+    ".beads/backup/e82dahtuu9ltc0lakkt8e6587l94prjk.darc": {
+      "description": "",
+      "tokens": 44055,
+      "hash": "4afcbdc6698c185b",
+      "size": 167541,
+      "mtimeMs": 1787409634578.0662,
+      "updatedAt": "2026-08-22T19:13:56.661Z",
+      "source": "scan"
+    },
+    ".beads/backup/ebk5igka3j9q6l5ef2etbcahfhs3f6go.darc": {
+      "description": "",
+      "tokens": 41853,
+      "hash": "95d4327d6b469504",
+      "size": 159441,
+      "mtimeMs": 1787316127219.6677,
+      "updatedAt": "2026-08-22T19:13:56.662Z",
+      "source": "scan"
+    },
+    ".beads/backup/eoeub0t4fben06eedih9d5n114sl6g12.darc": {
+      "description": "",
+      "tokens": 66921,
+      "hash": "4a46848932503e9a",
+      "size": 254166,
+      "mtimeMs": 1787399453045.213,
+      "updatedAt": "2026-08-22T19:13:56.667Z",
+      "source": "scan"
+    },
+    ".beads/backup/eq9p29skgof9mio8ii6r7rpimb67ka90.darc": {
+      "description": "",
+      "tokens": 18911,
+      "hash": "dcfb914f4e203d32",
+      "size": 71902,
+      "mtimeMs": 1787255606446.0964,
+      "updatedAt": "2026-08-22T19:13:56.672Z",
+      "source": "scan"
+    },
+    ".beads/backup/f6dn2olrbdlh3tkcjl31m6dqfu54nlks.darc": {
+      "description": "",
+      "tokens": 142455,
+      "hash": "3147aa225c9b4f44",
+      "size": 537916,
+      "mtimeMs": 1787076396439.7603,
+      "updatedAt": "2026-08-22T19:13:56.678Z",
+      "source": "scan"
+    },
+    ".beads/backup/fj7k5sgnoh82qtn2rgrqjflcmn2k45u9.darc": {
+      "description": "",
+      "tokens": 16358,
+      "hash": "357698041a9df669",
+      "size": 61994,
+      "mtimeMs": 1787127763156.0752,
+      "updatedAt": "2026-08-22T19:13:56.679Z",
+      "source": "scan"
+    },
+    ".beads/backup/fjag8sjljd1er6moms13h4aupvtt54rg.darc": {
+      "description": "",
+      "tokens": 234951,
+      "hash": "dec5f056235616ee",
+      "size": 890678,
+      "mtimeMs": 1787092886510.6455,
+      "updatedAt": "2026-08-22T19:13:56.689Z",
+      "source": "scan"
+    },
+    ".beads/backup/fkmc6i7272mvfefns89p8g4525n020uu.darc": {
+      "description": "",
+      "tokens": 107915,
+      "hash": "8478cdd2a739c419",
+      "size": 411025,
+      "mtimeMs": 1787397490029.67,
+      "updatedAt": "2026-08-22T19:13:56.693Z",
+      "source": "scan"
+    },
+    ".beads/backup/foi2c47eknqf7ufsglanrnts05q7ci38.darc": {
+      "description": "",
+      "tokens": 242614,
+      "hash": "e3415382098cc55f",
+      "size": 916222,
+      "mtimeMs": 1787238136482.7585,
+      "updatedAt": "2026-08-22T19:13:56.699Z",
+      "source": "scan"
+    },
+    ".beads/backup/gbju1ba4k5r6jbgcpso3m2rpng6qs7m3.darc": {
+      "description": "",
+      "tokens": 14349,
+      "hash": "7cfc06c827e3064c",
+      "size": 54639,
+      "mtimeMs": 1787234923639.2905,
+      "updatedAt": "2026-08-22T19:13:56.703Z",
+      "source": "scan"
+    },
+    ".beads/backup/gc2u38kjbfkbqeo8unvqvqnlvba1hqhh.darc": {
+      "description": "",
+      "tokens": 248148,
+      "hash": "a24502446404b1b4",
+      "size": 941343,
+      "mtimeMs": 1787235961967.843,
+      "updatedAt": "2026-08-22T19:13:56.709Z",
+      "source": "scan"
+    },
+    ".beads/backup/ggthgbb6irdm7gpr04rqofo25m02ktum.darc": {
+      "description": "",
+      "tokens": 173662,
+      "hash": "caf56daf8c698162",
+      "size": 656740,
+      "mtimeMs": 1787386525774.313,
+      "updatedAt": "2026-08-22T19:13:56.716Z",
+      "source": "scan"
+    },
+    ".beads/backup/h841q10mh7cc965ucih0a3lv8nk2jv39.darc": {
+      "description": "",
+      "tokens": 183,
+      "hash": "d6c8592b8519ceda",
+      "size": 690,
+      "mtimeMs": 1787195473088.3032,
+      "updatedAt": "2026-08-22T19:13:56.721Z",
+      "source": "scan"
+    },
+    ".beads/backup/hdmj6f21856j9lv333s3b8uc13u1aq9a.darc": {
+      "description": "",
+      "tokens": 40817,
+      "hash": "f721ffbda0e34dcb",
+      "size": 155586,
+      "mtimeMs": 1787155384908.7708,
+      "updatedAt": "2026-08-22T19:13:56.723Z",
+      "source": "scan"
+    },
+    ".beads/backup/hi51v2voogmpqlckb2qnap1rngr23e4b.darc": {
+      "description": "",
+      "tokens": 244869,
+      "hash": "5f5a67e5f66ba31f",
+      "size": 926956,
+      "mtimeMs": 1787297845837.183,
+      "updatedAt": "2026-08-22T19:13:56.735Z",
+      "source": "scan"
+    },
+    ".beads/backup/hkt4ndut43ahogf50v75ic1hlc5nnhrl.darc": {
+      "description": "",
+      "tokens": 10749,
+      "hash": "a99cbc5ea218c093",
+      "size": 40896,
+      "mtimeMs": 1787134836767.2278,
+      "updatedAt": "2026-08-22T19:13:56.741Z",
+      "source": "scan"
+    },
+    ".beads/backup/hqfu6rh5tg5a541nvlqgqhgus83upr9o.darc": {
+      "description": "",
+      "tokens": 70955,
+      "hash": "e8fdb498d1aa1550",
+      "size": 269605,
+      "mtimeMs": 1787248202419.2244,
+      "updatedAt": "2026-08-22T19:13:56.744Z",
+      "source": "scan"
+    },
+    ".beads/backup/hspef56jrep7qigaadqeib6qev2ia4r3.darc": {
+      "description": "",
+      "tokens": 131717,
+      "hash": "33b7dc1cafe5a586",
+      "size": 500551,
+      "mtimeMs": 1787228455166.1848,
+      "updatedAt": "2026-08-22T19:13:56.751Z",
+      "source": "scan"
+    },
+    ".beads/backup/i5t4bo05n0hh2q7bua4h1i6p5qejmjbf.darc": {
+      "description": "",
+      "tokens": 15277,
+      "hash": "a1d27b9c173875e4",
+      "size": 58014,
+      "mtimeMs": 1787162613750.8748,
+      "updatedAt": "2026-08-22T19:13:56.752Z",
+      "source": "scan"
+    },
+    ".beads/backup/ifhorc2li5cghmlk4bukmuui9omtgqk7.darc": {
+      "description": "",
+      "tokens": 161633,
+      "hash": "3a12f04fc8226f77",
+      "size": 613831,
+      "mtimeMs": 1787146153004.3127,
+      "updatedAt": "2026-08-22T19:13:56.757Z",
+      "source": "scan"
+    },
+    ".beads/backup/ihhbbjjkoqb2ovrvc60052eimatljckn.darc": {
+      "description": "",
+      "tokens": 250246,
+      "hash": "6f90d25ab0e38d3f",
+      "size": 949159,
+      "mtimeMs": 1787412778099.903,
+      "updatedAt": "2026-08-22T19:13:56.764Z",
+      "source": "scan"
+    },
+    ".beads/backup/ikj4o1l9ah04hc8m5n2h8314lltg3bat.darc": {
+      "description": "",
+      "tokens": 179267,
+      "hash": "93a9796bc8d2f584",
+      "size": 678544,
+      "mtimeMs": 1787331364436.4468,
+      "updatedAt": "2026-08-22T19:13:56.768Z",
+      "source": "scan"
+    },
+    ".beads/backup/j79886ohvhuprjppiksnppa73psuebtn.darc": {
+      "description": "",
+      "tokens": 32901,
+      "hash": "afde6481a8dd0f27",
+      "size": 125163,
+      "mtimeMs": 1787318204816.7185,
+      "updatedAt": "2026-08-22T19:13:56.770Z",
+      "source": "scan"
+    },
+    ".beads/backup/jammiim8bqnmhsuikp6t7nfv9s2qihhr.darc": {
+      "description": "",
+      "tokens": 61447,
+      "hash": "52874cf7757beb11",
+      "size": 233682,
+      "mtimeMs": 1787310016126.822,
+      "updatedAt": "2026-08-22T19:13:56.773Z",
+      "source": "scan"
+    },
+    ".beads/backup/jbcst2jeerejugferj80h8ei5sai1pl3.darc": {
+      "description": "",
+      "tokens": 140048,
+      "hash": "e8986d9b7ffa0e35",
+      "size": 530957,
+      "mtimeMs": 1787408718371.1426,
+      "updatedAt": "2026-08-22T19:13:56.778Z",
+      "source": "scan"
+    },
+    ".beads/backup/jg4ohla85255vvmif6u6bjq2c6m8ae73.darc": {
+      "description": "",
+      "tokens": 16707,
+      "hash": "47e6005981a30322",
+      "size": 63283,
+      "mtimeMs": 1787073538192.9177,
+      "updatedAt": "2026-08-22T19:13:56.780Z",
+      "source": "scan"
+    },
+    ".beads/backup/kcrsjl2kh499hun175jhfn38aok22q0e.darc": {
+      "description": "",
+      "tokens": 19792,
+      "hash": "e14d8e6fc6cb738e",
+      "size": 75335,
+      "mtimeMs": 1787140232350.8643,
+      "updatedAt": "2026-08-22T19:13:56.781Z",
+      "source": "scan"
+    },
+    ".beads/backup/kfo2rb0rokgmfo81o0ugv7abo4bn22u0.darc": {
+      "description": "",
+      "tokens": 42507,
+      "hash": "3467cbff6d5a9345",
+      "size": 161407,
+      "mtimeMs": 1787072272857.0618,
+      "updatedAt": "2026-08-22T19:13:56.783Z",
+      "source": "scan"
+    },
+    ".beads/backup/ktakcsfkuc2kuo90q7d2t1evl47pgt29.darc": {
+      "description": "",
+      "tokens": 68460,
+      "hash": "acffe9a0a64693ae",
+      "size": 260086,
+      "mtimeMs": 1787315221076.8113,
+      "updatedAt": "2026-08-22T19:13:56.785Z",
+      "source": "scan"
+    },
+    ".beads/backup/l01s1dh62qjajt4gi9ps2epaes1k1osp.darc": {
+      "description": "",
+      "tokens": 51963,
+      "hash": "4407e5e110bb734d",
+      "size": 197660,
+      "mtimeMs": 1787088289873.517,
+      "updatedAt": "2026-08-22T19:13:56.787Z",
+      "source": "scan"
+    },
+    ".beads/backup/l2mfas67o1gck0qo20gca05e5ef4utjb.darc": {
+      "description": "",
+      "tokens": 50738,
+      "hash": "37f0870c5466729b",
+      "size": 192663,
+      "mtimeMs": 1787320632640.9868,
+      "updatedAt": "2026-08-22T19:13:56.789Z",
+      "source": "scan"
+    },
+    ".beads/backup/l76fedq2cm2mnrk5v504nn9jmbjj045f.darc": {
+      "description": "",
+      "tokens": 48555,
+      "hash": "cba0ce980ce5adf4",
+      "size": 183742,
+      "mtimeMs": 1787137127033.949,
+      "updatedAt": "2026-08-22T19:13:56.791Z",
+      "source": "scan"
+    },
+    ".beads/backup/l9muegejrfnhael4tq3jlt8v7aq7fs0n.darc": {
+      "description": "",
+      "tokens": 12776,
+      "hash": "d2010afeb076f851",
+      "size": 48631,
+      "mtimeMs": 1787219805831.9465,
+      "updatedAt": "2026-08-22T19:13:56.792Z",
+      "source": "scan"
+    },
+    ".beads/backup/lavgd0hq2s52luecbjqh158eraqd3t6l.darc": {
+      "description": "",
+      "tokens": 44762,
+      "hash": "993fece5a6037210",
+      "size": 170434,
+      "mtimeMs": 1787165886923.6492,
+      "updatedAt": "2026-08-22T19:13:56.793Z",
+      "source": "scan"
+    },
+    ".beads/backup/lf5ohba0c043rlmf5n7ue3ob4ffgk9fb.darc": {
+      "description": "",
+      "tokens": 28913,
+      "hash": "ce1572271297d044",
+      "size": 109649,
+      "mtimeMs": 1787264443321.0896,
+      "updatedAt": "2026-08-22T19:13:56.795Z",
+      "source": "scan"
+    },
+    ".beads/backup/libclljn5tas30hm7okh3um9f54guph9.darc": {
+      "description": "",
+      "tokens": 98708,
+      "hash": "35042df8f37950c9",
+      "size": 374462,
+      "mtimeMs": 1787347918787.4683,
+      "updatedAt": "2026-08-22T19:13:56.798Z",
+      "source": "scan"
+    },
+    ".beads/backup/LOCK": {
+      "description": "",
+      "tokens": 0,
+      "hash": "e3b0c44298fc1c14",
+      "size": 0,
+      "mtimeMs": 1784814740000,
+      "updatedAt": "2026-08-22T19:13:56.798Z",
+      "source": "scan"
+    },
+    ".beads/backup/lubrdjvb3r4u5qh6t00cf2srjdduhs0b.darc": {
+      "description": "",
+      "tokens": 78366,
+      "hash": "c50629bff2413f7c",
+      "size": 297766,
+      "mtimeMs": 1787239094849.1667,
+      "updatedAt": "2026-08-22T19:13:56.800Z",
+      "source": "scan"
+    },
+    ".beads/backup/m16u4abnbips5vo9ib1t273iseul7d6r.darc": {
+      "description": "",
+      "tokens": 163061,
+      "hash": "92a7c0a4f5939b86",
+      "size": 619446,
+      "mtimeMs": 1787338212681.2212,
+      "updatedAt": "2026-08-22T19:13:56.805Z",
+      "source": "scan"
+    },
+    ".beads/backup/m8hnjr4vqn8bd49kthadb74lagvkfalf.darc": {
+      "description": "",
+      "tokens": 59241,
+      "hash": "738e3f8a8bc7c0c4",
+      "size": 224420,
+      "mtimeMs": 1787384673794.7856,
+      "updatedAt": "2026-08-22T19:13:56.808Z",
+      "source": "scan"
+    },
+    ".beads/backup/m945qdpak9tctcfspqkfjhmf8bi25094.darc": {
+      "description": "",
+      "tokens": 70363,
+      "hash": "b6f1a4bfa1b7d9c4",
+      "size": 267138,
+      "mtimeMs": 1787244684740.551,
+      "updatedAt": "2026-08-22T19:13:56.811Z",
+      "source": "scan"
+    },
+    ".beads/backup/manifest": {
+      "description": "",
+      "tokens": 1691,
+      "hash": "cee045b2d39a7a47",
+      "size": 6339,
+      "mtimeMs": 1787426006846.484,
+      "updatedAt": "2026-08-22T19:13:56.811Z",
+      "source": "scan"
+    },
+    ".beads/backup/mh0nnab1chlj2c86m1egrbl7pik015ik.darc": {
+      "description": "",
+      "tokens": 109240,
+      "hash": "9926da77518b258d",
+      "size": 413899,
+      "mtimeMs": 1787389373359.9404,
+      "updatedAt": "2026-08-22T19:13:56.815Z",
+      "source": "scan"
+    },
+    ".beads/backup/mosvcreruqjs26n4ne1d52caqpevb65n.darc": {
+      "description": "",
+      "tokens": 27002,
+      "hash": "afd3da4a91eefc46",
+      "size": 102604,
+      "mtimeMs": 1787272659461.5596,
+      "updatedAt": "2026-08-22T19:13:56.816Z",
+      "source": "scan"
+    },
+    ".beads/backup/mpf94c8k8njp88n7e5akfi9v2abuv4f1.darc": {
+      "description": "",
+      "tokens": 92378,
+      "hash": "54b0ac9192236932",
+      "size": 350411,
+      "mtimeMs": 1787420579288.423,
+      "updatedAt": "2026-08-22T19:13:56.819Z",
+      "source": "scan"
+    },
+    ".beads/backup/mpnpqmf17npolpgkeaha826hvtf1k3se.darc": {
+      "description": "",
+      "tokens": 33920,
+      "hash": "54a1ff3d94bc2710",
+      "size": 129255,
+      "mtimeMs": 1787078338349.4114,
+      "updatedAt": "2026-08-22T19:13:56.820Z",
+      "source": "scan"
+    },
+    ".beads/backup/mtlfniqm5h7482c71g2010vk3cug19ml.darc": {
+      "description": "",
+      "tokens": 10437,
+      "hash": "28c5808c38c283a9",
+      "size": 39690,
+      "mtimeMs": 1787245800708.9922,
+      "updatedAt": "2026-08-22T19:13:56.821Z",
+      "source": "scan"
+    },
+    ".beads/backup/mtnjl0qb52g2rnhurm7hhdg7npc329bi.darc": {
+      "description": "",
+      "tokens": 26459,
+      "hash": "de52bb160aa5b876",
+      "size": 100352,
+      "mtimeMs": 1787242329641.5557,
+      "updatedAt": "2026-08-22T19:13:56.822Z",
+      "source": "scan"
+    },
+    ".beads/backup/n6r512lr7q92kg7pf8qk73pg97tv0165.darc": {
+      "description": "",
+      "tokens": 17816,
+      "hash": "fdd1f12d1da99897",
+      "size": 67472,
+      "mtimeMs": 1787271419135.7764,
+      "updatedAt": "2026-08-22T19:13:56.823Z",
+      "source": "scan"
+    },
+    ".beads/backup/nf450lrnc30h6a1m81ivg4481gkdebh7.darc": {
+      "description": "",
+      "tokens": 37463,
+      "hash": "1e048b68056a34a5",
+      "size": 141668,
+      "mtimeMs": 1787421738209.131,
+      "updatedAt": "2026-08-22T19:13:56.825Z",
+      "source": "scan"
+    },
+    ".beads/backup/nqncuv76sqjfi2oiv5cahnms4t5e8l7i.darc": {
+      "description": "",
+      "tokens": 11498,
+      "hash": "8e446ee83dec763e",
+      "size": 43787,
+      "mtimeMs": 1787286063023.6929,
+      "updatedAt": "2026-08-22T19:13:56.826Z",
+      "source": "scan"
+    },
+    ".beads/backup/ns0jotdfrts82507gvjsbgmac57jnhk0.darc": {
+      "description": "",
+      "tokens": 74812,
+      "hash": "d4b645f787624eb4",
+      "size": 284391,
+      "mtimeMs": 1787280052578.2798,
+      "updatedAt": "2026-08-22T19:13:56.828Z",
+      "source": "scan"
+    },
+    ".beads/backup/ns3oh50s7le1ptj1rdt2suju6gq6mkg4.darc": {
+      "description": "",
+      "tokens": 15771,
+      "hash": "fc3320c3448f886c",
+      "size": 59980,
+      "mtimeMs": 1787218609003.9592,
+      "updatedAt": "2026-08-22T19:13:56.829Z",
+      "source": "scan"
+    },
+    ".beads/backup/o0lotiflp87o2jkd5usu4ttrvrg3kk51.darc": {
+      "description": "",
+      "tokens": 20847,
+      "hash": "15d8b054fdb74ba0",
+      "size": 79013,
+      "mtimeMs": 1787251640354.3237,
+      "updatedAt": "2026-08-22T19:13:56.830Z",
+      "source": "scan"
+    },
+    ".beads/backup/o13laei1m0oo9fhordkguosohpkcc7ki.darc": {
+      "description": "",
+      "tokens": 98582,
+      "hash": "06711f351302233b",
+      "size": 374203,
+      "mtimeMs": 1787251615999.9155,
+      "updatedAt": "2026-08-22T19:13:56.833Z",
+      "source": "scan"
+    },
+    ".beads/backup/o15lkpa33hookik45d7npannaasopnoq.darc": {
+      "description": "",
+      "tokens": 16215,
+      "hash": "416a619a3ab5aa62",
+      "size": 61535,
+      "mtimeMs": 1787296935874.875,
+      "updatedAt": "2026-08-22T19:13:56.834Z",
+      "source": "scan"
+    },
+    ".beads/backup/o2e7h5fimeeq8rulp58ut5chca2d0plt.darc": {
+      "description": "",
+      "tokens": 9482,
+      "hash": "25b1eac36d10cbda",
+      "size": 36155,
+      "mtimeMs": 1787085906868.7146,
+      "updatedAt": "2026-08-22T19:13:56.835Z",
+      "source": "scan"
+    },
+    ".beads/backup/o8a81g94e4stedr39l8nnud5la4e3b7j.darc": {
+      "description": "",
+      "tokens": 29639,
+      "hash": "79d760733512805d",
+      "size": 112623,
+      "mtimeMs": 1787209851449.312,
+      "updatedAt": "2026-08-22T19:13:56.836Z",
+      "source": "scan"
+    },
+    ".beads/backup/o8fmiutgrdn36hsggk13l1j2fd9ove75.darc": {
+      "description": "",
+      "tokens": 18083,
+      "hash": "3152bbd6b89a8b2b",
+      "size": 68681,
+      "mtimeMs": 1787217545880.5083,
+      "updatedAt": "2026-08-22T19:13:56.837Z",
+      "source": "scan"
+    },
+    ".beads/backup/o9sr50q6jjp56c7lcrpdgmtu5e0e4fuo.darc": {
+      "description": "",
+      "tokens": 15941,
+      "hash": "75ee96e13d8404f5",
+      "size": 60617,
+      "mtimeMs": 1787227186979.6216,
+      "updatedAt": "2026-08-22T19:13:56.838Z",
+      "source": "scan"
+    },
+    ".beads/backup/ofcdufts8j4h2j1rg7ed7tmu4o1begjl.darc": {
+      "description": "",
+      "tokens": 110914,
+      "hash": "1d6f832b830740ab",
+      "size": 420993,
+      "mtimeMs": 1787393811527.25,
+      "updatedAt": "2026-08-22T19:13:56.842Z",
+      "source": "scan"
+    },
+    ".beads/backup/og63b3j0ont04jultsg27706g9a6oda9.darc": {
+      "description": "",
+      "tokens": 83847,
+      "hash": "d4cbf3aee346e533",
+      "size": 318880,
+      "mtimeMs": 1787354053183.623,
+      "updatedAt": "2026-08-22T19:13:56.844Z",
+      "source": "scan"
+    },
+    ".beads/backup/ourcf92ps23v3hdfp36rrdo3cq23dld7.darc": {
+      "description": "",
+      "tokens": 65587,
+      "hash": "3402a80de662819e",
+      "size": 249057,
+      "mtimeMs": 1787135739427.573,
+      "updatedAt": "2026-08-22T19:13:56.847Z",
+      "source": "scan"
+    },
+    ".beads/backup/p9819fbr1nu3q60ueid0bia83uk202dc.darc": {
+      "description": "",
+      "tokens": 10588,
+      "hash": "824b528b66ce57a6",
+      "size": 40328,
+      "mtimeMs": 1787275733033.7778,
+      "updatedAt": "2026-08-22T19:13:56.849Z",
+      "source": "scan"
+    },
+    ".beads/backup/pbvd37lkv4semm3rt5luu6ek066cag3e.darc": {
+      "description": "",
+      "tokens": 59198,
+      "hash": "0f7a18c4840f8c3c",
+      "size": 225519,
+      "mtimeMs": 1787077414804.2283,
+      "updatedAt": "2026-08-22T19:13:56.851Z",
+      "source": "scan"
+    },
+    ".beads/backup/pdfkr30h3cc1tg541pd0ve1aoimkqpur.darc": {
+      "description": "",
+      "tokens": 194957,
+      "hash": "68151e3a752e36ca",
+      "size": 738393,
+      "mtimeMs": 1787262295012.2324,
+      "updatedAt": "2026-08-22T19:13:56.861Z",
+      "source": "scan"
+    },
+    ".beads/backup/pm5kk37e1tgoihltndn98oj097bn0st5.darc": {
+      "description": "",
+      "tokens": 152186,
+      "hash": "886fcb1ac658f56d",
+      "size": 578580,
+      "mtimeMs": 1787333272969.9597,
+      "updatedAt": "2026-08-22T19:13:56.867Z",
+      "source": "scan"
+    },
+    ".beads/backup/qp0hb53h0q7in2imvvhku7dr6vlg39h8.darc": {
+      "description": "",
+      "tokens": 192913,
+      "hash": "b6ff10a8a880c0cd",
+      "size": 733462,
+      "mtimeMs": 1787414161199.748,
+      "updatedAt": "2026-08-22T19:13:56.875Z",
+      "source": "scan"
+    },
+    ".beads/backup/qq7uiaavhdav35fgjf79ut8os0s1e3hh.darc": {
+      "description": "",
+      "tokens": 101598,
+      "hash": "8396734808def77c",
+      "size": 387056,
+      "mtimeMs": 1787237035983.2832,
+      "updatedAt": "2026-08-22T19:13:56.878Z",
+      "source": "scan"
+    },
+    ".beads/backup/qtriqkn5s9assvc90c0ecafb9n5tmcej.darc": {
+      "description": "",
+      "tokens": 104240,
+      "hash": "a3c99f02f946ed44",
+      "size": 396871,
+      "mtimeMs": 1787426006783.483,
+      "updatedAt": "2026-08-22T19:13:56.882Z",
+      "source": "scan"
+    },
+    ".beads/backup/r31qpap6avnvhfirsflik56e2an0tc1o.darc": {
+      "description": "",
+      "tokens": 11274,
+      "hash": "2e7d6febb13ccf46",
+      "size": 42815,
+      "mtimeMs": 1787344433140.4006,
+      "updatedAt": "2026-08-22T19:13:56.883Z",
+      "source": "scan"
+    },
+    ".beads/backup/r4f96g0rlr8hf7uhacqid2itjdrg455a.darc": {
+      "description": "",
+      "tokens": 54711,
+      "hash": "dd17eacfe12ebdd9",
+      "size": 207479,
+      "mtimeMs": 1787067787447.657,
+      "updatedAt": "2026-08-22T19:13:56.885Z",
+      "source": "scan"
+    },
+    ".beads/backup/r4gj0g7ietdhntcu50668dde7ictjc9f.darc": {
+      "description": "",
+      "tokens": 52672,
+      "hash": "5c800ab3a97bc8c4",
+      "size": 200145,
+      "mtimeMs": 1787339710030.8777,
+      "updatedAt": "2026-08-22T19:13:56.887Z",
+      "source": "scan"
+    },
+    ".beads/backup/rlj17gjve5dbfqf7n6s8be518mv1vtl2.darc": {
+      "description": "",
+      "tokens": 46340,
+      "hash": "6d262e9c9a55697b",
+      "size": 176334,
+      "mtimeMs": 1787403245044.6968,
+      "updatedAt": "2026-08-22T19:13:56.889Z",
+      "source": "scan"
+    },
+    ".beads/backup/rmahccvnctk07672ctl3u679253q1lm0.darc": {
+      "description": "",
+      "tokens": 47240,
+      "hash": "52eb955ad1098049",
+      "size": 179585,
+      "mtimeMs": 1787334231743.9202,
+      "updatedAt": "2026-08-22T19:13:56.890Z",
+      "source": "scan"
+    },
+    ".beads/backup/rni71dtuv9tgvnj8pl5fcu2f4ag7sl4h.darc": {
+      "description": "",
+      "tokens": 82663,
+      "hash": "2e11254dfbd0786a",
+      "size": 313620,
+      "mtimeMs": 1787352096742.9246,
+      "updatedAt": "2026-08-22T19:13:56.894Z",
+      "source": "scan"
+    },
+    ".beads/backup/s83ind3fjtg8qrhgijgcg79pe0c0k237.darc": {
+      "description": "",
+      "tokens": 12198,
+      "hash": "b634886878b23ccf",
+      "size": 46469,
+      "mtimeMs": 1787405158225.5215,
+      "updatedAt": "2026-08-22T19:13:56.895Z",
+      "source": "scan"
+    },
+    ".beads/backup/sk6qlu7hlc6uhqlljga43k1old8mdvdi.darc": {
+      "description": "",
+      "tokens": 47924,
+      "hash": "db8d1215611a7f64",
+      "size": 182991,
+      "mtimeMs": 1787214116063.344,
+      "updatedAt": "2026-08-22T19:13:56.897Z",
+      "source": "scan"
+    },
+    ".beads/backup/sv0e2p673vn7sedhccsueolrfahptki2.darc": {
+      "description": "",
+      "tokens": 34670,
+      "hash": "88bcd7c0d8311afa",
+      "size": 132150,
+      "mtimeMs": 1787082663936.1562,
+      "updatedAt": "2026-08-22T19:13:56.899Z",
+      "source": "scan"
+    },
+    ".beads/backup/tmbsdenbpp3u78fg9dojip950qknl0tk.darc": {
+      "description": "",
+      "tokens": 13750,
+      "hash": "83ad56d01fb3daac",
+      "size": 52285,
+      "mtimeMs": 1787208848622.4414,
+      "updatedAt": "2026-08-22T19:13:56.900Z",
+      "source": "scan"
+    },
+    ".beads/backup/tne5gqfggoun6u79qjve48pv7hgbpi3l.darc": {
+      "description": "",
+      "tokens": 123031,
+      "hash": "7402ed9ac3426749",
+      "size": 467126,
+      "mtimeMs": 1787398479757.8337,
+      "updatedAt": "2026-08-22T19:13:56.903Z",
+      "source": "scan"
+    },
+    ".beads/backup/tnm5sqsc701hd7cpev965rbi94ktus3l.darc": {
+      "description": "",
+      "tokens": 9111,
+      "hash": "42fc4b7a70b32dda",
+      "size": 34771,
+      "mtimeMs": 1787323308082.0342,
+      "updatedAt": "2026-08-22T19:13:56.905Z",
+      "source": "scan"
+    },
+    ".beads/backup/tro7ocabl18e62mcgncuvldgfko3qbga.darc": {
+      "description": "",
+      "tokens": 99495,
+      "hash": "cf7de6d1aace60d5",
+      "size": 377204,
+      "mtimeMs": 1787176067353.9563,
+      "updatedAt": "2026-08-22T19:13:56.909Z",
+      "source": "scan"
+    },
+    ".beads/backup/ulmu3cn4ovb2qrtlrlj4icviflqnolph.darc": {
+      "description": "",
+      "tokens": 108951,
+      "hash": "c3438651c93b6b1c",
+      "size": 413170,
+      "mtimeMs": 1787396558047.7732,
+      "updatedAt": "2026-08-22T19:13:56.912Z",
+      "source": "scan"
+    },
+    ".beads/backup/uo3ja0ibpj5v90ctem7q6o5b71b17dek.darc": {
+      "description": "",
+      "tokens": 55075,
+      "hash": "8931fded8b181a3d",
+      "size": 209222,
+      "mtimeMs": 1787308365746.1047,
+      "updatedAt": "2026-08-22T19:13:56.914Z",
+      "source": "scan"
+    },
+    ".beads/backup/v3n08jddjkj200qn3roih6aj1kek0348.darc": {
+      "description": "",
+      "tokens": 147635,
+      "hash": "6facdba24f4e7470",
+      "size": 559771,
+      "mtimeMs": 1787173919418.2231,
+      "updatedAt": "2026-08-22T19:13:56.918Z",
+      "source": "scan"
+    },
+    ".beads/backup/v3n0pppqrp5tdp6fo9bh6jcv5maq4u9m.darc": {
+      "description": "",
+      "tokens": 9873,
+      "hash": "64134d8a788055cf",
+      "size": 37569,
+      "mtimeMs": 1787301112644.3875,
+      "updatedAt": "2026-08-22T19:13:56.919Z",
+      "source": "scan"
+    },
+    ".beads/backup/vdbkon177n81lv9artkjsa28anbs69ml.darc": {
+      "description": "",
+      "tokens": 169484,
+      "hash": "d06f50419b142051",
+      "size": 641639,
+      "mtimeMs": 1787142151590.8022,
+      "updatedAt": "2026-08-22T19:13:56.924Z",
+      "source": "scan"
+    },
+    ".beads/backup/vhm1nq36n0l3q8j5tumjsph8pufdvb0g.darc": {
+      "description": "",
+      "tokens": 49173,
+      "hash": "807374f913201be2",
+      "size": 187388,
+      "mtimeMs": 1787230411892.4392,
+      "updatedAt": "2026-08-22T19:13:56.927Z",
+      "source": "scan"
+    },
+    ".beads/backup/vjk7ef3fe10sqiau9kg5qrg1c3ju94hb.darc": {
+      "description": "",
+      "tokens": 50528,
+      "hash": "fdb9e47480b6c96a",
+      "size": 192401,
+      "mtimeMs": 1787153135142.94,
+      "updatedAt": "2026-08-22T19:13:56.931Z",
+      "source": "scan"
+    },
+    ".beads/backup/vubtflrl28u55ftfjsgotjes43t8f1vp.darc": {
+      "description": "",
+      "tokens": 127456,
+      "hash": "c551b31759f540cd",
+      "size": 483372,
+      "mtimeMs": 1787259515725.008,
+      "updatedAt": "2026-08-22T19:13:56.936Z",
+      "source": "scan"
+    },
+    ".beads/config.yaml": {
+      "description": "Beads Configuration File",
+      "tokens": 898,
+      "hash": "15551ead2a3f8267",
+      "size": 3146,
+      "mtimeMs": 1786053005055.0776,
+      "updatedAt": "2026-08-22T19:13:56.936Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/config.json": {
+      "description": "",
+      "tokens": 16,
+      "hash": "08d2f19845664b9c",
+      "size": 56,
+      "mtimeMs": 1786570685377.2913,
+      "updatedAt": "2026-08-22T19:13:56.937Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/.dolt-gc-last": {
+      "description": "",
+      "tokens": 0,
+      "hash": "e3b0c44298fc1c14",
+      "size": 0,
+      "mtimeMs": 1787343410418.4304,
+      "updatedAt": "2026-08-22T19:13:56.937Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/config": {
+      "description": "",
+      "tokens": 46,
+      "hash": "7509ebdf40b44e3b",
+      "size": 172,
+      "mtimeMs": 1787426019839.6855,
+      "updatedAt": "2026-08-22T19:13:56.937Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/description": {
+      "description": "",
+      "tokens": 20,
+      "hash": "85ab6c163d43a17e",
+      "size": 73,
+      "mtimeMs": 1786052881081.1172,
+      "updatedAt": "2026-08-22T19:13:56.937Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/FETCH_HEAD": {
+      "description": "",
+      "tokens": 26,
+      "hash": "90b2139d583566cc",
+      "size": 94,
+      "mtimeMs": 1787426023406.741,
+      "updatedAt": "2026-08-22T19:13:56.937Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/HEAD": {
+      "description": "",
+      "tokens": 7,
+      "hash": "f6f2b945f6c411b0",
+      "size": 23,
+      "mtimeMs": 1786052881086.7144,
+      "updatedAt": "2026-08-22T19:13:56.937Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/applypatch-msg.sample": {
+      "description": "An example hook script to check the commit log message taken by",
+      "tokens": 143,
+      "hash": "5c4e5ccca535cf15",
+      "size": 535,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.938Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/commit-msg.sample": {
+      "description": "An example hook script to check the commit log message.",
+      "tokens": 542,
+      "hash": "fd592b0589449054",
+      "size": 2029,
+      "mtimeMs": 1786052881081.1172,
+      "updatedAt": "2026-08-22T19:13:56.938Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/fsmonitor-watchman.sample": {
+      "description": "An example hook script to integrate Watchman",
+      "tokens": 1244,
+      "hash": "b9561de55d59188c",
+      "size": 4662,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.939Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/post-update.sample": {
+      "description": "An example hook script to prepare a packed repository for use over",
+      "tokens": 66,
+      "hash": "72ea0fb9028a12d2",
+      "size": 246,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.939Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/pre-applypatch.sample": {
+      "description": "An example hook script to verify what is about to be committed",
+      "tokens": 129,
+      "hash": "40d5ee63c6a8938b",
+      "size": 481,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.939Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/pre-commit.sample": {
+      "description": "An example hook script to verify what is about to be committed.",
+      "tokens": 455,
+      "hash": "d256cbfe88783763",
+      "size": 1706,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.940Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/pre-merge-commit.sample": {
+      "description": "An example hook script to verify what is about to be committed.",
+      "tokens": 127,
+      "hash": "e484da214d8e8259",
+      "size": 473,
+      "mtimeMs": 1786052881081.1172,
+      "updatedAt": "2026-08-22T19:13:56.940Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/pre-push.sample": {
+      "description": "An example hook script to verify what is about to be pushed.  Called by \"git",
+      "tokens": 382,
+      "hash": "283bc5461c05dd28",
+      "size": 1431,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.940Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/pre-rebase.sample": {
+      "description": "The \"pre-rebase\" hook is run just before \"git rebase\" starts doing",
+      "tokens": 1335,
+      "hash": "337fd36b05af2736",
+      "size": 5006,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.940Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/pre-receive.sample": {
+      "description": "An example hook script to make use of push options.",
+      "tokens": 161,
+      "hash": "891ee3ef33669210",
+      "size": 601,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.941Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/prepare-commit-msg.sample": {
+      "description": "An example hook script to prepare the commit log message.",
+      "tokens": 454,
+      "hash": "8c46b206aa3fb638",
+      "size": 1702,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.941Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/push-to-checkout.sample": {
+      "description": "An example hook script to update a checked-out tree on a git push.",
+      "tokens": 758,
+      "hash": "60258a2149f5df07",
+      "size": 2840,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.941Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/sendemail-validate.sample": {
+      "description": "An example hook script to validate a patch (and/or patch series) before",
+      "tokens": 631,
+      "hash": "3fb0072cbf1d3c51",
+      "size": 2365,
+      "mtimeMs": 1786052881082.1172,
+      "updatedAt": "2026-08-22T19:13:56.941Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/hooks/update.sample": {
+      "description": "An example hook script to block unannotated tags from entering.",
+      "tokens": 989,
+      "hash": "657cc19129e888cb",
+      "size": 3707,
+      "mtimeMs": 1786052881081.1172,
+      "updatedAt": "2026-08-22T19:13:56.942Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/info/exclude": {
+      "description": "git ls-files --others --exclude-from=.git/info/exclude",
+      "tokens": 64,
+      "hash": "6671fe83b7a07c89",
+      "size": 240,
+      "mtimeMs": 1786052881081.1172,
+      "updatedAt": "2026-08-22T19:13:56.942Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/info/refs": {
+      "description": "",
+      "tokens": 468,
+      "hash": "f8c4ff1154aa1233",
+      "size": 1753,
+      "mtimeMs": 1787419611489.1394,
+      "updatedAt": "2026-08-22T19:13:56.942Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/01/1e4a1b6aff61ff6b59b186b8a9a6b88dfd1db8": {
+      "description": "",
+      "tokens": 37,
+      "hash": "6a48945560fd4312",
+      "size": 136,
+      "mtimeMs": 1787421801142.8918,
+      "updatedAt": "2026-08-22T19:13:56.943Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/01/c3b07b3f6b74f521dc8533193794060a2b9f2d": {
+      "description": "",
+      "tokens": 22312,
+      "hash": "d7c6c807cf11596d",
+      "size": 87317,
+      "mtimeMs": 1787425452049.2607,
+      "updatedAt": "2026-08-22T19:13:56.944Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/06/63d3f231e4264d2d6b59c1b6ddfa5e288dfd8f": {
+      "description": "",
+      "tokens": 344,
+      "hash": "524450c6ad46fe12",
+      "size": 1363,
+      "mtimeMs": 1787425515174.1504,
+      "updatedAt": "2026-08-22T19:13:56.945Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/07/79da36c4133634aeba84f5baecbcdc0618379d": {
+      "description": "",
+      "tokens": 29070,
+      "hash": "de2d97ed6eca735e",
+      "size": 114121,
+      "mtimeMs": 1787425452052.2607,
+      "updatedAt": "2026-08-22T19:13:56.947Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/0a/e7c8ca6ca06cb86f17ffba8d8ba4a904c1b624": {
+      "description": "",
+      "tokens": 37,
+      "hash": "4f84cdec181f7a5a",
+      "size": 136,
+      "mtimeMs": 1787420046728.548,
+      "updatedAt": "2026-08-22T19:13:56.950Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/0f/8df1656e29aa11281c45adc8eb7c1e9e8c4dba": {
+      "description": "",
+      "tokens": 44,
+      "hash": "052db0a19c83be18",
+      "size": 164,
+      "mtimeMs": 1787426004877.4534,
+      "updatedAt": "2026-08-22T19:13:56.950Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/13/dc9ff51e70832278de23387195c31f01b6c76e": {
+      "description": "",
+      "tokens": 54,
+      "hash": "fa26a71d284a6bea",
+      "size": 202,
+      "mtimeMs": 1787425451700.255,
+      "updatedAt": "2026-08-22T19:13:56.950Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/14/2afec0c0199a37e73b10faa64a326fb086d9e9": {
+      "description": "",
+      "tokens": 260,
+      "hash": "56bccb28c8012d61",
+      "size": 998,
+      "mtimeMs": 1787425585220.1484,
+      "updatedAt": "2026-08-22T19:13:56.950Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/14/7926924300b5b38510817b968bc627f2d0bdb5": {
+      "description": "",
+      "tokens": 16,
+      "hash": "6cd419b04ca78217",
+      "size": 59,
+      "mtimeMs": 1787421801140.8918,
+      "updatedAt": "2026-08-22T19:13:56.951Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/16/4b830b4dc2249137edea292a607a88d60c2893": {
+      "description": "",
+      "tokens": 16,
+      "hash": "4aba16e4a514d9aa",
+      "size": 58,
+      "mtimeMs": 1787423134022.0205,
+      "updatedAt": "2026-08-22T19:13:56.951Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/17/46442c7bccff52db6b4ece25087c9d6123c459": {
+      "description": "",
+      "tokens": 44,
+      "hash": "c3534dd21e329d58",
+      "size": 164,
+      "mtimeMs": 1787422096964.7559,
+      "updatedAt": "2026-08-22T19:13:56.951Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/18/78d6c0c098c594b179e1cc91521b34c13be70b": {
+      "description": "",
+      "tokens": 54,
+      "hash": "372185900c6b870e",
+      "size": 202,
+      "mtimeMs": 1787425577311.0347,
+      "updatedAt": "2026-08-22T19:13:56.952Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/19/a74bfc74aae78b9ec8087ee80d3b2e9de778f7": {
+      "description": "",
+      "tokens": 16,
+      "hash": "6028e1e36de27fcf",
+      "size": 59,
+      "mtimeMs": 1787419624022.3562,
+      "updatedAt": "2026-08-22T19:13:56.952Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1b/078be5285a6fd86993143ad637fcef21ad44ef": {
+      "description": "",
+      "tokens": 270,
+      "hash": "3c372fb10cd698b3",
+      "size": 1034,
+      "mtimeMs": 1787425994911.2988,
+      "updatedAt": "2026-08-22T19:13:56.952Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1c/6f31a0c63a08931e01c5a5ddf4b0438c5bf274": {
+      "description": "",
+      "tokens": 54,
+      "hash": "de56e45eb00bc9ac",
+      "size": 202,
+      "mtimeMs": 1787419622378.328,
+      "updatedAt": "2026-08-22T19:13:56.952Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1c/ffb012afe3f9ea4736088b8c4a1abadbb8c662": {
+      "description": "",
+      "tokens": 54,
+      "hash": "0e1a7539ad8f9ed6",
+      "size": 202,
+      "mtimeMs": 1787425451704.255,
+      "updatedAt": "2026-08-22T19:13:56.952Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1d/04662e3f130011f319abaa777aeb0c688370c5": {
+      "description": "",
+      "tokens": 44,
+      "hash": "6f1025c790eb6e6d",
+      "size": 164,
+      "mtimeMs": 1787425516696.1719,
+      "updatedAt": "2026-08-22T19:13:56.953Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1d/fe574614cfa3fcf6656750507157442680a216": {
+      "description": "",
+      "tokens": 54,
+      "hash": "653b24544582fb68",
+      "size": 202,
+      "mtimeMs": 1787419846472.1658,
+      "updatedAt": "2026-08-22T19:13:56.953Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1e/3a7c1c0e02f123eb69caa7e3557254e4389600": {
+      "description": "",
+      "tokens": 73,
+      "hash": "57e978f671622704",
+      "size": 286,
+      "mtimeMs": 1787425584036.1313,
+      "updatedAt": "2026-08-22T19:13:56.953Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/1f/d09a1de52d8d165155801a5da09d521ea13a4f": {
+      "description": "",
+      "tokens": 16,
+      "hash": "f36ce9d9a7a2f2a4",
+      "size": 59,
+      "mtimeMs": 1787425509300.0676,
+      "updatedAt": "2026-08-22T19:13:56.957Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/20/886765806f503e54c7549a45b18377cd50324f": {
+      "description": "",
+      "tokens": 131,
+      "hash": "08cb23ee4bb48803",
+      "size": 516,
+      "mtimeMs": 1787425452400.2666,
+      "updatedAt": "2026-08-22T19:13:56.957Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/22/2036e618b846eebad183e9b15cff6c9e9ce0b1": {
+      "description": "",
+      "tokens": 44,
+      "hash": "14fe156ce7f996e3",
+      "size": 164,
+      "mtimeMs": 1787420046721.5479,
+      "updatedAt": "2026-08-22T19:13:56.959Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/23/07c3363bdfca549e7aa6d5001de1a404090c36": {
+      "description": "",
+      "tokens": 12660,
+      "hash": "89c0e30ccad095f7",
+      "size": 49596,
+      "mtimeMs": 1787425575229.5022,
+      "updatedAt": "2026-08-22T19:13:56.960Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/23/3caef8b146b99532d3c4b39b640dc517ced639": {
+      "description": "",
+      "tokens": 44,
+      "hash": "d21dd65e6dbb2fdb",
+      "size": 164,
+      "mtimeMs": 1787424527941.3574,
+      "updatedAt": "2026-08-22T19:13:56.962Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/23/72a48e617733759d9f795fa591a82a842054a1": {
+      "description": "",
+      "tokens": 81,
+      "hash": "1a52162a45604ebc",
+      "size": 323,
+      "mtimeMs": 1787425452402.2666,
+      "updatedAt": "2026-08-22T19:13:56.962Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/25/80499d4229e169a847c25774a817ddd12c2000": {
+      "description": "",
+      "tokens": 16,
+      "hash": "0e433ee0ab63dd26",
+      "size": 59,
+      "mtimeMs": 1787419848032.1921,
+      "updatedAt": "2026-08-22T19:13:56.962Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/28/8bb9a1917a5294c502e4ec03d0b7f67d382e59": {
+      "description": "",
+      "tokens": 145,
+      "hash": "efcb13be2b45df28",
+      "size": 573,
+      "mtimeMs": 1787425452399.2666,
+      "updatedAt": "2026-08-22T19:13:56.962Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/2c/ee9141a5bf5aa30ff2c0a78087f7763a177309": {
+      "description": "",
+      "tokens": 3618,
+      "hash": "38369b7aea147e40",
+      "size": 14323,
+      "mtimeMs": 1787419629520.4512,
+      "updatedAt": "2026-08-22T19:13:56.963Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/2d/32de49f47f1cfd6e28860d58b669aebd56838f": {
+      "description": "",
+      "tokens": 270,
+      "hash": "9f82b0dffa48dd24",
+      "size": 1069,
+      "mtimeMs": 1787426003172.4268,
+      "updatedAt": "2026-08-22T19:13:56.963Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/30/4e1573ebd4b245d799d514a2fa101865a52348": {
+      "description": "",
+      "tokens": 54,
+      "hash": "114dbda79bebeeff",
+      "size": 202,
+      "mtimeMs": 1787425515190.1506,
+      "updatedAt": "2026-08-22T19:13:56.963Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/30/c3a90501019dca6ced0a5dbfa349fcff4ec91b": {
+      "description": "",
+      "tokens": 127,
+      "hash": "901e2e9e4e421df3",
+      "size": 499,
+      "mtimeMs": 1787425452399.2666,
+      "updatedAt": "2026-08-22T19:13:56.964Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/33/41bf0a6ad92dd9ff27158362a609c02c441475": {
+      "description": "",
+      "tokens": 16,
+      "hash": "c617d26ce0981d32",
+      "size": 59,
+      "mtimeMs": 1787420046726.548,
+      "updatedAt": "2026-08-22T19:13:56.965Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/34/e0cb970ea00bd7f8f78fa712a748bdb35be578": {
+      "description": "",
+      "tokens": 44,
+      "hash": "9c4d61b7e694aa23",
+      "size": 164,
+      "mtimeMs": 1787423126461.9053,
+      "updatedAt": "2026-08-22T19:13:56.965Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/36/04bd1e55644bb4f8ac0f1eef68463ddf756c83": {
+      "description": "",
+      "tokens": 2283,
+      "hash": "a22fe3c5ece8bb2f",
+      "size": 8924,
+      "mtimeMs": 1787419622363.3274,
+      "updatedAt": "2026-08-22T19:13:56.965Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/38/59b465ff1bceedc38a04dc2612e673cd1ccba7": {
+      "description": "",
+      "tokens": 73,
+      "hash": "aac3b541275bee77",
+      "size": 282,
+      "mtimeMs": 1787425452047.2607,
+      "updatedAt": "2026-08-22T19:13:56.965Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/38/640669954233508d9d4b0308d82cbcc21dde41": {
+      "description": "",
+      "tokens": 184,
+      "hash": "7fbad3e3b66eed0d",
+      "size": 712,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:56.966Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/39/feede5acbc0f6a811964eabf1e70bf41821a39": {
+      "description": "",
+      "tokens": 13950,
+      "hash": "4a4f5bb7351aa9f4",
+      "size": 54721,
+      "mtimeMs": 1787419843996.1235,
+      "updatedAt": "2026-08-22T19:13:56.970Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/3a/105aa12bcd11285ebf834370c1232a7ca11978": {
+      "description": "",
+      "tokens": 44,
+      "hash": "2cf35270c19d2ea8",
+      "size": 164,
+      "mtimeMs": 1787423134016.0205,
+      "updatedAt": "2026-08-22T19:13:56.971Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/3b/0ae11873e7a0f439d4d050efaf0929e0cf0ed5": {
+      "description": "",
+      "tokens": 26626,
+      "hash": "b5d3a5a79a4bb432",
+      "size": 104542,
+      "mtimeMs": 1787425991851.2515,
+      "updatedAt": "2026-08-22T19:13:56.972Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/3e/26e77fed183a1d613f7098c9da955133d218b4": {
+      "description": "",
+      "tokens": 44,
+      "hash": "8389591ac176aec3",
+      "size": 164,
+      "mtimeMs": 1787423732904.9946,
+      "updatedAt": "2026-08-22T19:13:56.975Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/3e/edc147884bf077dd8fe0ec0e2fe35d05b0ed18": {
+      "description": "",
+      "tokens": 54,
+      "hash": "71db0e59ba1e9fb9",
+      "size": 202,
+      "mtimeMs": 1787425451700.255,
+      "updatedAt": "2026-08-22T19:13:56.975Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/40/e9a04d81c8c2f3824da5a4a855558fcc7f13ff": {
+      "description": "",
+      "tokens": 136,
+      "hash": "9ccdef86d101d547",
+      "size": 535,
+      "mtimeMs": 1787425452399.2666,
+      "updatedAt": "2026-08-22T19:13:56.975Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/41/b9e070b24fe16f0f6bb881944968cc87611f3e": {
+      "description": "",
+      "tokens": 37,
+      "hash": "d065218589f4003d",
+      "size": 136,
+      "mtimeMs": 1787423740094.1516,
+      "updatedAt": "2026-08-22T19:13:56.975Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/44/aa11758aa7137a83b928a5402d60b0b58450fd": {
+      "description": "",
+      "tokens": 54,
+      "hash": "d799a9b7e6cb8adb",
+      "size": 202,
+      "mtimeMs": 1787425451704.255,
+      "updatedAt": "2026-08-22T19:13:56.976Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/45/02b6f222c4eacf952a173e2fc696de6f7cf9a3": {
+      "description": "",
+      "tokens": 15,
+      "hash": "db04cc7b73e7e423",
+      "size": 58,
+      "mtimeMs": 1787425516702.1719,
+      "updatedAt": "2026-08-22T19:13:56.976Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/46/d9bc1961414c10168cfd626925cb9059224cf8": {
+      "description": "",
+      "tokens": 37,
+      "hash": "9c05f13b806d92d6",
+      "size": 136,
+      "mtimeMs": 1787422096971.7559,
+      "updatedAt": "2026-08-22T19:13:56.977Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/46/e7688580cff19f5dfe43928219c36d25294aed": {
+      "description": "",
+      "tokens": 16,
+      "hash": "ae69326e12cef004",
+      "size": 59,
+      "mtimeMs": 1787425996752.3274,
+      "updatedAt": "2026-08-22T19:13:56.977Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/47/ab66fe8a112409f8563f0b5d59eaae0b74855c": {
+      "description": "",
+      "tokens": 36,
+      "hash": "ab0b3128ce519fb7",
+      "size": 136,
+      "mtimeMs": 1787424539716.5667,
+      "updatedAt": "2026-08-22T19:13:56.977Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/48/4d50cddd6ea6fbbafadf66640ea06910e7204c": {
+      "description": "",
+      "tokens": 37,
+      "hash": "b573e1f6be41bc73",
+      "size": 136,
+      "mtimeMs": 1787424527964.3577,
+      "updatedAt": "2026-08-22T19:13:56.978Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4a/a42437019bd5e9cc9fa7748ed8b21ba0cdd5ed": {
+      "description": "",
+      "tokens": 28815,
+      "hash": "99c76d86448dd4b4",
+      "size": 112734,
+      "mtimeMs": 1787425452044.2605,
+      "updatedAt": "2026-08-22T19:13:56.980Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4b/c3f049f083b00cc29ade68d538bafb5ce4d0f1": {
+      "description": "",
+      "tokens": 145,
+      "hash": "2b913bc83b393ff5",
+      "size": 570,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:56.983Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4c/1f7da9d35c2ef3c77f17a8272043bce3a3fbb4": {
+      "description": "",
+      "tokens": 16,
+      "hash": "19bacdbb83b7f846",
+      "size": 59,
+      "mtimeMs": 1787423740092.1516,
+      "updatedAt": "2026-08-22T19:13:56.983Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4c/643f1e09cf5fd070fcc238ae08e602e4ec01d9": {
+      "description": "",
+      "tokens": 16,
+      "hash": "e5eace7d4bafa61b",
+      "size": 59,
+      "mtimeMs": 1787424539712.5667,
+      "updatedAt": "2026-08-22T19:13:56.984Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4c/b8e7b52b43c28449378d3a3586d5395c5eea07": {
+      "description": "",
+      "tokens": 315,
+      "hash": "d18cb79b5489cc0a",
+      "size": 1250,
+      "mtimeMs": 1787425451707.255,
+      "updatedAt": "2026-08-22T19:13:56.984Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4c/f0e5667b23fa2fc3e47d740a955ece2fe6718f": {
+      "description": "",
+      "tokens": 44,
+      "hash": "5185ee832bfea399",
+      "size": 164,
+      "mtimeMs": 1787425579108.9453,
+      "updatedAt": "2026-08-22T19:13:56.984Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4d/370a4a987c0155ed5309d2903b2647e43c131d": {
+      "description": "",
+      "tokens": 16,
+      "hash": "7d8d26743ff33520",
+      "size": 59,
+      "mtimeMs": 1787419895860.0032,
+      "updatedAt": "2026-08-22T19:13:56.984Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/4f/4c3d6b631aa04ccadef742c2916182379734a2": {
+      "description": "",
+      "tokens": 72,
+      "hash": "968678fd5210f5b1",
+      "size": 285,
+      "mtimeMs": 1787419852460.2673,
+      "updatedAt": "2026-08-22T19:13:56.985Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/50/e0e10535f5e9134e23f4734d4d261664cc1bfb": {
+      "description": "",
+      "tokens": 273,
+      "hash": "11a93d72dd14cae6",
+      "size": 1081,
+      "mtimeMs": 1787425452397.2666,
+      "updatedAt": "2026-08-22T19:13:56.985Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/51/e2e17e08d5c4f448e064f6718d06e325daf0d9": {
+      "description": "",
+      "tokens": 54,
+      "hash": "2b4efebe79968ced",
+      "size": 202,
+      "mtimeMs": 1787425451706.255,
+      "updatedAt": "2026-08-22T19:13:56.985Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/53/696ff9b15940bfcf18155f8eb1716d85f8b6ee": {
+      "description": "",
+      "tokens": 398,
+      "hash": "d5afa859486cb243",
+      "size": 1588,
+      "mtimeMs": 1787426003184.427,
+      "updatedAt": "2026-08-22T19:13:56.985Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/54/769c3ced1a5ec0cef9a6f53a1b4c5805fc454b": {
+      "description": "",
+      "tokens": 54,
+      "hash": "1d909170724501e3",
+      "size": 202,
+      "mtimeMs": 1787425451700.255,
+      "updatedAt": "2026-08-22T19:13:56.985Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/55/d15c73663c018ec388edf53a4aa77cd9849d52": {
+      "description": "",
+      "tokens": 37,
+      "hash": "fe1d19f2af2baf70",
+      "size": 136,
+      "mtimeMs": 1787425579113.3071,
+      "updatedAt": "2026-08-22T19:13:56.987Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/56/7f49f2d8bdb0c71a1d9c4c6f1d8865cac0b219": {
+      "description": "",
+      "tokens": 173,
+      "hash": "08e2150ee3df5518",
+      "size": 686,
+      "mtimeMs": 1787425452399.2666,
+      "updatedAt": "2026-08-22T19:13:56.987Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/57/8da4624220a1073e4cdc9f40715655a0e64ae7": {
+      "description": "",
+      "tokens": 37,
+      "hash": "c72d1c1071f556bb",
+      "size": 136,
+      "mtimeMs": 1787425516703.1719,
+      "updatedAt": "2026-08-22T19:13:56.987Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/5b/4084011702e02cb3ae583f152f4a58e5e3589c": {
+      "description": "",
+      "tokens": 16,
+      "hash": "7d001677995b9677",
+      "size": 59,
+      "mtimeMs": 1787423732911.9949,
+      "updatedAt": "2026-08-22T19:13:56.987Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/5c/2499ba8441f93c80329469c535f39ba135cd59": {
+      "description": "",
+      "tokens": 72,
+      "hash": "93f3eab65fc6002a",
+      "size": 284,
+      "mtimeMs": 1787425452047.2607,
+      "updatedAt": "2026-08-22T19:13:56.988Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/5d/727ebcf727467f25d51fb40e89c62524c28617": {
+      "description": "",
+      "tokens": 71,
+      "hash": "908673c87d4fb38d",
+      "size": 284,
+      "mtimeMs": 1787425452394.2666,
+      "updatedAt": "2026-08-22T19:13:56.988Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/5d/dc6218b33cefdbfa19dd658c3963787206e219": {
+      "description": "",
+      "tokens": 160,
+      "hash": "aeedbae0a6fe8653",
+      "size": 630,
+      "mtimeMs": 1787425452400.2666,
+      "updatedAt": "2026-08-22T19:13:56.988Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/60/2ff2ceef3894f0232712275fb1cf735538812a": {
+      "description": "",
+      "tokens": 117,
+      "hash": "eec2ffbfcc6fa2c7",
+      "size": 460,
+      "mtimeMs": 1787425452402.2666,
+      "updatedAt": "2026-08-22T19:13:56.988Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/63/0733a5a93a38d7fe05b11a20eb700ae6b4f697": {
+      "description": "",
+      "tokens": 54,
+      "hash": "7e6cc18f06136335",
+      "size": 202,
+      "mtimeMs": 1787425451705.255,
+      "updatedAt": "2026-08-22T19:13:56.988Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/64/713ef99c6490262cd163e4cf0319d622145fa9": {
+      "description": "",
+      "tokens": 54,
+      "hash": "1572de3b77bc9db7",
+      "size": 202,
+      "mtimeMs": 1787425451706.255,
+      "updatedAt": "2026-08-22T19:13:56.988Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/64/dc9a699ccca5119766c0e6bab1c614e5865c62": {
+      "description": "",
+      "tokens": 16,
+      "hash": "25d072771f082828",
+      "size": 59,
+      "mtimeMs": 1787424672617.9116,
+      "updatedAt": "2026-08-22T19:13:56.990Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/69/b9c2b9f09d904232735809fa087907777e28b3": {
+      "description": "",
+      "tokens": 15,
+      "hash": "1c99a7e47216241a",
+      "size": 59,
+      "mtimeMs": 1787425586895.3086,
+      "updatedAt": "2026-08-22T19:13:56.990Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/6b/47a3aa5ee64de385e8f8fe7671c99b3aaca506": {
+      "description": "",
+      "tokens": 8126,
+      "hash": "794190db3ad62745",
+      "size": 31853,
+      "mtimeMs": 1787425452395.2666,
+      "updatedAt": "2026-08-22T19:13:56.991Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/6b/ba6eebb94cd992c39dff06cbc9d28cd8ab2127": {
+      "description": "",
+      "tokens": 155,
+      "hash": "fc4728fd16d83f40",
+      "size": 607,
+      "mtimeMs": 1787425452399.2666,
+      "updatedAt": "2026-08-22T19:13:56.994Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/6d/0ae6b4d67546f38b13508f0d69f8d788fb4b91": {
+      "description": "",
+      "tokens": 2289,
+      "hash": "9e41bcbcb93b79cd",
+      "size": 8962,
+      "mtimeMs": 1787419629508.451,
+      "updatedAt": "2026-08-22T19:13:56.994Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/6d/59172dc76d79ad575eeabdf264a7fafa4b15e6": {
+      "description": "",
+      "tokens": 37,
+      "hash": "4ac5f5ecf0610419",
+      "size": 136,
+      "mtimeMs": 1787422104044.8528,
+      "updatedAt": "2026-08-22T19:13:56.995Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/6f/97c5217b9a5aca9664cc97a555547bebaa07df": {
+      "description": "",
+      "tokens": 37,
+      "hash": "6c6e58d146e2e817",
+      "size": 136,
+      "mtimeMs": 1787423134024.0208,
+      "updatedAt": "2026-08-22T19:13:56.995Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/72/37874789288fbe89dd89dc1c5d114067854bb6": {
+      "description": "",
+      "tokens": 215,
+      "hash": "7e3418f397374826",
+      "size": 857,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:56.995Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/72/d78cab7f4a2fd9d404258b3cf200b2cef04acf": {
+      "description": "",
+      "tokens": 36,
+      "hash": "e1cdb2511a7d8add",
+      "size": 136,
+      "mtimeMs": 1787419624023.3562,
+      "updatedAt": "2026-08-22T19:13:56.998Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/74/22e3c6d8d02df8243ad396b019b0ff0fd73b9c": {
+      "description": "",
+      "tokens": 16,
+      "hash": "85f3a078c99a4ccb",
+      "size": 59,
+      "mtimeMs": 1787426004882.4534,
+      "updatedAt": "2026-08-22T19:13:56.998Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/76/ee7a9dd5943d8b7d18a89b7cfe9d4cac25f194": {
+      "description": "",
+      "tokens": 241,
+      "hash": "44f4ec90c650c0a6",
+      "size": 926,
+      "mtimeMs": 1787425515156.1501,
+      "updatedAt": "2026-08-22T19:13:56.998Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/79/4b00c57971a9434755c83c26f0feb6f10326f3": {
+      "description": "",
+      "tokens": 36,
+      "hash": "06d786bc708c02c9",
+      "size": 136,
+      "mtimeMs": 1787419631047.4775,
+      "updatedAt": "2026-08-22T19:13:56.999Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/7a/08c923c65d187452f9b1f8f52368652f5f1c0a": {
+      "description": "",
+      "tokens": 232,
+      "hash": "3e698c5a48caf95a",
+      "size": 891,
+      "mtimeMs": 1787425507190.0378,
+      "updatedAt": "2026-08-22T19:13:56.999Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/7b/0feecdfca5c69a025619dcc4d33deefc1a2e9f": {
+      "description": "",
+      "tokens": 119,
+      "hash": "72b7fb6218f94a33",
+      "size": 465,
+      "mtimeMs": 1787425452400.2666,
+      "updatedAt": "2026-08-22T19:13:57.000Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/7b/3cfff9b7750747689f542a41cb75c72ad2af95": {
+      "description": "",
+      "tokens": 194,
+      "hash": "5822cb1de4287c6f",
+      "size": 749,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.000Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/7c/34e621afdabfe57e1169c320d1a5c2dc795c2a": {
+      "description": "",
+      "tokens": 44,
+      "hash": "702f4b36fa6f7d01",
+      "size": 164,
+      "mtimeMs": 1787420054112.672,
+      "updatedAt": "2026-08-22T19:13:57.001Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/7f/344bdfd0e2a74d2140381b3524203fa06d2cf0": {
+      "description": "",
+      "tokens": 3647,
+      "hash": "0ebe12db6d7bc000",
+      "size": 14433,
+      "mtimeMs": 1787419853756.2893,
+      "updatedAt": "2026-08-22T19:13:57.002Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/84/11f03cf5f4ab44742a9575a41015edbe563788": {
+      "description": "",
+      "tokens": 301,
+      "hash": "d7db136446c319ed",
+      "size": 1193,
+      "mtimeMs": 1787425451707.255,
+      "updatedAt": "2026-08-22T19:13:57.002Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/85/a462ed868c1ea7db64fe8f409369a5859bdef3": {
+      "description": "",
+      "tokens": 16,
+      "hash": "b4799ff91fcdb11c",
+      "size": 58,
+      "mtimeMs": 1787422096970.7559,
+      "updatedAt": "2026-08-22T19:13:57.003Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/85/da6288185f25d3ad4d25ad77d9c266f204f5dd": {
+      "description": "",
+      "tokens": 187,
+      "hash": "969d29e29f611f3c",
+      "size": 743,
+      "mtimeMs": 1787425452399.2666,
+      "updatedAt": "2026-08-22T19:13:57.003Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/87/fd54373b2ad1cbdc4a83fffc82fca79df9ff06": {
+      "description": "",
+      "tokens": 54,
+      "hash": "9c34a63cc73083a4",
+      "size": 202,
+      "mtimeMs": 1787425451700.255,
+      "updatedAt": "2026-08-22T19:13:57.003Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/88/0a5e553282a262b990573b7c822105c9c67473": {
+      "description": "",
+      "tokens": 54,
+      "hash": "26b77c76a1049ed2",
+      "size": 202,
+      "mtimeMs": 1787425451700.255,
+      "updatedAt": "2026-08-22T19:13:57.003Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/89/8a42ad37b1a81d510b2be8f556f709b2815a72": {
+      "description": "",
+      "tokens": 16,
+      "hash": "96f7216ebe41ae14",
+      "size": 59,
+      "mtimeMs": 1787424665371.7844,
+      "updatedAt": "2026-08-22T19:13:57.005Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/8b/8d3effc5b8be63e1116d6b552ed3adeb00d56a": {
+      "description": "",
+      "tokens": 165,
+      "hash": "da9ac21719330393",
+      "size": 642,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.005Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/8f/aa1fc7aae1e54d7500363978cde3a63b53a0a0": {
+      "description": "",
+      "tokens": 54,
+      "hash": "bf85f6900c3168a2",
+      "size": 202,
+      "mtimeMs": 1787425451706.255,
+      "updatedAt": "2026-08-22T19:13:57.005Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/92/b18276c8fb0bd454098d19efdd4ee7c6f39b74": {
+      "description": "",
+      "tokens": 16,
+      "hash": "dd31644096bba2cd",
+      "size": 59,
+      "mtimeMs": 1787419631045.4775,
+      "updatedAt": "2026-08-22T19:13:57.006Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/95/42b6c31b3c36b8a75cc85bb94ef65ba9b00c52": {
+      "description": "",
+      "tokens": 287,
+      "hash": "61bd71f509fdc90f",
+      "size": 1137,
+      "mtimeMs": 1787425452397.2666,
+      "updatedAt": "2026-08-22T19:13:57.006Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/95/fa0c9e5f7c2f08bf7542e125bad59a985693af": {
+      "description": "",
+      "tokens": 44,
+      "hash": "88c3bd7a96648437",
+      "size": 164,
+      "mtimeMs": 1787419848027.1921,
+      "updatedAt": "2026-08-22T19:13:57.009Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/96/8c4320d65e6cf1205a31f0bac6d383c2af070d": {
+      "description": "",
+      "tokens": 37,
+      "hash": "631c3df3aa6af3e7",
+      "size": 136,
+      "mtimeMs": 1787423126468.1157,
+      "updatedAt": "2026-08-22T19:13:57.009Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/9a/7697d2f00212e41a757d34816befc420357236": {
+      "description": "",
+      "tokens": 13231,
+      "hash": "e17d981e2457ed88",
+      "size": 51931,
+      "mtimeMs": 1787425452397.2666,
+      "updatedAt": "2026-08-22T19:13:57.010Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/9a/e68eb8392ab90514374bc3f3580d731ce664e9": {
+      "description": "",
+      "tokens": 37,
+      "hash": "81028a8849167580",
+      "size": 136,
+      "mtimeMs": 1787419848034.1921,
+      "updatedAt": "2026-08-22T19:13:57.010Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a0/98f35933d22f0379c5c16a4f797bc959d973f3": {
+      "description": "",
+      "tokens": 44,
+      "hash": "12d0eeed4fda5fae",
+      "size": 164,
+      "mtimeMs": 1787424665365.7844,
+      "updatedAt": "2026-08-22T19:13:57.010Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a1/3b8413be042e698648d9f45ddb675e63371acb": {
+      "description": "",
+      "tokens": 37,
+      "hash": "036a698e97c09724",
+      "size": 136,
+      "mtimeMs": 1787425509302.0676,
+      "updatedAt": "2026-08-22T19:13:57.011Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a1/bd5a837d23e8afd6d6e246e5de290758da6d97": {
+      "description": "",
+      "tokens": 73,
+      "hash": "7a663008bc556bb5",
+      "size": 287,
+      "mtimeMs": 1787426001893.407,
+      "updatedAt": "2026-08-22T19:13:57.011Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a3/108f637f2c4a9324f8c813b8ebca9fe14cb6ac": {
+      "description": "",
+      "tokens": 44,
+      "hash": "bd08608f7474a3f1",
+      "size": 164,
+      "mtimeMs": 1787421801135.8918,
+      "updatedAt": "2026-08-22T19:13:57.011Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a4/878d3c1794961296c4b5b61ce369c1cd1684e1": {
+      "description": "",
+      "tokens": 258,
+      "hash": "79c0db33b3ffec7d",
+      "size": 1024,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.011Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a9/452639f9fddeba0afe34013ba958b94dde7f06": {
+      "description": "",
+      "tokens": 44,
+      "hash": "8d373c61800733b8",
+      "size": 164,
+      "mtimeMs": 1787419624018.3562,
+      "updatedAt": "2026-08-22T19:13:57.012Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/a9/b73252105c4bcec6208f7ceff3e844f1a1e4c9": {
+      "description": "",
+      "tokens": 54,
+      "hash": "29d5d7128c664a63",
+      "size": 202,
+      "mtimeMs": 1787419629524.4512,
+      "updatedAt": "2026-08-22T19:13:57.012Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/aa/2957dde668e2768e9e27b4aee57b61c353ff03": {
+      "description": "",
+      "tokens": 245,
+      "hash": "7ef4bfb5021e73e7",
+      "size": 970,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.012Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/aa/3977913353dcbd1e4142c62119300d440541ea": {
+      "description": "",
+      "tokens": 36,
+      "hash": "f105fed493043e37",
+      "size": 136,
+      "mtimeMs": 1787423732914.9949,
+      "updatedAt": "2026-08-22T19:13:57.014Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ab/0618fe99bd95c8ae30791d2ded7eebab049c93": {
+      "description": "",
+      "tokens": 44,
+      "hash": "4cc2b37c0ae5a932",
+      "size": 164,
+      "mtimeMs": 1787425586891.1724,
+      "updatedAt": "2026-08-22T19:13:57.014Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ab/719b3a5776be227e39dbe956c15e38e4e2fb54": {
+      "description": "",
+      "tokens": 203,
+      "hash": "c5c3145a2316e4a4",
+      "size": 784,
+      "mtimeMs": 1787425452397.2666,
+      "updatedAt": "2026-08-22T19:13:57.014Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ac/5de52ece56ea07c93a54dc5611245f99e10cdf": {
+      "description": "",
+      "tokens": 72,
+      "hash": "729e6eb57d2ad307",
+      "size": 287,
+      "mtimeMs": 1787419857435.3518,
+      "updatedAt": "2026-08-22T19:13:57.015Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ae/f2c1167e6c0b92ccd813a6e1b58a9b4f20f36c": {
+      "description": "",
+      "tokens": 386,
+      "hash": "f212578dc52e6d33",
+      "size": 1532,
+      "mtimeMs": 1787425994942.2993,
+      "updatedAt": "2026-08-22T19:13:57.015Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/af/824f8ce6af0fed5f84a9f4f2d2be40b429befb": {
+      "description": "",
+      "tokens": 16,
+      "hash": "b83c1be6f8993adc",
+      "size": 59,
+      "mtimeMs": 1787425579112.0605,
+      "updatedAt": "2026-08-22T19:13:57.015Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/b2/d2c0c668bbe2e02cb17270939fe93e7ba3e147": {
+      "description": "",
+      "tokens": 90,
+      "hash": "1131b3daa9f77ded",
+      "size": 358,
+      "mtimeMs": 1787425452402.2666,
+      "updatedAt": "2026-08-22T19:13:57.016Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/b4/b78c5bfca3e0e4762a6b214445cc206695876b": {
+      "description": "",
+      "tokens": 54,
+      "hash": "64f7f12b3a14eb10",
+      "size": 202,
+      "mtimeMs": 1787426003187.427,
+      "updatedAt": "2026-08-22T19:13:57.016Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/b5/197a7b164b6ce320df64ab7dfb34b97961da56": {
+      "description": "",
+      "tokens": 37,
+      "hash": "e667e87b9a59d72d",
+      "size": 136,
+      "mtimeMs": 1787424665373.7844,
+      "updatedAt": "2026-08-22T19:13:57.019Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/b5/7531498e1a53f420b5ea2fb0cc229098e42739": {
+      "description": "",
+      "tokens": 74,
+      "hash": "8d8c79db6315739b",
+      "size": 285,
+      "mtimeMs": 1787425452395.2666,
+      "updatedAt": "2026-08-22T19:13:57.020Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/b5/c6a87cdf74363f827673ea8f5e29538232c0ac": {
+      "description": "",
+      "tokens": 12246,
+      "hash": "a615e8e5da617d4f",
+      "size": 48091,
+      "mtimeMs": 1787425504593.0015,
+      "updatedAt": "2026-08-22T19:13:57.021Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ba/999c6a13c0febc17e545d28d419d83b857a0e6": {
+      "description": "",
+      "tokens": 52,
+      "hash": "ad553427f3024edf",
+      "size": 200,
+      "mtimeMs": 1787425451704.255,
+      "updatedAt": "2026-08-22T19:13:57.021Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/bf/d519ed91fe2b2c2c825365c29a36ff154f68e9": {
+      "description": "",
+      "tokens": 44,
+      "hash": "365529a439928dd3",
+      "size": 164,
+      "mtimeMs": 1787423740086.1514,
+      "updatedAt": "2026-08-22T19:13:57.021Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c0/bd3d0e2c482cfb01a6e9fc245bb85c0aef0a60": {
+      "description": "",
+      "tokens": 231,
+      "hash": "012ad87dde024b24",
+      "size": 912,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.022Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c2/5785ecf5d802e839d2739013de4f0557969ebb": {
+      "description": "",
+      "tokens": 37,
+      "hash": "2c8a72ed9f1d44eb",
+      "size": 136,
+      "mtimeMs": 1787426004884.4534,
+      "updatedAt": "2026-08-22T19:13:57.022Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c2/ceac8f2e711781d84dd1942a2964ae4233f120": {
+      "description": "",
+      "tokens": 37,
+      "hash": "87a59d3baec7d8ce",
+      "size": 136,
+      "mtimeMs": 1787419895861.2986,
+      "updatedAt": "2026-08-22T19:13:57.022Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c4/518d6484a259b3817c2ee8e001f6a4ba28623d": {
+      "description": "",
+      "tokens": 54,
+      "hash": "e2a8c2b19f845548",
+      "size": 202,
+      "mtimeMs": 1787425507205.038,
+      "updatedAt": "2026-08-22T19:13:57.022Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c5/ae4c60f737e50970ecc9f2bb2d6685b948907c": {
+      "description": "",
+      "tokens": 54,
+      "hash": "fcb2106bae04e48a",
+      "size": 202,
+      "mtimeMs": 1787425451706.255,
+      "updatedAt": "2026-08-22T19:13:57.022Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c7/5f2020d8433657ba8c336701d7bdaffdeea652": {
+      "description": "",
+      "tokens": 54,
+      "hash": "5b20d72eb5b12ee9",
+      "size": 202,
+      "mtimeMs": 1787425451704.255,
+      "updatedAt": "2026-08-22T19:13:57.023Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c8/b700c2586d8aa962010b0e2d2fb2d734d17da9": {
+      "description": "",
+      "tokens": 36,
+      "hash": "6a0c87c5907fd53e",
+      "size": 136,
+      "mtimeMs": 1787424672619.2095,
+      "updatedAt": "2026-08-22T19:13:57.023Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/c9/7af242474a1340714c7ad4fa91b0c2a3264270": {
+      "description": "",
+      "tokens": 15,
+      "hash": "4eb18eb56103e6f7",
+      "size": 58,
+      "mtimeMs": 1787419855314.316,
+      "updatedAt": "2026-08-22T19:13:57.023Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/cc/399415aeb0e4f04f06824119b2e79b09dc1224": {
+      "description": "",
+      "tokens": 328,
+      "hash": "8432b251a3ca2389",
+      "size": 1306,
+      "mtimeMs": 1787425507201.2156,
+      "updatedAt": "2026-08-22T19:13:57.023Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/cd/44a5e352a3343baf485f1f9d07aa03f04030e4": {
+      "description": "",
+      "tokens": 54,
+      "hash": "a27fde21044fb6c9",
+      "size": 202,
+      "mtimeMs": 1787425451704.255,
+      "updatedAt": "2026-08-22T19:13:57.023Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ce/a6ff7ea7517a4e15d5cedfa833c808bff7e4fc": {
+      "description": "",
+      "tokens": 16,
+      "hash": "12973d1c6f778659",
+      "size": 59,
+      "mtimeMs": 1787420054116.672,
+      "updatedAt": "2026-08-22T19:13:57.024Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/cf/24c43c7315055c771e93e8c00804b8273ec267": {
+      "description": "",
+      "tokens": 16,
+      "hash": "f06c2c6223325344",
+      "size": 59,
+      "mtimeMs": 1787424527959.3577,
+      "updatedAt": "2026-08-22T19:13:57.024Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/cf/58eb2fdbc418b039eaae83941e868d11cd879c": {
+      "description": "",
+      "tokens": 74,
+      "hash": "5b449856e920b65e",
+      "size": 286,
+      "mtimeMs": 1787425452052.2607,
+      "updatedAt": "2026-08-22T19:13:57.024Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/cf/d6e41261bff03880cd7c13af5ce00be6deca52": {
+      "description": "",
+      "tokens": 72,
+      "hash": "bf229c2b94a9d35b",
+      "size": 285,
+      "mtimeMs": 1787425452050.2607,
+      "updatedAt": "2026-08-22T19:13:57.024Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d3/18f095c874d2e74497d573017a397215a8b309": {
+      "description": "",
+      "tokens": 212,
+      "hash": "051890fc47861774",
+      "size": 818,
+      "mtimeMs": 1787425452395.2666,
+      "updatedAt": "2026-08-22T19:13:57.024Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d5/4d213a76de814918b0a64f760a34cbf97f0ed4": {
+      "description": "",
+      "tokens": 3633,
+      "hash": "5c840e4986e8d867",
+      "size": 14378,
+      "mtimeMs": 1787419846469.1655,
+      "updatedAt": "2026-08-22T19:13:57.025Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d6/7ef9101a825787e992d13e2ec8116e9b20910e": {
+      "description": "",
+      "tokens": 35,
+      "hash": "119e2b0c2fa8ae14",
+      "size": 134,
+      "mtimeMs": 1787420054118.672,
+      "updatedAt": "2026-08-22T19:13:57.025Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d7/c96b69011fa429edb35fa013bd35f336465a17": {
+      "description": "",
+      "tokens": 54,
+      "hash": "bec3601a3050c547",
+      "size": 202,
+      "mtimeMs": 1787425585238.1487,
+      "updatedAt": "2026-08-22T19:13:57.025Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d8/25105978e3d13ec6baa85109cd27b67160ad84": {
+      "description": "",
+      "tokens": 103,
+      "hash": "d2200fbb65125969",
+      "size": 403,
+      "mtimeMs": 1787425452400.2666,
+      "updatedAt": "2026-08-22T19:13:57.026Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d8/57787b81312bafff92b8085c840f156a8f01b1": {
+      "description": "",
+      "tokens": 16,
+      "hash": "b44511b03cfd7f37",
+      "size": 59,
+      "mtimeMs": 1787422104043.8528,
+      "updatedAt": "2026-08-22T19:13:57.029Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d8/5d5f2d4985463d912f2744947050b6c7a9bd40": {
+      "description": "",
+      "tokens": 44,
+      "hash": "0ddf2c37b7038472",
+      "size": 164,
+      "mtimeMs": 1787425509295.0676,
+      "updatedAt": "2026-08-22T19:13:57.029Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d8/e567487a4ac6e635d84a67c56affe995f245d0": {
+      "description": "",
+      "tokens": 89,
+      "hash": "16259e3f2531c93a",
+      "size": 346,
+      "mtimeMs": 1787419857447.3796,
+      "updatedAt": "2026-08-22T19:13:57.029Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/d9/a38a35a938f11f09b2b4db138fb738bc30eabd": {
+      "description": "",
+      "tokens": 125276,
+      "hash": "8bbd662b343d3533",
+      "size": 490029,
+      "mtimeMs": 1787425452042.2605,
+      "updatedAt": "2026-08-22T19:13:57.036Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/da/8a200ff09da1c4ae90323e1f085ed581fe877b": {
+      "description": "",
+      "tokens": 54,
+      "hash": "fea5e2644332ece1",
+      "size": 202,
+      "mtimeMs": 1787419853759.2893,
+      "updatedAt": "2026-08-22T19:13:57.037Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/da/bc43de54c7fee84c7b35f350f1df0d94401892": {
+      "description": "",
+      "tokens": 16,
+      "hash": "d10422b99a9c9b63",
+      "size": 59,
+      "mtimeMs": 1787421808273.9797,
+      "updatedAt": "2026-08-22T19:13:57.037Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/dc/b70a95c389d6dc78591bbff9175a84beae82c0": {
+      "description": "",
+      "tokens": 42,
+      "hash": "277606e30373f0ee",
+      "size": 154,
+      "mtimeMs": 1787419857449.352,
+      "updatedAt": "2026-08-22T19:13:57.037Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/dd/2d75690e96ab3387f999c6b9841a579877b732": {
+      "description": "",
+      "tokens": 72,
+      "hash": "0a9ba485a020859f",
+      "size": 282,
+      "mtimeMs": 1787425513827.1313,
+      "updatedAt": "2026-08-22T19:13:57.037Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/de/72c3cd03bc72e35cb2904658b72f74824ee6b5": {
+      "description": "",
+      "tokens": 44,
+      "hash": "b50cac7da2d84f68",
+      "size": 164,
+      "mtimeMs": 1787422104037.8528,
+      "updatedAt": "2026-08-22T19:13:57.038Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/df/4d4fc67bf70ef0e21a849ddd01760415393a17": {
+      "description": "",
+      "tokens": 3604,
+      "hash": "b8dcf1c36c86dfb9",
+      "size": 14266,
+      "mtimeMs": 1787419622374.3276,
+      "updatedAt": "2026-08-22T19:13:57.038Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e0/082efdad9b7c1cd453c94a1787ba5031fe00ce": {
+      "description": "",
+      "tokens": 2299,
+      "hash": "0ed76740236d19de",
+      "size": 8997,
+      "mtimeMs": 1787419846458.1655,
+      "updatedAt": "2026-08-22T19:13:57.039Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e0/562f23cdb5585e745830e9e14333f68b739e64": {
+      "description": "",
+      "tokens": 72,
+      "hash": "735b1454895167ae",
+      "size": 283,
+      "mtimeMs": 1787425452050.2607,
+      "updatedAt": "2026-08-22T19:13:57.039Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e4/1652bdc2647edce67e472cd41e8124fbe4925a": {
+      "description": "",
+      "tokens": 44,
+      "hash": "dcf4093ddbb07423",
+      "size": 164,
+      "mtimeMs": 1787424672613.9114,
+      "updatedAt": "2026-08-22T19:13:57.039Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e6/d568ea654faafd390fef3cd816c780db283d92": {
+      "description": "",
+      "tokens": 2313,
+      "hash": "e977c2605bf3c741",
+      "size": 9028,
+      "mtimeMs": 1787419853745.289,
+      "updatedAt": "2026-08-22T19:13:57.040Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e7/be35e7bba85163f0ab28216d4c8abaffdf4507": {
+      "description": "",
+      "tokens": 44,
+      "hash": "6de8fe0a0e71b607",
+      "size": 164,
+      "mtimeMs": 1787419631040.4775,
+      "updatedAt": "2026-08-22T19:13:57.041Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e8/33dcea1cecddef7c01fd756f2259954ee1aff4": {
+      "description": "",
+      "tokens": 44,
+      "hash": "6af2bda639719d8d",
+      "size": 164,
+      "mtimeMs": 1787424539692.5664,
+      "updatedAt": "2026-08-22T19:13:57.041Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e8/97156f53d0a8c15363079e8384b7dab632334d": {
+      "description": "",
+      "tokens": 35210,
+      "hash": "99cfc208bffe7b73",
+      "size": 138231,
+      "mtimeMs": 1787419619674.281,
+      "updatedAt": "2026-08-22T19:13:57.044Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/e8/dcb72191e4dd9b6c923a2b83c81a16f046a26c": {
+      "description": "",
+      "tokens": 44,
+      "hash": "905075916575fd78",
+      "size": 164,
+      "mtimeMs": 1787421808269.9797,
+      "updatedAt": "2026-08-22T19:13:57.047Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/eb/32d29c93313c07e495bcc1664f3809e4161fb5": {
+      "description": "",
+      "tokens": 31991,
+      "hash": "dbdeb53cba56d686",
+      "size": 125045,
+      "mtimeMs": 1787425452050.2607,
+      "updatedAt": "2026-08-22T19:13:57.049Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ec/1ca7babb2b8fd6482ee3cd643f05256c43a0d6": {
+      "description": "",
+      "tokens": 54,
+      "hash": "d1b3b465d5f4b2e5",
+      "size": 202,
+      "mtimeMs": 1787425451705.255,
+      "updatedAt": "2026-08-22T19:13:57.049Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ef/0269685583c77143b2ecc2b45258898e141846": {
+      "description": "",
+      "tokens": 360,
+      "hash": "5eb0a3a817424caf",
+      "size": 1420,
+      "mtimeMs": 1787425577298.0344,
+      "updatedAt": "2026-08-22T19:13:57.049Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ef/2e07918228b3c40b08f1a0ec60e40a70d9f0c3": {
+      "description": "",
+      "tokens": 100,
+      "hash": "7f6cedead855745f",
+      "size": 394,
+      "mtimeMs": 1787425452400.2666,
+      "updatedAt": "2026-08-22T19:13:57.050Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ef/2e8de8c8e0f54291e494995123ed7df151a3d9": {
+      "description": "",
+      "tokens": 248,
+      "hash": "694ae016ac334ec5",
+      "size": 961,
+      "mtimeMs": 1787425577277.0342,
+      "updatedAt": "2026-08-22T19:13:57.050Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ef/8d01f8d81c2d50ab416dc776fb4c3fcfebee25": {
+      "description": "",
+      "tokens": 37,
+      "hash": "2c127892388bd063",
+      "size": 136,
+      "mtimeMs": 1787425996755.3274,
+      "updatedAt": "2026-08-22T19:13:57.050Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/ef/af91f18c7f105e5399b924e8e2de18fcfd5418": {
+      "description": "",
+      "tokens": 201,
+      "hash": "07e7b56ccede502b",
+      "size": 800,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.050Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/f0/92e363d4bbdf6b3f944f2fdbeacf862af97088": {
+      "description": "",
+      "tokens": 109,
+      "hash": "2262b1ce00637fca",
+      "size": 429,
+      "mtimeMs": 1787425452400.2666,
+      "updatedAt": "2026-08-22T19:13:57.051Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/f5/160a10fa747a243d392b419a6beef003ec0254": {
+      "description": "",
+      "tokens": 44,
+      "hash": "f546fc4108514649",
+      "size": 164,
+      "mtimeMs": 1787419855310.3157,
+      "updatedAt": "2026-08-22T19:13:57.051Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/f6/5b4b86c15c8686252f208e26ef98794e03057a": {
+      "description": "",
+      "tokens": 72,
+      "hash": "4519029b13802b26",
+      "size": 281,
+      "mtimeMs": 1787425452047.2607,
+      "updatedAt": "2026-08-22T19:13:57.051Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fa/8bd0ca0e9ba4e97466b8107a51df48caca7947": {
+      "description": "",
+      "tokens": 374,
+      "hash": "892fc6fb41422bf3",
+      "size": 1475,
+      "mtimeMs": 1787425585234.1487,
+      "updatedAt": "2026-08-22T19:13:57.051Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fa/bb8f0a17f159412d5352edeec12a7b34daf722": {
+      "description": "",
+      "tokens": 37,
+      "hash": "d2d6f36a4cbcb16c",
+      "size": 136,
+      "mtimeMs": 1787425586897.1726,
+      "updatedAt": "2026-08-22T19:13:57.051Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fa/c72159763ee4542911130ecd1748c96904b7f2": {
+      "description": "",
+      "tokens": 44,
+      "hash": "f020656fb3f2b063",
+      "size": 164,
+      "mtimeMs": 1787425996733.3271,
+      "updatedAt": "2026-08-22T19:13:57.052Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fb/82b7756ebdd8bce1ef84f92e07d232bb45bb40": {
+      "description": "",
+      "tokens": 54,
+      "hash": "4141e65ca9fa0136",
+      "size": 202,
+      "mtimeMs": 1787425994951.2996,
+      "updatedAt": "2026-08-22T19:13:57.052Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fb/ba611b730260b6765a12a161b50563336fd020": {
+      "description": "",
+      "tokens": 37,
+      "hash": "1fa52b852355be76",
+      "size": 136,
+      "mtimeMs": 1787421808275.1663,
+      "updatedAt": "2026-08-22T19:13:57.052Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fb/ca258de26af59804e61a0c4635a26c86a0b9fd": {
+      "description": "",
+      "tokens": 16,
+      "hash": "a2339fda2db25336",
+      "size": 59,
+      "mtimeMs": 1787423126466.9055,
+      "updatedAt": "2026-08-22T19:13:57.054Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fc/43c75216b58099f296ac600afd5d25dc1b3c83": {
+      "description": "",
+      "tokens": 37,
+      "hash": "b17807006f8dacba",
+      "size": 136,
+      "mtimeMs": 1787419855315.316,
+      "updatedAt": "2026-08-22T19:13:57.054Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fc/a40435aea7d654db301cb1ddf4a18810494cbb": {
+      "description": "",
+      "tokens": 175,
+      "hash": "38bb8d30b21311b6",
+      "size": 680,
+      "mtimeMs": 1787425452398.2666,
+      "updatedAt": "2026-08-22T19:13:57.055Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fe/0f7a9c4ebebce2d81e44e11c8337bc30faa93a": {
+      "description": "",
+      "tokens": 44,
+      "hash": "a0ec064a0fef6aca",
+      "size": 164,
+      "mtimeMs": 1787419895854.0032,
+      "updatedAt": "2026-08-22T19:13:57.055Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fe/853f462405b363c2f9dca5a7bd21c297ffb89a": {
+      "description": "",
+      "tokens": 73,
+      "hash": "23401e22bedddb23",
+      "size": 283,
+      "mtimeMs": 1787419628278.4297,
+      "updatedAt": "2026-08-22T19:13:57.055Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/fe/ffcee6393128d1e0e7d09eb68550ad3cd89d9e": {
+      "description": "",
+      "tokens": 222,
+      "hash": "c89bda38604e7609",
+      "size": 855,
+      "mtimeMs": 1787425452395.2666,
+      "updatedAt": "2026-08-22T19:13:57.056Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/info/commit-graph": {
+      "description": "",
+      "tokens": 6176,
+      "hash": "beb88dca529e3d77",
+      "size": 23972,
+      "mtimeMs": 1787343410413.4304,
+      "updatedAt": "2026-08-22T19:13:57.056Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/info/packs": {
+      "description": "",
+      "tokens": 43,
+      "hash": "08dc032c9836aa87",
+      "size": 160,
+      "mtimeMs": 1787419611491.946,
+      "updatedAt": "2026-08-22T19:13:57.057Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/multi-pack-index": {
+      "description": "",
+      "tokens": 27935,
+      "hash": "4990900576d283cc",
+      "size": 108984,
+      "mtimeMs": 1787419611462.139,
+      "updatedAt": "2026-08-22T19:13:57.059Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-22e587998d888336265561f08895d730d09cc416.idx": {
+      "description": "",
+      "tokens": 21333,
+      "hash": "f790687d18ff75c1",
+      "size": 83868,
+      "mtimeMs": 1787411577533.4111,
+      "updatedAt": "2026-08-22T19:13:57.061Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-22e587998d888336265561f08895d730d09cc416.rev": {
+      "description": "",
+      "tokens": 3168,
+      "hash": "ed31c1369e4cc165",
+      "size": 11880,
+      "mtimeMs": 1787411577536.4114,
+      "updatedAt": "2026-08-22T19:13:57.061Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-d545709652da979b2231ba928ebd62fbad8932bb.idx": {
+      "description": "",
+      "tokens": 5764,
+      "hash": "d1a672e1750c0246",
+      "size": 22576,
+      "mtimeMs": 1787411577562.4116,
+      "updatedAt": "2026-08-22T19:13:57.062Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-d545709652da979b2231ba928ebd62fbad8932bb.mtimes": {
+      "description": "",
+      "tokens": 833,
+      "hash": "89bab0b88c804448",
+      "size": 3124,
+      "mtimeMs": 1787411577564.4116,
+      "updatedAt": "2026-08-22T19:13:57.062Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-d545709652da979b2231ba928ebd62fbad8932bb.pack": {
+      "description": "",
+      "tokens": 24725,
+      "hash": "5278897270e13966",
+      "size": 96981,
+      "mtimeMs": 1787411577560.4116,
+      "updatedAt": "2026-08-22T19:13:57.064Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-d545709652da979b2231ba928ebd62fbad8932bb.rev": {
+      "description": "",
+      "tokens": 833,
+      "hash": "7d000dc849d9843e",
+      "size": 3124,
+      "mtimeMs": 1787411577563.4116,
+      "updatedAt": "2026-08-22T19:13:57.066Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-f0987be1dd708003d733818f0ffaaf0824d88331.idx": {
+      "description": "",
+      "tokens": 1151,
+      "hash": "96239078d002c2f8",
+      "size": 4488,
+      "mtimeMs": 1787419611455.139,
+      "updatedAt": "2026-08-22T19:13:57.067Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/objects/pack/pack-f0987be1dd708003d733818f0ffaaf0824d88331.rev": {
+      "description": "",
+      "tokens": 144,
+      "hash": "3b57f48591ae5dbf",
+      "size": 540,
+      "mtimeMs": 1787419611457.139,
+      "updatedAt": "2026-08-22T19:13:57.069Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/packed-refs": {
+      "description": "pack-refs with: peeled fully-peeled sorted",
+      "tokens": 450,
+      "hash": "b680dddd0dadf36c",
+      "size": 1686,
+      "mtimeMs": 1787343410423.4304,
+      "updatedAt": "2026-08-22T19:13:57.069Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/refs/dolt/blobstore/origin/dolt/data/60c8e97b-0e2b-48ac-88ed-46c5fd638f39": {
+      "description": "",
+      "tokens": 11,
+      "hash": "056ad99192124245",
+      "size": 41,
+      "mtimeMs": 1787419857451.352,
+      "updatedAt": "2026-08-22T19:13:57.069Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/refs/dolt/info/__dolt_remote_info__": {
+      "description": "",
+      "tokens": 11,
+      "hash": "cd550e41a935e4bc",
+      "size": 41,
+      "mtimeMs": 1787426004885.4534,
+      "updatedAt": "2026-08-22T19:13:57.069Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/refs/dolt/remotes/origin/dolt/data/60c8e97b-0e2b-48ac-88ed-46c5fd638f39": {
+      "description": "",
+      "tokens": 11,
+      "hash": "048314e9e142363e",
+      "size": 41,
+      "mtimeMs": 1787419857427.3518,
+      "updatedAt": "2026-08-22T19:13:57.070Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/git-remote-cache/3bcb90c3af6ebe9c5a621f6288d8804af1074199e62ae982da1ad20cb9089b4c/repo.git/refs/remotes/origin/__dolt_remote_info__": {
+      "description": "",
+      "tokens": 11,
+      "hash": "cd550e41a935e4bc",
+      "size": 41,
+      "mtimeMs": 1787426006448.4775,
+      "updatedAt": "2026-08-22T19:13:57.070Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/034bdbkibe5uskrkmclbsh4e72aus15q.darc": {
+      "description": "",
+      "tokens": 9644,
+      "hash": "2cd3a2b170f4361c",
+      "size": 36680,
+      "mtimeMs": 1786052906079.5122,
+      "updatedAt": "2026-08-22T19:13:57.071Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/03bqs0utdugcfahqg2gqtd9goel0enj8.darc": {
+      "description": "",
+      "tokens": 24863,
+      "hash": "c7974c8e25196729",
+      "size": 94560,
+      "mtimeMs": 1786052906077.5122,
+      "updatedAt": "2026-08-22T19:13:57.073Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/08pm7e3ofdvhh2476isquhsq7d1cpbd1.darc": {
+      "description": "",
+      "tokens": 22189,
+      "hash": "91b84d9d8a986cba",
+      "size": 84184,
+      "mtimeMs": 1787059959382.0857,
+      "updatedAt": "2026-08-22T19:13:57.074Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/0b0bie7fvlb9hoc5abai04kgpnm4a12s.darc": {
+      "description": "",
+      "tokens": 20757,
+      "hash": "5d47ad15acec3fbb",
+      "size": 79190,
+      "mtimeMs": 1786975794360.0825,
+      "updatedAt": "2026-08-22T19:13:57.075Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/0lmol79jgdnr9kqre9b3hbuim6d568u5.darc": {
+      "description": "",
+      "tokens": 54340,
+      "hash": "faad2e301f95c213",
+      "size": 206180,
+      "mtimeMs": 1787242357638.9893,
+      "updatedAt": "2026-08-22T19:13:57.077Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/18n07g5vrnf3pjnj6k4erl1recjffal5.darc": {
+      "description": "",
+      "tokens": 33131,
+      "hash": "2245f85941240b3b",
+      "size": 125129,
+      "mtimeMs": 1786052906079.5122,
+      "updatedAt": "2026-08-22T19:13:57.079Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1bu4iv5i48epsk6u3ag9h509smvh4irf.darc": {
+      "description": "",
+      "tokens": 10759,
+      "hash": "365a887872a7e674",
+      "size": 40882,
+      "mtimeMs": 1786052906085.5125,
+      "updatedAt": "2026-08-22T19:13:57.083Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1e0569vgpd6ojrs2nfnkaab2n6mqnv2j": {
+      "description": "",
+      "tokens": 111,
+      "hash": "8fc3e05839bc8324",
+      "size": 414,
+      "mtimeMs": 1786052906084.5122,
+      "updatedAt": "2026-08-22T19:13:57.083Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1eabuvk7jt3icl22m31o97feljtvid34.darc": {
+      "description": "",
+      "tokens": 9435,
+      "hash": "5a6e66396b1b85aa",
+      "size": 35862,
+      "mtimeMs": 1786052906119.513,
+      "updatedAt": "2026-08-22T19:13:57.084Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1ee0boco3v4mokotdpjohnpo9so9on66": {
+      "description": "",
+      "tokens": 109,
+      "hash": "410e114f0609991d",
+      "size": 414,
+      "mtimeMs": 1786052906088.5125,
+      "updatedAt": "2026-08-22T19:13:57.084Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1hc7rpuh55cgk31u2vsisl8abhr4e7hl.darc": {
+      "description": "",
+      "tokens": 126391,
+      "hash": "adf58cdfd864292c",
+      "size": 479154,
+      "mtimeMs": 1786052906092.5125,
+      "updatedAt": "2026-08-22T19:13:57.089Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1k2in33o6or87kdklv3fu46jh3jlialn.darc": {
+      "description": "",
+      "tokens": 43602,
+      "hash": "cd804b8e99915316",
+      "size": 164967,
+      "mtimeMs": 1787048196267.3037,
+      "updatedAt": "2026-08-22T19:13:57.091Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1ks4e01o54das53b34uo3ok4bjv3accn": {
+      "description": "",
+      "tokens": 109,
+      "hash": "011aa094b0635f0b",
+      "size": 414,
+      "mtimeMs": 1786052906091.5125,
+      "updatedAt": "2026-08-22T19:13:57.091Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/1qhbj93qapkkvl9u05l864bpot6qprk4": {
+      "description": "",
+      "tokens": 110,
+      "hash": "0e2e5c9b74e1d099",
+      "size": 414,
+      "mtimeMs": 1786052906096.5125,
+      "updatedAt": "2026-08-22T19:13:57.091Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/25g7fqtsv60eoqauad5jp6adniir8j63.darc": {
+      "description": "",
+      "tokens": 86550,
+      "hash": "385ce6cf443314b5",
+      "size": 327643,
+      "mtimeMs": 1786052906101.5127,
+      "updatedAt": "2026-08-22T19:13:57.095Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/25tilrslb7pmr54bhhi49ul1t9j48n7f": {
+      "description": "",
+      "tokens": 110,
+      "hash": "062052a731e99cd9",
+      "size": 414,
+      "mtimeMs": 1786052906100.5127,
+      "updatedAt": "2026-08-22T19:13:57.096Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/2938c4jsli3qh79gug68cgptqj47khqt.darc": {
+      "description": "",
+      "tokens": 17510,
+      "hash": "536222b8b4921be1",
+      "size": 66705,
+      "mtimeMs": 1786052906104.5127,
+      "updatedAt": "2026-08-22T19:13:57.097Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/2cano40htvjps3j0054m196tmrh3vd68": {
+      "description": "",
+      "tokens": 111,
+      "hash": "eb952f7276e2234f",
+      "size": 420,
+      "mtimeMs": 1786052906105.5127,
+      "updatedAt": "2026-08-22T19:13:57.097Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/2ku3ri2dpjdo1v4fcp8s5v439gnos8sq": {
+      "description": "",
+      "tokens": 112,
+      "hash": "3e35c9cbc4db4a6b",
+      "size": 420,
+      "mtimeMs": 1786052906109.5127,
+      "updatedAt": "2026-08-22T19:13:57.097Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/2ng7gabbuemb5885lkc8ip29dsgub8pu.darc": {
+      "description": "",
+      "tokens": 10617,
+      "hash": "b0eac5cd1ff7f91f",
+      "size": 40215,
+      "mtimeMs": 1786779748077.129,
+      "updatedAt": "2026-08-22T19:13:57.098Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/2q7d2496ig6m4smk8b454abgqeot29ju": {
+      "description": "",
+      "tokens": 110,
+      "hash": "8607d14d5019cb3b",
+      "size": 414,
+      "mtimeMs": 1786052906110.5127,
+      "updatedAt": "2026-08-22T19:13:57.098Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/2sfinf22i54enn5106ej8fv5s3e424pf.darc": {
+      "description": "",
+      "tokens": 8599,
+      "hash": "0df8b3cd16ecf1e7",
+      "size": 32729,
+      "mtimeMs": 1786052906116.513,
+      "updatedAt": "2026-08-22T19:13:57.099Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/36el320ev32g8qgb28959iu2odr6romd.darc": {
+      "description": "",
+      "tokens": 13254,
+      "hash": "93b414987492fd64",
+      "size": 50517,
+      "mtimeMs": 1786052906115.5127,
+      "updatedAt": "2026-08-22T19:13:57.100Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/3emp2032knufn27089hi034ockipsi87": {
+      "description": "",
+      "tokens": 110,
+      "hash": "7e4966b670eed980",
+      "size": 414,
+      "mtimeMs": 1786052906119.513,
+      "updatedAt": "2026-08-22T19:13:57.102Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/3i96ipiml6f6eebqci2ddmml21ff3urv": {
+      "description": "",
+      "tokens": 111,
+      "hash": "6e52325e55426bcb",
+      "size": 420,
+      "mtimeMs": 1786052906120.513,
+      "updatedAt": "2026-08-22T19:13:57.103Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/3jms1n29mne10ip4t2chpvp67fk156f8.darc": {
+      "description": "",
+      "tokens": 68151,
+      "hash": "89d5a347789c02c9",
+      "size": 258987,
+      "mtimeMs": 1787082911149.3428,
+      "updatedAt": "2026-08-22T19:13:57.105Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/3ltni75e9b221jfu1fv1im7j3vsi2cfk": {
+      "description": "",
+      "tokens": 110,
+      "hash": "78df0d47471aeda1",
+      "size": 414,
+      "mtimeMs": 1786052906124.513,
+      "updatedAt": "2026-08-22T19:13:57.105Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/3n97eginpsea5qmlk0hpn7at5qnkqhcs.darc": {
+      "description": "",
+      "tokens": 7413,
+      "hash": "118a72653b9ac9e9",
+      "size": 28272,
+      "mtimeMs": 1786052906126.513,
+      "updatedAt": "2026-08-22T19:13:57.108Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/3ngujsima20b9slk3us7or0ubf651o1l": {
+      "description": "",
+      "tokens": 110,
+      "hash": "d680e869fe581830",
+      "size": 414,
+      "mtimeMs": 1786052906125.513,
+      "updatedAt": "2026-08-22T19:13:57.108Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/45kit2t1tp1l2i5cg2116aa7e13vbvlo.darc": {
+      "description": "",
+      "tokens": 44831,
+      "hash": "163d51c86eabed46",
+      "size": 170802,
+      "mtimeMs": 1787396953053.3708,
+      "updatedAt": "2026-08-22T19:13:57.111Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/45uj9isa3l3h19dp38k3kve4dtmnk8pi.darc": {
+      "description": "",
+      "tokens": 36884,
+      "hash": "d6262c4a60638944",
+      "size": 139963,
+      "mtimeMs": 1786052906132.5132,
+      "updatedAt": "2026-08-22T19:13:57.115Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4962uer0tvc7jdbke9dhqrfrm1rc0i44.darc": {
+      "description": "",
+      "tokens": 27815,
+      "hash": "b3b7d7e642ef66d0",
+      "size": 105381,
+      "mtimeMs": 1786052906131.5132,
+      "updatedAt": "2026-08-22T19:13:57.120Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4bogp9jr7svs8jpr5gctj76mq1lft8qb.darc": {
+      "description": "",
+      "tokens": 7524,
+      "hash": "1b9f5f1c6bad9de1",
+      "size": 28749,
+      "mtimeMs": 1786052906135.5132,
+      "updatedAt": "2026-08-22T19:13:57.121Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4c775pnr7dn5m8g074l5bbsu5gutj2kt": {
+      "description": "",
+      "tokens": 111,
+      "hash": "1810239d6bee56a3",
+      "size": 414,
+      "mtimeMs": 1786052906136.5132,
+      "updatedAt": "2026-08-22T19:13:57.121Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4gcapj7o2q29uos9v7l25k6j71pio2r2": {
+      "description": "",
+      "tokens": 110,
+      "hash": "395ef1afbbc6addc",
+      "size": 414,
+      "mtimeMs": 1786052906139.5132,
+      "updatedAt": "2026-08-22T19:13:57.121Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4i35hclm0jgr9g5cp42prqnbm5uuf7rb.darc": {
+      "description": "",
+      "tokens": 88386,
+      "hash": "1778b718ee7784c8",
+      "size": 336160,
+      "mtimeMs": 1786970167255.5684,
+      "updatedAt": "2026-08-22T19:13:57.124Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4q60scimpm0ocij03rqbgd9l0a7jhdjr.darc": {
+      "description": "",
+      "tokens": 73184,
+      "hash": "07f58774070783f6",
+      "size": 277944,
+      "mtimeMs": 1786296262628.645,
+      "updatedAt": "2026-08-22T19:13:57.127Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/4vctrm114ig16mpdur26lg6tkjjt6ieh.darc": {
+      "description": "",
+      "tokens": 19461,
+      "hash": "cc9568dfadecf6d7",
+      "size": 73821,
+      "mtimeMs": 1787057245260.0754,
+      "updatedAt": "2026-08-22T19:13:57.129Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/53dgsgaicp4qfnog829bfnbojig9bcu8": {
+      "description": "",
+      "tokens": 109,
+      "hash": "cfced7fd79e200a4",
+      "size": 414,
+      "mtimeMs": 1786052906144.5132,
+      "updatedAt": "2026-08-22T19:13:57.130Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/58af8q5kdpgkpb5jt1rjjci6bhmsgk3s": {
+      "description": "",
+      "tokens": 110,
+      "hash": "c17ecba420f234eb",
+      "size": 414,
+      "mtimeMs": 1786052906148.5134,
+      "updatedAt": "2026-08-22T19:13:57.130Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/5aku4m2hceueiuis17iulpd8v8vu7qr4": {
+      "description": "",
+      "tokens": 110,
+      "hash": "b7013f7f71a3637a",
+      "size": 414,
+      "mtimeMs": 1786052906152.5134,
+      "updatedAt": "2026-08-22T19:13:57.130Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/5h3closd265nvn2fg4ve1kr9fsgkibge": {
+      "description": "",
+      "tokens": 111,
+      "hash": "cb8dabcb89e0db34",
+      "size": 414,
+      "mtimeMs": 1786052906156.5134,
+      "updatedAt": "2026-08-22T19:13:57.130Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/5hh600ma6sdvkp8de2347qqbjrgjsd5u.darc": {
+      "description": "",
+      "tokens": 40514,
+      "hash": "b5d8ac46efe99960",
+      "size": 153520,
+      "mtimeMs": 1786052906162.5137,
+      "updatedAt": "2026-08-22T19:13:57.133Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/5kbu9l2cdn76lts4qagtcj3u2n68kah2": {
+      "description": "",
+      "tokens": 110,
+      "hash": "826654e9d4f8ae9e",
+      "size": 414,
+      "mtimeMs": 1786052906168.5137,
+      "updatedAt": "2026-08-22T19:13:57.133Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/5qlp8dnc9i4p0ncfj0rtgfca8aon3f06.darc": {
+      "description": "",
+      "tokens": 25013,
+      "hash": "b45c97f4f7a62441",
+      "size": 94881,
+      "mtimeMs": 1786052906174.5137,
+      "updatedAt": "2026-08-22T19:13:57.136Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/5r21m6drnt1f724ad8o2pkjtn7a76mpv": {
+      "description": "",
+      "tokens": 111,
+      "hash": "365b4495f8df13a4",
+      "size": 414,
+      "mtimeMs": 1786052906180.514,
+      "updatedAt": "2026-08-22T19:13:57.137Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/6g0fleppdl6gopsogjuensdgin6oaqt7.darc": {
+      "description": "",
+      "tokens": 26867,
+      "hash": "e10840510bad4065",
+      "size": 102077,
+      "mtimeMs": 1786052906207.5142,
+      "updatedAt": "2026-08-22T19:13:57.138Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/6mjd9n9lae6butoi1dvckkc386ptdlg6": {
+      "description": "",
+      "tokens": 111,
+      "hash": "5fbd95bf265f8203",
+      "size": 414,
+      "mtimeMs": 1786052906214.5144,
+      "updatedAt": "2026-08-22T19:13:57.138Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/6t72iqsdneh96344ue73d7feuq4fs8gj.darc": {
+      "description": "",
+      "tokens": 10656,
+      "hash": "bfbf16ffa01cc53f",
+      "size": 40527,
+      "mtimeMs": 1786624955836.3035,
+      "updatedAt": "2026-08-22T19:13:57.141Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/708cp9bb8ckg33gnbdkfh2kjnju0rqnn.darc": {
+      "description": "Declares into",
+      "tokens": 9156,
+      "hash": "98a93e3851e26d00",
+      "size": 34870,
+      "mtimeMs": 1786052906214.5144,
+      "updatedAt": "2026-08-22T19:13:57.142Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/76hsdedgduj42tfcleqi6tfpco7lje7m.darc": {
+      "description": "",
+      "tokens": 108867,
+      "hash": "a387e48c986f5f2d",
+      "size": 413872,
+      "mtimeMs": 1786702112639.5298,
+      "updatedAt": "2026-08-22T19:13:57.147Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/7bqt5m4vc8p7e715esquvn14luo9m4a1": {
+      "description": "",
+      "tokens": 109,
+      "hash": "d60bb7b1040a4485",
+      "size": 414,
+      "mtimeMs": 1786052906217.5144,
+      "updatedAt": "2026-08-22T19:13:57.148Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/7p4q2o8tca6kf23e02646u7pep08kuni": {
+      "description": "",
+      "tokens": 110,
+      "hash": "96fb293094ec6714",
+      "size": 414,
+      "mtimeMs": 1786052906219.5144,
+      "updatedAt": "2026-08-22T19:13:57.148Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/7qcng4djtatae21ot1rv63bhirivs7v3.darc": {
+      "description": "",
+      "tokens": 34620,
+      "hash": "59a274f80553067a",
+      "size": 131656,
+      "mtimeMs": 1787128321067.0774,
+      "updatedAt": "2026-08-22T19:13:57.152Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/80th8e79eio31t29l535kdhcj6b8369f.darc": {
+      "description": "",
+      "tokens": 59998,
+      "hash": "db78fcab9d5df540",
+      "size": 227902,
+      "mtimeMs": 1786794661677.3096,
+      "updatedAt": "2026-08-22T19:13:57.154Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/85a510e2r1fcu8phnps1vdk5tf4lk4t3.darc": {
+      "description": "",
+      "tokens": 71726,
+      "hash": "f010505cecbf42a3",
+      "size": 271775,
+      "mtimeMs": 1786560189806.9438,
+      "updatedAt": "2026-08-22T19:13:57.159Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/87lm6v3fnaccvn26eol9pujh18089iis.darc": {
+      "description": "",
+      "tokens": 60266,
+      "hash": "98e2c26d21b6cd3e",
+      "size": 228843,
+      "mtimeMs": 1787411577445.4102,
+      "updatedAt": "2026-08-22T19:13:57.163Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/88su5oqbk6hgiar13a6k5gf0ckblrq04": {
+      "description": "",
+      "tokens": 108,
+      "hash": "ba2abbcaf25a2a8b",
+      "size": 414,
+      "mtimeMs": 1786052906222.5144,
+      "updatedAt": "2026-08-22T19:13:57.163Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/8qbj2840mveurcad3fm0g9fuuklrr1m3.darc": {
+      "description": "",
+      "tokens": 26593,
+      "hash": "b794d00455b0b693",
+      "size": 100953,
+      "mtimeMs": 1787227293764.7417,
+      "updatedAt": "2026-08-22T19:13:57.165Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/8vkjbnjoitgf2k4657hqfdi9183avddj": {
+      "description": "",
+      "tokens": 110,
+      "hash": "2a51cfd502f4b2f7",
+      "size": 414,
+      "mtimeMs": 1786052906223.5144,
+      "updatedAt": "2026-08-22T19:13:57.165Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/916u580a83mrnmait4ka53pprgl362k4.darc": {
+      "description": "",
+      "tokens": 134025,
+      "hash": "36239cb462125a76",
+      "size": 506681,
+      "mtimeMs": 1786052906227.5146,
+      "updatedAt": "2026-08-22T19:13:57.173Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/93ub7cps0818eu25973js47lg452j7r9.darc": {
+      "description": "",
+      "tokens": 248361,
+      "hash": "fb7ad2ada5d0bab9",
+      "size": 941073,
+      "mtimeMs": 1786052906229.5146,
+      "updatedAt": "2026-08-22T19:13:57.182Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/98brnq3ucifais4q0s4j26lmp6io5pg9.darc": {
+      "description": "",
+      "tokens": 38628,
+      "hash": "b43cb6b8ba7bd021",
+      "size": 146115,
+      "mtimeMs": 1786884745811.2043,
+      "updatedAt": "2026-08-22T19:13:57.185Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/9gg12efk5nm1ua18q61ara6fr4uk4pd4.darc": {
+      "description": "",
+      "tokens": 10248,
+      "hash": "b127835a491138a9",
+      "size": 38990,
+      "mtimeMs": 1786052906230.5146,
+      "updatedAt": "2026-08-22T19:13:57.188Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/9ivk4j5tv19gcpno1j6l62l5g087it9o.darc": {
+      "description": "",
+      "tokens": 30403,
+      "hash": "04dc736bde7ef730",
+      "size": 115726,
+      "mtimeMs": 1786617052965.0107,
+      "updatedAt": "2026-08-22T19:13:57.190Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/9u4oeqjiqic85oik9ea5q122d2l7p916.darc": {
+      "description": "",
+      "tokens": 44346,
+      "hash": "f2d28542bf4b201b",
+      "size": 168061,
+      "mtimeMs": 1786052906236.5146,
+      "updatedAt": "2026-08-22T19:13:57.193Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/a3gmjrchg4piuug2gvk95pii5ksadqf5.darc": {
+      "description": "",
+      "tokens": 17973,
+      "hash": "e21010e2a0243183",
+      "size": 68384,
+      "mtimeMs": 1786052906235.5146,
+      "updatedAt": "2026-08-22T19:13:57.194Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/ac1gp11iqf7pam7g2er3j7t1tsbk172n": {
+      "description": "",
+      "tokens": 110,
+      "hash": "5c293d4294f0aced",
+      "size": 414,
+      "mtimeMs": 1786052906235.5146,
+      "updatedAt": "2026-08-22T19:13:57.194Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/ae1ot1bbqr9p8l602b4gh9lnhe8jcq70": {
+      "description": "",
+      "tokens": 110,
+      "hash": "6e1e45ba4697bd50",
+      "size": 414,
+      "mtimeMs": 1786052906239.515,
+      "updatedAt": "2026-08-22T19:13:57.194Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/al7hd3c99opbsi82thn0b83mebesbeo6": {
+      "description": "",
+      "tokens": 109,
+      "hash": "a0f91bf8c5e2b285",
+      "size": 414,
+      "mtimeMs": 1786052906240.515,
+      "updatedAt": "2026-08-22T19:13:57.194Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/aq3djhmi2d0jtkkh4leaoucfgvel3ida.darc": {
+      "description": "",
+      "tokens": 15809,
+      "hash": "273a16424e8f0052",
+      "size": 60184,
+      "mtimeMs": 1786052906242.515,
+      "updatedAt": "2026-08-22T19:13:57.197Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/b415elf5qncejal5gvvmmnslroa75096.darc": {
+      "description": "",
+      "tokens": 22162,
+      "hash": "b2072bd791aadcf8",
+      "size": 84519,
+      "mtimeMs": 1786052906244.515,
+      "updatedAt": "2026-08-22T19:13:57.199Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/ba3o20u3d2k0vfk01su6b8goq4a14601.darc": {
+      "description": "",
+      "tokens": 28551,
+      "hash": "9d024a8eac0adc25",
+      "size": 108789,
+      "mtimeMs": 1787425453304.2817,
+      "updatedAt": "2026-08-22T19:13:57.202Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/bdjdkoeglailhnphtfld4q4c6e3hj2cv.darc": {
+      "description": "",
+      "tokens": 8833,
+      "hash": "fe5854611028894a",
+      "size": 33598,
+      "mtimeMs": 1786052906244.515,
+      "updatedAt": "2026-08-22T19:13:57.205Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/bo2bsb0q427ksvp912bfbq4vj8ppmb4q": {
+      "description": "",
+      "tokens": 109,
+      "hash": "9ffe0d152356106a",
+      "size": 414,
+      "mtimeMs": 1786052906247.515,
+      "updatedAt": "2026-08-22T19:13:57.205Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/buvv3n23ef1hld3d91p1i9r73fl93ri0.darc": {
+      "description": "",
+      "tokens": 10323,
+      "hash": "2a81d9c63d66fafc",
+      "size": 39273,
+      "mtimeMs": 1786052906251.515,
+      "updatedAt": "2026-08-22T19:13:57.206Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/c03nb1qkc8678e65u6fod0ou2m1mb1rm.darc": {
+      "description": "",
+      "tokens": 46678,
+      "hash": "5af03f86359756bf",
+      "size": 177025,
+      "mtimeMs": 1786052906252.515,
+      "updatedAt": "2026-08-22T19:13:57.208Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/c1utm1hi1q3bn8br53d93ljt5ssqs7ok": {
+      "description": "",
+      "tokens": 111,
+      "hash": "9c2b3ccea47d4cd7",
+      "size": 414,
+      "mtimeMs": 1786052906251.515,
+      "updatedAt": "2026-08-22T19:13:57.209Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/c4h9s5mgee07shjtbmpil1u3nglj5o32.darc": {
+      "description": "",
+      "tokens": 21043,
+      "hash": "e035d8d4242c31c5",
+      "size": 79917,
+      "mtimeMs": 1786052906257.5151,
+      "updatedAt": "2026-08-22T19:13:57.210Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/ce6euvvj14165q2krg18i8f9ve7m0pjl": {
+      "description": "",
+      "tokens": 110,
+      "hash": "56a34caea76fd715",
+      "size": 414,
+      "mtimeMs": 1786052906258.5151,
+      "updatedAt": "2026-08-22T19:13:57.210Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/cl4kqgs67igi721b9fku7ma23qiinf86": {
+      "description": "",
+      "tokens": 110,
+      "hash": "ca865a995e689c0e",
+      "size": 414,
+      "mtimeMs": 1786052906259.5151,
+      "updatedAt": "2026-08-22T19:13:57.210Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/cnq7mcqjkii4hag46hagl2akdp0qt24e": {
+      "description": "",
+      "tokens": 110,
+      "hash": "8615a6877116acca",
+      "size": 414,
+      "mtimeMs": 1786052906262.5151,
+      "updatedAt": "2026-08-22T19:13:57.210Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/cokl3qpfc6jej3pag3vd9ah5a0s9m2f0.darc": {
+      "description": "",
+      "tokens": 30408,
+      "hash": "d896d1c177d642f7",
+      "size": 115647,
+      "mtimeMs": 1787414499164.9536,
+      "updatedAt": "2026-08-22T19:13:57.215Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/cvckjbat8d1fgnm97fo4st6hds3r1gio": {
+      "description": "",
+      "tokens": 110,
+      "hash": "ba7e24d19414ab09",
+      "size": 414,
+      "mtimeMs": 1786052906263.5151,
+      "updatedAt": "2026-08-22T19:13:57.215Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/cvng5h1b08cakkjn6i7n5ufffis2natl.darc": {
+      "description": "",
+      "tokens": 46174,
+      "hash": "b3ba204f92f36d97",
+      "size": 174941,
+      "mtimeMs": 1786052906266.5151,
+      "updatedAt": "2026-08-22T19:13:57.217Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/d8ilk53gnan7cmo7rl7ov5nugj247ikr.darc": {
+      "description": "",
+      "tokens": 83033,
+      "hash": "c0e68c1f5865657f",
+      "size": 314632,
+      "mtimeMs": 1786052906267.5151,
+      "updatedAt": "2026-08-22T19:13:57.221Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/d8mdps91s2lasu57edgm0ojfc7tmbi15": {
+      "description": "",
+      "tokens": 111,
+      "hash": "fcc05a02c33ef9ea",
+      "size": 414,
+      "mtimeMs": 1786052906267.5151,
+      "updatedAt": "2026-08-22T19:13:57.221Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/d8sm85255gabvk7imna8tnrqgj9ru7je.darc": {
+      "description": "",
+      "tokens": 7440,
+      "hash": "4e29a9f634b5db71",
+      "size": 28264,
+      "mtimeMs": 1786052906270.5154,
+      "updatedAt": "2026-08-22T19:13:57.222Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/da40oc92322hcknp8g029ddnruk106gl.darc": {
+      "description": "",
+      "tokens": 24039,
+      "hash": "9df097910393b268",
+      "size": 91328,
+      "mtimeMs": 1786052906273.5154,
+      "updatedAt": "2026-08-22T19:13:57.225Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/de8a6ccjchqeeh09q2ohcddc67ferc6o": {
+      "description": "",
+      "tokens": 110,
+      "hash": "cd2a64da279642f6",
+      "size": 414,
+      "mtimeMs": 1786052906274.5154,
+      "updatedAt": "2026-08-22T19:13:57.225Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/df3un1lhfhq1f6vetn6kbeop73pd48vc.darc": {
+      "description": "",
+      "tokens": 7420,
+      "hash": "870a82ff1f0bc5c5",
+      "size": 28155,
+      "mtimeMs": 1786901105547.4065,
+      "updatedAt": "2026-08-22T19:13:57.226Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/diu7r2nd686gskdcadqbefiokfr688ef": {
+      "description": "",
+      "tokens": 110,
+      "hash": "9ebe4687dfd1fca2",
+      "size": 414,
+      "mtimeMs": 1786052906275.5154,
+      "updatedAt": "2026-08-22T19:13:57.226Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/dmdedun0ofe2v1767121lgnbs5kptd3l": {
+      "description": "",
+      "tokens": 111,
+      "hash": "34415cd260fafb3d",
+      "size": 414,
+      "mtimeMs": 1786052906277.5154,
+      "updatedAt": "2026-08-22T19:13:57.226Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/dmt6l4oshaoe75nm4m34o31eqjrh6i43.darc": {
+      "description": "",
+      "tokens": 9320,
+      "hash": "e757411f437fbb2c",
+      "size": 35442,
+      "mtimeMs": 1786052906280.5154,
+      "updatedAt": "2026-08-22T19:13:57.227Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/doev1i4hjlmm7u6m0d64smhkmbfem0k1.darc": {
+      "description": "",
+      "tokens": 144904,
+      "hash": "37e5b1c800104766",
+      "size": 547247,
+      "mtimeMs": 1787235607172.5977,
+      "updatedAt": "2026-08-22T19:13:57.231Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/dpgtksdtk0g1fm80l1sp1u063boocdi8": {
+      "description": "",
+      "tokens": 110,
+      "hash": "bd826d8d96ed46f8",
+      "size": 414,
+      "mtimeMs": 1786052906280.5154,
+      "updatedAt": "2026-08-22T19:13:57.231Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/dsklthtaqhckr8fulc6q64f764s1n0lo.darc": {
+      "description": "",
+      "tokens": 76713,
+      "hash": "858f489f028219d8",
+      "size": 291891,
+      "mtimeMs": 1786052906283.5154,
+      "updatedAt": "2026-08-22T19:13:57.235Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/e3tnasic4brbrlbg38b4srk75cu9e9e9": {
+      "description": "",
+      "tokens": 110,
+      "hash": "69c7fa9ee90653f8",
+      "size": 414,
+      "mtimeMs": 1786052906284.5154,
+      "updatedAt": "2026-08-22T19:13:57.235Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/e4kli9tpafuoln97nfns8messi6diug2.darc": {
+      "description": "",
+      "tokens": 80447,
+      "hash": "e92eb895beff2574",
+      "size": 303952,
+      "mtimeMs": 1786052906323.516,
+      "updatedAt": "2026-08-22T19:13:57.238Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/eeakg8474hg9vh87k3leus0jhafktqca.darc": {
+      "description": "",
+      "tokens": 27683,
+      "hash": "e1aac2ef3a202fe4",
+      "size": 105405,
+      "mtimeMs": 1786558601417.6492,
+      "updatedAt": "2026-08-22T19:13:57.240Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/ei8mf2n2t546p3kl36g3j55t20p9snnc.darc": {
+      "description": "",
+      "tokens": 16119,
+      "hash": "9b3f31ab648cf705",
+      "size": 61336,
+      "mtimeMs": 1786729488642.09,
+      "updatedAt": "2026-08-22T19:13:57.241Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/em2nd4ke2rpv2mu15p82uodmtrr40il5.darc": {
+      "description": "",
+      "tokens": 253350,
+      "hash": "9fa96cdd1ec0576f",
+      "size": 958690,
+      "mtimeMs": 1786052906293.5156,
+      "updatedAt": "2026-08-22T19:13:57.247Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/er623ohhifomdhkali5h9pn2pvcq0r98.darc": {
+      "description": "",
+      "tokens": 7770,
+      "hash": "bcb095d7316e29b3",
+      "size": 29494,
+      "mtimeMs": 1787067821839.3264,
+      "updatedAt": "2026-08-22T19:13:57.248Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/eribq0ksnb0bhufs8me3i6us566ju3gc.darc": {
+      "description": "",
+      "tokens": 61580,
+      "hash": "ef5a8c1509b4879d",
+      "size": 234281,
+      "mtimeMs": 1787419613371.1719,
+      "updatedAt": "2026-08-22T19:13:57.250Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/es1r6fpt9sddh7376hueltbtu084v2ro": {
+      "description": "",
+      "tokens": 110,
+      "hash": "48534557b70eff98",
+      "size": 414,
+      "mtimeMs": 1786052906298.5156,
+      "updatedAt": "2026-08-22T19:13:57.250Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/fc6ea88vmj9uojf3t2n0bkd2prth68ht": {
+      "description": "",
+      "tokens": 110,
+      "hash": "e21639dd9a0faa40",
+      "size": 414,
+      "mtimeMs": 1786052906302.5159,
+      "updatedAt": "2026-08-22T19:13:57.250Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/fh09q3goek38dgubu9j8555v5j41967m": {
+      "description": "",
+      "tokens": 110,
+      "hash": "01e69981b2175764",
+      "size": 414,
+      "mtimeMs": 1786052906305.5159,
+      "updatedAt": "2026-08-22T19:13:57.250Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/fik5ou7rsgdbgipdschflk69v8o160re.darc": {
+      "description": "",
+      "tokens": 241630,
+      "hash": "700b25f2df9ea794",
+      "size": 915959,
+      "mtimeMs": 1786052906312.5159,
+      "updatedAt": "2026-08-22T19:13:57.257Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/fkf9ak7ropdnsjtkjbp8dhafkm4p3hmb.darc": {
+      "description": "",
+      "tokens": 25448,
+      "hash": "27d60f6b9b57b224",
+      "size": 96845,
+      "mtimeMs": 1786052906319.516,
+      "updatedAt": "2026-08-22T19:13:57.259Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/noms/fnf8cfmpcnk1hc9q6v81k8ovo2kke315": {
+      "description": "",
+      "tokens": 109,
+      "hash": "7ec2772f01c2cfd7",
+      "size": 414,
+      "mtimeMs": 1786052906323.516,
+      "updatedAt": "2026-08-22T19:13:57.259Z",
+      "source": "scan"
+    },
+    ".beads/embeddeddolt/nocx/.dolt/repo_state.json": {
+      "description": "",
+      "tokens": 169,
+      "hash": "4a09851fa6664cda",
+      "size": 589,
+      "mtimeMs": 1787426006705.4817,
+      "updatedAt": "2026-08-22T19:13:57.259Z",
+      "source": "scan"
+    },
+    ".beads/export-state.json": {
+      "description": "",
+      "tokens": 38,
+      "hash": "d300fdffe09b303b",
+      "size": 131,
+      "mtimeMs": 1787425988235.485,
+      "updatedAt": "2026-08-22T19:13:57.259Z",
+      "source": "scan"
+    },
+    ".beads/interactions.jsonl": {
+      "description": "Declares reserved",
+      "tokens": 250776,
+      "hash": "036759e9dcd09c32",
+      "size": 942670,
+      "mtimeMs": 1787425986059.1619,
+      "updatedAt": "2026-08-22T19:13:57.263Z",
+      "source": "scan"
+    },
+    ".beads/last-touched": {
+      "description": "",
+      "tokens": 3,
+      "hash": "64ed221e9ea24382",
+      "size": 11,
+      "mtimeMs": 1787425887345.6436,
+      "updatedAt": "2026-08-22T19:13:57.264Z",
+      "source": "scan"
+    },
+    ".beads/metadata.json": {
+      "description": "",
+      "tokens": 45,
+      "hash": "f8b70506cc2eaf91",
+      "size": 155,
+      "mtimeMs": 1786052906812.524,
+      "updatedAt": "2026-08-22T19:13:57.264Z",
+      "source": "scan"
+    },
+    ".beads/PRIME.md": {
+      "description": "Beads Workflow (lean pointer)",
+      "tokens": 164,
+      "hash": "ab0de533f3f35a99",
+      "size": 658,
+      "mtimeMs": 1784818484000,
+      "updatedAt": "2026-08-22T19:13:57.264Z",
+      "source": "scan"
+    },
+    ".beads/README.md": {
+      "description": "Project documentation",
+      "tokens": 569,
+      "hash": "cae1648db67c27f1",
+      "size": 2283,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:57.265Z",
+      "source": "scan"
+    },
+    ".gitattributes": {
+      "description": "Git attributes",
+      "tokens": 360,
+      "hash": "c3232709f856f166",
+      "size": 1356,
+      "mtimeMs": 1786801506237.8037,
+      "updatedAt": "2026-08-22T19:13:57.265Z",
+      "source": "scan"
+    },
+    ".gitignore": {
+      "description": "Git ignore rules",
+      "tokens": 671,
+      "hash": "7bc31bd84d7876a5",
+      "size": 2521,
+      "mtimeMs": 1787247754044.7317,
+      "updatedAt": "2026-08-22T19:13:57.265Z",
+      "source": "scan"
+    },
+    ".golangci.yml": {
+      "description": "",
+      "tokens": 148,
+      "hash": "76349fde87ec3d4c",
+      "size": 517,
+      "mtimeMs": 1784811629000,
+      "updatedAt": "2026-08-22T19:13:57.266Z",
+      "source": "scan"
+    },
+    ".mcp.json": {
+      "description": "",
+      "tokens": 38,
+      "hash": "a3b3ed6b7ec4036c",
+      "size": 133,
+      "mtimeMs": 1785094700750.0962,
+      "updatedAt": "2026-08-22T19:13:57.266Z",
+      "source": "scan"
+    },
+    ".prettierignore": {
+      "description": "",
+      "tokens": 242,
+      "hash": "e1554d429102ece6",
+      "size": 908,
+      "mtimeMs": 1787224802096.3206,
+      "updatedAt": "2026-08-22T19:13:57.267Z",
+      "source": "scan"
+    },
+    ".prettierrc.json": {
+      "description": "Prettier configuration",
+      "tokens": 39,
+      "hash": "a6a2f6b5e929a231",
+      "size": 134,
+      "mtimeMs": 1785094700750.0962,
+      "updatedAt": "2026-08-22T19:13:57.267Z",
+      "source": "scan"
+    },
+    "AGENTS.md": {
+      "description": "AGENTS.md — Working rules for AI agents on `nocx`",
+      "tokens": 10291,
+      "hash": "b628f7f6bc657360",
+      "size": 41405,
+      "mtimeMs": 1787426036417.943,
+      "updatedAt": "2026-08-22T19:13:57.267Z",
+      "source": "scan"
+    },
+    "CLAUDE.md": {
+      "description": "OpenWolf",
+      "tokens": 999,
+      "hash": "f3c7fb73a78f1fe1",
+      "size": 4008,
+      "mtimeMs": 1787426036405.943,
+      "updatedAt": "2026-08-22T19:13:57.267Z",
+      "source": "scan"
+    },
+    "eslint.config.mjs": {
+      "description": "ESLint flat configuration",
+      "tokens": 579,
+      "hash": "6156121b7c7faba9",
+      "size": 2175,
+      "mtimeMs": 1786129440770.815,
+      "updatedAt": "2026-08-22T19:13:57.269Z",
+      "source": "scan"
+    },
+    "GEMINI.md": {
+      "description": "OpenWolf",
+      "tokens": 75,
+      "hash": "e401f79554a8d796",
+      "size": 297,
+      "mtimeMs": 1787426036420.9434,
+      "updatedAt": "2026-08-22T19:13:57.269Z",
+      "source": "scan"
+    },
+    "go.mod": {
+      "description": "Go module definition",
+      "tokens": 775,
+      "hash": "76b3eee7459a7858",
+      "size": 2905,
+      "mtimeMs": 1787224802159.3208,
+      "updatedAt": "2026-08-22T19:13:57.270Z",
+      "source": "scan"
+    },
+    "go.sum": {
+      "description": "Go dependency checksums",
+      "tokens": 5074,
+      "hash": "047410470277d081",
+      "size": 19025,
+      "mtimeMs": 1787224802160.3208,
+      "updatedAt": "2026-08-22T19:13:57.270Z",
+      "source": "scan"
+    },
+    "LICENSE": {
+      "description": "Project license",
+      "tokens": 284,
+      "hash": "86e77dc487320970",
+      "size": 1064,
+      "mtimeMs": 1787245789573.7795,
+      "updatedAt": "2026-08-22T19:13:57.270Z",
+      "source": "scan"
+    },
+    "main.go": {
+      "description": "WailsApp (11 fields); methods: Log, LogFilePath, ServiceStartup",
+      "tokens": 7526,
+      "hash": "9b1c39069cf2232a",
+      "size": 26396,
+      "mtimeMs": 1787258263168.8096,
+      "updatedAt": "2026-08-22T19:13:57.272Z",
+      "source": "scan",
+      "symbols": [
+        {
+          "name": "main",
+          "kind": "fn",
+          "startLine": 39,
+          "endLine": 130,
+          "tokens": 1158
+        },
+        {
+          "name": "WailsApp",
+          "kind": "class",
+          "startLine": 134,
+          "endLine": 162,
+          "tokens": 324
+        },
+        {
+          "name": "Log",
+          "kind": "method",
+          "startLine": 165,
+          "endLine": 167,
+          "tokens": 19
+        },
+        {
+          "name": "LogFilePath",
+          "kind": "method",
+          "startLine": 172,
+          "endLine": 174,
+          "tokens": 22
+        },
+        {
+          "name": "ServiceStartup",
+          "kind": "method",
+          "startLine": 183,
+          "endLine": 326,
+          "tokens": 2071
+        },
+        {
+          "name": "resolveNotificationPermission",
+          "kind": "method",
+          "startLine": 342,
+          "endLine": 365,
+          "tokens": 279
+        },
+        {
+          "name": "restoreWindow",
+          "kind": "method",
+          "startLine": 392,
+          "endLine": 409,
+          "tokens": 201
+        },
+        {
+          "name": "wailsWindowPlacer",
+          "kind": "class",
+          "startLine": 417,
+          "endLine": 419,
+          "tokens": 20
+        },
+        {
+          "name": "SetSize",
+          "kind": "method",
+          "startLine": 421,
+          "endLine": 421,
+          "tokens": 26
+        },
+        {
+          "name": "SetPosition",
+          "kind": "method",
+          "startLine": 422,
+          "endLine": 422,
+          "tokens": 24
+        },
+        {
+          "name": "Center",
+          "kind": "method",
+          "startLine": 423,
+          "endLine": 423,
+          "tokens": 22
+        },
+        {
+          "name": "Maximise",
+          "kind": "method",
+          "startLine": 424,
+          "endLine": 424,
+          "tokens": 22
+        },
+        {
+          "name": "Fullscreen",
+          "kind": "method",
+          "startLine": 425,
+          "endLine": 425,
+          "tokens": 23
+        },
+        {
+          "name": "wailsWindowProbe",
+          "kind": "class",
+          "startLine": 432,
+          "endLine": 435,
+          "tokens": 31
+        },
+        {
+          "name": "Geometry",
+          "kind": "method",
+          "startLine": 437,
+          "endLine": 474,
+          "tokens": 300
+        },
+        {
+          "name": "wailsDialogService",
+          "kind": "class",
+          "startLine": 487,
+          "endLine": 489,
+          "tokens": 16
+        },
+        {
+          "name": "OpenFile",
+          "kind": "method",
+          "startLine": 491,
+          "endLine": 497,
+          "tokens": 66
+        },
+        {
+          "name": "wailsUrlOpener",
+          "kind": "class",
+          "startLine": 505,
+          "endLine": 507,
+          "tokens": 15
+        },
+        {
+          "name": "OpenURL",
+          "kind": "method",
+          "startLine": 509,
+          "endLine": 511,
+          "tokens": 31
+        },
+        {
+          "name": "upgradeInstallPath",
+          "kind": "fn",
+          "startLine": 516,
+          "endLine": 535,
+          "tokens": 125
+        },
+        {
+          "name": "shutdown",
+          "kind": "method",
+          "startLine": 537,
+          "endLine": 547,
+          "tokens": 128
+        },
+        {
+          "name": "ServiceShutdown",
+          "kind": "method",
+          "startLine": 554,
+          "endLine": 559,
+          "tokens": 38
+        },
+        {
+          "name": "GetWSPort",
+          "kind": "method",
+          "startLine": 561,
+          "endLine": 563,
+          "tokens": 19
+        },
+        {
+          "name": "GetWSToken",
+          "kind": "method",
+          "startLine": 565,
+          "endLine": 567,
+          "tokens": 20
+        },
+        {
+          "name": "CheckForUpdate",
+          "kind": "method",
+          "startLine": 572,
+          "endLine": 580,
+          "tokens": 66
+        },
+        {
+          "name": "ApplyUpdate",
+          "kind": "method",
+          "startLine": 584,
+          "endLine": 589,
+          "tokens": 56
+        },
+        {
+          "name": "ReportHealthy",
+          "kind": "method",
+          "startLine": 594,
+          "endLine": 596,
+          "tokens": 26
+        },
+        {
+          "name": "GetUpdateState",
+          "kind": "method",
+          "startLine": 601,
+          "endLine": 608,
+          "tokens": 95
+        },
+        {
+          "name": "versionRequested",
+          "kind": "fn",
+          "startLine": 613,
+          "endLine": 620,
+          "tokens": 43
+        }
+      ],
+      "symbolSource": "ts",
+      "skeleton": "func main() {\ntype WailsApp struct {\nfunc (w *WailsApp) Log(message string) {\nfunc (w *WailsApp) LogFilePath() string {\nfunc (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {\nfunc (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {\nfunc (w *WailsApp) restoreWindow() {\ntype wailsWindowPlacer struct {\nfunc (p wailsWindowPlacer) SetSize(width, height int) { p.window.SetSize(width, height) }\nfunc (p wailsWindowPlacer) SetPosition(x, y int)      { p.window.SetPosition(x, y) }\nfunc (p wailsWindowPlacer) Center()                   { p.window.Center() }\nfunc (p wailsWindowPlacer) Maximise()                 { p.window.Maximise() }\nfunc (p wailsWindowPlacer) Fullscreen()               { p.window.Fullscreen() }\ntype wailsWindowProbe struct {\nfunc (p wailsWindowProbe) Geometry() (uistate.Window, []uistate.Display, bool) {\ntype wailsDialogService struct {\nfunc (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {\ntype wailsUrlOpener struct {\nfunc (o *wailsUrlOpener) OpenURL(_ context.Context, url string) error {\nfunc upgradeInstallPath(execPath string) string {\nfunc (w *WailsApp) shutdown() {\nfunc (w *WailsApp) ServiceShutdown() error {\nfunc (w *WailsApp) GetWSPort() int {\nfunc (w *WailsApp) GetWSToken() string {\nfunc (w *WailsApp) CheckForUpdate() *update.UpdateInfo {\nfunc (w *WailsApp) ApplyUpdate() error {"
+    },
+    "Makefile": {
+      "description": "Make build targets",
+      "tokens": 6380,
+      "hash": "e82231bf03e65a67",
+      "size": 23996,
+      "mtimeMs": 1787331852152.753,
+      "updatedAt": "2026-08-22T19:13:57.272Z",
+      "source": "scan"
+    },
+    "package.json": {
+      "description": "Node.js package manifest",
+      "tokens": 355,
+      "hash": "6d3ab011e160e0c6",
+      "size": 1243,
+      "mtimeMs": 1787245789575.7795,
+      "updatedAt": "2026-08-22T19:13:57.272Z",
+      "source": "scan"
+    },
+    "playwright.config.ts": {
+      "description": "Playwright test configuration",
+      "tokens": 1582,
+      "hash": "4b74701d54708bfd",
+      "size": 5565,
+      "mtimeMs": 1787224802178.3208,
+      "updatedAt": "2026-08-22T19:13:57.273Z",
+      "source": "scan",
+      "symbols": [
+        {
+          "name": "wanted",
+          "kind": "fn",
+          "startLine": 38,
+          "endLine": 40,
+          "tokens": 27
+        },
+        {
+          "name": "projects",
+          "kind": "fn",
+          "startLine": 41,
+          "endLine": 43,
+          "tokens": 30
+        }
+      ],
+      "symbolSource": "ts"
+    },
+    "README.md": {
+      "description": "Project documentation",
+      "tokens": 5277,
+      "hash": "26155c3439283fcd",
+      "size": 21305,
+      "mtimeMs": 1787247754044.7317,
+      "updatedAt": "2026-08-22T19:13:57.273Z",
+      "source": "scan"
+    },
+    "tsconfig.json": {
+      "description": "TypeScript configuration",
+      "tokens": 362,
+      "hash": "ee278011d3b981a6",
+      "size": 1268,
+      "mtimeMs": 1786035911439.0461,
+      "updatedAt": "2026-08-22T19:13:57.273Z",
+      "source": "scan"
+    }
+  },
+  "preamble": [
+    "> Project structure index. Auto-maintained by OpenWolf hooks and daemon.",
+    "> Run `openwolf scan` to generate, or wait for the first Claude Code session.",
+    "> Status: Pending initial scan"
+  ]
+}

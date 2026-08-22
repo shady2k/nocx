@@ -22,6 +22,17 @@
           }
         ],
         "matcher": "manual|auto"
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/precompact.js",
+            "timeout": 5,
+            "statusMessage": "OpenWolf compaction snapshot"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -34,6 +45,17 @@
           }
         ],
         "matcher": "startup|resume|clear"
+      },
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/session-start.js",
+            "timeout": 5,
+            "statusMessage": "OpenWolf session bootstrap"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -43,6 +65,67 @@
             "command": "bd codex-hook UserPromptSubmit",
             "statusMessage": "Refreshing Beads context",
             "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/pre-read.js",
+            "timeout": 5,
+            "statusMessage": "OpenWolf read precheck"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/pre-write.js",
+            "timeout": 5,
+            "statusMessage": "OpenWolf write precheck"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/post-read.js",
+            "timeout": 5,
+            "statusMessage": "OpenWolf read tracking"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/post-write.js",
+            "timeout": 10,
+            "statusMessage": "OpenWolf anatomy update"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .wolf/hooks/stop.js",
+            "timeout": 10,
+            "statusMessage": "OpenWolf session wrap-up"
           }
         ]
       }

@@ -919,6 +919,7 @@ describe('sidebar view-zone actions', () => {
           title: 'Sandbox',
           icon: TestIcon,
           onActivate: () => {},
+          selected: () => true,
         },
       ],
     )
@@ -927,6 +928,9 @@ describe('sidebar view-zone actions', () => {
     expect(
       topButtons.map((button) => button.getAttribute('data-view') ?? button.dataset.action),
     ).toEqual(['alpha', 'sandbox-shield'])
+    const shield = topButtons[1]
+    expect(shield.getAttribute('aria-selected')).toBe('true')
+    expect(shield.dataset.railIndicator).toBe('true')
     expect(panel.querySelector('[data-testid="sandbox-shield"]')).toBeNull()
   })
 })

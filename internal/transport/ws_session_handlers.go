@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 	"unicode/utf8"
 
@@ -300,6 +302,27 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 	_ = respond(r, resp)
 }
 
+func canonicalizeOpenCwd(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New("cwd must be absolute")
+	}
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("cwd must be a directory")
+	}
+	return canonical, nil
+}
+
 // handleOpen creates a new session and output ring.
 //
 // Per AD-7: the server assigns the authoritative session-id. The JSON-RPC
@@ -406,9 +429,22 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		}
 	}
 
+	if params.Cwd != "" && (params.Kind == "ssh" || params.Sandbox != nil) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "Invalid params: cwd is only valid for ordinary local sessions",
+		})
+		return
+	}
+	localCwd, cwdErr := canonicalizeOpenCwd(params.Cwd)
+	if cwdErr != nil {
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: cwd"})
+		return
+	}
+
 	cfg := session.Config{
 		Kind:   session.KindLocal,
 		Cols:   params.Cols,
+		Cwd:    localCwd,
 		Rows:   params.Rows,
 		XPixel: params.XPixel,
 		YPixel: params.YPixel,

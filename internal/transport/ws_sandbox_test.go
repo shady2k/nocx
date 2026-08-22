@@ -801,3 +801,25 @@ func TestOpen_SandboxPolicyTooLargeKeepsItsReason(t *testing.T) {
 		t.Errorf("private path leaked in backend log: %s", logs.String())
 	}
 }
+
+func TestCanonicalizeOpenCwdAcceptsOnlyExistingAbsoluteDirectories(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := canonicalizeOpenCwd(link)
+	if err != nil || got != dir {
+		t.Fatalf("canonicalizeOpenCwd(link) = %q, %v; want %q, nil", got, err, dir)
+	}
+	if _, err := canonicalizeOpenCwd("relative"); err == nil {
+		t.Fatal("canonicalizeOpenCwd(relative) succeeded")
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := canonicalizeOpenCwd(file); err == nil {
+		t.Fatal("canonicalizeOpenCwd(file) succeeded")
+	}
+}

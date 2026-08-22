@@ -93,13 +93,16 @@ export interface OpenAnchor {
    * blank.
    */
   paneId?: string
+  /** Canonical local cwd for a replacement shell; absent uses backend default. */
+  cwd?: string
 }
 
-/** The paneId as the wire wants it: the key, or no key at all. One helper for
- *  all three openers, because "how an absent pane is expressed" is one fact
- *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
-function paneParam(anchor: OpenAnchor): { paneId?: string } {
-  return anchor.paneId ? { paneId: anchor.paneId } : {}
+/** Optional ordinary-open facts as the wire wants them. */
+function paneParam(anchor: OpenAnchor): { paneId?: string; cwd?: string } {
+  return {
+    ...(anchor.paneId ? { paneId: anchor.paneId } : {}),
+    ...(anchor.cwd ? { cwd: anchor.cwd } : {}),
+  }
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on

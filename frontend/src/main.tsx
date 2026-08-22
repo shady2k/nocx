@@ -432,6 +432,7 @@ async function main() {
   // PaneManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
+  const [activeSandboxed, setActiveSandboxed] = createSignal(tm.activePaneSandboxed())
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
@@ -440,6 +441,7 @@ async function main() {
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    setActiveSandboxed(tm.activePaneSandboxed())
   }
   let convertActiveTabToSandboxed: () => Promise<void> = async () => {}
   const currentShieldState = () =>
@@ -447,6 +449,7 @@ async function main() {
       enabled: sandboxEnabledLive(),
       statusAvailable: sandboxStatusAvailable(),
       origin: activeOrigin(),
+      sandboxed: activeSandboxed(),
     })
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -830,12 +833,15 @@ async function main() {
         title: () => {
           const state = currentShieldState()
           return state.kind === 'ready'
-            ? `Convert this tab to a sandboxed shell (${state.workspace})`
+            ? state.action === 'remove'
+              ? `Remove sandbox from this tab (${state.workspace})`
+              : `Convert this tab to a sandboxed shell (${state.workspace})`
             : state.kind === 'disabled'
               ? state.reason
               : 'Convert active tab to a sandboxed shell'
         },
         icon: ShieldIcon,
+        selected: () => activeSandboxed(),
         hidden: () => currentShieldState().kind === 'hidden',
         disabled: () => currentShieldState().kind !== 'ready',
         onActivate: () => void convertActiveTabToSandboxed(),
@@ -999,6 +1005,18 @@ async function main() {
   convertActiveTabToSandboxed = async (): Promise<void> => {
     const ready = currentShieldState()
     if (ready.kind !== 'ready') return
+    const source = tm.activeOrigin()
+    const oldPane = source ? tm.paneOf(source.paneId) : undefined
+    if (!source || !oldPane || !tm.tabOf(source.paneId)) return
+    if (ready.action === 'remove') {
+      const made = tm.newLocalPaneAt(ready.workspace)
+      if (await made.created) {
+        tm.replaceTabPosition(oldPane.id, made.pane.id)
+        void tm.closePane(oldPane)
+      }
+      return
+    }
+
     let state: { enabled: boolean; status: SandboxStatus | null }
     try {
       state = await getSandboxState()
@@ -1013,9 +1031,6 @@ async function main() {
       )
       return
     }
-    const source = tm.activeOrigin()
-    const oldPane = source ? tm.paneOf(source.paneId) : undefined
-    if (!source || !oldPane || !tm.tabOf(source.paneId)) return
     await openSandboxedShell(
       {
         getSnapshot: () => profileClient.getSnapshot(),

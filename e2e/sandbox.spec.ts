@@ -88,6 +88,15 @@ test.describe('sandbox shield', () => {
       await expect(selected.locator('.nocx-tab-line > :first-child')).toHaveClass(
         /nocx-tab-sandboxed-marker/,
       )
+      await expect(shield).toHaveAttribute('aria-selected', 'true')
+      await expect(shield).toHaveAttribute('title', /Remove sandbox from this tab/)
+
+      await shield.click()
+      await expect(page.getByRole('tab')).toHaveCount(before)
+      await expect(
+        page.getByRole('tab', { selected: true }).locator('.nocx-tab-sandboxed-marker'),
+      ).toHaveCount(0)
+      await expect(shield).not.toHaveAttribute('aria-selected', 'true')
     }
   })
 })

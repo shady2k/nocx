@@ -12,40 +12,48 @@ const localOrigin: ActiveOrigin = {
   host: null,
 }
 
+const base = {
+  enabled: true,
+  statusAvailable: true,
+  origin: localOrigin,
+  sandboxed: false,
+}
+
 describe('shieldState', () => {
   it.each([
-    [{ enabled: false, statusAvailable: true, origin: localOrigin }, { kind: 'hidden' }],
+    [{ ...base, enabled: false }, { kind: 'hidden' }],
     [
-      { enabled: true, statusAvailable: null, origin: localOrigin },
+      { ...base, statusAvailable: null },
       { kind: 'disabled', reason: 'Sandbox unavailable (status-unavailable)' },
     ],
     [
-      { enabled: true, statusAvailable: false, origin: localOrigin },
+      { ...base, statusAvailable: false },
       { kind: 'disabled', reason: 'Sandbox unavailable (status-unavailable)' },
     ],
     [
-      { enabled: true, statusAvailable: true, origin: null },
+      { ...base, origin: null },
       { kind: 'disabled', reason: 'Switch to a local tab to sandbox it' },
     ],
     [
-      { enabled: true, statusAvailable: true, origin: { ...localOrigin, kind: 'ssh' as const } },
+      { ...base, origin: { ...localOrigin, kind: 'ssh' as const } },
       { kind: 'disabled', reason: 'Switch to a local tab to sandbox it' },
     ],
     [
-      { enabled: true, statusAvailable: true, origin: { ...localOrigin, cwdFollow: false } },
+      { ...base, origin: { ...localOrigin, cwdFollow: false } },
       { kind: 'disabled', reason: 'Switch to a local tab to sandbox it' },
     ],
     [
-      { enabled: true, statusAvailable: true, origin: { ...localOrigin, cwdVerified: false } },
+      { ...base, origin: { ...localOrigin, cwdVerified: false } },
       { kind: 'disabled', reason: 'Wait for the shell to report its folder' },
     ],
     [
-      { enabled: true, statusAvailable: true, origin: { ...localOrigin, cwd: null } },
+      { ...base, origin: { ...localOrigin, cwd: null } },
       { kind: 'disabled', reason: 'Wait for the shell to report its folder' },
     ],
+    [base, { kind: 'ready', workspace: '/repo', action: 'apply' }],
     [
-      { enabled: true, statusAvailable: true, origin: localOrigin },
-      { kind: 'ready', workspace: '/repo' },
+      { ...base, enabled: false, statusAvailable: false, sandboxed: true },
+      { kind: 'ready', workspace: '/repo', action: 'remove' },
     ],
   ])('maps eligibility %#', (input, expected) => {
     expect(shieldState(input)).toEqual(expected)

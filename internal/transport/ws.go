@@ -1506,6 +1506,9 @@ type openParams struct {
 	Rows   uint16 `json:"rows"`
 	XPixel uint16 `json:"xpixel"`
 	YPixel uint16 `json:"ypixel"`
+	// Cwd is an optional canonical local directory for an ordinary replacement
+	// shell. It is rejected on SSH and sandbox requests.
+	Cwd string `json:"cwd,omitempty"`
 
 	// SSH fields — when Kind="ssh", the session opens an SSH channel.
 	// ProfileID identifies the SSH profile to connect to; the backend

@@ -75,6 +75,7 @@ export interface SidebarAction {
   readonly title: string | (() => string)
   readonly icon: Component
   readonly onActivate: () => void
+  readonly selected?: () => boolean
   readonly disabled?: () => boolean
   readonly hidden?: () => boolean
 }
@@ -416,6 +417,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                 data-testid={action.id}
                 title={typeof action.title === 'function' ? action.title() : action.title}
                 ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
+                selected={action.selected?.() === true}
                 disabled={action.disabled?.() === true}
                 tabIndex={action.id === tabbableId() ? 0 : -1}
                 onClick={() => handleActionClick(action)}
@@ -437,6 +439,7 @@ function SidebarSolid(props: SidebarSolidProps) {
             <IconButton
               size="lg"
               data-action={action.id}
+              selected={action.selected?.() === true}
               title={typeof action.title === 'function' ? action.title() : action.title}
               ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
               disabled={action.disabled?.() === true}

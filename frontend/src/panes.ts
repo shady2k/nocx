@@ -960,7 +960,7 @@ export class PaneManager {
    * never appears (nocx-rtg0.29). Returning the id alone is what made that
    * race impossible to close at the call site.
    */
-  private mintPane(kind: 'local' | 'ssh', endpoint: string | null): PaneIdentity {
+  private mintPane(kind: 'local' | 'ssh', endpoint: string | null, cwd = ''): PaneIdentity {
     // No store is a DEGRADE, not a refusal: the id is minted and simply
     // names no row, which `registered: false` states rather than leaving the
     // caller to infer it from a promise that never settles.
@@ -970,7 +970,7 @@ export class PaneManager {
     // would either vanish on arrival or drag the window away from where the
     // person was working. The default is where it goes when that is where
     // they are.
-    const opened = this.layout.openTab({ kind, endpoint, cwd: '' }, this.currentWorkspaceId())
+    const opened = this.layout.openTab({ kind, endpoint, cwd }, this.currentWorkspaceId())
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the
@@ -1002,6 +1002,15 @@ export class PaneManager {
     return this.buildLocalPane(this.mintPane('local', null))
   }
 
+  /** Create an ordinary local replacement in a verified current directory. */
+  newLocalPaneAt(cwd: string): { pane: Pane; created: Promise<boolean> } {
+    const identity = this.mintPane('local', null, cwd)
+    return {
+      pane: this.buildLocalPane(identity, true, undefined, cwd),
+      created: identity.registered,
+    }
+  }
+
   newSandboxedPane(
     workspace: string,
     launch: SandboxLaunch,
@@ -1028,6 +1037,7 @@ export class PaneManager {
     identity: PaneIdentity,
     activateNow = true,
     sandbox?: SandboxRequest,
+    initialCwd = '',
   ): Pane {
     const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
@@ -1056,8 +1066,11 @@ export class PaneManager {
         onCreateEndpoint: this.onCreateEndpoint,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         sandbox,
+        initialCwd,
         onSandboxedChange: (confirmed) => {
-          if (confirmed) paneRef.current?.setSandboxed()
+          if (!confirmed) return
+          paneRef.current?.setSandboxed()
+          this.onActivePaneChange?.()
         },
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
@@ -2043,6 +2056,11 @@ export class PaneManager {
     const pane = this.activePane
     const origin = pane?.content.activeOrigin?.()
     return pane && origin ? { paneId: pane.id, ...origin } : null
+  }
+
+  /** Whether the active renderer pane is confirmed filesystem-sandboxed. */
+  activePaneSandboxed(): boolean {
+    return this.activePane?.sandboxed === true
   }
 
   /** The ACTIVE pane's surface type (B.8) — the seam chrome reads to answer

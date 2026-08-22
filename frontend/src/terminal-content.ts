@@ -312,6 +312,8 @@ export interface TerminalContentHooks {
   onCreateEndpoint?: () => void
   /** Backend-authorized filesystem sandbox request for this local pane. */
   sandbox?: SandboxRequest
+  /** Verified cwd for a replacement local shell; empty uses backend default. */
+  initialCwd?: string
   /** Reports the immutable sandbox state from the open result. */
   onSandboxedChange?: (sandboxed: boolean) => void
 }
@@ -1094,7 +1096,8 @@ export class TerminalContent extends BasePaneContent {
     }
     const anchor: OpenAnchor = registered ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows, anchor)
+      const local = this.hooks.initialCwd ? { ...anchor, cwd: this.hooks.initialCwd } : anchor
+      return this.client.openSession(this.cols, this.rows, local)
     }
     if (this.sshOpts.profileId) {
       return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId, anchor)

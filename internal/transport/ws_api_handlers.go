@@ -212,21 +212,44 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 // handleSend is api.request.send, and its shape is the point: the gate is
 // held for the snapshot and released before the dial.
 //
-// The interval, both ends: the api gate is acquired before the request file
-// is opened and released when Run returns with the request value in hand;
-// from that moment until the response is captured no domain gate is held at
-// all, so a server that never answers delays this one request and nothing
-// else. The context still bounds the exchange — a cancelled request stops
-// where it is.
+// TWO INTERVALS, both stated with both ends.
+//
+// The GATE: the api gate is acquired before the request file is opened and
+// released when Run returns with the request value in hand; from that moment
+// until the response is captured no domain gate is held at all, so a server
+// that never answers delays this one request and nothing else.
+//
+// The TOKEN: registered before anything else happens — before the gate is
+// even asked for — and dropped in a defer when this function returns,
+// whichever way it returns. It is that early on purpose. The renderer draws
+// its Stop the instant a person presses Send, so a registration that waited
+// for the snapshot would leave a window in which a visible, stoppable-looking
+// run answers "no request is running under this token"; and the window is
+// widest exactly when the api gate is busy, which is when a person is most
+// likely to be reaching for Stop. Because the snapshot runs under the
+// cancellable context too, a Stop pressed during it ends the operation rather
+// than being remembered until the dial.
 func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcRequest) {
 	var p apiRequestSendParams
+	if !h.decode(req, &p) {
+		return
+	}
+
+	sendCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// A token already in flight refuses the SEND rather than replacing the
+	// registration: two exchanges under one name would leave Stop guessing
+	// which it meant.
+	if taken := h.cancels.register(h.conn, p.Token, cancel); taken != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: taken.Error()})
+		return
+	}
+	defer h.cancels.drop(h.conn, p.Token)
+
 	var inputs capability.SendInputs
 	snapshotted := false
 
-	err := h.op.Run(ctx, func(_ context.Context, svc capability.APICollectionService) error {
-		if !h.decode(req, &p) {
-			return nil
-		}
+	err := h.op.Run(sendCtx, func(_ context.Context, svc capability.APICollectionService) error {
 		got, err := svc.Snapshot(apicoll.HandleID(p.Handle), p.RelPath, p.EnvRelPath)
 		if err != nil {
 			h.fail(req, err)
@@ -270,30 +293,13 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	// credential (§6.5).
 	var look apicoll.Lookup
 	if h.values != nil {
-		look = h.values.Variables(ctx, inputs.CookieScope, inputs.Environment)
+		look = h.values.Variables(sendCtx, inputs.CookieScope, inputs.Environment)
 	}
 	sending, used, err := apisend.Apply(inputs.Request, look)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
 		return
 	}
-
-	// THE TOKEN NAMES THIS EXCHANGE, and the two lines below are the whole
-	// of its interval: registered before the send starts, dropped when the
-	// send has settled whichever way it settled. There is no window in
-	// which a person can press Stop on a run they can see and be told
-	// nothing is running, and none in which a Stop lands on an exchange
-	// that is already over.
-	//
-	// A token already in flight refuses the SEND rather than replacing the
-	// registration: two exchanges under one name would leave Stop guessing.
-	sendCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if taken := h.cancels.register(h.conn, p.Token, cancel); taken != nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: taken.Error()})
-		return
-	}
-	defer h.cancels.drop(h.conn, p.Token)
 
 	// No gate from here on. The cookie scope is the collection, so two
 	// collections never share a jar.

@@ -8,6 +8,15 @@ package transport
 // particular id — and the sender itself blocks on a channel plus its own
 // context rather than on a sleep, so a cancelled send returns because it was
 // cancelled and never because time passed.
+//
+// ONE PROPERTY IS NOT TESTED HERE, AND IT IS SAID RATHER THAN LEFT TO BE
+// NOTICED. handleSend registers the token BEFORE it asks for the api gate,
+// so a Stop pressed while the snapshot is still queued finds the run — and
+// there is no observable, from this side of the socket, between "the frame
+// was accepted" and "the sender was called". Every test below therefore
+// waits for the sender, which is the later of the two, and none of them
+// would go red if the registration moved back after the gate. The reason
+// the registration is early is in handleSend's own comment.
 
 import (
 	"encoding/json"

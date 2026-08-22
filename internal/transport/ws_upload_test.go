@@ -431,21 +431,127 @@ func TestFilesUpload_RefusesANegativeSizeAndAnUnknownDecision(t *testing.T) {
 	}
 }
 
-// TestFilesUpload_RefusesASourceTicketNothingMinted pins the honest answer
-// while the mint side does not exist (Task 8): an id nothing minted names
-// nothing, and treating it as a stream upload would silently change what
-// the caller asked for.
+// TestFilesUpload_RefusesASourceTicketNothingMinted: an id nothing minted
+// names nothing, and treating it as a stream upload would silently change
+// what the caller asked for. Both shapes are refused and both are -32602 —
+// a ticket of the right width that was never minted, and one of the wrong
+// width, which is what every sourceTicket used to be held to.
 func TestFilesUpload_RefusesASourceTicketNothingMinted(t *testing.T) {
 	e := newUploadTestEnv(t)
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 
-	p := uploadParams(bid, dir, "a.txt", 1)
-	p["sourceTicket"] = strings.Repeat("ab", uploadTicketHexLen/2)
-	env := callUpload(t, e.conn, p, 3)
-	if env.Error == nil || env.Error.Code != -32602 {
-		t.Fatalf("an unmintable sourceTicket must be -32602, got %+v", env.Error)
+	for i, ticket := range []string{
+		strings.Repeat("ab", sourceTicketHexLen/2), // well-shaped, never minted
+		strings.Repeat("ab", uploadTicketHexLen/2), // the SINK ticket's width
+		"NOTHEX0123456789abcdef0123456789",
+	} {
+		p := uploadParams(bid, dir, "a.txt", 1)
+		p["sourceTicket"] = ticket
+		env := callUpload(t, e.conn, p, 3+i)
+		if env.Error == nil || env.Error.Code != -32602 {
+			t.Fatalf("sourceTicket %q must be -32602, got %+v", ticket, env.Error)
+		}
+	}
+	// And nothing started: a refused redemption costs no transfer.
+	if n := len(e.ws.uploads.pick(func(*runningTransfer) bool { return true })); n != 0 {
+		t.Fatalf("%d transfers registered after refused redemptions, want 0", n)
+	}
+}
+
+// TestFilesUpload_ACollisionDoesNotSpendTheTicket is the interval the claim
+// sits inside, stated with both ends: the ticket is live from the mint
+// until the request that actually starts a transfer, and a collision answer
+// starts none. The renderer's whole collision protocol is "ask the person,
+// then call again with onExists" — a claim taken before the probe would
+// spend the ticket on the answer that asks for the second call, so the
+// second call could never succeed and the native picker would be unusable
+// against any name that already exists.
+func TestFilesUpload_ACollisionDoesNotSpendTheTicket(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "taken.txt"), []byte("original"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	src := filepath.Join(t.TempDir(), "taken.txt")
+	want := []byte("the replacement")
+	if err := os.WriteFile(src, want, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, err := e.ws.UploadSources().Mint(src)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	first := uploadParams(bid, dir, "taken.txt", pick.Size)
+	first["sourceTicket"] = pick.Ticket
+	if got := callUpload(t, e.conn, first, 3).mustResult(t); got.Collision != "exists" {
+		t.Fatalf("want the collision branch, got %+v", got)
+	}
+
+	second := uploadParams(bid, dir, "taken.txt", pick.Size)
+	second["sourceTicket"] = pick.Ticket
+	second["onExists"] = "overwrite"
+	got := callUpload(t, e.conn, second, 4).mustResult(t)
+	if got.TransferID == "" {
+		t.Fatalf("the ticket did not survive the collision question: %+v", got)
+	}
+	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	landed, err := os.ReadFile(filepath.Join(dir, "taken.txt")) //nolint:gosec // see above
+	if err != nil || !bytes.Equal(landed, want) {
+		t.Fatalf("destination = %q, %v; want the replacement", landed, err)
+	}
+}
+
+// Skip moves no bytes, so a redeemed ticket's reader is opened and closed
+// without being read — and the ticket is still spent, because the person
+// answered the question this gesture asked.
+func TestFilesUpload_ASourceTicketWithSkipMovesNothing(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(dest, []byte("original"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	src := filepath.Join(t.TempDir(), "a.txt")
+	if err := os.WriteFile(src, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, err := e.ws.UploadSources().Mint(src)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	p := uploadParams(bid, dir, "a.txt", pick.Size)
+	p["sourceTicket"] = pick.Ticket
+	p["onExists"] = "skip"
+	got := callUpload(t, e.conn, p, 3).mustResult(t)
+	if got.Ticket != "" || got.URL != "" {
+		t.Fatalf("skip needs no body: %+v", got)
+	}
+	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateSkipped {
+		t.Fatalf("state = %q, want %q", state, uploadStateSkipped)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	body, err := os.ReadFile(dest) //nolint:gosec // see above
+	if err != nil || string(body) != "original" {
+		t.Fatalf("destination = %q, %v; skip leaves it alone", body, err)
+	}
+	// The ticket was spent all the same: the gesture is over.
+	again := uploadParams(bid, dir, "b.txt", pick.Size)
+	again["sourceTicket"] = pick.Ticket
+	if env := callUpload(t, e.conn, again, 4); env.Error == nil {
+		t.Fatal("a skipped redemption left the ticket live")
 	}
 }
 
@@ -730,5 +836,98 @@ func TestFilesUploadCancel_RefusesATransferAnotherConnectionOwns(t *testing.T) {
 	case <-rt.done:
 		t.Fatal("a connection that does not own the transfer's session cancelled it")
 	default:
+	}
+}
+
+// ── D1's other source: a ticket, redeemed ────────────────────────────────
+
+// TestFilesUpload_ASourceTicketMovesTheBytesToTheSink is THE test this
+// surface never had, and the reason the seam was never built.
+//
+// Task 8 minted source tickets and Task 5 refused every one of them, so the
+// two halves of one mechanism were each green alone: the mint tests stop at
+// Claim, and every files.upload test drives the STREAM source. Nothing on
+// either side ever asked "and then what moves the bytes?" — which is
+// exactly the question a person picking a file in the native picker is
+// asking, and on the desktop build the answer was -32602.
+//
+// So this drives the whole path: a human's gesture mints a ticket behind
+// the seam, the renderer echoes it on files.upload with its own bindingId,
+// and the bytes land at the destination. It asserts the CONTENT, because a
+// transfer that reports "written" and wrote nothing is the failure this
+// test is here to catch.
+func TestFilesUpload_ASourceTicketMovesTheBytesToTheSink(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	// The mint happens where a human chose the file — behind the picker
+	// seam, never on the wire. The test stands in for the human.
+	want := []byte("the bytes a person chose, all of them\n")
+	src := filepath.Join(t.TempDir(), "chosen.txt")
+	if err := os.WriteFile(src, want, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, err := e.ws.UploadSources().Mint(src)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	p := uploadParams(bid, dir, pick.Name, pick.Size)
+	p["sourceTicket"] = pick.Ticket
+	got := callUpload(t, e.conn, p, 3).mustResult(t)
+
+	// A request WITH a ticket is a path upload: it sends no body, so it
+	// takes the started branch and gets no url (§5.3).
+	if got.TransferID == "" {
+		t.Fatalf("a redeemed ticket must start a transfer, got %+v", got)
+	}
+	if got.Ticket != "" || got.URL != "" {
+		t.Fatalf("a path upload needs no body and must mint no sink ticket: %+v", got)
+	}
+	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+
+	// #nosec G304 — under this test's own t.TempDir().
+	landed, err := os.ReadFile(filepath.Join(dir, "chosen.txt")) //nolint:gosec // see above
+	if err != nil {
+		t.Fatalf("the destination does not exist: %v", err)
+	}
+	if !bytes.Equal(landed, want) {
+		t.Fatalf("destination = %q, want %q", landed, want)
+	}
+}
+
+// A source ticket is one-shot on this path too: the second files.upload
+// naming it finds nothing, so a ticket that leaked to a second caller
+// cannot be replayed into a second transfer.
+func TestFilesUpload_ASourceTicketIsRedeemedExactlyOnce(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	src := filepath.Join(t.TempDir(), "once.txt")
+	if err := os.WriteFile(src, []byte("once"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, err := e.ws.UploadSources().Mint(src)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	first := uploadParams(bid, dir, "a.txt", pick.Size)
+	first["sourceTicket"] = pick.Ticket
+	if id := callUpload(t, e.conn, first, 3).mustResult(t).TransferID; id == "" {
+		t.Fatal("the first redemption did not start a transfer")
+	}
+
+	second := uploadParams(bid, dir, "b.txt", pick.Size)
+	second["sourceTicket"] = pick.Ticket
+	env := callUpload(t, e.conn, second, 4)
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("a second redemption must be refused with -32602, got %+v", env)
 	}
 }

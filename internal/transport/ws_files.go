@@ -924,7 +924,7 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),
 		reg(bindingSub, "files.upload", params(validateFilesUploadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := uploadHandlers{op: bindingOp, machine: s, r: r}
+			h := uploadHandlers{op: bindingOp, machine: s, sources: s.sources, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUpload(ctx, state, req) }
 		}),
 		reg(bindingSub, "files.uploadCancel", params(validateFilesUploadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

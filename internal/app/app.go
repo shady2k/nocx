@@ -1219,7 +1219,7 @@ func New(opts ...Option) (*App, error) {
 		Pty:              ptf,
 		Session:          sess,
 		Transport:        tp,
-		UploadSources:    transport.NewSourceTicketStore(tp),
+		UploadSources:    tp.UploadSources(),
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,

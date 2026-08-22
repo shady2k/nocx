@@ -472,6 +472,15 @@ type WSServer struct {
 	// binding, closing the session or stopping the server cancels the set
 	// and waits for it to unwind, bounded — never for the upload.
 	uploads uploadRegistry
+
+	// sources is the SOURCE-ticket mint (ws_upload_source.go) — the other
+	// half of R2. The server owns it rather than being handed one, because
+	// it is both ends of the same mechanism: the two mint sites reach it
+	// through this server (the picker seam and the window drop), and
+	// files.upload redeems from it. Two stores would be a ticket minted in
+	// one and unclaimable in the other, which is the defect this field
+	// exists to make unspellable.
+	sources *SourceTicketStore
 }
 
 // ── Tabby import plan store (server-side, never reaches renderer) ─────────
@@ -969,6 +978,10 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		resolver:            &resolverHolder{},
 		satNotify:           newSaturatedNotifyLimiter(time.Second),
 	}
+	// The mint's emitter is this server: a drop is told to the renderer
+	// over this socket. Constructed here so there is exactly one store per
+	// server and no window in which a mint site could reach a different one.
+	s.sources = NewSourceTicketStore(s)
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
 		// capture saves are refused. A predictable fingerprint key would be

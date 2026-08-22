@@ -74,6 +74,19 @@ type SourceFile struct {
 	Size int64
 }
 
+// Open opens the file the ticket names, for the transfer to read. The error
+// is DISCARDED and replaced, for the reason Mint discards its stat's: an
+// *os.PathError prints the path, and this error reaches the renderer.
+func (f SourceFile) Open() (*os.File, error) {
+	// #nosec G304 — Path came from the platform picker or the window drop,
+	// never from the wire; that is the whole of R2.
+	h, err := os.Open(f.Path) //nolint:gosec // see above
+	if err != nil {
+		return nil, errSourceUnreadable
+	}
+	return h, nil
+}
+
 const (
 	// sourceTicketTTL bounds how long an unclaimed ticket lives. It spans a
 	// person picking a file, being asked the collision question and
@@ -186,20 +199,16 @@ func (s *SourceTicketStore) Mint(path string) (SourcePick, error) {
 // a second claim of the same ticket finds nothing, so a leaked ticket
 // cannot be replayed. An unknown or expired ticket names nothing.
 //
-// NOTHING IN PRODUCTION CALLS THIS YET, and that is stated here rather than
-// left to be discovered:
+// Its one production caller is files.upload's handler, redeeming the
+// optional sourceTicket param (ws_upload.go). It reaches this through
+// sourceClaimer — Claim and nothing else — so the wire can spend a ticket a
+// human minted and can never mint one.
 //
-//	deadcode -tags gtk3 -whylive '…transport.SourceTicketStore.Claim' ./...
-//	  → "reachable only through reflection"
-//
-// while Mint and Dropped answer with a path from main(). The caller is
-// files.upload accepting its optional sourceTicket param — the sink half,
-// in ws_upload.go, which this task deliberately does not touch. Until that
-// lands, a source ticket can be minted and handed to the renderer and
-// cannot yet be redeemed: the picker and the drop are real, the transfer
-// they feed is not. The deadcode ratchet does NOT catch this (the baseline
-// is unchanged at 90 either way) — an unwired METHOD is exactly its blind
-// spot (AGENTS.md, nocx-re6gk), which is why it is written down.
+// The claim happens AFTER every refusal that costs no bytes, and the
+// collision question is the one that makes that ordering load-bearing: a
+// collision answer starts no transfer and asks the renderer to call again,
+// so a ticket spent before the probe could never be redeemed by the second
+// call.
 func (s *SourceTicketStore) Claim(ticket string) (SourceFile, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -308,6 +317,12 @@ func (s *SourceTicketStore) forget(picks []SourcePick) {
 		delete(s.entries, p.Ticket)
 	}
 }
+
+// UploadSources is the server's source-ticket mint: what the composition
+// root hands to the two gestures that mint (the native picker adapter and
+// the window drop) and what files.upload redeems from. One store, one
+// owner — a second one would mint tickets this server could never claim.
+func (s *WSServer) UploadSources() *SourceTicketStore { return s.sources }
 
 // EmitFilesDropped sends the files.dropped notification to every connected
 // renderer. It is the same broadcast the vault unlock ask uses — one owner

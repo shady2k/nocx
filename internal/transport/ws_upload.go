@@ -125,6 +125,15 @@ const (
 	uploadRoutePrefix  = "/upload/"
 	uploadTicketHexLen = 64
 
+	// sourceTicketHexLen is the hex width of a SOURCE ticket, which is a
+	// different credential of a different width: sourceTicketBytes = 16,
+	// D4's floor exactly (ws_upload_source.go). Naming it separately is
+	// the point — validateFilesUploadRaw held every sourceTicket to the
+	// SINK ticket's 64, so no ticket the mint could ever produce passed
+	// the validator, and the refusal arrived before any handler could have
+	// redeemed one.
+	sourceTicketHexLen = 2 * sourceTicketBytes
+
 	// uploadUnwindTimeout bounds how long files.close and session teardown
 	// wait for a CANCELLED transfer to unwind (D8). It is not a wait for
 	// the upload: the transfer's context is cancelled and its body closed
@@ -318,7 +327,7 @@ func validateFilesUploadRaw(raw json.RawMessage) string {
 	if p.Size < 0 {
 		return "size must not be negative"
 	}
-	if p.SourceTicket != "" && !isLowerHex(p.SourceTicket, uploadTicketHexLen) {
+	if p.SourceTicket != "" && !isLowerHex(p.SourceTicket, sourceTicketHexLen) {
 		return "sourceTicket must be the id the backend minted"
 	}
 	return validateUploadDecision(p.OnExists)
@@ -356,7 +365,14 @@ type runningTransfer struct {
 	// goroutine running the sink. Buffered by one: the claim happens once,
 	// so nothing can ever queue behind it.
 	body chan io.ReadCloser
-	done chan struct{}
+	// source is the reader for a PATH upload — the file a source ticket
+	// named, opened on the backend's own disk (design D1). It is set
+	// before the goroutine starts and is the reason such a transfer waits
+	// for nothing: the bytes are already reachable, so there is no ticket,
+	// no POST and no body channel. Exactly one of source and ticket is
+	// ever set, and runUpload closes whichever reader it ends up with.
+	source io.ReadCloser
+	done   chan struct{}
 	// progressWake is the transfer's progress mailbox: one slot, written
 	// without blocking, read by the transfer's progress emitter. It carries
 	// no value — the emitter reads the LATEST byte count off rt.bytes — so
@@ -992,8 +1008,9 @@ func (s *WSServer) startUpload(rt *runningTransfer, needsBody bool, sink transfe
 func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 	defer close(rt.done)
 
-	var body io.ReadCloser
-	if rt.ticket != "" {
+	// A path upload already holds its reader; only a stream upload waits.
+	body := rt.source
+	if body == nil && rt.ticket != "" {
 		select {
 		case body = <-rt.body:
 		case <-rt.ctx.Done():
@@ -1230,7 +1247,19 @@ func (s *WSServer) invalidateUploadDest(rt *runningTransfer) {
 type uploadHandlers struct {
 	op      capability.FilesystemBindingOperation // nil → filesystem not wired
 	machine uploadMachine
+	// sources redeems a source ticket. It is the mint's own store, reached
+	// through the narrowest interface that can redeem one: this handler can
+	// claim a ticket a human already minted and can never mint one, which
+	// is R2 stated as what the handler can reach.
+	sources sourceClaimer
 	r       Responder
+}
+
+// sourceClaimer is the redemption half of the source-ticket mint
+// (ws_upload_source.go). Claim only — a handler that could Mint would be a
+// path the wire reaches, which is the whole of what R2 forbids.
+type sourceClaimer interface {
+	Claim(ticket string) (SourceFile, bool)
 }
 
 // handleUpload mints a transfer and starts it — and does not wait for it.
@@ -1271,15 +1300,6 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(sinkErr), Message: sinkErr.Error()})
 			return nil
 		}
-		if params.SourceTicket != "" {
-			// The mint side is Task 8. Refusing is the honest answer: a
-			// ticket nothing minted names nothing, and treating it as a
-			// stream upload would silently change what the caller asked
-			// for.
-			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sourceTicket"})
-			return nil
-		}
-
 		decision := transfer.Decision(params.OnExists)
 		if decision == "" {
 			// The collision question is asked before a byte moves (D5).
@@ -1311,8 +1331,42 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			return nil
 		}
 
+		// The ticket is redeemed HERE and not one line earlier, and the
+		// order is the whole of what makes the collision question askable
+		// on this source: a claim is one-shot, so claiming before the
+		// probe would burn the ticket on the very answer that asks the
+		// renderer to call again. Everything that can refuse this request
+		// without moving a byte has now refused it.
+		var source *SourceFile
+		var sourceReader io.ReadCloser
+		if params.SourceTicket != "" {
+			if h.sources == nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sourceTicket"})
+				return nil
+			}
+			src, ok := h.sources.Claim(params.SourceTicket)
+			if !ok {
+				// Unknown, already redeemed, or expired — one answer for
+				// all three, because distinguishing them would tell a
+				// caller which guesses were closer.
+				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sourceTicket"})
+				return nil
+			}
+			reader, openErr := src.Open()
+			if openErr != nil {
+				// Worded without the path, like every refusal the mint
+				// makes: the caller never learned where the file was and
+				// must not learn it from a failure either.
+				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: openErr.Error()})
+				return nil
+			}
+			source = &src
+			sourceReader = reader
+		}
+
 		id, err := newUploadID()
 		if err != nil {
+			closeSource(sourceReader)
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return nil
 		}
@@ -1330,8 +1384,15 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			sessionID: sid,
 			bindingID: params.BindingID,
 			upload: transfer.Upload{
-				DestDir:  params.DestDir,
-				Name:     params.Name,
+				DestDir: params.DestDir,
+				Name:    params.Name,
+				// The SOURCE's length is a property of the source, so on a
+				// path upload the ticket answers it and the renderer's
+				// declared size is not consulted at all — R2 read as far as
+				// it goes: what the renderer may not name, it may not
+				// measure either. The sink enforces this number against the
+				// reader, so a file that changed length since the mint
+				// fails the transfer rather than silently truncating.
 				Size:     params.Size,
 				OnExists: decision,
 			},
@@ -1344,12 +1405,17 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			// the same number twice.
 			progressWake: make(chan struct{}, 1),
 		}
-		// Skip is the one decision that moves no bytes, so it needs no
-		// ticket: the transfer exists and is already over. Every other
-		// decision is a stream source, and the ticket is what authorises
-		// the request that carries the bytes (D4).
-		if err := h.machine.startUpload(rt, decision != transfer.Skip, sink); err != nil {
+		if source != nil {
+			rt.source = sourceReader
+			rt.upload.Size = source.Size
+		}
+		// A body is wanted only when the bytes are the RENDERER's to send:
+		// a path upload already holds its reader, and Skip moves nothing at
+		// all. Everything else is a stream source, and the sink ticket is
+		// what authorises the request that carries the bytes (D4).
+		if err := h.machine.startUpload(rt, rt.source == nil && decision != transfer.Skip, sink); err != nil {
 			cancel()
+			closeSource(rt.source)
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return nil
 		}
@@ -1413,6 +1479,16 @@ func uploadDestinationTaken(ctx context.Context, h filesystem.Handle, dest strin
 		return true, nil
 	default:
 		return false, err
+	}
+}
+
+// closeSource lets go of a redeemed source on a path that never reached the
+// transfer. A claimed ticket is spent whatever happens next, so the reader
+// it opened has exactly one owner from that moment and every refusal after
+// it has to be one of them.
+func closeSource(r io.ReadCloser) {
+	if r != nil {
+		_ = r.Close()
 	}
 }
 

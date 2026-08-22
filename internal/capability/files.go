@@ -101,9 +101,16 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	// is the last moment the provider is in hand: Binding.provider is
 	// unexported and Acquire returns a Handle, so nothing downstream can
 	// perform this assertion (upload design D7). A provider that does not
-	// implement it — every local one — contributes no sink, and that nil is
-	// rule R1: the binding's Upload refuses because it has nothing to write
-	// through, not because somebody remembered to check where the tab is.
+	// implement it contributes no sink, and that nil is rule R1: the
+	// binding's Upload refuses because it has nothing to write through, not
+	// because somebody remembered to check where the tab is.
+	//
+	// Both shipped providers implement it, so the nil branch is the seam's
+	// shape rather than a case in production. It stayed an assertion rather
+	// than becoming a required Provider method because Provider is read-only
+	// by contract (§5.1) and because R1 must keep being expressible: the
+	// next provider that cannot write inherits the refusal here without
+	// anybody adding a check for it.
 	var sink transfer.Sink
 	if u, ok := provider.(filesystem.Uploader); ok {
 		sink = u.Sink()

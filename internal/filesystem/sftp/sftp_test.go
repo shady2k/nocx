@@ -102,14 +102,27 @@ func TestRemoteProviderIsAnUploader(t *testing.T) {
 	_ = uploaderSeam
 }
 
-// TestLocalProviderIsNotAnUploader is the other direction, and it is the
-// load-bearing one: rule R1 holds because the local provider does NOT
-// implement Uploader, so a local binding is registered with no sink and
-// refuses structurally. The day local grows a Sink method, this test breaks
-// — which is the point, because nothing else would notice.
-func TestLocalProviderIsNotAnUploader(t *testing.T) {
-	if _, ok := any(local.New()).(filesystem.Uploader); ok {
-		t.Fatal("local must NOT implement Uploader — R1 depends on it not doing so")
+// TestBothProvidersAreUploaders is the other half of the pair, and it is
+// here — beside the remote one — because the two are the same claim seen
+// from two sides: whoever this backend can list files for, it can write a
+// file for.
+//
+// It asserted the OPPOSITE until D7 was corrected: that local must NOT
+// implement Uploader, because R1 was read as "only a remote tab may be
+// written to". That was reasoned from the desktop build, where a drop on a
+// local tab yields an absolute path and inserting it is the whole gesture.
+// A browser drop yields bytes and no path, and the machine those bytes
+// belong on is the backend's own — which IS the machine that tab's shell is
+// on, so R1 is satisfied rather than bent. R1's structural expression moved
+// with it: it is now "a provider that cannot write implements no Uploader
+// and its binding holds a nil sink", asserted in
+// internal/filesystem/upload_test.go, not "local is that provider".
+func TestBothProvidersAreUploaders(t *testing.T) {
+	if _, ok := any(local.New()).(filesystem.Uploader); !ok {
+		t.Error("local must implement Uploader — a browser drop on a local tab has bytes and no path, so the upload is the only thing the gesture can mean")
+	}
+	if _, ok := any(New(newFakeFS(t))).(filesystem.Uploader); !ok {
+		t.Error("sftp must implement Uploader — the remote path is unchanged by the local one landing")
 	}
 }
 

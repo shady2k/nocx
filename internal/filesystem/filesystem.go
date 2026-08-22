@@ -63,15 +63,27 @@ type Provider interface {
 }
 
 // Uploader is the optional write seam (upload design D7). A provider that
-// can write a file onto the machine it views implements it; the local
-// provider deliberately does not, and that silence is rule R1 — "a file can
-// only be uploaded to the machine the tab is actually on" — expressed as a
-// missing method rather than as a check somebody performs.
+// can write a file onto the machine it views implements it. BOTH providers
+// do: sftp writes over the tab's lease, local writes through os.
+//
+// The seam is still optional, and rule R1 — "a file can only be uploaded to
+// the machine the tab is actually on" — is still its absence rather than a
+// check somebody performs: a provider that cannot write must not implement
+// it, and the binding it is registered on then refuses with
+// *ErrUploadUnsupported because it holds no sink.
+//
+// D7 first withheld this method from the local provider, on the reasoning
+// that a local tab inserts a path and never copies (D9), so a local write
+// would be a path with no caller — the nocx-rtg0 failure. That was true of
+// the DESKTOP build only. In a browser a "local" tab is a shell on the
+// backend's machine while the dropped file is on the browser's, so there is
+// no path to insert and the upload is the only thing the gesture can mean.
+// The caller exists; the seam is implemented rather than dead.
 //
 // It is not part of Provider because Provider is read-only by contract and
-// a mutating method there would have to land on BOTH providers (§5.1); a
-// local Write has no caller — a local tab inserts a path, it does not copy
-// — and a write path with no caller is the nocx-rtg0 failure exactly.
+// a mutating method there would have to land on BOTH providers (§5.1) —
+// which is now what happened, deliberately and on both, rather than by one
+// provider quietly growing a write.
 //
 // The assertion is performed once, where the endpoint attester's already is:
 // in the composition of files.open, the last moment the provider is in hand

@@ -172,16 +172,23 @@ func (e *ErrWatchUnavailable) Error() string { return "filesystem: watching is n
 // ErrUploadUnsupported — Uploader was called on a binding with no write seam,
 // which is a binding whose provider did not implement Uploader. That is the
 // upload design's rule R1 ("a file can only be uploaded to the machine the
-// tab is actually on") arriving as a typed refusal: a local binding cannot
-// be written to, and neither can a tab where somebody typed `ssh srv-01` by
-// hand, because that session is KindLocal and its binding is the local one.
+// tab is actually on") arriving as a typed refusal rather than as a check
+// somebody performs: a provider that cannot write contributes no sink, and
+// the binding then has nothing to write through.
 //
-// It names the binding rather than the path: the refusal is a property of
-// where the tab is, not of what was being written.
+// Both shipped providers CAN write, so no binding the composition root mints
+// takes this refusal today (D7, as corrected: a browser drop on a local tab
+// has bytes and no path, so it uploads onto the backend's own machine, which
+// is the machine that tab's shell is on). The refusal is the seam's shape,
+// not a case that has gone away: the next provider that cannot write inherits
+// it without anybody adding a check.
+//
+// It names the binding rather than the path: the refusal is a property of the
+// binding, not of what was being written.
 type ErrUploadUnsupported struct {
 	BindingID string
 }
 
 func (e *ErrUploadUnsupported) Error() string {
-	return fmt.Sprintf("filesystem: binding %q has no write seam; this tab is not on a remote machine", e.BindingID)
+	return fmt.Sprintf("filesystem: binding %q has no write seam; files cannot be uploaded to this tab", e.BindingID)
 }

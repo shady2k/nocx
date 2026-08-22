@@ -17,13 +17,30 @@ This is the file-manager rule (`§0` there: "the panel shows files of the machin
 currently in") applied to a consequential write. It is not restated as renderer discipline; it
 is a property of the addressing. An upload is addressed by a `bindingId`, and the only route
 to a filesystem is the `Handle` that `Registry.Acquire` returns after re-checking that the
-binding's session belongs to the requesting connection. A local binding's `Upload` refuses,
-the way a local `Watch` refuses with `ErrWatchUnavailable` rather than returning a channel
-that never fires.
+binding's session belongs to the requesting connection. A binding whose provider cannot write
+refuses, the way a local `Watch` refuses with `ErrWatchUnavailable` rather than returning a
+channel that never fires — it holds no sink, so there is no check to forget.
 
-So a tab where somebody typed `ssh srv-01` by hand — a `session.KindLocal` session
-(`nocx-520z`) — is refused because its binding is local, not because a renderer remembered to
-check. There is no check to forget.
+**R1 forbids the WRONG host; it does not forbid this one.** A local tab's binding views the
+backend's own machine, which is exactly the machine that tab's shell is on, so uploading into
+its cwd satisfies R1. That is what a browser drop on a local tab does, and D9 says why. What R1
+refuses is a write addressed to a machine the tab is not on, and the addressing is what makes
+that inexpressible: the binding names one session's filesystem and nothing else.
+
+> **This paragraph corrects an earlier draft of this section.** It said "a local binding's
+> `Upload` refuses", and gave a tab where somebody typed `ssh srv-01` by hand — a
+> `session.KindLocal` session (`nocx-520z`) — as the case it protects. The first half was a
+> consequence of D9's original form and is gone with it; the second is a real and unchanged
+> concern, and it is one the addressing does NOT answer: such a tab's binding views the backend
+> while its shell is on another host, and neither the binding nor R1 can tell. What refuses the
+> drop there today is weaker and renderer-side: walking into a hand-typed `ssh` starts a fresh
+> integration domain whose environment record is blank
+> (`frontend/src/lifecycle/domain-environment.ts`), so the origin carries no verified cwd and
+> `§5.5`'s unverified-cwd refusal fires. That holds until the far shell emits its own OSC 7,
+> which attributes a REMOTE path to a tab whose binding is local. The same shape predates this
+> change on the remote side — an `ssh` tab walked by hand onto a second host uploads to the
+> first — so it is a standing gap in R1's coverage rather than one this correction opened. Named
+> here so the next reader knows it is a live question; tracked outside this spec.
 
 **R2 — The renderer may name the destination. It may never name the source.**
 
@@ -162,16 +179,46 @@ carries the same random suffix as the temp so two concurrent fallbacks cannot co
 > first and leaves a window holding nothing. Ours leaves the old content on disk under a named
 > path for the whole window.
 
-**D7 — Upload is not a `Provider` method; it is a `Handle` method.** `filesystem.Provider` is
-read-only by contract, and its own documentation says a mutating method must land on **both**
-providers. A local `Write` has no caller here (a local tab inserts a path, it does not copy), and
-a write path with no caller is the `nocx-rtg0` failure exactly.
+**D7 — Upload is not a `Provider` method; it is a `Handle` method, and the write seam is
+optional.** `filesystem.Provider` is read-only by contract, and its own documentation says a
+mutating method must land on **both** providers. So the write half is a separate, optional
+interface — `filesystem.Uploader`, one method, `Sink() transfer.Sink`.
 
-The seam is therefore resolved where the attester already is — in
-`filesystemOpenService.OpenBinding`, which type-asserts the provider _before_ `Register`
-(`internal/capability/files.go:95`) — and the capability is recorded on the binding beside
-`endpointID`. `Handle` gains `Upload`, which is refused on a binding that has no uploader. That
-failed capability **is** R1.
+The seam is resolved where the attester already is — in `filesystemOpenService.OpenBinding`,
+which type-asserts the provider _before_ `Register` (`internal/capability/files.go`) — and the
+capability is recorded on the binding beside `endpointID`. `Handle` gains `Upload`, which is
+refused on a binding that has no uploader. That failed capability **is** R1: a provider that
+cannot write implements no `Uploader`, so its binding holds a nil sink, and the refusal is a
+missing field rather than a check somebody performs.
+
+**Both shipped providers implement it.** `sftp.Provider` writes over the tab's lease;
+`local.Provider` writes through `os` (`internal/filesystem/local/upload.go`). Neither carries
+its own copy of the transfer logic: `internal/transfer` already declares `RemoteFS` — `Create`,
+`PosixRename`, `Rename`, `Remove` — and both sides satisfy it, so the temp file, `O_EXCL`, the
+promote, progress, cancellation and the stranded-path accounting are ONE implementation. That
+is D1 ("one sink, two sources") holding at the destination end as well. On the local side
+`PosixRename` is `os.Rename`, which is `rename(2)` and replaces atomically, so the two-rename
+fallback and its window where the destination holds nothing are unreachable there.
+
+> **This paragraph replaces the opposite claim, and the correction is the point.** D7 first
+> withheld the seam from `local.Provider` and said so in these words: "A local `Write` has no
+> caller in this design (a local tab inserts a path, it does not copy), and a write path with no
+> caller is exactly the `nocx-rtg0` failure." That reasoning was sound **only while D9 was**, and
+> D9 was reasoned from the desktop build alone (see below). Correcting D9 gave the seam a caller,
+> so it is now implemented rather than dead. What R1 rests on did not move: it rests on a nil
+> sink, and it still does.
+
+**The capability this adds, said in both halves, because an unwritten capability is one nobody
+reviews.** The backend now **writes a file to its own filesystem at the renderer's request**, at
+a caller-supplied destination directory and name. That is new. It is **not** an escalation: the
+same client can already type `cat > file` into that same tab, the request reaches the seam only
+through a binding whose session the connection owns (D15), `destDir` and `name` are validated by
+`§5.3` before anything is stat'd, and R2 is untouched — the renderer still cannot name a SOURCE
+on the backend's disk, so it can put bytes it holds somewhere, and can never ask the backend to
+read something and send it. What is genuinely new is the destination side, and the honest
+statement of its scope is the one `scp` gives: the write lands wherever that name resolved on
+that machine at commit time, which the file manager's D8 already decided is navigation scope and
+not a sandbox.
 
 > The first draft said transport would type-assert "the binding's provider". It cannot:
 > `Binding.provider` is unexported and `Acquire` returns a `Handle` exposing only
@@ -186,15 +233,44 @@ running transfer is registered in a per-session set. Closing the binding, closin
 losing the connection **cancels** that set and waits for it to unwind, bounded — it never blocks
 on it. A cancelled transfer takes the cleanup path in `§6`.
 
-**D9 — A local tab's drop inserts the path; it does not copy.** Every terminal does this, and
-copying a file onto the machine it is already on is not a thing anybody asked for. **Only the
-desktop build can keep this promise**, and the reason is the source, not the rule: the Wails
-drop hands Go the absolute path, and for a local tab — which mints nothing and uploads nothing
-— Go sends it back to the renderer to insert. A browser drop hands the renderer a `File`,
-which has a name and no location; that is the web platform, not a gap we intend to close. So
-`dev-web` and a browser against a networked backend refuse the gesture and say why. They do
-not insert the base name: it looks like a path, resolves against whatever the shell's cwd
-happens to be, and so runs the command against a different file or none.
+**D9 — Whoever has the path inserts it; whoever has only the bytes uploads them.**
+
+That is the whole rule, and it appeals to nothing about which machine anything is on:
+
+- The **Wails** drop yields an **absolute path**. Go took it from the runtime and, for a local
+  tab — which mints no source ticket — sends it back in `files.dropped` as `localPath`. There is
+  a path, so it is shell-quoted and inserted at the prompt, and no byte moves. Copying a file
+  onto the machine it is already on is not a thing anybody asked for.
+- A **browser** drop yields a `File`: a name, a size, and no location. There is nothing to
+  insert, so the bytes are **uploaded into the tab's cwd**, through the same `files.upload` call
+  a remote drop makes.
+
+Neither branch inserts a base name in place of a path. It looks like a path, resolves against
+whatever the shell's cwd happens to be, and so runs the command against a different file or
+none.
+
+A drop that has neither — no path and no bytes — is refused rather than started: a source with
+no `blob` and no `sourceTicket` would open a transfer whose body can never arrive, and the
+person would watch "uploading" for ever.
+
+> **D9 first said the opposite of half of this, and the next reader needs to know why.** It read:
+> a local tab's drop inserts the path and does not copy, "only the desktop build can keep this
+> promise", and `dev-web` and a browser against a networked backend "refuse the gesture and say
+> why". That was reasoned entirely from the **desktop** build, where the UI and the tab's shell
+> are provably one machine and "local" therefore means "the same machine as the file".
+>
+> In a browser the premise is false. A **local tab** is a shell on the **backend's** machine; the
+> dropped file is on the **browser's**. Under `make dev-web` those coincide physically and the
+> renderer still has no path to insert; against a networked backend they are genuinely different
+> machines and copying is the only thing the gesture can mean. The refusal was never a defence,
+> it was a consequence of the wrong premise — which is why the browser case now falls out of the
+> rule instead of needing an exception.
+
+**This does not weaken R1.** R1 forbids sending a file to the **wrong** host. The backend's own
+machine is exactly the host a local tab's shell is on, so a local upload satisfies R1 rather than
+bending it. R1's structural expression moved with the rule and did not weaken: it is "a provider
+that cannot write implements no `Uploader`, and its binding refuses", not "the local provider is
+that provider" (D7).
 
 Sending the path outward does not weaken `R2`, which is a rule about **direction**. `R2`'s
 threat is a renderer that can NAME a source inbound — a path it can spell is a file it can ask
@@ -216,7 +292,10 @@ already on, and no wire field takes it back.
   networked backend from the first commit.
 - Per-transfer progress, speed and cancellation.
 - The collision decision, with apply-to-all across a multi-file drop.
-- Honest refusal on a tab that has no remote (R1).
+- Upload into a **local** tab's cwd from a browser, where the gesture yields bytes and no path
+  (D9). The desktop's own drop on a local tab inserts instead, and starts no transfer.
+- Honest refusal where there is nothing to write through, or nowhere honest to write (R1, and
+  the unverified-cwd refusal of `§5.5`).
 
 ### Out — each a refusal, not an omission
 
@@ -464,14 +543,28 @@ is the precedent) covering every row of `§6`, including a fake that refuses
 whose `Close` fails after a complete write. Plus: a write longer than `fsHardTimeout` in total
 completes, proving D2's per-chunk lane rule (each chunk is short; only the whole is long).
 
+The local sink is tested against the real filesystem under `t.TempDir()`, not against a fake:
+`os` IS the dependency, so a fake would only restate this package's own beliefs about it. Its
+failure paths are the ones `os` can actually produce — a destination directory that is not
+there, a read-only directory (which must classify as `fs.ErrPermission`, or `KeepBoth` spends
+all 32 attempts on it and reports "no free name", which is false), a source shorter than
+declared, and a cancelled context. `RemoteFS`'s three unstated contracts — `Create` refusing a
+taken name, `PosixRename` replacing without ever reporting unsupported, `Rename` refusing an
+existing destination — are asserted directly, because the compiler cannot check them and the
+sink's correctness rests on them.
+
 **Unit, transport.** Sink-ticket lifecycle across all four states of `§5.4`, size mismatch, short
 body, long body, wrong origin, headers-then-silence. Source-ticket lifecycle: one-shot, expiry,
-and that it cannot be minted from the wire. `files.upload` against a **local** binding is
-refused — the test that proves R1. A request carrying anything path-shaped as a source is
+and that it cannot be minted from the wire. `files.upload` against a binding whose provider **cannot write** is
+refused — the test that proves R1 — and one against an ordinary **local** binding runs the whole
+round trip onto the backend's own disk, which is the test that proves the local half of D9 over
+the real wire rather than in a unit. A request carrying anything path-shaped as a source is
 rejected by the schema — the test that proves R2.
 
-**Unit, frontend.** The collision dialog's apply-to-all across a multi-file drop; a drop on a
-local tab inserts the path and starts no transfer; in-flight state survives a reconnect that
+**Unit, frontend.** The collision dialog's apply-to-all across a multi-file drop; a **native**
+drop on a local tab inserts the path and starts no transfer, while a **browser** drop on the
+same tab uploads into its cwd and takes the same collision question — both halves of D9, and the
+insert half is the one that already worked and would break silently; in-flight state survives a reconnect that
 drops every progress notification and delivers only `files.uploadDone` on attach; tab reordering
 still works with `EnableFileDrop` on.
 
@@ -526,3 +619,17 @@ changed:
   drags. → committed to the Wails route, fallback cut, regression test kept.
 - `§4` and `§5.5` disagreed about folder-row drops. → out, in both places.
 - Over-the-wire conformance was promised for one shape and demanded for one. → all four.
+
+**2026-08-22, `nocx-9le.5.22` — D9 was reasoned from one build.** The owner reported that a
+browser drop on a local tab refuses instead of uploading. It was a design error, not an
+implementation one: D9 said a local tab inserts a path and never copies "because copying a file
+onto the machine it is already on is not a thing anybody asked for", which is true of the
+desktop build and false in a browser, where a "local" tab is a shell on the BACKEND's machine
+and the file is on the BROWSER's. D9 was rewritten to turn on what the gesture YIELDS — whoever
+has the path inserts it, whoever has only the bytes uploads them — so the browser case falls out
+instead of needing an exception. D7's withheld write seam was a consequence of D9's first form,
+so it landed too: `local.Provider` implements `Uploader` over `os`, reusing `internal/transfer`
+verbatim. R1 is unchanged and its structural expression moved with it, from "a local binding
+refuses" to "a binding whose provider cannot write refuses". The new capability — the backend
+writing to its own filesystem at the renderer's request — is stated in D7, with why it is not an
+escalation and what about it is genuinely new.

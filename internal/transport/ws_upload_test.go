@@ -290,21 +290,48 @@ func TestFilesUpload_TheParamsStructNamesNoSource(t *testing.T) {
 
 // ── R1: only the machine the tab is on ───────────────────────────────────
 
-// TestFilesUpload_RefusesALocalBinding is R1 from the wire. A tab where
-// somebody typed `ssh srv-01` by hand is a KindLocal session, its binding
-// carries no sink, and the refusal is that missing field — not a check a
-// handler remembered to perform, and not a reading of endpointId.
-func TestFilesUpload_RefusesALocalBinding(t *testing.T) {
-	// The ordinary local factory: a provider that does NOT implement
-	// filesystem.Uploader, so Register receives a nil sink.
-	e := newFilesTestEnv(t)
+// readOnlyLocalProvider is a provider with no write half. It embeds the
+// Provider INTERFACE, which promotes exactly that interface's methods, so
+// whatever writable value is inside it the wrapper has no Sink at all —
+// which is the shape this test needs and, on the remote side, the exact
+// mistake internal/app's endpointAttestedProvider is documented to avoid.
+type readOnlyLocalProvider struct{ filesystem.Provider }
+
+// readOnlyFactory is the composition-root shape for a provider that cannot
+// write. Neither shipped provider is one since D7 was corrected — both the
+// local and the sftp provider implement filesystem.Uploader — so R1's
+// structural refusal needs a provider built for the purpose to stay
+// testable from the wire. That is the point rather than a workaround: the
+// refusal is a property of having no sink, and the next provider that
+// cannot write inherits it without anybody adding a check.
+func readOnlyFactory(sess session.Session, rootPath string) (filesystem.Provider, error) {
+	p, err := filesLocalFactory(sess, rootPath)
+	if err != nil {
+		return nil, err
+	}
+	return readOnlyLocalProvider{Provider: p}, nil
+}
+
+// TestFilesUpload_RefusesABindingWhoseProviderCannotWrite is R1 from the
+// wire: the binding carries no sink and the refusal is that missing field —
+// not a check a handler remembered to perform, and not a reading of
+// endpointId.
+//
+// It drove the ORDINARY local factory until D7 was corrected, on the
+// reasoning that a local tab inserts a path and never copies. A browser drop
+// has bytes and no path, so a local tab does upload — onto the backend's own
+// machine, which is the machine that tab's shell is on. The paired success
+// for that is TestFilesUpload_ALocalBindingWritesOntoTheBackendsOwnMachine
+// below; this one keeps the refusal itself under test.
+func TestFilesUpload_RefusesABindingWhoseProviderCannotWrite(t *testing.T) {
+	e := newUploadTestEnvWith(t, log.NewSlogAdapter(nil), readOnlyFactory)
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 
 	env := callUpload(t, e.conn, uploadParams(bid, dir, "a.txt", 5), 3)
 	if env.Error == nil {
-		t.Fatal("R1: a tab with no remote cannot be uploaded to — a hand-typed ssh is KindLocal and its binding has no sink")
+		t.Fatal("R1: a binding whose provider cannot write has no sink, and Uploader must refuse on that")
 	}
 	if env.Error.Code != -32602 {
 		t.Fatalf("code = %d, want -32602 (a request-shaped refusal)", env.Error.Code)

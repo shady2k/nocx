@@ -14,7 +14,7 @@
 // walk sliced by UTF-16 code units, every span after the first non-ASCII
 // character would land in the wrong place.
 import { describe, expect, it } from 'vitest'
-import { rawSegments } from './api-model'
+import { connectionRawText, rawSegments } from './api-model'
 import type { Raw } from '../generated/api.request.send'
 
 /** What the walk reads as, end to end — the check that nothing was dropped.
@@ -135,5 +135,44 @@ describe('rawSegments — the walk is total', () => {
       spans: [{ from: 0, to: 99, kind: 'text', name: '', damage: '' }],
     }
     expect(reading(raw)).toBe('ab')
+  })
+})
+
+describe('connectionRawText', () => {
+  const base = { remoteAddr: '', dnsAddresses: [] as string[] }
+
+  it('prints what the resolver answered, under the address that took the call', () => {
+    expect(
+      connectionRawText({
+        ...base,
+        remoteAddr: '3.223.1.2:443',
+        dnsAddresses: ['3.223.1.2', '54.10.0.9'],
+      }),
+    ).toBe('3.223.1.2:443\nresolved  3.223.1.2, 54.10.0.9')
+  })
+
+  it('says WHERE a name was resolved when it was not resolved here', () => {
+    // A request routed through a connection cannot resolve on this side —
+    // the far side does it — so an absent line would read as "we did not
+    // look" instead of "it was not ours to look".
+    expect(connectionRawText({ ...base, routedThrough: 'bastion' })).toBe(
+      'resolved  on bastion, which is where this request left from',
+    )
+  })
+
+  it('drops the zero address a tunnelled connection reports', () => {
+    // `0.0.0.0:0` looks like an answer and is the absence of one.
+    expect(connectionRawText({ ...base, remoteAddr: '0.0.0.0:0', routedThrough: 'bastion' })).toBe(
+      'resolved  on bastion, which is where this request left from',
+    )
+    expect(connectionRawText({ ...base, remoteAddr: '[::]:0' })).toBe('')
+  })
+
+  it('keeps a real address that merely ends in a zero digit', () => {
+    expect(connectionRawText({ ...base, remoteAddr: '10.0.0.10:8080' })).toBe('10.0.0.10:8080')
+  })
+
+  it('says nothing at all when there is nothing to say', () => {
+    expect(connectionRawText(base)).toBe('')
   })
 })

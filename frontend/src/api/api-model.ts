@@ -386,20 +386,48 @@ export function certificateText(cert: ApiCertificate, index: number): string {
 export function connectionRawText(where: {
   remoteAddr: string
   dnsAddresses: readonly string[]
+  /** How the request left this machine — a `connection` route resolves the
+   *  name on the FAR side, which is why this line can be about somebody
+   *  else's resolver. */
+  routedThrough?: string
   tlsVersion?: string
   tlsCipherSuite?: string
 }): string {
-  const head = [where.remoteAddr, where.tlsVersion ?? '', where.tlsCipherSuite ?? '']
+  const head = [address(where.remoteAddr), where.tlsVersion ?? '', where.tlsCipherSuite ?? '']
     .filter((s) => s !== '')
     .join('  ')
-  // The resolver's answer on its own line, and only when there was one. It is
-  // BELOW the address that answered because that is the order the two facts
-  // arrive in and the order a person reads them: this name stands for these
-  // addresses, and this is the one that took the call. A single address that
-  // equals remoteAddr's host is still worth printing — "it resolved, and to
-  // exactly one thing" is an answer, and its absence is a different one.
-  const resolved = where.dnsAddresses.length > 0 ? `resolved  ${where.dnsAddresses.join(', ')}` : ''
-  return [head, resolved].filter((line) => line !== '').join('\n')
+  return [head, resolvedLine(where)].filter((line) => line !== '').join('\n')
+}
+
+/**
+ * WHAT THE NAME RESOLVED TO — or where it was resolved, when it was not here.
+ *
+ * A request routed through a connection cannot resolve on this side at all:
+ * the far side does it (apisend's ErrNameResolvedRemotely says so by name), so
+ * this machine's resolver answered nothing and there is no list to print. That
+ * was rendering as an absent line, which reads as "we did not look" rather
+ * than "it was not ours to look" — the second is a fact about the route and
+ * worth a sentence.
+ */
+function resolvedLine(where: { dnsAddresses: readonly string[]; routedThrough?: string }): string {
+  if (where.dnsAddresses.length > 0) return `resolved  ${where.dnsAddresses.join(', ')}`
+  if (where.routedThrough !== undefined && where.routedThrough !== '') {
+    return `resolved  on ${where.routedThrough}, which is where this request left from`
+  }
+  return ''
+}
+
+/**
+ * The address that answered, or '' when there is nothing to say.
+ *
+ * A TUNNELLED connection has no local socket to name and reports the zero
+ * address, which was printing as `0.0.0.0:0` — a value that looks like an
+ * answer and is the absence of one. The wildcard host with port 0 is the only
+ * shape this rejects: a real address never has port 0.
+ */
+function address(remote: string): string {
+  if (remote === '') return ''
+  return /:0$/.test(remote) && /^(0\.0\.0\.0|\[::\]|::)/.test(remote) ? '' : remote
 }
 
 /**

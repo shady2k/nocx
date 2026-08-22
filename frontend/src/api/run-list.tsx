@@ -138,6 +138,10 @@ function Run(props: {
             connection={connectionRawText({
               remoteAddr: run().remoteAddr,
               dnsAddresses: run().dnsAddresses,
+              routedThrough:
+                run().route.kind === 'connection'
+                  ? props.connectionName(run().route.profileId)
+                  : undefined,
               tlsVersion: res?.tlsVersion,
               tlsCipherSuite: res?.tlsCipherSuite,
             })}

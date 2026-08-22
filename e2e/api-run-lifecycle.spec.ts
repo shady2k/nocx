@@ -127,7 +127,12 @@ test.describe('an API run you can watch, stop, and read a failure off', () => {
     const workbench = page.locator('.api-workbench')
     await expect(workbench).toBeVisible({ timeout: 15_000 })
 
-    await workbench.getByRole('button', { name: 'Open folder…' }).click()
+    // The folder ask lives in the collections menu — the ⋮ beside the
+    // section, not a button on the panel. A panel that wears its own form is
+    // what that menu exists to end, and a spec that clicks a button nobody
+    // has any more is a spec asserting the shape of an older product.
+    await workbench.locator('#api-collections-menu').click()
+    await page.getByRole('menuitem', { name: 'Open folder…' }).click()
     const folderAsk = page.getByRole('dialog').filter({ hasText: 'Open a collection folder' })
     await expect(folderAsk).toBeVisible()
     await page.locator('#api-collection-path').fill(collectionRoot)

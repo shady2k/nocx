@@ -529,6 +529,57 @@ describe('the store as a surface', () => {
   })
 })
 
+// The renderer's own intent, recorded so the flow can tell a cancel apart
+// from a refusal when the body send dies under it (nocx-hbdw4.3).
+describe('the store remembers that somebody asked to stop', () => {
+  it('says no about a transfer nobody has cancelled', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    seeded(store, 400)
+    expect(store.cancelRequested('t1')).toBe(false)
+  })
+
+  it('says yes the instant cancel is called, not when the wire answers', () => {
+    // Synchronously: the body POST this cancel is about to break may fail
+    // before services.cancel resolves, and that is the moment the flow asks.
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    seeded(store, 400)
+    store.cancel('t1')
+    expect(store.cancelRequested('t1')).toBe(true)
+  })
+
+  it('answers per transfer, never for the session', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    store.begin({ transferId: 'a', name: 'a', destDir: '/d', machine: 'srv-01', size: 1 })
+    store.begin({ transferId: 'b', name: 'b', destDir: '/d', machine: 'srv-01', size: 1 })
+    store.cancel('a')
+    expect(store.cancelRequested('a')).toBe(true)
+    expect(store.cancelRequested('b')).toBe(false)
+  })
+
+  it('stays yes after the outcome lands — the question is "did we ask"', () => {
+    // Not "did it work". A cancel that lost the race was still asked for,
+    // and a later body failure for the same id is still not news.
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    seeded(store, 400)
+    store.cancel('t1')
+    services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
+    expect(store.cancelRequested('t1')).toBe(true)
+  })
+
+  it('is legitimate for a transfer with no row', () => {
+    // The row may have gone with the page, and files.uploadCancel still
+    // reaches the transfer.
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    store.cancel('gone')
+    expect(store.cancelRequested('gone')).toBe(true)
+  })
+})
+
 // What a finished row needs and the store is the only place that can stamp
 // (nocx-hbdw4.4).
 describe('the store stamps both ends of the work', () => {

@@ -161,6 +161,20 @@ export interface UploadStore {
    *  actually happened arrives as `uploadDone` with outcome `cancelled`
    *  when the cancel landed and `written` when it did not. */
   cancel(transferId: string): void
+  /**
+   * Has the person asked for this transfer to stop?
+   *
+   * The renderer's own intent, recorded the instant `cancel` is called and
+   * never unset — an id that was cancelled stays cancelled whatever the
+   * backend then says, because the question this answers is "did we ask",
+   * not "did it work". It is NOT a phase and must never be rendered as one:
+   * the cancel races the transfer's own completion every time and
+   * `files.uploadDone` is still the only account of what happened.
+   *
+   * It exists because a body send that fails AFTER a cancel is the cancel
+   * working, and the renderer is the only party that knows that (nocx-hbdw4.3).
+   */
+  cancelRequested(transferId: string): boolean
   /** Drop the wire subscriptions. */
   dispose(): void
 }
@@ -193,6 +207,10 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
    *  them: it is arithmetic bookkeeping, and a surface that could read it
    *  would start rendering it. */
   const samples = new Map<string, { at: number; bytes: number }>()
+  /** Transfers the person has asked to stop. Ids and not records: a cancel
+   *  is legitimate for a transfer with no row (it finished, or the page
+   *  reloaded), and the set is what makes the answer survive the row. */
+  const cancelled = new Set<string>()
   let disposed = false
 
   /** The public lookup: a TRACKED read, so a surface that asks for one
@@ -374,6 +392,10 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
   }
 
   function cancel(transferId: string): void {
+    // The INTENT is recorded before the call goes out, and synchronously:
+    // the body POST this cancel is about to break may fail before the
+    // request resolves, and the flow asks this question at that moment.
+    cancelled.add(transferId)
     // Fire and forget, and quiet: cancelling a transfer that has already
     // finished, or one that never existed, is not an error. What happened
     // arrives as uploadDone either way.
@@ -383,11 +405,16 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
   const unsubProgress = services.subscribeProgress(applyProgress)
   const unsubDone = services.subscribeDone(applyDone)
 
+  function cancelRequested(transferId: string): boolean {
+    return cancelled.has(transferId)
+  }
+
   function dispose(): void {
     disposed = true
     unsubProgress()
     unsubDone()
     samples.clear()
+    cancelled.clear()
     setTransfers([])
   }
 
@@ -398,6 +425,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     failLocally,
     unsettle,
     cancel,
+    cancelRequested,
     dispose,
   }
 }

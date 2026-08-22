@@ -137,6 +137,31 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
     }
     const outcome = await services.sendBody(url, body, source.size)
     if (outcome.ok) return
+    // THE PERSON ASKED FOR THIS. A body send that fails after a cancel is
+    // the cancel WORKING — the backend tore the sink down under it — and
+    // the renderer is the only party that knows the two events are one.
+    //
+    // Left to the table below, the row said `Cancelled` while a red toast
+    // beside it said "the server refused the body (500)": two messages
+    // about one event, contradicting each other, and the toast blaming the
+    // server for what the person did on purpose (nocx-hbdw4.3).
+    //
+    // So: no report at all, because intent succeeding is not news, and
+    // `unsettled` rather than `failed`, because that is precisely what the
+    // renderer now knows — its own half is over and the outcome is the
+    // backend's to state. The cancel races the transfer's completion every
+    // time, and `files.uploadDone` still says which of `cancelled` and
+    // `written` actually happened.
+    //
+    // The check is AFTER the await and never before it: the button is
+    // pressed while the body is in flight, which is the whole case.
+    if (store.cancelRequested(transferId)) {
+      store.unsettle(
+        transferId,
+        `${source.name}: cancelled — waiting for the server to say how it ended`,
+      )
+      return
+    }
     const account: BodyAccount =
       outcome.kind === 'status'
         ? outcome.status === 409

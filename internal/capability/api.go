@@ -617,11 +617,13 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 	// says which ones it cannot resolve when it has.
 	var look apicoll.Lookup
 	var secrets apicoll.Lookup
+	var env apicoll.Environment
 	if envRelPath != "" {
-		env, envErr := s.svc.ReadEnvironment(h, envRelPath)
+		read, envErr := s.svc.ReadEnvironment(h, envRelPath)
 		if envErr != nil {
 			return SendInputs{}, envErr
 		}
+		env = read
 		inputs.Environment = env.Name
 		inputs.Route = env.Route
 		look = env.Lookup()
@@ -644,7 +646,24 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 		}
 	}
 
-	resolved, err := apicoll.Substitute(req, apicoll.Chain(look, secrets))
+	// THE REQUEST'S OWN VARIABLES GO IN FRONT, and the environment's are
+	// inherited: a name the request answers wins, and everything else falls
+	// through exactly as it did. That is the whole shape of the feature —
+	// `id` in `/users/{{id}}` belongs to the request, because two requests
+	// want different ones, while `baseUrl` belongs to the environment
+	// because every request under it wants the same one.
+	//
+	// The one case the order does NOT decide is a name the environment
+	// declares secret: the request loses, loudly (ErrSecretShadowed). A
+	// request file goes into git and a credential belongs in the vault, so
+	// the two meeting is refused rather than resolved silently in either
+	// direction.
+	own, ownErr := apicoll.RequestLookup(req, env)
+	if ownErr != nil {
+		return inputs, ownErr
+	}
+
+	resolved, err := apicoll.Substitute(req, apicoll.Chain(own, look, secrets))
 	if err != nil {
 		// THE INPUTS COME BACK WITH THE ERROR, and that is the one thing
 		// this signature does that a plain failure would not. An unresolved

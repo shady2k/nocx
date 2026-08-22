@@ -163,6 +163,11 @@ export type ApiImportNote = CurlUnsupported
 export function adoptImportedRequest(imported: CurlRequest): ApiRequest {
   const headers: ApiHeader[] = imported.headers satisfies CurlHeader[]
   const query: ApiParam[] = imported.query satisfies CurlParam[]
+  // The request's OWN variables, carried by the same assertion as the rest:
+  // a curl line can spell `{{name}}` as readily as a Postman export can, and
+  // a converter that dropped the table would be one entrance with a shorter
+  // model than the other's.
+  const variables: ApiParam[] = imported.variables satisfies CurlParam[]
   const body: ApiBody = imported.body satisfies CurlBody
   const auth: ApiAuth = imported.auth satisfies CurlAuth
   return {
@@ -172,6 +177,7 @@ export function adoptImportedRequest(imported: CurlRequest): ApiRequest {
     url: imported.url,
     headers,
     query,
+    variables,
     body,
     auth,
   }

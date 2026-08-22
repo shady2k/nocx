@@ -14,6 +14,7 @@ const request = (over: Partial<ApiRequest> = {}): ApiRequest => ({
   url: '{{baseUrl}}/users',
   headers: [],
   query: [],
+  variables: [],
   body: { kind: 'none', text: '', fileRef: '' },
   auth: { kind: 'none', var: '', user: '' },
   ...over,

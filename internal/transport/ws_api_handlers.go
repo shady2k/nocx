@@ -271,7 +271,7 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 
 	err := h.op.Run(sendCtx, func(ctx context.Context, svc capability.APICollectionService) error {
 		got, err := svc.Snapshot(ctx, apicoll.HandleID(p.Handle), p.RelPath, p.EnvRelPath)
-		if err != nil && !errors.Is(err, apicoll.ErrUnresolvedVariable) {
+		if err != nil && !composeRefusal(err) {
 			h.fail(req, err)
 			return nil
 		}
@@ -347,7 +347,7 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		// who pressed Send. Anything else Apply refuses — a scheme this
 		// build does not implement — is the caller's to fix and stays an
 		// error.
-		if errors.Is(err, apicoll.ErrUnresolvedVariable) {
+		if composeRefusal(err) {
 			_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
 				apisend.Unsent(inputs.Request, apisend.PhaseCompose, err),
 				inputs.Environment, inputs.Route)))
@@ -423,6 +423,25 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		}
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(ex, inputs.Environment, inputs.Route)))
+}
+
+// composeRefusal reports whether err is a reason the request could not be
+// BUILT from what the person has — the `compose` phase of an exchange that
+// never went out, and therefore a RUN rather than a JSON-RPC error.
+//
+// Two members, and they are one concept from two directions. A variable with
+// no value is a hole nobody filled; a request row shadowing a name the
+// environment declares secret is a hole filled from the wrong place (§8).
+// Both are fixed by editing something the person owns — a table, an
+// environment, a binding — and both belong on a row beside everything else
+// they have sent rather than as a sentence with no request attached to it.
+//
+// What is NOT here is what is not an exchange at all: an unknown handle, a
+// file that will not read, a vault that is sealed. Those stay errors, which
+// is the line the epic drew and this predicate keeps in one place rather
+// than at each of the two call sites.
+func composeRefusal(err error) bool {
+	return errors.Is(err, apicoll.ErrUnresolvedVariable) || errors.Is(err, apicoll.ErrSecretShadowed)
 }
 
 // handleCancel is api.request.cancel: stop the exchange running under this
@@ -936,8 +955,12 @@ type apiRequestWire struct {
 	URL     string          `json:"url"`
 	Headers []apiHeaderWire `json:"headers"`
 	Query   []apiParamWire  `json:"query"`
-	Body    apiBodyWire     `json:"body"`
-	Auth    apiAuthWire     `json:"auth"`
+	// Variables are the request's own. Never null on the wire, like every
+	// other list here: the file may omit the key — `omitempty` is right for
+	// a file — and the renderer's first .map on a null throws.
+	Variables []apiParamWire `json:"variables"`
+	Body      apiBodyWire    `json:"body"`
+	Auth      apiAuthWire    `json:"auth"`
 }
 
 type apiHeaderWire struct {
@@ -1301,14 +1324,15 @@ func wireRequest(r apicoll.Request) (apiRequestWire, error) {
 		return apiRequestWire{}, err
 	}
 	return apiRequestWire{
-		ID:      r.ID,
-		Name:    r.Name,
-		Method:  r.Method,
-		URL:     r.URL,
-		Headers: wireHeaders(r.Headers),
-		Query:   wireParams(r.Query),
-		Body:    apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
-		Auth:    apiAuthWire{Kind: authKind, Var: r.Auth.Var, User: r.Auth.User},
+		ID:        r.ID,
+		Name:      r.Name,
+		Method:    r.Method,
+		URL:       r.URL,
+		Headers:   wireHeaders(r.Headers),
+		Query:     wireParams(r.Query),
+		Variables: wireParams(r.Variables),
+		Body:      apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		Auth:      apiAuthWire{Kind: authKind, Var: r.Auth.Var, User: r.Auth.User},
 	}, nil
 }
 
@@ -1322,15 +1346,20 @@ func storedRequest(r apiRequestWire) apicoll.Request {
 	for _, q := range r.Query {
 		query = append(query, apicoll.Param{Name: q.Name, Value: q.Value, Enabled: q.Enabled})
 	}
+	variables := make([]apicoll.Param, 0, len(r.Variables))
+	for _, v := range r.Variables {
+		variables = append(variables, apicoll.Param{Name: v.Name, Value: v.Value, Enabled: v.Enabled})
+	}
 	return apicoll.Request{
-		ID:      r.ID,
-		Name:    r.Name,
-		Method:  r.Method,
-		URL:     r.URL,
-		Headers: headers,
-		Query:   query,
-		Body:    apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
-		Auth:    apicoll.Auth{Kind: r.Auth.Kind, Var: r.Auth.Var, User: r.Auth.User},
+		ID:        r.ID,
+		Name:      r.Name,
+		Method:    r.Method,
+		URL:       r.URL,
+		Headers:   headers,
+		Query:     query,
+		Variables: variables,
+		Body:      apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		Auth:      apicoll.Auth{Kind: r.Auth.Kind, Var: r.Auth.Var, User: r.Auth.User},
 	}
 }
 
@@ -1760,6 +1789,21 @@ func validateAPIRequestBody(r apiRequestWire) string {
 			return msg
 		}
 		if msg := boundedRunes("request.query.value", q.Value, maxHeaderValueRunes); msg != "" {
+			return msg
+		}
+	}
+	// The request's own variables get the same bounds the query rows get,
+	// and for the same reason: a name reaches a substitution and a value
+	// reaches the wire. A validator that bounded two of the three lists
+	// would leave the newest one as the way in.
+	if len(r.Variables) > maxAPIRequestRows {
+		return fmt.Sprintf("request.variables exceeds %d rows", maxAPIRequestRows)
+	}
+	for _, v := range r.Variables {
+		if msg := boundedRunes("request.variables.name", v.Name, maxConfigNameRunes); msg != "" {
+			return msg
+		}
+		if msg := boundedRunes("request.variables.value", v.Value, maxHeaderValueRunes); msg != "" {
 			return msg
 		}
 	}

@@ -24,8 +24,32 @@ type Request struct {
 	URL     string   `json:"url"`
 	Headers []Header `json:"headers,omitempty"`
 	Query   []Param  `json:"query,omitempty"`
-	Body    Body     `json:"body"`
-	Auth    Auth     `json:"auth"`
+	// Variables are the request's OWN, and they are rows of name, value and
+	// enabled because that is the shape Query and Headers already have —
+	// the model grows by one more list of the same thing rather than by a
+	// new idea, and the editor draws it with the table it already has.
+	//
+	// WHY A REQUEST HAS ANY. A variable could only live in an environment,
+	// and that is the wrong home for half of them: `id` in `/users/{{id}}`
+	// belongs to the REQUEST, because two requests legitimately want
+	// different ones and an environment that carried both would be a place
+	// to keep other people's values. The environment's are INHERITED — a
+	// name the request answers wins and everything else falls through
+	// (RequestLookup) — so nothing that resolves today resolves differently.
+	//
+	// ONE GRAMMAR, `{{name}}`. Postman spells a path variable `:id`, and
+	// what it gets right is the SCOPE rather than the syntax; a second
+	// spelling would be two owners of "a hole in the address", agreeing
+	// until the day somebody wrote both. The importer rewrites `:id` into
+	// this grammar and says it did (internal/apiimport).
+	//
+	// `omitempty` for the same reason every other list here has it: a file
+	// with no variables says nothing about them. The WIRE is the opposite —
+	// the renderer's first .map on a null throws, so the transport forces
+	// the list non-nil.
+	Variables []Param `json:"variables,omitempty"`
+	Body      Body    `json:"body"`
+	Auth      Auth    `json:"auth"`
 }
 
 // Header and Param carry Enabled because a disabled row is a row the user

@@ -5300,13 +5300,21 @@ func TestAPIRequestRead_DTOConformsToContract(t *testing.T) {
 			ID: "r1", Name: "ping", Method: "GET", URL: "https://example.test/{{path}}",
 			Headers: []apiHeaderWire{{Name: "X-Probe", Value: "1", Enabled: true}},
 			Query:   []apiParamWire{{Name: "q", Value: "{{term}}", Enabled: false}},
-			Body:    apiBodyWire{Kind: "raw", Text: "hello"},
-			Auth:    apiAuthWire{Kind: "bearer", Var: "token"},
+			// The request's OWN variables — the third list, carried like the
+			// other two, including a disabled row: one the person keeps and
+			// has switched off, which resolves nothing.
+			Variables: []apiParamWire{
+				{Name: "path", Value: "users", Enabled: true},
+				{Name: "term", Value: "unused", Enabled: false},
+			},
+			Body: apiBodyWire{Kind: "raw", Text: "hello"},
+			Auth: apiAuthWire{Kind: "bearer", Var: "token"},
 		}},
-		// A request with no headers and no query: both are [], never null.
+		// A request with no headers, no query and no variables: all three
+		// are [], never null.
 		"bare": {Request: apiRequestWire{
 			ID: "r2", Name: "bare", Method: "GET", URL: "https://example.test",
-			Headers: []apiHeaderWire{}, Query: []apiParamWire{},
+			Headers: []apiHeaderWire{}, Query: []apiParamWire{}, Variables: []apiParamWire{},
 			Body: apiBodyWire{Kind: "none"}, Auth: apiAuthWire{Kind: "none"},
 		}},
 	}
@@ -6077,6 +6085,8 @@ func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
 		"list with null collections":             {"api.collections.list.schema.json", `{"collections":null,"defaultRoot":""}`},
 		"list with no defaultRoot":               {"api.collections.list.schema.json", `{"collections":[]}`},
 		"a read with no request":                 {"api.request.read.schema.json", `{}`},
+		"a request with null variables":          {"api.request.read.schema.json", `{"request":{"id":"r","name":"n","method":"GET","url":"u","headers":[],"query":[],"variables":null,"body":{"kind":"none","text":"","fileRef":""},"auth":{"kind":"none","var":"","user":""}}}`},
+		"a request with no variables key":        {"api.request.read.schema.json", `{"request":{"id":"r","name":"n","method":"GET","url":"u","headers":[],"query":[],"body":{"kind":"none","text":"","fileRef":""},"auth":{"kind":"none","var":"","user":""}}}`},
 		"a send with no outcome":                 {"api.request.send.schema.json", `{"request":{"text":"","spans":[]},"response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
 		"a send with no request block":           {"api.request.send.schema.json", `{"outcome":"failed","response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
 		"a send with a phase nobody declared":    {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"handshake","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},

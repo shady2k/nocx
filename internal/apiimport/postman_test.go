@@ -653,11 +653,14 @@ func TestPostmanUnmarkedCredentialIsPromotedAndSaidOutLoud(t *testing.T) {
 }
 
 // A Postman path variable — `/users/:id` with its value beside the address —
-// has nowhere to go in this model, and the import must SAY so. It used to be
-// dropped in silence: `url.variable` was not even a field on the struct that
-// reads a URL, so no code path could report it, while the ask above the file
-// field promises that what the format cannot carry is named afterwards.
-func TestPostmanPathVariablesAreItemisedRatherThanDropped(t *testing.T) {
+// is CARRIED now, and the import says what it did (nocx-kprt4.3).
+//
+// It used to be dropped in silence, then reported as a loss: there was
+// nowhere in the model for `id = 54321` to go, so the address kept `:id` and
+// nothing could resolve it. The request has variables of its own now, so the
+// same import is a reported CHANGE — one grammar, `{{name}}`, and the value
+// in the request's own table.
+func TestPostmanPathVariablesBecomeTheRequestsOwnVariables(t *testing.T) {
 	const doc = `{
       "info": {"name": "PV", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
       "item": [
@@ -669,19 +672,86 @@ func TestPostmanPathVariablesAreItemisedRatherThanDropped(t *testing.T) {
       ]}`
 	coll, reqs, _, unsup := mustPostman(t, doc)
 
-	// The address arrives as written — nothing here rewrites a path.
+	// ONE GRAMMAR: the address holds `{{id}}` and never `:id`, because two
+	// spellings of one hole would be two owners of it.
 	req, _ := findRequest(t, coll, reqs, "One user")
-	if req.URL != "https://example.test/users/:id" {
-		t.Fatalf("url = %q", req.URL)
+	if req.URL != "https://example.test/users/{{id}}" {
+		t.Fatalf("url = %q, want the `:id` segment rewritten into our grammar", req.URL)
+	}
+	// AND THE VALUE CAME WITH IT, into the request's own table.
+	if len(req.Variables) != 1 {
+		t.Fatalf("variables = %+v, want the one the address uses", req.Variables)
+	}
+	if got := req.Variables[0]; got.Name != "id" || got.Value != "54321" || !got.Enabled {
+		t.Errorf("variable = %+v, want id=54321 enabled", got)
 	}
 
-	// With a value, the VALUE is what was lost, and the name says which.
+	// A `:name` WITH NO VALUE is still rewritten, with an empty value beside
+	// it: the panel gets a row to fill, and the send refuses by naming the
+	// variable rather than dialling a URL with a colon segment in it.
+	templated, _ := findRequest(t, coll, reqs, "Templated")
+	if templated.URL != "https://example.test/orders/{{orderId}}/items" {
+		t.Fatalf("url = %q, want the segment rewritten", templated.URL)
+	}
+	if len(templated.Variables) != 1 || templated.Variables[0].Name != "orderId" {
+		t.Fatalf("variables = %+v, want an empty row named orderId", templated.Variables)
+	}
+	if templated.Variables[0].Value != "" {
+		t.Errorf("value = %q, want empty — the export carried none", templated.Variables[0].Value)
+	}
+
+	// AND IT IS REPORTED. What the format could not carry is named
+	// afterwards; so is what it carried DIFFERENTLY, because an address a
+	// person wrote as `:id` and reads back as `{{id}}` is a change they
+	// should not have to discover.
 	if !anyUnsupportedContaining(unsup, "path variables") || !anyUnsupportedContaining(unsup, "id") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
-	// Without one, what is lost is any way to resolve the segment at all.
-	if !anyUnsupportedContaining(unsup, "templated path") {
-		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
+	if !anyUnsupportedContaining(unsup, "{{name}}") {
+		t.Fatalf("unsupported = %v, want the new spelling named", unsupportedWhat(unsup))
+	}
+}
+
+// A DECLARED VARIABLE THE ADDRESS NEVER USES is reported and not carried.
+// Inventing a row for it would put a value in a file under a name nothing
+// reads — and the person would have no way to tell it apart from a hole they
+// still have to fill.
+func TestPostmanAPathVariableTheAddressNeverUsesIsReported(t *testing.T) {
+	const doc = `{
+      "info": {"name": "PV", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "item": [{"name": "Plain", "request": {"method": "GET", "url": {
+         "raw": "https://example.test/users",
+         "variable": [{"key": "id", "value": "54321"}]}}}]}`
+	coll, reqs, _, unsup := mustPostman(t, doc)
+
+	req, _ := findRequest(t, coll, reqs, "Plain")
+	if len(req.Variables) != 0 {
+		t.Errorf("variables = %+v, want none — the address uses no hole", req.Variables)
+	}
+	if req.URL != "https://example.test/users" {
+		t.Errorf("url = %q, want it untouched", req.URL)
+	}
+	if !anyUnsupportedContaining(unsup, "never used them") {
+		t.Fatalf("unsupported = %v, want the unused declaration named", unsupportedWhat(unsup))
+	}
+}
+
+// A URL POSTMAN WROTE AS A BARE STRING carries no `variable` list beside it
+// and can still spell a `:name`. It is rewritten too — otherwise the same
+// export written two legal ways would import two different addresses.
+func TestPostmanAColonSegmentInAStringURLIsRewrittenToo(t *testing.T) {
+	const doc = `{
+      "info": {"name": "PV", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "item": [{"name": "Bare", "request": {"method": "GET",
+        "url": "https://example.test/users/:id/orders"}}]}`
+	coll, reqs, _, _ := mustPostman(t, doc)
+
+	req, _ := findRequest(t, coll, reqs, "Bare")
+	if req.URL != "https://example.test/users/{{id}}/orders" {
+		t.Fatalf("url = %q", req.URL)
+	}
+	if len(req.Variables) != 1 || req.Variables[0].Name != "id" {
+		t.Fatalf("variables = %+v", req.Variables)
 	}
 }
 

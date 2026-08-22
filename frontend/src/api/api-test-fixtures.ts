@@ -61,6 +61,10 @@ export const REQUEST: ApiRequest = {
   url: '{{baseUrl}}/users',
   headers: [{ name: 'Content-Type', value: 'application/json', enabled: true }],
   query: [],
+  // The request's own variables — empty in the default fixture, because a
+  // request with none is the ordinary case and the tests that are about them
+  // say so.
+  variables: [],
   body: { kind: 'raw', text: '{"email":"a@b.c","name":"A"}', fileRef: '' },
   // A VARIABLE NAME. There is deliberately no field in the contract where a
   // secret value or an identifier for one could be spelled (design §8).

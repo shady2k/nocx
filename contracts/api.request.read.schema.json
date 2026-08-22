@@ -7,30 +7,55 @@
   "additionalProperties": false,
   "required": ["request"],
   "properties": {
-    "request": { "$ref": "#/$defs/request" }
+    "request": {
+      "$ref": "#/$defs/request"
+    }
   },
   "$defs": {
     "request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "method", "url", "headers", "query", "body", "auth"],
+      "required": ["id", "name", "method", "url", "headers", "query", "variables", "body", "auth"],
       "properties": {
-        "id": { "type": "string" },
-        "name": { "type": "string" },
-        "method": { "type": "string" },
-        "url": { "type": "string" },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
         "headers": {
           "description": "Never null — a request with no headers is []. The stored form omits the key entirely, which is right for a file and wrong for the renderer's first .map.",
           "type": "array",
-          "items": { "$ref": "#/$defs/header" }
+          "items": {
+            "$ref": "#/$defs/header"
+          }
         },
         "query": {
           "description": "Never null — a request with no query is [].",
           "type": "array",
-          "items": { "$ref": "#/$defs/param" }
+          "items": {
+            "$ref": "#/$defs/param"
+          }
         },
-        "body": { "$ref": "#/$defs/body" },
-        "auth": { "$ref": "#/$defs/auth" }
+        "variables": {
+          "description": "The request's OWN variables — rows of name, value and enabled, the shape `query` and `headers` already have, because the model grows by one more list of the same thing rather than by a new idea.\n\nWHY A REQUEST HAS ANY. A variable could only live in an environment, and that is the wrong home for half of them: `id` in `/users/{{id}}` belongs to the REQUEST, since two requests legitimately want different ones and an environment carrying both would be a place to keep other people's values. The environment's are INHERITED — a name the request answers wins, everything else falls through — so nothing that resolves today resolves differently.\n\nONE GRAMMAR, `{{name}}`. Postman spells a path variable `:id`, and what it gets right is the SCOPE and not the syntax; a second spelling would be two owners of \"a hole in the address\", agreeing until the day somebody wrote both. The importer rewrites `:id` into this grammar and says it did.\n\nNever null — a request with none is []. The file is allowed to omit the key, which is what `omitempty` is right for on disk; the wire is not, because the renderer's first .map on a null throws.\n\nA row whose name the environment declares SECRET is refused at send time rather than resolved: a credential belongs in the vault and a request file goes into git (design §8).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/param"
+          }
+        },
+        "body": {
+          "$ref": "#/$defs/body"
+        },
+        "auth": {
+          "$ref": "#/$defs/auth"
+        }
       }
     },
     "header": {
@@ -38,8 +63,12 @@
       "additionalProperties": false,
       "required": ["name", "value", "enabled"],
       "properties": {
-        "name": { "type": "string" },
-        "value": { "type": "string" },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
         "enabled": {
           "description": "A disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.",
           "type": "boolean"
@@ -51,9 +80,15 @@
       "additionalProperties": false,
       "required": ["name", "value", "enabled"],
       "properties": {
-        "name": { "type": "string" },
-        "value": { "type": "string" },
-        "enabled": { "type": "boolean" }
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "body": {
@@ -66,7 +101,9 @@
           "type": "string",
           "enum": ["none", "raw", "json", "form", "file"]
         },
-        "text": { "type": "string" },
+        "text": {
+          "type": "string"
+        },
         "fileRef": {
           "description": "A path WITHIN the collection, read on send under the handle's path rules — never a path the renderer supplies (design §13.1).",
           "type": "string"
@@ -78,12 +115,17 @@
       "additionalProperties": false,
       "required": ["kind", "var", "user"],
       "properties": {
-        "kind": { "type": "string", "enum": ["none", "bearer", "basic", "apikey"] },
+        "kind": {
+          "type": "string",
+          "enum": ["none", "bearer", "basic", "apikey"]
+        },
         "var": {
           "description": "A VARIABLE NAME, never a secret and never an identifier for one. There is deliberately no field here in which stored credential material can be spelled, which is the whole of design §8: the attack is unspellable rather than guarded. A file that puts a vault identifier here has merely named a variable nobody bound, and the send is blocked as unresolved.",
           "type": "string"
         },
-        "user": { "type": "string" }
+        "user": {
+          "type": "string"
+        }
       }
     }
   }

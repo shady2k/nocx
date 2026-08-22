@@ -427,9 +427,10 @@ func (c *pmConv) request(it pmItem, dir string, inherited *pmAuth) {
 		req.Method = "GET"
 	}
 
-	base, query := c.readURL(pr.URL, clip(it.Name.String()))
+	base, query, pathVars := c.readURL(pr.URL, clip(it.Name.String()))
 	req.URL = base
 	req.Query = query
+	req.Variables = pathVars
 
 	headers := c.readHeaders(pr.Header, clip(it.Name.String()))
 
@@ -585,18 +586,23 @@ func (c *pmConv) readHeaders(raw json.RawMessage, item string) []apicoll.Header 
 // raw URL is percent-decoded — the same rule splitQuery states for curl,
 // and the reason there is one rule is that two would disagree on exactly
 // one input.
-func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Param) {
+func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Param, []apicoll.Param) {
 	if len(raw) == 0 {
-		return "", nil
+		return "", nil, nil
 	}
 	var asString string
 	if err := json.Unmarshal(raw, &asString); err == nil {
-		return splitQuery(asString)
+		// A URL Postman wrote as a bare string carries no `variable` list
+		// beside it, but it can still spell a `:name` — so the rewrite runs
+		// here too and the panel gets a row to fill.
+		plain, query := splitQuery(asString)
+		rewritten, vars := c.readPathVariables(plain, nil, item)
+		return rewritten, query, vars
 	}
 	var u pmURL
 	if err := json.Unmarshal(raw, &u); err != nil {
 		c.itemise("url on "+item, "the url could not be read in either of the two shapes Postman writes")
-		return "", nil
+		return "", nil, nil
 	}
 
 	base := u.Raw.String()
@@ -604,9 +610,9 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 		base = assembleURL(u)
 	}
 	base, decoded := splitQuery(base)
-	c.notePathVariables(base, u.Variable, item)
+	base, pathVars := c.readPathVariables(base, u.Variable, item)
 	if len(u.Query) == 0 {
-		return base, decoded
+		return base, decoded, pathVars
 	}
 	out := make([]apicoll.Param, 0, len(u.Query))
 	for _, q := range u.Query {
@@ -616,7 +622,7 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 		}
 		out = append(out, apicoll.Param{Name: name, Value: q.Value.String(), Enabled: !q.Disabled})
 	}
-	return base, out
+	return base, out, pathVars
 }
 
 // notePathVariables says what a `/users/:id` address loses on the way in.
@@ -635,39 +641,132 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 // templated the path and never filled it in — what is gone is any way to
 // resolve `:id` at all, and a request that goes out with a literal colon
 // segment is a request to a URL nobody meant.
-func (c *pmConv) notePathVariables(base string, vars []pmVariable, item string) {
-	named := make([]string, 0, len(vars))
+// readPathVariables turns Postman's path variables into ours: the address
+// keeps a hole and the value moves into the request's OWN table.
+//
+// IT IS A REPORTED CHANGE NOW, NOT A REPORTED LOSS. Until the request had
+// variables of its own there was nowhere for `id = 54321` to go, so this
+// function itemised what had been dropped; the address arrived with `:id`
+// still in it and nothing could resolve it. What it says now is what it did.
+//
+// ONE GRAMMAR. `:id` becomes `{{id}}` rather than being kept as a second
+// spelling of the same hole — two spellings would be two owners of "a hole
+// in the address", agreeing until the day somebody wrote both. Postman's
+// scope is what we took; its syntax is not.
+//
+// A `:name` WITH NO VALUE is still rewritten, with an empty value beside it.
+// The alternative is an address that can never resolve and a table with
+// nothing in it to fix; this way the panel has a row to offer, and the send
+// refuses by naming the variable (§6.5) instead of dialling a URL with a
+// colon segment in it.
+func (c *pmConv) readPathVariables(base string, vars []pmVariable, item string) (string, []apicoll.Param) {
+	values := make(map[string]string, len(vars))
+	declared := make([]string, 0, len(vars))
 	for _, v := range vars {
-		if name := strings.TrimSpace(v.Key.String()); name != "" {
-			named = append(named, name)
-		}
-	}
-	if len(named) > 0 {
-		c.itemise("path variables on "+item+" ("+strings.Join(named, ", ")+")",
-			"the model has no per-request variable, so the address keeps its `:name` segments and the values beside them were not carried")
-		return
-	}
-	if colonSegments(base) {
-		c.itemise("a templated path on "+item,
-			"the address contains a `:name` segment and the export carried no value for it; nothing resolves it here, and it goes out as written")
-	}
-}
-
-// colonSegments reports whether the path has a `:name` segment — Postman's
-// path-variable spelling. The scheme's own colon is not one: it is followed
-// by `//`, and a port is digits, so both are excluded by requiring a letter
-// or `_` immediately after a `/:`.
-func colonSegments(rawURL string) bool {
-	for i := 0; i+2 < len(rawURL); i++ {
-		if rawURL[i] != '/' || rawURL[i+1] != ':' {
+		name := strings.TrimSpace(v.Key.String())
+		if name == "" || v.off() {
 			continue
 		}
-		ch := rawURL[i+2]
-		if ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
-			return true
+		if _, already := values[name]; !already {
+			declared = append(declared, name)
+		}
+		values[name] = v.Value.String()
+	}
+
+	rewritten, found := rewriteColonSegments(base)
+	if len(found) == 0 && len(declared) == 0 {
+		return base, nil
+	}
+
+	// One row per name the ADDRESS uses, in the order it uses them, so the
+	// table reads like the URL. A variable the export declared but the
+	// address never mentions is not a hole to fill and is reported rather
+	// than carried — inventing a row for it would put a value in a file
+	// under a name nothing reads.
+	out := make([]apicoll.Param, 0, len(found))
+	seen := make(map[string]bool, len(found))
+	for _, name := range found {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, apicoll.Param{Name: name, Value: values[name], Enabled: true})
+	}
+
+	var unused []string
+	for _, name := range declared {
+		if !seen[name] {
+			unused = append(unused, name)
 		}
 	}
-	return false
+	if len(unused) > 0 {
+		c.itemise("path variables on "+item+" ("+strings.Join(unused, ", ")+")",
+			"the export declared them and the address never used them, so there was no hole to carry them into")
+	}
+	if len(out) > 0 {
+		c.itemise("path variables on "+item+" ("+strings.Join(namesOf(out), ", ")+")",
+			"Postman's `:name` segments became `{{name}}` — one grammar for a hole in an address — and the values moved into the request's own variables")
+	}
+	return rewritten, out
+}
+
+// namesOf lists the rows' names, for a sentence that itemises them.
+func namesOf(rows []apicoll.Param) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
+// rewriteColonSegments replaces every `/:name` with `/{{name}}` and reports
+// the names it found, in the order they appear.
+//
+// WHAT IS NOT A PATH VARIABLE is the load-bearing half, and startsPathVariable
+// is where it is decided: the scheme's own colon is followed by `//` and a
+// port is digits, so requiring a letter or `_` immediately after a `/:`
+// excludes both. Without that, every ordinary `https://host:8443/x` would be
+// rewritten into nonsense and reported as a change. The name runs to the next
+// `/`, `?`, `#` or the end — the characters a path segment ends at.
+func rewriteColonSegments(rawURL string) (string, []string) {
+	var b strings.Builder
+	var found []string
+	for i := 0; i < len(rawURL); i++ {
+		if !startsPathVariable(rawURL, i) {
+			b.WriteByte(rawURL[i])
+			continue
+		}
+		// rawURL[i] is the '/', rawURL[i+1] is the ':'.
+		b.WriteByte('/')
+		j := i + 2
+		for j < len(rawURL) && !endsPathSegment(rawURL[j]) {
+			j++
+		}
+		name := rawURL[i+2 : j]
+		found = append(found, name)
+		b.WriteString("{{")
+		b.WriteString(name)
+		b.WriteString("}}")
+		i = j - 1
+	}
+	if len(found) == 0 {
+		return rawURL, nil
+	}
+	return b.String(), found
+}
+
+// startsPathVariable reports whether a `/:name` begins at i.
+func startsPathVariable(rawURL string, i int) bool {
+	if i+2 >= len(rawURL) || rawURL[i] != '/' || rawURL[i+1] != ':' {
+		return false
+	}
+	ch := rawURL[i+2]
+	return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+}
+
+// endsPathSegment reports the characters a path variable's name stops at.
+func endsPathSegment(ch byte) bool {
+	return ch == '/' || ch == '?' || ch == '#'
 }
 
 // assembleURL rebuilds a URL from Postman's parts, for the exports that

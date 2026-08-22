@@ -154,3 +154,40 @@ describe('OperationRow owns the outcome vocabulary', () => {
     expect(row(container).getAttribute('data-phase')).toBe('written')
   })
 })
+
+// ── The row's grammar in a rail-width panel (nocx-hbdw4.1) ───────────────
+//
+// The row shipped into a surface a few hundred pixels wide and every field
+// in it ellipsised — the name, the path, and the status badge, which read
+// "D…". A badge that cannot fit its own word is worse than no badge, and a
+// name that yields room to a path nobody can read to the end is the row
+// failing at the one thing it exists for. What a jsdom test can assert is
+// the STRUCTURE the widths then follow from; the paint itself is measured in
+// e2e/ops-indicator.spec.ts.
+describe('OperationRow — what shares a line with what', () => {
+  it('gives the name its own line, with only the badge beside it', () => {
+    const { container } = render(() => <OperationRow {...RUNNING} phase="written" />)
+    const line = container.querySelector('.ui-operation-row__line')
+    expect(line?.querySelector('.ui-operation-row__title')).not.toBeNull()
+    expect(line?.querySelector('.ui-badge')).not.toBeNull()
+    // The destination is NOT on that line: it is a path, it outruns any
+    // panel, and beside the name it took the name's room.
+    expect(line?.querySelector('.ui-operation-row__destination')).toBeNull()
+  })
+
+  it('puts the destination on its own line, whole value on hover', () => {
+    const { container } = render(() => <OperationRow {...RUNNING} />)
+    const dest = container.querySelector<HTMLElement>('.ui-operation-row__destination')
+    expect(dest?.textContent).toBe('/srv/data')
+    // What is on screen is usually an ellipsis of it, so the whole value has
+    // to be reachable somewhere.
+    expect(dest?.getAttribute('title')).toBe('/srv/data')
+    expect(dest?.parentElement?.classList.contains('ui-operation-row__body')).toBe(true)
+  })
+
+  it('draws no destination line at all when there is none', () => {
+    // An adopted transfer knows its name and not where it went.
+    const { container } = render(() => <OperationRow {...RUNNING} destination="" />)
+    expect(container.querySelector('.ui-operation-row__destination')).toBeNull()
+  })
+})

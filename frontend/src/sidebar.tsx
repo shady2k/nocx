@@ -6,30 +6,24 @@
  * The activity bar has two zones:
  *   Top zone   — views from the registry.  Clicking toggles the panel and
  *                switches the active view.
- *   Bottom zone — global entries.  It is the only part of the sidebar that
- *                stays on screen whatever the panel is doing, so what lives
- *                here is what must be reachable from anywhere.
+ *   Bottom zone — global actions (e.g. Settings gear).  An action opens a tab
+ *                and never touches the panel.
  *
- * THE BOTTOM ZONE TAKES TWO KINDS OF ENTRY, and the second was added
- * deliberately rather than smuggled in as a special case (nocx-hbdw4):
+ * THE BOTTOM ZONE TAKES ONE KIND OF ENTRY, and that is the whole contract.
+ * It was briefly widened to a second — an INDICATOR that opened its own
+ * popover and touched neither the panel nor the tabs — for the operations
+ * list (nocx-hbdw4).  The widening went back with the thing it was for
+ * (nocx-hbdw4.1): "I cannot see that something is running" is answered by an
+ * ICON, which a view already has, while a LIST is a place somebody goes to
+ * look on purpose, and in this shell such places open the panel.  A widened
+ * contract nobody uses is worse than one that was never widened.
  *
- *   Action    — opens a TAB and never touches the panel.  The Settings gear.
- *   Indicator — reports a state that outlives whatever view is on screen,
- *               and opens its own POPOVER.  It touches neither the panel nor
- *               the tabs.  The operations indicator is the first: an upload
- *               survives a WebSocket drop and runs on its own SSH lease, and
- *               while the Files panel owned the only list of transfers, a
- *               2 GB upload became invisible and uncancellable the moment
- *               somebody switched view or pressed Cmd+B.
- *
- * A view in the TOP zone was considered for that and rejected: views are
- * mutually exclusive and vanish with the panel, so one would not have
- * answered the complaint at all.
- *
- * What the sidebar owns about an indicator is where it sits and whether it
- * is the toolbar's tab stop.  What it renders, and what its popover holds,
- * belongs to whoever registered it — the bar has no opinion about either,
- * which is what keeps a third kind of entry from becoming a framework.
+ * WHAT A VIEW'S ICON MAY CARRY is the half of that which stayed, because it
+ * is what lets the TOP zone answer the complaint at all: a count and an
+ * aggregate progress, drawn on the activity-bar button, which is on screen
+ * whatever the panel is doing (`SidebarViewDescriptor.status`).  The bar owns
+ * the drawing, so two views cannot say "3 running" in two different
+ * vocabularies; the view owns only the numbers.
  *
  * The panel is rendered via a separate Solid root (`PanelRoot`) that shares
  * the same store as the activity bar, so both zones and panel stay in sync.
@@ -51,6 +45,8 @@ import { SidebarView } from './ui/sidebar-view'
 import { ResizeHandle } from './ui/resize-handle'
 import { createAppStore, type AppActions, type AppState } from './state'
 import { IconButton } from './ui/icon-button'
+import { Badge } from './ui/badge'
+import { ProgressBar } from './ui/progress-bar'
 import type { ActiveOrigin } from './pane-content'
 import {
   SIDEBAR_WIDTH_MAX,
@@ -81,6 +77,34 @@ export interface SidebarViewProps {
   activeOrigin: () => ActiveOrigin | null
 }
 
+/**
+ * What a view's activity-bar ICON says about work going on behind it: how
+ * many things are running, and how far along they are between them.
+ *
+ * It exists because the activity bar is the one part of the sidebar that
+ * stays on screen whatever the panel is doing, and that is the whole of what
+ * "visible from anywhere" needs (nocx-hbdw4.1). The LIST behind the icon is
+ * an ordinary view and vanishes with the panel like every other; the count
+ * and the bar do not.
+ *
+ * The bar draws both, from these numbers, so every view that grows a count
+ * says it in one vocabulary. A descriptor that carried markup instead would
+ * be the second kind of entry all over again.
+ */
+export interface SidebarViewStatus {
+  /** How many things are live. The badge is ABSENT at zero — a badge that
+   *  said "0" would be a permanent mark meaning nothing. */
+  count: number
+  /** Aggregate progress over those things, 0..1, or null when nothing is
+   *  running — which is how the bar knows not to be there.
+   *
+   *  Null and not "0 when idle": zero is a real fraction, and a bar drawn at
+   *  zero for a view with nothing to do is motion-free chrome a person has
+   *  to learn to ignore. Determinate, never a spinner: a 20-minute upload
+   *  must not put permanent motion in somebody's peripheral vision. */
+  progress: number | null
+}
+
 /** A view whose content is rendered inside the sidebar panel. */
 export interface SidebarViewDescriptor {
   readonly id: string
@@ -89,6 +113,11 @@ export interface SidebarViewDescriptor {
   readonly view: Component<SidebarViewProps> // panel body, receives view props
   readonly actions?: Component // per-view header actions (…, refresh, collapse-all)
   readonly order: number
+  /** What the icon says while the panel is elsewhere — a REACTIVE accessor,
+   *  read inside the bar's own JSX so the badge and the bar move without the
+   *  view being mounted. Absent for a view with nothing to report, which is
+   *  most of them. */
+  readonly status?: () => SidebarViewStatus | null
 }
 
 /** An action button in the bottom zone (global actions, never opens panel). */
@@ -97,26 +126,6 @@ export interface SidebarAction {
   readonly title: string
   readonly icon: Component
   readonly onActivate: () => void
-}
-
-/**
- * An indicator in the bottom zone — the zone's second kind of entry (see
- * the module doc).
- *
- * Unlike a view and an action, an indicator is rendered WHOLE by whoever
- * registered it: its own button, its own badge, its own popover. The bar
- * supplies only the one thing it owns, which is the toolbar's roving
- * tabindex — an entry that minted its own would take the toolbar's keyboard
- * away from it.
- *
- * The contract on the renderer is exactly one line long and it is not
- * decoration: it must render EXACTLY ONE `<button>` into the zone, because
- * the roving keyboard walks the toolbar's buttons and a second one would be
- * a stop the arrow keys land on and nothing describes.
- */
-export interface SidebarIndicator {
-  readonly id: string
-  readonly render: Component<{ tabIndex: number }>
 }
 
 /** The sidebar's remembered state, and the seam that records a change.
@@ -245,7 +254,6 @@ interface SidebarSolidProps {
   panel: HTMLElement
   views: readonly SidebarViewDescriptor[]
   actions: readonly SidebarAction[]
-  indicators: readonly SidebarIndicator[]
   persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
@@ -275,7 +283,6 @@ function SidebarSolid(props: SidebarSolidProps) {
     // Fall back to the first item in toolbar order (views, then the
     // bottom zone in the order it renders).
     if (props.views.length > 0) return props.views[0].id
-    if (props.indicators.length > 0) return props.indicators[0].id
     if (props.actions.length > 0) return props.actions[0].id
     return null
   })
@@ -430,41 +437,64 @@ function SidebarSolid(props: SidebarSolidProps) {
       {/* Top zone: views */}
       <div class="activity-bar-zone activity-bar-top" role="group" aria-label="Views">
         <For each={props.views}>
-          {(view) => (
-            <IconButton
-              size="lg"
-              selected={
-                view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
-              }
-              data-view={view.id}
-              title={view.title}
-              ariaLabel={view.title}
-              tabIndex={view.id === tabbableId() ? 0 : -1}
-              railIndicator={true}
-              onClick={() => handleViewClick(view)}
-            >
-              <view.icon />
-            </IconButton>
-          )}
+          {(view) => {
+            const status = () => view.status?.() ?? null
+            const count = () => status()?.count ?? 0
+            const progress = () => status()?.progress ?? null
+            /* The name carries the count, because somebody who reaches this
+               button with the keyboard cannot see the badge. */
+            const label = () => (count() === 0 ? view.title : `${view.title} — ${count()} running`)
+            return (
+              <IconButton
+                size="lg"
+                selected={
+                  view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
+                }
+                data-view={view.id}
+                title={label()}
+                ariaLabel={label()}
+                tabIndex={view.id === tabbableId() ? 0 : -1}
+                railIndicator={true}
+                onClick={() => handleViewClick(view)}
+              >
+                <view.icon />
+                {/* Inside the button, not beside it: the button is the
+                    positioning context and the only toolbar stop, so a mark
+                    drawn on it cannot become a second thing to tab to. Both
+                    are pointer-events:none in CSS — the whole button is one
+                    target. */}
+                <Show when={count() > 0}>
+                  <span class="activity-bar-badge" data-view-badge={view.id}>
+                    <Badge tone="info">{String(count())}</Badge>
+                  </span>
+                </Show>
+                {/* The guard is on PRESENCE and not on truthiness: zero is a
+                    real fraction, and `when={progress()}` would hide the bar
+                    for a transfer that has not moved a byte yet. */}
+                <Show when={progress() !== null}>
+                  <span class="activity-bar-progress" data-view-progress={view.id}>
+                    {/* Non-null inside this branch by the guard above, which
+                        is what the cast rests on. Deliberately not
+                        `progress() ?? 0`: a default painted at the render
+                        site is a fraction the view never produced and cannot
+                        see. */}
+                    <ProgressBar
+                      value={progress() as number}
+                      ariaLabel={`${view.title} progress`}
+                    />
+                  </span>
+                </Show>
+              </IconButton>
+            )
+          }}
         </For>
       </div>
 
       {/* Spacer pushes bottom zone to the bottom */}
       <div class="activity-bar-spacer" />
 
-      {/* Bottom zone: indicators, then actions. The gear stays the
-          bottom-most entry — a fixed position is one a person learns, and
-          an indicator arriving must not move the thing that was already
-          there. */}
+      {/* Bottom zone: actions. */}
       <div class="activity-bar-zone activity-bar-bottom" role="group" aria-label="Actions">
-        <For each={props.indicators}>
-          {(indicator) => (
-            <Dynamic
-              component={indicator.render}
-              tabIndex={indicator.id === tabbableId() ? 0 : -1}
-            />
-          )}
-        </For>
         <For each={props.actions}>
           {(action) => (
             <IconButton
@@ -522,15 +552,6 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           nor the width is written. Defaults to false —
  *                           the shell without a Settings surface never
  *                           collapses for it.
- * @param indicators         the bottom zone's second kind of entry
- *                           (SidebarIndicator, nocx-hbdw4). Last and
- *                           optional because it is: every existing caller
- *                           passes none, and a shell without one is a shell
- *                           with nothing running to report. It sits here
- *                           rather than beside `actions`, where it belongs,
- *                           only because inserting a parameter in the
- *                           middle of nine positional ones would rewrite
- *                           every call site to say nothing new.
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -542,7 +563,6 @@ export function mountSidebar(
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActivePaneIsSettings?: () => boolean,
-  indicators: readonly SidebarIndicator[] = [],
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
@@ -582,7 +602,6 @@ export function mountSidebar(
         panel={panel}
         views={views}
         actions={actions}
-        indicators={indicators}
         persistence={persistence ?? null}
         state={state}
         storeActions={storeActions}

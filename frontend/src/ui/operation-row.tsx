@@ -82,8 +82,9 @@ export interface OperationRowProps {
   kind: OperationKind
   /** What the operation is about, as the person named it — the file. */
   title: string
-  /** Where it is going. Rendered dimmed after the title; empty draws
-   *  nothing rather than an empty column. */
+  /** Where it is going. Rendered dimmed on its OWN line under the numbers,
+   *  never beside the title — a path outruns any panel and would take the
+   *  name's room with it. Empty draws nothing rather than an empty line. */
   destination?: string
   phase: OperationPhase
   /** Bytes confirmed so far, or null while nothing has been observed. NOT
@@ -120,15 +121,15 @@ export function OperationRow(props: OperationRowProps) {
           </span>
           <span class="ui-operation-row__body">
             <span class="ui-operation-row__line">
-              {/* The title ellipsises and the destination gives way first:
-                  which file this is survives a narrow panel, and where it
-                  is going is what a person gives up. */}
+              {/* THE NAME HAS THE LINE TO ITSELF (bar the badge). It used to
+                  share it with the destination, and in a rail-width panel the
+                  path won every pixel the name gave up — so which file this is,
+                  which is what the row exists to say, was the first thing to
+                  ellipsise. The destination reads on its own line below
+                  (nocx-hbdw4.1). */}
               <span class="ui-operation-row__title" title={props.title}>
                 {props.title}
               </span>
-              <Show when={props.destination}>
-                <span class="ui-operation-row__destination">{props.destination}</span>
-              </Show>
               <Show when={isTerminalPhase(props.phase)}>
                 <Badge tone={PHASE_TONE[props.phase as TerminalOperationPhase]}>
                   {PHASE_LABEL[props.phase as TerminalOperationPhase]}
@@ -158,6 +159,17 @@ export function OperationRow(props: OperationRowProps) {
                   total: props.total,
                   speedBytesPerSecond: props.speedBytesPerSecond ?? null,
                 })}
+              </span>
+            </Show>
+            {/* Where it is going, under the numbers rather than beside the
+                name: a path is longer than any panel and it is the part a
+                person can do without. It carries the whole value on hover,
+                because what is on screen is an ellipsis of it. Empty draws
+                nothing — an adopted transfer knows its name and not its
+                destination, and says so by carrying nothing. */}
+            <Show when={props.destination}>
+              <span class="ui-operation-row__destination" title={props.destination}>
+                {props.destination}
               </span>
             </Show>
           </span>

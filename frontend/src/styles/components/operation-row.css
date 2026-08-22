@@ -59,9 +59,12 @@
   min-width: 0;
 }
 
-/* The title keeps the room and gives it up last: which file this is is what
-   the row exists to say, so it ellipsises rather than wrapping and the
-   destination beside it is what yields first. */
+/* WHICH FILE THIS IS IS WHAT THE ROW EXISTS TO SAY, and in a rail-width panel
+   it gets the whole first line to say it in. It shared the line with the
+   destination once, and the shrink went to whichever the browser felt like:
+   in a 239 px panel the name ellipsised while a path nobody can read to the
+   end sat beside it. The path moved to its own line (see the component), and
+   what is left here is the name and the badge (nocx-hbdw4.1). */
 .ui-operation-row__title {
   flex: 1 1 auto;
   min-width: 0;
@@ -70,12 +73,27 @@
   white-space: nowrap;
 }
 
+/* AND THE BADGE NEVER SHRINKS. `.ui-badge` clips its own overflow — it must,
+   or a long value wraps inside the pill — and an overflow-hidden flex item's
+   automatic minimum size is zero, so as a sibling of the title it was free to
+   shrink to a few pixels: "Done" rendered as "D…" in the first, narrow
+   surface this row shipped in. A badge that cannot fit its own word is worse
+   than no badge, and the word is short and fixed, so it is the one part of
+   the line that keeps its size whatever else has to give. */
+.ui-operation-row__line > .ui-badge {
+  flex: none;
+}
+
+/* The destination: dim, one line, and the FIRST thing to be ellipsised,
+   because it is now the only thing on its line and takes room from nothing.
+   The component puts the whole value on a title attribute, since what is on
+   screen is usually an ellipsis of it. */
 .ui-operation-row__destination {
-  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--font-size-2xs);
   color: var(--color-text-dim);
 }
 

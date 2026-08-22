@@ -38,6 +38,34 @@
   height: 48px;
 }
 
+/* ── What a view's icon says about work behind it (nocx-hbdw4.1) ──────────
+   A view may carry a count and an aggregate progress
+   (SidebarViewDescriptor.status). The bar draws both, on the button itself,
+   which is the one part of the sidebar that stays on screen whatever the
+   panel is doing — that is the whole reason they are here and not in the
+   panel. The Badge and the ProgressBar are the kit's own; this is placement.
+
+   `pointer-events: none` on both, because the button is ONE target: a mark
+   drawn on it must not be able to swallow the click meant for it. */
+.activity-bar-badge {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  pointer-events: none;
+}
+
+/* A line UNDER the icon, spanning the button and inset by the same amount on
+   both sides, so it reads as belonging to the button rather than to the
+   rail's edge. */
+.activity-bar-progress {
+  position: absolute;
+  left: var(--space-2);
+  right: var(--space-2);
+  bottom: 2px;
+  display: block;
+  pointer-events: none;
+}
+
 /* ── Panel title ──────────────────────────────────────────────────────────
    Moved from style.css by T20 (nocx-zhjx), and detokenised on the way: it used a
    `font:` shorthand that spelled out the UI font stack by hand — character for

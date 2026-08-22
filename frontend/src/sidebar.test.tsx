@@ -7,7 +7,6 @@ import {
   type SidebarHandle,
   type SidebarViewDescriptor,
   type SidebarAction,
-  type SidebarIndicator,
   type SidebarViewProps,
 } from './sidebar'
 import { createSidebarWidthController } from './sidebar-width'
@@ -328,146 +327,130 @@ describe('sidebar', () => {
   })
 })
 
-// ── The bottom zone's second kind of entry (nocx-hbdw4) ──────────────────
+// ── What a view's icon says about work behind it (nocx-hbdw4.1) ─────────
 //
-// An INDICATOR reports a state that outlives whatever view is on screen and
-// opens its own popover: it touches neither the panel nor the tabs, which
-// is what makes it neither a view nor an action. What the sidebar owns
-// about one is only where it sits and whether it is the toolbar's tab stop;
-// everything else is the registrant's, and that is asserted here as much as
-// the placement is.
-describe('sidebar — bottom-zone indicators', () => {
+// The activity bar is the one part of the sidebar that stays on screen
+// whatever the panel is doing, so a count and an aggregate progress drawn on
+// a view's BUTTON are what answer "I cannot see that something is running" —
+// the list behind the button is an ordinary view and vanishes with the panel
+// like every other. These assert the half that must survive the panel being
+// elsewhere, which is the half the epic exists for.
+describe('sidebar — a view’s icon carries its status', () => {
   afterEach(() => {
     document.body.replaceChildren()
   })
 
-  /** An indicator that records the tabIndex it was handed and draws one
-   *  button, which is the whole of the contract. */
-  function testIndicator(id = 'ops'): { entry: SidebarIndicator; seen: number[] } {
-    const seen: number[] = []
-    const entry: SidebarIndicator = {
-      id,
-      render: (props) => {
-        createEffect(() => seen.push(props.tabIndex))
-        return (
-          <button type="button" data-indicator={id} tabIndex={props.tabIndex}>
-            {id}
-          </button>
-        )
-      },
-    }
-    return { entry, seen }
+  /* eslint-disable solid/reactivity -- `status` is consumed reactively, inside
+     the bar's own JSX (see SidebarViewDescriptor.status); the gate cannot see
+     across the mountSidebar boundary, exactly as it cannot in main.tsx. */
+
+  /** Two views where the SECOND carries a status, so every assertion below
+   *  also says the mark landed on the right button. */
+  function withStatus(status: () => { count: number; progress: number | null } | null) {
+    return [TWO_VIEWS[0], { ...TWO_VIEWS[1], status }] as SidebarViewDescriptor[]
   }
 
-  it('renders an indicator in the bottom zone, before the actions', () => {
-    // The gear stays bottom-most: a fixed position it already had must not
-    // move because something new arrived.
+  const badge = (bar: HTMLElement, id: string) =>
+    bar.querySelector<HTMLElement>(`[data-view-badge="${id}"]`)
+  const progress = (bar: HTMLElement, id: string) =>
+    bar.querySelector<HTMLElement>(`[data-view-progress="${id}"]`)
+
+  it('draws the count on the view’s own button, and nothing at zero', () => {
     const { bar, panel } = mount()
-    const ops = testIndicator()
+    const [count, setCount] = createSignal(0)
     mountSidebar(
       bar,
       panel,
-      TWO_VIEWS,
+      withStatus(() => ({ count: count(), progress: null })),
       [SETTINGS_ACTION],
-      null,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      [ops.entry],
     )
-    const bottom = bar.querySelector('.activity-bar-bottom')
-    expect([...(bottom?.querySelectorAll('button') ?? [])].map((b) => b.textContent)).toEqual([
-      'ops',
-      '',
-    ])
-    // And it is not in the top zone, which is for views.
-    expect(bar.querySelector('.activity-bar-top [data-indicator]')).toBeNull()
+
+    expect(badge(bar, 'beta')).toBeNull()
+    setCount(3)
+    expect(badge(bar, 'beta')?.textContent).toBe('3')
+    expect(badge(bar, 'alpha')).toBeNull()
+    // Inside the button, so it cannot become a second toolbar stop.
+    expect(badge(bar, 'beta')?.closest('button')).toBe(viewBtn(bar, 'beta'))
+    expect(bar.querySelectorAll('.activity-bar-top button')).toHaveLength(2)
   })
 
-  it('opens no panel and switches no view when it is activated', () => {
-    // The distinguishing property. A view opens the panel, an action opens
-    // a tab; an indicator does neither, and its own popover is its own.
+  it('keeps the count in the accessible name, for somebody who cannot see it', () => {
     const { bar, panel } = mount()
-    const ops = testIndicator()
     mountSidebar(
       bar,
       panel,
-      TWO_VIEWS,
+      withStatus(() => ({ count: 2, progress: null })),
       [SETTINGS_ACTION],
-      null,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      [ops.entry],
     )
-    const before = panelTitle(panel)
-    bar.querySelector<HTMLElement>('[data-indicator="ops"]')!.click()
-    expect(panelTitle(panel)).toBe(before)
+    expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 2 running')
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-label')).toBe('Alpha')
+  })
+
+  it('draws the bar only while something is running, and at zero it is still drawn', () => {
+    // Zero is a MEASUREMENT and null is its absence: a transfer that has
+    // not moved a byte yet is running, and a bar that vanished at 0 would
+    // say it was not.
+    const { bar, panel } = mount()
+    const [fraction, setFraction] = createSignal<number | null>(null)
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 1, progress: fraction() })),
+      [SETTINGS_ACTION],
+    )
+
+    expect(progress(bar, 'beta')).toBeNull()
+    setFraction(0)
+    expect(progress(bar, 'beta')).not.toBeNull()
+    expect(
+      progress(bar, 'beta')!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow'),
+    ).toBe('0')
+    setFraction(0.5)
+    expect(
+      progress(bar, 'beta')!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow'),
+    ).toBe('50')
+    setFraction(null)
+    expect(progress(bar, 'beta')).toBeNull()
+  })
+
+  it('goes on reporting while ANOTHER view is on screen and while the panel is collapsed', () => {
+    // The whole reason the status is on the bar and not in the panel. This
+    // is the jsdom half of e2e/ops-indicator.spec.ts.
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 1, progress: 0.25 })),
+      [SETTINGS_ACTION],
+    )
+
+    // The panel is showing the OTHER view, and beta still reports.
     expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
+    expect(badge(bar, 'beta')?.textContent).toBe('1')
+    expect(progress(bar, 'beta')).not.toBeNull()
+
+    // Collapse the panel altogether — the case that bought this feature.
+    viewBtn(bar, 'alpha').click()
+    expect(panel.classList.contains('collapsed')).toBe(true)
+    expect(badge(bar, 'beta')?.textContent).toBe('1')
+    expect(progress(bar, 'beta')).not.toBeNull()
   })
 
-  it('takes part in the toolbar’s roving tabindex rather than minting its own', () => {
-    const { bar, panel } = mount()
-    const ops = testIndicator()
-    mountSidebar(
-      bar,
-      panel,
-      TWO_VIEWS,
-      [SETTINGS_ACTION],
-      null,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      [ops.entry],
-    )
-    // The active view holds the tab stop, so the indicator is handed -1 —
-    // and it is HANDED it, which is the contract: an entry that minted its
-    // own would take the toolbar's keyboard away from it.
-    expect(ops.seen[ops.seen.length - 1]).toBe(-1)
-
-    // End walks to the last button in the toolbar, which is the gear, and
-    // the arrows reach the indicator on the way.
-    const alpha = viewBtn(bar, 'alpha')
-    alpha.focus()
-    fireEvent.keyDown(alpha, { key: 'End' })
-    expect(document.activeElement).toBe(actionBtn(bar, 'settings'))
-    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' })
-    expect(document.activeElement).toBe(bar.querySelector('[data-indicator="ops"]'))
-  })
-
-  it('is the toolbar’s tab stop when there are no views at all', () => {
-    // The fallback order is views, then the bottom zone as it renders. A
-    // shell with no views must still be keyboard-reachable.
-    const { bar, panel } = mount()
-    const ops = testIndicator()
-    mountSidebar(
-      bar,
-      panel,
-      [],
-      [SETTINGS_ACTION],
-      null,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      [ops.entry],
-    )
-    expect(ops.seen[ops.seen.length - 1]).toBe(0)
-    expect(actionBtn(bar, 'settings').getAttribute('tabindex')).toBe('-1')
-  })
-
-  it('registers none by default, and the bar is unchanged', () => {
-    // Every existing caller passes none, and a shell without an indicator
-    // is a shell with nothing running to report.
+  it('a view with no status draws neither, and the bottom zone holds only actions', () => {
+    // The bottom zone's contract is one kind of entry again (nocx-hbdw4.1):
+    // the indicator that briefly widened it is gone with its popover.
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+    expect(bar.querySelector('[data-view-badge]')).toBeNull()
+    expect(bar.querySelector('[data-view-progress]')).toBeNull()
     const bottom = bar.querySelector('.activity-bar-bottom')
     expect(bottom?.querySelectorAll('button')).toHaveLength(1)
+    expect(bottom?.querySelector('[data-action="settings"]')).not.toBeNull()
   })
 })
+
+/* eslint-enable solid/reactivity */
 
 describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
   afterEach(() => {

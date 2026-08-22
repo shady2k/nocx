@@ -1,47 +1,22 @@
-/* The operations indicator (nocx-hbdw4) — the activity bar's bottom-zone
-   entry and the list its popover holds.
+/* The operations view (nocx-hbdw4, replaced in nocx-hbdw4.1) — the sidebar
+   panel that lists everything running.
 
-   PLACEMENT ONLY. The button is the kit's IconButton, the count is the
-   kit's Badge, the aggregate is the kit's ProgressBar, the panel is the
-   kit's Popover and each row is the kit's OperationRow. What this file
-   owns is where they sit relative to one another. */
+   PLACEMENT ONLY. Each row is the kit's OperationRow and the empty state is
+   the kit's EmptyState; what this file owns is where they sit. The BADGE and
+   the PROGRESS BAR that ride the activity-bar icon are not here — they are
+   drawn by the bar for any view with a `status`, and live in
+   components/sidebar.css beside the rest of the rail. */
 
-/* The entry is a positioning context so the badge and the bar can sit over
-   the button, and it takes the rail's full width the way a rail button
-   does — otherwise the bar underneath would be as wide as its content. */
-.ops-indicator {
-  position: relative;
+.ops-panel {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
-/* The count rides the button's top-right corner, the way a badge on an app
-   icon does. `pointer-events: none` so the badge cannot swallow a click
-   meant for the button underneath it — the whole entry is one target. */
-.ops-indicator__badge {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  pointer-events: none;
-}
-
-/* The aggregate is a line UNDER the icon, spanning the rail. Inset by the
-   same amount on both sides so it reads as belonging to the button rather
-   than to the rail's edge. */
-.ops-indicator__progress {
-  position: absolute;
-  left: var(--space-2);
-  right: var(--space-2);
-  bottom: 2px;
-  display: block;
-}
-
-/* The list inside the popover. It scrolls itself rather than growing the
-   panel past the window: the panel's own max-height is what bounds it, and
-   a list that scrolled the page would take the scroll from whatever is
-   underneath. */
+/* The list scrolls itself rather than growing the panel: the panel's own
+   height is what bounds it, and a list that scrolled the page would take the
+   scroll from whatever is underneath. */
 .ops-list {
   display: flex;
   flex-direction: column;

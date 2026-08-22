@@ -101,7 +101,16 @@ func TestDialogOpenFile_CancelledYieldsEmptyPath(t *testing.T) {
 // waiting, not refused — and must then succeed once the first releases.
 // Against an instant-refusal dialog admission it fails on the first check.
 func TestDialogCapability_QueuesRatherThanRefusingBehindItsOwnTail(t *testing.T) {
-	h := newInventoryHarness(t)
+	// The wait bound is generous ON PURPOSE, and it is not what this test is
+	// about. What is under test is the gate's CLASS — waiting versus instant
+	// refusal — and the old wiring refuses instantly whatever the bound is,
+	// so this still fails on the first check against it. Left at the
+	// production 1 s the test would additionally require the release below
+	// to land inside that second, which is a dependence on a fast machine:
+	// green here, red on a loaded runner, and broken either way.
+	// TestDialogOpenFile_NonCooperativeAdapterBusyUntilReturn is where the
+	// production bound running out is the assertion.
+	h := newInventoryHarness(t, WithDomainConflictWaitTimeout(time.Minute))
 	dlg := &blockingDialog{started: make(chan struct{}), release: make(chan struct{})}
 	h.ws.SetDialogService(dlg)
 

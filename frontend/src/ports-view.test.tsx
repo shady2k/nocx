@@ -11,7 +11,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
-import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
+import {
+  PortsPanel,
+  createPortsFilter,
+  createPortsFilterControl,
+  createPortsPauseControl,
+  type PortsPanelServices,
+} from './ports'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from './sidebar'
 import { IconButton } from './ui/icon-button'
 import { PlugIcon, RefreshIcon } from './ui/icons'
@@ -95,10 +101,14 @@ function portsView(
   unavailableIn: () => string = () => '',
 ): SidebarViewDescriptor {
   const pause = createPortsPauseControl()
+  // The filter is the shell's pinned row, not the body's (nocx-708q.3):
+  // one control, the field above the scroller and the rows inside it.
+  const filter = createPortsFilterControl()
   return {
     id: PORTS_VIEW_ID,
     title: 'Ports',
     icon: PlugIcon,
+    filter: createPortsFilter(filter),
     actions: () => (
       <IconButton
         data-testid="ports-refresh"
@@ -118,6 +128,7 @@ function portsView(
         services={services}
         visible={props.visible}
         pause={pause}
+        filter={filter}
       />
     ),
     order: 0,
@@ -357,6 +368,49 @@ describe('ports sidebar view', () => {
     document.removeEventListener('keydown', handler)
   })
 
+  it('pins the filter above the scroller, where it cannot scroll away (nocx-708q.3)', async () => {
+    const status = vi.fn().mockResolvedValue({
+      ...statusFixture('ssh:p1:1'),
+      discovery: {
+        ...statusFixture('ssh:p1:1').discovery,
+        listeners: [listenerFixture(22)],
+      },
+    })
+    const services = fakeServices({ status })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(panel.textContent).toContain('0.0.0.0:22'))
+
+    // The field used to sit above the sections INSIDE the body, which is
+    // the right place in a scrolling column and the wrong place full stop:
+    // scroll the list and the control that narrows it goes with it (owner,
+    // 2026-08-22). Pinned means the filter row, never the body.
+    const field = panel.querySelector<HTMLElement>('input[aria-label="Filter ports"]')
+    expect(field).not.toBeNull()
+    expect(field!.closest('.ui-sidebar-view__filter')).not.toBeNull()
+    expect(field!.closest('.ui-sidebar-view__body')).toBeNull()
+  })
+
+  it('offers no filter where there is no list to narrow (nocx-cdub)', async () => {
+    // A search box above an explanation of why there are no ports is noise.
+    // Only the panel knows the discovery state, so it reports it through
+    // the shared control — the field moved out of the body but the rule it
+    // was drawn under did not move with it.
+    const base = statusFixture('ssh:p1:1')
+    const status = vi.fn().mockResolvedValue({
+      ...base,
+      discovery: {
+        ...base.discovery,
+        state: 'unavailable',
+        classification: 'No probe tool is usable on this host.',
+      },
+    })
+    const { panel } = await mountApp(fakeServices({ status }))
+    await vi.waitFor(() =>
+      expect(panel.textContent).toContain('Could not determine what is listening'),
+    )
+    expect(panel.querySelector('input[aria-label="Filter ports"]')).toBeNull()
+  })
+
   it('refreshing from the header asks the active target again (nocx-wzc4.11)', async () => {
     const sample = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
     const status = vi.fn().mockResolvedValue(statusFixture('ssh:p1:1'))
@@ -501,6 +555,7 @@ describe('ports sidebar view', () => {
         services={services}
         visible={() => true}
         pause={pause}
+        filter={createPortsFilterControl()}
       />
     ))
     await vi.waitFor(() => {

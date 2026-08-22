@@ -50,7 +50,13 @@ import {
   type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
-import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
+import {
+  PortsPanel,
+  createPortsFilter,
+  createPortsFilterControl,
+  createPortsPanelServices,
+  createPortsPauseControl,
+} from './ports'
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
@@ -717,10 +723,16 @@ async function main() {
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
   const portsPause = createPortsPauseControl()
+  // The filter is a HEADER-LEVEL slot too (nocx-708q.3), for the same
+  // reason Pause is: one control shared between the shell's pinned row and
+  // the panel, so the field and the rows read one signal. In the body it
+  // scrolled away with the list it narrows.
+  const portsFilter = createPortsFilterControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
     icon: PlugIcon,
+    filter: createPortsFilter(portsFilter),
     // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
     // nothing to protect a host from; what a user actually wants is to ask
     // again after starting something.
@@ -746,6 +758,7 @@ async function main() {
         services={portsServices}
         visible={props.visible}
         pause={portsPause}
+        filter={portsFilter}
       />
     ),
     order: 0,

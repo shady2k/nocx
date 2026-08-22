@@ -12,11 +12,19 @@
 // pause controller — the body offers no second vocabulary for it, and Retry
 // exists only inside the failure states that need it (nocx-wzc4.9).
 //
+// THE FILTER IS THE SAME ARRANGEMENT one slot down (nocx-708q.3): the field
+// lives in the shell's pinned row (SidebarViewDescriptor.filter) and the
+// panel narrows its rows by the control they share. It was in the body,
+// above the sections it governs, and so it scrolled away with the very list
+// it narrows — which every panel with a filter had done, in its own way, for
+// the same reason nobody had written down where a filter goes.
+//
 // The ledger labels, it never claims causation (spec D6): a row says what the
 // remote listens on and why we know it, never "opened by <command>".
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
+import type { Component } from 'solid-js'
 import type { Dispatcher } from './dispatcher'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -105,6 +113,68 @@ export function createPortsPauseControl(): PortsPauseControl {
   }
 }
 
+/** The panel's FILTER, shared with the shell's pinned slot exactly the way
+ *  the pause control is shared with the header action.
+ *
+ *  It exists because the field cannot live in the body any more: a filter
+ *  rendered among the rows scrolls away with the rows it narrows, which is
+ *  the one control that must stay reachable while you scroll (owner,
+ *  2026-08-22). `SidebarViewDescriptor.filter` is where a panel says which
+ *  of its children is the filter, and the descriptor is built outside the
+ *  panel — so the query has to be, too, or the field and the list would
+ *  read two signals and could disagree about what is typed.
+ *
+ *  `available` travels the same seam in the opposite direction, and that is
+ *  deliberate rather than convenient: only the panel can know whether there
+ *  is a list to narrow, because it owns the discovery state, and a search
+ *  box drawn above an explanation of why there are no ports is noise
+ *  (nocx-cdub). `sync` on the pause control is the same shape for the same
+ *  reason. */
+export interface PortsFilterControl {
+  /** What is typed. */
+  query: () => string
+  setQuery(q: string): void
+  /** True while the panel holds a list a query could narrow — the field is
+   *  absent when it is false. */
+  available: () => boolean
+  /** The panel reports its discovery state; nobody else may. */
+  setAvailable(a: boolean): void
+}
+
+export function createPortsFilterControl(): PortsFilterControl {
+  const [query, setQuery] = createSignal('')
+  const [available, setAvailable] = createSignal(false)
+  return {
+    query,
+    setQuery: (q) => setQuery(q),
+    available,
+    setAvailable: (a) => setAvailable(a),
+  }
+}
+
+/** The Ports view's filter component, for `SidebarViewDescriptor.filter`.
+ *  A factory rather than a component with a prop: the descriptor's slot
+ *  takes a bare `Component`, so the control is closed over here — which is
+ *  also what guarantees the field and the rows read one signal. */
+export function createPortsFilter(control: PortsFilterControl): Component {
+  return () => (
+    <Show when={control.available()}>
+      <SearchField
+        value={control.query()}
+        onInput={(v) => control.setQuery(v)}
+        placeholder="Filter ports"
+        ariaLabel="Filter ports"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && control.query() !== '') {
+            e.stopPropagation()
+            control.setQuery('')
+          }
+        }}
+      />
+    </Show>
+  )
+}
+
 // ── Panel ─────────────────────────────────────────────────────────────────
 
 export const POLL_INTERVAL_MS = 5_000
@@ -123,6 +193,10 @@ export interface PortsPanelProps {
   /** The shared Pause control — the header action toggles it, the panel
    *  reflects and syncs it (nocx-wzc4.9). */
   pause: PortsPauseControl
+  /** The shared Filter control — the shell's pinned row holds the field,
+   *  the panel narrows its rows by it and reports whether there is a list
+   *  to narrow at all (nocx-708q.3). */
+  filter: PortsFilterControl
   /** When profileId is null because the pane walked into an environment we
    *  cannot enumerate, this names it — a hand-typed `ssh` has no managed
    *  connection, so there is no second exec channel to ask on. '' otherwise
@@ -142,7 +216,11 @@ export function PortsPanel(props: PortsPanelProps) {
   const [status, setStatus] = createSignal<PortsStatusResult | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
-  const [query, setQuery] = createSignal('')
+
+  /** The query, read from the shared control rather than held here: the
+   *  field that writes it is in the shell's pinned row, outside this
+   *  component (nocx-708q.3). */
+  const query = () => props.filter.query()
 
   /** The panel's view of the shared pause state. */
   const paused = () => props.pause.paused()
@@ -205,8 +283,9 @@ export function PortsPanel(props: PortsPanelProps) {
       setForwards(new Map())
       // The filter is part of the re-scoped state: a query typed for the
       // previous host must not meet the next host's list half-filtered
-      // (nocx-cdub decision 4).
-      setQuery('')
+      // (nocx-cdub decision 4). It is cleared through the shared control,
+      // which is what makes the pinned field go blank with the rows.
+      props.filter.setQuery('')
     }),
   )
 
@@ -339,6 +418,12 @@ export function PortsPanel(props: PortsPanelProps) {
    *  showing a search box above an explanation reads as noise (nocx-cdub). */
   const listAvailable = (): boolean =>
     st()?.state === 'available' || st()?.state === 'available-limited'
+  /** Tell the shell's pinned row whether there is a list to narrow. Only
+   *  this panel knows — the descriptor that owns the row cannot see the
+   *  discovery state — and a search box above an explanation of why there
+   *  are no ports is noise (nocx-cdub). A connection that dropped has no
+   *  list either, which is why connLost counts here and not only below. */
+  createEffect(() => props.filter.setAvailable(listAvailable() && !st()?.connLost))
   /** Reading, as opposed to having nothing to read. No status yet is always
    *  loading; a connected target whose first sample has not landed is too —
    *  that window is the settle delay plus a round trip, and showing nothing
@@ -566,25 +651,19 @@ export function PortsPanel(props: PortsPanelProps) {
               />
             </Show>
             <Show when={!st()?.connLost}>
-              {/* The filter sits ABOVE the sections it governs — a query
-                    is about the whole panel, and the kit's SearchField is
-                    the one search vocabulary (the one connections.tsx and
-                    secrets.tsx drive). It appears only in the discovery
-                    states that can hold rows: a failure state has no list
-                    to filter, so a search box above an explanation would be
-                    noise. The orphaned forwards are deliberately outside
-                    the filter — every one of them is running or self-stopped
-                    by construction, so filtering them could only hide a
+              {/* THE FILTER IS NOT HERE, and that is the change. It used to
+                    sit above the sections it governs, which is the right
+                    place inside a body and the wrong place full stop: the
+                    body scrolls, so the query field went up and away with
+                    the very list it narrows (owner, 2026-08-22). It is now
+                    `createPortsFilter` in the shell's pinned row, reading
+                    the same control this panel filters by — one signal, two
+                    readers. What the query means is unchanged: it is about
+                    the whole panel, and the orphaned forwards stay outside
+                    it, because every one of them is running or self-stopped
+                    by construction and filtering them could only hide a
                     forward the user must still be able to stop or retry
                     (nocx-cdub decision 3). */}
-              <Show when={listAvailable()}>
-                <SearchField
-                  value={query()}
-                  onInput={setQuery}
-                  placeholder="Filter ports"
-                  ariaLabel="Filter ports"
-                />
-              </Show>
               <Section title="Detected" divided dense>
                 {/* Whose listeners these are, said out loud and always. The
                     panel had no such statement, so a tab titled

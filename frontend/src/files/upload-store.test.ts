@@ -18,10 +18,12 @@ import {
 } from './upload-store'
 import { isTerminalPhase, type OperationPhase } from '../ui/operation'
 import type { UploadServices } from './upload-client'
-import { fakeClock, fakeUploadServices } from './upload-fixtures'
+import { beginTransfer, fakeClock, fakeUploadServices } from './upload-fixtures'
 
-function seeded(store: UploadStore, size = 400): void {
-  store.begin({
+/** One running transfer, and the ROW's id for it — which is what every
+ *  store call takes, because a file has a row before it has a transferId. */
+function seeded(store: UploadStore, size = 400): string {
+  return beginTransfer(store, {
     transferId: 't1',
     name: 'big.iso',
     destDir: '/srv/data',
@@ -93,8 +95,8 @@ describe('in-flight state never comes from a progress notification', () => {
   it('leaves the phase alone when the person cancels — the outcome is the wire to say', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store)
-    store.cancel('t1')
+    const id = seeded(store)
+    store.cancel(id)
     expect(services.cancels).toEqual(['t1'])
     // The cancel races the transfer's own completion every time, and losing
     // that race is not a failure to show anybody: 'written' is a legitimate
@@ -109,11 +111,12 @@ describe('the row a result seeds', () => {
   it('is running, with nothing observed about it yet', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store, 400)
+    const id = seeded(store, 400)
     // The WHOLE record, not the fields this test happens to care about: a
     // partial assertion is how a field nobody set stays undefined until a
     // surface reads it.
     const expected: UploadTransfer = {
+      id,
       transferId: 't1',
       name: 'big.iso',
       destDir: '/srv/data',
@@ -284,8 +287,8 @@ describe('the terminal account', () => {
     // — the account that may not be lost — is the authority over both.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store)
-    store.failLocally('t1', 'the file changed size while it was being sent')
+    const id = seeded(store)
+    store.failLocally(id, 'the file changed size while it was being sent')
     expect(store.transfer('t1')?.phase).toBe('failed')
     services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
     expect(store.transfer('t1')?.phase).toBe('written')
@@ -301,8 +304,8 @@ describe('the row the renderer cannot account for', () => {
   it('is not terminal, so nothing about it is settled yet', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store)
-    store.unsettle('t1', 'the upload was already claimed by another request')
+    const id = seeded(store)
+    store.unsettle(id, 'the upload was already claimed by another request')
     const t = store.transfer('t1')
     expect(t?.phase).toBe('unsettled')
     expect(isTerminalPhase(t!.phase)).toBe(false)
@@ -315,8 +318,8 @@ describe('the row the renderer cannot account for', () => {
   it('still takes progress, because a 409 transfer is genuinely running', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store, 400)
-    store.unsettle('t1', 'the upload was already claimed by another request')
+    const id = seeded(store, 400)
+    store.unsettle(id, 'the upload was already claimed by another request')
     services.emitProgress({ transferId: 't1', bytes: 200, total: 400 })
     const t = store.transfer('t1')
     expect(t?.bytes).toBe(200)
@@ -329,8 +332,8 @@ describe('the row the renderer cannot account for', () => {
     for (const outcome of ['written', 'failed', 'cancelled', 'skipped'] as const) {
       const services = fakeUploadServices()
       const store = createUploadStore({ services, now: fakeClock().now })
-      seeded(store)
-      store.unsettle('t1', 'the connection dropped')
+      const id = seeded(store)
+      store.unsettle(id, 'the connection dropped')
       services.emitDone({ transferId: 't1', outcome, finalName: '', stranded: [] })
       const t = store.transfer('t1')
       expect(t?.phase).toBe(outcome)
@@ -343,9 +346,9 @@ describe('the row the renderer cannot account for', () => {
   it('cannot reopen a transfer the wire already settled', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store)
+    const id = seeded(store)
     services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
-    store.unsettle('t1', 'the connection dropped')
+    store.unsettle(id, 'the connection dropped')
     expect(store.transfer('t1')?.phase).toBe('written')
   })
 })
@@ -354,14 +357,14 @@ describe('the store as a surface', () => {
   it('lists transfers in the order they started', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    store.begin({
+    beginTransfer(store, {
       transferId: 'a',
       name: 'a.txt',
       destDir: '/d',
       machine: 'deploy@srv-01',
       size: 1,
     })
-    store.begin({
+    beginTransfer(store, {
       transferId: 'b',
       name: 'b.txt',
       destDir: '/d',
@@ -379,14 +382,14 @@ describe('the store as a surface', () => {
     const clock = fakeClock()
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: clock.now })
-    store.begin({
+    beginTransfer(store, {
       transferId: 'a',
       name: 'a.txt',
       destDir: '/d',
       machine: 'deploy@srv-01',
       size: 1,
     })
-    store.begin({
+    beginTransfer(store, {
       transferId: 'b',
       name: 'b.txt',
       destDir: '/d',
@@ -414,9 +417,9 @@ describe('the store as a surface', () => {
     const clock = fakeClock()
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: clock.now })
-    seeded(store)
+    const id = seeded(store)
     clock.advance(7)
-    store.failLocally('t1', 'the file could not be read')
+    store.failLocally(id, 'the file could not be read')
     expect(store.transfer('t1')?.endedAt).toBe(1_007)
   })
 
@@ -426,8 +429,8 @@ describe('the store as a surface', () => {
     // it to eviction while files.uploadCancel still reaches it.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store)
-    store.unsettle('t1', 'the connection dropped')
+    const id = seeded(store)
+    store.unsettle(id, 'the connection dropped')
     expect(store.transfer('t1')?.endedAt).toBeNull()
   })
 
@@ -440,7 +443,7 @@ describe('the store as a surface', () => {
     const store = createUploadStore({ services, now: clock.now })
     const total = FINISHED_TRANSFERS_RETAINED + 3
     for (let i = 0; i < total; i++) {
-      store.begin({
+      beginTransfer(store, {
         transferId: `t${i}`,
         name: `f${i}`,
         destDir: '/d',
@@ -475,7 +478,7 @@ describe('the store as a surface', () => {
     const clock = fakeClock()
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: clock.now })
-    store.begin({
+    beginTransfer(store, {
       transferId: 'live',
       name: 'big.iso',
       destDir: '/d',
@@ -483,7 +486,7 @@ describe('the store as a surface', () => {
       size: 400,
     })
     for (let i = 0; i < FINISHED_TRANSFERS_RETAINED + 5; i++) {
-      store.begin({
+      beginTransfer(store, {
         transferId: `t${i}`,
         name: `f${i}`,
         destDir: '/d',
@@ -520,8 +523,8 @@ describe('the store as a surface', () => {
       cancel: () => Promise.reject(new Error('socket gone')),
     }
     const store = createUploadStore({ services: failing, now: fakeClock().now })
-    seeded(store)
-    expect(() => store.cancel('t1')).not.toThrow()
+    const id = seeded(store)
+    expect(() => store.cancel(id)).not.toThrow()
     await Promise.resolve()
     // The transfer is still running as far as anybody knows: nothing was
     // told to it, so nothing about it changed.
@@ -535,8 +538,8 @@ describe('the store remembers that somebody asked to stop', () => {
   it('says no about a transfer nobody has cancelled', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store, 400)
-    expect(store.cancelRequested('t1')).toBe(false)
+    const id = seeded(store, 400)
+    expect(store.cancelRequested(id)).toBe(false)
   })
 
   it('says yes the instant cancel is called, not when the wire answers', () => {
@@ -544,19 +547,31 @@ describe('the store remembers that somebody asked to stop', () => {
     // before services.cancel resolves, and that is the moment the flow asks.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store, 400)
-    store.cancel('t1')
-    expect(store.cancelRequested('t1')).toBe(true)
+    const id = seeded(store, 400)
+    store.cancel(id)
+    expect(store.cancelRequested(id)).toBe(true)
   })
 
   it('answers per transfer, never for the session', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    store.begin({ transferId: 'a', name: 'a', destDir: '/d', machine: 'srv-01', size: 1 })
-    store.begin({ transferId: 'b', name: 'b', destDir: '/d', machine: 'srv-01', size: 1 })
-    store.cancel('a')
-    expect(store.cancelRequested('a')).toBe(true)
-    expect(store.cancelRequested('b')).toBe(false)
+    const a = beginTransfer(store, {
+      transferId: 'a',
+      name: 'a',
+      destDir: '/d',
+      machine: 'srv-01',
+      size: 1,
+    })
+    const b = beginTransfer(store, {
+      transferId: 'b',
+      name: 'b',
+      destDir: '/d',
+      machine: 'srv-01',
+      size: 1,
+    })
+    store.cancel(a)
+    expect(store.cancelRequested(a)).toBe(true)
+    expect(store.cancelRequested(b)).toBe(false)
   })
 
   it('stays yes after the outcome lands — the question is "did we ask"', () => {
@@ -564,19 +579,23 @@ describe('the store remembers that somebody asked to stop', () => {
     // and a later body failure for the same id is still not news.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    seeded(store, 400)
-    store.cancel('t1')
+    const id = seeded(store, 400)
+    store.cancel(id)
     services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
-    expect(store.cancelRequested('t1')).toBe(true)
+    expect(store.cancelRequested(id)).toBe(true)
   })
 
-  it('is legitimate for a transfer with no row', () => {
-    // The row may have gone with the page, and files.uploadCancel still
-    // reaches the transfer.
+  it('names a row that is not there and does nothing at all', () => {
+    // Since nocx-hbdw4.6 a cancel names the ROW, and a row is what a
+    // person presses — so there is no such thing as cancelling something
+    // that is not on screen, and the previous "cancel an id with no row"
+    // case cannot be written any more. What is left is that naming a row
+    // that has gone is quiet: nothing on the wire, nothing recorded.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
     store.cancel('gone')
-    expect(store.cancelRequested('gone')).toBe(true)
+    expect(services.cancels).toEqual([])
+    expect(store.cancelRequested('gone')).toBe(false)
   })
 })
 
@@ -613,5 +632,259 @@ describe('the store stamps both ends of the work', () => {
     expect(t?.startedAt).toBeNull()
     expect(t?.size).toBeNull()
     expect(t?.machine).toBe('')
+  })
+})
+
+// ── The half of a batch the backend has never heard of (nocx-hbdw4.6) ────
+//
+// A batch sends one file at a time per binding (design §4), so every file
+// after the first is waiting its turn. Before this it was waiting in a loop
+// variable: drop two files and the second was not in the list, not in the
+// count and not cancellable until the first had finished (owner,
+// 2026-08-22).
+describe('a file that has joined the batch and not been sent', () => {
+  function batch(store: UploadStore, names: string[]): string[] {
+    return store.enqueue(
+      names.map((name) => ({ name, destDir: '/srv/data', machine: 'deploy@srv-01', size: 400 })),
+    )
+  }
+
+  it('is a row from the moment it is enqueued, one per file, in order', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const ids = batch(store, ['a.txt', 'b.txt', 'c.txt'])
+    expect(ids).toHaveLength(3)
+    expect(new Set(ids).size).toBe(3)
+    expect(store.transfers().map((t) => t.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    expect(store.transfers().map((t) => t.id)).toEqual(ids)
+  })
+
+  it('claims nothing about itself that has not happened', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [id] = batch(store, ['a.txt'])
+    // The WHOLE record: a partial assertion is how a field nobody set
+    // stays undefined until a surface reads it.
+    const expected: UploadTransfer = {
+      id,
+      // No call has been made, so the wire has no name for it.
+      transferId: null,
+      name: 'a.txt',
+      destDir: '/srv/data',
+      machine: 'deploy@srv-01',
+      // The one measurement a waiting file has, and it is what lets the
+      // aggregate bar be about the batch rather than about one file.
+      size: 400,
+      bytes: null,
+      speedBytesPerSecond: null,
+      phase: 'queued',
+      // Not started. A duration needs both ends and this end has not
+      // happened yet.
+      startedAt: null,
+      endedAt: null,
+      finalName: '',
+      error: null,
+      stranded: [],
+      adopted: false,
+    }
+    expect(store.row(id)).toEqual(expected)
+    // And it is outstanding work, not finished work: something is still
+    // going to happen to it.
+    expect(isTerminalPhase(store.row(id)!.phase)).toBe(false)
+  })
+
+  it('is not reachable by the wire, because the wire has not named it', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    batch(store, ['a.txt'])
+    // A progress frame quoting an id nothing has been given cannot find a
+    // queued row and must not mint one — rule 2 holds for this phase as
+    // much as for `running`.
+    services.emitProgress({ transferId: 't1', bytes: 5, total: 400 })
+    expect(store.transfers()).toHaveLength(1)
+    expect(store.transfers()[0].phase).toBe('queued')
+    expect(store.transfers()[0].bytes).toBeNull()
+  })
+
+  it('starts in place when the result finally names it, keeping its identity', () => {
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    const [id] = batch(store, ['a.txt'])
+    clock.advance(500)
+    expect(store.start(id, 't1')).toBe(true)
+    const t = store.row(id)
+    // The SAME row: a surface keys on the id, and a promotion that minted a
+    // new one would dispose the row under whoever was pressing its × —
+    // which is nocx-hbdw4.1's defect, arriving a second way.
+    expect(t?.id).toBe(id)
+    expect(store.transfers()).toHaveLength(1)
+    expect(t?.transferId).toBe('t1')
+    expect(t?.phase).toBe('running')
+    // Stamped when it STARTED, not when it was dropped: the duration a
+    // finished row reports is how long the transfer took, not how long the
+    // person waited for their turn in the queue.
+    expect(t?.startedAt).toBe(1_500)
+    expect(store.transfer('t1')?.id).toBe(id)
+  })
+
+  it('takes progress only after it has started', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [id] = batch(store, ['a.txt'])
+    store.start(id, 't1')
+    services.emitProgress({ transferId: 't1', bytes: 100, total: 400 })
+    expect(store.row(id)?.bytes).toBe(100)
+  })
+})
+
+describe('taking one file out of the batch', () => {
+  function batch(store: UploadStore, names: string[]): string[] {
+    return store.enqueue(
+      names.map((name) => ({ name, destDir: '/srv/data', machine: 'deploy@srv-01', size: 400 })),
+    )
+  }
+
+  it('says nothing on the wire, because there is no transfer to say it about', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [a, b] = batch(store, ['a.txt', 'b.txt'])
+    store.cancel(b)
+    // files.upload was never called for it, so files.uploadCancel has
+    // nothing to name.
+    expect(services.cancels).toEqual([])
+    // It leaves the batch. It is not an OUTCOME — nothing was attempted,
+    // nothing was written — so it is not a row in the finished list either.
+    expect(store.row(b)).toBeUndefined()
+    expect(store.transfers().map((t) => t.id)).toEqual([a])
+  })
+
+  it('leaves every other file in the batch exactly where it was', () => {
+    // One press stops one file. A cancel that took the batch with it would
+    // make the outcome depend on which row somebody happened to press.
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [a, b, c] = batch(store, ['a.txt', 'b.txt', 'c.txt'])
+    store.start(a, 't1')
+    store.cancel(b)
+    expect(store.row(a)?.phase).toBe('running')
+    expect(store.row(c)?.phase).toBe('queued')
+  })
+
+  it('still cancels on the wire once the file has started', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [a] = batch(store, ['a.txt'])
+    store.start(a, 't1')
+    store.cancel(a)
+    expect(services.cancels).toEqual(['t1'])
+    // And the row stays: the cancel races the transfer's own completion,
+    // and uploadDone is what says which won.
+    expect(store.row(a)?.phase).toBe('running')
+  })
+})
+
+describe('a file cancelled while its own files.upload call was in flight', () => {
+  // The narrow window the sequential send opens: the row is queued for as
+  // long as the call takes, and longer if the backend answers `collision`
+  // and a person is looking at the dialog. Press × in that window and an
+  // id comes back for a row that is not there any more.
+
+  function inFlight(): {
+    services: ReturnType<typeof fakeUploadServices>
+    store: UploadStore
+    id: string
+  } {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [id] = store.enqueue([
+      { name: 'a.txt', destDir: '/srv/data', machine: 'deploy@srv-01', size: 400 },
+    ])
+    store.cancel(id)
+    return { services, store, id }
+  }
+
+  it('stops the transfer that came back, rather than orphaning it', () => {
+    // It exists on the backend and has no row and no owner. Leaving it
+    // would be an upload running on somebody's server that nothing in the
+    // product can reach.
+    const f = inFlight()
+    expect(f.store.start(f.id, 't1')).toBe(false)
+    expect(f.services.cancels).toEqual(['t1'])
+  })
+
+  it('does not bring the row back when the outcome arrives', () => {
+    // Adoption is for a transfer this renderer never saw start (rule 3).
+    // This is the opposite: it started it, stopped it on purpose, and the
+    // person watched the row go — reappearing as an adopted row that knows
+    // neither its destination nor its size would contradict them.
+    const f = inFlight()
+    f.store.start(f.id, 't1')
+    f.services.emitDone({ transferId: 't1', outcome: 'cancelled', finalName: '', stranded: [] })
+    expect(f.store.transfers()).toEqual([])
+  })
+})
+
+describe('the files a refusal means nobody will ever attempt', () => {
+  it('are closed with the reason rather than left waiting for ever', () => {
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    const [id] = store.enqueue([
+      { name: 'b.txt', destDir: '/srv/data', machine: 'deploy@srv-01', size: 400 },
+    ])
+    clock.advance(9)
+    store.abandon(id, 'not attempted: a.txt was refused')
+    const t = store.row(id)
+    // `skipped` is the wire's own word for "not written, and that is
+    // fine", which is exactly what happened to it — and it is NEUTRAL, so
+    // four of them do not read as four failures beside the one real one.
+    expect(t?.phase).toBe('skipped')
+    expect(t?.error).toContain('not attempted')
+    expect(isTerminalPhase(t!.phase)).toBe(true)
+    // Stamped, so it is ordered and retained like any other outcome.
+    expect(t?.endedAt).toBe(1_009)
+    // And never given a start it did not have: a duration needs both ends.
+    expect(t?.startedAt).toBeNull()
+  })
+
+  it('cannot be used on a file that did start — that one has an account coming', () => {
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const id = seeded(store)
+    store.abandon(id, 'not attempted')
+    expect(store.row(id)?.phase).toBe('running')
+  })
+})
+
+describe('a transfer whose outcome arrived before its own result did', () => {
+  it('is one row and not two, and keeps what each half knew', () => {
+    // A retained `uploadDone` adopts a transfer this renderer never saw
+    // start (rule 3) — and it can name the very transfer a queued row is
+    // about to be given. They are one file: the adopted half has the
+    // outcome, the queued half has where it was going.
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    const [id] = store.enqueue([
+      { name: 'big.iso', destDir: '/srv/data', machine: 'deploy@srv-01', size: 400 },
+    ])
+    services.emitDone({
+      transferId: 't1',
+      outcome: 'written',
+      finalName: 'big.iso',
+      stranded: [],
+    })
+
+    // Nothing left to send: it is already over.
+    expect(store.start(id, 't1')).toBe(false)
+
+    const rows = store.transfers()
+    expect(rows).toHaveLength(1)
+    expect(rows[0].phase).toBe('written')
+    // And it no longer says it knows nothing about where the file went.
+    expect(rows[0].destDir).toBe('/srv/data')
+    expect(rows[0].machine).toBe('deploy@srv-01')
+    expect(rows[0].size).toBe(400)
+    expect(rows[0].adopted).toBe(false)
   })
 })

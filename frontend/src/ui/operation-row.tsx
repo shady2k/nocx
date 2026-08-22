@@ -30,6 +30,19 @@
  * - `cancelled` and `skipped` are NOT failures. A cancelled transfer's
  *   underlying error is a context cancellation and a skipped one is the
  *   person's own decision, so neither is danger.
+ * - `queued` DRAWS NO PROGRESS BAR AND NO PERCENTAGE, and keeps its badge.
+ *   The bar is now the row's loudest element, and a panel of bars at zero
+ *   would read "five things are stalled" where the truth is "four are
+ *   waiting their turn" — zero is a measurement and nothing has been
+ *   measured. What it draws instead is the size it is going to send.
+ *
+ *   The badge stays even though the operations list groups queued rows
+ *   under a heading that already says it, which is the opposite of the
+ *   `written` decision two rows down. The reason is that the two rows are
+ *   not equally self-describing: THE HEADING SCROLLS AWAY AND THE ROW DOES
+ *   NOT, and a finished row still has its summary line — size, when, how
+ *   long — to say what it is, while a queued row stripped of the badge is
+ *   a name and a size with nothing at all to distinguish it.
  *
  * ## What the caller owns
  *
@@ -37,7 +50,7 @@
  * operation would mean nothing any more — which is the model's judgement
  * about that operation, not a rendering rule this component could derive.
  */
-import { Show, type Component } from 'solid-js'
+import { Match, Show, Switch, type Component } from 'solid-js'
 import { Badge, type BadgeTone } from './badge'
 import { IconButton } from './icon-button'
 import { CollectionRow } from './collection-view'
@@ -47,6 +60,7 @@ import { ArrowDownIcon, ArrowUpIcon, CloseIcon } from './icons'
 import { ProgressBar } from './progress-bar'
 import {
   isTerminalPhase,
+  isWaitingPhase,
   type OperationKind,
   type OperationPhase,
   type TerminalOperationPhase,
@@ -131,7 +145,14 @@ export interface OperationRowProps {
 export function OperationRow(props: OperationRowProps) {
   // Read inside the JSX, never hoisted into a const: every one of these is
   // a prop and a captured value would freeze the row at its first render.
-  const running = () => !isTerminalPhase(props.phase)
+  //
+  // THREE STATES AND NOT TWO, since nocx-hbdw4.6: an operation can be
+  // waiting, moving, or over, and the numbers half of the row differs in
+  // all three. `running` is the middle one alone — `unsettled` included,
+  // because there the bytes genuinely were moving and the last count is
+  // the truth about them.
+  const waiting = () => isWaitingPhase(props.phase)
+  const running = () => !isWaitingPhase(props.phase) && !isTerminalPhase(props.phase)
   const fraction = () => {
     const total = props.total
     return total !== null && total > 0 ? (props.done ?? 0) / total : 0
@@ -200,6 +221,13 @@ export function OperationRow(props: OperationRowProps) {
                   {PHASE_LABEL[props.phase as TerminalOperationPhase]}
                 </Badge>
               </Show>
+              {/* IT SAYS IT IS WAITING. There is no percentage on this row
+                  and no bar under it, so without this the row states
+                  nothing about itself at all — see the module doc for why
+                  this badge stays where `written`'s was removed. */}
+              <Show when={waiting()}>
+                <Badge tone="neutral">Queued</Badge>
+              </Show>
               <Show when={props.phase === 'unsettled'}>
                 {/* The reason is the badge's hover detail: the person was
                     already told it as a toast when it happened, and the row
@@ -209,9 +237,43 @@ export function OperationRow(props: OperationRowProps) {
                 </Badge>
               </Show>
             </span>
-            <Show
-              when={running()}
-              fallback={
+            {/* THE NUMBERS UNDER THE NAME, one form per state. A Switch and
+                not nested Shows: the three are exclusive and a reader has to
+                be able to see that they are, which is what stopped a queued
+                row falling through into the finished branch and reporting
+                itself as over. */}
+            <Switch>
+              <Match when={waiting()}>
+                {/* WHAT IT IS GOING TO SEND, and nothing that claims any of
+                    it has moved. `done: null` is the absence of a
+                    measurement and format-bytes.ts already renders that as
+                    the size alone — the same line a running row shows
+                    before its first progress frame, which is the same
+                    fact. */}
+                <span class="ui-operation-row__progress">
+                  {formatProgress({
+                    done: null,
+                    total: props.total,
+                    speedBytesPerSecond: null,
+                  })}
+                </span>
+              </Match>
+              <Match when={running()}>
+                <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} size="md" />
+                {/* Its OWN class, not `__detail`. The two shared one, and they
+                    want opposite things: a failure reason is a sentence and
+                    must wrap, while these numbers must never — they change
+                    several times a second, and a wrap made the row's height
+                    twitch as the digits changed width (owner, 2026-08-22). */}
+                <span class="ui-operation-row__progress">
+                  {formatProgress({
+                    done: props.done,
+                    total: props.total,
+                    speedBytesPerSecond: props.speedBytesPerSecond ?? null,
+                  })}
+                </span>
+              </Match>
+              <Match when={isTerminalPhase(props.phase)}>
                 <>
                   {/* The reason first: it is the news, and the numbers under
                       it are the same three facts every finished row carries
@@ -239,22 +301,8 @@ export function OperationRow(props: OperationRowProps) {
                     </span>
                   </Show>
                 </>
-              }
-            >
-              <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} size="md" />
-              {/* Its OWN class, not `__detail`. The two shared one, and they
-                  want opposite things: a failure reason is a sentence and
-                  must wrap, while these numbers must never — they change
-                  several times a second, and a wrap made the row's height
-                  twitch as the digits changed width (owner, 2026-08-22). */}
-              <span class="ui-operation-row__progress">
-                {formatProgress({
-                  done: props.done,
-                  total: props.total,
-                  speedBytesPerSecond: props.speedBytesPerSecond ?? null,
-                })}
-              </span>
-            </Show>
+              </Match>
+            </Switch>
             {/* Where it landed, under the numbers rather than beside the
                 name: a path is longer than any panel and it is the part a
                 person can do without. Machine and path read as ONE fact on

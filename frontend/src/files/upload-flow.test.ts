@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SendBodyOutcome } from './upload-client'
 import { createUploadFlow, type UploadSource } from './upload-flow'
-import { createUploadStore } from './upload-store'
+import { createUploadStore, type UploadStore } from './upload-store'
 import { isTerminalPhase, type OperationPhase } from '../ui/operation'
 import { fakeClock, fakeUploadServices } from './upload-fixtures'
 import type { CollisionRequest, CollisionResult } from '../ui/collision-dialog'
@@ -38,6 +38,15 @@ function scriptedPerson(result: CollisionResult): {
 function reporter(): { report: (m: string, l: ToastLevel) => void; said: string[] } {
   const said: string[] = []
   return { said, report: (m) => said.push(m) }
+}
+
+/** The ROW id for a transfer the wire has named, which is what every store
+ *  call takes: a file has a row from the moment it is dropped and a
+ *  transferId only once files.upload has answered (nocx-hbdw4.6). */
+function rowOf(store: UploadStore, transferId: string): string {
+  const t = store.transfer(transferId)
+  if (t === undefined) throw new Error(`no row for ${transferId}`)
+  return t.id
 }
 
 function harness(answer: CollisionResult = { answer: 'skip', applyToAll: false }) {
@@ -227,7 +236,7 @@ describe('what the renderer does not know, it does not claim', () => {
     expect(isTerminalPhase(t!.phase)).toBe(false)
     // Cancelling still means something: the body running on the backend is
     // another request's, and files.uploadCancel reaches the transfer.
-    h.store.cancel('t1')
+    h.store.cancel(rowOf(h.store, 't1'))
     expect(h.services.cancels).toEqual(['t1'])
 
     h.services.emitDone({
@@ -340,7 +349,7 @@ describe('a body send that fails after the person cancelled', () => {
       void url
       void body
       void size
-      h.store.cancel(transferId)
+      h.store.cancel(rowOf(h.store, transferId))
       return Promise.resolve(outcome)
     }
   }
@@ -422,7 +431,7 @@ describe('a body send that fails and nobody asked for it', () => {
     let call = 0
     h.services.sendBody = () => {
       call++
-      if (call === 1) h.store.cancel('t1')
+      if (call === 1) h.store.cancel(rowOf(h.store, 't1'))
       return Promise.resolve({ ok: false, kind: 'status', status: 500 })
     }
 
@@ -442,5 +451,214 @@ describe('the machine the transfer is going to', () => {
     h.services.nextResult = [started('t1')]
     await h.flow.send(DEST, [streamSource('a.txt')])
     expect(h.store.transfer('t1')?.machine).toBe('deploy@srv-01')
+  })
+})
+
+// ── The batch exists before the first byte does (nocx-hbdw4.6) ───────────
+//
+// The owner dropped two files. One uploaded; the second was nowhere — not
+// in the list, not counted, not cancellable — until the first had finished.
+// The send is sequential by design (§4) and stays that way; what was
+// missing is that the waiting half was not represented anywhere.
+describe('a multi-file drop, from the moment it is dropped', () => {
+  it('registers every file BEFORE the first one is sent', async () => {
+    const h = harness()
+    // Counted at the moment files.upload is entered, which is the only
+    // place the question can be asked: after the call it is trivially true
+    // for the file being sent and says nothing about the others.
+    const rowsAtFirstCall: number[] = []
+    const services = h.services
+    services.upload = (req) => {
+      rowsAtFirstCall.push(h.store.transfers().length)
+      services.uploads.push(req)
+      return Promise.resolve(services.nextResult.shift() ?? started('t1'))
+    }
+    h.services.nextResult = [started('t1'), started('t2'), started('t3')]
+
+    await h.flow.send(DEST, [streamSource('a.txt'), streamSource('b.txt'), streamSource('c.txt')])
+
+    expect(rowsAtFirstCall[0]).toBe(3)
+  })
+
+  it('shows three rows for a three-file drop, every one of them waiting', async () => {
+    const h = harness()
+    // The first call never answers, so the batch is caught before anything
+    // has started — including the file whose own call is in flight, which
+    // is queued precisely because nothing has happened to it yet. No timer
+    // and no duration: the state is observed, never waited for.
+    let release: (r: { transferId: string }) => void = () => {}
+    h.services.upload = () => new Promise((resolve) => (release = resolve))
+
+    const sending = h.flow.send(DEST, [
+      streamSource('a.txt'),
+      streamSource('b.txt'),
+      streamSource('c.txt'),
+    ])
+
+    expect(h.store.transfers().map((t) => [t.name, t.phase])).toEqual([
+      ['a.txt', 'queued'],
+      ['b.txt', 'queued'],
+      ['c.txt', 'queued'],
+    ])
+    // And the sizes are known, which is what lets the aggregate bar be
+    // about the batch rather than about whichever file is moving.
+    expect(h.store.transfers().every((t) => t.size === 4)).toBe(true)
+
+    // Distinct ids for the rest: one transfer, one row, and a fixture that
+    // reused an id would be asking the store to fold two files into one.
+    let next = 1
+    h.services.upload = () => Promise.resolve(started(`t${++next}`))
+    release(started('t1'))
+    await sending
+    expect(h.store.transfers()).toHaveLength(3)
+  })
+})
+
+describe('taking one file out of a batch that is already running', () => {
+  /** A batch caught mid-flight: `a.txt` is sending its body, `b.txt` and
+   *  `c.txt` are queued behind it, and `act` runs at that exact moment. */
+  async function midBatch(
+    h: ReturnType<typeof harness>,
+    act: (rows: string[]) => void,
+  ): Promise<void> {
+    h.services.nextResult = [waiting('t1', 'k1'), waiting('t2', 'k2'), waiting('t3', 'k3')]
+    let first = true
+    h.services.sendBody = () => {
+      if (first) {
+        first = false
+        act(h.store.transfers().map((t) => t.id))
+      }
+      return Promise.resolve({ ok: true })
+    }
+    await h.flow.send(DEST, [streamSource('a.txt'), streamSource('b.txt'), streamSource('c.txt')])
+  }
+
+  it('sends nothing on the wire for the file that had not started', async () => {
+    // There is no transfer yet, so there is nothing to cancel. Asserted on
+    // the service double rather than by eye: a cancel for a transfer that
+    // does not exist is the call this must never make.
+    const h = harness()
+    await midBatch(h, (rows) => h.store.cancel(rows[2]))
+    expect(h.services.cancels).toEqual([])
+    // And the call that would have created it never happened either.
+    expect(h.services.uploads.map((u) => u.name)).toEqual(['a.txt', 'b.txt'])
+  })
+
+  it('leaves the rest of the batch alone — one press stops one file', async () => {
+    const h = harness()
+    await midBatch(h, (rows) => h.store.cancel(rows[2]))
+    expect(h.store.transfers().map((t) => t.name)).toEqual(['a.txt', 'b.txt'])
+    expect(h.store.transfer('t1')?.phase).toBe('running')
+    expect(h.store.transfer('t2')?.phase).toBe('running')
+  })
+
+  it('does not silently drop the rest when the RUNNING file is the one cancelled', async () => {
+    // The other half of the same rule, and the reason it is written both
+    // ways: what is not defensible is that the batch's fate depends on
+    // which row somebody happened to press.
+    const h = harness()
+    await midBatch(h, (rows) => h.store.cancel(rows[0]))
+    expect(h.services.cancels).toEqual(['t1'])
+    expect(h.services.uploads.map((u) => u.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    expect(h.store.transfers().map((t) => t.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+  })
+
+  it('stops the transfer that comes back for a file cancelled mid-call', async () => {
+    // The window the sequential send opens: the row is queued for as long
+    // as its own files.upload call takes. A transfer created after the
+    // person left would otherwise run on the server with no row.
+    const h = harness()
+    let release: (r: { transferId: string }) => void = () => {}
+    h.services.upload = () => new Promise((resolve) => (release = resolve))
+    const sending = h.flow.send(DEST, [streamSource('a.txt')])
+    h.store.cancel(h.store.transfers()[0].id)
+    h.services.upload = () => Promise.reject(new Error('no more files'))
+    release(started('t1'))
+    await sending
+    expect(h.services.cancels).toEqual(['t1'])
+    // No body either: the transfer is not ours to feed any more.
+    expect(h.services.bodies).toEqual([])
+  })
+})
+
+describe('the files a refusal never got to', () => {
+  it('are accounted for rather than left waiting for a turn that is not coming', async () => {
+    // The batch still stops — a refusal is about the DESTINATION and one
+    // message per remaining file would be noise — but the remaining files
+    // are ROWS now, and a row that says "queued" for ever is the product
+    // claiming work is coming that nobody is going to do.
+    const h = harness()
+    h.services.nextResult = []
+    await h.flow.send(DEST, [streamSource('a.txt'), streamSource('b.txt'), streamSource('c.txt')])
+
+    expect(h.services.uploads).toHaveLength(1)
+    // One message, about the destination, once.
+    expect(h.said.said).toHaveLength(1)
+    expect(h.said.said[0]).toContain('a.txt')
+
+    const rows = h.store.transfers()
+    expect(rows.map((t) => [t.name, t.phase])).toEqual([
+      // The one that was asked for and refused is a failure, and reads as
+      // one, with the reason under it.
+      ['a.txt', 'failed'],
+      // The ones behind it were never asked. `skipped` is neutral, so
+      // three of them do not read as three failures beside the one real
+      // one.
+      ['b.txt', 'skipped'],
+      ['c.txt', 'skipped'],
+    ])
+    expect(rows[0].error).toContain('no result queued')
+    expect(rows[1].error).toContain('a.txt was refused')
+    // Nothing is still outstanding: every row in the batch has an account.
+    expect(rows.every((t) => isTerminalPhase(t.phase))).toBe(true)
+  })
+
+  it('are accounted for when the refusal comes after the collision question too', async () => {
+    // The second call is the one that carries the person's decision, and
+    // it can be refused just as the first can.
+    const h = harness({ answer: 'overwrite', applyToAll: false })
+    h.services.nextResult = [COLLISION]
+    await h.flow.send(DEST, [streamSource('a.txt'), streamSource('b.txt')])
+    expect(h.store.transfers().map((t) => t.phase)).toEqual(['failed', 'skipped'])
+  })
+})
+
+describe('what the collision question calls "the remaining files"', () => {
+  it('counts what is still in the batch, not what is left in the array', async () => {
+    // The apply-to-all offer names a number, and a person who took two
+    // files out of a five-file drop would otherwise be offered an answer
+    // "for the 4 remaining files" when three exist.
+    const h = harness({ answer: 'overwrite', applyToAll: false })
+    h.services.nextResult = [
+      waiting('t1', 'k1'),
+      COLLISION,
+      started('t2'),
+      started('t3'),
+      started('t4'),
+    ]
+    let first = true
+    h.services.sendBody = () => {
+      if (first) {
+        first = false
+        // c.txt and d.txt leave while a.txt is sending; b.txt is next and
+        // is the one that collides.
+        const rows = h.store.transfers()
+        h.store.cancel(rows[2].id)
+        h.store.cancel(rows[3].id)
+      }
+      return Promise.resolve({ ok: true })
+    }
+
+    await h.flow.send(DEST, [
+      streamSource('a.txt'),
+      streamSource('b.txt'),
+      streamSource('c.txt'),
+      streamSource('d.txt'),
+      streamSource('e.txt'),
+    ])
+
+    // b.txt and e.txt: the two that are still going to be sent.
+    expect(h.person.asked.map((r) => r.remaining)).toEqual([2])
+    expect(h.services.uploads.map((u) => u.name)).toEqual(['a.txt', 'b.txt', 'b.txt', 'e.txt'])
   })
 })

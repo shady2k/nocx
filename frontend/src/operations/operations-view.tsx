@@ -42,7 +42,7 @@ import type { SidebarViewDescriptor, SidebarViewStatus } from '../sidebar'
 import { EmptyState } from '../ui/empty-state'
 import { ArrowDownUpIcon } from '../ui/icons'
 import { OperationRow } from '../ui/operation-row'
-import { isTerminalPhase } from '../ui/operation'
+import { isTerminalPhase, isWaitingPhase } from '../ui/operation'
 import type { Operation, OperationsModel } from './operations'
 import { createThrottledOperations, type RenderThrottleDeps } from './render-throttle'
 
@@ -125,9 +125,20 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
      that is NEWS (failed, cancelled, skipped); `written` is the expected end
      and the heading covers it (owner, 2026-08-22).
 
-     Order is deliberate: running first, because it is the only part that
-     changes while you look at it. */
-  const runningOps = () => operations().filter((o) => !isTerminalPhase(o.phase))
+     THREE GROUPS AND NOT TWO, since nocx-hbdw4.6. Waiting work is not
+     terminal, so it would land in "In progress" for free — and that heading
+     would then be false about most of what is under it. Drop five files and
+     it reads "In progress 5" while one file is moving and four have not
+     started: the count is the very number a person is looking for, and it
+     would lie at exactly the moment the queue exists to be seen. Its own
+     heading answers both halves at a glance — one moving, four coming.
+
+     Order is deliberate and chronological: what is moving, then what is
+     coming, then what is done. Running leads because it is the only part
+     that changes while you look at it. */
+  const runningOps = () =>
+    operations().filter((o) => !isWaitingPhase(o.phase) && !isTerminalPhase(o.phase))
+  const queuedOps = () => operations().filter((o) => isWaitingPhase(o.phase))
   const finishedOps = () => operations().filter((o) => isTerminalPhase(o.phase))
 
   const clock = deps.now ?? ((): number => Date.now())
@@ -194,7 +205,7 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
           />
         }
       >
-        {/* TWO LISTS, ONE PER STATE, each with its own role="list" — the
+        {/* THREE LISTS, ONE PER STATE, each with its own role="list" — the
             kit's row carries role="listitem" and a listitem must be owned by
             a list, so a single list spanning both headings would put a
             heading inside a list where no listitem explains it. An empty
@@ -206,6 +217,15 @@ function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
           </h3>
           <div class="ops-list" role="list" aria-label="In progress" data-testid="ops-list">
             {renderRows(runningOps)}
+          </div>
+        </Show>
+        <Show when={queuedOps().length > 0}>
+          <h3 class="ops-group__heading">
+            Queued
+            <span class="ops-group__count">{queuedOps().length}</span>
+          </h3>
+          <div class="ops-list" role="list" aria-label="Queued" data-testid="ops-list-queued">
+            {renderRows(queuedOps)}
           </div>
         </Show>
         <Show when={finishedOps().length > 0}>

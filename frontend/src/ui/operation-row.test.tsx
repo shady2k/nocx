@@ -23,6 +23,58 @@ const RUNNING = {
   speedBytesPerSecond: 500_000,
 }
 
+// ── A file that has not started (nocx-hbdw4.6) ──────────────────────────
+//
+// A batch sends one file at a time per binding (design §4), so every file
+// after the first is waiting its turn. Drop five and four of them are in
+// this state — and the row has to say so without claiming any byte has
+// moved, because a panel of bars at zero reads "five things are stalled"
+// where the truth is "four are waiting".
+describe('OperationRow before the work has started', () => {
+  const QUEUED = { ...RUNNING, phase: 'queued' as OperationPhase, done: null, total: 4_000_000 }
+
+  it('draws no progress bar at all', () => {
+    const { container } = render(() => <OperationRow {...QUEUED} />)
+    expect(container.querySelector('[role="progressbar"]')).toBeNull()
+  })
+
+  it('draws no percentage either — zero would be a measurement nobody took', () => {
+    const { container } = render(() => <OperationRow {...QUEUED} />)
+    expect(container.querySelector('.ui-operation-row__percent')).toBeNull()
+    expect(row(container).textContent).not.toContain('0%')
+  })
+
+  it('says it is queued, on the row itself and not only in whatever list holds it', () => {
+    // The heading a surface groups it under scrolls away and the row does
+    // not, and a queued row has no summary line to identify it by either —
+    // see the component's module doc for why this badge stays where
+    // `written`'s was removed.
+    const { container } = render(() => <OperationRow {...QUEUED} />)
+    expect(row(container).textContent).toContain('Queued')
+  })
+
+  it('says what it is going to send', () => {
+    const { container } = render(() => <OperationRow {...QUEUED} />)
+    expect(container.querySelector('.ui-operation-row__progress')?.textContent).toBe('4.0 MB')
+  })
+
+  it('does not report itself as finished', () => {
+    // It fell through into the finished branch while the split was still
+    // two-way, which drew the "size · when · how long" summary for work
+    // that had not started.
+    const { container } = render(() => <OperationRow {...QUEUED} endedAt={null} />)
+    expect(container.querySelector('.ui-operation-row__summary')).toBeNull()
+    expect(row(container).textContent).not.toContain('Done')
+  })
+
+  it('keeps its cancel — a file can be taken out of the batch before its turn', () => {
+    const onCancel = vi.fn()
+    const view = render(() => <OperationRow {...QUEUED} onCancel={onCancel} />)
+    fireEvent.click(view.getByRole('button', { name: 'Cancel notes.txt' }))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('OperationRow while the work is live', () => {
   it('says what it is, where it is going, how far and how fast', () => {
     const { container } = render(() => <OperationRow {...RUNNING} />)

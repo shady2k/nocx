@@ -25,8 +25,32 @@ const LOCAL: DropOrigin = {
   machine: 'This machine',
 }
 
-/** A DataTransfer jsdom does not have: the two things a handler reads. */
-function filesTransfer(files: File[]): DataTransfer {
+/**
+ * A DataTransfer jsdom does not have, built the way a browser builds one:
+ * `files` for the bytes and `items` for what each entry IS, in the same
+ * order. A real drop always carries both, so a fake that carried only
+ * `files` would let a folder through in the test and nowhere else.
+ *
+ * `folders` names the entries whose `webkitGetAsEntry()` answers
+ * `isDirectory` — which is what a dropped folder looks like, since it
+ * arrives as an ordinary `File` with the folder's name and its directory
+ * entry's size.
+ */
+function filesTransfer(files: File[], folders: string[] = []): DataTransfer {
+  const items = files.map((f) => ({
+    kind: 'file',
+    webkitGetAsEntry: () => ({
+      isDirectory: folders.includes(f.name),
+      isFile: !folders.includes(f.name),
+    }),
+  }))
+  return { types: ['Files'], files, items } as unknown as DataTransfer
+}
+
+/** An engine that does not implement `items` at all — the fallback path,
+ *  where nothing can be said about an entry and every one is treated as a
+ *  file, which is what happened everywhere before the check existed. */
+function transferWithoutItems(files: File[]): DataTransfer {
   return { types: ['Files'], files } as unknown as DataTransfer
 }
 
@@ -393,5 +417,133 @@ describe('detaching', () => {
     fire(h.element, 'drop', filesTransfer([new File(['a'], 'a.txt')]))
     await settle()
     expect(h.services.uploads).toEqual([])
+  })
+})
+
+// ── A dropped FOLDER is refused, not attempted (nocx-hbdw4.6, amendment) ─
+//
+// The owner dropped a folder and got two rows with no file name, `0%`,
+// "Waiting for the server" and a toast reading "Failed to fetch" — a
+// network error offered as the answer to "can I send a folder". Directories
+// are out of scope (design §4), so the answer belongs at the gesture,
+// before anything is registered.
+describe('a folder in a browser drop', () => {
+  it('is not sent, and never becomes an operation', async () => {
+    const h = harness(REMOTE)
+    fire(h.element, 'drop', filesTransfer([new File([''], 'Photos')], ['Photos']))
+    await settle()
+    // Nothing on the wire, and no row: a row implies something is
+    // happening to the thing it names, and nothing ever will.
+    expect(h.services.uploads).toEqual([])
+    expect(h.services.bodies).toEqual([])
+    expect(h.store.transfers()).toEqual([])
+    // No binding was even opened for it.
+    expect(h.bindings).toEqual([])
+  })
+
+  it('is answered with the limit, not with whatever failed downstream', async () => {
+    const h = harness(REMOTE)
+    fire(h.element, 'drop', filesTransfer([new File([''], 'Photos')], ['Photos']))
+    await settle()
+    expect(h.said).toHaveLength(1)
+    expect(h.said[0].message).toContain('cannot upload a folder yet')
+    expect(h.said[0].message).toContain('Photos')
+    // And it says what to do instead — somebody dropping a folder asked
+    // for something reasonable.
+    expect(h.said[0].message).toContain('archive')
+    // Never the downstream symptom.
+    expect(h.said[0].message).not.toContain('Failed to fetch')
+    expect(h.said[0].level).toBe('warning')
+  })
+
+  it('does not take the files dropped beside it down with it', async () => {
+    // Refusing the whole batch punishes the files that could be sent;
+    // sending them silently leaves the person to work out which item is
+    // missing. So: send the files, name the folder, say how many are going.
+    const h = harness(REMOTE)
+    h.services.nextResult = [{ transferId: 't1' }, { transferId: 't2' }, { transferId: 't3' }]
+    fire(
+      h.element,
+      'drop',
+      filesTransfer(
+        [
+          new File(['a'], 'a.txt'),
+          new File([''], 'Photos'),
+          new File(['b'], 'b.txt'),
+          new File(['c'], 'c.txt'),
+        ],
+        ['Photos'],
+      ),
+    )
+    await settle()
+    expect(h.services.uploads.map((u) => u.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    expect(h.said).toHaveLength(1)
+    expect(h.said[0].message).toContain('Photos')
+    expect(h.said[0].message).toContain('The other 3 files are being uploaded.')
+    // The three that could be sent are the three rows, and the folder is
+    // not among them.
+    expect(h.store.transfers().map((t) => t.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
+  })
+
+  it('names every folder when more than one was dropped', async () => {
+    const h = harness(REMOTE)
+    fire(
+      h.element,
+      'drop',
+      filesTransfer([new File([''], 'Photos'), new File([''], 'Docs')], ['Photos', 'Docs']),
+    )
+    await settle()
+    expect(h.said).toHaveLength(1)
+    expect(h.said[0].message).toContain('cannot upload folders yet')
+    expect(h.said[0].message).toContain('Photos, Docs')
+  })
+
+  it('is decided by the entry API and not by what the File looks like', async () => {
+    // 192 B is a directory entry's size on one filesystem, and an empty
+    // MIME type is what plenty of real files have. A file that looks
+    // exactly like the owner's folder — same size, no type, no extension —
+    // is still uploaded.
+    const h = harness(REMOTE)
+    h.services.nextResult = [{ transferId: 't1' }]
+    fire(h.element, 'drop', filesTransfer([new File(['x'.repeat(192)], 'Photos')]))
+    await settle()
+    expect(h.services.uploads.map((u) => [u.name, u.size])).toEqual([['Photos', 192]])
+    expect(h.said).toEqual([])
+  })
+
+  it('says nothing about folders when an engine cannot tell it about them', async () => {
+    // No `items` means nothing can be said, and a guess would refuse real
+    // files. The drop behaves exactly as it did before the check existed.
+    const h = harness(REMOTE)
+    h.services.nextResult = [{ transferId: 't1' }]
+    fire(h.element, 'drop', transferWithoutItems([new File(['a'], 'a.txt')]))
+    await settle()
+    expect(h.services.uploads.map((u) => u.name)).toEqual(['a.txt'])
+    expect(h.said).toEqual([])
+  })
+})
+
+// ── The name is the platform's, character for character ─────────────────
+//
+// The toast that came back from the folder drop read `15498198pril: Failed
+// to fetch`, and `15498198pril` is not what anybody would call a folder —
+// so the report was that something builds a display name from a timestamp
+// and a fragment, and that whatever it is would mislabel a real file too.
+//
+// It does not exist. Every name on this path is carried, never composed:
+// the browser half takes `File.name` verbatim (below), the Wails half takes
+// `filepath.Base` of the dropped path (ws_upload_source.go), the picker
+// takes the same, and nothing between here and the row touches either. This
+// test is that claim in a form that can fail: a name only a generator could
+// have produced goes in, and the same characters come out on the row.
+describe('what a row calls a dropped file', () => {
+  it('is the name the platform gave it, unaltered', async () => {
+    const odd = '15498198pril'
+    const h = harness(REMOTE)
+    h.services.nextResult = [{ transferId: 't1' }]
+    fire(h.element, 'drop', filesTransfer([new File(['a'], odd)]))
+    await settle()
+    expect(h.services.uploads.map((u) => u.name)).toEqual([odd])
+    expect(h.store.transfers().map((t) => t.name)).toEqual([odd])
   })
 })

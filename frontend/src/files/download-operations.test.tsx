@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fakeClock, fakeDownloadServices } from './download-fixtures'
 import { createDownloadStore, type DownloadStore } from './download-store'
 import { downloadOperations } from './download-operations'
-import { fakeUploadServices } from './upload-fixtures'
+import { beginTransfer, fakeUploadServices } from './upload-fixtures'
 import { createUploadStore, type UploadStore } from './upload-store'
 import { uploadOperations } from './upload-operations'
 import { createOperationsModel } from '../operations/operations'
@@ -100,7 +100,7 @@ function cancelIn(row: HTMLElement): HTMLElement | undefined {
 describe('a download in the operations list', () => {
   it('is the same row an upload is, in the one list, beside it', () => {
     const m = mount()
-    m.uploads.begin({
+    beginTransfer(m.uploads, {
       transferId: 'u1',
       name: 'up.iso',
       destDir: '/srv',
@@ -149,7 +149,7 @@ describe('a download in the operations list', () => {
     // open. Both rows carry it, from one derivation (machine-name.ts), and
     // the row draws them the same way.
     const m = mount()
-    m.uploads.begin({
+    beginTransfer(m.uploads, {
       transferId: 'u1',
       name: 'up.iso',
       destDir: '/srv',

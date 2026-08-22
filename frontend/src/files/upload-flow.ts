@@ -22,6 +22,26 @@
 // means here: not that a second question is suppressed, but that the second
 // call cannot produce one.
 //
+// ## The batch is registered before the first byte moves
+//
+// The send is SEQUENTIAL and stays that way — one transfer at a time per
+// binding is design §4 and this module does not make uploads concurrent.
+// What changed in nocx-hbdw4.6 is that the waiting half is now DATA: every
+// file joins the upload store as a `queued` row before the first
+// files.upload call goes out, so a five-file drop is five rows, five in
+// the count, and five things somebody can cancel one at a time.
+//
+// It used to live in the loop variable below and nowhere else, because a
+// transfer only became real when files.upload answered with a transferId.
+// Drop two files and the second was not in the list, not counted and not
+// cancellable until the first had finished (owner, 2026-08-22).
+//
+// Two consequences the loop now has to carry. A file can leave the batch
+// while an earlier one is sending — its row is simply gone, and its turn
+// is skipped. And a refusal that stops the batch has to ACCOUNT for the
+// files it never attempted, because they are rows on screen and cannot be
+// left waiting for a turn that is not coming.
+//
 // ## The two sources are a routing decision, not two implementations
 //
 // A source the renderer holds bytes for (a browser drop, a browser picker)
@@ -125,14 +145,14 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
    *  rest are the renderer's own half ending for good: the file could not
    *  be read at the declared size, the ticket names nothing, or the sink
    *  read the body and refused it. */
-  async function sendBody(transferId: string, url: string, source: UploadSource): Promise<void> {
+  async function sendBody(id: string, url: string, source: UploadSource): Promise<void> {
     const body = source.blob
     if (body === undefined) {
       // The sink is waiting for bytes and the caller has none. It cannot
       // happen through either gesture — a ticket source never gets this
       // branch back — and if it ever does, saying so beats hanging. No
       // bytes are going to leave this machine, so it is settled.
-      store.failLocally(transferId, 'the sink asked for a body and there is none to send')
+      store.failLocally(id, 'the sink asked for a body and there is none to send')
       return
     }
     const outcome = await services.sendBody(url, body, source.size)
@@ -155,11 +175,8 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
     //
     // The check is AFTER the await and never before it: the button is
     // pressed while the body is in flight, which is the whole case.
-    if (store.cancelRequested(transferId)) {
-      store.unsettle(
-        transferId,
-        `${source.name}: cancelled — waiting for the server to say how it ended`,
-      )
+    if (store.cancelRequested(id)) {
+      store.unsettle(id, `${source.name}: cancelled — waiting for the server to say how it ended`)
       return
     }
     const account: BodyAccount =
@@ -182,14 +199,14 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
               settled: false,
             }
     if (account.settled) {
-      store.failLocally(transferId, account.why)
+      store.failLocally(id, account.why)
       report(account.why, 'danger')
       return
     }
     // A warning and not a danger: nothing has gone wrong that anybody can
     // act on yet, and a person who is told "failed" about a transfer that
     // then succeeds has been lied to twice.
-    store.unsettle(transferId, account.why)
+    store.unsettle(id, account.why)
     report(account.why, 'warning')
   }
 
@@ -197,7 +214,19 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
     destination: UploadDestination,
     source: UploadSource,
     onExists: UploadDecision | undefined,
-  ): Promise<{ kind: 'done' } | { kind: 'collision' } | { kind: 'refused'; message: string }> {
+    /** The row this file already has, from the batch registered before the
+     *  first send. Every store call below addresses it, never the wire's
+     *  id: the row is what a person is looking at and pressing. */
+    id: string,
+  ): Promise<
+    | { kind: 'done' }
+    | { kind: 'collision' }
+    | { kind: 'refused'; message: string }
+    /** The person took the file out of the batch while this call was in
+     *  flight. The store has already stopped the transfer it created; what
+     *  is left for the loop is to send no body and move on. */
+    | { kind: 'withdrawn' }
+  > {
     let result
     try {
       result = await services.upload({
@@ -213,23 +242,58 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
     }
     if ('collision' in result) return { kind: 'collision' }
     // The RESULT is what says the transfer exists — never a progress frame.
-    store.begin({
-      transferId: result.transferId,
-      name: source.name,
-      destDir: destination.destDir,
-      machine: destination.machine,
-      size: source.size,
-    })
-    if ('url' in result) await sendBody(result.transferId, result.url, source)
+    // The row already existed; this is where it stops waiting.
+    if (!store.start(id, result.transferId)) return { kind: 'withdrawn' }
+    if ('url' in result) await sendBody(id, result.url, source)
     return { kind: 'done' }
   }
 
+  /**
+   * What the rows behind a refusal are told.
+   *
+   * THE FILES AFTER A REFUSAL ARE NOT AN ERROR EACH. The refusal is about
+   * the destination and it has already been reported once; saying it again
+   * per file would be the noise the early return exists to prevent. But
+   * they are rows on screen now, and leaving them `queued` for ever would
+   * be the product claiming work is coming that nobody is going to do.
+   *
+   * So each is closed as `skipped` — the wire's own word for "not written,
+   * and that is fine" — carrying why. Neutral, not danger: one thing went
+   * wrong and it is already marked on the row above them.
+   *
+   * They are closed rather than REMOVED, which is the opposite of what a
+   * cancel does to a queued row, and the difference is who acted. A person
+   * who cancels a file has just decided that and watched the row go; these
+   * files were dropped by somebody who asked for them to be sent, and a
+   * product that silently discarded four of five would be answering a
+   * question nobody asked it.
+   */
+  function accountForUnattempted(ids: string[], because: string): void {
+    for (const id of ids) store.abandon(id, `not attempted: ${because}`)
+  }
+
   async function send(destination: UploadDestination, sources: UploadSource[]): Promise<void> {
+    // THE WHOLE BATCH, BEFORE THE FIRST CALL. Every file is on screen, in
+    // the count and cancellable from this moment — which is the whole of
+    // what a person dropping five files could not see (nocx-hbdw4.6).
+    const ids = store.enqueue(
+      sources.map((s) => ({
+        name: s.name,
+        destDir: destination.destDir,
+        machine: destination.machine,
+        size: s.size,
+      })),
+    )
     /** The apply-to-all decision, once the person has made one. */
     let sticky: UploadDecision | undefined
     for (let i = 0; i < sources.length; i++) {
       const source = sources[i]
-      const first = await sendOne(destination, source, sticky)
+      const id = ids[i]
+      // Its row is gone, so the person took this file out of the batch
+      // while an earlier one was sending. Cancelling one file is not
+      // cancelling the batch: the rest still go.
+      if (store.row(id) === undefined) continue
+      const first = await sendOne(destination, source, sticky, id)
       if (first.kind === 'refused') {
         // Stop the batch. A refusal from files.upload is almost always
         // about the DESTINATION — a local binding has no uploader (R1), a
@@ -237,9 +301,13 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
         // identical message per remaining file about a place that is not
         // going to start accepting them.
         report(`Could not upload ${source.name}: ${first.message}`, 'danger')
+        // This file was asked for and refused, which is a failure of its
+        // own and reads as one. The ones behind it were never asked.
+        store.failLocally(id, first.message)
+        accountForUnattempted(ids.slice(i + 1), `${source.name} was refused`)
         return
       }
-      if (first.kind === 'done') continue
+      if (first.kind === 'done' || first.kind === 'withdrawn') continue
 
       // A collision, and nobody has been asked yet — if `sticky` were set
       // the call above carried it and the backend could not have answered
@@ -247,12 +315,22 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
       const answer = await ask({
         name: source.name,
         destination: destination.destDir,
-        remaining: sources.length - i,
+        // THE FILES STILL IN THE BATCH, this one included — not the ones
+        // left in the array. Once a waiting file can be taken out, the two
+        // are different numbers, and the dialog offers to apply an answer
+        // to files it would be applied to.
+        remaining: ids.slice(i).filter((x) => store.row(x) !== undefined).length,
       })
       if (answer.applyToAll) sticky = answer.answer
-      const second = await sendOne(destination, source, answer.answer)
+      // ASKED AGAIN AFTER THE QUESTION, because the question is the one
+      // place the batch waits on a person and a person can spend that time
+      // taking this very file out of it.
+      if (store.row(id) === undefined) continue
+      const second = await sendOne(destination, source, answer.answer, id)
       if (second.kind === 'refused') {
         report(`Could not upload ${source.name}: ${second.message}`, 'danger')
+        store.failLocally(id, second.message)
+        accountForUnattempted(ids.slice(i + 1), `${source.name} was refused`)
         return
       }
       // A second `collision` is not reachable: the call carried a decision.

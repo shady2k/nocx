@@ -3,7 +3,7 @@
 // judgement it does make, which is whether a cancel is offered.
 import { describe, expect, it } from 'vitest'
 
-import { fakeClock, fakeUploadServices } from './upload-fixtures'
+import { beginTransfer, fakeClock, fakeUploadServices } from './upload-fixtures'
 import { createUploadStore } from './upload-store'
 import { uploadOperations } from './upload-operations'
 
@@ -16,7 +16,7 @@ function fixture() {
 describe('an upload as an operation', () => {
   it('carries what the row draws, and nothing the store did not say', () => {
     const f = fixture()
-    f.store.begin({
+    const id = beginTransfer(f.store, {
       transferId: 't1',
       name: 'big.iso',
       destDir: '/srv/data',
@@ -30,7 +30,9 @@ describe('an upload as an operation', () => {
     // undefined until a surface reads it.
     const { cancel, ...data } = op
     expect(data).toEqual({
-      id: 't1',
+      // The ROW's id and not the wire's: an operation must not change
+      // identity when the backend finally names its transfer.
+      id,
       kind: 'upload',
       title: 'big.iso',
       destination: '/srv/data',
@@ -49,7 +51,7 @@ describe('an upload as an operation', () => {
   it('says the name that was actually written, once there is one', () => {
     // keepBoth changes it, and the row must say what is on the far side.
     const f = fixture()
-    f.store.begin({
+    beginTransfer(f.store, {
       transferId: 't1',
       name: 'notes.txt',
       destDir: '/srv',
@@ -67,7 +69,7 @@ describe('an upload as an operation', () => {
 
   it('offers a cancel while the work is live, on both non-terminal phases', () => {
     const f = fixture()
-    f.store.begin({
+    const live = beginTransfer(f.store, {
       transferId: 't1',
       name: 'a',
       destDir: '/srv',
@@ -80,14 +82,14 @@ describe('an upload as an operation', () => {
     // backend may still be writing, and files.uploadCancel is exactly what
     // reaches it. A row with no cancel here would take away the only
     // control that can stop it.
-    f.store.unsettle('t1', 'the connection dropped')
+    f.store.unsettle(live, 'the connection dropped')
     expect(f.ops()[0].cancel).not.toBeNull()
   })
 
   it('offers none once it is over, on every terminal outcome', () => {
     for (const outcome of ['written', 'skipped', 'cancelled', 'failed'] as const) {
       const f = fixture()
-      f.store.begin({
+      beginTransfer(f.store, {
         transferId: 't1',
         name: 'a',
         destDir: '/srv',
@@ -103,7 +105,7 @@ describe('an upload as an operation', () => {
     // Not by deciding a phase locally: the person's cancel races the
     // transfer's own completion every time, and uploadDone says which won.
     const f = fixture()
-    f.store.begin({
+    beginTransfer(f.store, {
       transferId: 't1',
       name: 'a',
       destDir: '/srv',

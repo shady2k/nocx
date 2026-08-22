@@ -20,6 +20,8 @@ import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
 import type { SandboxAccessClient } from './sandbox-access-settings'
+import type { AboutClient } from './about-client'
+import type { ClipboardAccess } from './clipboard'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -62,6 +64,8 @@ export class SettingsContent extends SolidPaneContent {
     private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
     private readonly skillsStore?: SkillsStore,
     private readonly sandboxAccessClient?: SandboxAccessClient,
+    private readonly aboutClient?: AboutClient,
+    private readonly clipboard?: ClipboardAccess,
   ) {
     super()
   }

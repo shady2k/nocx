@@ -51,6 +51,17 @@ describe('openSandboxedShell', () => {
     expect(d.reportError).not.toHaveBeenCalled()
   })
 
+  it('uses a verified workspace override without opening the initial picker', async () => {
+    const d = deps()
+    await openSandboxedShell(d, { workspace: '/verified/project' })
+
+    expect(d.openDirectory).not.toHaveBeenCalled()
+    expect(d.showPermissions).toHaveBeenCalledWith(
+      expect.objectContaining({ workspace: '/verified/project' }),
+    )
+    expect(d.newSandboxedTab).toHaveBeenCalledWith('/verified/project', expect.any(Object))
+  })
+
   it('never sends either baseline or an effective root', async () => {
     const d = deps()
     await openSandboxedShell(d)

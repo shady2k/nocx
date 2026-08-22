@@ -17,7 +17,7 @@ Non-restorability is derived. At backend startup, every open pane named by `sand
 
 Schema version remains 12. The previous v12 shape existed only on this unmerged branch, and the documented discard mechanism already rebuilds files whose version differs. Creating v13 would preserve no released data.
 
-The only launch entry is the shield in the active sidebar-panel header. It is hidden while `sandbox.enabled` is false. It is disabled when the backend is unavailable, the active surface is not a local terminal, or OSC 7 has not verified a cwd. Quick Connect, the tab-strip More menu, `+`, and Cmd/Ctrl+T contain no sandbox action.
+The only launch entry is the shield in the activity bar's top zone beside the Files view icon; it is not part of the Files panel header. It is hidden while `sandbox.enabled` is false. It is disabled when the backend is unavailable, the active surface is not a local terminal, or OSC 7 has not verified a cwd. Quick Connect, the tab-strip More menu, `+`, and Cmd/Ctrl+T contain no sandbox action.
 
 Conversion creates a new sandbox pane using the source cwd, waits for its durable create acknowledgement, moves the new tab to the source tab's strip position, and then closes the source. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
 

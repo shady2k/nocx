@@ -569,32 +569,33 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
   })
 })
 
-describe('sidebar panel actions', () => {
-  it('renders the shared action before the active view action', () => {
+describe('sidebar view-zone actions', () => {
+  it('renders an action beside the Files view, not in the Files panel header', () => {
     const { bar, panel } = mount()
-    const views: SidebarViewDescriptor[] = [
-      {
-        ...TWO_VIEWS[0],
-        actions: () => <button data-testid="view-action">View</button>,
-      },
-    ]
     mountSidebar(
       bar,
       panel,
-      views,
+      [TWO_VIEWS[0]],
       [],
       undefined,
       undefined,
       undefined,
       undefined,
       undefined,
-      () => <button data-testid="panel-action">Panel</button>,
+      [
+        {
+          id: 'sandbox-shield',
+          title: 'Sandbox',
+          icon: TestIcon,
+          onActivate: () => {},
+        },
+      ],
     )
 
-    const actions = [...panel.querySelectorAll('.ui-sidebar-view__actions button')]
-    expect(actions.map((action) => action.getAttribute('data-testid'))).toEqual([
-      'panel-action',
-      'view-action',
-    ])
+    const topButtons = [...bar.querySelectorAll<HTMLElement>('.activity-bar-top button')]
+    expect(
+      topButtons.map((button) => button.getAttribute('data-view') ?? button.dataset.action),
+    ).toEqual(['alpha', 'sandbox-shield'])
+    expect(panel.querySelector('[data-testid="sandbox-shield"]')).toBeNull()
   })
 })

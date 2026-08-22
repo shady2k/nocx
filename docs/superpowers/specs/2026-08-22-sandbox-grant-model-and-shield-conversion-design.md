@@ -6,7 +6,7 @@
 
 ## Goal
 
-Represent sandbox authority as an immutable pane-subject grant and provide one launch path: converting the active local terminal through the sidebar-panel shield.
+Represent sandbox authority as an immutable pane-subject grant and provide one launch path: converting the active local terminal through the activity-bar shield beside the Files view icon.
 
 ## Persistence and startup
 
@@ -22,7 +22,7 @@ A sandbox `open` must name an open pane with no existing grant. Duplicate grants
 
 The shield is hidden when `sandbox.enabled` is false. When enabled it is disabled unless `sandbox.status.available` is true, the active surface is a local terminal, and its cwd came from verified OSC 7. The disabled title names the unmet condition. A ready title includes the verified workspace.
 
-The panel header owns one shared `panelActions` slot rendered before view-specific actions. The shield uses the UI kit `IconButton` and existing `ShieldIcon`.
+The activity bar's top zone owns action buttons that sit beside view icons without activating a view. The shield renders there immediately after Files; it is not part of the Files panel header. It uses the UI kit `IconButton` and existing `ShieldIcon`.
 
 ## Conversion
 

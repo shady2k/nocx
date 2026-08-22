@@ -442,6 +442,12 @@ async function main() {
     setActiveOrigin(tm.activeOrigin())
   }
   let convertActiveTabToSandboxed: () => Promise<void> = async () => {}
+  const currentShieldState = () =>
+    shieldState({
+      enabled: sandboxEnabledLive(),
+      statusAvailable: sandboxStatusAvailable(),
+      origin: activeOrigin(),
+    })
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
   // binding lifecycle: a binding is live from the files.open that created
@@ -818,30 +824,23 @@ async function main() {
     () => activeOrigin(),
     sidebarWidthCtrl,
     () => activeSurfaceType() === SURFACE_SETTINGS,
-    () => {
-      const state = shieldState({
-        enabled: sandboxEnabledLive(),
-        statusAvailable: sandboxStatusAvailable(),
-        origin: activeOrigin(),
-      })
-      if (state.kind === 'hidden') return <></>
-      const title =
-        state.kind === 'ready'
-          ? `Convert this tab to a sandboxed shell (${state.workspace})`
-          : state.reason
-      return (
-        <IconButton
-          data-testid="sandbox-shield"
-          size="sm"
-          ariaLabel="Convert active tab to a sandboxed shell"
-          title={title}
-          disabled={state.kind !== 'ready'}
-          onClick={() => void convertActiveTabToSandboxed()}
-        >
-          <ShieldIcon />
-        </IconButton>
-      )
-    },
+    [
+      {
+        id: 'sandbox-shield',
+        title: () => {
+          const state = currentShieldState()
+          return state.kind === 'ready'
+            ? `Convert this tab to a sandboxed shell (${state.workspace})`
+            : state.kind === 'disabled'
+              ? state.reason
+              : 'Convert active tab to a sandboxed shell'
+        },
+        icon: ShieldIcon,
+        hidden: () => currentShieldState().kind === 'hidden',
+        disabled: () => currentShieldState().kind !== 'ready',
+        onActivate: () => void convertActiveTabToSandboxed(),
+      },
+    ],
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
@@ -998,11 +997,7 @@ async function main() {
   }
 
   convertActiveTabToSandboxed = async (): Promise<void> => {
-    const ready = shieldState({
-      enabled: sandboxEnabledLive(),
-      statusAvailable: sandboxStatusAvailable(),
-      origin: activeOrigin(),
-    })
+    const ready = currentShieldState()
     if (ready.kind !== 'ready') return
     let state: { enabled: boolean; status: SandboxStatus | null }
     try {

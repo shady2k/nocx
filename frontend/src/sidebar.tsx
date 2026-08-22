@@ -24,7 +24,7 @@
 
 import { render, Dynamic } from 'solid-js/web'
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack } from 'solid-js'
-import type { Component, JSX } from 'solid-js'
+import type { Component } from 'solid-js'
 import { SidebarView } from './ui/sidebar-view'
 import { ResizeHandle } from './ui/resize-handle'
 import { createAppStore, type AppActions, type AppState } from './state'
@@ -69,12 +69,14 @@ export interface SidebarViewDescriptor {
   readonly order: number
 }
 
-/** An action button in the bottom zone (global actions, never opens panel). */
+/** An action button in the activity bar that never opens a panel. */
 export interface SidebarAction {
   readonly id: string
-  readonly title: string
+  readonly title: string | (() => string)
   readonly icon: Component
   readonly onActivate: () => void
+  readonly disabled?: () => boolean
+  readonly hidden?: () => boolean
 }
 
 /** The sidebar's remembered state, and the seam that records a change.
@@ -116,7 +118,6 @@ interface PanelRootProps {
   /** The width controller (nocx-qmcu) — when present the panel renders the
    *  kit ResizeHandle at its trailing edge and the drag resizes #sidebar. */
   resize?: SidebarWidthController
-  panelActions?: () => JSX.Element
 }
 
 function PanelRoot(props: PanelRootProps) {
@@ -142,7 +143,6 @@ function PanelRoot(props: PanelRootProps) {
         collapsed={() => props.state.sidebar.collapsed}
         getActiveProfileId={props.getActiveProfileId}
         getActiveOrigin={props.getActiveOrigin}
-        panelActions={props.panelActions}
       />
       {/* The handle is the flex row's trailing slot (see #sidebar in
           style.css): a real flex item, never an overlay, so it can neither
@@ -176,7 +176,6 @@ function ActiveView(props: {
   collapsed: () => boolean
   getActiveProfileId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
-  panelActions?: () => JSX.Element
 }) {
   // Only the active view renders, so "visible" is exactly the panel's
   // expanded state — a collapsed sidebar is a hidden view (nocx-wzc4.7).
@@ -186,10 +185,7 @@ function ActiveView(props: {
     <SidebarView
       title={props.desc.title}
       actions={
-        <>
-          {props.panelActions?.()}
-          <Show when={props.desc.actions}>{(Actions) => <Dynamic component={Actions()} />}</Show>
-        </>
+        <Show when={props.desc.actions}>{(Actions) => <Dynamic component={Actions()} />}</Show>
       }
     >
       <Dynamic
@@ -209,6 +205,7 @@ interface SidebarSolidProps {
   panel: HTMLElement
   views: readonly SidebarViewDescriptor[]
   actions: readonly SidebarAction[]
+  viewActions: readonly SidebarAction[]
   persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
@@ -235,8 +232,10 @@ function SidebarSolid(props: SidebarSolidProps) {
       const found = props.views.find((v) => v.id === props.state.sidebar.activeViewId)
       if (found) return found.id
     }
-    // Fall back to the first item in toolbar order (views before actions).
+    // Fall back to the first item in toolbar order (views, view actions,
+    // then bottom actions).
     if (props.views.length > 0) return props.views[0].id
+    if (props.viewActions.length > 0) return props.viewActions[0].id
     if (props.actions.length > 0) return props.actions[0].id
     return null
   })
@@ -408,6 +407,24 @@ function SidebarSolid(props: SidebarSolidProps) {
             </IconButton>
           )}
         </For>
+        <For each={props.viewActions}>
+          {(action) => (
+            <Show when={action.hidden?.() !== true}>
+              <IconButton
+                size="lg"
+                data-action={action.id}
+                data-testid={action.id}
+                title={typeof action.title === 'function' ? action.title() : action.title}
+                ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
+                disabled={action.disabled?.() === true}
+                tabIndex={action.id === tabbableId() ? 0 : -1}
+                onClick={() => handleActionClick(action)}
+              >
+                <action.icon />
+              </IconButton>
+            </Show>
+          )}
+        </For>
       </div>
 
       {/* Spacer pushes bottom zone to the bottom */}
@@ -420,8 +437,9 @@ function SidebarSolid(props: SidebarSolidProps) {
             <IconButton
               size="lg"
               data-action={action.id}
-              title={action.title}
-              ariaLabel={action.title}
+              title={typeof action.title === 'function' ? action.title() : action.title}
+              ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
+              disabled={action.disabled?.() === true}
               tabIndex={action.id === tabbableId() ? 0 : -1}
               onClick={() => handleActionClick(action)}
             >
@@ -483,12 +501,12 @@ export function mountSidebar(
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActivePaneIsSettings?: () => boolean,
-  panelActions?: () => JSX.Element,
+  viewActions: readonly SidebarAction[] = [],
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
   const activePaneIsSettings = getActivePaneIsSettings ?? (() => false)
-  const actionsForPanel = panelActions
+  const actionsBesideViews = viewActions
 
   const [state, storeActions] = createAppStore()
 
@@ -521,6 +539,7 @@ export function mountSidebar(
     () => (
       <SidebarSolid
         bar={bar}
+        viewActions={actionsBesideViews}
         panel={panel}
         views={views}
         actions={actions}
@@ -540,7 +559,6 @@ export function mountSidebar(
         getActiveProfileId={activeProfileId}
         getActiveOrigin={activeOrigin}
         resize={resize}
-        panelActions={actionsForPanel}
       />
     ),
     panel,

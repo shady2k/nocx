@@ -160,7 +160,7 @@ therefore `layout.read.ts`) regenerate with `ephemeral: boolean` on `Pane`.
    settings snapshot → native directory picker (workspace) → permission dialog
 
 > **Superseded:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
-> consolidates sandbox launch into the active sidebar-panel shield.
+> consolidates sandbox launch into the activity-bar shield beside Files.
 
 (deltas) → `deps.newSandboxedTab(workspace, launch)`.
 

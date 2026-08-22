@@ -863,7 +863,7 @@ var SandboxEnabled = MustRegisterBool(BoolSpec{
 	Key:         "sandbox.enabled",
 	Section:     "Experimental",
 	Label:       "Filesystem sandbox",
-	Description: "Expose the sidebar shield action that converts the active local tab into a filesystem-isolated sandbox (experimental). The action requires a verified current folder; the flag alone never sandboxes anything.",
+	Description: "Expose the activity-bar shield beside Files that converts the active local tab into a filesystem-isolated sandbox (experimental). The action requires a verified current folder; the flag alone never sandboxes anything.",
 	DataClass:   PublicConfig,
 	Default:     false,
 })

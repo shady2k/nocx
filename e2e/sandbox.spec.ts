@@ -63,6 +63,8 @@ test.describe('sandbox shield', () => {
 
     const shield = page.locator(SHIELD)
     await expect(shield).toHaveCount(1)
+    await expect(page.locator('.activity-bar-top').locator(SHIELD)).toHaveCount(1)
+    await expect(page.locator('.ui-sidebar-view__actions').locator(SHIELD)).toHaveCount(0)
     await expect(shield).toHaveAttribute(
       'title',
       /Convert this tab to a sandboxed shell|Sandbox unavailable|Wait for the shell/,

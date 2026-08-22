@@ -30,7 +30,10 @@ describe('fetching one file', () => {
   it('names the file and nothing else — no destination crosses the seam', async () => {
     const f = fixture()
     f.services.nextResult.push(downloadResultFixture())
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso' })
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
+    // The MACHINE is not on the wire and must not be: it is a label
+    // `machine-name.ts` produced for a person, and the backend already
+    // knows which host a binding names.
     expect(f.services.downloads).toEqual([{ bindingId: 'b1', path: '/srv/big.iso' }])
   })
 
@@ -40,7 +43,7 @@ describe('fetching one file', () => {
     // renderer's second opinion about it.
     const f = fixture()
     f.services.nextResult.push(downloadResultFixture({ name: 'measured.iso', size: 4096 }))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso' })
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
     expect(f.store.transfers()).toHaveLength(1)
     expect(f.store.transfers()[0]).toMatchObject({
       name: 'measured.iso',
@@ -58,7 +61,7 @@ describe('fetching one file', () => {
     const f = fixture()
     const ticket = 'b'.repeat(64)
     f.services.nextResult.push(downloadResultFixture({ url: `/download/${ticket}` }))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso' })
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
     expect(f.saver.saved).toEqual([`http://127.0.0.1:7331/download/${ticket}`])
   })
 
@@ -67,7 +70,7 @@ describe('fetching one file', () => {
     // as an uploaded file appearing in the destination is.
     const f = fixture()
     f.services.nextResult.push(downloadResultFixture())
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso' })
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
     expect(f.said).toEqual([])
   })
 })
@@ -78,7 +81,7 @@ describe('when it cannot start', () => {
     // send one — so it would sit "running" until the session ended.
     const f = fixture()
     f.services.download = () => Promise.reject(new Error('binding is closed'))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso' })
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
     expect(f.store.transfers()).toEqual([])
     expect(f.said).toEqual([
       {
@@ -92,7 +95,9 @@ describe('when it cannot start', () => {
   it('never rejects, whatever the seam does', async () => {
     const f = fixture()
     f.services.download = () => Promise.reject(new Error('boom'))
-    await expect(f.flow.fetch({ bindingId: 'b1', path: '/x' })).resolves.toBeUndefined()
+    await expect(
+      f.flow.fetch({ bindingId: 'b1', path: '/x', machine: 'alice@srv-01' }),
+    ).resolves.toBeUndefined()
   })
 
   it('with no connection to fetch over, the row FAILS rather than sitting at nothing', async () => {
@@ -102,7 +107,7 @@ describe('when it cannot start', () => {
     const f = fixture()
     f.services.origin = null
     f.services.nextResult.push(downloadResultFixture({ name: 'big.iso' }))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso' })
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
     expect(f.saver.saved).toEqual([])
     expect(f.store.transfers()[0]).toMatchObject({ phase: 'failed' })
     expect(f.store.transfers()[0].error).toContain('no connection')

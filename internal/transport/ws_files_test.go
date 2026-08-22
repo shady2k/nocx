@@ -116,42 +116,21 @@ func waitFor(t *testing.T, what string, d time.Duration, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// readNotification reads messages until one carrying the given method
-// arrives (notifications have no id) or the deadline passes, and returns
-// its raw params.
+// readNotification answers with the params of the next notification
+// carrying the given method — one already retained for this connection, or
+// the next to arrive — and fails the test when the deadline passes with
+// none.
+//
+// It reads through the inbox (ws_inbox_test.go), so a response or another
+// notification seen on the way is kept rather than dropped. awaitNotification
+// is the same wait without the t.Fatalf, for the tests that assert it fails.
 func readNotification(t *testing.T, conn *websocket.Conn, method string, d time.Duration) json.RawMessage {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("timed out waiting for %s notification", method)
-		}
-		// The deadline is the REMAINING budget, so one failed read has
-		// already spent it and there is nothing left to retry with. The
-		// loop used to set the full budget every pass and `continue` on
-		// error, which was wrong twice over: gorilla makes a read error
-		// permanent (c.readErr), so every later pass returned instantly and
-		// the loop spun at full speed for the whole bound — burning a core
-		// beside every other test in the package — and then reported "timed
-		// out" for a socket that had failed at the first read (nocx-2bvy).
-		_ = conn.SetReadDeadline(time.Now().Add(remaining))
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("waiting for %s notification: %v", method, err)
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil && n.Method == method {
-			return n.Params
-		}
+	params, err := awaitNotification(conn, method, d)
+	if err != nil {
+		t.Fatalf("waiting for %s notification: %v", method, err)
 	}
+	return params
 }
 
 // drainFilesChanged collects every files.changed params that arrives on
@@ -161,28 +140,17 @@ func drainFilesChanged(t *testing.T, conn *websocket.Conn, d time.Duration) []ma
 	t.Helper()
 	var got []map[string]any
 	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(d))
-		_, msg, err := conn.ReadMessage()
+	for {
+		msg, err := awaitFrame(conn, deadline, isNotification("files.changed"))
 		if err != nil {
-			return got
+			return got // the window closed, or the socket did
 		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil && n.Method == "files.changed" {
-			var params map[string]any
-			if err := json.Unmarshal(n.Params, &params); err == nil {
-				got = append(got, params)
-			}
+		f, _ := decodeFrame(msg)
+		var params map[string]any
+		if err := json.Unmarshal(f.Params, &params); err == nil {
+			got = append(got, params)
 		}
 	}
-	return got
 }
 
 // watchDir installs a watch over the wire and returns the transport's

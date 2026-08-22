@@ -943,82 +943,26 @@ func TestGitChanged_DeliveredOnSessionClose(t *testing.T) {
 	}
 }
 
-// closeSessionCollectNotification issues the close RPC and reads until BOTH
-// the matching response and a notification with the given method have
-// arrived, returning the response and the notification's params. Notifications
-// that beat the response are retained, never discarded: gitSessionClosed
-// writes git.changed from a detached goroutine, so its delivery can precede
-// the close response, and a response-only wait (jsonrpcCallWithID) would
-// consume and drop the frame. That discard is the flake this helper replaces:
-// with the notification gone, the follow-up read deadlined once, and
-// gorilla/websocket stores the first read error in c.readErr and returns it
-// from every subsequent read — so the "5s wait" could never succeed even
-// though the delivery had already happened.
+// closeSessionCollectNotification issues the close RPC and returns both the
+// matching response and the params of the given notification.
+//
+// It used to be the ONLY reader in this package that retained a frame it
+// had not asked for, with a doc comment describing why: gitSessionClosed
+// writes git.changed from a detached goroutine, so the notification can
+// precede the close response and a response-only wait would eat it. That
+// was right, and it was right for every other wait in the package too —
+// which is now where it lives (ws_inbox_test.go). What is left here is the
+// close call and its two waits, in either order on the wire.
 func closeSessionCollectNotification(t *testing.T, conn *websocket.Conn, sid, method string, id int, d time.Duration) (json.RawMessage, json.RawMessage) {
 	t.Helper()
-	req, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  "close",
-		"params":  map[string]string{"sessionId": sid},
-	})
-	if err != nil {
-		t.Fatalf("close: marshal: %v", err)
-	}
-	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
-		t.Fatalf("close: write: %v", err)
-	}
-
 	deadline := time.Now().Add(d)
-	var resp json.RawMessage
-	var params json.RawMessage
-	for time.Now().Before(deadline) {
-		// The remaining budget, not the whole one: a read error is
-		// permanent in gorilla (c.readErr), so retrying after one spun this
-		// loop at full speed until the bound and then blamed the deadline
-		// for a socket that had already failed (nocx-2bvy). The loop below
-		// still reports whichever half is missing.
-		_ = conn.SetReadDeadline(deadline)
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil {
-			if n.Method == method && params == nil {
-				params = n.Params
-			}
-		} else {
-			var idCheck struct {
-				ID int `json:"id"`
-			}
-			_ = json.Unmarshal(msg, &idCheck)
-			if idCheck.ID == id && resp == nil {
-				resp = msg
-			}
-		}
-		// Checked after EITHER half arrives: the notification can precede
-		// the response or follow it, and a `continue` that skipped this
-		// check let the loop run to its deadline, poison the connection
-		// (gorilla's permanent c.readErr) and break the NEXT call.
-		if resp != nil && params != nil {
-			break
-		}
+	resp := jsonrpcCallWithID(t, conn, "close", map[string]string{"sessionId": sid}, id)
+	msg, err := awaitFrame(conn, deadline, isNotification(method))
+	if err != nil {
+		t.Fatalf("waiting for %s notification after close: %v", method, err)
 	}
-	if resp == nil {
-		t.Fatalf("timed out waiting for close response")
-	}
-	if params == nil {
-		t.Fatalf("timed out waiting for %s notification", method)
-	}
-	return resp, params
+	f, _ := decodeFrame(msg)
+	return resp, f.Params
 }
 
 // TestGitChanged_NotDeliveredWithoutSubscriber pins the other end: with no
@@ -1239,24 +1183,9 @@ func initRealGitRepo(t *testing.T, dir string) {
 // nil when no matching notification arrives within the window.
 func tryReadNotification(t *testing.T, conn *websocket.Conn, method string, d time.Duration) json.RawMessage {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(d))
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			return nil
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil && n.Method == method {
-			return n.Params
-		}
+	params, err := awaitNotification(conn, method, d)
+	if err != nil {
+		return nil
 	}
-	return nil
+	return params
 }

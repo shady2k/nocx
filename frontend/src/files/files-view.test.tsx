@@ -134,6 +134,10 @@ const SSH_ORIGIN: ActiveOrigin = {
   cwdVerified: false,
   cwdFollow: true,
   host: 'srv-01',
+  // What terminal-content answers the activeOrigin capability with — the
+  // machine-name.ts string, derived once in the composition root so no
+  // surface builds a second spelling of one machine.
+  machine: 'alice@srv-01',
 }
 
 const liveHandles: SidebarHandle[] = []
@@ -1487,6 +1491,21 @@ describe('downloading a file from the tree', () => {
     // handed the URL the backend minted.
     await vi.waitFor(() => expect(app.saver!.saved).toHaveLength(1))
     expect(app.saver!.saved[0]).toContain('/download/')
+  })
+
+  it('records WHICH MACHINE the file came from, off the origin the panel follows', async () => {
+    // The operations list is global, so the row is read out of the context
+    // of the tab that started the work. The panel does not derive the
+    // string — machine-name.ts already answered it in the composition root
+    // and it rides the origin — and it must not reach the WIRE, which
+    // already knows which host a binding names.
+    const app = await openMenuOn('ssh', false)
+    app.services!.nextResult.push(downloadResultFixture({ name: 'notes.md', size: 12 }))
+    menuRow('Download').click()
+
+    await vi.waitFor(() => expect(app.store!.transfers()).toHaveLength(1))
+    expect(app.store!.transfers()[0].machine).toBe('alice@srv-01')
+    expect(app.services!.downloads[0]).toEqual({ bindingId: 'b1', path: '/notes.md' })
   })
 
   it('the transfer appears in the download store, which is what the operations list reads', async () => {

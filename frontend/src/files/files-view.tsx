@@ -296,7 +296,13 @@ function FilesPanel(props: FilesPanelProps) {
     if (u === null || b === null) return
     const sources = await props.pickSources()
     if (sources.length === 0) return
-    await u.flow.send({ bindingId: b.bindingId, destDir: node.path }, sources)
+    // WHICH MACHINE, from the origin the store is BOUND to rather than from
+    // whatever tab is active now: the machine is a property of the binding,
+    // and the operations list is global, so the row has no tab to ask later.
+    await u.flow.send(
+      { bindingId: b.bindingId, destDir: node.path, machine: props.store.origin()?.machine ?? '' },
+      sources,
+    )
   }
 
   /**
@@ -319,7 +325,14 @@ function FilesPanel(props: FilesPanelProps) {
     const d = props.download
     const b = props.store.binding()
     if (d === null || b === null) return
-    await d.flow.fetch({ bindingId: b.bindingId, path: node.path })
+    // The machine comes off the origin the panel is already following —
+    // the same place the Upload action reads it from, and the same string,
+    // because `machine-name.ts` answered it once in the composition root.
+    await d.flow.fetch({
+      bindingId: b.bindingId,
+      path: node.path,
+      machine: props.store.origin()?.machine ?? '',
+    })
   }
 
   /** The menu's items for the row it is open on. The two copy entries are
@@ -789,7 +802,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
     const b = store.binding()
     const folder = store.revealTarget()
     if (b === null || folder === null) return null
-    return { bindingId: b.bindingId, destDir: folder }
+    return { bindingId: b.bindingId, destDir: folder, machine: store.origin()?.machine ?? '' }
   }
 
   const uploadHere = async (): Promise<void> => {

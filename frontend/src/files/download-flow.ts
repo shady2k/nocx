@@ -35,6 +35,13 @@ import type { DownloadStore } from './download-store'
 interface DownloadTarget {
   bindingId: string
   path: string
+  /** WHICH MACHINE `path` is on, as a person names it. It rides the target
+   *  rather than being derived here for the reason `UploadDestination`
+   *  carries it: `machine-name.ts` is the one owner of the string and its
+   *  answer is already on the origin the panel follows, so a flow that
+   *  built its own would be a second spelling of one machine — and the two
+   *  agree everywhere anybody looks until the day one of them has no user. */
+  machine: string
 }
 
 /** Tell the person something went wrong. A refusal is an action outcome and
@@ -76,6 +83,7 @@ export function createDownloadFlow(deps: DownloadFlowDeps): DownloadFlow {
       transferId: result.transferId,
       name: result.name,
       sourcePath: target.path,
+      machine: target.machine,
       size: result.size,
     })
     const url = services.resolveUrl(result.url)

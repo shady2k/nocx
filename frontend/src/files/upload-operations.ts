@@ -25,11 +25,13 @@ export function uploadOperations(store: UploadStore): OperationSource {
       // changed it, and the row must say what is on the far side.
       title: t.finalName !== '' ? t.finalName : t.name,
       destination: t.destDir,
+      machine: t.machine,
       phase: t.phase,
       done: t.bytes,
       total: t.size,
       speedBytesPerSecond: t.speedBytesPerSecond,
       error: t.error,
+      startedAt: t.startedAt,
       endedAt: t.endedAt,
       cancel: isTerminalPhase(t.phase) ? null : () => store.cancel(t.transferId),
     }))

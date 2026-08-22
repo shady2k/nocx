@@ -62,6 +62,21 @@ interface DownloadTransfer {
    *  so it always knows it — except on an adopted row, which is why it can
    *  be empty. */
   sourcePath: string
+  /** WHICH MACHINE `sourcePath` is on, as a person names it
+   *  (machine-name.ts). '' only where it is genuinely unknown — an adopted
+   *  transfer, which never saw the call that started it. Recorded HERE, at
+   *  the start, for the reason the upload store records it here: the
+   *  operations list is GLOBAL, one list for every tab, so by the time a
+   *  row is drawn there is no tab to ask — and this store knows neither
+   *  binding nor session, so there is nothing to derive it from later.
+   *
+   *  For a download the machine is the host the file came FROM, which is
+   *  the machine of the binding it was read through. That is the same
+   *  string an upload TO that host would carry, and it reaches this store
+   *  by the same route: the origin the panel is already following, which
+   *  is where `machine-name.ts`'s answer is put so that no call site has
+   *  to derive one of its own. */
+  machine: string
   /** The size measured on the open handle at mint time, refreshed from any
    *  frame's `total`. Zero is legitimate: an empty file is a file. */
   size: number
@@ -72,6 +87,11 @@ interface DownloadTransfer {
   /** Derived here, never on the wire. Null until two samples exist. */
   speedBytesPerSecond: number | null
   phase: OperationPhase
+  /** When `begin` was called, on the store's own clock; null for an adopted
+   *  transfer, which this renderer never saw start. The other end of the
+   *  duration a finished row reports — a span needs both, and naming only
+   *  the end is how a "how long did it take" becomes a moment. */
+  startedAt: number | null
   /** When it reached a terminal phase, on the store's own clock; null while
    *  it is live. It orders the finished half of the operations list and
    *  decides which one falls off the end. */
@@ -92,8 +112,16 @@ export interface DownloadStore {
   transfers(): DownloadTransfer[]
   transfer(transferId: string): DownloadTransfer | undefined
   /** Seed a row from files.download's RESULT. This — not a progress frame —
-   *  is what says a transfer exists. */
-  begin(t: { transferId: string; name: string; sourcePath: string; size: number }): void
+   *  is what says a transfer exists. `machine` is passed rather than derived
+   *  because this store is global and has no tab to ask; `startedAt` is
+   *  taken from the clock here, because this call IS the start. */
+  begin(t: {
+    transferId: string
+    name: string
+    sourcePath: string
+    machine: string
+    size: number
+  }): void
   /**
    * Record a failure only the renderer can know about, and that is the
    * whole story: no bytes are going to be asked for. The one caller is a
@@ -186,8 +214,15 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
     })
   }
 
-  function begin(t: { transferId: string; name: string; sourcePath: string; size: number }): void {
+  function begin(t: {
+    transferId: string
+    name: string
+    sourcePath: string
+    machine: string
+    size: number
+  }): void {
     if (disposed) return
+    const startedAt = now()
     setTransfers((list) => {
       // A transfer the retained done frame already adopted, now being
       // begun: one row, not two. The id is the identity.
@@ -198,10 +233,12 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
           transferId: t.transferId,
           name: t.name,
           sourcePath: t.sourcePath,
+          machine: t.machine,
           size: t.size,
           bytes: null,
           speedBytesPerSecond: null,
           phase: 'running',
+          startedAt,
           endedAt: null,
           error: null,
           adopted: false,
@@ -250,7 +287,14 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
           {
             transferId: p.transferId,
             name: p.name,
+            // Unknown, and saying so: this renderer never saw the call that
+            // would have carried the path or the machine, and a guess at
+            // either reads exactly like a fact. The SIZE is the one thing
+            // an adopted download does know — files.downloadDone carries
+            // `total` on every outcome, which is the asymmetry with an
+            // adopted upload, whose done frame carries no size at all.
             sourcePath: '',
+            machine: '',
             size: p.total,
             // The frame's own count, and this is where the two directions
             // differ most: a failed download's byte count is the account
@@ -259,6 +303,7 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
             bytes: p.bytes,
             speedBytesPerSecond: null,
             phase,
+            startedAt: null,
             endedAt,
             error: p.outcome === 'failed' ? (p.error ?? null) : null,
             adopted: true,

@@ -70,6 +70,22 @@ export interface ActiveOrigin {
    *  look local (the marker asymmetry backwards). Never inferred from the
    *  cwd; it is how the session was opened. */
   host: string | null
+  /**
+   * The machine this origin speaks for, as a person NAMES it — the string
+   * `machine-name.ts` produces (`user@host`, or "This machine"), and the
+   * same one the tab strip's second line shows for this tab.
+   *
+   * Distinct from `host`, which is the bare hostname a surface compares or
+   * prefixes a filename with. This one is for telling a person which
+   * machine, in a place where the tab is not in front of them: the
+   * operations list is global, one list for every tab, so a row naming a
+   * path and no machine answers nothing once two connections are open.
+   *
+   * Optional because only a LIVE terminal origin can answer it. A viewer or
+   * diff tab carries a frozen origin and no live user to name, and says so
+   * by carrying nothing rather than by naming a machine it is no longer on.
+   */
+  machine?: string
 }
 
 // ── Host (B.4) ────────────────────────────────────────────────────────────

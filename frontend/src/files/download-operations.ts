@@ -32,11 +32,18 @@ export function downloadOperations(store: DownloadStore): OperationSource {
       // tell two files of the same name apart; showing a guessed
       // "~/Downloads" would be the renderer inventing an answer.
       destination: t.sourcePath,
+      // WHICH machine that path is on. It matters more here than for an
+      // upload, not less: the list is global, and "/etc/nginx.conf" with no
+      // machine beside it is a path that exists on every host a person has
+      // open. The store recorded it at the start, because by the time this
+      // row is drawn there is no tab left to ask.
+      machine: t.machine,
       phase: t.phase,
       done: t.bytes,
       total: t.size,
       speedBytesPerSecond: t.speedBytesPerSecond,
       error: t.error,
+      startedAt: t.startedAt,
       endedAt: t.endedAt,
       cancel: isTerminalPhase(t.phase) ? null : () => store.cancel(t.transferId),
     }))

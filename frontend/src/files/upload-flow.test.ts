@@ -9,7 +9,7 @@ import { fakeClock, fakeUploadServices } from './upload-fixtures'
 import type { CollisionRequest, CollisionResult } from '../ui/collision-dialog'
 import type { ToastLevel } from '../ui/toast'
 
-const DEST = { bindingId: 'b1', destDir: '/srv/data' }
+const DEST = { bindingId: 'b1', destDir: '/srv/data', machine: 'deploy@srv-01' }
 
 function blobOf(size: number): Blob {
   return new Blob([new Uint8Array(size)])
@@ -316,5 +316,131 @@ describe('what the renderer does not know, it does not claim', () => {
     expect(h.said.said[0]).toContain('already claimed')
     expect(h.said.said[0]).toContain('waiting for the server')
     expect(h.said.said[0].toLowerCase()).not.toContain('failed')
+  })
+})
+
+// ── Cancelling is intent succeeding, not a failure (nocx-hbdw4.3) ────────
+//
+// Press Cancel and the row correctly said `Cancelled`, while a red toast
+// beside it said "calmhub.zip: the server refused the body (500)": two
+// messages about one event, contradicting each other, and the toast blaming
+// the server for what the person did on purpose (owner, running the
+// product). The backend answering 500 to a deliberate cancellation is its
+// own wrong and its own bead; this half is the renderer, which ALREADY
+// KNOWS the transfer was cancelled because it is the thing that asked.
+describe('a body send that fails after the person cancelled', () => {
+  /** The real sequence: the body is in flight, the person presses Cancel,
+   *  and the POST dies under it. Nothing else can produce this. */
+  function cancelDuringBody(
+    h: ReturnType<typeof harness>,
+    outcome: SendBodyOutcome,
+    transferId = 't1',
+  ): void {
+    h.services.sendBody = (url: string, body: Blob, size: number) => {
+      void url
+      void body
+      void size
+      h.store.cancel(transferId)
+      return Promise.resolve(outcome)
+    }
+  }
+
+  it('raises no toast at all', async () => {
+    const h = harness()
+    h.services.nextResult = [waiting('t1')]
+    cancelDuringBody(h, { ok: false, kind: 'status', status: 500 })
+
+    await h.flow.send(DEST, [streamSource('calmhub.zip')])
+
+    expect(h.said.said).toEqual([])
+  })
+
+  it('does not call it failed either — the backend still says how it ended', async () => {
+    const h = harness()
+    h.services.nextResult = [waiting('t1')]
+    cancelDuringBody(h, { ok: false, kind: 'status', status: 500 })
+    await h.flow.send(DEST, [streamSource('calmhub.zip')])
+
+    // The renderer's half is over and the outcome is not the renderer's to
+    // state: the cancel races the transfer's completion every time.
+    expect(h.store.transfer('t1')?.phase).toBe('unsettled')
+    expect(isTerminalPhase(h.store.transfer('t1')!.phase)).toBe(false)
+
+    h.services.emitDone({
+      transferId: 't1',
+      outcome: 'cancelled',
+      finalName: '',
+      stranded: [],
+    })
+    expect(h.store.transfer('t1')?.phase).toBe('cancelled')
+    // And no reason under the row: a cancelled transfer's underlying error
+    // is a context cancellation, which is not a fault.
+    expect(h.store.transfer('t1')?.error).toBeNull()
+    expect(h.said.said).toEqual([])
+  })
+
+  it('stays quiet for the cancel LOSING the race too', async () => {
+    // The person pressed Cancel, the body still failed, and the backend
+    // finished writing anyway. Still not a refusal, still not news.
+    const h = harness()
+    h.services.nextResult = [waiting('t1')]
+    cancelDuringBody(h, { ok: false, kind: 'network', message: 'connection reset' })
+    await h.flow.send(DEST, [streamSource('calmhub.zip')])
+
+    h.services.emitDone({
+      transferId: 't1',
+      outcome: 'written',
+      finalName: 'calmhub.zip',
+      stranded: [],
+    })
+    expect(h.store.transfer('t1')?.phase).toBe('written')
+    expect(h.said.said).toEqual([])
+  })
+})
+
+// AND THE OTHER HALF, which is what stops this fix trading one silence for
+// another: a refusal nobody asked for must still be reported. This is the
+// exact message the defect above was about, arriving for the exact reason
+// it is meant to.
+describe('a body send that fails and nobody asked for it', () => {
+  it('says so, in danger, and marks the row failed', async () => {
+    const h = harness()
+    h.services.nextResult = [waiting('t1')]
+    h.services.nextSendBody = [{ ok: false, kind: 'status', status: 500 }]
+
+    await h.flow.send(DEST, [streamSource('calmhub.zip')])
+
+    expect(h.said.said).toEqual(['calmhub.zip: the server refused the body (500)'])
+    expect(h.store.transfer('t1')?.phase).toBe('failed')
+  })
+
+  it('is silenced only for the transfer that was cancelled, never for its neighbour', async () => {
+    // The intent is recorded per transfer id. A set keyed on nothing would
+    // silence the whole session after one cancel.
+    const h = harness()
+    h.services.nextResult = [waiting('t1', 'k1'), waiting('t2', 'k2')]
+    let call = 0
+    h.services.sendBody = () => {
+      call++
+      if (call === 1) h.store.cancel('t1')
+      return Promise.resolve({ ok: false, kind: 'status', status: 500 })
+    }
+
+    await h.flow.send(DEST, [streamSource('cancelled.zip'), streamSource('refused.zip')])
+
+    expect(h.said.said).toEqual(['refused.zip: the server refused the body (500)'])
+    expect(h.store.transfer('t1')?.phase).toBe('unsettled')
+    expect(h.store.transfer('t2')?.phase).toBe('failed')
+  })
+})
+
+describe('the machine the transfer is going to', () => {
+  it('is recorded on the row from the destination the gesture resolved', async () => {
+    // The list is global and the store knows neither binding nor session,
+    // so this is the last place that can know it (amendment to nocx-hbdw4.4).
+    const h = harness()
+    h.services.nextResult = [started('t1')]
+    await h.flow.send(DEST, [streamSource('a.txt')])
+    expect(h.store.transfer('t1')?.machine).toBe('deploy@srv-01')
   })
 })

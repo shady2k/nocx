@@ -187,9 +187,14 @@ test('a running upload is visible and cancellable with the sidebar collapsed', a
     await expect(title).toHaveText(firstName)
     expect(await ellipsised(title), 'the file name is not ellipsised').toBe(false)
     // And the path, which cannot fit any panel, is what gives way instead —
-    // on its own line, so it takes no room from the name.
+    // on its own line, so it takes no room from the name. It reads WITH the
+    // machine, as one fact: the operations list is global, one list for
+    // every tab, so a row naming a path and no machine named nowhere the
+    // moment a second connection was open (amendment to nocx-hbdw4.4). This
+    // is a local tab, and the local machine has a name too — it is not a
+    // blank.
     const dest = row.locator('.ui-operation-row__destination')
-    await expect(dest).toHaveAttribute('title', destDir)
+    await expect(dest).toHaveAttribute('title', `This machine · ${destDir}`)
 
     // ── 4: cancel, pressed ACROSS a change to the list ──────────────────
     // The defect that shipped: an unkeyed row was rebuilt under the finger

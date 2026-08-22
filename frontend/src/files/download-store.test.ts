@@ -26,7 +26,13 @@ function fixture() {
 }
 
 function start(store: DownloadStore, id = 't1'): void {
-  store.begin({ transferId: id, name: 'big.iso', sourcePath: '/srv/big.iso', size: 400 })
+  store.begin({
+    transferId: id,
+    name: 'big.iso',
+    sourcePath: '/srv/big.iso',
+    machine: 'alice@srv-01',
+    size: 400,
+  })
 }
 
 describe('what the renderer knows about a download', () => {
@@ -38,11 +44,16 @@ describe('what the renderer knows about a download', () => {
       transferId: 't1',
       name: 'big.iso',
       sourcePath: '/srv/big.iso',
+      // Recorded at the START, because the operations list is global and by
+      // the time the row is drawn there is no tab left to ask.
+      machine: 'alice@srv-01',
       size: 400,
       phase: 'running',
       endedAt: null,
       adopted: false,
     })
+    // The call IS the start, so the store stamps it from its own clock.
+    expect(t?.startedAt).toBe(1_000)
     // NOT zero: zero is a measurement, and nothing has been measured.
     expect(t?.bytes).toBeNull()
     expect(t?.speedBytesPerSecond).toBeNull()
@@ -86,8 +97,14 @@ describe('what the renderer knows about a download', () => {
     expect(f.store.transfer('t9')).toMatchObject({
       name: 'orphan.bin',
       sourcePath: '',
+      // Unknown, and saying so rather than guessing: a machine invented
+      // here would read exactly like a fact.
+      machine: '',
+      startedAt: null,
       adopted: true,
       phase: 'sent',
+      // The size IS known, and this is the asymmetry with an adopted
+      // upload: files.downloadDone carries `total` on every outcome.
       bytes: 12,
       size: 12,
     })

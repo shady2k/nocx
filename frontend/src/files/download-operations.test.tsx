@@ -11,7 +11,7 @@
 // component, in one list, one of them cancellable through the download
 // seam, is what says so.
 import { cleanup } from '@solidjs/testing-library'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { fakeClock, fakeDownloadServices } from './download-fixtures'
 import { createDownloadStore, type DownloadStore } from './download-store'
@@ -20,12 +20,16 @@ import { fakeUploadServices } from './upload-fixtures'
 import { createUploadStore, type UploadStore } from './upload-store'
 import { uploadOperations } from './upload-operations'
 import { createOperationsModel } from '../operations/operations'
-import { createOperationsView, OPERATIONS_VIEW_ID } from '../operations/operations-view'
+import {
+  createOperationsView,
+  OPERATIONS_VIEW_ID,
+  type OperationsViewDeps,
+} from '../operations/operations-view'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 
 let handle: SidebarHandle | null = null
 
-function mount(): {
+function mount(deps: OperationsViewDeps = {}): {
   uploads: UploadStore
   downloads: DownloadStore
   services: ReturnType<typeof fakeDownloadServices>
@@ -41,7 +45,7 @@ function mount(): {
   const panel = document.createElement('div')
   panel.id = 'sidebar'
   document.body.append(bar, panel)
-  handle = mountSidebar(bar, panel, [createOperationsView(model)], [])
+  handle = mountSidebar(bar, panel, [createOperationsView(model, deps)], [])
   document.querySelector<HTMLElement>(`button[data-view="${OPERATIONS_VIEW_ID}"]`)!.click()
   return { uploads, downloads, services }
 }
@@ -51,7 +55,26 @@ afterEach(() => {
   handle = null
   document.body.replaceChildren()
   cleanup()
+  vi.useRealTimers()
 })
+
+/** Both clocks the throttled list reads — the injected one and the fake
+ *  timer its release is scheduled on. The list publishes NUMBERS a few
+ *  times a second (render-throttle.ts), so a byte count asserted in the
+ *  same tick it was emitted is asserted before the surface has drawn it.
+ *  Driving both by hand rather than waiting is the rule: a test may not
+ *  depend on timing. */
+function ticking(): { deps: OperationsViewDeps; advance: (ms: number) => void } {
+  vi.useFakeTimers()
+  let t = 1000
+  return {
+    deps: { now: () => t },
+    advance: (ms: number) => {
+      t += ms
+      vi.advanceTimersByTime(ms)
+    },
+  }
+}
 
 const rows = () => [...document.querySelectorAll<HTMLElement>('.ui-operation-row')]
 
@@ -74,11 +97,18 @@ function cancelIn(row: HTMLElement): HTMLElement | undefined {
 describe('a download in the operations list', () => {
   it('is the same row an upload is, in the one list, beside it', () => {
     const m = mount()
-    m.uploads.begin({ transferId: 'u1', name: 'up.iso', destDir: '/srv', size: 10 })
+    m.uploads.begin({
+      transferId: 'u1',
+      name: 'up.iso',
+      destDir: '/srv',
+      machine: 'alice@srv-01',
+      size: 10,
+    })
     m.downloads.begin({
       transferId: 'd1',
       name: 'down.iso',
       sourcePath: '/srv/down.iso',
+      machine: 'alice@srv-01',
       size: 400,
     })
     expect(rows()).toHaveLength(2)
@@ -89,28 +119,76 @@ describe('a download in the operations list', () => {
   })
 
   it('draws progress as the bytes arrive', () => {
-    const m = mount()
+    // Through the THROTTLE the merged list now publishes numbers behind
+    // (render-throttle.ts): a byte count is held for a fraction of a
+    // second, so this advances both of its clocks rather than waiting on
+    // one. A download is subject to exactly the same rule as an upload,
+    // which is the point — it is the same list.
+    const c = ticking()
+    const m = mount(c.deps)
     m.downloads.begin({
       transferId: 'd1',
       name: 'down.iso',
       sourcePath: '/srv/down.iso',
+      machine: 'alice@srv-01',
       size: 400,
     })
+    c.advance(250)
     m.services.emitProgress({ transferId: 'd1', bytes: 100, total: 400 })
+    c.advance(250)
     const bar = rowFor('down.iso').querySelector('[role="progressbar"]')
     expect(bar?.getAttribute('aria-valuenow')).toBe('25')
   })
 
+  it('says WHICH MACHINE the file came from, the way an upload row says where it went', () => {
+    // The list is global — one list for every tab — so "/srv/down.iso" with
+    // no machine beside it is a path that exists on every host a person has
+    // open. Both rows carry it, from one derivation (machine-name.ts), and
+    // the row draws them the same way.
+    const m = mount()
+    m.uploads.begin({
+      transferId: 'u1',
+      name: 'up.iso',
+      destDir: '/srv',
+      machine: 'alice@srv-01',
+      size: 10,
+    })
+    m.downloads.begin({
+      transferId: 'd1',
+      name: 'down.iso',
+      sourcePath: '/srv/down.iso',
+      machine: 'bob@srv-02',
+      size: 400,
+    })
+    expect(rowFor('down.iso').textContent).toContain('bob@srv-02')
+    expect(rowFor('up.iso').textContent).toContain('alice@srv-01')
+    // And not each other's: two rows in one list must not blur into one
+    // machine, which is the whole reason the field is on the item.
+    expect(rowFor('down.iso').textContent).not.toContain('alice@srv-01')
+  })
+
   it('offers a cancel that reaches files.downloadCancel', () => {
     const m = mount()
-    m.downloads.begin({ transferId: 'd1', name: 'down.iso', sourcePath: '/srv/d', size: 400 })
+    m.downloads.begin({
+      transferId: 'd1',
+      name: 'down.iso',
+      sourcePath: '/srv/d',
+      machine: 'alice@srv-01',
+      size: 400,
+    })
     cancelIn(rowFor('down.iso'))!.click()
     expect(m.services.cancels).toEqual(['d1'])
   })
 
   it('takes the cancel away once it is over, and says Done', () => {
     const m = mount()
-    m.downloads.begin({ transferId: 'd1', name: 'down.iso', sourcePath: '/srv/d', size: 400 })
+    m.downloads.begin({
+      transferId: 'd1',
+      name: 'down.iso',
+      sourcePath: '/srv/d',
+      machine: 'alice@srv-01',
+      size: 400,
+    })
     m.services.emitDone({
       transferId: 'd1',
       outcome: 'sent',
@@ -134,7 +212,13 @@ describe('the projection itself', () => {
 
   it('carries what the row draws, and nothing the store did not say', () => {
     const f = unit()
-    f.store.begin({ transferId: 'd1', name: 'big.iso', sourcePath: '/srv/big.iso', size: 400 })
+    f.store.begin({
+      transferId: 'd1',
+      name: 'big.iso',
+      sourcePath: '/srv/big.iso',
+      machine: 'alice@srv-01',
+      size: 400,
+    })
     const [op, ...rest] = f.ops()
     expect(rest).toEqual([])
     // The WHOLE record but for the closure: a partial assertion is how a
@@ -145,11 +229,13 @@ describe('the projection itself', () => {
       kind: 'download',
       title: 'big.iso',
       destination: '/srv/big.iso',
+      machine: 'alice@srv-01',
       phase: 'running',
       done: null,
       total: 400,
       speedBytesPerSecond: null,
       error: null,
+      startedAt: 1_000,
       endedAt: null,
     })
     expect(typeof cancel).toBe('function')
@@ -160,7 +246,13 @@ describe('the projection itself', () => {
     // the page. The source path is what lets a person tell two files of the
     // same name apart; a guessed "~/Downloads" would be an invention.
     const f = unit()
-    f.store.begin({ transferId: 'd1', name: 'a.txt', sourcePath: '/etc/a.txt', size: 1 })
+    f.store.begin({
+      transferId: 'd1',
+      name: 'a.txt',
+      sourcePath: '/etc/a.txt',
+      machine: 'alice@srv-01',
+      size: 1,
+    })
     expect(f.ops()[0].destination).toBe('/etc/a.txt')
   })
 
@@ -174,12 +266,22 @@ describe('the projection itself', () => {
       total: 1,
     })
     expect(f.ops()[0].destination).toBe('')
+    // Nor a machine, and nor a start: this renderer never saw the call that
+    // would have carried either.
+    expect(f.ops()[0].machine).toBe('')
+    expect(f.ops()[0].startedAt).toBeNull()
     expect(f.ops()[0].title).toBe('orphan.bin')
   })
 
   it('offers a cancel while the work is live, on both non-terminal phases', () => {
     const f = unit()
-    f.store.begin({ transferId: 'd1', name: 'a', sourcePath: '/a', size: 1 })
+    f.store.begin({
+      transferId: 'd1',
+      name: 'a',
+      sourcePath: '/a',
+      machine: 'alice@srv-01',
+      size: 1,
+    })
     expect(f.ops()[0].cancel).not.toBeNull()
     // `unsettled` especially: the renderer lost sight of a transfer the
     // backend may still be sending, and files.downloadCancel reaches it.
@@ -190,7 +292,13 @@ describe('the projection itself', () => {
   it('offers none once it is over, on every terminal outcome', () => {
     for (const outcome of ['sent', 'cancelled', 'failed'] as const) {
       const f = unit()
-      f.store.begin({ transferId: 'd1', name: 'a', sourcePath: '/a', size: 1 })
+      f.store.begin({
+        transferId: 'd1',
+        name: 'a',
+        sourcePath: '/a',
+        machine: 'alice@srv-01',
+        size: 1,
+      })
       f.services.emitDone({ transferId: 'd1', outcome, name: 'a', bytes: 1, total: 1 })
       expect(f.ops()[0].cancel).toBeNull()
     }

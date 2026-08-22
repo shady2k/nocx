@@ -41,7 +41,8 @@ import { Show, type Component } from 'solid-js'
 import { Badge, type BadgeTone } from './badge'
 import { Button } from './button'
 import { CollectionRow } from './collection-view'
-import { formatProgress } from './format-bytes'
+import { formatFinished, formatProgress } from './format-bytes'
+import { formatTimestamp } from './format-time'
 import { ArrowDownIcon, ArrowUpIcon } from './icons'
 import { ProgressBar } from './progress-bar'
 import {
@@ -93,19 +94,36 @@ export interface OperationRowProps {
    *  never beside the title — a path outruns any panel and would take the
    *  name's room with it. Empty draws nothing rather than an empty line. */
   destination?: string
+  /** WHICH MACHINE the destination is on, as a person names it. It shares
+   *  the destination's line and reads BEFORE the path, because the two
+   *  answer one question together — where did this land — and a machine
+   *  under its own path would read as a second, competing fact. Empty draws
+   *  nothing; an adopted operation knows neither. */
+  machine?: string
   phase: OperationPhase
   /** Bytes confirmed so far, or null while nothing has been observed. NOT
    *  zero — zero is a measurement and this is its absence, and the progress
    *  line says so by naming the size alone. */
   done: number | null
-  /** The declared size. Zero is legitimate: an empty file is a file. */
-  total: number
+  /** The declared size. Zero is legitimate: an empty file is a file — and
+   *  null is the absence of a declaration, which an adopted operation has. */
+  total: number | null
   /** Derived by whoever counts the bytes; null until it is known. */
   speedBytesPerSecond?: number | null
   /** Why the row says what it says — the wire's reason on a failure, and
    *  what the renderer's own half hit on `unsettled`, which is a reason for
    *  not knowing and not a fault. */
   error?: string | null
+  /** When it started and when it ended, on the source's clock. Together
+   *  they are the duration a finished row reports; either may be null and
+   *  the row then says less rather than guessing. */
+  startedAt?: number | null
+  endedAt?: number | null
+  /** The clock the relative age is read against. A parameter and not
+   *  `Date.now()` inside, for the reason format-time.ts gives: "2 min ago"
+   *  ages, so somebody has to repaint it, and that somebody owns the tick.
+   *  Defaults to now for a caller with nothing finished to show. */
+  now?: number
   /** Stop it. Absent means stopping would mean nothing any more. */
   onCancel?: () => void
 }
@@ -114,7 +132,25 @@ export function OperationRow(props: OperationRowProps) {
   // Read inside the JSX, never hoisted into a const: every one of these is
   // a prop and a captured value would freeze the row at its first render.
   const running = () => !isTerminalPhase(props.phase)
-  const fraction = () => (props.total > 0 ? (props.done ?? 0) / props.total : 0)
+  const fraction = () => {
+    const total = props.total
+    return total !== null && total > 0 ? (props.done ?? 0) / total : 0
+  }
+  /** WHERE IT LANDED, as one fact. The machine first because it is the
+   *  coarser half and the half that cannot be ellipsised away — the list is
+   *  global, so `/var/www` with three connections open names nowhere. */
+  const where = () =>
+    [props.machine ?? '', props.destination ?? ''].filter((p) => p !== '').join(' · ')
+  /** What a finished row says about itself: size, when, how long. Composed
+   *  by format-bytes.ts, never here — two callers wording a duration is how
+   *  two vocabularies for one concept start. */
+  const summary = () =>
+    formatFinished({
+      total: props.total,
+      startedAt: props.startedAt ?? null,
+      endedAt: props.endedAt ?? null,
+      now: props.now ?? Date.now(),
+    })
 
   return (
     <CollectionRow
@@ -154,9 +190,33 @@ export function OperationRow(props: OperationRowProps) {
             <Show
               when={running()}
               fallback={
-                <Show when={props.error !== null && props.error !== undefined}>
-                  <span class="ui-operation-row__detail">{props.error}</span>
-                </Show>
+                <>
+                  {/* The reason first: it is the news, and the numbers under
+                      it are the same three facts every finished row carries
+                      whether or not anything went wrong. */}
+                  <Show when={props.error !== null && props.error !== undefined}>
+                    <span class="ui-operation-row__detail">{props.error}</span>
+                  </Show>
+                  {/* SIZE, WHEN, AND HOW LONG. A finished row used to read
+                      `appicon.png · Done · /home/dev` — a name, a word and a
+                      path — so somebody coming back to the list learnt
+                      nothing from it (owner, 2026-08-22). The exact moment
+                      rides the title, because the label ages and a reader
+                      who wants the clock time should not have to compute
+                      it. */}
+                  <Show when={summary() !== ''}>
+                    <span
+                      class="ui-operation-row__summary"
+                      title={
+                        props.endedAt !== null && props.endedAt !== undefined
+                          ? formatTimestamp(props.endedAt)
+                          : undefined
+                      }
+                    >
+                      {summary()}
+                    </span>
+                  </Show>
+                </>
               }
             >
               <ProgressBar value={fraction()} ariaLabel={`${props.title} progress`} />
@@ -168,15 +228,18 @@ export function OperationRow(props: OperationRowProps) {
                 })}
               </span>
             </Show>
-            {/* Where it is going, under the numbers rather than beside the
+            {/* Where it landed, under the numbers rather than beside the
                 name: a path is longer than any panel and it is the part a
-                person can do without. It carries the whole value on hover,
+                person can do without. Machine and path read as ONE fact on
+                ONE line — this list is global, and a row that named a path
+                without a machine was meaningless the moment a second
+                connection was open. It carries the whole value on hover,
                 because what is on screen is an ellipsis of it. Empty draws
-                nothing — an adopted transfer knows its name and not its
-                destination, and says so by carrying nothing. */}
-            <Show when={props.destination}>
-              <span class="ui-operation-row__destination" title={props.destination}>
-                {props.destination}
+                nothing — an adopted transfer knows neither, and says so by
+                carrying nothing. */}
+            <Show when={where() !== ''}>
+              <span class="ui-operation-row__destination" title={where()}>
+                {where()}
               </span>
             </Show>
           </span>

@@ -221,6 +221,38 @@ func TestAPIRequestSend_ABoundAuthVariableBecomesTheHeaderAndNeverCrosses(t *tes
 	}
 }
 
+// unresolvedRun decodes a send that came back as a RUN which never went out,
+// and asserts the shape every one of them has: outcome failed at phase
+// `compose`, no response, and the request the person wrote on it.
+//
+// It is a run rather than an error since nocx-pgp9c.6. The refusal is the
+// same refusal — nothing goes out, the server is never reached — but it
+// arrives where a person is already looking, beside every other thing they
+// have sent, instead of as a sentence with no request attached to it.
+func unresolvedRun(t *testing.T, resp *vaultRPCResult) apiSendResponse {
+	t.Helper()
+	if resp.Error != nil {
+		t.Fatalf("the send answered an error rather than a run: %+v", resp.Error)
+	}
+	var got apiSendResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal send result: %v", err)
+	}
+	if got.Outcome != "failed" {
+		t.Fatalf("outcome = %q, want failed", got.Outcome)
+	}
+	if got.Response != nil {
+		t.Errorf("a run that never went out carries a response: %+v", *got.Response)
+	}
+	if got.Failure == nil || got.Failure.Phase != "compose" {
+		t.Fatalf("failure = %+v, want phase compose", got.Failure)
+	}
+	if got.Request.Text == "" {
+		t.Error("the run carries no request text; the person cannot see what they asked for")
+	}
+	return got
+}
+
 // ── 2. an unbound variable blocks the send and names itself ──────────────
 
 // `Authorization: Bearer ` is a plausible-looking request that teaches the
@@ -243,20 +275,23 @@ func TestAPIRequestSend_AnUnboundAuthVariableBlocksTheSendAndNamesItself(t *test
 		"handle": handle, "relPath": "private.json", "envRelPath": "environments/dev.json",
 	}, 2)
 
-	if resp.Error == nil {
-		t.Fatalf("a send whose auth variable is bound nowhere succeeded: %s", resp.Result)
-	}
-	if !strings.Contains(resp.Error.Message, "token") {
+	got := unresolvedRun(t, resp)
+	if !strings.Contains(got.Failure.Reason, "token") {
 		t.Errorf("the refusal reads %q and does not name the variable the person has to bind",
-			resp.Error.Message)
+			got.Failure.Reason)
 	}
 	// The remedy is "bind this variable", and it has to read that way. A
 	// send path that never resolves auth at all refuses every one of these
 	// too, with apisend.ErrAuthUnresolved — an answer that is about the
 	// program rather than about anything the person can do.
-	if strings.Contains(resp.Error.Message, "cannot resolve") {
+	if strings.Contains(got.Failure.Reason, "cannot resolve") {
 		t.Errorf("the refusal reads %q: that is the sender saying auth was never resolved, "+
-			"not this environment saying the variable is unbound", resp.Error.Message)
+			"not this environment saying the variable is unbound", got.Failure.Reason)
+	}
+	// And the run says which environment it was asked of, which is half of
+	// "where do I go to fix this".
+	if got.Environment != "dev" {
+		t.Errorf("environment = %q, want dev", got.Environment)
 	}
 	if reached.Load() != 0 {
 		t.Errorf("the server was reached %d times, want 0 — no empty credential goes out", reached.Load())
@@ -318,8 +353,9 @@ func TestAPIRequestSend_AVaultIdentifierInTheFileResolvesToNothing(t *testing.T)
 	resp, frame := sendRaw(t, conn, map[string]any{
 		"handle": hostileHandle, "relPath": "private.json", "envRelPath": "environments/dev.json",
 	}, 2)
-	if resp.Error == nil {
-		t.Fatalf("a file naming a vault identifier was sent: %s", resp.Result)
+	hostileRun := unresolvedRun(t, resp)
+	if !strings.Contains(hostileRun.Failure.Reason, string(id)) {
+		t.Errorf("the reason reads %q and does not name what the file asked for", hostileRun.Failure.Reason)
 	}
 	if reached.Load() != 0 {
 		t.Errorf("the server was reached %d times, want 0", reached.Load())

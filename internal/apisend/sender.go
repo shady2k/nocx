@@ -237,9 +237,11 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 		}
 		// Everything else buildRequest refuses — an address that will not
 		// parse, one that is not absolute, a method net/http will not take
-		// — is a send a person attempted and the attempt is the run. There
-		// is no request text for it, and the phase says why.
-		return settled(Raw{Spans: []Span{}}, tr, 0, PhaseCompose, err), nil
+		// — is a send a person attempted, and the attempt is the run. It
+		// carries the request AS WRITTEN, because there is no *http.Request
+		// to compose from and what the person needs to see is what they
+		// typed.
+		return settled(c.mark(composeUnsent(r), used), tr, 0, PhaseCompose, err), nil
 	}
 
 	// The raw request is composed and PLACED before the send, against the
@@ -250,8 +252,7 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 	//
 	// It is also what makes a failed run readable: this value exists from
 	// here to every return below, so no exit path can be missing it.
-	composed := composeRequest(req, bodyText)
-	sent := MarkRequest(c.bound(composed), locate(composed, used))
+	sent := c.mark(composeRequest(req, bodyText), used)
 
 	cl, err := c.instanceFor(ctx, k)
 	if err != nil {
@@ -322,6 +323,79 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 		Certificates: certs,
 		Response:     &out,
 	}, nil
+}
+
+// Unsent is an exchange that never reached this package at all: the caller
+// refused to hand it over, and the refusal is still a RUN.
+//
+// It exists because the caller owns two refusals this package cannot make.
+// A variable with no value is one (design §6.5, apicoll.UnresolvedError) and
+// an auth variable that is not bound is the other, and both are decided
+// before a request can be built — but both are things that happened to
+// somebody who pressed Send, so both belong on a row beside every other
+// thing they have sent rather than in an error string. The caller has the
+// reason; this package has the one renderer of a request's text and the one
+// constructor of an exchange, and putting them together anywhere else would
+// be a second answer to "what was sent" (§11.2).
+//
+// NO PLACEMENTS, deliberately. An exchange that never went out substituted
+// nothing, so there is no credential in the text to elide: the file itself
+// can never hold one (§8), and any value that WOULD have been placed is
+// exactly the value the caller could not resolve.
+func Unsent(r apicoll.Request, phase Phase, reason error) Exchange {
+	return settled(MarkRequest(boundTo(ceiling, composeUnsent(r)), nil), &tracer{}, 0, phase, reason)
+}
+
+// mark composes one side and elides what was placed in it, bounded by this
+// client's ceiling. One helper because both the sent and the unsent path
+// need exactly this, and two copies would drift on the bound.
+func (c *Client) mark(text string, used []NamedSecret) Raw {
+	bounded := c.bound(text)
+	return MarkRequest(bounded, locate(text, used))
+}
+
+// composeUnsent renders a request THE FILE'S WAY, for a run that never got
+// as far as an http.Request.
+//
+// Two differences from composeRequest, and both are the honest ones. There
+// is no Host line, because the address never parsed and inventing a host
+// would be describing a request that could not exist. And the headers are in
+// the user's own order rather than sorted, because there is no http.Header
+// map to have lost it — this is the request as written, not as net/http
+// would have canonicalised it on the way out.
+func composeUnsent(r apicoll.Request) string {
+	method := r.Method
+	if method == "" {
+		method = http.MethodGet
+	}
+	var b strings.Builder
+	b.WriteString(method)
+	b.WriteByte(' ')
+	b.WriteString(strings.TrimSpace(r.URL))
+	b.WriteString(" HTTP/1.1\n")
+	for _, h := range r.Headers {
+		// A disabled row is a row the user keeps and does not send, so it is
+		// not part of what would have gone out.
+		if !h.Enabled || h.Name == "" {
+			continue
+		}
+		b.WriteString(h.Name)
+		b.WriteString(": ")
+		b.WriteString(h.Value)
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	switch r.Body.Kind {
+	case apicoll.BodyRaw, apicoll.BodyJSON, apicoll.BodyForm:
+		b.WriteString(r.Body.Text)
+	case apicoll.BodyFile:
+		// The bytes were never read — that is the caller's to do (ErrFileBody)
+		// — so the run says which file it would have sent rather than
+		// pretending to show it.
+		b.WriteString("file body: ")
+		b.WriteString(r.Body.FileRef)
+	}
+	return b.String()
 }
 
 // settled builds the exchange for an attempt that did not answer. It is the
@@ -415,8 +489,11 @@ func isTLSFailure(err error) bool {
 // A cut can land inside a rune, so the result is made valid UTF-8 again:
 // invalid bytes in a JSON string are not a diagnostic, they are a payload
 // the renderer cannot decode at all.
-func (c *Client) bound(s string) string {
-	limit := c.limit
+func (c *Client) bound(s string) string { return boundTo(c.limit, s) }
+
+// boundTo is the rule itself, without a client — Unsent has no instance and
+// must not invent a second ceiling.
+func boundTo(limit int64, s string) string {
 	if limit <= 0 || limit > ceiling {
 		limit = ceiling
 	}

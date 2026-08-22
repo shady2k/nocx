@@ -5376,6 +5376,16 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	if chosen[0].Path != root {
 		t.Errorf("listed path = %q, want %q", chosen[0].Path, root)
 	}
+	// WHERE A NEW COLLECTION WOULD GO, off the real socket. The renderer
+	// proposes an import destination from it, so a listing that answered ""
+	// on a build that HAS an app directory is an ask back to demanding an
+	// absolute path with nothing in it (nocx-6hg2w.14).
+	if listed.DefaultRoot == "" {
+		t.Error("defaultRoot is empty on a server built with an app directory")
+	}
+	if filepath.Base(listed.DefaultRoot) != apicoll.DefaultCollectionsDirName {
+		t.Errorf("defaultRoot = %q, want the collections directory under the data dir", listed.DefaultRoot)
+	}
 
 	readResp := vaultCall(t, conn, "api.request.read",
 		map[string]any{"handle": opened.Handle, "relPath": "ping.json"}, 4)
@@ -6041,7 +6051,8 @@ func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
 		"create with a field nobody declared":    {"api.collections.create.schema.json", `{"handle":"a","collection":{"name":"a","requests":[],"malformed":[]},"path":"/tmp/acme"}`},
 		"open with an undeclared key":            {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":[],"malformed":[]},"root":"/etc"}`},
 		"a null request list":                    {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":null,"malformed":[]}}`},
-		"list with null collections":             {"api.collections.list.schema.json", `{"collections":null}`},
+		"list with null collections":             {"api.collections.list.schema.json", `{"collections":null,"defaultRoot":""}`},
+		"list with no defaultRoot":               {"api.collections.list.schema.json", `{"collections":[]}`},
 		"a read with no request":                 {"api.request.read.schema.json", `{}`},
 		"a send with no outcome":                 {"api.request.send.schema.json", `{"request":{"text":"","spans":[]},"response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
 		"a send with no request block":           {"api.request.send.schema.json", `{"outcome":"failed","response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},

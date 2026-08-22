@@ -20,6 +20,7 @@ import {
   WATCH_SESSION,
   collectionFixture,
   collectionsFixture,
+  DEFAULT_ROOT,
   createdFixture,
   sendFixture,
   failedSendFixture,
@@ -59,6 +60,7 @@ describe('ApiStore — the collections', () => {
         collections: [
           { handle: 'h1', path: '/w/gone', collection: emptyCollection(), error: 'no such folder' },
         ],
+        defaultRoot: DEFAULT_ROOT,
       }),
     })
     await store.refresh()
@@ -632,6 +634,7 @@ describe('ApiStore — the environment', () => {
         collections: [
           collectionsFixture({ collection: collectionFixture({ environments: envs }) }),
         ],
+        defaultRoot: DEFAULT_ROOT,
       }),
     }
   }

@@ -79,11 +79,12 @@ func failedAt(t *testing.T, ex Exchange, err error, want Phase) Failure {
 	if f.Phase != want {
 		t.Errorf("phase = %q, want %q (reason: %s)", f.Phase, want, f.Reason)
 	}
-	// AND THE REQUEST SURVIVED. Every failure phase but compose composed a
-	// request before it failed, and dropping it is the defect this whole
-	// change is against — so it is asserted for every one of them, here,
-	// rather than in the one test somebody thought to write it in.
-	if want != PhaseCompose && ex.Request.Text == "" {
+	// AND THE REQUEST SURVIVED — for EVERY phase, compose included. The
+	// sender has the composed text before it dials, and at compose it has
+	// the request as written; dropping either is the defect this whole
+	// change is against, so it is asserted here rather than in the one test
+	// somebody thought to write it in.
+	if ex.Request.Text == "" {
 		t.Error("the failed exchange carries no request text; the sender had it before it dialled")
 	}
 	if ex.Request.Spans == nil {

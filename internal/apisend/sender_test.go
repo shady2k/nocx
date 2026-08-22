@@ -407,11 +407,23 @@ func TestSend_RefusesAMalformedRequest(t *testing.T) {
 			if !strings.Contains(fail.Reason, c.want) {
 				t.Fatalf("reason = %q, want it to contain %q", fail.Reason, c.want)
 			}
-			// compose is the one phase with no request text — there was
-			// none to compose — and the spans are [] rather than null
-			// either way, because the renderer walks them either way.
-			if c.phase == PhaseCompose && ex.Request.Text != "" {
-				t.Errorf("a compose failure carries request text %q", ex.Request.Text)
+			// EVEN AT COMPOSE THE RUN SHOWS WHAT WAS ASKED FOR. There is
+			// no *http.Request to render, so the text is the request as
+			// WRITTEN (composeUnsent) — which is the thing a person has to
+			// look at to see the address they mistyped.
+			if !strings.Contains(ex.Request.Text, c.req.Method) {
+				t.Errorf("the run does not show the method:\n%s", ex.Request.Text)
+			}
+			// The WHOLE address, but only where composeUnsent wrote it. The
+			// ftp:// case built a perfectly good *http.Request and was
+			// refused at the dial, so its text is the real composition —
+			// request-URI plus a Host line, which is what actually would
+			// have crossed.
+			if c.phase == PhaseCompose && c.req.URL != "" && !strings.Contains(ex.Request.Text, c.req.URL) {
+				t.Errorf("the run does not show the address that was refused:\n%s", ex.Request.Text)
+			}
+			if c.phase != PhaseCompose && !strings.Contains(ex.Request.Text, "Host: ") {
+				t.Errorf("a composed run carries no Host line:\n%s", ex.Request.Text)
 			}
 			if ex.Request.Spans == nil {
 				t.Error("Request.Spans is nil; a side with nothing to mark is []")

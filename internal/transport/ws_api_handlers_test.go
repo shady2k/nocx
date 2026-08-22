@@ -153,6 +153,17 @@ func apiEnvironmentFolder(t *testing.T) string {
 	write("environments/prod.json",
 		`{"name":"prod","values":{"baseUrl":"https://api.internal"},"route":{"kind":"connection","profileId":"ssh:bastion:1"}}`)
 	write("environments/nobase.json", `{"name":"nobase","values":{},"route":{"kind":"direct"}}`)
+	// One request per FIELD a variable can be used in (§6.5's four places,
+	// of which auth is resolved a step later by apisend.Apply). A
+	// substitution that works in three out of four is the shape that ships,
+	// so the refusal has to be asked of each of them separately.
+	write("in-header.json", `{"id":"r2","name":"in-header","method":"GET","url":"http://127.0.0.1:1/x",`+
+		`"headers":[{"name":"X-Tenant","value":"{{tenant}}","enabled":true}],`+
+		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("in-body.json", `{"id":"r3","name":"in-body","method":"POST","url":"http://127.0.0.1:1/x",`+
+		`"body":{"kind":"raw","text":"{\"who\":\"{{tenant}}\"}"},"auth":{"kind":"none"}}`)
+	write("in-auth.json", `{"id":"r4","name":"in-auth","method":"GET","url":"http://127.0.0.1:1/x",`+
+		`"body":{"kind":"none"},"auth":{"kind":"bearer","var":"tenant"}}`)
 	return root
 }
 
@@ -277,25 +288,140 @@ func TestAPIRequestSend_WithNoEnvironmentIsStillTheDirectRoute(t *testing.T) {
 	}
 }
 
-// An unresolved variable BLOCKS the send and names itself. The assertion
-// that matters is the second one: the sender was never asked, so there is no
-// request going out with empty braces or an empty string in it.
-func TestAPIRequestSend_AnUnresolvedVariableBlocksTheSendAndNamesItself(t *testing.T) {
+// AN UNRESOLVED VARIABLE IS A RUN, at the `compose` phase, in every field
+// one can be used in (nocx-pgp9c.6).
+//
+// It answers with the UNRESOLVED reason — which names the variable and the
+// field it was used in — and never with a complaint about a URL. That was
+// the defect: `{{baseUrl}}/zen` reached the sender as text and came back as
+// `apisend: "{{baseUrl}}/zen" is not an absolute URL`, a sentence about a
+// URL nobody typed, naming neither the variable nor the environment. It also
+// only happened at all when an environment was named — with none, the
+// substitution was skipped entirely, which is the case a person starting
+// from the Playground actually meets.
+//
+// The second assertion is the one that carries the weight and is unchanged
+// by the new shape: the sender is never asked, so nothing goes out with
+// empty braces or an empty string in it.
+func TestAPIRequestSend_AnUnresolvedVariableIsARunNamingTheVariableAndItsField(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		relPath string
+		env     string
+		// field is the words apicoll uses for WHERE the reference was, and
+		// asserting it is what stops this passing on a build that reports
+		// only the first place it looked.
+		field string
+		want  string
+	}{
+		{"in the URL, with an environment that has no value for it", "users.json", "environments/nobase.json", "the URL", "baseUrl"},
+		{"in the URL, with NO environment at all", "users.json", "", "the URL", "baseUrl"},
+		{"in a header value", "in-header.json", "", `header "X-Tenant" value`, "tenant"},
+		{"in the body", "in-body.json", "", "the body", "tenant"},
+		// Auth is resolved a step later, by apisend.Apply, and lands on the
+		// same phase through the other branch of handleSend — which is the
+		// point of asking it here beside the other three.
+		{"in the auth", "in-auth.json", "", "", "tenant"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sender := &recordingSender{}
+			conn := newAPIWSServerWithSender(t, sender)
+			root := apiEnvironmentFolder(t)
+			handle := openAPICollection(t, conn, root, 1)
+
+			params := map[string]any{"handle": handle, "relPath": c.relPath, "token": "t-1"}
+			if c.env != "" {
+				params["envRelPath"] = c.env
+			}
+			resp := vaultCall(t, conn, "api.request.send", params, 2)
+			if resp.Error != nil {
+				t.Fatalf("the send answered an error rather than a run: %+v", resp.Error)
+			}
+			var got apiSendResponse
+			if err := json.Unmarshal(resp.Result, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Outcome != "failed" {
+				t.Fatalf("outcome = %q, want failed", got.Outcome)
+			}
+			if got.Failure == nil || got.Failure.Phase != "compose" {
+				t.Fatalf("failure = %+v, want phase compose", got.Failure)
+			}
+			if !strings.Contains(got.Failure.Reason, c.want) {
+				t.Errorf("reason = %q, want it to name %q", got.Failure.Reason, c.want)
+			}
+			if c.field != "" && !strings.Contains(got.Failure.Reason, c.field) {
+				t.Errorf("reason = %q, want it to say the reference was in %q", got.Failure.Reason, c.field)
+			}
+			// NEVER the URL complaint, which is the sentence this replaces.
+			if strings.Contains(got.Failure.Reason, "not an absolute URL") {
+				t.Errorf("reason = %q — that is the sender complaining about text nobody typed", got.Failure.Reason)
+			}
+			// The run shows what was asked for. In the three TEXT fields the
+			// reference is still in it — that is the thing the person has to
+			// go and bind — and in the auth it is not, deliberately: an auth
+			// variable is a NAME in the auth block rather than text
+			// containing a reference, and the header it would have become is
+			// apisend.Apply's mapping to make. Rendering it here would be a
+			// second owner of "which header does bearer auth produce", so
+			// the run shows the request line and the reason names the
+			// variable.
+			if c.field != "" && !strings.Contains(got.Request.Text, "{{") {
+				t.Errorf("the run does not show the unresolved reference:\n%s", got.Request.Text)
+			}
+			if !strings.Contains(got.Request.Text, "HTTP/1.1") {
+				t.Errorf("the run does not show the request line:\n%s", got.Request.Text)
+			}
+			if got.Response != nil {
+				t.Error("a request that never went out carries a response")
+			}
+			if n := sender.count(); n != 0 {
+				t.Errorf("the sender was asked to send %d times, want 0 — a request went out unresolved", n)
+			}
+		})
+	}
+}
+
+// And the pair, without which the five above would pass on a build that
+// refused every send: an environment that ANSWERS the name still sends, with
+// the value substituted in.
+func TestAPIRequestSend_AnEnvironmentThatAnswersTheNameStillSends(t *testing.T) {
 	sender := &recordingSender{}
 	conn := newAPIWSServerWithSender(t, sender)
 	root := apiEnvironmentFolder(t)
 	handle := openAPICollection(t, conn, root, 1)
 
+	resp := vaultCall(t, conn, "api.request.send", map[string]any{
+		"handle": handle, "relPath": "users.json",
+		"envRelPath": "environments/dev.json", "token": "t-1",
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.request.send: %+v", resp.Error)
+	}
+	_, req := sender.last(t)
+	if req.URL != "http://localhost:3000/users" {
+		t.Errorf("URL = %q, want the substituted address", req.URL)
+	}
+}
+
+// A request with NO references goes out unchanged when nothing is named —
+// the other half of "no environment is a lookup that answers nothing".
+// Without this, the change that made the no-environment case substitute
+// could have made every unnamed send fail and still passed the tests above.
+func TestAPIRequestSend_WithNoEnvironmentAndNoVariablesSendsAsWritten(t *testing.T) {
+	sender := &recordingSender{}
+	conn := newAPIWSServerWithSender(t, sender)
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/nobase.json", "token": "t-nobase"}, 2)
-	if resp.Error == nil {
-		t.Fatal("api.request.send succeeded with an unresolved variable")
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-1"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
-	if !strings.Contains(resp.Error.Message, "baseUrl") {
-		t.Errorf("message = %q, want it to name the variable that has no value", resp.Error.Message)
-	}
-	if got := sender.count(); got != 0 {
-		t.Errorf("the sender was asked to send %d times, want 0 — a request went out unresolved", got)
+	_, req := sender.last(t)
+	if req.URL != "https://example.test/ping" {
+		t.Errorf("URL = %q, want the file's own", req.URL)
 	}
 }
 

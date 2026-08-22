@@ -342,15 +342,26 @@ const ENVIRONMENT = {
 /** A backend that has no collections open — the state a person starts in,
  *  and exactly when they need to be able to make one. */
 export function noCollections(): Partial<ApiWorkbenchServices> {
-  return { listCollections: vi.fn().mockResolvedValue({ collections: [] }) }
+  return {
+    listCollections: vi.fn().mockResolvedValue({ collections: [], defaultRoot: DEFAULT_ROOT }),
+  }
 }
+
+/** Where this build puts a collection made with no place named — the value
+ *  `api.collections.list` answers beside the rows. It is a real path rather
+ *  than '' because '' is the DEGRADED state (a build with no app directory)
+ *  and a fixture that used it everywhere would let a surface that ignores
+ *  the field pass every test. */
+export const DEFAULT_ROOT = '/home/dev/.local/share/nocx/collections'
 
 /** Every backend call the workbench makes, as spies that succeed. A test
  *  that is about a failure overrides exactly the one call it is about. */
 export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWorkbenchServices {
   const opened = collectionsFixture()
   return {
-    listCollections: vi.fn().mockResolvedValue({ collections: [collectionsFixture()] }),
+    listCollections: vi
+      .fn()
+      .mockResolvedValue({ collections: [collectionsFixture()], defaultRoot: DEFAULT_ROOT }),
     openCollection: vi
       .fn()
       .mockResolvedValue({ handle: opened.handle, collection: opened.collection }),

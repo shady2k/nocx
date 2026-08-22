@@ -41,6 +41,70 @@ func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 	)
 }
 
+// WHERE A NEW COLLECTION WOULD GO, so a surface can show a person before
+// they commit to it — and the pair that makes it evidence: a service built
+// with no app directory answers "", which is the same state Create refuses
+// by name (apicoll.ErrNoDefaultLocation). Without the second half, a
+// DefaultRoot that always answered "" would pass the first.
+func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testing.T) {
+	root := t.TempDir()
+	op := capability.NewAPICollectionOperation(
+		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate("lane", 8, 64, 5*time.Second),
+		apicoll.NewCollections(apiPaths{root: root}),
+	)
+
+	var got string
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		// Create it, and ask where new ones go: the answer has to be the
+		// directory the folder actually landed in, not a second opinion
+		// about where they should.
+		made, err := svc.Create("orders-api")
+		if err != nil {
+			return err
+		}
+		where, err := svc.DefaultRoot()
+		if err != nil {
+			return err
+		}
+		got = where
+		if dir := filepath.Dir(made.Root); dir != where {
+			t.Errorf("Create put the collection in %q while DefaultRoot says %q", dir, where)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got == "" {
+		t.Fatal("DefaultRoot is empty on a service built with an app directory")
+	}
+	if filepath.Base(got) != apicoll.DefaultCollectionsDirName {
+		t.Errorf("DefaultRoot = %q, want the collections directory", got)
+	}
+
+	// And the pair: no app directory, no default location, "" said plainly.
+	none := capability.NewAPICollectionOperation(
+		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate("lane", 8, 64, 5*time.Second),
+		apicoll.NewCollections(nil),
+	)
+	if err := none.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		where, err := svc.DefaultRoot()
+		if err != nil {
+			return err
+		}
+		if where != "" {
+			t.Errorf("DefaultRoot = %q on a service with no app directory, want \"\"", where)
+		}
+		if _, createErr := svc.Create("orders-api"); !errors.Is(createErr, apicoll.ErrNoDefaultLocation) {
+			t.Errorf("Create = %v, want ErrNoDefaultLocation — the same state DefaultRoot reports as \"\"", createErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 // apiFolder writes a real collection folder and returns its root.
 func apiFolder(t *testing.T) string {
 	t.Helper()
@@ -96,6 +160,12 @@ func TestAPICollectionService_IsUselessOutsideItsOperation(t *testing.T) {
 	}
 	if _, err := escaped.Create("later"); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("Create outside the operation = %v, want ErrOperationInactive", err)
+	}
+	// It reaches no folder and answers a derived path, and it is still
+	// refused: one method that kept answering would be an exception to "a
+	// service that escaped is useless" that somebody has to remember.
+	if _, err := escaped.DefaultRoot(); !errors.Is(err, capability.ErrOperationInactive) {
+		t.Errorf("DefaultRoot outside the operation = %v, want ErrOperationInactive", err)
 	}
 }
 

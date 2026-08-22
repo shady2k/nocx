@@ -187,21 +187,39 @@ class ApiClient {
 }
 
 /**
- * The native directory picker, as this surface consumes it: the chosen
- * ABSOLUTE path, or an empty one when the person changed their mind.
+ * What a native picker answers: the chosen ABSOLUTE path, or an empty one
+ * when the person changed their mind.
  *
- * Structural rather than the generated `dialog.openDirectory` type, and
- * deliberately so — `key-material-input.tsx` states the same shape for
- * `dialog.openFile` for the same reason. A component prop is not a wire
- * declaration: the client that OWNS the call (`dialog-client.ts`) is typed
- * from the contract, and this is the one field of its result that the
- * workbench uses. Nothing here decodes a payload.
+ * Structural rather than the generated `dialog.*` types, and deliberately
+ * so — `key-material-input.tsx` states the same shape for `dialog.openFile`
+ * for the same reason. A component prop is not a wire declaration: the
+ * client that OWNS the call (`dialog-client.ts`) is typed from the contract,
+ * and this is the one field of its result that the workbench uses. Nothing
+ * here decodes a payload.
+ */
+type ChosenPath = { path: string }
+
+/**
+ * The native directory picker, as this surface consumes it.
  *
  * A function rather than the client itself, because the surface may hold it
  * detached; `secrets.tsx` and `connections.tsx` bind `openFileDialog` the
  * same way.
  */
-export type DirectoryPicker = () => Promise<{ path: string }>
+export type DirectoryPicker = () => Promise<ChosenPath>
+
+/**
+ * The native FILE picker, for the one thing this surface reads rather than
+ * writes: a Postman export.
+ *
+ * Its own type beside DirectoryPicker although the shapes are identical,
+ * because they are two capabilities and either can be absent on its own —
+ * two `dialog.*` methods, each of which answers -32601 independently. A
+ * single picker type would make "this build can choose a folder" and "this
+ * build can choose a file" one fact, and the surface would then draw a
+ * control for whichever it had not got.
+ */
+export type FilePicker = () => Promise<ChosenPath>
 
 /**
  * Bind the directory picker off the dialog client, when the build has one.
@@ -222,6 +240,23 @@ export function directoryPicker(client: object): DirectoryPicker | undefined {
   if (!('openDirectoryDialog' in client)) return undefined
   const carrier = client as { openDirectoryDialog: DirectoryPicker }
   return () => carrier.openDirectoryDialog()
+}
+
+/**
+ * Bind the FILE picker off the dialog client, the same way and for the same
+ * reasons as the directory one above.
+ *
+ * `dialog.openFile` has been a declared method with a contract since before
+ * this surface existed — Connections and Secrets choose a private key with
+ * it — and the workbench was simply never wired with it. That is why the
+ * import ask's destination had a picker and its export did not: one
+ * capability was handed in and the other was not, so a person naming a
+ * Postman export opened a terminal, found the file and pasted its path.
+ */
+export function filePicker(client: object): FilePicker | undefined {
+  if (!('openFileDialog' in client)) return undefined
+  const carrier = client as { openFileDialog: FilePicker }
+  return () => carrier.openFileDialog()
 }
 
 /**
@@ -320,6 +355,15 @@ export interface ApiWorkbenchServices {
    */
   openDirectory?: DirectoryPicker
   /**
+   * The native file picker, when the backend offers one — and ABSENT, not a
+   * function that rejects, when it does not. Optionality is the capability,
+   * exactly as it is for `openDirectory`: the ask draws a Browse control on
+   * the export field only where there is a picker to reach, so the
+   * `make dev-web` harness shows a typeable field rather than a button that
+   * fails when pressed.
+   */
+  openFile?: FilePicker
+  /**
    * How the workbench notices a collection folder changed — and ABSENT when
    * this build cannot watch, for the same reason `openDirectory` is.
    *
@@ -353,10 +397,12 @@ export function createApiWorkbenchServices(
   picker?: DirectoryPicker,
   watchCollections?: CollectionWatchPort,
   listConnections?: () => Promise<readonly ApiConnection[]>,
+  files?: FilePicker,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
     ...(picker ? { openDirectory: picker } : {}),
+    ...(files ? { openFile: files } : {}),
     ...(watchCollections ? { watchCollections } : {}),
     ...(listConnections ? { listConnections } : {}),
     listCollections: () => client.listCollections(),

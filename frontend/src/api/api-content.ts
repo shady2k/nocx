@@ -17,7 +17,7 @@ import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import type { SingletonKey, SurfaceType } from '../pane-content'
 import { ApiPane } from './api-pane'
 import { createApiStore, type ApiStore } from './api-store'
-import type { ApiWorkbenchServices, DirectoryPicker } from './api-client'
+import type { ApiWorkbenchServices, DirectoryPicker, FilePicker } from './api-client'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────────
 
@@ -36,16 +36,27 @@ export class ApiContent extends SolidPaneContent {
    *  store rather than in it: `dialog.*` is another domain's method, and the
    *  store owns api.* state (AD-8). */
   private readonly openDirectory?: DirectoryPicker
+  /** The native file picker, when this build has one — held beside the
+   *  directory picker and never merged with it: either can be absent on its
+   *  own, and a surface that read one capability for both would draw a
+   *  control it cannot honour. */
+  private readonly openFile?: FilePicker
 
   constructor(services: ApiWorkbenchServices) {
     super()
     this.store = createApiStore(services)
     this.openDirectory = services.openDirectory
+    this.openFile = services.openFile
   }
 
   renderContent(root: HTMLElement): () => void {
     return render(
-      () => createComponent(ApiPane, { store: this.store, openDirectory: this.openDirectory }),
+      () =>
+        createComponent(ApiPane, {
+          store: this.store,
+          openDirectory: this.openDirectory,
+          openFile: this.openFile,
+        }),
       root,
     )
   }

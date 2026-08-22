@@ -80,7 +80,16 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				h.fail(req, err)
 				return nil
 			}
-			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(svc, open)))
+			// Inside the operation the only failure this can have is the
+			// guard, which is held — so it is answered rather than
+			// swallowed into "", which would report a build with no app
+			// directory and a service somebody escaped as the same state.
+			root, err := svc.DefaultRoot()
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(svc, open, root)))
 		case "api.collections.open":
 			var p apiCollectionsOpenParams
 			if !h.decode(req, &p) {
@@ -247,15 +256,22 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	defer h.cancels.drop(h.conn, p.Token)
 
 	var inputs capability.SendInputs
+	// unresolved is the one snapshot failure that is a RUN rather than an
+	// error: a variable with no value. Carried out of the callback rather
+	// than answered inside it, because the answer needs the route and the
+	// environment the snapshot read, and building it under the gate would
+	// hold the whole domain to render a string.
+	var unresolved error
 	snapshotted := false
 
 	err := h.op.Run(sendCtx, func(_ context.Context, svc capability.APICollectionService) error {
 		got, err := svc.Snapshot(apicoll.HandleID(p.Handle), p.RelPath, p.EnvRelPath)
-		if err != nil {
+		if err != nil && !errors.Is(err, apicoll.ErrUnresolvedVariable) {
 			h.fail(req, err)
 			return nil
 		}
 		inputs = got
+		unresolved = err
 		snapshotted = true
 		return nil
 	})
@@ -265,6 +281,23 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	}
 	if !snapshotted {
 		return // the callback has already answered
+	}
+
+	// A VARIABLE WITH NO VALUE IS A RUN, at the `compose` phase, and it
+	// answers with the unresolved reason — which names every missing
+	// variable and the field each was used in (apicoll.UnresolvedError) —
+	// rather than with a complaint about a URL nobody typed. Before this the
+	// substitution simply did not happen when no environment was named, so
+	// `{{baseUrl}}/zen` reached the sender as text and came back as
+	// `"{{baseUrl}}/zen" is not an absolute URL`.
+	//
+	// It is answered here rather than sent, because there is nothing to
+	// send: the request is the one the file holds, references and all.
+	if unresolved != nil {
+		_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
+			apisend.Unsent(inputs.Request, apisend.PhaseCompose, unresolved),
+			inputs.Environment, inputs.Route)))
+		return
 	}
 
 	// The route comes off the environment the snapshot read, in the same
@@ -297,6 +330,18 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	}
 	sending, used, err := apisend.Apply(inputs.Request, look)
 	if err != nil {
+		// The SAME division as the snapshot's above, at the fourth place a
+		// variable can be used: an auth variable nothing can resolve is a
+		// run at `compose`, because it is a thing that happened to somebody
+		// who pressed Send. Anything else Apply refuses — a scheme this
+		// build does not implement — is the caller's to fix and stays an
+		// error.
+		if errors.Is(err, apicoll.ErrUnresolvedVariable) {
+			_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
+				apisend.Unsent(inputs.Request, apisend.PhaseCompose, err),
+				inputs.Environment, inputs.Route)))
+			return
+		}
 		_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
 		return
 	}
@@ -568,6 +613,12 @@ type apiEmptyResponse struct{}
 
 type apiCollectionsListResponse struct {
 	Collections []apiOpenCollectionWire `json:"collections"`
+	// DefaultRoot is where a collection made with no place named goes, so an
+	// ask can PROPOSE a destination rather than demand one. It rides the
+	// listing because it is a fact about this build rather than about any
+	// one folder, and the listing is the call every surface already makes.
+	// "" is a build with no app directory to derive it from.
+	DefaultRoot string `json:"defaultRoot"`
 }
 
 type apiOpenCollectionWire struct {
@@ -958,7 +1009,7 @@ type apiUnsupportedWire struct {
 // already has for "this one folder is in trouble" (capability.OpenCollection).
 // A dead folder hiding every live one is the defect that field exists to
 // prevent, and a soft degrade the UI cannot see is the one AGENTS.md names.
-func wireOpenCollections(svc capability.APICollectionService, open []capability.OpenCollection) apiCollectionsListResponse {
+func wireOpenCollections(svc capability.APICollectionService, open []capability.OpenCollection, defaultRoot string) apiCollectionsListResponse {
 	out := make([]apiOpenCollectionWire, 0, len(open))
 	for _, c := range open {
 		row := apiOpenCollectionWire{
@@ -979,7 +1030,7 @@ func wireOpenCollections(svc capability.APICollectionService, open []capability.
 		row.Collection = wire
 		out = append(out, row)
 	}
-	return apiCollectionsListResponse{Collections: out}
+	return apiCollectionsListResponse{Collections: out, DefaultRoot: defaultRoot}
 }
 
 // joinReasons puts two failures in one sentence, and answers the one that

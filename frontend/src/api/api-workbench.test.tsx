@@ -38,6 +38,7 @@ import {
   SECRET_VALUE,
   collectionFixture,
   collectionsFixture,
+  DEFAULT_ROOT,
   createdFixture,
   failedSendFixture,
   requestRawFixture,
@@ -468,6 +469,7 @@ describe('a request goes out from the workbench', () => {
     const { bar } = await mountApp({
       listCollections: vi.fn().mockResolvedValue({
         collections: [collectionsFixture({ error: 'the folder was replaced' })],
+        defaultRoot: DEFAULT_ROOT,
       }),
     })
     await openWorkbench(bar)
@@ -478,6 +480,7 @@ describe('a request goes out from the workbench', () => {
     const bad = collectionsFixture()
     const { bar } = await mountApp({
       listCollections: vi.fn().mockResolvedValue({
+        defaultRoot: DEFAULT_ROOT,
         collections: [
           {
             ...bad,
@@ -1224,6 +1227,16 @@ describe('the raw view and the body', () => {
 // collections menu now, and the curl half is on the request line, where a
 // person pasting a command is already looking.
 
+/** Open the workbench and the import ask — the entrance a person uses, off
+ *  the collections menu, rather than a signal set from the outside. */
+async function openImportAsk(bar: HTMLElement): Promise<void> {
+  await openWorkbench(bar)
+  fireEvent.click(button('More collection actions'))
+  await vi.waitFor(() => menuItem('Import collection…'))
+  fireEvent.click(menuItem('Import collection…'))
+  await vi.waitFor(() => expect(reachable(field('api-import-postman-file'))).toBe(true))
+}
+
 describe('a Postman export is imported through an ask', () => {
   it('the panel wears no import form — the fields live inside the ask', async () => {
     const { bar } = await mountApp()
@@ -1235,6 +1248,135 @@ describe('a Postman export is imported through an ask', () => {
     const file = workbench().querySelector('#api-import-postman-file')
     expect(file).not.toBeNull()
     expect(reachable(file!)).toBe(false)
+  })
+
+  // ── The export's own picker, and the destination it proposes ────────────
+  //
+  // The ask named the export by PATH and offered no way to choose one: a
+  // person opened a terminal, found the file they had just downloaded from
+  // Postman, copied its path and pasted it back. And it asked for a
+  // destination as an absolute path with nothing in it, while
+  // `api.collections.create` next door takes a name and puts the folder
+  // where nocx keeps collections — the same concept behind two doors of very
+  // different difficulty (nocx-6hg2w.15, nocx-6hg2w.14).
+
+  it('with no file picker there is no control on the export field, and typing still works', async () => {
+    // servicesFixture carries no openFile — the dev-web shape, and the
+    // ordinary one: `dialog.openFile` answers -32601 wherever there is no
+    // Wails runtime, so the absent case may not look broken.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({ importPostman })
+    await openImportAsk(bar)
+
+    expect(buttonNames()).not.toContain('Choose export…')
+    expect(field('api-import-postman-file').disabled).toBe(false)
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith('/w/acme.json', '/w/acme-api'),
+    )
+  })
+
+  it('with a picker, choosing an export fills the field and PROPOSES where the collection lands', async () => {
+    const openFile = vi.fn().mockResolvedValue({ path: '/work/acme.postman_collection.json' })
+    const { bar } = await mountApp({ openFile })
+    await openImportAsk(bar)
+
+    // The control is reachable from the state the ask opens in — which is
+    // the half a test that called the picker directly could not say.
+    expect(buttonNames()).toContain('Choose export…')
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('/work/acme.postman_collection.json'),
+    )
+    expect(openFile).toHaveBeenCalled()
+    // BOTH suffixes go: a folder called `acme.postman_collection` would be
+    // named after our import machinery rather than after the collection.
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-dest').value).toBe(`${DEFAULT_ROOT}/acme`),
+    )
+  })
+
+  it('a destination the person has typed is never overwritten by a later pick', async () => {
+    const openFile = vi.fn().mockResolvedValue({ path: '/work/acme.postman_collection.json' })
+    const { bar } = await mountApp({ openFile })
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/elsewhere/mine' } })
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('/work/acme.postman_collection.json'),
+    )
+    // The person said where it goes. A proposal that argued with them is the
+    // surface deciding something they had already decided.
+    expect(field('api-import-postman-dest').value).toBe('/elsewhere/mine')
+  })
+
+  it("typing an export proposes too — the offer is not the picker's alone", async () => {
+    const { bar } = await mountApp()
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-file'), {
+      target: { value: '/work/orders.postman_collection.json' },
+    })
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-dest').value).toBe(`${DEFAULT_ROOT}/orders`),
+    )
+  })
+
+  it('with no default location the ask proposes nothing and stays typeable', async () => {
+    // '' is what a build with no app directory answers — the state
+    // apicoll.ErrNoDefaultLocation names. Nothing was promised, so nothing
+    // degrades: the person types a path, exactly as before.
+    const { bar } = await mountApp({
+      listCollections: vi.fn().mockResolvedValue({ collections: [], defaultRoot: '' }),
+    })
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-file'), {
+      target: { value: '/work/orders.postman_collection.json' },
+    })
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('/work/orders.postman_collection.json'),
+    )
+    expect(field('api-import-postman-dest').value).toBe('')
+    expect(field('api-import-postman-dest').disabled).toBe(false)
+  })
+
+  it('a file picker that reports itself unavailable retires its control and says why', async () => {
+    // The same interval the folder ask's picker has, and its own signal: the
+    // two dialog methods retire independently, so this must not depend on
+    // the directory picker at all.
+    const { bar } = await mountApp({
+      openFile: vi.fn().mockRejectedValue(new RpcError('method not found', -32601)),
+    })
+    await openImportAsk(bar)
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/half-typed.json' } })
+    expect(buttonNames()).toContain('Choose export…')
+
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Choose export…'))
+    // The refusal costs the person nothing they typed, and is said where
+    // every other refusal in this ask is said.
+    expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
+    expect(workbench().textContent).toContain('method not found')
+  })
+
+  it('cancelling the file picker leaves what was typed untouched', async () => {
+    const { bar } = await mountApp({ openFile: vi.fn().mockResolvedValue({ path: '' }) })
+    await openImportAsk(bar)
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/half-typed.json' } })
+
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() => expect(button('Import')).toBeTruthy())
+    expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
   })
 
   it('entrance, fields, confirm — and the backend is reached', async () => {
@@ -1303,6 +1445,7 @@ async function openRequestWithEnvironments(
   const { bar } = await mountApp({
     listCollections: vi.fn().mockResolvedValue({
       collections: [collectionsFixture({ collection: collectionFixture({ environments: envs }) })],
+      defaultRoot: DEFAULT_ROOT,
     }),
     sendRequest,
     ...over,

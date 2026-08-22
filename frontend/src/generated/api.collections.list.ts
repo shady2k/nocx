@@ -17,6 +17,14 @@ export interface ApiCollectionsListResult {
    * Never null — nothing open is [].
    */
   collections: OpenCollection[]
+  /**
+   * WHERE a collection made with no place named goes — the DIRECTORY that holds them, `<data dir>/collections`, and never a collection inside it. It rides the listing because it is a fact about this build rather than about any one folder, and the listing is the call every surface already makes.
+   *
+   * It exists so an ask can PROPOSE a destination instead of demanding one. `api.collections.create` takes a name and puts the folder here; the import ask next door asked for an absolute path with nothing filled in, which is the same concept behind two doors of very different difficulty — and the harder one is what somebody arriving from Postman meets. A proposal rather than "send nothing and let the backend decide": the person has to be able to SEE where their collection is about to land and change it, which an empty field with a sentence under it does not give them.
+   *
+   * "" when this build has no app directory to derive it from — the state apicoll.ErrNoDefaultLocation names for the creation path. A surface that gets "" proposes nothing and the person types a path, which is what they already do; nothing was promised, so nothing degraded.
+   */
+  defaultRoot: string
 }
 export interface OpenCollection {
   handle: string

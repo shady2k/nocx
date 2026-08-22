@@ -198,6 +198,16 @@ export interface ApiStore {
    *  signal answering both would have to be read as "a request, unless it is
    *  a collection", and Send is gated on it. */
   activeCollection(): string
+  /**
+   * WHERE A COLLECTION MADE WITH NO PLACE NAMED GOES — the directory, off
+   * the backend's own listing. '' on a build with no app directory, and ''
+   * before the first listing answers.
+   *
+   * It is here rather than derived in the surface because only the backend
+   * knows it: the location comes from the app's data directory, which the
+   * renderer has no way to compute and must never guess at.
+   */
+  defaultRoot(): string
   /** The environments of the collection the workbench is pointed at, as the
    *  last listing had them. [] when that collection has none, and [] when
    *  nothing is open — a collection with no environments is a collection
@@ -417,6 +427,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const [notes, setNotes] = createSignal<readonly ApiImportNote[]>([])
   const [error, setError] = createSignal('')
   const [loading, setLoading] = createSignal(false)
+  const [defaultRoot, setDefaultRoot] = createSignal('')
 
   // Run ids come from a counter rather than a clock: `Date.now()` gives two
   // runs fired in the same millisecond one id, and a list keyed by a
@@ -653,6 +664,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     try {
       const result = await services.listCollections()
       setCollections(result.collections)
+      // WHERE A NEW COLLECTION WOULD GO. It rides the listing because it is
+      // a fact about the build rather than about any folder, so there is no
+      // second call to make and nothing to keep in step: every refresh
+      // re-reads it beside the rows.
+      setDefaultRoot(result.defaultRoot)
       // THE WORKBENCH POINTS AT SOMETHING WHENEVER SOMETHING IS OPEN, and
       // the interval closes when the last folder does. Without this a pane
       // mounted onto folders opened in an earlier session was pointed at
@@ -1179,6 +1195,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     error,
     loading,
     pending,
+    defaultRoot,
     watchMode,
     watchDegradedReason,
     watchFailed,

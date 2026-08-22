@@ -121,6 +121,15 @@ type App struct {
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
 
+	// notifyFeed and notifyIngress are the notification centre: ingress is
+	// the pipeline's one entry point (it stamps, records, then submits) and
+	// the feed is the bounded in-memory record the bell reads. Held here so
+	// the composition root's wiring is assertable — a feature whose write
+	// path is reachable only from its own tests is the shape nocx-rtg0
+	// shipped.
+	notifyFeed    *notify.Feed
+	notifyIngress *notify.Ingress
+
 	// UIState owns what the app must remember without being asked
 	// (ADR-0033) — window geometry and the shell's layout. Exported because
 	// main.go is the only place a Wails context exists, and the window half
@@ -401,6 +410,20 @@ func WithLogFilePath(path string) Option {
 // summary. Eight seconds is termic's number for the same job (design §6.2),
 // long enough to absorb a build's chatter.
 const notifyDebounceWindow = 8 * time.Second
+
+// The feed's budgets. Rows alone are not a usable unit of account — a single
+// occurrence may carry 8 KiB of title and body — so both bind, and eviction is
+// always recorded in the dropped row rather than being silent.
+//
+// The collapse window is deliberately much shorter than any read lifetime. If
+// it were not, two separate acts sharing a session, kind and level (two
+// deploys an hour apart) would merge into one row simply because nobody had
+// cleared the inbox.
+const (
+	notifyFeedMaxOccurrences   = 200
+	notifyFeedMaxRetainedBytes = 1 << 20
+	notifyFeedCollapseWindow   = 30 * time.Second
+)
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -1032,6 +1055,13 @@ func New(opts ...Option) (*App, error) {
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
 			{Sink: notify.HostSink{Host: attentionHost}},
 		},
+		// A session that ended is a registry fact, so it is attested and may
+		// reach every sink (ADR-0029 §3). It gets the banner for the same
+		// reason the program's own request does: the user is not looking at
+		// the tab, which is the only moment either event matters.
+		{Kind: notify.KindSessionEnded, Trust: notify.TrustAttested}: {
+			{Sink: notify.HostSink{Host: attentionHost}},
+		},
 	}, notify.Limits{
 		MaxInFlight:     4,
 		MaxQueued:       32,
@@ -1072,7 +1102,28 @@ func New(opts ...Option) (*App, error) {
 	if policyErr != nil {
 		return nil, fmt.Errorf("notify policy: %w", policyErr)
 	}
-	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyPolicy))
+	// Ingress is the pipeline's one entry point: it stamps what nocx owns,
+	// records the occurrence in the feed, and only THEN submits for
+	// delivery. The policy is reached THROUGH it and never around it, which
+	// is the whole inversion — before this, a suppressed notification was
+	// destroyed, so the events most worth seeing were exactly the ones
+	// nothing remembered.
+	notifyFeed, feedErr := notify.NewFeed(notify.FeedLimits{
+		MaxOccurrences:   notifyFeedMaxOccurrences,
+		MaxRetainedBytes: notifyFeedMaxRetainedBytes,
+		CollapseWindow:   notifyFeedCollapseWindow,
+	}, notify.RealClock{})
+	if feedErr != nil {
+		return nil, fmt.Errorf("notify feed: %w", feedErr)
+	}
+	notifyIngress, ingressErr := notify.NewIngress(notifyFeed, notifyPolicy, notify.RealClock{})
+	if ingressErr != nil {
+		return nil, fmt.Errorf("notify ingress: %w", ingressErr)
+	}
+	tpOpts = append(tpOpts,
+		transport.WithNotifyRaiser(notifyIngress),
+		transport.WithNotifyFeed(notifyFeed),
+	)
 
 	// The assistant engine (nocx-edio): eino behind the guarded HTTP
 	// client, wired at the composition root like every other client —
@@ -1086,6 +1137,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// The feed's change hint, bound now that the server exists: every
+	// mutation tells the attached renderers the revision moved. It carries
+	// the revision only, so it rides the refreshable outbound queue and a
+	// dropped one costs one refetch rather than a row nobody learns about.
+	notifyFeed.OnChange(tp.BroadcastFeedChanged)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the
 	// server is built above; the window before this line is empty (no
@@ -1219,6 +1275,8 @@ func New(opts ...Option) (*App, error) {
 		logFile:          logFile,
 		procs:            procs,
 		attentionHost:    attentionHost,
+		notifyFeed:       notifyFeed,
+		notifyIngress:    notifyIngress,
 		UIState:          uiStateStore,
 		slogger:          slogger,
 	}
@@ -1462,6 +1520,26 @@ type lifecyclePTY struct {
 	// descriptors this session's shell inherited, and a reader outliving its
 	// shell would report a stage for a session that no longer exists.
 	bp *bootstrapprogress.Reader
+}
+
+// WaitErr forwards the shell's wait result from the pty this wraps
+// (nocx-o3amz). It exists because lifecyclePTY embeds the pty.Pty INTERFACE,
+// and a concrete type's method is not promoted through an embedded interface:
+// *pty.LocalPty.WaitErr — the only thing that knows what cmd.Wait returned —
+// was invisible to the optional-method assertion session.ExitOutcome makes, so
+// every enhanced local session classified as a LOSS. The tab hung about marked
+// "Connection lost" on a clean `exit`, and the shell's status was discarded.
+//
+// Anything else optional a pty grows needs the same forward, for the same
+// reason. The `(nil, false)` answer is not a stand-in for a clean exit: it says
+// this pty made no report, which ExitOutcome maps to a loss without inventing
+// a status.
+func (p *lifecyclePTY) WaitErr() (error, bool) {
+	provider, ok := p.Pty.(interface{ WaitErr() (error, bool) })
+	if !ok {
+		return nil, false
+	}
+	return provider.WaitErr()
 }
 
 func (p *lifecyclePTY) Close() error {

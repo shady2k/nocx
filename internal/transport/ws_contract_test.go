@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -5164,5 +5165,105 @@ func TestSessionIntegrationChanged_ABootstrapOutcomeNeverOverwritesAnAnswer(t *t
 	e.ws.integrationMu.Unlock()
 	if st.reason != ssh.ReasonRemoteCommand {
 		t.Errorf("reason = %q, want the first answer %q", st.reason, ssh.ReasonRemoteCommand)
+	}
+}
+
+// ── notify.feed.read / notify.feed.markRead / notify.feed.changed ──────
+
+// The DTO's own conformance across the shapes a live feed produces. The
+// over-the-socket cases live in ws_notify_feed_test.go — this pins the
+// struct: field tags, the empty slice marshalling as [] rather than null,
+// the enum spellings, and that a read row and an unread row both satisfy
+// the contract.
+func TestNotifyFeedRead_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.read.schema.json")
+	at := time.Date(2026, 8, 22, 9, 41, 0, 0, time.UTC)
+	read := at.Add(time.Minute)
+
+	cases := map[string]notify.FeedSnapshot{
+		// Everything populated, including a collapsed row and a read one.
+		"populated": {
+			Revision:    12,
+			UnreadCount: 1,
+			Occurrences: []notify.Occurrence{
+				{
+					ID: "occ-2", Count: 3, LastAt: at,
+					Event: notify.Event{
+						SessionID: "s2", Title: "build finished", Body: "",
+						Kind: notify.KindBlockFinished, Trust: notify.TrustAttested,
+						Level: notify.LevelSuccess, At: at,
+						Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s2"},
+					},
+				},
+				{
+					ID: "occ-1", Count: 1, LastAt: at, ReadAt: &read,
+					Event: notify.Event{
+						SessionID: "s1", Title: "deploy failed", Body: "exit status 1",
+						Kind: notify.KindSessionEnded, Trust: notify.TrustAttested,
+						Level: notify.LevelWarning, At: at,
+						Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
+					},
+				},
+			},
+		},
+		// The state a fresh process is in. occurrences must be [] and never
+		// null — the schema's `type: array` rejects null, which is the
+		// defect the first schema run caught on vault.status — and the
+		// dropped record's two instants are the empty string, not "0001-01-01".
+		"empty": {Revision: 0, UnreadCount: 0, Occurrences: nil},
+		// Eviction happened, and it is visible: a soft degrade must be in
+		// the product, not only in a log.
+		"something was dropped": {
+			Revision: 40, UnreadCount: 0, Occurrences: nil,
+			Dropped: notify.DroppedRecord{Count: 7, Oldest: at, Newest: at.Add(time.Hour)},
+		},
+	}
+
+	for name, snap := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(snapshotToResult(snap))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "notify.feed.read DTO ("+name+")")
+			if !strings.Contains(string(raw), `"occurrences":[`) {
+				t.Errorf("occurrences did not marshal as an array: %s", raw)
+			}
+		})
+	}
+}
+
+func TestNotifyFeedMarkRead_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.markRead.schema.json")
+	// Zero is a legal revision (minimum: 0) and must still marshal as a
+	// present key — there is no omitempty on it, and a mark on an untouched
+	// feed is exactly when it would bite.
+	for name, dto := range map[string]feedMarkReadResult{
+		"an advanced feed": {Revision: 41},
+		"a zero revision":  {Revision: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "notify.feed.markRead DTO ("+name+")")
+		})
+	}
+}
+
+func TestNotifyFeedChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.changed.schema.json")
+	for name, dto := range map[string]feedChangedParams{
+		"an advanced feed": {Revision: 9},
+		"a zero revision":  {Revision: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "notify.feed.changed DTO ("+name+")")
+		})
 	}
 }

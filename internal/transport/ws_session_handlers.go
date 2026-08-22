@@ -38,6 +38,9 @@ type sessionMachine interface {
 	laneFor(sid session.ID, sess session.Session) *sessionLane
 	closeLane(sid session.ID)
 	closeSession(sid session.ID, sess session.Session)
+	// markCloseRequested records that this session's end was asked for, so
+	// the exit it produces is not filed as news the user has to read.
+	markCloseRequested(sid session.ID)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
@@ -726,6 +729,15 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 			_ = respond(h.r, resp)
 			return nil
 		}
+		// The end is the user's own doing, and the session layer cannot
+		// see that: a forced teardown records no shell report, so the exit
+		// it produces reads as ExitInterrupted like any dropped connection.
+		// Marked BEFORE the registry close, because the registry close is
+		// what wakes monitorExit — which takes the marker and files
+		// nothing. Not marked on the branch above: the session is already
+		// out of the registry there, so no exit of ours is coming and the
+		// entry would have nothing to clear it.
+		h.machine.markCloseRequested(sid)
 		_ = svc.Close(sid)
 		h.machine.closeSession(sid, sess)
 		state.remove(sid)

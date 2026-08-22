@@ -546,6 +546,18 @@ function insertionIndex(from: number, to: number, before: boolean): number {
   return from < at ? at - 1 : at
 }
 
+/**
+ * The route identity of this machine, the one backend a tab can be on today.
+ *
+ * The same vocabulary internal/commandnames.LocalRoute uses, and the same
+ * string the notify feed stamps into every occurrence's backendId. It is
+ * spelled here rather than imported from ports-client's LOCAL_TARGET_ID
+ * because that constant answers a different question — which target the
+ * ports methods scope to — and one of the two will change when the relay
+ * lands.
+ */
+const LOCAL_BACKEND_ID = 'local'
+
 export class PaneManager {
   private readonly panes: Pane[] = []
   private nextPaneId = 1
@@ -1943,6 +1955,40 @@ export class PaneManager {
   activeTerminalContent(): TerminalContent | null {
     const content = this.activePane?.content
     return content instanceof TerminalContent ? content : null
+  }
+
+  /**
+   * The tab a (backendId, sessionId) pair names, or undefined.
+   *
+   * Session -> tab is the RENDERER's question and only the renderer can
+   * answer it: the backend's Attribution.Tab is a WebSocket connection id,
+   * not a tab. The notification centre asks it to focus the tab an
+   * occurrence came from.
+   *
+   * The backend id is COMPARED, never ignored. Every tab this build opens is
+   * on this machine, so the only pair that can match carries
+   * internal/commandnames.LocalRoute's value — and an argument that is
+   * accepted and dropped silently stops meaning anything by the time the
+   * relay lands and a second backend's sessions start arriving with ids of
+   * their own.
+   *
+   * The session comes from the content's own capability, so PaneManager never
+   * learns which content class replied — and the capability is `lineage()`,
+   * the one that answers what a tab HOLDS, not `activeOrigin()`, which answers
+   * which MACHINE a tab speaks for (nocx-2gfh6). The difference is the whole
+   * defect: activeOrigin goes silent the moment the shell exits, so a
+   * session.ended row — the notification centre's own first source — could
+   * never be activated, while its tab was still on the strip with its
+   * scrollback readable. A pane is resolvable for exactly as long as it
+   * exists, which is what the panel's meta line already claims.
+   *
+   * Only the session id is read here. The parent edge beside it confers
+   * nothing and is not consulted: this answers "which tab is this occurrence
+   * from", never "what may one tab do to another" (ADR-0020 §5, lineage.ts).
+   */
+  findBySession(backendId: string, sessionId: string): Pane | undefined {
+    if (backendId !== LOCAL_BACKEND_ID || sessionId === '') return undefined
+    return this.panes.find((p) => p.content.lineage?.()?.sessionId === sessionId)
   }
 
   /** The active pane's PANE element — the always-visible mount the snippet

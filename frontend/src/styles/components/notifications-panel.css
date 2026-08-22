@@ -1,0 +1,28 @@
+/* The notification centre's panel.
+
+   Placement only. Not one rule here sets background, border, color, font-*,
+   padding or box-shadow on a ui-* class — a surface may place a kit component
+   and may never repaint it. The dropped line is this surface's OWN element,
+   so it carries its own appearance. */
+
+.notifications-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.notifications-panel__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.notifications-panel__dropped {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+  border-top: 1px solid var(--color-border);
+}

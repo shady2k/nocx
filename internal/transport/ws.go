@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/backup"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
@@ -31,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -140,6 +142,11 @@ type WSServer struct {
 	// pipeline (ADR-0029). Wired through WithNotifyRaiser; when nil,
 	// notify.raise answers -32601.
 	notifyRaiser NotifyRaiser
+
+	// notifyFeed is the notification centre's bounded in-memory record,
+	// read by notify.feed.read and marked by notify.feed.markRead. Wired
+	// through WithNotifyFeed; when nil, both methods answer -32601.
+	notifyFeed NotifyFeed
 
 	// Profile service provides a single validated write path for profiles
 	// and groups through the domain layer.
@@ -384,6 +391,23 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+	// closeRequested holds the session ids whose end the user asked for:
+	// written by the "close" handler before the registry close, read and
+	// cleared by monitorExit when that close produces the exit. It is the
+	// only thing that can tell a teardown apart from a loss, because a
+	// forced teardown leaves no shell report and ExitOutcome correctly
+	// refuses to invent one — so both arrive as ExitInterrupted.
+	//
+	// The interval, both ends: an id is in this map from just before the
+	// registry close that the "close" handler runs until the monitorExit
+	// woken by that close takes it out (takeCloseRequested). Exactly one
+	// monitorExit exists per session (sessionRx.monitorOnce) and it always
+	// runs — at the latest when Stop closes the registry — so an entry left
+	// by a close whose registry close failed is cleared by the session's
+	// eventual end, and no id can be entered twice (ids are unique per
+	// session). Guarded by ringsMu, the mutex that already owns the other
+	// session-keyed transport state.
+	closeRequested map[session.ID]struct{}
 	// lanesMu guards lanes: the per-session resize lanes (ws_session_ops.go).
 	// One lane per session that has been resized or closed; entries are
 	// never deleted (a closed lane is the tombstone that refuses every
@@ -943,6 +967,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		rx:                  make(map[session.ID]*sessionRx),
+		closeRequested:      make(map[session.ID]struct{}),
 		conns:               make(map[*wsConn]struct{}),
 		outboundBudget:      outbound.NewBudget(outboundBudgetBytes),
 		tunnels:             make(map[string]*tunnel.Tunnel),
@@ -1013,6 +1038,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.notifySpecs()...)
+	specs = append(specs, s.notifyFeedSpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
@@ -1224,6 +1250,29 @@ func (s *WSServer) removeRx(id session.ID) *sessionRx {
 	}
 	delete(s.rx, id)
 	return rx
+}
+
+// markCloseRequested records that the user asked for this session's end.
+// Called by the "close" handler BEFORE the registry close, because the
+// registry close is what wakes monitorExit and the marker has to be there
+// when it looks.
+func (s *WSServer) markCloseRequested(id session.ID) {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	s.closeRequested[id] = struct{}{}
+}
+
+// takeCloseRequested reports whether this session's end was asked for, and
+// clears the marker. Read-and-clear: the marker describes one teardown, and
+// the exit it describes happens once.
+func (s *WSServer) takeCloseRequested(id session.ID) bool {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	_, ok := s.closeRequested[id]
+	if ok {
+		delete(s.closeRequested, id)
+	}
+	return ok
 }
 
 // Responder is the outbound capability handed to control-plane handlers:
@@ -2306,15 +2355,79 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		s.gitSessionClosed(sess.ID(), wconn)
 	}
 
+	// The cause discriminates an authoritative shell exit (with its status)
+	// from a loss, so a tab whose ssh connection dropped is marked instead
+	// of destroyed (nocx-ictcq). The classification is the session layer's
+	// single owner; here the outcome is only mapped onto the wire fields —
+	// and onto the notification centre's record below.
+	//
+	// It is read BEFORE the subscriber check because the raise that follows
+	// does not need a renderer and the exit notification does. That order is
+	// the whole point of the raise: a session that ended while nothing was
+	// attached is exactly the one the bell exists to remember.
+	cause, status := sess.ExitOutcome()
+
+	// Was this end the user's own doing? Read-and-cleared here, and read
+	// unconditionally so the marker never outlives the session it names
+	// (see closeRequested). It cannot be inferred from the cause: a forced
+	// teardown leaves no shell report, so the session layer classifies a
+	// closed tab exactly as it classifies a dropped connection, and it is
+	// right to — the difference is intent, which only the handler saw.
+	requested := s.takeCloseRequested(sess.ID())
+
+	// The feed's first attested source (spec §9). This is a registry fact,
+	// not a parsed byte: AD-6 is untouched because nothing here reads the
+	// stream — the cause comes from the session layer, which is its single
+	// owner (nocx-ictcq).
+	//
+	// A close the user asked for raises NOTHING. This is source
+	// correctness, not filtering: every event that is raised is a member of
+	// the feed and policy decides only its channels, so an end nobody needs
+	// to be told about must not become an event in the first place.
+	// Otherwise the centre's first source opened with a warning — "Session
+	// on <host> was interrupted" — on the most ordinary action there is.
+	// The exit notification below is unaffected: the renderer still learns
+	// the session is gone.
+	if s.notifyRaiser != nil && !requested {
+		level := notify.LevelWarning
+		body := ""
+		if cause == session.ExitExited {
+			if status == 0 {
+				level = notify.LevelSuccess
+			} else {
+				body = fmt.Sprintf("exit status %d", status)
+			}
+		}
+		// At is deliberately not stamped: ingress is the first nocx-owned
+		// stage and stamps it once (internal/notify/ingress.go).
+		//
+		// Background, deliberately. Owner: monitorExit, which is this
+		// session's own teardown goroutine and runs exactly once per
+		// session. Closing event: the return of Admit, which records into
+		// the feed and hands the event to the policy synchronously —
+		// delivery past the debounce window is the policy's to own, not
+		// this call's. Tying it to a connection's context instead would
+		// cancel the record of a session that ended precisely because
+		// nothing was attached, which is the one case the feed exists for.
+		s.notifyRaiser.Raise(context.Background(), notify.Event{
+			SessionID: string(sess.ID()),
+			Title:     sessionEndedTitle(sess.Host(), cause),
+			Body:      body,
+			Kind:      notify.KindSessionEnded,
+			Trust:     notify.TrustAttested,
+			Level:     level,
+			Attribution: notify.Attribution{
+				Backend: commandnames.LocalRoute,
+				Host:    sess.Host(),
+				Session: string(sess.ID()),
+			},
+		})
+	}
+
 	if wconn == nil {
 		return
 	}
 
-	// The cause discriminates an authoritative shell exit (with its status)
-	// from a loss, so a tab whose ssh connection dropped is marked instead
-	// of destroyed (nocx-ictcq). The classification is the session layer's
-	// single owner; here the outcome is only mapped onto the wire fields.
-	cause, status := sess.ExitOutcome()
 	var statusPtr *int
 	if cause == session.ExitExited {
 		statusPtr = &status
@@ -2329,6 +2442,24 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	})); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
+}
+
+// sessionEndedTitle names the end of a session, and is the ONE place that
+// wording is decided (nocx-lmmi5). A local session has no host — Config.Host
+// is set only on the remote branch (internal/session/session.go) — so the
+// hostless format rendered "Session on  ended", a double space in the centre's
+// very first source. The renderer must not paper over it either: a second
+// place deciding how an end reads is two owners of one sentence, and they
+// would part company the first time either changed.
+func sessionEndedTitle(host string, cause session.ExitCause) string {
+	verb := "was interrupted"
+	if cause == session.ExitExited {
+		verb = "ended"
+	}
+	if host == "" {
+		return "Local session " + verb
+	}
+	return "Session on " + host + " " + verb
 }
 
 // exitNotificationParams is the exit notification payload, declared once

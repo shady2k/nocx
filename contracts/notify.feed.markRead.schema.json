@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notify.feed.markRead.schema.json",
+  "title": "NotifyFeedMarkRead",
+  "description": "Result of notify.feed.markRead: every unread occurrence becomes read and the feed's revision advances. The renderer applies the returned revision directly rather than waiting for the change notification it will also receive — the notification is a hint and the result is authoritative.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["revision"],
+  "properties": {
+    "revision": {
+      "description": "The feed revision after the mark. Monotonic.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

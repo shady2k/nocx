@@ -122,6 +122,7 @@ test.describe('sandboxed shell action', () => {
       await expect(page.locator(SANDBOX_UNAVAILABLE)).toContainText(
         /landlock|seatbelt|unsupported|probe|sandbox-exec/,
       )
+      await expect(page.getByText('Sandbox enabled — new shell', { exact: true })).toBeVisible()
       await expect(shield).toHaveAttribute('aria-selected', 'true')
       await expect(shield).toHaveAttribute('title', /Remove sandbox from this tab/)
 
@@ -130,6 +131,7 @@ test.describe('sandboxed shell action', () => {
       await expect(
         page.getByRole('tab', { selected: true }).locator('.nocx-tab-sandboxed-marker'),
       ).toHaveCount(0)
+      await expect(page.getByText('Sandbox removed — new shell', { exact: true })).toBeVisible()
       await expect(shield).not.toHaveAttribute('aria-selected', 'true')
     }
 

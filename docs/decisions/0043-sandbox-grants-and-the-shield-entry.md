@@ -25,6 +25,8 @@ Pressing the selected shield removes sandbox by replacement, never by widening t
 
 Applying sandbox follows the symmetric replacement sequence. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
 
+Both replacement directions preserve the frontend-owned transcript before closing the source. Frozen blocks are copied through the existing restored-block grammar, the normal xterm buffer through the existing SGR serializer, and the unsent editor draft with its selection and scroll offset. The replacement inserts `Sandbox enabled — new shell` or `Sandbox removed — new shell` as the session boundary. This handoff is memory-only and frontend-only under AD-6: raw PTY bytes never enter JSON or persistence. Alternate-screen program state and running processes are not transferable because the replacement is a new shell.
+
 Generalizing `authority_grants` to multiple subject kinds is deferred. Reopening a grant or changing a running pane's grant is also deferred; both require explicit user consent and a restart design.
 
 ## Consequences

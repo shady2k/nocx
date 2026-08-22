@@ -55,7 +55,7 @@ import {
 import { mountIntegrationNotice } from './integration/notice'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand, type FrozenStatus } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -68,7 +68,7 @@ import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
 import { blocksForPane, bodyForBlock } from './restore-client'
 import { restoredBlock } from './scrollback/restored-block'
-import { fromITheme } from './scrollback/serializer'
+import { fromITheme, serializeRangeSGR } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle, OpenAnchor, SessionSandboxInfo, SandboxRequest } from './ipc'
@@ -381,6 +381,27 @@ export interface PaneBlock {
   readonly command: string
   readonly status: CommandStatus
   readonly exitCode: number | null
+}
+
+export interface ConversionTranscript {
+  blocks: Array<{
+    command: string
+    cwd: string
+    location: string
+    durationMs: number
+    exitCode: number | null
+    status: FrozenStatus
+    body: string
+  }>
+  liveBody: string
+  draft: string
+  selection: { from: number; to: number }
+  editorScrollTop: number
+  alternateScreenOmitted: boolean
+}
+
+function safeTranscriptBody(text: string): string {
+  return text.replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[char]!)
 }
 
 export class TerminalContent extends BasePaneContent {
@@ -883,6 +904,104 @@ export class TerminalContent extends BasePaneContent {
       if (text) lines.push(text)
     }
     return lines.reverse()
+  }
+
+  /** Capture the text a replacement tab must keep. Frontend-only: the VT
+   *  buffer stays under AD-6 and no PTY bytes cross the control plane. */
+  captureConversionTranscript(): ConversionTranscript {
+    const renderer = this.renderer
+    const scrollback = this.scrollback
+    const editor = this.editor
+    const location = this.hostLabel()
+    const inherited =
+      [
+        ...(scrollback?.scrollbackInner.querySelectorAll<HTMLElement>('[data-restored="true"]') ??
+          []),
+      ].map((block) => ({
+        command:
+          block.dataset.recordedCommand ??
+          block.querySelector<HTMLElement>('.cmd-header-text')?.textContent ??
+          'Previous command',
+        cwd:
+          block.querySelector<HTMLElement>('.cmd-header-cwd')?.textContent?.replace(/^📁\s*/, '') ??
+          '',
+        location: block.querySelector<HTMLElement>('.cmd-header-location')?.textContent ?? location,
+        durationMs: 0,
+        exitCode: null,
+        status: 'unknown' as const,
+        body: safeTranscriptBody(blockOutputText(block)),
+      })) ?? []
+    const current =
+      scrollback?.blockManager.blocks.map((block) => ({
+        command: block.command,
+        cwd: block.cwd,
+        location,
+        durationMs: block.durationMs ?? 0,
+        exitCode: block.exitCode,
+        status: block.status === 'running' ? ('unknown' as const) : block.status,
+        body: block.captured?.sgr ?? safeTranscriptBody(blockOutputText(block.el)),
+      })) ?? []
+    const blocks = [...inherited, ...current]
+    const liveBody =
+      renderer && this._bufferType === 'normal'
+        ? serializeRangeSGR((line) => renderer.getBufferLine(line), 0, renderer.cursorLine())
+        : ''
+    return {
+      blocks,
+      liveBody,
+      draft: editor?.getDoc() ?? '',
+      selection: editor?.getSelection() ?? { from: 0, to: 0 },
+      editorScrollTop: editor?.getScrollTop() ?? 0,
+      alternateScreenOmitted: this._bufferType === 'alternate',
+    }
+  }
+
+  /** Install a previous shell's immutable transcript above this shell. */
+  installConversionTranscript(transcript: ConversionTranscript, boundaryLabel: string): void {
+    const scrollback = this.scrollback
+    if (!scrollback) return
+    const snapshot = fromITheme(getCurrentTheme())
+    const els = transcript.blocks.map((block) =>
+      restoredBlock(
+        {
+          id: scrollback.blockManager.nextRestoredId(),
+          ...block,
+        },
+        snapshot,
+        () => scrollback.scrollbackInner,
+        () => {},
+        scrollback.snapshotStore,
+      ),
+    )
+    if (transcript.liveBody !== '') {
+      els.push(
+        restoredBlock(
+          {
+            id: scrollback.blockManager.nextRestoredId(),
+            command: transcript.alternateScreenOmitted
+              ? 'Previous full-screen program ended during sandbox switch'
+              : 'Previous shell output',
+            cwd: this._cwd,
+            location: this.hostLabel(),
+            durationMs: 0,
+            exitCode: null,
+            status: 'unknown',
+            body: transcript.liveBody,
+          },
+          snapshot,
+          () => scrollback.scrollbackInner,
+          () => {},
+          scrollback.snapshotStore,
+        ),
+      )
+    }
+    scrollback.restorePast(els, boundaryLabel)
+    this.editor?.replaceDoc(
+      transcript.draft,
+      Math.min(transcript.selection.from, transcript.draft.length),
+      Math.min(transcript.selection.to, transcript.draft.length),
+    )
+    this.editor?.setScrollTop(transcript.editorScrollTop)
   }
 
   /**

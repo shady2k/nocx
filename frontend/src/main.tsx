@@ -1009,8 +1009,16 @@ async function main() {
     const oldPane = source ? tm.paneOf(source.paneId) : undefined
     if (!source || !oldPane || !tm.tabOf(source.paneId)) return
     if (ready.action === 'remove') {
+      const transcript = tm.captureConversionTranscript(oldPane.id)
       const made = tm.newLocalPaneAt(ready.workspace)
-      if (await made.created) {
+      if (
+        (await made.created) &&
+        (await tm.installConversionTranscript(
+          made.pane.id,
+          transcript,
+          'Sandbox removed — new shell',
+        ))
+      ) {
         tm.replaceTabPosition(oldPane.id, made.pane.id)
         void tm.closePane(oldPane)
       }
@@ -1037,12 +1045,21 @@ async function main() {
         openDirectory: () => dialogClient.openDirectoryDialog(),
         showPermissions: showSandboxPermissions,
         newSandboxedTab: (_workspace, launch) => {
+          const transcript = tm.captureConversionTranscript(oldPane.id)
           const made = tm.newSandboxedPane(ready.workspace, launch)
-          void made.created.then((created) => {
-            if (!created) return
-            tm.replaceTabPosition(oldPane.id, made.pane.id)
-            void tm.closePane(oldPane)
-          })
+          void (async () => {
+            if (
+              (await made.created) &&
+              (await tm.installConversionTranscript(
+                made.pane.id,
+                transcript,
+                'Sandbox enabled — new shell',
+              ))
+            ) {
+              tm.replaceTabPosition(oldPane.id, made.pane.id)
+              void tm.closePane(oldPane)
+            }
+          })()
         },
         reportError: reportSandboxOpenError,
       },

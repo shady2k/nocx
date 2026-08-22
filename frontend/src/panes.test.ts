@@ -2298,3 +2298,39 @@ describe('newLocalPaneAt', () => {
     expect(made.pane.sandboxed).toBe(false)
   })
 })
+
+describe('conversion transcript handoff', () => {
+  it('restores the unsent draft and a visible shell boundary before closing the source', async () => {
+    const { manager } = await mountPaneManager()
+    const source = manager.activeTerminalContent()
+    if (!source) throw new Error('missing active terminal')
+    source.installConversionTranscript(
+      {
+        blocks: [],
+        liveBody: '',
+        draft: 'unsent draft',
+        selection: { from: 12, to: 12 },
+        editorScrollTop: 0,
+        alternateScreenOmitted: false,
+      },
+      'Seed',
+    )
+    const transcript = source.captureConversionTranscript()
+    transcript.liveBody = 'previous output'
+
+    const made = manager.newLocalPaneAt('/verified/project')
+    await expect(made.created).resolves.toBe(true)
+    await expect(
+      manager.installConversionTranscript(made.pane.id, transcript, 'Sandbox removed — new shell'),
+    ).resolves.toBe(true)
+
+    expect(manager.captureConversionTranscript(made.pane.id)?.draft).toBe('unsent draft')
+    expect(made.pane.pane.querySelector('[data-restore-boundary]')?.textContent).toBe(
+      'Sandbox removed — new shell',
+    )
+    const secondTranscript = manager.captureConversionTranscript(made.pane.id)
+    expect(secondTranscript?.blocks.some((block) => block.body.includes('previous output'))).toBe(
+      true,
+    )
+  })
+})

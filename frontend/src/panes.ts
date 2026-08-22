@@ -62,7 +62,12 @@ import type {
 } from './pane-content'
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
-import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import {
+  TerminalContent,
+  type ConversionTranscript,
+  type HostKeyErrorEvidence,
+  type PaneIdentity,
+} from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -1548,6 +1553,25 @@ export class PaneManager {
   /** The durable tab row behind one renderer pane. */
   tabOf(paneId: number) {
     return this.tabFor(paneId)
+  }
+
+  captureConversionTranscript(paneId: number): ConversionTranscript | null {
+    const pane = this.paneOf(paneId)
+    return pane?.content instanceof TerminalContent
+      ? pane.content.captureConversionTranscript()
+      : null
+  }
+
+  async installConversionTranscript(
+    paneId: number,
+    transcript: ConversionTranscript | null,
+    boundaryLabel: string,
+  ): Promise<boolean> {
+    const pane = this.paneOf(paneId)
+    if (!(pane?.content instanceof TerminalContent)) return false
+    if (!(await pane.content.ready)) return false
+    if (transcript) pane.content.installConversionTranscript(transcript, boundaryLabel)
+    return true
   }
 
   /** Put a newly created tab in the replaced tab's durable strip position. */

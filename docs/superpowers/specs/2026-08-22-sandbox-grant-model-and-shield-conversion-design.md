@@ -32,6 +32,12 @@ Clicking a ready shield opens the existing permission dialog with the verified c
 
 Removing sandbox is the reverse replacement. The selected shield creates an ordinary local pane with the verified current cwd carried in the strict `open.cwd` field. The backend accepts only an existing absolute local directory and canonicalizes symlinks; SSH and sandbox requests reject `cwd`. After create acknowledgement the new tab takes the old strip position and the sandbox pane closes. The immutable grant is not deleted or mutated; it remains attached to the closed historical pane.
 
+## Transcript handoff
+
+Before creating either replacement, `TerminalContent.captureConversionTranscript` snapshots frontend-owned presentation state: frozen command blocks, inherited restored blocks from earlier toggles, the settled normal xterm buffer as SGR, and the unsent editor document, selection, and scroll offset. Alternate-screen frames are deliberately omitted: they are a live program's repaintable screen, not terminal history.
+
+After the replacement session reports ready, `installConversionTranscript` renders the blocks through the existing `restoredBlock` grammar, restores the draft, and inserts a visible `Sandbox enabled — new shell` or `Sandbox removed — new shell` boundary. Only then may the source pane close. Failed creation or hydration leaves the source pane untouched. The handoff is in-memory and frontend-only; no PTY bytes or transcript enter JSON-RPC, the content database, or logs.
+
 ## Removed paths
 
 The command palette has no `Sandboxed shell…` row. The tab-strip More menu has no `New sandboxed tab` row and no sandbox-enabled imperative state. `+`, Cmd/Ctrl+T, ordinary local creation, SSH creation, and Settings placement are unchanged.

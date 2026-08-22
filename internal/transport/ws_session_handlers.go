@@ -1470,8 +1470,7 @@ func decodeOpenParams(data []byte) (openParams, error) {
 	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
 		return p, errors.New("open params: must be an object")
 	}
-
-	seen := make(map[string]bool, 9)
+	seen := make(map[string]bool, 13)
 	for dec.More() {
 		keyTok, keyErr := dec.Token()
 		if keyErr != nil {
@@ -1503,6 +1502,12 @@ func decodeOpenParams(data []byte) (openParams, error) {
 			if err := dec.Decode(&p.YPixel); err != nil {
 				return p, fmt.Errorf("open params ypixel: %w", err)
 			}
+		case "cwd":
+			v, err := decodeStringField(dec)
+			if err != nil {
+				return p, fmt.Errorf("open params cwd: %w", err)
+			}
+			p.Cwd = v
 		case "kind":
 			v, err := decodeStringField(dec)
 			if err != nil {

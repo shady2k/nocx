@@ -13,7 +13,7 @@
 import { cleanup, fireEvent } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { fakeClock, fakeUploadServices } from '../files/upload-fixtures'
+import { beginTransfer, fakeClock, fakeUploadServices } from '../files/upload-fixtures'
 import { uploadOperations } from '../files/upload-operations'
 import { createUploadStore, type UploadStore } from '../files/upload-store'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
@@ -67,14 +67,13 @@ const icon = () => document.querySelector<HTMLElement>(`button[data-view="${OPER
 const badge = () => document.querySelector<HTMLElement>(`[data-view-badge="${OPERATIONS_VIEW_ID}"]`)
 const progress = () =>
   document.querySelector<HTMLElement>(`[data-view-progress="${OPERATIONS_VIEW_ID}"]`)
-// TWO LISTS NOW, one per state (nocx-hbdw4.5). A helper that looked at
-// `[data-testid="ops-list"]` alone stopped seeing finished rows the moment
-// they moved under their own heading — so these span both deliberately.
-const anyList = () => [
-  ...document.querySelectorAll<HTMLElement>(
-    '[data-testid="ops-list"], [data-testid="ops-list-finished"]',
-  ),
-]
+// THREE LISTS NOW, one per state (nocx-hbdw4.5, then nocx-hbdw4.6). A
+// helper that looked at `[data-testid="ops-list"]` alone stopped seeing
+// finished rows the moment they moved under their own heading — so these
+// span all of them deliberately.
+const LIST_SELECTOR =
+  '[data-testid="ops-list"], [data-testid="ops-list-queued"], [data-testid="ops-list-finished"]'
+const anyList = () => [...document.querySelectorAll<HTMLElement>(LIST_SELECTOR)]
 const rows = () => [...document.querySelectorAll<HTMLElement>('.ui-operation-row')]
 
 function openTheList(): void {
@@ -84,7 +83,9 @@ function openTheList(): void {
 function cancelButton(): HTMLElement {
   const el = [
     ...document.querySelectorAll<HTMLElement>(
-      '[data-testid="ops-list"] button, [data-testid="ops-list-finished"] button',
+      LIST_SELECTOR.split(', ')
+        .map((s) => `${s} button`)
+        .join(', '),
     ),
   ].find((b) =>
     // BY ITS ACCESSIBLE NAME, not its text. Cancel became an icon button so
@@ -98,8 +99,8 @@ function cancelButton(): HTMLElement {
   return el
 }
 
-function startTransfer(store: UploadStore, id = 't1'): void {
-  store.begin({
+function startTransfer(store: UploadStore, id = 't1'): string {
+  return beginTransfer(store, {
     transferId: id,
     name: 'big.iso',
     destDir: '/srv/data',
@@ -285,7 +286,7 @@ describe('the list itself', () => {
     const { store, services } = mount()
     startTransfer(store, 'done')
     services.emitDone({ transferId: 'done', outcome: 'written', finalName: 'done', stranded: [] })
-    store.begin({
+    beginTransfer(store, {
       transferId: 'live',
       name: 'live.iso',
       destDir: '/srv',
@@ -326,7 +327,7 @@ describe('the list itself', () => {
 
     services.emitProgress({ transferId: 't1', bytes: 100, total: 400 })
     // A second transfer arriving moves the list itself, not just one row.
-    store.begin({
+    beginTransfer(store, {
       transferId: 't2',
       name: 'other.iso',
       destDir: '/srv/data',
@@ -357,14 +358,14 @@ describe('the list says which machine each operation is on', () => {
     // same word and whose machines are not: without the machine they are
     // one row printed twice.
     const { store } = mount()
-    store.begin({
+    beginTransfer(store, {
       transferId: 't1',
       name: 'a.zip',
       destDir: '/var/www',
       machine: 'deploy@web-01',
       size: 4,
     })
-    store.begin({
+    beginTransfer(store, {
       transferId: 't2',
       name: 'b.zip',
       destDir: '/var/www',
@@ -381,7 +382,7 @@ describe('the list says which machine each operation is on', () => {
 
   it('names the local machine too, rather than leaving that row blank', () => {
     const { store } = mount()
-    store.begin({
+    beginTransfer(store, {
       transferId: 't1',
       name: 'a.zip',
       destDir: '/home/dev',
@@ -402,7 +403,7 @@ describe('a finished row in the real list', () => {
     // One clock for the store (which stamps the record) and for the view
     // (which reads the age against it), so the test states one time.
     const { store, services } = mount({ now: clock.now }, clock.now)
-    store.begin({
+    beginTransfer(store, {
       transferId: 't1',
       name: 'big.iso',
       destDir: '/srv',
@@ -493,5 +494,96 @@ describe('the list repaints a few times a second, whatever the wire does', () =>
     expect(rows()[0].textContent).not.toContain('Done')
     // No bar and no held progress line left behind it.
     expect(document.querySelector('[role="progressbar"]')).toBeNull()
+  })
+})
+
+// ── The waiting half of a batch, on screen (nocx-hbdw4.6) ────────────────
+describe('a batch with files still to be sent', () => {
+  /** One running transfer and `n` behind it, the way the flow leaves them:
+   *  the batch is registered first and the first file then starts. */
+  function batchOf(store: UploadStore, n: number): string[] {
+    const ids = store.enqueue(
+      Array.from({ length: n }, (_, i) => ({
+        name: `f${i}.iso`,
+        destDir: '/srv/data',
+        machine: 'deploy@srv-01',
+        size: 400,
+      })),
+    )
+    store.start(ids[0], 't1')
+    return ids
+  }
+
+  const heading = (text: string): HTMLElement | undefined =>
+    [...document.querySelectorAll<HTMLElement>('.ops-group__heading')].find((h) =>
+      (h.textContent ?? '').startsWith(text),
+    )
+
+  it('gives the waiting files their own heading, with how many are coming', () => {
+    // Not "In progress", which would be false about most of what is under
+    // it: three of these four have not started, and the count beside that
+    // heading is the very number a person is looking for.
+    const { store } = mount()
+    batchOf(store, 4)
+    openTheList()
+    expect(heading('In progress')?.textContent).toBe('In progress1')
+    expect(heading('Queued')?.textContent).toBe('Queued3')
+  })
+
+  it('reads the batch chronologically: what is moving, then what is coming', () => {
+    const { store } = mount()
+    batchOf(store, 3)
+    openTheList()
+    const order = [...document.querySelectorAll<HTMLElement>('.ops-group__heading, .ops-list')].map(
+      (el) => el.getAttribute('data-testid') ?? el.textContent,
+    )
+    expect(order).toEqual(['In progress1', 'ops-list', 'Queued2', 'ops-list-queued'])
+  })
+
+  it('draws no progress bar under a file that has not started', () => {
+    // A bar at zero claims bytes are moving when none are, and it is the
+    // row's loudest element — a panel of them reads "everything is
+    // stalled".
+    const { store } = mount()
+    batchOf(store, 3)
+    openTheList()
+    const queued = document.querySelector<HTMLElement>('[data-testid="ops-list-queued"]')
+    expect(queued?.querySelectorAll('[role="progressbar"]')).toHaveLength(0)
+    expect(queued?.textContent).toContain('Queued')
+    // The one that IS moving still has one.
+    expect(
+      document.querySelector('[data-testid="ops-list"]')?.querySelectorAll('[role="progressbar"]'),
+    ).toHaveLength(1)
+  })
+
+  it('counts every waiting file on the icon, from anywhere in the app', () => {
+    // The badge is what somebody sees without opening anything, and a
+    // count of one for a four-file drop would be wrong at exactly the
+    // moment they dropped it.
+    const { store } = mount()
+    batchOf(store, 4)
+    expect(badge()?.textContent).toBe('4')
+  })
+
+  it('cancels the waiting file the person pressed, and nothing else', () => {
+    const { store, services } = mount()
+    const ids = batchOf(store, 3)
+    openTheList()
+    const queuedCancel = [
+      ...document.querySelectorAll<HTMLElement>('[data-testid="ops-list-queued"] button'),
+    ].find((b) => b.getAttribute('aria-label') === 'Cancel f2.iso')
+    queuedCancel!.click()
+    // No transfer exists for it, so nothing is said on the wire.
+    expect(services.cancels).toEqual([])
+    expect(store.transfers().map((t) => t.id)).toEqual([ids[0], ids[1]])
+    expect(badge()?.textContent).toBe('2')
+  })
+
+  it('says nothing about a queue when there is none', () => {
+    const { store } = mount()
+    startTransfer(store)
+    openTheList()
+    expect(heading('Queued')).toBeUndefined()
+    expect(document.querySelector('[data-testid="ops-list-queued"]')).toBeNull()
   })
 })

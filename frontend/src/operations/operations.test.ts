@@ -147,3 +147,33 @@ describe('the aggregate under the icon', () => {
     expect(model.progress()).toEqual({ fraction: 1 })
   })
 })
+
+// ── Waiting work is outstanding work (nocx-hbdw4.6) ──────────────────────
+describe('what the badge counts once a batch has a waiting half', () => {
+  it('counts a queued operation, because a person dropped it and it has not happened', () => {
+    // The number is the answer to "how much does nocx still owe me". Drop
+    // five files and a count of one would be wrong the instant the batch
+    // was dropped, which is the exact moment somebody looks at it.
+    const model = createOperationsModel([
+      () => [op({ id: 'running' }), op({ id: 'waiting', phase: 'queued' })],
+    ])
+    expect(model.activeCount()).toBe(2)
+  })
+
+  it('keeps a queued operation on the live side of the list, never among the finished', () => {
+    const model = createOperationsModel([
+      () => [finished('done', 10), op({ id: 'waiting', phase: 'queued' })],
+    ])
+    expect(model.operations().map((o) => o.id)).toEqual(['waiting', 'done'])
+  })
+
+  it('counts a queued operation into the aggregate, so the bar is about the batch', () => {
+    // Its size is known — the one measurement a waiting file has — and the
+    // bar a person watches is about everything they dropped, not about
+    // whichever file happens to be moving.
+    const model = createOperationsModel([
+      () => [op({ id: 'running', done: 50, total: 100 }), op({ id: 'waiting', phase: 'queued' })],
+    ])
+    expect(model.progress()?.fraction).toBeCloseTo(0.25)
+  })
+})

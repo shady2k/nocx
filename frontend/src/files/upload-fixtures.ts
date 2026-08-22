@@ -7,6 +7,7 @@
 // Beside src/panes-fixtures.ts, and for the same reason: a helper a test
 // imports belongs in a module, not copied into each spec.
 import type { SendBodyOutcome, UploadRequest, UploadServices } from './upload-client'
+import type { UploadStore } from './upload-store'
 import type { DialogOpenFileForUpload } from '../generated/dialog.openFileForUpload'
 import type { FilesDropped } from '../generated/files.dropped'
 import type { FilesUploadDone } from '../generated/files.uploadDone'
@@ -93,4 +94,24 @@ export function fakeClock(): { now: () => number; advance(ms: number): void } {
       t += ms
     },
   }
+}
+
+/**
+ * Seed one RUNNING row the way the flow does it: the file joins the batch,
+ * and then files.upload's result gives it the address the wire will use.
+ *
+ * A helper rather than a call, because those are two steps now and a test
+ * about what happens to a transfer in flight should not have to restate
+ * them. It answers the ROW's id — which is what every store call takes,
+ * since a queued file has a row before it has a transferId.
+ */
+export function beginTransfer(
+  store: UploadStore,
+  t: { transferId: string; name: string; destDir: string; machine: string; size: number },
+): string {
+  const [id] = store.enqueue([
+    { name: t.name, destDir: t.destDir, machine: t.machine, size: t.size },
+  ])
+  store.start(id, t.transferId)
+  return id
 }

@@ -638,31 +638,6 @@ function FilesPanel(props: FilesPanelProps) {
             </Button>
           </div>
         </Show>
-        {/* ── The filter (nocx-708q.2) ──────────────────────────────────
-            The kit's SearchField, placed and never repainted (ADR-0014),
-            beside the Names/Contents toggle the file-manager design put in
-            scope. Built the way the Git panel's was (nocx-52by) down to the
-            Escape-clears behaviour, because this is the second panel to
-            ship without the filter its design promised and a third
-            invention is how three panels come to filter differently.
-
-            Renderer-side: typing narrows the rows already in the store and
-            issues no request, so it can neither churn the watch set nor
-            race a reveal walk. */}
-        <div class="files-filter" data-testid="files-filter">
-          <SearchField
-            value={props.store.filter()}
-            onInput={(v) => props.store.setFilter(v)}
-            placeholder="Filter by name…"
-            ariaLabel="Filter files by name"
-            onKeyDown={(e) => {
-              if (e.key === 'Escape' && props.store.filter() !== '') {
-                e.stopPropagation()
-                props.store.setFilter('')
-              }
-            }}
-          />
-        </div>
         {/* A filter that matches nothing is a STATE, never a blank tree —
             the Git panel's rule, and the same one action: drop the filter.
             Without it the panel is indistinguishable from a machine with no
@@ -911,11 +886,37 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
     )
   }
 
+  /** THE FILTER, declared for the shell's pinned slot rather than rendered
+   *  in the body. Inside the body it scrolled away with the tree it filters,
+   *  which is exactly backwards: the control that narrows a long list is the
+   *  one thing that must stay reachable while you scroll it (owner,
+   *  2026-08-22). The shell pins it; this only says which child it is.
+   *
+   *  It closes over `store` the same way FilesHeaderActions does, so the
+   *  field and the tree read one signal and cannot disagree. */
+  const FilesFilter: Component = () => (
+    <div class="files-filter" data-testid="files-filter">
+      <SearchField
+        value={store.filter()}
+        onInput={(v) => store.setFilter(v)}
+        placeholder="Filter by name…"
+        ariaLabel="Filter files by name"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && store.filter() !== '') {
+            e.stopPropagation()
+            store.setFilter('')
+          }
+        }}
+      />
+    </div>
+  )
+
   return {
     id: FILES_VIEW_ID,
     title: 'Files',
     icon: FilesIcon,
     actions: FilesHeaderActions,
+    filter: FilesFilter,
     view: (props) => (
       <FilesPanel
         store={store}

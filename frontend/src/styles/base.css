@@ -329,7 +329,12 @@ select:focus-visible {
      title it belongs to. 12px each side put 24px between the heading and the
      first row once a surface added its own group spacing, which read as a
      gap rather than as a join (owner, 2026-08-22). */
-  padding: 12px var(--space-2) var(--space-1);
+  /* NOTHING below. The room above separates the panel's name from the tab
+     strip; the room below only pushed the content away from the title it
+     belongs to, and every surface adds its own spacing under the header
+     anyway. Every activity-bar panel, because they are one family and this
+     is the kit's decision to make once (owner, 2026-08-22). */
+  padding: 12px var(--space-2) 0;
   font-weight: 600;
   /* BODY SIZE, and it is shared by every panel — Files, Git, Ports,
      Operations — so they stay one family. It was --font-size-sm, which left

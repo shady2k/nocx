@@ -112,6 +112,15 @@ export interface SidebarViewDescriptor {
   readonly icon: Component // activity-bar icon — a component, never markup
   readonly view: Component<SidebarViewProps> // panel body, receives view props
   readonly actions?: Component // per-view header actions (…, refresh, collapse-all)
+  /** The view's filter control, declared HERE rather than rendered in the
+   *  body — which is the whole point. A filter inside the body scrolls away
+   *  with the content it filters, and every panel that had one put it there,
+   *  so every panel's filter scrolled away (owner, 2026-08-22). The shell
+   *  pins it between the header and the scrolling body, so the behaviour is
+   *  the kit's and a panel only has to say WHICH of its children is the
+   *  filter — the one thing the kit cannot know for itself. Same shape as
+   *  `actions`, in the same place, for the same reason. */
+  readonly filter?: Component
   readonly order: number
   /** What the icon says while the panel is elsewhere — a REACTIVE accessor,
    *  read inside the bar's own JSX so the badge and the bar move without the
@@ -236,6 +245,7 @@ function ActiveView(props: {
       actions={
         <Show when={props.desc.actions}>{(Actions) => <Dynamic component={Actions()} />}</Show>
       }
+      filter={<Show when={props.desc.filter}>{(Filter) => <Dynamic component={Filter()} />}</Show>}
     >
       <Dynamic
         component={props.desc.view}

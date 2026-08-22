@@ -138,6 +138,14 @@ type App struct {
 	notifyFeed    *notify.Feed
 	notifyIngress *notify.Ingress
 
+	// notifyWindow is the live read of the debounce-window setting: the very
+	// closure the attention policy was given (notify.WithWindowSource), kept
+	// here so a test can watch the running pipeline's window follow a
+	// settings.set without waiting out a real window. It answers on every
+	// call — nothing caches the number, so nothing has to be invalidated
+	// when it moves.
+	notifyWindow notify.WindowSource
+
 	// UIState owns what the app must remember without being asked
 	// (ADR-0033) — window geometry and the shell's layout. Exported because
 	// main.go is the only place a Wails context exists, and the window half
@@ -432,7 +440,57 @@ func WithLogFilePath(path string) Option {
 // not a delay on anything — it is how much of a burst collapses into that one
 // summary. Eight seconds is termic's number for the same job (design §6.2),
 // long enough to absorb a build's chatter.
+//
+// It is no longer what the pipeline runs on — it is the DEFAULT of the
+// setting below, and the floor the policy falls back to if that setting is
+// ever unreadable. The two roles are the same number on purpose: a person who
+// never opens Settings gets exactly the behaviour this constant described
+// before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
+
+// The bounds of that setting, as durations, because a duration is what the
+// thing IS — the seconds the registry stores are derived from these and never
+// spelled a second time.
+//
+// A second is the floor because below it the debounce stops being one: the
+// window exists so a loop cannot produce a notification per iteration, and at
+// a tenth of a second it very nearly can. Five minutes is the ceiling because
+// past it the leading edge is all anyone would ever see — a summary five
+// minutes after the thing it summarises is about a build the person has
+// already gone to look at. Neither bound is a safety limit; both are the
+// range in which the control still does the job it is named for.
+const (
+	notifyDebounceWindowMin = 1 * time.Second
+	notifyDebounceWindowMax = 5 * time.Minute
+)
+
+// notifyDebounceWindowSetting is that window, as the bounded number a person
+// can move. It is declared at package init beside the routing matrix and in
+// the same section, because the two are one subject: which notifications
+// reach you, and how much of a burst collapses before they do.
+//
+// The stored unit is SECONDS rather than a Duration, because the registry's
+// numbers are float64 and a control that says "8" with "seconds" beside it is
+// the only spelling a person has to read. Every conversion back to a Duration
+// happens in one place (the window source New builds), so there is no second
+// answer to what the number means.
+var notifyDebounceWindowSetting = settings.MustRegisterNumber(settings.NumberSpec{
+	Key:         "notifications.debounceSeconds",
+	Section:     notify.RouteSettingSection,
+	Label:       "Collapse repeats for",
+	Description: "After a notification goes out, further notifications of the same kind from the same tab are held back for this long and arrive as one summary naming how many there were. The first notification is never delayed — this is how much of a burst collapses behind it, not a wait before it. A change applies to the next burst: one already collapsing keeps the length it started with.",
+	DataClass:   settings.PublicConfig,
+	Default:     notifyDebounceWindow.Seconds(),
+	Min:         notifyWindowBound(notifyDebounceWindowMin),
+	Max:         notifyWindowBound(notifyDebounceWindowMax),
+	Unit:        "seconds",
+})
+
+// notifyWindowBound is a NumberSpec bound expressed as the duration it means.
+func notifyWindowBound(d time.Duration) *float64 {
+	seconds := d.Seconds()
+	return &seconds
+}
 
 // The feed's budgets. Rows alone are not a usable unit of account — a single
 // occurrence may carry 8 KiB of title and body — so both bind, and eviction is
@@ -453,18 +511,53 @@ const (
 	notifyFeedMaxRunRetained = 20
 )
 
-// notifyBannerTarget is the resolved Destination.Target of the banner route:
-// a local sink's target is its own name (notify.Destination). It is named
-// once, here, because the router carries it into every outcome and a failed
-// delivery repeats it to say which channel failed — two spellings of one
-// surface would be two answers to one question (AD-8).
-const notifyBannerTarget = "banner"
+// notifyBannerTarget and notifyToastTarget are the resolved
+// Destination.Target of the two local routes: a local sink's target is its own
+// name (notify.Destination), the router carries it into every outcome, and a
+// failed delivery repeats it to say which channel failed.
+//
+// The WORD is the catalogue's, not this file's (AD-8). It used to be spelled
+// here because the table was written here; now the table is built from the
+// catalogue, which also derives the settings key of every cell from the same
+// id — so a second spelling in the composition root would be a second answer
+// to "what is this channel called". These stay as the names the composition
+// root and its tests reach for, bound to the one declaration.
+const (
+	notifyBannerTarget = notify.ChannelBanner
+	notifyToastTarget  = notify.ChannelToast
+)
 
-// notifyToastTarget is the resolved Destination.Target of the toast route,
-// named here for the same reason the banner's is: the router carries it into
-// every outcome and a failed delivery repeats it to say which channel failed.
-// Two spellings of one surface would be two answers to one question (AD-8).
-const notifyToastTarget = "toast"
+// notifyRouteToggles is the routing matrix as settings: one Bool per offered
+// (kind, channel) cell, declared from the catalogue.
+//
+// It is declared at package init, like every other setting, because that is
+// what a settings declaration is — MustRegisterBool appends to a list read
+// once and panics on a duplicate key, so declaring the matrix inside New would
+// panic the second time a process built an App. What New does with it is READ
+// it, which is a different thing and happens per composition root.
+//
+// Nothing here enumerates a kind or a channel: the loop is over the
+// catalogue's offered pairs, so a cell the trust bound forbids has no toggle
+// to turn on, and a kind added to the catalogue tomorrow gets its row of
+// toggles with no edit in this file (D1, D3).
+var notifyRouteToggles = registerNotifyRouteToggles()
+
+func registerNotifyRouteToggles() map[string]*settings.Bool {
+	settings.RegisterSectionGroup(notify.RouteSettingSection, "application")
+	pairs := notify.DefaultCatalogue().Pairs()
+	toggles := make(map[string]*settings.Bool, len(pairs))
+	for _, pair := range pairs {
+		toggles[pair.SettingKey()] = settings.MustRegisterBool(settings.BoolSpec{
+			Key:         pair.SettingKey(),
+			Section:     notify.RouteSettingSection,
+			Label:       pair.SettingLabel(),
+			Description: pair.SettingDescription(),
+			DataClass:   settings.PublicConfig,
+			Default:     pair.DefaultOn,
+		})
+	}
+	return toggles
+}
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -1104,33 +1197,93 @@ func New(opts ...Option) (*App, error) {
 	// built with the pipeline already wired into it. The route is decided
 	// here; the surface arrives a few lines later.
 	notifyToast := &notify.ToastHolder{}
-	// Both rows name their destination, which is what makes a failed delivery
-	// able to say WHICH channel failed: Destination.Target is a local sink's
-	// own name (notify.Destination), the router is the only thing that holds
-	// it, and the feed row for a failure repeats that word rather than
-	// inventing a second vocabulary for the same surface (AD-8).
-	notifyRouter, routerErr := notify.NewRouter(notify.Table{
-		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: notify.HostSink{Host: attentionHost}, Destination: notify.Destination{Target: notifyBannerTarget}},
-			{Sink: notify.ToastSink{Presenter: notifyToast}, Destination: notify.Destination{Target: notifyToastTarget}},
+	// The table is no longer written here. It is BUILT, from the catalogue and
+	// the toggles the person ticked, and swapped into the live router whenever
+	// one of them moves (D1, D4). What this composition root still decides —
+	// and the only thing it may decide — is which SINK sits behind each
+	// catalogue channel: the route is the router's, the surface is ours.
+	//
+	// Each row still names its destination, which is what makes a failed
+	// delivery able to say WHICH channel failed. The word comes from the
+	// catalogue's channel id now, so the toggle key, the routed target and the
+	// failure row all spell the surface once (AD-8).
+	//
+	// With nothing ticked the built table is exactly the four rows this file
+	// used to carry by hand — program.notify and session.ended, each to the
+	// banner and the toast — so nobody's notifications change the day the
+	// matrix lands (D2, notify.DefaultCatalogue).
+	notifyRoutes, routesErr := notify.NewRoutingSource(notify.RoutingConfig{
+		Catalogue: notify.DefaultCatalogue(),
+		Sinks: map[string]notify.Sink{
+			notifyBannerTarget: notify.HostSink{Host: attentionHost},
+			notifyToastTarget:  notify.ToastSink{Presenter: notifyToast},
 		},
-		// A session that ended is a registry fact, so it is attested and may
-		// reach every sink (ADR-0029 §3). It gets the banner for the same
-		// reason the program's own request does: the user is not looking at
-		// the tab, which is the only moment either event matters.
-		{Kind: notify.KindSessionEnded, Trust: notify.TrustAttested}: {
-			{Sink: notify.HostSink{Host: attentionHost}, Destination: notify.Destination{Target: notifyBannerTarget}},
-			{Sink: notify.ToastSink{Presenter: notifyToast}, Destination: notify.Destination{Target: notifyToastTarget}},
+		Enabled: func(kindID, channelID string) bool {
+			toggle, declared := notifyRouteToggles[notify.RouteSettingKey(kindID, channelID)]
+			if !declared {
+				// A cell with no declaration is a cell nobody can turn on.
+				// Default-deny is the answer to every question this lookup
+				// cannot answer, including this one.
+				return false
+			}
+			on, err := settingsRegistry.GetBool(toggle)
+			if err != nil {
+				logger.Warn("notification routing cell unreadable; treating it as off",
+					"key", toggle.Key(), "error", err)
+				return false
+			}
+			return on
 		},
-	}, notify.Limits{
-		MaxInFlight:     4,
-		MaxQueued:       32,
-		MaxRetained:     1 << 20,
-		DeliveryTimeout: 10 * time.Second,
+		Limits: notify.Limits{
+			MaxInFlight:     4,
+			MaxQueued:       32,
+			MaxRetained:     1 << 20,
+			DeliveryTimeout: 10 * time.Second,
+		},
+		// A refused table has to be visible in the PRODUCT and not only in a
+		// log (AGENTS.md): the previous routing stays live, so from the
+		// Settings screen the change looks accepted while nothing about
+		// delivery moved — the silent degrade the UI contradicts.
+		//
+		// It goes to the toast DIRECTLY, not through the router, for the same
+		// reason a failed delivery's feed row is admitted directly (D3,
+		// notify.Feed.RecordDeliveryFailure): a complaint about the routing
+		// table cannot travel through the routing table that was just refused.
+		// The toast is the right surface rather than the feed because this is
+		// a fact about an action the person took a moment ago in this window,
+		// and because the feed's kind is a closed enum on the wire
+		// (contracts/notify.feed.read.schema.json) that has no honest value
+		// for it — smuggling one past the schema is what rule 5 forbids.
+		OnRefused: func(err error) {
+			logger.Warn("notification routing table refused; the previous routing stays live", "error", err)
+			toastCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = notifyToast.Toast(toastCtx, notify.Event{
+				Title: "Notification routing unchanged",
+				Body:  "That change was refused, so the previous routing is still in effect: " + err.Error(),
+				Level: notify.LevelWarning,
+			})
+		},
 	})
-	if routerErr != nil {
-		return nil, fmt.Errorf("notify router: %w", routerErr)
+	if routesErr != nil {
+		return nil, fmt.Errorf("notify routing: %w", routesErr)
 	}
+	notifyRouter := notifyRoutes.Router()
+	// Live routing: a Settings toggle applies without a restart, through the
+	// registry's own notifier — the same seam the History policy uses, and for
+	// the same reason (there is one change mechanism and this subscribes to
+	// it rather than growing a second).
+	//
+	// One rebuild per notification, not per key: a batch that moved three
+	// cells produces one table, and the table is a whole-value swap anyway.
+	settingsRegistry.AddNotifier(func(_ int, keys []string) {
+		for _, k := range keys {
+			if _, ours := notifyRouteToggles[k]; ours {
+				_ = notifyRoutes.Rebuild()
+				return
+			}
+		}
+	})
 
 	// The feed: the centre's memory, built BEFORE the policy because the
 	// policy's result handler records into it (see below).
@@ -1157,8 +1310,37 @@ func New(opts ...Option) (*App, error) {
 	// silently swallows one they did. Debounce and coalescing need no focus
 	// and work in full from the first raise.
 	notifyFocus := &notify.FocusHolder{}
+	// The window is the user's, and it is PULLED rather than pushed: the
+	// policy asks this closure for the length of every window it opens, so
+	// the registry stays the one owner of the number and no notifier has to
+	// keep a copy of it in step (AD-8). That is why there is no
+	// AddNotifier for this setting beside the routing one above — the
+	// routing table is a built artefact that must be rebuilt when its
+	// inputs move; a window length is just a number, read when it is needed.
+	//
+	// Which window a change governs is stated at the seam that decides it
+	// (notify.WithWindowSource): a window's length is fixed from the moment
+	// it opens until the moment it closes, so a change governs every window
+	// opened after it and no window already open.
+	//
+	// An unreadable setting answers 0, which the policy reads as "fall back
+	// to the window I was constructed with" rather than "no debounce" — a
+	// zero window would deliver one notification per event, which is the
+	// flood the policy exists to prevent. So the degrade is to the default,
+	// and it says so in the log rather than only in behaviour.
+	notifyWindow := notify.WindowSource(func() time.Duration {
+		seconds, err := settingsRegistry.GetNumber(notifyDebounceWindowSetting)
+		if err != nil {
+			logger.Warn("debounce window unreadable; falling back to the default",
+				"key", notifyDebounceWindowSetting.Key(),
+				"default", notifyDebounceWindow, "error", err)
+			return 0
+		}
+		return time.Duration(seconds * float64(time.Second))
+	})
 	notifyPolicy, policyErr := notify.NewPolicy(
 		context.Background(), notifyRouter, notifyDebounceWindow, notifyFocus, notify.RealClock{},
+		notify.WithWindowSource(notifyWindow),
 		// The failure surface (nocx-r6pxp). notify.raise answers {} at
 		// ACCEPTANCE: under the policy the delivery can happen a debounce
 		// window later, with no caller left to fail to, so a failure past
@@ -1390,6 +1572,7 @@ func New(opts ...Option) (*App, error) {
 		notifyToast:      notifyToast,
 		notifyFeed:       notifyFeed,
 		notifyIngress:    notifyIngress,
+		notifyWindow:     notifyWindow,
 		UIState:          uiStateStore,
 		slogger:          slogger,
 	}

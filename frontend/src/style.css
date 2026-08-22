@@ -75,6 +75,7 @@
 @import './styles/components/notes.css';
 @import './styles/components/notifications-panel.css';
 @import './styles/components/overview.css';
+@import './styles/components/toggle-matrix.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';

@@ -27,6 +27,12 @@ func newToastWS(t *testing.T) (*WSServer, *websocket.Conn) {
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
+	// A dial that has returned is not yet a client: the server registers the
+	// connection on its own goroutine, and Toast answers "unavailable" when
+	// it finds none registered. Wait on the registration -- the observable --
+	// rather than on a duration, or this passes on a quiet machine and fails
+	// in the container under load, which is exactly what it did.
+	waitForConns(t, ws, 1)
 	return ws, conn
 }
 

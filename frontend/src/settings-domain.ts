@@ -330,3 +330,145 @@ export function applyAcceptedSnapshot(snapshot: AcceptedSnapshot): SettingsMirro
     revision: snapshot.revision,
   }
 }
+
+// ── The routing matrix ─────────────────────────────────────────────────────
+
+/**
+ * The key convention for one cell of the notification routing matrix.
+ *
+ * **The convention is owned by `internal/notify/catalogue.go`** — `RouteSettingKey`
+ * builds `notifications.route.<kindId>.<channelId>` from the catalogue's own ids, and
+ * `Pair.SettingLabel` builds the cell's label as `<kind label> → <channel label>`.
+ * This module is the citing half, and it restates the two literals below because
+ * `settings.describe` carries no axis structure: the wire has a flat `Declaration`
+ * list and nothing on it says which cell of which grid a key is. Putting the axes on
+ * the wire would make every future grid a schema change, so the KEY carries them, as
+ * it already did for the section and the group.
+ *
+ * What this half must never do is name a kind or a channel. It reads whatever ids the
+ * keys carry, so a kind the backend adds next year gets its row here with no edit —
+ * which is what `sectionBlocks` is tested on.
+ */
+const ROUTE_SETTING_PREFIX = 'notifications.route.'
+
+/** The separator `Pair.SettingLabel` puts between the two halves of a cell's label. */
+const ROUTE_LABEL_SEPARATOR = ' → '
+
+/** The two ids a cell key carries: its row (the kind) and its column (the channel). */
+export interface RouteCell {
+  rowId: string
+  columnId: string
+}
+
+/**
+ * The ids in a routing-matrix cell key, or `null` when the key is not one.
+ *
+ * `null` is not a discard: a key under the namespace that does not parse is a
+ * malformed cell, and `sectionBlocks` renders it as an ordinary setting row so the
+ * control stays operable and visible. A malformed key that vanished into a grid nobody
+ * could see it in is the failure this refusal exists to prevent.
+ */
+export function parseRouteSettingKey(key: string): RouteCell | null {
+  if (!key.startsWith(ROUTE_SETTING_PREFIX)) return null
+  const parts = key.slice(ROUTE_SETTING_PREFIX.length).split('.')
+  if (parts.length !== 2) return null
+  if (parts[0] === '' || parts[1] === '') return null
+  return { rowId: parts[0], columnId: parts[1] }
+}
+
+/** One axis entry of a matrix: the id from the key, the label from the declaration. */
+interface MatrixAxis {
+  id: string
+  label: string
+}
+
+/** A matrix of toggles, derived entirely from the declarations it was built from. */
+export interface SettingsMatrix {
+  /** Rows in first-seen order — the order the backend declared them in. */
+  rows: MatrixAxis[]
+  /** Columns in first-seen order, for the same reason. */
+  columns: MatrixAxis[]
+  /**
+   * The declaration where a row meets a column, or `undefined` when the backend
+   * offers no such pair. Absence is the answer on purpose: the catalogue does not
+   * offer a pair its trust bound forbids, so there is nothing to render and nothing
+   * to refuse (ADR-0029 §3, plan D3).
+   */
+  cell(rowId: string, columnId: string): Declaration | undefined
+}
+
+/**
+ * One piece of a rendered section: either a single setting, or the whole matrix its
+ * cells collapse into.
+ */
+export type SectionBlock =
+  { kind: 'setting'; decl: Declaration } | { kind: 'matrix'; matrix: SettingsMatrix }
+
+/**
+ * Lay a section's declarations out as blocks, in declaration order.
+ *
+ * Every cell of the section folds into ONE matrix block, placed where the first cell
+ * stood; everything else stays a setting in the position it was declared in. A section
+ * with no cells therefore comes back exactly as it went in, which is every section but
+ * one.
+ */
+export function sectionBlocks(decls: readonly Declaration[]): SectionBlock[] {
+  const rows: MatrixAxis[] = []
+  const columns: MatrixAxis[] = []
+  const byRow = new Map<string, Map<string, Declaration>>()
+
+  const blocks: SectionBlock[] = []
+  let matrixAt = -1
+
+  for (const decl of decls) {
+    const at = parseRouteSettingKey(decl.key)
+    // A cell key on anything but a toggle is not a cell of a toggle matrix. It
+    // renders as an ordinary row rather than being dropped — the same refusal
+    // parseRouteSettingKey makes, for the same reason.
+    if (at === null || decl.control !== 'toggle') {
+      blocks.push({ kind: 'setting', decl })
+      continue
+    }
+
+    const [rowLabel, columnLabel] = splitCellLabel(decl.label)
+    if (!byRow.has(at.rowId)) {
+      byRow.set(at.rowId, new Map())
+      rows.push({ id: at.rowId, label: rowLabel ?? at.rowId })
+    }
+    if (!columns.some((c) => c.id === at.columnId)) {
+      columns.push({ id: at.columnId, label: columnLabel ?? at.columnId })
+    }
+    const row = byRow.get(at.rowId)!
+    if (!row.has(at.columnId)) row.set(at.columnId, decl)
+
+    if (matrixAt === -1) {
+      matrixAt = blocks.length
+      blocks.push({
+        kind: 'matrix',
+        matrix: {
+          rows,
+          columns,
+          cell: (rowId, columnId) => byRow.get(rowId)?.get(columnId),
+        },
+      })
+    }
+  }
+
+  return blocks
+}
+
+/**
+ * The two halves of a cell's label, or `undefined` for a half the label does not
+ * carry.
+ *
+ * The label is display text, so it may never decide whether a control appears: a
+ * declaration whose label has lost the separator still gets its cell, with the id
+ * standing in for the missing half. Only the KEY decides placement.
+ */
+function splitCellLabel(label: string): [string | undefined, string | undefined] {
+  const at = label.indexOf(ROUTE_LABEL_SEPARATOR)
+  if (at === -1) return [label === '' ? undefined : label, undefined]
+  const before = label.slice(0, at)
+  const after = label.slice(at + ROUTE_LABEL_SEPARATOR.length)
+  return [before === '' ? undefined : before, after === '' ? undefined : after]
+}

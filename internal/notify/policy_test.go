@@ -1206,3 +1206,149 @@ func TestPolicy_ResultHandler_NamesTheEventThatFailed(t *testing.T) {
 		t.Fatalf("summary outcome title = %q, want the window's summary", summary.Event.Title)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The live debounce window (nocx-3mniv task 3)
+
+// liveWindow is a window the user can change while the policy runs, which is
+// what the composition root's settings read is: a source the policy calls,
+// whose answer moves underneath it. Guarded, because the policy calls it from
+// whichever goroutine submitted.
+type liveWindow struct {
+	mu sync.Mutex
+	d  time.Duration
+}
+
+func newLiveWindow(d time.Duration) *liveWindow { return &liveWindow{d: d} }
+
+func (w *liveWindow) get() time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.d
+}
+
+func (w *liveWindow) set(d time.Duration) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.d = d
+}
+
+// TestPolicy_Window_TheSourceGovernsFromTheFirstWindow: a policy given a
+// source uses the source's answer, not the duration it was constructed with,
+// for the very first window it opens. Without this the setting would take
+// effect only after some unnamed warm-up, which is the same defect as not
+// being live at all.
+func TestPolicy_Window_TheSourceGovernsFromTheFirstWindow(t *testing.T) {
+	live := newLiveWindow(3 * time.Second) // the constructed window is 8s
+	pt := newPolicyTest(t, notify.WithWindowSource(live.get))
+
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "one")); d != notify.DispositionOpened {
+		t.Fatalf("first Submit = %v, want opened", d)
+	}
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "two")); d != notify.DispositionCoalesced {
+		t.Fatalf("second Submit = %v, want coalesced", d)
+	}
+
+	pt.clock.Advance(3 * time.Second)
+	if got := pt.sink.count(); got != 2 {
+		t.Fatalf("%d deliveries three seconds in, want 2 — the leading edge and the "+
+			"summary of a window the source sized at 3s, not the 8s the policy was built with", got)
+	}
+}
+
+// TestPolicy_Window_AnOpenWindowKeepsTheLengthItOpenedWith is the chosen
+// interval, asserted: a window's length is fixed from the moment it opens
+// until the moment it closes, so shortening the setting mid-burst does not
+// retime the window already running.
+//
+// It fails under the rejected alternative, and it fails TWICE, once through
+// each of the two things a window decides. A policy that retimed this window
+// to two seconds would have closed it at the three-second mark and delivered
+// its summary there — the count assertion. And it would answer the submit at
+// that mark with DispositionOpened, because the event would now be outside
+// the window rather than inside it — the disposition assertion, which needs
+// no timer at all and so holds against a retiming built any way round.
+func TestPolicy_Window_AnOpenWindowKeepsTheLengthItOpenedWith(t *testing.T) {
+	live := newLiveWindow(8 * time.Second)
+	pt := newPolicyTest(t, notify.WithWindowSource(live.get))
+
+	pt.policy.Submit(pt.mk("s1", kindA, "one"))
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "two")); d != notify.DispositionCoalesced {
+		t.Fatalf("second Submit = %v, want coalesced", d)
+	}
+
+	// The user shortens the window while the burst is still running.
+	live.set(2 * time.Second)
+
+	// Three seconds in: past where a retimed window would have closed, and
+	// well inside the one that is actually open.
+	pt.clock.Advance(3 * time.Second)
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries three seconds after the window was shortened, want 1 — "+
+			"an open window keeps the eight seconds it opened with; a retimed one "+
+			"would have closed at two and delivered its summary here", got)
+	}
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "three")); d != notify.DispositionCoalesced {
+		t.Fatalf("Submit three seconds into a window that opened at eight = %v, want "+
+			"coalesced — a retimed window would call this one opened, which is the "+
+			"disposition of an event decided by a value read after it arrived", d)
+	}
+
+	pt.clock.Advance(5 * time.Second) // eight in total: the length it opened with
+	if got := pt.sink.count(); got != 2 {
+		t.Fatalf("%d deliveries at the eight-second mark, want 2 — the window that "+
+			"opened at eight seconds must still close at eight", got)
+	}
+}
+
+// TestPolicy_Window_TheNextWindowUsesTheNewValue is the other end of the same
+// interval: a change governs every window opened after it. Together with the
+// test above, the interval is stated with both ends and both are asserted.
+func TestPolicy_Window_TheNextWindowUsesTheNewValue(t *testing.T) {
+	live := newLiveWindow(8 * time.Second)
+	pt := newPolicyTest(t, notify.WithWindowSource(live.get))
+
+	pt.policy.Submit(pt.mk("s1", kindA, "one"))
+	pt.policy.Submit(pt.mk("s1", kindA, "two"))
+	live.set(2 * time.Second)
+	pt.clock.Advance(8 * time.Second) // the first window closes at its own length
+	if got := pt.sink.count(); got != 2 {
+		t.Fatalf("%d deliveries after the first window closed, want 2", got)
+	}
+
+	// The next window is opened after the change, so it is two seconds long.
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "three")); d != notify.DispositionOpened {
+		t.Fatalf("Submit after the window closed = %v, want opened", d)
+	}
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "four")); d != notify.DispositionCoalesced {
+		t.Fatalf("Submit inside the new window = %v, want coalesced", d)
+	}
+	pt.clock.Advance(2 * time.Second)
+	if got := pt.sink.count(); got != 4 {
+		t.Fatalf("%d deliveries two seconds into the window that opened AFTER the "+
+			"change, want 4 — the new value governs every window opened after it", got)
+	}
+}
+
+// TestPolicy_Window_ANonPositiveSourceFallsBackToTheConstructedWindow: an
+// unreadable setting must not silently disable the debounce. A zero window is
+// not "no debouncing", it is one notification per event — the flood the policy
+// exists to prevent — so the policy falls back to the window it was built
+// with rather than honouring an answer it cannot use.
+func TestPolicy_Window_ANonPositiveSourceFallsBackToTheConstructedWindow(t *testing.T) {
+	live := newLiveWindow(0)
+	pt := newPolicyTest(t, notify.WithWindowSource(live.get))
+
+	pt.policy.Submit(pt.mk("s1", kindA, "one"))
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "two")); d != notify.DispositionCoalesced {
+		t.Fatalf("Submit with a zero-answering source = %v, want coalesced — a zero "+
+			"window would have opened a second window and delivered at once", d)
+	}
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries before any time passed, want 1", got)
+	}
+	pt.clock.Advance(8 * time.Second) // the constructed window
+	if got := pt.sink.count(); got != 2 {
+		t.Fatalf("%d deliveries at the constructed window's length, want 2", got)
+	}
+}

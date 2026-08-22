@@ -5318,3 +5318,70 @@ func TestNotifyFeedChanged_DTOConformsToContract(t *testing.T) {
 		})
 	}
 }
+
+// ── settings.set ───────────────────────────────────────────────────────
+
+// The result shape settings.set answers with, pinned. It is the method the
+// notification routing matrix travels on (nocx-3mniv D1): the epic adds no
+// JSON-RPC method of its own because the settings methods already carry the
+// user's choice, so the wire criterion (AGENTS.md rule 5) is honoured on the
+// method that actually carries the feature rather than on a redundant one
+// built to have somewhere to put it. The other six settings methods stay with
+// the nocx-bt3w sweep.
+//
+// The handler's result is a map literal rather than a named DTO, so this case
+// cannot do what a struct case does — there is no field tag or omitempty to
+// catch. What it CAN do is pin the shape in both directions, which is why the
+// refusals below are half the test: `additionalProperties: false` plus an
+// explicit `required` is what makes a schema exact, and a schema whose
+// negative cases are untested has never been shown to refuse anything.
+func TestSettingsSet_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "settings.set.schema.json")
+
+	// The expression the handler itself marshals (ws_config_handlers.go,
+	// handleSet's last line).
+	validateJSON(t, schema, mustMarshal(map[string]bool{"ok": true}), "settings.set result")
+
+	refusals := map[string]any{
+		"ok absent":           map[string]any{},
+		"ok false":            map[string]bool{"ok": false},
+		"ok not a boolean":    map[string]any{"ok": "true"},
+		"an undeclared field": map[string]any{"ok": true, "revision": 3},
+	}
+	for name, payload := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, mustMarshal(payload)); err == nil {
+				t.Fatalf("the contract accepts %s; it is not exact", name)
+			}
+		})
+	}
+}
+
+// The real result off the real socket. This is the row that matters
+// (contracts/README.md): a test that validates a payload the test itself built
+// proves the shape is well-formed, not that the server sends it.
+//
+// It drives a REAL setting through a REAL registry — and it drives the toggle
+// kind on purpose, because that is the control the routing matrix is made of.
+func TestSettingsSet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "settings.set.schema.json")
+
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	raw := jsonrpcCall(t, conn, "settings.set", map[string]any{
+		"key":   "clipboard.osc52Suppressed",
+		"value": true,
+	})
+	var env rpcEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal settings.set response: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("settings.set: code=%d msg=%s", env.Error.Code, env.Error.Message)
+	}
+	validateJSON(t, schema, env.Result, "settings.set result over the socket")
+}

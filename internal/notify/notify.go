@@ -16,8 +16,12 @@
 //     in-flight slot is released on return, never at deadline expiry.
 //     Finalization is one-shot: a late result is ignored (ADR-0029 §2.2).
 //
-// The package has no production callers yet: the wire task (notify.raise,
-// nocx-9zmc) is what wires it into the composition root.
+// It is wired at the composition root (internal/app). Ingress is the one
+// entry point: it stamps what nocx owns, records the occurrence in the feed,
+// and only then submits for delivery, so membership and delivery are two
+// decisions and a suppressed event is still remembered. The routing table is
+// built from the user's settings and swapped into the router atomically —
+// a raise resolves against exactly one table, the one live when it began.
 package notify
 
 import (
@@ -25,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -180,8 +185,12 @@ type Key struct {
 
 // Table is the default-deny routing table. A (kind, trust) pair reaches a
 // sink only where a row says so; one table governs both the ordinary route
-// and the ad-hoc completion-subscription route (ADR-0029 §3). The table
-// must be treated as immutable after construction.
+// and the ad-hoc completion-subscription route (ADR-0029 §3).
+//
+// One table value is immutable: nothing mutates a Table after it has been
+// handed to a router. A CHANGE replaces the whole value (SetTable), which is
+// what makes the swap atomic with respect to a raise — see the interval named
+// on SetTable.
 type Table map[Key][]Route
 
 // RouteKind selects which route an event resolves through.
@@ -283,7 +292,12 @@ type RouteResult struct {
 // default-deny table, bounds admission globally, and invokes every resolved
 // sink synchronously. It is safe for concurrent use.
 type Router struct {
-	table  Table
+	// table is the live routing table, replaced whole by SetTable. It is an
+	// atomic pointer rather than a mutex-guarded field because every reader
+	// takes exactly one load and no reader may ever hold two: a raise reads
+	// it once, at the top of Raise, and carries the routes it got for the
+	// rest of its life.
+	table  atomic.Pointer[Table]
 	limits Limits
 
 	mu       sync.Mutex
@@ -303,6 +317,7 @@ type pending struct {
 // NewRouter validates limits and the table's trust-class capability bounds,
 // then returns a router. A row a trust class may never reach is refused
 // here — loudly, at construction — rather than resolved to nothing forever.
+// The same check runs again on every table SetTable is handed.
 func NewRouter(table Table, limits Limits) (*Router, error) {
 	if limits.MaxInFlight < 1 {
 		return nil, errors.New("notify: MaxInFlight must be at least 1")
@@ -313,14 +328,56 @@ func NewRouter(table Table, limits Limits) (*Router, error) {
 	if limits.MaxQueued < 0 || limits.MaxRetained < 0 {
 		return nil, errors.New("notify: queue limits must not be negative")
 	}
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
+	r := &Router{limits: limits}
+	r.table.Store(&table)
+	return r, nil
+}
+
+// validateTable enforces the trust-class capability bound over a whole table:
+// a heuristic row may never reach a sink that leaves the machine (ADR-0029
+// §3). It returns on the FIRST offending row and reports nothing partial,
+// because its callers apply a table whole or not at all.
+//
+// It is a function rather than a method so it runs identically on the table a
+// router is built with and on every table it is later handed. A check that
+// ran only at construction would be a security control that stops holding the
+// moment the table becomes user-authored (D3).
+func validateTable(table Table) error {
 	for key, routes := range table {
 		for _, route := range routes {
+			if route.Sink == nil {
+				return fmt.Errorf("notify: table row %q/%q has no sink", key.Kind, key.Trust)
+			}
 			if key.Trust == TrustHeuristic && route.Sink.LeavesMachine() {
-				return nil, fmt.Errorf("%w: heuristic %q row grants a network sink", ErrTrustCapability, key.Kind)
+				return fmt.Errorf("%w: heuristic %q row grants a network sink", ErrTrustCapability, key.Kind)
 			}
 		}
 	}
-	return &Router{table: table, limits: limits}, nil
+	return nil
+}
+
+// SetTable re-validates a table and, only if it passes, makes it the live one.
+//
+// The interval, both ends named: a raise resolves against exactly ONE table —
+// the one live at the instant Raise called Resolve — and it keeps the routes
+// it got there until its last sink invocation has returned. A swap takes
+// effect for raises that call Resolve after the store below, and for no
+// others. No raise ever sees half of two tables, because no raise reads the
+// table twice.
+//
+// A table that fails validation is refused WHOLE: the previous table stays
+// live and nothing of the new one is applied. Partially applying a routing
+// table would silently grant a route nobody chose, which is worse than
+// refusing the change and saying so (D3).
+func (r *Router) SetTable(table Table) error {
+	if err := validateTable(table); err != nil {
+		return err
+	}
+	r.table.Store(&table)
+	return nil
 }
 
 // Resolve maps (kind, trust) through the default-deny table for one route.
@@ -332,7 +389,9 @@ func (r *Router) Resolve(kind Kind, trust Trust, route RouteKind) []Route {
 	if route == RouteSubscription && trust != TrustAttested {
 		return nil
 	}
-	return append([]Route(nil), r.table[Key{Kind: kind, Trust: trust}]...)
+	// One load, once. This is the instant the raise binds to a table.
+	table := *r.table.Load()
+	return append([]Route(nil), table[Key{Kind: kind, Trust: trust}]...)
 }
 
 // Raise resolves once, admits the event under the global limits, and

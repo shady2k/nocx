@@ -4,7 +4,9 @@ import {
   createMirror,
   numberRangeCaption,
   numberRangeError,
+  parseRouteSettingKey,
   recordSaveOutcome,
+  sectionBlocks,
   canResetSetting,
   applyAcceptedSnapshot,
   AcceptedSnapshot,
@@ -341,5 +343,131 @@ describe('number range caption and error (nocx-w7h.7)', () => {
     expect(numberRangeError(daysDecl, -1)).toBe('Must be at least 0 days')
     expect(numberRangeError(daysDecl, 4000)).toBe('Must be at most 3650 days')
     expect(numberRangeError(daysDecl, 30)).toBeUndefined()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  The routing matrix — axes derived from the declarations, never listed here
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('parseRouteSettingKey (nocx-3mniv)', () => {
+  it('splits a well-formed cell key into its two ids', () => {
+    expect(parseRouteSettingKey('notifications.route.programNotify.banner')).toEqual({
+      rowId: 'programNotify',
+      columnId: 'banner',
+    })
+  })
+
+  it('is not fooled by a key that merely resembles one', () => {
+    // Not under the namespace at all.
+    expect(parseRouteSettingKey('notifications.debounceMs')).toBeNull()
+    expect(parseRouteSettingKey('terminal.fontSize')).toBeNull()
+    // Under the namespace and malformed: one segment, three segments, or an
+    // empty one. Each of these renders as an ordinary row rather than
+    // disappearing into the grid — see sectionBlocks below.
+    expect(parseRouteSettingKey('notifications.route.programNotify')).toBeNull()
+    expect(parseRouteSettingKey('notifications.route.a.b.c')).toBeNull()
+    expect(parseRouteSettingKey('notifications.route..banner')).toBeNull()
+    expect(parseRouteSettingKey('notifications.route.programNotify.')).toBeNull()
+    expect(parseRouteSettingKey('notifications.route.')).toBeNull()
+  })
+})
+
+describe('sectionBlocks (nocx-3mniv)', () => {
+  function cell(kind: string, channel: string, label: string): Declaration {
+    return {
+      key: `notifications.route.${kind}.${channel}`,
+      section: 'Notifications',
+      label,
+      description: `${label} description`,
+      control: 'toggle',
+      dataClass: 'publicConfig',
+      default: false,
+    }
+  }
+
+  const bellBanner = cell('bell', 'banner', 'A terminal bell → OS banner')
+  const bellToast = cell('bell', 'toast', 'A terminal bell → In-app toast')
+  const progBanner = cell('programNotify', 'banner', 'A program asked → OS banner')
+  const progToast = cell('programNotify', 'toast', 'A program asked → In-app toast')
+
+  const debounce: Declaration = {
+    key: 'notifications.debounceMs',
+    section: 'Notifications',
+    label: 'Quiet window',
+    description: 'How long one notification silences the next.',
+    control: 'number',
+    dataClass: 'publicConfig',
+    default: 500,
+    min: 0,
+    max: 60000,
+  }
+
+  it('a section with no cell keys is unchanged — one block per declaration, in order', () => {
+    const blocks = sectionBlocks([debounce])
+    expect(blocks).toEqual([{ kind: 'setting', decl: debounce }])
+  })
+
+  it('collapses every cell in the section into one matrix, at the position of the first', () => {
+    const blocks = sectionBlocks([bellBanner, bellToast, progBanner, progToast, debounce])
+    expect(blocks.map((b) => b.kind)).toEqual(['matrix', 'setting'])
+    expect(blocks[1]).toEqual({ kind: 'setting', decl: debounce })
+  })
+
+  it('the axes come from the keys in first-seen order, and nothing else names them', () => {
+    const blocks = sectionBlocks([progBanner, progToast, bellBanner, bellToast])
+    const b = blocks[0]
+    expect(b.kind).toBe('matrix')
+    if (b.kind !== 'matrix') return
+    expect(b.matrix.rows.map((r) => r.id)).toEqual(['programNotify', 'bell'])
+    expect(b.matrix.columns.map((c) => c.id)).toEqual(['banner', 'toast'])
+  })
+
+  // The declaration a backend has never shipped before is the whole test: no
+  // list here needs editing for it to appear.
+  it('a kind this code has never heard of gets its row from the declaration alone', () => {
+    const invented = cell('diskFull', 'toast', 'The disk filled up → In-app toast')
+    const blocks = sectionBlocks([progBanner, progToast, invented])
+    const b = blocks[0]
+    if (b.kind !== 'matrix') throw new Error('expected a matrix block')
+    expect(b.matrix.rows.map((r) => r.id)).toEqual(['programNotify', 'diskFull'])
+    expect(b.matrix.rows.map((r) => r.label)).toEqual(['A program asked', 'The disk filled up'])
+    expect(b.matrix.cell('diskFull', 'toast')).toBe(invented)
+    // And a pair the backend does not offer is absent, not invented.
+    expect(b.matrix.cell('diskFull', 'banner')).toBeUndefined()
+  })
+
+  it('the axis labels are the halves of the cell label, and fall back to the id', () => {
+    const b = sectionBlocks([bellBanner, bellToast])[0]
+    if (b.kind !== 'matrix') throw new Error('expected a matrix block')
+    expect(b.matrix.rows.map((r) => r.label)).toEqual(['A terminal bell'])
+    expect(b.matrix.columns.map((c) => c.label)).toEqual(['OS banner', 'In-app toast'])
+
+    // A label that does not carry the separator cannot remove a control from
+    // the grid: the id stands in for the half that is missing.
+    const odd = { ...cell('bell', 'banner', 'A terminal bell') }
+    const c = sectionBlocks([odd])[0]
+    if (c.kind !== 'matrix') throw new Error('expected a matrix block')
+    expect(c.matrix.rows[0].label).toBe('A terminal bell')
+    expect(c.matrix.columns[0].label).toBe('banner')
+  })
+
+  // "Visible rather than silently absent from the grid": a key under the
+  // namespace that does not parse is still a control the user can operate.
+  it('a malformed cell key renders as an ordinary setting, not as nothing', () => {
+    const malformed: Declaration = {
+      ...bellBanner,
+      key: 'notifications.route.bell',
+      label: 'A terminal bell',
+    }
+    const blocks = sectionBlocks([progBanner, malformed])
+    expect(blocks.map((b) => b.kind)).toEqual(['matrix', 'setting'])
+    expect(blocks[1]).toEqual({ kind: 'setting', decl: malformed })
+  })
+
+  it('a cell key carrying something other than a toggle is an ordinary setting too', () => {
+    const notAToggle: Declaration = { ...progBanner, control: 'number', default: 3 }
+    const blocks = sectionBlocks([notAToggle])
+    expect(blocks).toEqual([{ kind: 'setting', decl: notAToggle }])
   })
 })

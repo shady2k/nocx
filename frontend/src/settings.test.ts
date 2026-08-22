@@ -950,6 +950,288 @@ describe('SettingsContent', () => {
   })
 })
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  The routing matrix (nocx-3mniv task 4)
+//
+//  The criterion that is easy to fake: NOTHING in the renderer enumerates a
+//  kind or a channel. The proof is not a reading of the code — it is the
+//  invented-declaration test below, which adds a kind and a channel this
+//  repository has never heard of and watches them appear.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** One cell of the routing matrix, in the shape internal/notify declares it:
+ *  key `notifications.route.<kind>.<channel>`, label `<kind> → <channel>`. */
+function routeCell(
+  kind: string,
+  channel: string,
+  kindLabel: string,
+  channelLabel: string,
+  defaultOn = false,
+): Declaration {
+  return {
+    key: `notifications.route.${kind}.${channel}`,
+    section: 'Notifications',
+    label: `${kindLabel} → ${channelLabel}`,
+    description: `${kindLabel}. When on, it reaches ${channelLabel}.`,
+    control: 'toggle',
+    dataClass: 'publicConfig',
+    default: defaultOn,
+  }
+}
+
+const NOTIFY_DECLARATIONS: Declaration[] = [
+  routeCell('bell', 'banner', 'A terminal bell', 'OS banner'),
+  routeCell('bell', 'toast', 'A terminal bell', 'In-app toast'),
+  routeCell('programNotify', 'banner', 'A program asked', 'OS banner', true),
+  routeCell('programNotify', 'toast', 'A program asked', 'In-app toast', true),
+  {
+    key: 'notifications.debounceMs',
+    section: 'Notifications',
+    label: 'Quiet window',
+    description: 'How long one notification silences the next.',
+    control: 'number',
+    dataClass: 'publicConfig',
+    default: 500,
+    min: 0,
+    max: 60000,
+    unit: 'ms',
+  },
+]
+
+const NOTIFY_SECTION_GROUPS: Record<string, string> = {
+  ...TEST_SECTION_GROUPS,
+  Notifications: 'application',
+}
+
+describe('notification routing matrix (nocx-3mniv)', () => {
+  let target: HTMLDivElement
+  let client: ProfileClient
+  let content: SettingsContent
+  let host: PaneHost
+  let signal: AbortSignal
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+    target = document.createElement('div')
+    document.body.append(target)
+    client = new ProfileClient(new Dispatcher())
+    content = new SettingsContent(client)
+    host = mockPaneHost()
+    signal = new AbortController().signal
+  })
+
+  async function openNotifications(declarations: Declaration[] = NOTIFY_DECLARATIONS) {
+    // The snapshot carries EFFECTIVE values, defaults included — that is what
+    // Registry.GetSnapshot sends, and a fixture that omitted them would show
+    // every shipped-on cell as off and prove nothing.
+    const values: Record<string, unknown> = {}
+    for (const d of declarations) values[d.key] = d.default
+    mockReady(client, {
+      declarations: [...TEST_DECLARATIONS, ...declarations],
+      sectionGroups: NOTIFY_SECTION_GROUPS,
+      values,
+    })
+    await content.mount(target, host, signal)
+    openSection(target, 'Notifications')
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-toggle-matrix')).toBeTruthy()
+    })
+    return target.querySelector<HTMLTableElement>('.ui-toggle-matrix')!
+  }
+
+  /** The row labels currently on screen — a hidden row is marked on its
+   *  `<tr>`, which is what `display: none` needs to hide the whole row. */
+  function visibleRowLabels(matrix: HTMLElement): string[] {
+    return Array.from(
+      matrix.querySelectorAll(
+        '.ui-toggle-matrix__row:not([data-hidden="true"]) .ui-toggle-matrix__row-header',
+      ),
+    ).map((e) => e.textContent ?? '')
+  }
+
+  /** The column labels currently on screen. */
+  function visibleColumnLabels(matrix: HTMLElement): string[] {
+    return Array.from(
+      matrix.querySelectorAll('.ui-toggle-matrix__column:not([data-hidden="true"])'),
+    ).map((e) => e.textContent ?? '')
+  }
+
+  it('reads as kind × channel, not as one sentence per pair', async () => {
+    const matrix = await openNotifications()
+
+    expect(visibleRowLabels(matrix)).toEqual(['A terminal bell', 'A program asked'])
+    expect(visibleColumnLabels(matrix)).toEqual(['OS banner', 'In-app toast'])
+    // Four pairs, four switches — and none of them is a settings row of its
+    // own any more.
+    expect(matrix.querySelectorAll('.ui-toggle-matrix__cell input[type="checkbox"]').length).toBe(4)
+    expect(document.getElementById('st-setting-notifications.route.bell.banner')).toBeTruthy()
+    expect(
+      target.querySelector('.ui-settings-row[data-key="notifications.route.bell.banner"]'),
+    ).toBeNull()
+  })
+
+  // THE criterion. A kind and a channel that exist nowhere in this repository
+  // — not in the catalogue, not in the renderer, not in this fixture's other
+  // tests — appear because the backend declared them.
+  it('a kind and a channel this code has never heard of appear because the backend declared them', async () => {
+    const matrix = await openNotifications([
+      ...NOTIFY_DECLARATIONS,
+      routeCell('quotaExceeded', 'banner', 'A quota was exceeded', 'OS banner'),
+      routeCell('quotaExceeded', 'carrierPigeon', 'A quota was exceeded', 'Carrier pigeon'),
+    ])
+
+    expect(visibleRowLabels(matrix)).toEqual([
+      'A terminal bell',
+      'A program asked',
+      'A quota was exceeded',
+    ])
+    expect(visibleColumnLabels(matrix)).toEqual(['OS banner', 'In-app toast', 'Carrier pigeon'])
+    const invented = matrix.querySelector<HTMLElement>(
+      '.ui-toggle-matrix__cell[data-row="quotaExceeded"][data-column="carrierPigeon"]',
+    )!
+    expect(invented.querySelector('input[type="checkbox"]')).toBeTruthy()
+
+    // And a pair the backend does NOT declare is an empty cell — absent
+    // rather than offered and declined (ADR-0029 §3).
+    const notOffered = matrix.querySelector<HTMLElement>(
+      '.ui-toggle-matrix__cell[data-row="bell"][data-column="carrierPigeon"]',
+    )!
+    expect(notOffered.querySelector('input')).toBeNull()
+  })
+
+  it('every switch has an accessible name that stands on its own, under both headers', async () => {
+    const matrix = await openNotifications()
+
+    const names = Array.from(
+      matrix.querySelectorAll<HTMLInputElement>('.ui-toggle-matrix__cell input[type="checkbox"]'),
+    ).map((i) => i.getAttribute('aria-label'))
+    expect(names).toEqual([
+      'A terminal bell → OS banner',
+      'A terminal bell → In-app toast',
+      'A program asked → OS banner',
+      'A program asked → In-app toast',
+    ])
+    // The headers are what locate the switch; without scope a screen reader
+    // gets a grid of switches and no idea where any of them sits.
+    expect(
+      Array.from(matrix.querySelectorAll('.ui-toggle-matrix__row-header')).every(
+        (h) => h.getAttribute('scope') === 'row',
+      ),
+    ).toBe(true)
+    expect(
+      Array.from(matrix.querySelectorAll('.ui-toggle-matrix__column')).every(
+        (h) => h.getAttribute('scope') === 'col',
+      ),
+    ).toBe(true)
+  })
+
+  it('the shipped defaults show as the state of the cells, and flipping one saves its own key', async () => {
+    const setSetting = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const matrix = await openNotifications()
+
+    const on = matrix.querySelector<HTMLInputElement>(
+      '.ui-toggle-matrix__cell[data-row="programNotify"][data-column="banner"] input',
+    )!
+    const off = matrix.querySelector<HTMLInputElement>(
+      '.ui-toggle-matrix__cell[data-row="bell"][data-column="banner"] input',
+    )!
+    expect(on.checked).toBe(true)
+    expect(off.checked).toBe(false)
+
+    on.checked = false
+    on.dispatchEvent(new Event('change', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(setSetting).toHaveBeenCalledWith('notifications.route.programNotify.banner', false)
+    })
+  })
+
+  // A control that exists only inside a custom grid the search cannot see is
+  // a control the user cannot find.
+  it('the section is searchable, and searching narrows the matrix rather than emptying it', async () => {
+    const matrix = await openNotifications()
+
+    const searchInput = target.querySelector<HTMLInputElement>('input[type="search"]')!
+    searchInput.value = 'In-app toast'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+
+    await vi.waitFor(() => {
+      expect(visibleColumnLabels(matrix)).toEqual(['In-app toast'])
+    })
+    // Both kinds carry a toast cell, so both rows stay.
+    expect(visibleRowLabels(matrix)).toEqual(['A terminal bell', 'A program asked'])
+    // The number in the same section does not match and is hidden.
+    const number = document.getElementById('st-setting-notifications.debounceMs')!
+    expect(number.classList.contains('st-vis-hidden')).toBe(true)
+
+    // Narrowing to one kind leaves one row and both of its columns.
+    searchInput.value = 'A terminal bell'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(visibleRowLabels(matrix)).toEqual(['A terminal bell'])
+    })
+    expect(visibleColumnLabels(matrix)).toEqual(['OS banner', 'In-app toast'])
+
+    // A search that matches nothing in the section takes the whole grid away
+    // rather than leaving a table of headers with no controls under them.
+    searchInput.value = 'cursor'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-settings-matrix.st-vis-hidden')).toBeTruthy()
+    })
+  })
+
+  // A cell is addressable exactly as a row is: the deep link from a
+  // notification, or from anything else that knows a key, has to land on the
+  // control itself and not merely on the section holding it.
+  it('a deep link lands on a cell and focuses its switch, search cleared', async () => {
+    await openNotifications()
+
+    const searchInput = target.querySelector<HTMLInputElement>('input[type="search"]')!
+    searchInput.value = 'cursor'
+    searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-settings-matrix.st-vis-hidden')).toBeTruthy()
+    })
+
+    content.scrollToKey('notifications.route.bell.toast')
+
+    expect(searchInput.value).toBe('')
+    const cell = document.getElementById('st-setting-notifications.route.bell.toast')!
+    expect(cell.classList.contains('ui-settings-matrix-cell')).toBe(true)
+    const control = cell.querySelector<HTMLElement>('input, select, button')
+    expect(control).toBeTruthy()
+    expect(document.activeElement).toBe(control)
+  })
+
+  it('a setting in the section that is not a cell keeps its own row', async () => {
+    await openNotifications()
+    const number = document.getElementById('st-setting-notifications.debounceMs')!
+    expect(number.classList.contains('ui-settings-row')).toBe(true)
+    expect(number.querySelector('input[type="number"]')).toBeTruthy()
+  })
+
+  // "Visible rather than silently absent from the grid": a key under the
+  // namespace that the convention cannot parse is still a control the user
+  // can operate, in the section it was declared in.
+  it('a malformed cell key falls out of the grid as an ordinary, operable row', async () => {
+    const malformed: Declaration = {
+      key: 'notifications.route.bell',
+      section: 'Notifications',
+      label: 'A terminal bell',
+      description: 'A key the cell convention cannot place.',
+      control: 'toggle',
+      dataClass: 'publicConfig',
+      default: false,
+    }
+    await openNotifications([...NOTIFY_DECLARATIONS, malformed])
+
+    const row = document.getElementById('st-setting-notifications.route.bell')!
+    expect(row.classList.contains('ui-settings-row')).toBe(true)
+    expect(row.querySelector('input[type="checkbox"]')).toBeTruthy()
+    expect(row.closest('.ui-toggle-matrix')).toBeNull()
+  })
+})
+
 describe('horizontal Field gate — every settings row must use primary label', () => {
   let target: HTMLDivElement
   let client: ProfileClient

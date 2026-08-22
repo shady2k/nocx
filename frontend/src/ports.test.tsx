@@ -17,6 +17,8 @@ afterEach(cleanup)
 import {
   PortsPanel,
   POLL_INTERVAL_MS,
+  createPortsFilter,
+  createPortsFilterControl,
   createPortsPauseControl,
   type PortsPanelProps,
   type PortsPanelServices,
@@ -93,23 +95,37 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
   }
 }
 
-/** The panel plus its shared Pause control — the seam the header action and
- *  the panel share in main.tsx (nocx-wzc4.9). */
+/** The panel plus the two controls it shares with the shell — Pause, which
+ *  the header action drives (nocx-wzc4.9), and Filter, whose field the
+ *  shell pins ABOVE the scrolling body (nocx-708q.3).
+ *
+ *  The filter component is rendered here rather than left out, because it
+ *  is no longer part of the panel: the panel narrows its rows by the
+ *  control and reports whether there is a list to narrow, and the field
+ *  that writes the query is the shell's. Rendering both is what keeps
+ *  `getByLabelText('Filter ports')` a test of the seam a user reaches
+ *  rather than of markup that no longer exists. */
 function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps> = {}) {
-  // The control is created ONCE, outside the JSX. Solid wraps every prop
+  // The controls are created ONCE, outside the JSX. Solid wraps every prop
   // expression in a getter, so `pause={createPortsPauseControl()}` builds a
   // fresh control on every read — `sync` would write one instance while the
   // view read another, and the panel could never show a pause it did not
   // itself initiate (nocx-wzc4.10).
   const pause = createPortsPauseControl()
+  const filter = over.filter ?? createPortsFilterControl()
+  const PortsFilter = createPortsFilter(filter)
   return render(() => (
-    <PortsPanel
-      profileId={() => 'ssh:p1:1'}
-      services={services}
-      visible={() => true}
-      pause={pause}
-      {...over}
-    />
+    <>
+      <PortsFilter />
+      <PortsPanel
+        profileId={() => 'ssh:p1:1'}
+        services={services}
+        visible={() => true}
+        pause={pause}
+        {...over}
+        filter={filter}
+      />
+    </>
   ))
 }
 

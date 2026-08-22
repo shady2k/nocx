@@ -30,7 +30,12 @@ import { PaneManager } from './panes'
 import { HorizontalTabStrip } from './tab-strip'
 import { ClipboardGate } from './clipboard'
 import type { ProfileClient } from './profiles'
-import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
+import {
+  PortsPanel,
+  createPortsFilterControl,
+  createPortsPauseControl,
+  type PortsPanelServices,
+} from './ports'
 import { ToastHost } from './ui/toast'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -135,6 +140,7 @@ function mountPanel(
   const [pid, setPid] = createSignal<string | null>(null)
   manager.onActivePaneChange = () => setPid(manager.portsTargetId())
   const pause = createPortsPauseControl()
+  const filter = createPortsFilterControl()
   render(() => (
     <>
       <ToastHost />
@@ -145,6 +151,7 @@ function mountPanel(
         services={services}
         visible={() => true}
         pause={pause}
+        filter={filter}
       />
     </>
   ))

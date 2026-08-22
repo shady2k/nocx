@@ -3,6 +3,15 @@
 // stage/unstage, stage-all/unstage-all and the commit form. The store owns
 // every call; the panel renders state and routes user intent into it.
 //
+// THE BODY, and that is why nothing here mentions `SidebarView`. The frame —
+// header, header actions, pinned filter row, the one scrolling body — is the
+// kit's, and it is reached through the DESCRIPTOR in git-view.tsx, which the
+// shell renders inside `SidebarView` for every panel alike (sidebar.tsx
+// builds it once). A panel body that imported the frame would be the second
+// owner of a layout the shell already owns; what a body may say about the
+// frame is which of its children is the filter, and it says that in the
+// descriptor beside `actions`. Same for notes-panel.tsx (nocx-708q.3).
+//
 // The render rules that make it correct:
 //
 // 1. state() IS THE DISCRIMINATOR, SWITCHED ON FIRST — exactly one of the
@@ -48,7 +57,6 @@ import { Section } from '../ui/section'
 import { Spinner } from '../ui/spinner'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
-import { SearchField } from '../ui/search-field'
 import { matchesPathFilter } from './git-filter'
 import { showToast } from '../ui/toast'
 import type { FileStatus } from '../ui/file-status-row'
@@ -677,28 +685,17 @@ export function GitPanel(props: GitPanelProps) {
               is resolved.
             </p>
           </Show>
-          {/* ── The filter (nocx-52by): the kit's SearchField, placed and
-               never repainted (ADR-0014). Renderer-side: typing narrows the
-               rows already in the store and issues no request. A collapsed
-               section stays collapsed — the filter narrows lists, the
-               disclosure hides them, and the two compose independently; a
-               filter never silently expands a section the user folded
-               (nocx-nak2). Escape drops the filter and keeps focus, the
-               settings search's pattern. */}
-          <div class="git-filter" data-testid="git-filter">
-            <SearchField
-              value={filter()}
-              onInput={(v) => props.store.setFilter(v)}
-              placeholder="Filter files…"
-              ariaLabel="Filter changed files"
-              onKeyDown={(e) => {
-                if (e.key === 'Escape' && filter() !== '') {
-                  e.stopPropagation()
-                  props.store.setFilter('')
-                }
-              }}
-            />
-          </div>
+          {/* THE FILTER IS NOT HERE. It stood exactly at this point, above
+               the two lists it narrows, and it went up and off the panel
+               with them the moment anybody scrolled — the whole reason a
+               filter exists is to be reachable while you scroll a long list
+               (owner, 2026-08-22). It is `GitFilter` in git-view.tsx now,
+               declared on the descriptor and pinned by the shell, reading
+               the same `store.filter()` this panel narrows by. Nothing else
+               about it moved: typing still narrows rows already in the store
+               and issues no request, and a collapsed section stays collapsed
+               because the filter narrows lists while the disclosure hides
+               them (nocx-nak2). */}
           {/* ── The two lists ─────────────────────────────────────────── */}
           <Section
             title={`Staged (${filteredStaged().length})`}

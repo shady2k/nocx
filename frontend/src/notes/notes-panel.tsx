@@ -8,11 +8,21 @@
  * does with the query is hand it over and render rows — it never filters a
  * list it loaded, because that would mean loading every note to look inside
  * it.
+ *
+ * WHAT THIS COMPONENT IS is the panel's BODY and nothing else — which is
+ * why nothing here mentions `SidebarView`. The frame is the kit's and is
+ * reached through the DESCRIPTOR in notes-view.tsx, which the shell renders
+ * inside `SidebarView` for every panel alike (sidebar.tsx builds it once).
+ * The search field and the "+ New note" button used to be here, in a
+ * bordered strip at the top of the scrolling body, and both went away with
+ * the list the moment anybody scrolled it. They are the descriptor's header
+ * action and pinned filter slots now, the way every other panel says it; the
+ * state and the query arrive as accessors so the field, the button and the
+ * rows read one signal (nocx-708q.3).
  */
-import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, onMount, Show } from 'solid-js'
 import { Button } from '../ui/button'
 import { RecordRow } from '../ui/record-row'
-import { SearchField } from '../ui/search-field'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
 import { TrashIcon } from '../ui/icons'
@@ -23,14 +33,19 @@ import type { NoteRow, NotesState, NotesStore } from './notes-store'
 
 export interface NotesPanelProps {
   store: NotesStore
+  /** The store's list, as the view descriptor holds it. An accessor, never
+   *  a snapshot: the header's create action reads the same signal, and a
+   *  panel that re-derived it would be a second answer to one question. */
+  state: () => NotesState
+  /** What is typed in the shell's pinned field. Read here only to quote it
+   *  back in the "nothing matched" state — the search itself is issued by
+   *  the field, because the backend is what searches. */
+  query: () => string
   /** Open this note's tab — the panel finds, the tab writes. */
   onOpen: (id: string) => void
-  /** Make one and open it: the panel's own "+", and the same path the
-   *  chord takes. */
+  /** Make one and open it: the empty state's button, and the same path the
+   *  header action and the chord take. */
   onCreate: () => void
-  /** The activity bar tells a panel when it is on screen; a panel that is
-   *  not visible has no business re-reading. */
-  visible: boolean
 }
 
 /** A row's date, in the person's locale — the one piece of naming that
@@ -46,25 +61,16 @@ function nameOf(row: NoteRow): string {
 }
 
 export function NotesPanel(props: NotesPanelProps) {
-  const [state, setState] = createSignal<NotesState>({ kind: 'loading' })
-  const [query, setQuery] = createSignal('')
-
-  onMount(() => {
-    const unsubscribe = props.store.subscribe(setState)
-    onCleanup(unsubscribe)
-    void props.store.refresh()
-  })
+  // Opening the panel re-reads the library. The panel unmounts whenever
+  // another view is in front, so this IS "the user came to look" — and the
+  // subscription that renders the answer is the descriptor's, made once,
+  // because the header's create action has to know whether the store is
+  // reachable while this component does not exist.
+  onMount(() => void props.store.refresh())
 
   const rows = (): readonly NoteRow[] => {
-    const s = state()
+    const s = props.state()
     return s.kind === 'ready' ? s.rows : []
-  }
-
-  const onSearch = (value: string): void => {
-    setQuery(value)
-    // Every keystroke asks; the store's generation guard is what keeps a
-    // slow answer from overwriting a newer one.
-    void props.store.search(value)
   }
 
   const remove = async (row: NoteRow): Promise<void> => {
@@ -80,30 +86,14 @@ export function NotesPanel(props: NotesPanelProps) {
 
   return (
     <div class="notes-panel">
-      <div class="notes-panel__search">
-        <SearchField
-          value={query()}
-          onInput={onSearch}
-          placeholder="Search notes…"
-          ariaLabel="Search notes"
-        />
-        {/* The create affordance is absent while the store is unavailable:
-            an offer that cannot be honoured is a lie (design §8). */}
-        <Show when={state().kind !== 'unavailable'}>
-          <Button variant="primary" onClick={() => props.onCreate()}>
-            + New note
-          </Button>
-        </Show>
-      </div>
-
       <Show
         when={rows().length > 0}
         fallback={
           <Show
-            when={state().kind === 'unavailable'}
+            when={props.state().kind === 'unavailable'}
             fallback={
               <Show
-                when={query().trim() !== ''}
+                when={props.query().trim() !== ''}
                 fallback={
                   <EmptyState
                     title="No notes yet"
@@ -118,14 +108,16 @@ export function NotesPanel(props: NotesPanelProps) {
               >
                 <EmptyState
                   title="Nothing matches"
-                  description={`No note contains "${query().trim()}".`}
+                  description={`No note contains "${props.query().trim()}".`}
                 />
               </Show>
             }
           >
             <EmptyState
               title="Couldn't load your notes"
-              description={state().kind === 'unavailable' ? unavailableMessage(state()) : ''}
+              description={
+                props.state().kind === 'unavailable' ? unavailableMessage(props.state()) : ''
+              }
               action={
                 <Button variant="default" onClick={() => void props.store.refresh()}>
                   Retry

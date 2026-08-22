@@ -11,7 +11,12 @@
 // unbounded on its own line.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, waitFor } from '@solidjs/testing-library'
-import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
+import {
+  PortsPanel,
+  createPortsFilterControl,
+  createPortsPauseControl,
+  type PortsPanelServices,
+} from './ports'
 import type { PortsStatusResult } from './generated/ports.status'
 
 afterEach(() => cleanup())
@@ -131,6 +136,7 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
     // Created once, outside the JSX: Solid wraps prop expressions in getters,
     // so building it inline yields a fresh control on every read.
     const pause = createPortsPauseControl()
+    const filter = createPortsFilterControl()
     render(
       () => (
         <PortsPanel
@@ -138,6 +144,7 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
           services={services}
           visible={() => true}
           pause={pause}
+          filter={filter}
         />
       ),
       { container: root },
@@ -211,6 +218,7 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
     const root = document.createElement('div')
     document.body.append(root)
     const pause = createPortsPauseControl()
+    const filter = createPortsFilterControl()
     render(
       () => (
         <PortsPanel
@@ -218,6 +226,7 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
           services={services}
           visible={() => true}
           pause={pause}
+          filter={filter}
         />
       ),
       { container: root },
@@ -275,6 +284,7 @@ describe('the hidden actions reserve no width (nocx-4wbx)', () => {
     const root = document.createElement('div')
     document.body.append(root)
     const pause = createPortsPauseControl()
+    const filter = createPortsFilterControl()
     render(
       () => (
         <PortsPanel
@@ -282,6 +292,7 @@ describe('the hidden actions reserve no width (nocx-4wbx)', () => {
           services={services}
           visible={() => true}
           pause={pause}
+          filter={filter}
         />
       ),
       { container: root },

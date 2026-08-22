@@ -131,6 +131,10 @@ func apiConnectionFolder(t *testing.T, url string) string {
 	write("environments/bastion.json",
 		`{"name":"bastion","values":{},"route":{"kind":"connection","profileId":"ssh:custom:1"}}`)
 	write("environments/here.json", `{"name":"here","values":{},"route":{"kind":"direct"}}`)
+	// An environment with verification OFF, out of this machine — the
+	// switch §6.5 gives a development host with a self-signed certificate.
+	write("environments/unverified.json",
+		`{"name":"unverified","values":{},"route":{"kind":"direct","insecureTls":true}}`)
 	return root
 }
 

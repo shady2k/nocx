@@ -158,6 +158,10 @@ function responseFixture(over: Partial<ApiResponse> = {}): ApiResponse {
     truncated: false,
     size: 1229,
     tlsVersion: 'TLS 1.3',
+    // The ordinary case: the handshake verified the chain. A fixture that
+    // defaulted to the WARNING state would put a badge on every test that
+    // did not think about it, which is the defect this field replaces.
+    trust: { state: 'verified', reason: '' },
     // raw is REQUIRED on the contract, not optional, and its spans are what
     // the badges are drawn from — so the default fixture carries a real
     // tiling rather than an empty one. An empty `spans` is a legitimate

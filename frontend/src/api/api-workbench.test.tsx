@@ -709,6 +709,90 @@ describe('a request goes out from the workbench', () => {
     expect(card.querySelector('[aria-label="Raw request"]')).toBeNull()
   })
 
+  // ── The badge means something (nocx-6hg2w.19) ───────────────────────────
+  //
+  // It was drawn from the environment's SETTING, so it appeared on every run
+  // under an environment with verification off — the owner's screenshot has
+  // it on `https://httpbin.org`, a public host with an ordinary Amazon
+  // chain, wearing the words and the colour a self-signed development host
+  // would get. What it means now is that THIS run accepted something that
+  // would otherwise have been refused, which the backend answers.
+
+  const withTrust = (trust: { state: string; reason: string }) =>
+    vi.fn().mockResolvedValue({
+      ...sendFixture(),
+      route: { kind: 'direct' as const, profileId: '', insecureTls: true },
+      response: { ...sendFixture().response!, trust },
+    })
+
+  it('warns only when the run accepted a chain that would have been refused, and says why', async () => {
+    const { bar } = await mountApp({
+      sendRequest: withTrust({
+        state: 'unchecked-untrusted',
+        reason: 'x509: certificate signed by unknown authority',
+      }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.textContent).toContain('unverified TLS')
+    // The REASON, because a warning that only repeats the setting is the one
+    // this replaces: a person has to know it is an unknown authority rather
+    // than an expiry or a name they can fix.
+    expect(card.textContent).toContain('certificate signed by unknown authority')
+    const warning = [...card.querySelectorAll<HTMLElement>('.ui-badge')].find(
+      (b) => b.dataset.tone === 'warning',
+    )
+    expect(warning, 'the badge is drawn in the kit’s warning tone').toBeTruthy()
+  })
+
+  it('does NOT warn when the switch was on and the chain would have passed anyway', async () => {
+    // The same environment, the same switch — this is the run the old badge
+    // was wrong about. The fact still appears, in the connection block,
+    // because a switch somebody left on is worth seeing; it is simply not an
+    // alarm.
+    const { bar } = await mountApp({
+      sendRequest: withTrust({ state: 'unchecked-trusted', reason: '' }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.textContent).not.toContain('unverified TLS')
+    expect(
+      [...card.querySelectorAll<HTMLElement>('.ui-badge')].some(
+        (b) => b.dataset.tone === 'warning',
+      ),
+    ).toBe(false)
+
+    fireEvent.click(optionIn(card, 'Raw'))
+    await vi.waitFor(() =>
+      expect(rawBlockText(runCards()[0], 'Connection')).toContain('not checked'),
+    )
+  })
+
+  it('does NOT warn on an ordinary verified run, whatever the environment says', async () => {
+    // route.insecureTls is TRUE on this run and the chain verified: the
+    // setting and the answer disagree, and the answer is what the surface
+    // reads. Without this the badge could still be drawn from the setting
+    // and every other case here would pass.
+    const { bar } = await mountApp({
+      sendRequest: withTrust({ state: 'verified', reason: '' }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.textContent).not.toContain('unverified TLS')
+    fireEvent.click(optionIn(card, 'Raw'))
+    await vi.waitFor(() => expect(rawBlockText(runCards()[0], 'Connection')).toBeTruthy())
+    expect(rawBlockText(runCards()[0], 'Connection')).not.toContain('not checked')
+  })
+
   it('the run shows the status, the elapsed time and the size', async () => {
     const { bar } = await mountApp()
     await openRequest(bar)

@@ -38,6 +38,7 @@ import {
   type ApiRawSegment,
   bodySummary,
   certificateText,
+  acceptedUntrusted,
   connectionRawText,
   formatElapsed,
   formatSize,
@@ -46,6 +47,7 @@ import {
   phaseSentence,
   rawSegments,
   responseHeaderText,
+  untrustedSentence,
   statusTone,
 } from './api-model'
 
@@ -86,6 +88,13 @@ function Run(props: {
   const run = () => props.run
   const response = () => props.run.response
   const elapsed = pendingElapsed(props)
+  /** The verdict a warning is drawn from, and undefined for the three states
+   *  that are not warnings — including the quiet one, which is a line in the
+   *  connection block rather than a badge. */
+  const untrusted = () => {
+    const trust = run().response?.trust
+    return acceptedUntrusted(trust) ? trust : undefined
+  }
 
   // THE TABS EXIST FOR AN ATTEMPT, not for an answer. A failed run has a
   // request, a route and how far it got, and the raw view is where a person
@@ -144,6 +153,7 @@ function Run(props: {
                   : undefined,
               tlsVersion: res?.tlsVersion,
               tlsCipherSuite: res?.tlsCipherSuite,
+              trust: res?.trust,
             })}
             timings={run().timings ?? EMPTY_TIMINGS}
             certificates={run().certificates}
@@ -183,7 +193,7 @@ function Run(props: {
       </div>
       <Show
         when={
-          run().environment !== '' || run().route.kind === 'connection' || run().route.insecureTls
+          run().environment !== '' || run().route.kind === 'connection' || untrusted() !== undefined
         }
       >
         <div class="api-run__under">
@@ -203,13 +213,21 @@ function Run(props: {
           <Show when={run().route.kind === 'connection'}>
             <Badge tone="info">{`via ${props.connectionName(run().route.profileId)}`}</Badge>
           </Show>
-          {/* AND WHETHER IT CHECKED WHO ANSWERED. A warning tone, on the run
-              rather than only in the file that allowed it: an environment
-              with verification off is a setting somebody turned on for one
-              host and will forget, and the run is where they will be looking
-              when it matters. */}
-          <Show when={run().route.insecureTls}>
-            <Badge tone="warning">unverified TLS</Badge>
+          {/* AND WHETHER THIS RUN ACCEPTED SOMETHING IT WOULD OTHERWISE HAVE
+              REFUSED — the backend's verdict on the chain, never the
+              environment's setting.
+              It was the setting (`route.insecureTls`), which is true of
+              every run under that environment: the badge sat on
+              `https://httpbin.org` — a public host with an ordinary chain —
+              in the same colour and words a self-signed development host
+              would get. A warning that is on most of the time is a warning
+              nobody reads, and the one run where it mattered looked exactly
+              like the twenty where it did not. The quiet case — verification
+              off over a chain that would have passed anyway — is a line in
+              the connection block instead (api-model.ts), because it is a
+              fact and not a warning. */}
+          <Show when={untrusted()}>
+            {(trust) => <Badge tone="warning">{untrustedSentence(trust())}</Badge>}
           </Show>
         </div>
       </Show>

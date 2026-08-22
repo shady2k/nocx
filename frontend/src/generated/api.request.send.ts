@@ -127,6 +127,7 @@ export interface Response {
    * The negotiated cipher suite's name, and "" when the exchange was not over TLS.
    */
   tlsCipherSuite: string
+  trust: Trust
 }
 export interface Header {
   name: string
@@ -135,6 +136,25 @@ export interface Header {
    * A disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.
    */
   enabled: boolean
+}
+/**
+ * WHAT VERIFICATION SAYS about the chain this exchange accepted — never the environment's SETTING, which is what `route.insecureTls` is and what this replaces on the run.
+ *
+ * The badge a surface draws from it used to come from that setting, so it appeared on every run under an environment with verification off — including a public host with an ordinary chain, in the same colour and words a self-signed development host would get. A warning that is on most of the time is a warning nobody reads, and the one run where it matters looks exactly like the twenty where it did not.
+ *
+ * What it means now is WE ACCEPTED SOMETHING THAT WOULD OTHERWISE HAVE BEEN REFUSED, which is knowable: the handshake completed, the chain is in hand, and the backend asks crypto/x509's own verifier — the presented intermediates, the host name, this build's roots — whether it verifies. It USES the verifier and does not become a second one; the renderer still parses no X.509 and reads a state and a sentence.
+ *
+ * It is HERE, beside tlsVersion and tlsCipherSuite, because like both of those it is a fact of a handshake that COMPLETED and exists exactly when they do. One level up it would be the only TLS fact to survive a run whose exchange broke after its handshake, with no version beside it to attach to.
+ */
+export interface Trust {
+  /**
+   * Four answers, because there are four different things to say. `none` there is nothing to say — no TLS, or a handshake that never completed. `verified` the handshake verified the chain before it would speak at all: the ordinary case, and nothing to report. `unchecked-trusted` verification was OFF and the chain verifies anyway — worth a quiet line beside the TLS version and never a warning, because nothing was accepted that would not have been accepted regardless. `unchecked-untrusted` verification was OFF and the chain does NOT verify: this is the one a warning is for, and `reason` says which.
+   */
+  state: 'none' | 'verified' | 'unchecked-trusted' | 'unchecked-untrusted'
+  /**
+   * Why the chain would have been refused, in the verifier's own words — "certificate signed by unknown authority", "certificate has expired or is not yet valid", "certificate is valid for a, not b". Empty in every other state. Passed through rather than reworded: the verifier's sentence IS the sentence a person wants, and a second vocabulary would be one more thing to keep in step with the standard library.
+   */
+  reason: string
 }
 /**
  * How the attempt ended when it did not answer. It is present for a `failed` AND for a `stopped` exchange, because both are asks about the same thing — how far did it get — and only the outcome says how to read it: a phase is a POSITION on the way to an answer, not a verdict. The reason is the backend's own words, already redacted (apisend.redact): userinfo and the query string never reach it.

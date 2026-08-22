@@ -185,6 +185,55 @@ type Exchange struct {
 	Failure *Failure
 }
 
+// TrustState is what verification says about the chain this exchange
+// accepted. Four states, because there are four different things to say and
+// a surface that could only say two said the wrong one most of the time.
+//
+// The badge this feeds used to be drawn from the environment's SETTING, so
+// it appeared on every run under an environment with verification off —
+// including `https://httpbin.org`, a public host with an ordinary chain, in
+// the same colour and words a self-signed development host would get. A
+// warning that is on most of the time is a warning nobody reads, and the one
+// run where it matters looks exactly like the twenty where it did not.
+//
+// What the badge should mean is WE ACCEPTED SOMETHING THAT WOULD OTHERWISE
+// HAVE BEEN REFUSED, and that is knowable: the handshake completed, the
+// chain is in hand, and asking whether it verifies is a question the
+// standard library answers.
+type TrustState string
+
+const (
+	// TrustNone — there is nothing to say. No TLS at all, or a handshake
+	// that never completed.
+	TrustNone TrustState = "none"
+	// TrustVerified — the handshake verified the chain, against the system
+	// roots and the host name, before it would agree to speak at all. The
+	// ordinary case, and nothing to report.
+	TrustVerified TrustState = "verified"
+	// TrustUncheckedTrusted — verification was OFF and the chain verifies
+	// anyway. Worth a quiet line and not a warning: the setting is on, but
+	// nothing was accepted that would not have been accepted regardless.
+	TrustUncheckedTrusted TrustState = "unchecked-trusted"
+	// TrustUncheckedUntrusted — verification was OFF and the chain does NOT
+	// verify. This is the one the badge exists for, and Reason says which
+	// of the four ordinary answers it was: unknown authority, expired, a
+	// name it is not valid for, self-signed.
+	TrustUncheckedUntrusted TrustState = "unchecked-untrusted"
+)
+
+// Trust is that answer, with the verifier's own sentence when there is one.
+type Trust struct {
+	State TrustState
+	// Reason is why the chain would have been refused, in the words
+	// crypto/x509 used — "certificate signed by unknown authority", "certificate
+	// has expired or is not yet valid", "certificate is valid for a, not b".
+	// Empty in every other state. It is passed through rather than reworded
+	// because the verifier's sentence IS the sentence a person wants, and a
+	// second vocabulary here would be one more thing to keep in step with
+	// the standard library.
+	Reason string
+}
+
 // Response is what came back. Text, Binary, Lossy and Truncated are four
 // separate facts because they are four separate sentences in the UI, and
 // collapsing any two of them loses one.
@@ -212,6 +261,16 @@ type Response struct {
 	// TLSCipherSuite is the negotiated suite's name, and "" when the
 	// exchange was not over TLS.
 	TLSCipherSuite string
+	// Trust is what verification says about the chain that was accepted.
+	//
+	// It is HERE, beside the version and the suite, rather than on the
+	// exchange: like both of those it is a fact of a handshake that
+	// COMPLETED, and it exists exactly when they do. Putting it one level up
+	// would make it the only TLS fact to survive a run whose exchange broke
+	// after the handshake, printed in a connection block with no version
+	// beside it to attach it to — and if that run ever should carry its TLS
+	// facts, all three move together rather than two of them drifting apart.
+	Trust Trust
 	// Raw is the RESPONSE SIDE of §11's segmented text — what came back,
 	// with the bounded known-plaintext search run over it.
 	//
@@ -340,12 +399,18 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 		Lossy:     body.Lossy,
 		Truncated: body.Truncated,
 		Size:      body.Size,
+		// The state is spelled out rather than left as the zero value, so
+		// every response carries one of the four answers and a reader never
+		// meets an empty string it has to interpret. A plain http exchange
+		// keeps this one: there was no chain, so there is nothing to say.
+		Trust: Trust{State: TrustNone},
 	}
 	certs := tr.certificates()
 	if resp.TLS != nil {
 		out.TLSVersion = tls.VersionName(resp.TLS.Version)
 		out.TLSCipherSuite = tls.CipherSuiteName(resp.TLS.CipherSuite)
 		certs = describeChain(resp.TLS.PeerCertificates)
+		out.Trust = c.trustOf(resp.TLS.PeerCertificates, req.URL.Hostname(), k.InsecureTLS)
 	}
 	// The response is searched on exactly the text that crosses, so there
 	// is nothing on this side for a bound to damage — which is the
@@ -993,6 +1058,50 @@ type Certificate struct {
 	// prints, so the value on screen can be compared with the one a person
 	// has in a terminal without either of them reformatting anything.
 	Fingerprint string
+}
+
+// trustOf answers what verification says about the chain the handshake
+// accepted.
+//
+// IT USES THE VERIFIER, IT DOES NOT WRITE ONE. Certificate's own doc refuses
+// a second X.509 implementation in this product, and this does not become
+// one: it is x509.Certificate.Verify with the intermediates the server
+// presented, the host name we asked for, and the same roots this client's
+// transport would have used. Every judgement — expiry, the name, the chain
+// up to a root, the key usages — is the standard library's, so this cannot
+// drift from what the handshake itself would have decided.
+//
+// WITH VERIFICATION ON IT RUNS NOTHING. The handshake already did exactly
+// this before it agreed to speak, and doing it a second time would be the
+// duplicate the whole design avoids — two verifications of one connection
+// that agree today and could disagree the day one of them is configured
+// differently.
+//
+// The roots are read off the client's own config so the answer is about
+// THIS build's trust rather than about the machine's in the abstract: a
+// caller that supplied a root pool gets an answer computed against it. A nil
+// pool is the system's, which is what x509 does with an empty Roots.
+func (c *Client) trustOf(chain []*x509.Certificate, host string, insecure bool) Trust {
+	if len(chain) == 0 {
+		// No handshake completed, so there is no chain and nothing to
+		// claim. A failed handshake reaches here through this branch.
+		return Trust{State: TrustNone}
+	}
+	if !insecure {
+		return Trust{State: TrustVerified}
+	}
+	intermediates := x509.NewCertPool()
+	for _, cert := range chain[1:] {
+		intermediates.AddCert(cert)
+	}
+	opts := x509.VerifyOptions{DNSName: host, Intermediates: intermediates}
+	if c.tlsConfig != nil {
+		opts.Roots = c.tlsConfig.RootCAs
+	}
+	if _, err := chain[0].Verify(opts); err != nil {
+		return Trust{State: TrustUncheckedUntrusted, Reason: err.Error()}
+	}
+	return Trust{State: TrustUncheckedTrusted}
 }
 
 // describeChain renders the presented chain, leaf first. A cap, because the

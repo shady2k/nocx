@@ -5687,6 +5687,29 @@ func TestAPIRequestSend_DTOConformsToContract(t *testing.T) {
 				Text:    `{"ok":true}`,
 				Size:    11,
 				Raw:     apisend.Raw{Text: "HTTP/1.1 200 OK\n\n", Spans: []apisend.Span{}},
+				// The route above has verification off, and this is what
+				// that route's run actually accepted — the state a badge is
+				// drawn from, carrying the verifier's own sentence.
+				Trust: apisend.Trust{
+					State:  apisend.TrustUncheckedUntrusted,
+					Reason: "x509: certificate signed by unknown authority",
+				},
+			},
+		},
+		// The ordinary connection: verification ran and there is nothing to
+		// report. Beside the case above so the two states that a run can
+		// legitimately carry are both marshalled, and neither is only ever
+		// seen as the other's absence.
+		"answered over a verified chain": {
+			Outcome:      apisend.Answered,
+			Request:      request,
+			RemoteAddr:   "10.0.0.4:443",
+			Certificates: []apisend.Certificate{},
+			Response: &apisend.Response{
+				Status:  200,
+				Headers: []apicoll.Header{},
+				Raw:     apisend.Raw{Spans: []apisend.Span{}},
+				Trust:   apisend.Trust{State: apisend.TrustVerified},
 			},
 		},
 		// The failure the whole change exists for: a request, a route, how

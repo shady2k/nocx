@@ -100,6 +100,30 @@ type Failure struct {
 	// sendError unwraps the *url.Error whose message is the whole URL, and
 	// redact drops the userinfo and the query string.
 	Reason string
+	// Err is the failure ITSELF, so a caller can ask what KIND it was
+	// instead of reading the words of Reason.
+	//
+	// It exists for one caller and one question: the transport asks whether
+	// the attempt stopped because the vault is sealed
+	// (errors.Is(err, vault.ErrVaultSealed)), because that is a precondition
+	// the user can fix rather than an exchange that happened, and it has a
+	// prompt of its own. This package must not learn what a vault is — it
+	// knows nothing about the vault by design, and the layer that may import
+	// it is internal/capability and above — so it hands the error up whole
+	// and the question is asked where the answer is knowable.
+	//
+	// It NEVER REACHES THE WIRE. There is no field for it on
+	// apiSendFailureWire and nothing marshals it: an error's text is
+	// arbitrary, unredacted by anyone but its author, and the diagnostic a
+	// person is shown is Reason, which this package built for that purpose.
+	// A field that could carry a credential to the renderer by accident is
+	// exactly what §11 exists to prevent, so this one is a Go value that
+	// stops at the handler.
+	//
+	// A caller matching on Reason's WORDS instead would be the second owner
+	// of "what does a sealed vault look like" — the defect the transport's
+	// own sealed seam already keeps a string fallback for and warns about.
+	Err error
 }
 
 // Exchange is ONE ATTEMPT TO SEND, and it exists from the moment Send is
@@ -426,7 +450,7 @@ func settled(sent Raw, tr *tracer, total time.Duration, phase Phase, err error) 
 		DNSAddresses: tr.resolved(),
 		Timings:      tr.timings(total),
 		Certificates: tr.certificates(),
-		Failure:      &Failure{Phase: phase, Reason: err.Error()},
+		Failure:      &Failure{Phase: phase, Reason: err.Error(), Err: err},
 	}
 	if phase == PhaseStopped {
 		out.Outcome = Stopped

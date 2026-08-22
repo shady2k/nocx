@@ -56,8 +56,42 @@ package transport
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/vault"
 )
+
+// sealedVaultFailure recognises a sealed vault in an ERROR CHAIN, and gives
+// back the canonical error to answer with.
+//
+// It is the same concept the normalizer below owns — "this failure is the
+// vault being shut" — asked at a different moment, so it lives beside it
+// rather than at the one call site that needs it. The normalizer inspects a
+// failure that is ALREADY an RPCError on its way out; this inspects a Go
+// error a handler is still holding, before it has decided what to answer at
+// all. api.request.send needs the second: since a run became the RESULT of
+// the call, its failures no longer pass through TryError, so the normalizer
+// never sees them and the unlock prompt never fired for a send.
+//
+// BY THE SENTINEL, NEVER BY THE WORDS. errors.Is walks the chain, so it
+// holds for a message wrapped by four layers on the way up and keeps holding
+// when any of them rewords itself. The normalizer keeps a string fallback
+// for handlers whose error is already flattened to a message; a second copy
+// of that fallback here would be a second owner of the vault's vocabulary,
+// agreeing with the first until the day the vault reworded the sentence.
+//
+// The canonical shape comes from rpcErrorFor, which is the one builder the
+// vault's own handlers use, so the code and the data the renderer keys on
+// cannot drift from what it produces for a sealed vault reached any other
+// way. Its fallback code is unreachable here — errors.Is has already matched
+// — and is passed only because the builder takes one.
+func sealedVaultFailure(err error) (RPCError, bool) {
+	if err == nil || !errors.Is(err, vault.ErrVaultSealed) {
+		return RPCError{}, false
+	}
+	return rpcErrorFor(-32603, "", err), true
+}
 
 // vaultSealedCode is the JSON-RPC code for a sealed vault, the code the
 // renderer reads as "offer the unlock". It mirrors the code vaultErrorCode

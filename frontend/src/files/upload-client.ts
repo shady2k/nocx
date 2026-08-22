@@ -126,15 +126,22 @@ class UploadClient {
    * plane carries PTY I/O and a multi-gigabyte upload multiplexed onto it
    * would compete with terminal responsiveness.
    *
-   * **Content-Length.** The sink requires it and refuses a body whose length
-   * disagrees with the size declared at mint time. Two things make it right
-   * here and both are needed: the header is set explicitly, which is what a
-   * non-browser fetch honours; and the body is refused before the request
-   * when its own `size` is not the declared one, which is what makes the
-   * value a BROWSER computes — from the blob, ignoring a header it treats as
-   * forbidden — the declared size too. Setting the header alone would be
-   * theatre in the shipped app; checking alone would leave the header off
-   * wherever nothing computes one.
+   * **Content-Length is not ours to set.** The sink requires it and refuses
+   * a body whose length disagrees with the size declared at mint time, and
+   * the temptation is to declare it here. `Content-Length` is a FORBIDDEN
+   * header: a browser silently drops an attempt to set one, so the header
+   * that reached the server was always the browser's own, computed from the
+   * blob. Setting it was therefore theatre in every real client and a lie in
+   * the one test that asserted it. What makes the requirement hold is the
+   * check below — the blob is refused before the request when its own `size`
+   * is not the declared one — which is what makes the value the browser
+   * computes the declared size too.
+   *
+   * The route is cross-origin in every browser configuration this ships in,
+   * so the backend answers a preflight and names this origin back on every
+   * reply (`internal/transport/ws_upload.go`). Nothing here asks for that;
+   * it is stated because a reply that stops naming the origin turns every
+   * status below into an unreadable "Failed to fetch".
    *
    * The url the result carried is a PATH on the backend's HTTP surface. It
    * is resolved against the socket's own origin rather than the document's:
@@ -162,7 +169,6 @@ class UploadClient {
       res = await this.fetchImpl(target, {
         method: 'POST',
         body,
-        headers: { 'Content-Length': String(size) },
         signal,
       })
     } catch (e) {

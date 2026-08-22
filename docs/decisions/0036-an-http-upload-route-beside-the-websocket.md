@@ -155,7 +155,7 @@ The obvious alternative — multiplex the upload onto the socket we already have
 buys one fewer connection and pays for it with the responsiveness that AD-1's
 own data-plane rule exists to protect.
 
-### 2. Backpressure on that plane would have to be invented; HTTP inherits TCP's
+### 2. Flow control on that plane would have to be invented; HTTP already has it
 
 nocx has flow control, and it is the wrong direction.
 
@@ -185,9 +185,19 @@ So carrying an upload on the data plane means inventing the missing half:
 credit in the client→server direction, an ack for it, a chunk sequence, a
 resume-from-offset rule, and a way for the sender to stop when the SFTP write
 falls behind. That is a second flow-control protocol, spanning both codecs,
-existing to serve one feature. Over HTTP the sender stops when the reader stops
-reading, because that is what a TCP receive window does, and the sink pulls
-through an `io.Reader` (`§5.2`) at whatever rate the far filesystem accepts.
+existing to serve one feature. Over HTTP the transfer gets an independently
+flow-controlled byte stream instead: the sink pulls through an `io.Reader`
+(`§5.2`) at whatever rate the far filesystem accepts, net/http stops reading the
+socket when nobody is pulling, and the sender stops when that window closes —
+one connection's window against another's, with the shared read loop nowhere in
+the path.
+
+Be precise about why the browser cannot supply the missing half itself.
+`WebSocket.bufferedAmount` looks like backpressure and is not: it reports what
+the browser has queued locally, and says nothing about whether the backend read
+it, whether the session's 64-frame queue has room, or whether the last SFTP
+write landed. A sender pacing on it would still overrun the sink, and the only
+place that overrun can be absorbed is the one read loop.
 
 The framing ceiling makes the same point from the other end. `wsReadLimit` is
 16 MiB and a frame above it is refused by the protocol layer with close code
@@ -262,6 +272,39 @@ these are its properties:
 - **It travels in the request path.** Acceptable only because the request never
   leaves loopback. Both tickets are minted from `crypto/rand` at no less than
   128 bits, are never logged and never appear in an error string (`§D4`).
+
+### The route needs CORS, and that is part of what it costs
+
+Not foreseen when this was decided, and written down now because the next
+person adding an HTTP route pays it too (`nocx-9le.5.19`).
+
+The renderer resolves the upload URL against the **socket's** origin rather than
+the document's, because under `dev-web` the page is served by vite on one port
+and the backend listens on another. Every `POST` here is therefore a
+cross-origin request in the configuration the product is developed and tested
+in, and the browser preflights it — the body's `Content-Type` is not on the CORS
+safelist. Until the server answered that, the whole feature was unreachable from
+a browser while every unit test on the route was green, because every one of
+those callers is a non-browser client and a non-browser client never asks for
+these headers.
+
+The contract is scoped to `/upload/{ticket}` and to nothing else on the mux, and
+the shape of it is the same defence-in-depth argument as above rather than a
+second credential: the origin is decided by the same `OriginPolicy`, and decided
+**before** the ticket is read out of the path, so a refusal is not an oracle for
+a credential that authorises a write. `OPTIONS` answers `204` without touching
+the ticket — a preflight precedes every upload, so one that claimed a one-shot
+ticket would break the route for the only client that needs it. The requesting
+origin is echoed exactly and never as `*`, `Vary: Origin` is always sent,
+`Access-Control-Allow-Credentials` is never sent because the ticket is the
+credential, and the allow-list is `POST` plus `Content-Type` and nothing more.
+
+The part that is easy to get wrong: the headers belong on **every** reply,
+including `400`, `409`, `410` and `5xx`. A browser hands the page nothing at all
+from a cross-origin reply that does not name it — the fetch rejects with
+"Failed to fetch" — so an error response without them collapses "the ticket is
+gone" into "the network died", which is exactly the distinction the renderer
+depends on.
 
 ### The `OriginPolicy` does not come for free, and it is weaker here
 

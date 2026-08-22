@@ -88,11 +88,19 @@ Liveness of the transfer as a whole is a **stall** rule — no chunk has complet
 never a rule about total duration. A 2 GB upload over a slow link is a working upload.
 
 **D3 — Bytes travel as a streamed `POST`, not as a new binary msg-type.** The data plane carries
-PTY I/O over one TCP connection; a multi-gigabyte upload multiplexed onto it competes with
-terminal responsiveness and needs a flow-control scheme invented for the purpose. An HTTP
-request is a separate connection whose backpressure is TCP's. It also keeps `frame.go` and
-`frame.ts` — two codecs pinned to each other by golden vectors — about PTY only.
-`internal/transport` already runs an `http.ServeMux` (`/session`), so the surface exists.
+PTY I/O over one TCP connection, and an upload runs renderer→backend, the same direction as
+keystrokes: bulk PTY output is the other direction and never queues ahead of input, whereas an
+upload on that socket would. A `POST` gives the transfer its own independently flow-controlled
+byte stream — the sender stops when the sink stops reading, one connection's window against
+another's, and the backend's single read loop is not in the path at all. Multiplexing it onto
+the WebSocket would require the missing half to be invented: application-level credit in the
+client→server direction, an ack for it, a chunk sequence and reconnect semantics, all of it
+existing so that a full upload queue cannot block the one read loop that carries every
+session's keystrokes and cancellations. `WebSocket.bufferedAmount` is not a substitute — it
+reports what the browser has queued, not whether the backend read it, whether its bounded
+queue has room, or whether the far filesystem accepted the last chunk. It also keeps
+`frame.go` and `frame.ts` — two codecs pinned to each other by golden vectors — about PTY
+only. `internal/transport` already runs an `http.ServeMux` (`/session`), so the surface exists.
 
 This crosses AD-1, which allocates the planes on the WebSocket. **ADR required**, recorded with
 this design rather than decided inside a commit.
@@ -111,6 +119,22 @@ than implied:
   leaves loopback; the `OriginPolicy` that guards `/session` guards this route too.
 - The source ticket additionally never leaves the backend's own address space as a path: the
   renderer learns a display name and a size, never the directory the file came from.
+- **A CORS surface, and it is part of the price.** The renderer resolves the upload URL against
+  the socket's origin rather than the document's, because under `dev-web` the page is vite's
+  and the backend is not — so the route is cross-origin by construction in the configuration
+  the product is developed and tested in, and unreachable from a browser until the server says
+  so. It is scoped to `/upload/{ticket}` and to nothing else on the mux: the origin is decided
+  by the same `OriginPolicy` and decided **before** the ticket is looked up or claimed, an
+  `OPTIONS` preflight answers `204` without touching the ticket, the requesting origin is
+  echoed exactly and never as `*`, `Vary: Origin` is always sent, credentials are never
+  allowed, and the allow-list is `POST` plus `Content-Type` and nothing more. The headers go on
+  **every** reply including `400`, `409`, `410` and `5xx` — a browser hands the page nothing at
+  all from a cross-origin reply that does not name it, so without them a `410` and a dropped
+  connection arrive as the same "Failed to fetch".
+- **`Content-Length` is the browser's to set, not the renderer's.** It is a forbidden header;
+  an attempt to set it is silently dropped. The sink still requires it and still matches it
+  against the declared size, and what makes that hold is the renderer refusing a blob whose own
+  length is not the declared one before the request is made.
 
 **D5 — The collision question is asked before a byte moves, and `O_EXCL` is the arbiter.**
 `files.upload` stats the destination first and refuses with a typed `collision` outcome when no

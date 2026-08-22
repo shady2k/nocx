@@ -263,7 +263,15 @@ describe('the upload control plane on the wire', () => {
 })
 
 describe('sendBody — the one request that is not JSON-RPC', () => {
-  it('declares Content-Length as the size the transfer was minted for', async () => {
+  // The previous version of this asserted the client SETS Content-Length.
+  // It was modelling behaviour that exists in no browser: Content-Length is
+  // a forbidden header, so the attempt was silently dropped and the length
+  // that reached the server was always the browser's own. The requirement
+  // the sink enforces is met by the size check further down — "refuses a
+  // body that is not the declared size, and sends nothing", which is what
+  // makes the length the browser computes the declared one — and never by
+  // a header this side can write.
+  it('sends the blob and sets no header a browser would refuse to send', async () => {
     const d = new Dispatcher()
     await connect(d)
     const f = fakeFetch(OK)
@@ -272,7 +280,9 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
     expect(out).toEqual({ ok: true })
     expect(f.calls).toHaveLength(1)
     expect(f.calls[0].init.method).toBe('POST')
-    expect((f.calls[0].init.headers as Record<string, string>)['Content-Length']).toBe('12')
+    expect(f.calls[0].init.body).toBe(body)
+    const headers = (f.calls[0].init.headers ?? {}) as Record<string, string>
+    expect(Object.keys(headers)).toEqual([])
   })
 
   it('posts to the backend the socket is on, not to the page origin', async () => {

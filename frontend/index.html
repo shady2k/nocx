@@ -9,10 +9,19 @@
          and an injected onerror= handler cannot execute even if the escaping
          in connections.ts regresses. style-src keeps 'unsafe-inline' because
          the UI assigns element.style.* directly and xterm injects stylesheets
-         at runtime. connect-src is pinned to the loopback PTY socket. -->
+         at runtime. connect-src is pinned to the loopback backend: the PTY
+         socket, and the http:// form of the same hosts for the upload route
+         (POST /upload/{ticket}, ADR-0036). The port is a wildcard because it
+         is ephemeral — the backend binds 127.0.0.1:0 — and the http entries
+         name exactly the hosts the ws entries already name, so this widens
+         the scheme and not the trust boundary: a page that may open a
+         WebSocket to any loopback port can already reach every one of them.
+         Without it the upload never leaves the renderer at all: the page is
+         vite's origin and the backend is not, so the POST is blocked by
+         connect-src before CORS is even asked. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:* http://127.0.0.1:* http://localhost:*; font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
     />
     <title>nocx</title>
   </head>

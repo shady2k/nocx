@@ -1105,11 +1105,18 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// design D3). Bytes travel as a streamed POST rather than as a new
 	// binary msg-type because the data plane carries PTY I/O: a
 	// multi-gigabyte upload multiplexed onto it would compete with terminal
-	// responsiveness and need a flow-control scheme invented for the
-	// purpose, where an HTTP request is a separate connection whose
-	// backpressure is TCP's. The method is in the pattern, so anything but
-	// POST is answered 405 by the mux itself.
+	// responsiveness and would need application-level credit and reconnect
+	// semantics invented for the purpose, where an HTTP request is an
+	// independently flow-controlled byte stream on its own connection.
+	//
+	// The method is in each pattern, so anything but POST and OPTIONS is
+	// still answered 405 by the mux itself. OPTIONS is a route of its own
+	// rather than a branch inside handleUpload because the two share
+	// nothing past the origin check: the preflight never reads the ticket
+	// (ws_upload.go, the CORS block), and a branch is how it would one day
+	// come to.
 	mux.HandleFunc("POST "+uploadRoutePrefix+"{ticket}", s.handleUpload)
+	mux.HandleFunc("OPTIONS "+uploadRoutePrefix+"{ticket}", s.handleUploadPreflight)
 
 	addr := s.listenAddr
 	if addr == "" {

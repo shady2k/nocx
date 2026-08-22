@@ -1835,6 +1835,108 @@ func (b *uploadBody) Close() error {
 	return nil
 }
 
+// ── CORS, scoped to this route and to nothing else on the mux ────────────
+//
+// The route is cross-origin BY CONSTRUCTION, which is why this exists at
+// all. `upload-client.ts` resolves the upload URL against the SOCKET's
+// origin rather than the document's, because under `dev-web` the page is
+// served by vite on one port and the backend listens on another — so every
+// POST here is a cross-origin request in the configuration the product is
+// developed and tested in. Both halves knew about the split and neither
+// made the server allow it, so the feature was unreachable from a browser
+// while every unit test was green: a non-browser caller never asks for
+// these headers, and every test on this route was one.
+//
+// The contract is deliberately narrow, and each line is a decision:
+//
+//   - The origin is decided by the SAME OriginPolicy that guards /session.
+//     Two matchers that must agree is a defect with a delay fuse, so there
+//     is one and this route asks it rather than restating it.
+//   - The check runs BEFORE the ticket is looked up or claimed, so a
+//     refusal is not an oracle for a credential that authorises a write.
+//   - The requesting origin is echoed EXACTLY, never `*`. A wildcard would
+//     let any page on the machine read the reply, and the reply is the only
+//     place a 409 and a 410 are told apart.
+//   - `Vary: Origin` on every reply, refusals included: the answer depends
+//     on a request header, and a cache that missed that would serve one
+//     origin's answer to another.
+//   - No `Access-Control-Allow-Credentials`. The ticket is the credential;
+//     cookies and HTTP auth have no business at a route whose whole purpose
+//     is one filesystem write on somebody's server.
+//   - Exactly the request headers the handler needs, which is Content-Type
+//     and nothing else. No blanket Authorization, no X-* wildcard.
+//   - `Access-Control-Max-Age` is omitted: a cached preflight is an origin
+//     decision the server cannot withdraw for as long as the cache holds it,
+//     and a preflight per upload costs one round trip on loopback.
+//
+// And the headers go on EVERY reply this route gives, including 400, 409,
+// 410 and 5xx. A browser hands the page nothing at all from a cross-origin
+// reply that does not name it — the fetch rejects with "Failed to fetch" —
+// which collapses "the ticket is gone" and "the network died" into one
+// outcome, the two the renderer was just taught to treat differently
+// (nocx-9le.5.18).
+const (
+	uploadAllowMethods = http.MethodPost
+	uploadAllowHeaders = "Content-Type"
+)
+
+// allowUploadOrigin applies the part of the CORS reply that belongs on every
+// answer, and reports whether the request may proceed. It writes the refusal
+// itself and returns false when it may not.
+func (s *WSServer) allowUploadOrigin(w http.ResponseWriter, r *http.Request) bool {
+	// Unconditionally, and before the decision: Vary describes what the
+	// answer depends on, which is as true of the refusal as of the reply.
+	w.Header().Set("Vary", "Origin")
+
+	policy := s.origins
+	if policy == nil {
+		policy = LoopbackOriginPolicy{}
+	}
+	origin := r.Header.Get("Origin")
+	if !policy.Allow(origin, r.Host) {
+		// Origin and Host are logged for the same reason /session logs them
+		// — a rejection nobody can diagnose is worse than one that quotes
+		// what it rejected — but NOT the path, which carries the ticket.
+		s.log.Warn("upload rejected",
+			"reason", "origin_or_host",
+			"origin", origin,
+			"host", r.Host,
+			"method", r.Method,
+			"route", uploadRoutePrefix)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	if origin != "" {
+		// Echoed exactly. An absent Origin is a caller that is not a page
+		// (LoopbackOriginPolicy allows it deliberately), and it gets no
+		// header: there is nothing to echo and `*` is never the answer.
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
+	return true
+}
+
+// handleUploadPreflight answers the OPTIONS a browser sends before a POST it
+// cannot safelist — which is every POST here, because the body carries a
+// Content-Type the safelist does not cover.
+//
+// It never reads the ticket out of the path. A preflight precedes every
+// upload, so one that claimed, extended or merely reported on a one-shot
+// ticket would break the route for the only client that needs it, and would
+// answer a question about a credential to a caller that has presented
+// nothing but an origin. 204 with no body is the whole reply.
+func (s *WSServer) handleUploadPreflight(w http.ResponseWriter, r *http.Request) {
+	// Connection: close for the same reason the POST sets it, and one more:
+	// it keeps "an upload is always the FIRST request on its connection"
+	// true, which is the premise the guard's byte offsets are read against.
+	w.Header().Set("Connection", "close")
+	if !s.allowUploadOrigin(w, r) {
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Methods", uploadAllowMethods)
+	w.Header().Set("Access-Control-Allow-Headers", uploadAllowHeaders)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleUpload carries one file's bytes to a claimed sink ticket.
 //
 // The ticket is the credential (D4): a POST cannot present a WebSocket
@@ -1856,20 +1958,10 @@ func (s *WSServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// so headerEnd is known for every one of them.
 	w.Header().Set("Connection", "close")
 
-	policy := s.origins
-	if policy == nil {
-		policy = LoopbackOriginPolicy{}
-	}
-	if !policy.Allow(r.Header.Get("Origin"), r.Host) {
-		// Origin and Host are logged for the same reason /session logs them
-		// — a rejection nobody can diagnose is worse than one that quotes
-		// what it rejected — but NOT the path, which carries the ticket.
-		s.log.Warn("upload rejected",
-			"reason", "origin_or_host",
-			"origin", r.Header.Get("Origin"),
-			"host", r.Host,
-			"route", uploadRoutePrefix)
-		http.Error(w, "forbidden", http.StatusForbidden)
+	// Before the ticket is read out of the path, let alone claimed. An
+	// origin we refuse must not learn whether a well-formed guess names a
+	// live transfer, and must not consume one.
+	if !s.allowUploadOrigin(w, r) {
 		return
 	}
 

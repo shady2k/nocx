@@ -60,6 +60,17 @@ func postUpload(t *testing.T, ws *WSServer, ticket string, body []byte) (int, st
 // a test decides exactly how much of the body arrives and when.
 func rawUpload(t *testing.T, ws *WSServer, ticket, headers string, writeBody func(c *net.TCPConn)) (int, string) {
 	t.Helper()
+	resp, body := rawUploadResponse(t, ws, ticket, headers, writeBody)
+	return resp.StatusCode, body
+}
+
+// rawUploadResponse is the same request with the whole reply handed back,
+// for the assertions that are about HEADERS rather than only a status —
+// the CORS contract has to hold on the refusals a well-behaved client
+// cannot even provoke. The body is drained before the connection closes,
+// so the returned response is safe to read after this returns.
+func rawUploadResponse(t *testing.T, ws *WSServer, ticket, headers string, writeBody func(c *net.TCPConn)) (*http.Response, string) {
+	t.Helper()
 	c, dialErr := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", ws.Port()))
 	if dialErr != nil {
 		t.Fatalf("dial: %v", dialErr)
@@ -89,7 +100,7 @@ func rawUpload(t *testing.T, ws *WSServer, ticket, headers string, writeBody fun
 	if err != nil {
 		t.Fatalf("read response body: %v", err)
 	}
-	return resp.StatusCode, string(body)
+	return resp, string(body)
 }
 
 // rawUploadNoReply writes the request headers, hands control back with the
@@ -838,4 +849,402 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// ── CORS: the route is cross-origin by construction (nocx-9le.5.19) ──────
+//
+// Every assertion in this section is about a reply a BROWSER has to be able
+// to read. The route is reached from a page that vite serves on its own
+// port, against a backend listening on another, so a POST here is a
+// cross-origin request in every browser configuration the product has —
+// which is why the whole feature was unreachable from a browser while every
+// test above was green: they are all non-browser callers, and a non-browser
+// caller never asks for these headers.
+
+const (
+	// browserOrigin is the shape `dev-web` actually sends: an http loopback
+	// origin on vite's port, which LoopbackOriginPolicy allows.
+	browserOrigin = "http://localhost:5173"
+	// foreignOrigin is a page that must never drive this route.
+	foreignOrigin = "https://evil.example.com"
+)
+
+// uploadBrowserRequest addresses the route the way a browser does — a
+// method, an Origin, and, for a preflight, the two headers a real preflight
+// carries — and hands back the whole reply so a test can read its headers.
+func uploadBrowserRequest(t *testing.T, ws *WSServer, method, ticket, origin string, body []byte) (*http.Response, string) {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, uploadURLFor(ws, ticket), r)
+	if err != nil {
+		t.Fatalf("new %s request: %v", method, err)
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	if method == http.MethodOptions {
+		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		req.Header.Set("Access-Control-Request-Headers", "content-type")
+	}
+	resp, err := uploadHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s /upload: %v", method, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	return resp, string(raw)
+}
+
+// assertNamesTheOrigin is the whole positive half of the contract, in one
+// place because it must hold identically on a 200 and on a 410 — the reply
+// a browser can read is what keeps those two apart.
+func assertNamesTheOrigin(t *testing.T, h http.Header, origin string) {
+	t.Helper()
+	if got := h.Get("Access-Control-Allow-Origin"); got != origin {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the requesting origin echoed exactly (%q)", got, origin)
+	}
+	if got := h.Get("Access-Control-Allow-Origin"); got == "*" {
+		t.Errorf("Access-Control-Allow-Origin is a wildcard; the ticket authorises a filesystem write and any page could then read the reply")
+	}
+	if got := h.Get("Vary"); !strings.Contains(got, "Origin") {
+		t.Errorf("Vary = %q, want it to name Origin: the answer depends on that request header", got)
+	}
+	if got := h.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("Access-Control-Allow-Credentials = %q, want it absent: the ticket is the credential and cookies have no business here", got)
+	}
+}
+
+func TestUploadCORS_PreflightFromAnAllowedOriginIs204AndNamesTheContract(t *testing.T) {
+	e := newUploadTestEnv(t)
+	// A ticket nothing ever minted, deliberately: the preflight answers
+	// without looking one up, so a well-formed guess learns nothing.
+	resp, body := uploadBrowserRequest(t, e.ws, http.MethodOptions, strings.Repeat("ab", uploadTicketHexLen/2), browserOrigin, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight: want 204, got %d (%s)", resp.StatusCode, body)
+	}
+	if body != "" {
+		t.Errorf("preflight answered with a body %q; 204 carries none", body)
+	}
+	assertNamesTheOrigin(t, resp.Header, browserOrigin)
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); got != http.MethodPost {
+		t.Errorf("Access-Control-Allow-Methods = %q, want exactly %q", got, http.MethodPost)
+	}
+	// Exactly the header the handler needs. A blanket Authorization or an
+	// X-* wildcard would widen what a page may send at a route whose only
+	// credential is in the URL.
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.EqualFold(got, "Content-Type") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want exactly Content-Type", got)
+	}
+	// Omitted on purpose: a cached preflight is an origin decision the
+	// server cannot withdraw for as long as the cache holds it.
+	if got := resp.Header.Get("Access-Control-Max-Age"); got != "" {
+		t.Errorf("Access-Control-Max-Age = %q, want it omitted", got)
+	}
+}
+
+// The preflight is not a claim. A browser sends OPTIONS before every POST
+// it cannot safelist, so a preflight that consumed, extended or revealed a
+// one-shot ticket would make the upload impossible from the only client
+// that needs the route at all.
+func TestUploadCORS_PreflightDoesNotConsumeTheTicket(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	tid, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	// Twice: once is not evidence against a handler that claims on the
+	// second look, and a browser really can preflight more than once.
+	for i := 0; i < 2; i++ {
+		resp, _ := uploadBrowserRequest(t, e.ws, http.MethodOptions, ticket, browserOrigin, nil)
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("preflight %d: want 204, got %d", i, resp.StatusCode)
+		}
+	}
+	// The ticket is still redeemable, which is the assertion. A handler
+	// that claimed on OPTIONS would answer 409 or 410 here.
+	if status, body := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusOK {
+		t.Fatalf("the preflight consumed the ticket: POST answered %d (%s)", status, body)
+	}
+	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	got, err := os.ReadFile(filepath.Join(dir, "a.txt")) //nolint:gosec // see above
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("destination holds %q, want %q", got, "hello")
+	}
+}
+
+// A refused origin gets no origin back — on either method — and its refusal
+// costs the ticket nothing.
+func TestUploadCORS_ARefusedOriginIsNamedBackToNobodyAndKeepsItsHandsOffTheTicket(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	tid, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	for _, method := range []string{http.MethodOptions, http.MethodPost} {
+		var body []byte
+		if method == http.MethodPost {
+			body = []byte("hello")
+		}
+		resp, _ := uploadBrowserRequest(t, e.ws, method, ticket, foreignOrigin, body)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s from %s: want 403, got %d", method, foreignOrigin, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s: a refused origin was handed %q back; the browser would then let the page read the reply", method, got)
+		}
+		// Vary still, even on the refusal: a cache that missed it would
+		// serve this 403 to an origin the policy allows.
+		if got := resp.Header.Get("Vary"); !strings.Contains(got, "Origin") {
+			t.Errorf("%s: Vary = %q on the refusal, want it to name Origin", method, got)
+		}
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("directory holds %d entries (%v), want 0", len(entries), err)
+	}
+	// And the ticket survived both refusals.
+	if status, body := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusOK {
+		t.Fatalf("a refused origin consumed the ticket: got %d (%s)", status, body)
+	}
+	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+}
+
+// The origin check runs BEFORE the ticket is looked up, and the evidence is
+// that a refused origin cannot tell a live ticket from a guess: three
+// tickets in three different states, one identical answer. A handler that
+// looked first would answer 410 for the unknown one and 403 for the live
+// one, which is an oracle for a credential that authorises a write.
+func TestUploadCORS_ARefusedOriginCannotTellALiveTicketFromAGuess(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	_, live := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	unknown := strings.Repeat("cd", uploadTicketHexLen/2)
+	malformed := "short"
+	var seen []string
+	for _, ticket := range []string{live, unknown, malformed} {
+		resp, body := uploadBrowserRequest(t, e.ws, http.MethodPost, ticket, foreignOrigin, []byte("hello"))
+		seen = append(seen, fmt.Sprintf("%d|%s", resp.StatusCode, body))
+	}
+	for i := range seen {
+		if seen[i] != seen[0] {
+			t.Fatalf("a refused origin distinguished ticket %d from the first: %q vs %q", i, seen[i], seen[0])
+		}
+	}
+	if !strings.HasPrefix(seen[0], fmt.Sprintf("%d|", http.StatusForbidden)) {
+		t.Fatalf("want every answer to be 403, got %q", seen[0])
+	}
+}
+
+// The headers are on the ERROR replies, and that is the point of the task:
+// a browser hands the page nothing at all from a cross-origin reply that
+// does not name it, so "the ticket is gone" and "the network died" arrive
+// as the same "Failed to fetch". The renderer was taught to treat those
+// two differently (nocx-9le.5.18); without this, it cannot.
+func TestUploadCORS_TheHeadersAreOnEveryReplyIncludingTheRefusals(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	// 410 — a ticket that names nothing.
+	resp, _ := uploadBrowserRequest(t, e.ws, http.MethodPost, strings.Repeat("ab", uploadTicketHexLen/2), browserOrigin, []byte("x"))
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("unknown ticket: want 410, got %d", resp.StatusCode)
+	}
+	assertNamesTheOrigin(t, resp.Header, browserOrigin)
+
+	// 400 — a Content-Length that disagrees with the declared size.
+	_, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+	resp, _ = uploadBrowserRequest(t, e.ws, http.MethodPost, ticket, browserOrigin, []byte("hello there"))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("size mismatch: want 400, got %d", resp.StatusCode)
+	}
+	assertNamesTheOrigin(t, resp.Header, browserOrigin)
+
+	// 400 again, the other shape — no Content-Length at all, which no
+	// browser sends and which a raw client is needed to produce.
+	rawResp, _ := rawUploadResponse(t, e.ws, ticket, "Origin: "+browserOrigin+"\r\nTransfer-Encoding: chunked\r\n", nil)
+	if rawResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("absent Content-Length: want 400, got %d", rawResp.StatusCode)
+	}
+	assertNamesTheOrigin(t, rawResp.Header, browserOrigin)
+
+	// 200 — the paired success, without which every assertion above is
+	// satisfied by a handler that refuses everything.
+	tid, ok := startStreamUpload(t, e, bid, dir, "b.txt", 5, 4)
+	resp, _ = uploadBrowserRequest(t, e.ws, http.MethodPost, ok, browserOrigin, []byte("hello"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d", resp.StatusCode)
+	}
+	assertNamesTheOrigin(t, resp.Header, browserOrigin)
+	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+}
+
+// 5xx carries them too. A body that ends short of its own Content-Length
+// fails the transfer, and the handler answers "the transfer failed" — an
+// answer the renderer must be able to read as a status rather than as a
+// network fault.
+func TestUploadCORS_TheHeadersAreOnAFailedTransferToo(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	tid, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 8, 3)
+
+	resp, _ := rawUploadResponse(t, e.ws, ticket, "Origin: "+browserOrigin+"\r\nContent-Length: 8\r\n", func(c *net.TCPConn) {
+		if _, err := c.Write([]byte("hell")); err != nil {
+			t.Errorf("write short body: %v", err)
+		}
+		// A half-close is the source stopping, which is what makes this a
+		// failure rather than a stall the deadline has to find.
+		if err := c.CloseWrite(); err != nil {
+			t.Errorf("close write: %v", err)
+		}
+	})
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("a short body: want 500, got %d", resp.StatusCode)
+	}
+	assertNamesTheOrigin(t, resp.Header, browserOrigin)
+	if state := awaitUploadState(t, e.ws, tid); state == uploadStateWritten {
+		t.Fatal("a short body must not write the destination")
+	}
+}
+
+// 409 carries them too — and this is the status the renderer most needs to
+// read, because it is the one that means somebody else's transfer is alive
+// and not ours to mourn.
+func TestUploadCORS_TheHeadersAreOnAConflictToo(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	const size = 4096
+	tid, ticket := startStreamUpload(t, e, bid, dir, "a.txt", size, 3)
+
+	pr, pw := io.Pipe()
+	req, reqErr := http.NewRequest(http.MethodPost, uploadURLFor(e.ws, ticket), pr)
+	if reqErr != nil {
+		t.Fatalf("new request: %v", reqErr)
+	}
+	req.ContentLength = size
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resp, err := uploadHTTPClient.Do(req)
+		if err != nil {
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		_, _ = io.Copy(io.Discard, resp.Body)
+	}()
+	if _, err := pw.Write(bytes.Repeat([]byte("a"), size/2)); err != nil {
+		t.Fatalf("write first half: %v", err)
+	}
+	rt := e.ws.uploads.get(tid)
+	waitFor(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
+		_, _, n, _ := rt.snapshot()
+		return n > 0
+	})
+
+	resp, _ := uploadBrowserRequest(t, e.ws, http.MethodPost, ticket, browserOrigin, bytes.Repeat([]byte("b"), size))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("want 409, got %d", resp.StatusCode)
+	}
+	assertNamesTheOrigin(t, resp.Header, browserOrigin)
+
+	if _, err := pw.Write(bytes.Repeat([]byte("a"), size/2)); err != nil {
+		t.Fatalf("write second half: %v", err)
+	}
+	_ = pw.Close()
+	wg.Wait()
+	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+		t.Fatalf("the first claimant must keep its transfer; state = %q", state)
+	}
+}
+
+// An Origin the policy does not allow is refused whatever it says, and
+// "null" is the one worth pinning: it is what a sandboxed iframe, a
+// data: document and a file:// page all send, and reading it as "no
+// origin, therefore not a browser" would hand exactly those the route.
+func TestUploadCORS_ANullOriginIsRefused(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	_, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	for _, method := range []string{http.MethodOptions, http.MethodPost} {
+		resp, _ := uploadBrowserRequest(t, e.ws, method, ticket, "null", nil)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s with Origin: null: want 403, got %d", method, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s: Access-Control-Allow-Origin = %q, want none", method, got)
+		}
+	}
+}
+
+// A caller that sends no Origin is not a browser — LoopbackOriginPolicy
+// allows it deliberately, and it is how every other test in this file
+// reaches the route. It gets no Access-Control-Allow-Origin, because there
+// is nothing to echo and a wildcard is never the answer.
+func TestUploadCORS_ACallerWithNoOriginIsAnsweredWithNoAllowOrigin(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	_, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
+
+	resp, body := uploadBrowserRequest(t, e.ws, http.MethodPost, ticket, "", []byte("hello"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want none: there is no origin to echo", got)
+	}
+	if got := resp.Header.Get("Vary"); !strings.Contains(got, "Origin") {
+		t.Errorf("Vary = %q, want it to name Origin even here", got)
+	}
+}
+
+// CORS is scoped to this route and to nothing else on the mux. /session is
+// a WebSocket upgrade whose origin check already refuses a foreign page,
+// and a browser cannot be given a way to fetch it cross-origin.
+func TestUploadCORS_IsScopedToTheUploadRoute(t *testing.T) {
+	e := newUploadTestEnv(t)
+	req, err := http.NewRequest(http.MethodOptions, fmt.Sprintf("http://127.0.0.1:%d/session", e.ws.Port()), nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Origin", browserOrigin)
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	resp, err := uploadHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS /session: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("/session answered Access-Control-Allow-Origin %q; CORS belongs to the upload route alone", got)
+	}
 }

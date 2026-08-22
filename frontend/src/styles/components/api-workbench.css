@@ -53,11 +53,15 @@
   padding: var(--space-2) var(--space-3);
   min-width: 0;
   /* THE ROW IS ONE HEIGHT, ALWAYS. With nothing open it holds plain text and
-     with a request open it holds a button and Save — so the header grew by a
-     few pixels the moment a request was clicked, and everything below it
-     jumped. The floor is the tallest thing it can hold, which is a
-     default-size control. */
-  min-height: var(--control-height-md);
+     with a request open it holds a button and Save — so the header grew the
+     moment a request was clicked, and everything below it jumped.
+     The floor is the tallest thing it can hold PLUS the row's own padding,
+     which is the half the first attempt left out: `min-height` is a border-box
+     height here, so naming the control height alone declared a floor two
+     paddings SHORTER than the row a control makes. Measured on the reported
+     case: 32.5px with nothing open, 48.5px with a request open, one floor
+     that could not be reached in either state. */
+  min-height: calc(var(--control-height-md) + 2 * var(--space-2));
 }
 
 .api-crumbs__collection {

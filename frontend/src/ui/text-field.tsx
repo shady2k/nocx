@@ -8,9 +8,15 @@
  * - settings.ts: input[type=text] and input[type=number] with change event, min/max
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
  */
-import { Show, Switch, Match, type JSX } from 'solid-js'
+import { For, Show, Switch, Match, type JSX } from 'solid-js'
 import { Field } from './field'
 import { mirrorControlledValue } from './controlled-value'
+
+/** One marked span of a field's text. `to` is exclusive. */
+export interface TextFieldMark {
+  from: number
+  to: number
+}
 
 export interface TextFieldProps {
   id?: string
@@ -77,6 +83,28 @@ export interface TextFieldProps {
    */
   caption?: string
   /**
+   * Spans of the value the reader must see as something other than plain
+   * text — a `{{variable}}` inside a URL.
+   *
+   * The caller says WHICH spans and the kit says what they look like, and
+   * that split is the whole point: which characters are a reference is the
+   * API domain's grammar (it must agree, character for character, with the
+   * backend that substitutes them), while how a marked span is painted is
+   * one decision for the whole product. A surface that highlighted its own
+   * field would be repainting a kit control, which is the thing the kit
+   * exists to stop.
+   *
+   * Offsets are UTF-16 code units into `value`, half-open [from, to), in
+   * order and non-overlapping. A mark outside the value is ignored rather
+   * than clamped: a stale mark is a caller that has not caught up, and
+   * painting it somewhere it does not belong would be worse than not
+   * painting it.
+   *
+   * Single-line fields only. A textarea scrolls in two dimensions and the
+   * ink layer follows one, so `multiline` ignores this.
+   */
+  marks?: readonly TextFieldMark[]
+  /**
    * Which edge the caption is flush with — 'start' (the default) or 'end'.
    *
    * It follows the column the field sits in, not the field: on a settings
@@ -137,6 +165,7 @@ export function TextField(props: TextFieldProps) {
       }}
       onInput={onInput}
       onBlur={onBlur}
+      onScroll={followScroll}
     />
   )
 
@@ -169,17 +198,69 @@ export function TextField(props: TextFieldProps) {
     />
   )
 
+  /**
+   * The value split into plain and marked runs.
+   *
+   * Built from the marks the caller gave, in order, skipping anything that
+   * does not land inside the value. The runs are what the ink layer draws:
+   * the SAME characters the input holds, in the same font at the same
+   * position, so the two layers cannot drift — only the paint differs. That
+   * is why a mark is a highlight and not a widget: a chip of a different
+   * width would put every character after it in a different place than the
+   * caret believes it is.
+   */
+  const runs = (): Array<{ text: string; marked: boolean }> => {
+    const text = String(props.value)
+    const out: Array<{ text: string; marked: boolean }> = []
+    let at = 0
+    for (const m of props.marks ?? []) {
+      if (m.from < at || m.to > text.length || m.from >= m.to) continue
+      if (m.from > at) out.push({ text: text.slice(at, m.from), marked: false })
+      out.push({ text: text.slice(m.from, m.to), marked: true })
+      at = m.to
+    }
+    if (at < text.length) out.push({ text: text.slice(at), marked: false })
+    return out
+  }
+
+  const inked = () => props.multiline !== true && (props.marks?.length ?? 0) > 0
+
+  // The ink follows the input's own horizontal scroll. A URL longer than the
+  // field scrolls under the caret, and a layer that stayed put would sit a
+  // word to the left of the text it is marking.
+  let ink: HTMLDivElement | undefined
+  const followScroll = (e: Event): void => {
+    const el = e.currentTarget as HTMLInputElement
+    if (ink) ink.style.transform = `translateX(${-el.scrollLeft}px)`
+  }
+
   const input = () => (
     <>
       <div
         class="ui-text-field__control"
         data-trailing={props.trailing !== undefined ? 'true' : 'false'}
         data-unit={props.unit !== undefined && props.multiline !== true ? 'true' : undefined}
+        data-ink={inked() ? 'true' : undefined}
       >
         <Switch>
           <Match when={props.multiline === true}>{textareaElement()}</Match>
           <Match when={true}>{inputElement()}</Match>
         </Switch>
+        {/* ABOVE the input and inert: it paints the same characters the input
+            holds, while the input keeps the caret, the selection and every
+            gesture. aria-hidden because it is the same text twice — a reader
+            announcing both would hear the value stutter. */}
+        <Show when={inked()}>
+          <div class="ui-text-field__ink" aria-hidden="true" ref={ink}>
+            <For each={runs()}>
+              {(run) => (
+                <Show when={run.marked} fallback={<span>{run.text}</span>}>
+                  <span class="ui-text-field__mark">{run.text}</span>
+                </Show>
+              )}
+            </For>
+          </div>
+        </Show>
         <Show when={!props.multiline && props.trailing}>
           <span class="ui-text-field__trailing">{props.trailing}</span>
         </Show>

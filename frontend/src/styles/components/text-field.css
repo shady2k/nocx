@@ -44,6 +44,46 @@
   padding-right: 40px;
 }
 
+/* ── The ink layer: marked spans of the value ─────────────────────────────
+   The same characters as the input, in the same font at the same offset,
+   painted on top of it while the input keeps the caret and every gesture.
+   Two rules keep the two layers from drifting: the metrics below are the
+   input's own (font, size, padding, height), and a mark changes COLOUR only —
+   never padding, never a border box that would take horizontal space, because
+   one extra pixel of width puts every character after it somewhere the caret
+   is not. */
+.ui-text-field__ink {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The input under it keeps its ground and its border and gives up only its
+   glyphs; the caret is coloured back explicitly, because `color: transparent`
+   would otherwise take it too and the field would look dead while being
+   typed into. */
+.ui-text-field__control[data-ink='true'] .ui-text-field__input {
+  color: transparent;
+  caret-color: var(--color-text);
+}
+
+/* A reference reads as ours: the accent, at the badge's own strength, so a
+   `{{variable}}` in a URL and a variable named anywhere else in the product
+   are the same colour. */
+.ui-text-field__mark {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--color-accent), transparent 80%);
+  color: var(--color-accent);
+}
+
 .ui-text-field__trailing {
   position: absolute;
   top: 50%;

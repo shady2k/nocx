@@ -129,6 +129,23 @@
   padding: var(--space-2) 10px;
 }
 
+/* AND ITS HEIGHT IS A TOKEN, like every other variant's. Ghost was the one
+   whose height came from its padding plus whatever line-height the inherited
+   font happened to have — about 32.5px, which is not any control height we
+   declare. A row that sizes itself to its tallest child then cannot be given
+   a floor: the API crumbs declared `--control-height-md` as theirs and still
+   grew by sixteen pixels the moment a request opened and put a ghost in it,
+   because the ghost was taller than the tallest control the row believed it
+   could hold.
+   `:not([data-size])` and not a bare rule: `[data-size='sm']` is declared
+   ABOVE this and would lose to it on source order, which would silently
+   inflate every small ghost in the product. */
+.ui-button[data-variant='ghost']:not([data-size]) {
+  height: var(--control-height-md);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .ui-button[data-variant='ghost']:hover {
   background: var(--color-surface-hover);
   color: var(--color-text);

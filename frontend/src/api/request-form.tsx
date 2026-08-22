@@ -45,12 +45,13 @@ import { Checkbox } from '../ui/checkbox'
 import { IconButton } from '../ui/icon-button'
 import { ArrowDownIcon } from '../ui/icons'
 import { Select } from '../ui/select'
-import { TextField } from '../ui/text-field'
+import { TextField, type TextFieldMark } from '../ui/text-field'
 import { EditableRowList } from '../ui/row-list'
 import { BodyEditor } from './body-editor'
 import { Tabs } from '../ui/tabs'
 import { createSecretChip } from '../ui/secret-chip'
 import { applyTypedUrl, urlWithParams } from './api-url'
+import { findVariables } from './variable-reference'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
 
 /** The verbs the picker offers. A file may hold anything the wire accepts,
@@ -159,6 +160,18 @@ export function RequestLine(props: RequestLineProps) {
     if (current) props.onEdit(applyTypedUrl(current, typed))
   }
 
+  /**
+   * Which parts of the address are references rather than text.
+   *
+   * The scan is `variable-reference.ts`, which mirrors the backend's rule
+   * character for character — that is what makes the mark honest: a
+   * highlight over something the backend will send literally, or plain text
+   * over something it will substitute, is worse than no highlight at all.
+   * The kit paints them; nothing here says how they look.
+   */
+  const variableMarks = (): TextFieldMark[] =>
+    findVariables(typedUrl()).map(({ from, to }) => ({ from, to }))
+
   const methodOptions = () => {
     const current = request()?.method ?? ''
     const all = current !== '' && !METHODS.includes(current) ? [current, ...METHODS] : METHODS
@@ -193,6 +206,7 @@ export function RequestLine(props: RequestLineProps) {
           placeholder="{{baseUrl}}/users"
           disabled={request() === null}
           onInput={editUrl}
+          marks={variableMarks()}
         />
       </div>
       {/* The import mark is the collections menu's own (ArrowDownIcon),

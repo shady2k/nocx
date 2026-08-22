@@ -281,3 +281,86 @@ describe('composition with Field', () => {
     expect(label?.textContent?.trim()).toBe('Name')
   })
 })
+
+describe('marks — the ink layer', () => {
+  const inkOf = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>('.ui-text-field__ink')
+
+  it('paints the marked run and leaves the rest plain', () => {
+    const { container } = render(() => (
+      <TextField id="u" value="{{baseUrl}}/zen" marks={[{ from: 0, to: 11 }]} />
+    ))
+    const ink = inkOf(container)
+    expect(ink?.textContent).toBe('{{baseUrl}}/zen')
+    const marks = ink?.querySelectorAll('.ui-text-field__mark') ?? []
+    expect(marks.length).toBe(1)
+    expect(marks[0].textContent).toBe('{{baseUrl}}')
+  })
+
+  it('the ink says the same text as the value, character for character', () => {
+    // The two layers are only ever aligned because they hold the same
+    // characters; a run dropped or doubled here is a highlight sitting over
+    // the wrong part of the address.
+    const value = 'a{{x}}b{{y}}c'
+    const { container } = render(() => (
+      <TextField
+        id="u"
+        value={value}
+        marks={[
+          { from: 1, to: 6 },
+          { from: 7, to: 12 },
+        ]}
+      />
+    ))
+    expect(inkOf(container)?.textContent).toBe(value)
+  })
+
+  it('marks the control so the input gives up its glyphs', () => {
+    const { container } = render(() => (
+      <TextField id="u" value="{{a}}" marks={[{ from: 0, to: 5 }]} />
+    ))
+    expect(container.querySelector('.ui-text-field__control')?.getAttribute('data-ink')).toBe(
+      'true',
+    )
+  })
+
+  it('draws no layer at all without marks', () => {
+    const { container } = render(() => <TextField id="u" value="{{a}}" />)
+    expect(inkOf(container)).toBeNull()
+    expect(container.querySelector('.ui-text-field__control')?.hasAttribute('data-ink')).toBe(false)
+  })
+
+  it('ignores a mark that does not land inside the value', () => {
+    // A stale mark is a caller that has not caught up. Painting it anyway
+    // would put a highlight over characters it was never about.
+    const { container } = render(() => (
+      <TextField id="u" value="short" marks={[{ from: 2, to: 99 }]} />
+    ))
+    expect(inkOf(container)?.textContent).toBe('short')
+    expect(inkOf(container)?.querySelectorAll('.ui-text-field__mark').length).toBe(0)
+  })
+
+  it('ignores marks that go backwards or overlap the previous one', () => {
+    const { container } = render(() => (
+      <TextField
+        id="u"
+        value="abcdef"
+        marks={[
+          { from: 2, to: 4 },
+          { from: 3, to: 5 },
+          { from: 4, to: 4 },
+        ]}
+      />
+    ))
+    const ink = inkOf(container)
+    expect(ink?.textContent).toBe('abcdef')
+    expect(ink?.querySelectorAll('.ui-text-field__mark').length).toBe(1)
+  })
+
+  it('a multiline field has no ink — it scrolls in two dimensions', () => {
+    const { container } = render(() => (
+      <TextField id="u" multiline value="{{a}}" marks={[{ from: 0, to: 5 }]} />
+    ))
+    expect(inkOf(container)).toBeNull()
+  })
+})

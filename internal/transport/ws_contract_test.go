@@ -4183,15 +4183,15 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
+	readLifecycleWhere(t, e.conn, "the hello's prompt_ready fact",
+		lifecycleIs(lifecyclepub.LifecyclePromptReady))
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
-	var lost lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &lost); err != nil {
-		t.Fatalf("decode lost: %v", err)
-	}
+	// The lost fact BY NAME, for the reason readLifecycleWhere gives: the
+	// open handler's replay can put a second prompt_ready exactly here.
+	_, lost := readLifecycleWhere(t, e.conn, "the lane's lost fact",
+		lifecycleIs(lifecyclepub.LifecycleLost))
 	if lost.Recovery == nil {
 		t.Fatal("a live session's lost fact must carry the recovery contract")
 	}
@@ -4594,12 +4594,16 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 
 	// The shell never speaks. The handshake bound expires, the adapter names
 	// the path that lost the channel, and the product finally hears about it.
-	raw = readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+	//
+	// Asked for BY THE PROPERTY that makes it the outcome, never by position.
+	// The axis legitimately re-sends `starting` — the open handler emits the
+	// status once after its ack, and registering the axis after `open` has
+	// returned races that emit — so "the next session.integrationChanged" is
+	// not the same question as "the one that says how it ended", and on the
+	// run where the handler loses the race the two have different answers.
+	raw, timedOut := readIntegrationWhere(t, e.conn, sid,
+		"the fact that concludes the axis", integrationConcluded)
 	validateJSON(t, schema, raw, "session.integrationChanged params (real socket, handshake timeout)")
-	var timedOut integrationChangedParams
-	if err := json.Unmarshal(raw, &timedOut); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
 	if timedOut.Status != IntegrationConventional {
 		t.Errorf("status = %q, want %q", timedOut.Status, IntegrationConventional)
 	}
@@ -5573,12 +5577,14 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 			// The bootstrap reaches its terminal outcome.
 			e.ws.NoteBootstrapOutcome(lane, tc.reason)
 
-			raw = readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+			// Asked for BY THE PROPERTY that makes it the outcome. The
+			// first `session.integrationChanged` after this point is not
+			// reliably the terminal one: the open handler emits the status
+			// once after its ack, so a test that enters the axis afterwards
+			// races that emit and an extra `starting` can land exactly here.
+			raw, got := readIntegrationWhere(t, e.conn, sid,
+				"the fact that concludes the axis", integrationConcluded)
 			validateJSON(t, schema, raw, "session.integrationChanged params (real socket, "+tc.name+")")
-			var got integrationChangedParams
-			if err := json.Unmarshal(raw, &got); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
 			if got.Status != IntegrationConventional {
 				t.Errorf("status = %q, want %q", got.Status, IntegrationConventional)
 			}

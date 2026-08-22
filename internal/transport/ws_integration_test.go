@@ -33,30 +33,77 @@ import (
 // on the emulated Linux container, where the handler is slower than the test,
 // and read as "the wrong status arrived" (nocx-6au4).
 //
-// A status that never arrives still fails, on readNotification's own bound.
+// A status that never arrives still fails, on readIntegrationWhere's bound.
 func awaitIntegration(t *testing.T, conn *websocket.Conn, sid, want string) integrationChangedParams {
 	t.Helper()
+	_, p := readIntegrationWhere(t, conn, sid, "the session to reach "+want,
+		func(p integrationChangedParams) bool { return p.Status == want })
+	return p
+}
+
+// readIntegration reads the next session.integrationChanged for a session,
+// whatever it says. Correct only where the very next fact is the one meant —
+// see readIntegrationWhere for why that is rarely true on this axis.
+func readIntegration(t *testing.T, conn *websocket.Conn, sid string) integrationChangedParams {
+	t.Helper()
+	_, p := readIntegrationWhere(t, conn, sid, "the next session.integrationChanged",
+		func(integrationChangedParams) bool { return true })
+	return p
+}
+
+// readIntegrationWhere answers with the first session.integrationChanged for
+// this session that `want` accepts, RAW and decoded. Raw because the contract
+// tests validate the bytes the server actually sent, and re-marshalling the
+// decoded struct would prove the struct rather than the wire.
+//
+// The predicate is the whole point, and naming one is not optional here. This
+// axis has FIVE emitters for one session — the open handler after its ack, a
+// reattach's replay, the bootstrap outcome, a transport loss, the kernel's
+// live domain — so how many facts a sequence puts on the wire is not the
+// test's to choose. In particular a test that registers the axis after `open`
+// has RETURNED is racing the handler's own emit (integrationPTYFactory below
+// says why, and is the other half of this answer): on an idle machine the
+// handler emits nothing and there are two frames, under load the test wins and
+// there are three, with an extra `starting` sitting exactly where the outcome
+// was expected. So "wait for a session.integrationChanged" cannot mean "the
+// one that says how it ended", and neither can "wait for the second" — a
+// predicate is the only form of the question that survives a sixth emitter.
+//
+// ONE ABSOLUTE DEADLINE covers the whole search rather than one per frame: a
+// loop that re-armed wantWithin for each frame it skipped would have no bound
+// at all, which is the defect ws_inbox_test.go's own comment records from the
+// other direction.
+func readIntegrationWhere(t *testing.T, conn *websocket.Conn, sid, what string,
+	want func(integrationChangedParams) bool,
+) (json.RawMessage, integrationChangedParams) {
+	t.Helper()
+	deadline := time.Now().Add(wantWithin)
 	for {
-		got := readIntegration(t, conn, sid)
-		if got.Status == want {
-			return got
+		msg, err := awaitFrame(conn, deadline, isNotification("session.integrationChanged"))
+		if err != nil {
+			t.Fatalf("waiting for %s: %v", what, err)
+		}
+		f, _ := decodeFrame(msg)
+		var p integrationChangedParams
+		if derr := json.Unmarshal(f.Params, &p); derr != nil {
+			t.Fatalf("decode session.integrationChanged: %v\nraw: %s", derr, f.Params)
+		}
+		if p.SessionID == sid && want(p) {
+			return f.Params, p
 		}
 	}
 }
 
-// readIntegration reads the next session.integrationChanged for a session.
-func readIntegration(t *testing.T, conn *websocket.Conn, sid string) integrationChangedParams {
-	t.Helper()
-	for {
-		raw := readNotification(t, conn, "session.integrationChanged", wantWithin)
-		var p integrationChangedParams
-		if err := json.Unmarshal(raw, &p); err != nil {
-			t.Fatalf("decode session.integrationChanged: %v\nraw: %s", err, raw)
-		}
-		if p.SessionID == sid {
-			return p
-		}
-	}
+// integrationConcluded accepts the fact that ENDS the honest `starting`
+// interval: the one that says how the attempt came out.
+//
+// It names the outcome by what MAKES it the outcome — the axis has stopped
+// saying "still trying" — rather than by the status the caller expects. That
+// leaves the caller's own assertion on the status something to say, so a
+// product that concluded with the wrong terminal word is reported as a wrong
+// word rather than as a frame that never arrived.
+func integrationConcluded(p integrationChangedParams) bool {
+	return p.Status != IntegrationStarting
 }
 
 // integrationEnv boots a server with a lifecycle publisher, opens a session,

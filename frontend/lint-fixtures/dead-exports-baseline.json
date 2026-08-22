@@ -205,6 +205,26 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/files.download.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.downloadCancel.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.downloadDone.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.downloadProgress.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/ledger.bind.ts",
       "symbol": ""
     },

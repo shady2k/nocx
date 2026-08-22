@@ -12,7 +12,8 @@ import (
 // stubRemoteProvider is a remote provider that can write: the shape the
 // factory wraps for attestation.
 type stubRemoteProvider struct {
-	sink transfer.Sink
+	sink   transfer.Sink
+	source transfer.Source
 }
 
 func (p *stubRemoteProvider) Root(context.Context) (filesystem.Root, error) {
@@ -34,14 +35,25 @@ func (p *stubRemoteProvider) Watch(context.Context, string) (filesystem.Watch, e
 func (p *stubRemoteProvider) Canonical(_ context.Context, path string) (string, error) {
 	return path, nil
 }
-func (p *stubRemoteProvider) Close() error        { return nil }
-func (p *stubRemoteProvider) Sink() transfer.Sink { return p.sink }
+func (p *stubRemoteProvider) Close() error            { return nil }
+func (p *stubRemoteProvider) Sink() transfer.Sink     { return p.sink }
+func (p *stubRemoteProvider) Source() transfer.Source { return p.source }
 
 // nopSink is a Sink identity — the tests compare the pointer, not behaviour.
 type nopSink struct{}
 
 func (nopSink) Put(context.Context, transfer.Upload, io.Reader, func(int64)) (transfer.Outcome, error) {
 	return transfer.Outcome{}, nil
+}
+
+// nopSource is a Source identity — the tests compare the pointer, not
+// behaviour.
+type nopSource struct{}
+
+func (nopSource) Open(string) (*transfer.Download, error) { return nil, nil }
+
+func (nopSource) Get(context.Context, *transfer.Download, io.Writer, func(int64)) (int64, error) {
+	return 0, nil
 }
 
 // TestEndpointAttestedProviderCarriesTheWriteSeam is the test the upload plan
@@ -72,5 +84,27 @@ func TestEndpointAttestedProviderCarriesTheWriteSeam(t *testing.T) {
 	}
 	if _, ok := any(wrapped).(filesystem.Provider); !ok {
 		t.Error("the wrapper stopped being a Provider")
+	}
+}
+
+// TestEndpointAttestedProviderCarriesTheReadStreamSeam is the same test one
+// direction over, and it is not a copy for symmetry's sake: the wrapper
+// embeds ONE interface, so the day somebody narrows writableProvider back to
+// filesystem.Provider + filesystem.Uploader, this is the assertion that
+// fails. Without it the symptom would be downloads refusing on a remote tab
+// while every other files.* call, uploads included, worked perfectly.
+func TestEndpointAttestedProviderCarriesTheReadStreamSeam(t *testing.T) {
+	source := nopSource{}
+	wrapped := &endpointAttestedProvider{
+		writableProvider: &stubRemoteProvider{sink: nopSink{}, source: source},
+		endpointID:       "v1:abc",
+	}
+
+	down, ok := any(wrapped).(filesystem.Downloader)
+	if !ok {
+		t.Fatal("the attested wrapper dropped the read-stream seam; a remote tab would refuse every download")
+	}
+	if down.Source() != transfer.Source(source) {
+		t.Errorf("Source() returned %v, want the wrapped provider's own", down.Source())
 	}
 }

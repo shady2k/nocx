@@ -31,26 +31,39 @@ type sink struct {
 	chunk int
 }
 
-// Option configures a Sink.
-type Option func(*sink)
+// config is what an Option configures. It is shared by both directions
+// because the one knob either of them has is the chunk bound, and a chunk
+// is the same idea going each way: the most bytes one call may carry, which
+// is what keeps a single call inside the lease's lane timeout (D2). Two
+// Option types would be two names for one number.
+type config struct {
+	chunk int
+}
 
-// WithChunkSize sets the bytes written per lane call. Values below one are
+// Option configures a Sink or a Source.
+type Option func(*config)
+
+// WithChunkSize sets the bytes moved per lane call. Values below one are
 // ignored; the default is 256 KiB.
 func WithChunkSize(n int) Option {
-	return func(s *sink) {
+	return func(c *config) {
 		if n > 0 {
-			s.chunk = n
+			c.chunk = n
 		}
 	}
 }
 
+func newConfig(opts []Option) config {
+	c := config{chunk: defaultChunk}
+	for _, o := range opts {
+		o(&c)
+	}
+	return c
+}
+
 // NewSink returns a Sink writing through fs.
 func NewSink(remote RemoteFS, opts ...Option) Sink {
-	s := &sink{fs: remote, chunk: defaultChunk}
-	for _, o := range opts {
-		o(s)
-	}
-	return s
+	return &sink{fs: remote, chunk: newConfig(opts).chunk}
 }
 
 // Put writes r into u.DestDir under a temp name and promotes it.
@@ -168,23 +181,53 @@ func (s *sink) Put(ctx context.Context, u Upload, r io.Reader, progress func(tot
 // follows — the caller closes the reader on cancellation — and this loop
 // keeps its half by unwinding on whatever error the reader then returns.
 func (s *sink) copy(ctx context.Context, w RemoteFile, r io.Reader, size int64, progress func(int64)) error {
-	buf := make([]byte, s.chunk)
+	return copyChunks(ctx, w, r, size, s.chunk, progress, copyLabels{read: "read source", write: "write"})
+}
+
+// copyLabels name the two ends of a copy, so one loop can say which end
+// failed in the vocabulary of the direction it is serving: a sink reads a
+// source and writes to the server, a source reads the server and sends to
+// the client.
+type copyLabels struct{ read, write string }
+
+// copyChunks streams exactly size bytes from src to dst, chunk at a time,
+// and is the ONE place either direction decides how many bytes cross per
+// call, when cancellation is observed, and when progress is reported.
+//
+// Cancellation is checked BETWEEN chunks and never inside one: a chunk is a
+// single lane call on the lease, and abandoning it mid-flight is the shape
+// D2 rejects. A chunk is bounded, so the wait is bounded too.
+//
+// The blocking call is the exception, and it is the CALLER's to bound
+// rather than this loop's, in whichever direction it lies. An io.Reader has
+// no context and neither has an io.Writer, so the check below cannot cover
+// a call that has already blocked: Sink.Put and Source.Get each state the
+// contract that follows, and this loop keeps its half by unwinding on
+// whatever error the blocked end eventually returns.
+//
+// The size is enforced in BOTH directions and both are failures. Too few
+// bytes is a truncated file; too many is a source that lied, and the excess
+// is never passed on — a reader that can keep going must not be able to
+// fill the server's disk, and a body that can keep going must not be able
+// to overrun the length its own framing already declared.
+func copyChunks(ctx context.Context, dst io.Writer, src io.Reader, size int64, chunk int, progress func(int64), label copyLabels) error {
+	buf := make([]byte, chunk)
 	var total int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		n, readErr := r.Read(buf)
+		n, readErr := src.Read(buf)
 		if n > 0 {
 			if total+int64(n) > size {
 				return &SizeMismatchError{Declared: size, Got: total + int64(n), AtLeast: true}
 			}
-			nw, err := w.Write(buf[:n])
+			nw, err := dst.Write(buf[:n])
 			if err == nil && nw != n {
 				err = io.ErrShortWrite
 			}
 			if err != nil {
-				return fmt.Errorf("transfer: write: %w", err)
+				return fmt.Errorf("transfer: %s: %w", label.write, err)
 			}
 			total += int64(n)
 			progress(total)
@@ -193,7 +236,7 @@ func (s *sink) copy(ctx context.Context, w RemoteFile, r io.Reader, size int64, 
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return fmt.Errorf("transfer: read source: %w", readErr)
+			return fmt.Errorf("transfer: %s: %w", label.read, readErr)
 		}
 	}
 	if total != size {

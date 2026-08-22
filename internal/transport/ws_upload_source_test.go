@@ -823,7 +823,7 @@ func TestFilesUpload_ARedeemedTicketUploadsTheBytesThatWereChosen(t *testing.T) 
 	p := uploadParams(bid, destDir, "doc.txt", pick.Size)
 	p["sourceTicket"] = pick.Ticket
 	got := callUpload(t, e.conn, p, 3).mustResult(t)
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().

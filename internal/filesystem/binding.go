@@ -27,6 +27,12 @@ type Binding struct {
 	// check (design D7). Immutable: it is set at Register and read for the
 	// binding's whole life.
 	sink transfer.Sink
+	// source is the binding's read-stream half, or nil — the same field
+	// shape and the same rule, one direction over. It is nil exactly when
+	// the provider did not implement Downloader, so a tab whose files
+	// cannot be streamed refuses because it holds nothing to stream
+	// through, not because a handler remembered to ask where the tab is.
+	source transfer.Source
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -80,6 +86,16 @@ type Handle interface {
 	// close therefore fails and names what it stranded; it never writes
 	// through a torn-down lease, and it never holds the close open.
 	Uploader() (transfer.Sink, error)
+	// Downloader returns the binding's read-stream half — the source one
+	// download runs on — or *ErrDownloadUnsupported when the binding has
+	// none. It is Uploader's mirror in every respect that matters, and the
+	// two comments above apply here unchanged: the refusal is a missing
+	// field rather than a check, the guard covers the hand-off and not the
+	// transfer that follows (D8), and what makes running unguarded safe is
+	// the lease underneath — closing the provider closes the SFTP session
+	// and client, so a read racing a close fails and reports how far it
+	// got, and never reads through a torn-down lease.
+	Downloader() (transfer.Source, error)
 }
 
 // Caller is who is asking. filesystem declares it and transport satisfies it —
@@ -90,6 +106,28 @@ type Handle interface {
 // transport adds an exported Owns(session.ID) bool that forwards to it.
 type Caller interface {
 	Owns(sessionID session.ID) bool
+}
+
+// Capabilities are the optional seams a provider contributed, resolved once
+// at files.open where the concrete provider is still in hand and carried on
+// the binding beside the endpoint attestation (design D7).
+//
+// A struct rather than a parameter per seam, and that is a decision about
+// what happens next: a download seam arrived after the upload one, a
+// directory upload will arrive after that, and each of them is the same kind
+// of thing — a capability the provider either has or has not. Growing this
+// struct leaves every call site that does not care untouched, where growing
+// the parameter list makes each new seam a change to twenty-five of them.
+//
+// A nil field is not an omission: it IS rule R1 for that direction. A
+// provider that cannot write contributes no Sink and its binding refuses to
+// be uploaded to; a provider that cannot stream contributes no Source and
+// its binding refuses to be downloaded from. Both shipped providers
+// contribute both, so neither nil is a case in production — it is the shape
+// that keeps the refusal expressible for the next provider that cannot.
+type Capabilities struct {
+	Sink   transfer.Sink
+	Source transfer.Source
 }
 
 // Registry maps bindingId → Binding (spec §5.1 "Bindings"). It is where a
@@ -108,14 +146,11 @@ func New() *Registry { return &Registry{bindings: make(map[string]*Binding)} }
 // bearer token — Acquire re-checks ownership on every call. endpointID is
 // the attestation; leave it empty for local. The composition layer
 //
-// sink is the binding's write half and is nil for a binding that cannot be
-// written to — one whose provider did not implement Uploader. Both shipped
-// providers do (D7, as corrected), so a nil sink is the seam's shape rather
-// than a case in production. It is a parameter rather than something derived here
-// because Register takes a Provider: the assertion belongs where the
-// concrete provider is still in hand, beside the endpoint attestation
-// (design D7).
-func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string, sink transfer.Sink) (string, error) {
+// caps are the optional seams the provider contributed. They are parameters
+// rather than something derived here because Register takes a Provider: the
+// assertions belong where the concrete provider is still in hand, beside the
+// endpoint attestation (design D7).
+func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string, caps Capabilities) (string, error) {
 	if p == nil || isNilProvider(p) {
 		return "", errors.New("filesystem: Register with nil provider")
 	}
@@ -128,7 +163,8 @@ func (r *Registry) Register(p Provider, sessionID session.ID, endpointID string,
 		sessionID:  sessionID,
 		endpointID: endpointID,
 		provider:   p,
-		sink:       sink,
+		sink:       caps.Sink,
+		source:     caps.Source,
 		watches:    make(map[string]Watch),
 	}
 	b.cond = sync.NewCond(&b.mu)
@@ -414,6 +450,30 @@ func (h *handle) Uploader() (transfer.Sink, error) {
 		return nil, &ErrUploadUnsupported{BindingID: h.b.id}
 	}
 	return h.b.sink, nil
+}
+
+// Downloader hands back the binding's source.
+//
+// It is Uploader's mirror line for line, and deliberately so: the refusal is
+// rule R1 in the read direction expressed as a nil field, the provider is
+// not touched on either path, and the guard is taken and dropped around the
+// hand-off only — what the caller then runs on the source is unguarded,
+// which is the whole of D8 on this side.
+//
+// The one thing that differs from the write direction is what running
+// unguarded can cost, and it is smaller: a download creates nothing on the
+// far host, so a read racing a binding close reports how far it got and can
+// leave nothing behind to be named.
+func (h *handle) Downloader() (transfer.Source, error) {
+	drop, err := h.begin()
+	if err != nil {
+		return nil, err
+	}
+	defer drop()
+	if h.b.source == nil {
+		return nil, &ErrDownloadUnsupported{BindingID: h.b.id}
+	}
+	return h.b.source, nil
 }
 
 // release drops the use-guard. It is idempotent: the second call is a no-op,

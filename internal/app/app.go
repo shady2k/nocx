@@ -1310,14 +1310,15 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 			opts = append(opts, sftp.WithRoot(rootPath))
 		}
 		return &endpointAttestedProvider{
-			writableProvider: sftp.New(fsUploadLease{FSConn: fs}, opts...),
+			writableProvider: sftp.New(fsTransferLease{FSConn: fs}, opts...),
 			endpointID:       endpointIDFor(sess),
 		}, nil
 	}
 }
 
-// fsUploadLease presents an SFTP lease as the write surface
-// internal/transfer declares. It is the one place the two vocabularies meet,
+// fsTransferLease presents an SFTP lease as the two surfaces
+// internal/transfer declares — RemoteFS for the write direction and
+// RemoteReadFS for the read one. It is the one place the two vocabularies meet,
 // and it exists because neither package may know the other: internal/ssh
 // must not import internal/transfer, and internal/transfer deliberately
 // declares its own RemoteFS rather than importing internal/ssh
@@ -1348,11 +1349,11 @@ func filesystemProviderFactory(client fsLeaseProvider) transport.FilesystemProvi
 // passes an unclassified error through unchanged, so it already holds; this
 // adapter's job there is not to break it. Both directions are asserted in
 // fs_upload_lease_test.go.
-type fsUploadLease struct {
+type fsTransferLease struct {
 	ssh.FSConn
 }
 
-func (l fsUploadLease) Create(path string) (transfer.RemoteFile, error) {
+func (l fsTransferLease) Create(path string) (transfer.RemoteFile, error) {
 	f, err := l.FSConn.Create(path)
 	if err != nil {
 		return nil, err
@@ -1360,12 +1361,45 @@ func (l fsUploadLease) Create(path string) (transfer.RemoteFile, error) {
 	return f, nil
 }
 
-func (l fsUploadLease) PosixRename(old, new string) error {
+func (l fsTransferLease) PosixRename(old, new string) error {
 	err := l.FSConn.PosixRename(old, new)
 	if err != nil && errors.Is(err, ssh.ErrPosixRenameUnsupported) {
 		return fmt.Errorf("%w: %w", transfer.ErrPosixRenameUnsupported, err)
 	}
 	return err
+}
+
+// Open translates the READ direction, and it has the same two jobs the
+// write direction has, for the same two reasons.
+//
+// The SHAPE: Open returns ssh.FSReadFile where RemoteReadFS asks for
+// transfer.RemoteReader — one shape under two names, and Go matches result
+// types by identity.
+//
+// The VOCABULARY: "that is a folder, not a file" arrives as
+// ssh.ErrNotRegularFile and the transport's refusal keys on
+// transfer.ErrNotRegular. Untranslated, a person who asked to download a
+// directory would be told the server had gone wrong (-32603) instead of
+// being told what they actually did, with both packages' tests green
+// because each fakes its own sentinel. The translation ADDS the transfer
+// vocabulary and keeps the lease's, so a log still says which lease said
+// it.
+//
+// The contracts that need no translation are worth naming for the same
+// reason the write half names its one: fs.ErrNotExist and fs.ErrPermission
+// already hold, because pkg/sftp normalises SSH_FX_NO_SUCH_FILE and
+// SSH_FX_PERMISSION_DENIED (client.go:2237) and fsConn.classify passes an
+// unclassified error through unchanged. This adapter's job there is not to
+// break it, and fs_upload_lease_test.go asserts both directions.
+func (l fsTransferLease) Open(path string) (transfer.RemoteReader, int64, error) {
+	f, size, err := l.FSConn.Open(path)
+	if err != nil {
+		if errors.Is(err, ssh.ErrNotRegularFile) {
+			return nil, 0, fmt.Errorf("%w: %w", transfer.ErrNotRegular, err)
+		}
+		return nil, 0, err
+	}
+	return f, size, nil
 }
 
 // writableProvider is what the factory builds for EITHER kind of session: a
@@ -1386,6 +1420,7 @@ func (l fsUploadLease) PosixRename(old, new string) error {
 type writableProvider interface {
 	filesystem.Provider
 	filesystem.Uploader
+	filesystem.Downloader
 }
 
 // endpointAttestedProvider wraps a remote provider with the endpoint

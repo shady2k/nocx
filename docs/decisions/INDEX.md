@@ -62,6 +62,7 @@ When a collision is cited by number alone, disambiguate by filename.
 | 0035 | [The AppImage carries WebKitGTK's helper processes](0035-appimage-carries-webkits-helper-processes.md)                            | Accepted                             |
 | 0035 | [The channel we own is the carrier, not the command line](0035-the-channel-we-own-is-the-carrier.md)                              | Accepted (2026-08-20)                |
 | 0036 | [An HTTP upload route beside the WebSocket](0036-an-http-upload-route-beside-the-websocket.md)                                    | Accepted (2026-08-21)                |
+| 0037 | [An HTTP download route beside the WebSocket](0037-an-http-download-route-beside-the-websocket.md)                                | Accepted (2026-08-22)                |
 
 ## Adding one
 

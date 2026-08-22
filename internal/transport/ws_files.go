@@ -309,10 +309,10 @@ type filesMachine interface {
 	// filesBaseline takes the watch baseline synchronously: one listing per
 	// path in the new set, inside files.watch, before the response.
 	filesBaseline(h filesystem.Handle, paths []string) map[string]string
-	// cancelBindingUploads cancels every running transfer of one binding
+	// cancelBindingTransfers cancels every running transfer of one binding
 	// and waits, bounded, for them to unwind — files.close's half of D8.
 	// It never waits for an upload: the bound expires and the close goes on.
-	cancelBindingUploads(bid string)
+	cancelBindingTransfers(bid string)
 }
 
 // ── wire shapes (contracts/files.*.schema.json) ──────────────────────────
@@ -815,7 +815,7 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 		// gone should be told so, and told so before its lease is closed
 		// underneath it. The wait after the cancel is bounded and the close
 		// proceeds either way.
-		h.machine.cancelBindingUploads(params.BindingID)
+		h.machine.cancelBindingTransfers(params.BindingID)
 		if err := svc.Close(params.BindingID); err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
@@ -898,7 +898,7 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	}
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
-	return []methodSpec{
+	specs := []methodSpec{
 		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
@@ -932,6 +932,10 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUploadCancel(ctx, state, req) }
 		}),
 	}
+	// The download half is declared in ws_download.go and appended here,
+	// on the SAME bounded submission, so both directions of the binding
+	// domain queue against one bound rather than two.
+	return append(specs, s.filesDownloadSpecs(bindingOp, bindingSub)...)
 }
 
 // ── notification delivery ─────────────────────────────────────────────────
@@ -1224,7 +1228,7 @@ func (s *WSServer) filesSessionClosed(sid session.ID) {
 	// Same ordering, same reason as files.close (D8): the cancel tells a
 	// transfer its binding is going before the lease under its sink is
 	// closed. CloseSession does not wait for it either way.
-	s.cancelSessionUploads(sid)
+	s.cancelSessionTransfers(sid)
 	if s.filesys != nil {
 		s.filesys.CloseSession(sid)
 	}
@@ -1342,11 +1346,14 @@ func filesErrorCode(err error) int {
 		*filesystem.ErrInvalidPath, *filesystem.ErrInvalidPage,
 		*filesystem.ErrNotFound, *filesystem.ErrNotDir,
 		*filesystem.ErrNotRegular, *filesystem.ErrPermission,
-		// A binding with no sink cannot be uploaded to (upload rule R1).
-		// It belongs with the request-shaped refusals and not with -32603:
-		// the caller named a binding that cannot do this, which is a
-		// property of what they asked for, not of the server going wrong.
-		*filesystem.ErrUploadUnsupported:
+		// A binding with no sink cannot be uploaded to, and one with no
+		// source cannot be downloaded from (rule R1, in each direction).
+		// Both belong with the request-shaped refusals and not with
+		// -32603: the caller named a binding that cannot do this, which is
+		// a property of what they asked for, not of the server going
+		// wrong.
+		*filesystem.ErrUploadUnsupported,
+		*filesystem.ErrDownloadUnsupported:
 		return -32602
 	default:
 		return -32603

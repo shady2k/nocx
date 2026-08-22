@@ -3064,14 +3064,14 @@ func TestFilesUploadCancel_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("files.uploadCancel: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "files.uploadCancel result (real socket)")
-	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateCancelled {
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != uploadStateCancelled {
 		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
 	}
 }
 
 func TestFilesUploadProgress_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.uploadProgress.schema.json")
-	cases := map[string]filesUploadProgressParams{
+	cases := map[string]filesTransferProgressParams{
 		// Mid-transfer: the ordinary frame.
 		"in flight": {TransferID: strings.Repeat("a1", 16), Bytes: 4096, Total: 1 << 20},
 		// Nothing confirmed yet — the first chunk has not landed.
@@ -3111,7 +3111,7 @@ func TestFilesUploadProgress_OverTheWireConformsToContract(t *testing.T) {
 	raw := readNotification(t, e.conn, "files.uploadProgress", wantWithin)
 	validateJSON(t, schema, raw, "files.uploadProgress params (real socket)")
 
-	var got filesUploadProgressParams
+	var got filesTransferProgressParams
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -3122,7 +3122,7 @@ func TestFilesUploadProgress_OverTheWireConformsToContract(t *testing.T) {
 		t.Errorf("total = %d, want the declared size 4096", got.Total)
 	}
 	sink.release()
-	awaitUploadState(t, e.ws, started.TransferID)
+	awaitTransferState(t, e.ws, started.TransferID)
 }
 
 func TestFilesUploadDone_DTOConformsToContract(t *testing.T) {
@@ -3213,7 +3213,7 @@ func TestFilesUploadDone_OverTheWireConformsToContract(t *testing.T) {
 		if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
 			t.Fatalf("POST /upload = %d %q, want 200", code, resp)
 		}
-		awaitUploadState(t, e.ws, started.TransferID)
+		awaitTransferState(t, e.ws, started.TransferID)
 
 		connB := reattach(t, e, sid, 4)
 		raw := readNotification(t, connB, "files.uploadDone", wantWithin)
@@ -5637,4 +5637,285 @@ func TestSessionIntegrationChanged_ABootstrapOutcomeNeverOverwritesAnAnswer(t *t
 	if st.reason != ssh.ReasonRemoteCommand {
 		t.Errorf("reason = %q, want the first answer %q", st.reason, ssh.ReasonRemoteCommand)
 	}
+}
+
+// ── files.download* ──────────────────────────────────────────────────────
+
+func TestFilesDownload_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.download.schema.json")
+	good := strings.Repeat("ab", uploadTicketHexLen/2)
+	cases := map[string]filesDownloadResult{
+		"an ordinary file": {
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     good,
+			URL:        "/download/" + good,
+			Name:       "report.pdf",
+			Size:       1 << 20,
+		},
+		// An empty file is a file: size 0 must not be an omitempty hole.
+		"an empty file": {
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     good,
+			URL:        "/download/" + good,
+			Name:       "empty",
+			Size:       0,
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.download DTO")
+		})
+	}
+}
+
+// The patterns are what make the security-relevant VALUES exact. A schema
+// that described a 64-hex ticket and typed it as an unrestricted string
+// would accept an empty one, an uppercase one, or a URL pointing somewhere
+// else entirely — and a pattern with nothing asserting that it refuses
+// anything is the same theatre as a schema without one.
+func TestFilesDownload_ContractRefusesValuesItOnlyUsedToDescribe(t *testing.T) {
+	schema := loadSchema(t, "files.download.schema.json")
+	good := strings.Repeat("ab", uploadTicketHexLen/2)
+	base := filesDownloadResult{
+		TransferID: "0123456789abcdef0123456789abcdef",
+		Ticket:     good,
+		URL:        "/download/" + good,
+		Name:       "a.txt",
+		Size:       1,
+	}
+	empty := base
+	empty.TransferID = ""
+	upper := base
+	upper.Ticket = strings.ToUpper(good)
+	elsewhere := base
+	elsewhere.URL = "https://elsewhere.example.com/collect"
+	wrongRoute := base
+	wrongRoute.URL = "/upload/" + good
+	negative := base
+	negative.Size = -1
+
+	cases := map[string]filesDownloadResult{
+		"an empty transfer id":              empty,
+		"an uppercase ticket":               upper,
+		"a url that is not this backend":    elsewhere,
+		"a url naming the OTHER byte route": wrongRoute,
+		"a negative size":                   negative,
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("the contract accepted %s:\n%s", name, raw)
+			}
+		})
+	}
+}
+
+// The one that matters: the real result off the real socket, from the real
+// handler, against the real schema. A payload the test itself built proves
+// the struct is well-formed, not that the server sends it.
+func TestFilesDownload_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.download.schema.json")
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	p := fixture(t, dir, "report.bin", strings.Repeat("x", 4096))
+	empty := fixture(t, dir, "empty", "")
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := callDownload(t, e.conn, downloadParams(bid, p), 3)
+	if resp.Error != nil {
+		t.Fatalf("files.download: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "files.download result (real socket)")
+
+	// And the zero-size shape, which is where an omitempty defect would
+	// hide: a size that vanished from the payload fails `required`.
+	respEmpty := callDownload(t, e.conn, downloadParams(bid, empty), 4)
+	if respEmpty.Error != nil {
+		t.Fatalf("files.download of an empty file: %+v", respEmpty.Error)
+	}
+	validateJSON(t, schema, respEmpty.Result, "files.download result, empty file (real socket)")
+	if !bytes.Contains(respEmpty.Result, []byte(`"size":0`)) {
+		t.Fatalf("an empty file's size vanished from the payload: %s", respEmpty.Result)
+	}
+}
+
+func TestFilesDownloadCancel_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadCancel.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.downloadCancel DTO")
+}
+
+func TestFilesDownloadCancel_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadCancel.schema.json")
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	p := fixture(t, dir, "a.txt", strings.Repeat("x", 4096))
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.downloadCancel", map[string]any{
+		"transferId": started.TransferID,
+	}, 4)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.downloadCancel: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.downloadCancel result (real socket)")
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateCancelled {
+		t.Fatalf("state = %q, want %q", state, downloadStateCancelled)
+	}
+}
+
+func TestFilesDownloadProgress_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadProgress.schema.json")
+	cases := map[string]filesTransferProgressParams{
+		"in flight":     {TransferID: strings.Repeat("a1", 16), Bytes: 4096, Total: 1 << 20},
+		"at zero":       {TransferID: strings.Repeat("b2", 16), Bytes: 0, Total: 1 << 20},
+		"an empty file": {TransferID: strings.Repeat("c3", 16), Bytes: 0, Total: 0},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.downloadProgress DTO")
+		})
+	}
+}
+
+// The real progress notification off the real socket. The source holds
+// inside Get after reporting, so the frame is guaranteed rather than raced.
+func TestFilesDownloadProgress_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadProgress.schema.json")
+	src := newPausingSource()
+	e := newDownloadTestEnvWith(t, downloadFactoryWithSource(src))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	p := fixture(t, dir, "watched.bin", "x")
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+
+	go func() { _, _ = getDownloadRaw(e.ws, started.Ticket) }()
+	<-src.reported
+
+	raw := readNotification(t, e.conn, "files.downloadProgress", wantWithin)
+	validateJSON(t, schema, raw, "files.downloadProgress params (real socket)")
+	src.release()
+	awaitTransferState(t, e.ws, started.TransferID)
+}
+
+func TestFilesDownloadDone_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadDone.schema.json")
+	cases := map[string]filesDownloadDoneParams{
+		"sent": {
+			TransferID: strings.Repeat("a1", 16), Outcome: downloadStateSent,
+			Name: "report.pdf", Bytes: 1 << 20, Total: 1 << 20,
+		},
+		// A partial transfer that cannot be taken back: bytes is the whole
+		// of the account.
+		"failed part-way": {
+			TransferID: strings.Repeat("b2", 16), Outcome: downloadStateFailed,
+			Name: "report.pdf", Bytes: 4096, Total: 1 << 20,
+			Error: "transfer: read remote: connection lost",
+		},
+		"cancelled carries no error": {
+			TransferID: strings.Repeat("c3", 16), Outcome: downloadStateCancelled,
+			Name: "report.pdf", Bytes: 0, Total: 1 << 20,
+		},
+		"an empty file": {
+			TransferID: strings.Repeat("d4", 16), Outcome: downloadStateSent,
+			Name: "empty", Bytes: 0, Total: 0,
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.downloadDone DTO")
+			// bytes and total are required, so a zero that vanished behind
+			// an omitempty would fail the schema — asserted directly too,
+			// because that is the defect class this directory exists for.
+			if !bytes.Contains(raw, []byte(`"bytes":`)) || !bytes.Contains(raw, []byte(`"total":`)) {
+				t.Errorf("a count vanished from the payload: %s", raw)
+			}
+		})
+	}
+}
+
+// The real terminal notification off the real socket, in both of the ways
+// it can reach a person: delivered live, and RETAINED across a reconnect
+// and flushed on attach. The second is the one an addressing defect hides
+// in — an outcome addressed like progress would be emitted into nothing.
+func TestFilesDownloadDone_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadDone.schema.json")
+
+	t.Run("live, failed part-way", func(t *testing.T) {
+		src := &failingSource{err: errors.New("transfer: read remote: connection lost"), sent: 1024}
+		e := newDownloadTestEnvWith(t, downloadFactoryWithSource(src))
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		p := fixture(t, dir, "f", "x")
+		bid := e.openBinding(t, sid, dir, 2)
+		started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+		go func() { _, _ = getDownloadRaw(e.ws, started.Ticket) }()
+
+		raw := readNotification(t, e.conn, "files.downloadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.downloadDone params (real socket, live)")
+		var got filesDownloadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Outcome != downloadStateFailed || got.Error == "" || got.Bytes != 1024 {
+			t.Fatalf("got %+v; want a failed outcome carrying its reason and how far it got", got)
+		}
+	})
+
+	t.Run("retained across a reconnect, sent", func(t *testing.T) {
+		e := newDownloadTestEnv(t)
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		body := "finished while nobody was watching"
+		p := fixture(t, dir, "late.txt", body)
+		bid := e.openBinding(t, sid, dir, 2)
+		started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+
+		dropSubscriber(t, e, sid)
+		if code, _, _, err := getDownloadFull(e.ws, started.Ticket, nil); err != nil || code != 200 {
+			t.Fatalf("GET = %d %v", code, err)
+		}
+		awaitTransferState(t, e.ws, started.TransferID)
+
+		connB := reattach(t, e, sid, 4)
+		raw := readNotification(t, connB, "files.downloadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.downloadDone params (real socket, flushed on attach)")
+		var got filesDownloadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.TransferID != started.TransferID || got.Outcome != downloadStateSent || got.Name != "late.txt" {
+			t.Fatalf("got %+v; want the sent outcome of %s", got, started.TransferID)
+		}
+	})
 }

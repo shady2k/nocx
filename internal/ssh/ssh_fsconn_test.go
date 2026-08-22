@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -1538,5 +1539,170 @@ func TestFSConn_Remove_MissingPathFails(t *testing.T) {
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Remove of a missing path = %v, want os.ErrNotExist", err)
+	}
+}
+
+// ── the read-stream half (FSConn.Open) ───────────────────────────────────
+
+// TestFSConn_OpenReadsAFileBackOverTheLease is the paired success for the
+// read direction, against a real SFTP server: the handle opens, reports the
+// size the file actually has, and reads back byte for byte.
+func TestFSConn_OpenReadsAFileBackOverTheLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	want := []byte("hello download")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, size, err := c.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	if size != int64(len(want)) {
+		t.Fatalf("size = %d, want %d", size, len(want))
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("read %q, want %q", got, want)
+	}
+}
+
+// TestFSConn_OpenRefusesADirectory pins the kind check, which is the one
+// thing about this method that is not obvious from its signature. Opening a
+// directory over SFTP SUCCEEDS on an OpenSSH server and fails only at the
+// first read, so without the check a download of a folder would become a
+// framed 200 that dies mid-body — and the person would be told the transfer
+// broke rather than that they picked a folder.
+func TestFSConn_OpenRefusesADirectory(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _, err := c.Open(sub)
+	if err == nil {
+		_ = r.Close()
+		t.Fatal("Open of a directory succeeded; the kind check is what keeps it out of a framed response")
+	}
+	if !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("Open of a directory: %v, want ErrNotRegularFile", err)
+	}
+	if r != nil {
+		t.Fatal("Open returned a handle alongside the error")
+	}
+}
+
+// TestFSConn_OpenOfAMissingPathReportsNotExist is the contract
+// transfer.RemoteReadFS documents and the compiler cannot check: the
+// transport turns fs.ErrNotExist into a request-shaped refusal a person can
+// act on, and anything unclassified into a server fault.
+func TestFSConn_OpenOfAMissingPathReportsNotExist(t *testing.T) {
+	c, dir := newTestFSConn(t)
+
+	if _, _, err := c.Open(filepath.Join(dir, "nope")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open of a missing path: %v, want an error satisfying fs.ErrNotExist", err)
+	}
+}
+
+// TestFSConn_ManyShortReadsOutliveTheHardTimeout is D2 in the read
+// direction, and it is the assertion that makes a large download possible
+// at all: the watchdog times one lane CALL and never the transfer, so a
+// read made of short chunks runs arbitrarily longer than the hard timeout
+// without poisoning the lease. Like its write counterpart it sleeps for
+// nothing — it makes many real calls whose sum exceeds a deliberately short
+// watchdog while each one is short.
+func TestFSConn_ManyShortReadsOutliveTheHardTimeout(t *testing.T) {
+	c, dir := newTestFSConnWithTimeout(t, 200*time.Millisecond)
+	path := filepath.Join(dir, "big.bin")
+	const chunks = 40
+	body := bytes.Repeat([]byte("y"), 4096*chunks)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, size, err := c.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	if size != int64(len(body)) {
+		t.Fatalf("size = %d, want %d", size, len(body))
+	}
+	buf := make([]byte, 4096)
+	var total int
+	start := time.Now()
+	for total < len(body) {
+		n, readErr := r.Read(buf)
+		total += n
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			t.Fatalf("read at %d failed — the watchdog is timing the transfer, not the call: %v", total, readErr)
+		}
+	}
+	elapsed := time.Since(start)
+	if total != len(body) {
+		t.Fatalf("read %d of %d bytes", total, len(body))
+	}
+	t.Logf("%d chunks in %s against a %s watchdog", chunks, elapsed, 200*time.Millisecond)
+	// The lease is still usable: nothing was poisoned along the way. That
+	// is the assertion, and it is a state rather than a duration — a
+	// watchdog that timed the whole read would have poisoned the lease
+	// before this line, and the loop above would already have failed.
+	if _, err := c.Stat(path); err != nil {
+		t.Fatalf("lease unusable after the transfer: %v", err)
+	}
+}
+
+// TestFSConn_ReadHalfRespectsTheLease proves the read half runs INSIDE the
+// lane rather than beside it: after the lease is released, every call the
+// handle makes reports the lease's own state instead of reaching the wire.
+// A *sftp.File handed out raw would happily keep reading here — which is
+// the whole reason fsReadFile keeps the lease instead of the file.
+func TestFSConn_ReadHalfRespectsTheLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := c.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("lease Close: %v", err)
+	}
+
+	if _, err := r.Read(make([]byte, 4)); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Read after lease Close = %v, want ErrFSClosed", err)
+	}
+	if err := r.Close(); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("handle Close after lease Close = %v, want ErrFSClosed", err)
+	}
+}
+
+// TestFSConn_OpenAfterCloseReportsAClosedLease closes the read handle's
+// interval at the far end: once the lease is closed nothing opened through
+// it can succeed, and the failure is the lease's own typed answer rather
+// than an I/O error nobody can classify.
+func TestFSConn_OpenAfterCloseReportsAClosedLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, _, err := c.Open(path); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Open on a closed lease: %v, want ErrFSClosed", err)
 	}
 }

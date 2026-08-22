@@ -5,7 +5,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -111,11 +110,20 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	// by contract (§5.1) and because R1 must keep being expressible: the
 	// next provider that cannot write inherits the refusal here without
 	// anybody adding a check for it.
-	var sink transfer.Sink
+	// The read-stream seam is resolved in the same breath and for the same
+	// reasons, one direction over: reading a file off the wrong host is as
+	// wrong as writing to it, so R1 is a nil Source here exactly as it is a
+	// nil Sink above. Both assertions are here rather than two lines apart
+	// in two files because they answer one question — what can this
+	// provider do — and a second site would be a second place to forget.
+	var caps filesystem.Capabilities
 	if u, ok := provider.(filesystem.Uploader); ok {
-		sink = u.Sink()
+		caps.Sink = u.Sink()
 	}
-	bid, err := s.reg.Register(provider, sess.ID(), endpointID, sink)
+	if d, ok := provider.(filesystem.Downloader); ok {
+		caps.Source = d.Source()
+	}
+	bid, err := s.reg.Register(provider, sess.ID(), endpointID, caps)
 	if err != nil {
 		return "", "", err
 	}

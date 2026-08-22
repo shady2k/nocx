@@ -35,7 +35,7 @@ import (
 // retainedCount reads the depth of a session's retained-outcome queue. A
 // test-only accessor, in the test file: production has no reader for it,
 // and a production method only tests call is dead code with a docstring.
-func (u *uploadRegistry) retainedCount(sid session.ID) int {
+func (u *transferRegistry) retainedCount(sid session.ID) int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return len(u.retained[sid])
@@ -234,7 +234,7 @@ func TestUploadDone_SurvivesAReconnectWithNoSubscriber(t *testing.T) {
 	if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
 		t.Fatalf("POST /upload = %d %q, want 200", code, resp)
 	}
-	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — a path the test itself built under t.TempDir().
@@ -271,7 +271,7 @@ func TestUploadDone_RetentionIsClearedOnDelivery(t *testing.T) {
 	if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
 		t.Fatalf("POST /upload = %d %q, want 200", code, resp)
 	}
-	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q", state)
 	}
 
@@ -279,7 +279,7 @@ func TestUploadDone_RetentionIsClearedOnDelivery(t *testing.T) {
 	if done := readUploadDone(t, connB); done.TransferID != started.TransferID {
 		t.Fatalf("transferId = %q, want %q", done.TransferID, started.TransferID)
 	}
-	if n := e.ws.uploads.retainedCount(session.ID(sid)); n != 0 {
+	if n := e.ws.transfers.retainedCount(session.ID(sid)); n != 0 {
 		t.Fatalf("%d outcomes still retained after delivery, want 0", n)
 	}
 
@@ -300,13 +300,18 @@ func TestUploadDone_RetentionIsClearedOnDelivery(t *testing.T) {
 // without a ceiling would be an unbounded queue keyed by a session nobody
 // ever comes back to.
 func TestUploadDone_RetentionIsBounded(t *testing.T) {
-	var reg uploadRegistry
+	var reg transferRegistry
 	sid := session.ID("s1")
-	for i := 0; i < maxRetainedUploadDone+10; i++ {
-		reg.retainDone(sid, filesUploadDoneParams{TransferID: fmt.Sprintf("t%03d", i), Outcome: uploadStateWritten})
+	for i := 0; i < maxRetainedDone+10; i++ {
+		reg.retainDone(sid, retainedDone{
+			method: "files.uploadDone",
+			params: mustMarshal(filesUploadDoneParams{
+				TransferID: fmt.Sprintf("t%03d", i), Outcome: uploadStateWritten, Stranded: []string{},
+			}),
+		})
 	}
-	if n := reg.retainedCount(sid); n != maxRetainedUploadDone {
-		t.Fatalf("retained %d outcomes, want the bound %d", n, maxRetainedUploadDone)
+	if n := reg.retainedCount(sid); n != maxRetainedDone {
+		t.Fatalf("retained %d outcomes, want the bound %d", n, maxRetainedDone)
 	}
 	// The OLDEST went, not the newest: what a returning person is looking
 	// at is the recent end.
@@ -314,8 +319,12 @@ func TestUploadDone_RetentionIsBounded(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing retained")
 	}
-	if want := "t010"; first.TransferID != want {
-		t.Fatalf("oldest surviving = %q, want %q — the bound must drop the oldest", first.TransferID, want)
+	var got filesUploadDoneParams
+	if err := json.Unmarshal(first.params, &got); err != nil {
+		t.Fatalf("decode retained outcome: %v", err)
+	}
+	if want := "t010"; got.TransferID != want {
+		t.Fatalf("oldest surviving = %q, want %q — the bound must drop the oldest", got.TransferID, want)
 	}
 }
 
@@ -334,15 +343,15 @@ func TestUploadDone_RetentionEndsWithTheSession(t *testing.T) {
 	if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
 		t.Fatalf("POST /upload = %d %q, want 200", code, resp)
 	}
-	awaitUploadState(t, e.ws, started.TransferID)
-	if n := e.ws.uploads.retainedCount(session.ID(sid)); n != 1 {
+	awaitTransferState(t, e.ws, started.TransferID)
+	if n := e.ws.transfers.retainedCount(session.ID(sid)); n != 1 {
 		t.Fatalf("retained %d, want 1 before the session ends", n)
 	}
 
 	// The real teardown entry point, not the leaf it calls: closing a
 	// terminal closes its bindings and, with them, its transfers.
 	e.ws.filesSessionClosed(session.ID(sid))
-	if n := e.ws.uploads.retainedCount(session.ID(sid)); n != 0 {
+	if n := e.ws.transfers.retainedCount(session.ID(sid)); n != 0 {
 		t.Fatalf("retained %d after the session ended, want 0", n)
 	}
 }
@@ -370,7 +379,7 @@ func TestUploadProgress_EveryNotificationDroppedStillCompletes(t *testing.T) {
 	if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
 		t.Fatalf("POST /upload = %d %q, want 200", code, resp)
 	}
-	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — a path the test itself built under t.TempDir().
@@ -384,7 +393,7 @@ func TestUploadProgress_EveryNotificationDroppedStillCompletes(t *testing.T) {
 	// The sink DID report progress: the notifications were dropped, not
 	// the reporting. Without this the test would also pass on a transfer
 	// that never called progress at all.
-	rt := e.ws.uploads.get(started.TransferID)
+	rt := e.ws.transfers.get(started.TransferID)
 	if rt == nil {
 		t.Fatal("the transfer left the registry before it could be inspected")
 	}
@@ -445,7 +454,7 @@ func TestUploadProgress_ReachesTheCurrentSubscriber(t *testing.T) {
 	// merely likely.
 	<-sink.reported
 	raw := readNotification(t, e.conn, "files.uploadProgress", wantWithin)
-	var got filesUploadProgressParams
+	var got filesTransferProgressParams
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("files.uploadProgress: decode: %v", err)
 	}
@@ -459,7 +468,7 @@ func TestUploadProgress_ReachesTheCurrentSubscriber(t *testing.T) {
 		t.Errorf("total = %d, want the declared size 4096", got.Total)
 	}
 	sink.release()
-	if state := awaitUploadState(t, e.ws, started.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q", state)
 	}
 }

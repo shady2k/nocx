@@ -137,6 +137,7 @@ type fsReader interface {
 type fsConn interface {
 	fsReader
 	transfer.RemoteFS
+	transfer.RemoteReadFS
 }
 
 // Option configures a Provider.
@@ -204,6 +205,18 @@ func New(conn fsConn, opts ...Option) *Provider {
 // The sink is built per call rather than cached because it holds no state of
 // its own: it is the lease plus a chunk size, and the lease is the field.
 func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(p.conn) }
+
+// Source returns the read-stream half of this provider's lease — the
+// optional filesystem.Downloader seam. It is Sink's mirror in construction
+// and in lifetime: never nil, built per call because it holds no state of
+// its own, and reading through the same lease every other call on this
+// provider uses.
+//
+// It is a separate seam from Read, which is this provider's bounded,
+// buffered, text-decoded answer to "show me this file". A download is
+// unbounded and never decoded, and one method cannot be both without one of
+// the two answers being wrong (filesystem.Downloader says which).
+func (p *Provider) Source() transfer.Source { return transfer.NewSource(p.conn) }
 
 // Root computes the navigation root (spec D2) from the provider, never from a
 // shell: the server canonicalises "." — the SFTP session's starting

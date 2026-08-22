@@ -114,14 +114,14 @@ func (s *unresponsiveSink) Put(context.Context, transfer.Upload, io.Reader, func
 // that must prove a close happens REGARDLESS of the bound should not spend
 // the bound proving it.
 func withUploadUnwind(d time.Duration) WSServerOption {
-	return func(s *WSServer) { s.uploads.unwind = d }
+	return func(s *WSServer) { s.transfers.unwind = d }
 }
 
 // withUploadHeaderTimeout shortens the guard's bound on a header block, and
 // with it the handler's own entry deadline. Not an exported option for the
 // same reason as withUploadUnwind.
 func withUploadHeaderTimeout(d time.Duration) WSServerOption {
-	return func(s *WSServer) { s.uploads.header = d }
+	return func(s *WSServer) { s.transfers.header = d }
 }
 
 // uploadFactoryWithSink is uploadableFactory with the write half replaced,
@@ -214,12 +214,12 @@ func uploadParams(bid, dir, name string, size int64) map[string]any {
 	return map[string]any{"bindingId": bid, "destDir": dir, "name": name, "size": size}
 }
 
-// awaitUploadState blocks until the transfer settles and returns its
+// awaitTransferState blocks until the transfer settles and returns its
 // terminal state. It waits on the transfer's own done channel — an
 // observable state change, never a duration.
-func awaitUploadState(t *testing.T, ws *WSServer, transferID string) string {
+func awaitTransferState(t *testing.T, ws *WSServer, transferID string) string {
 	t.Helper()
-	rt := ws.uploads.get(transferID)
+	rt := ws.transfers.get(transferID)
 	if rt == nil {
 		t.Fatalf("no transfer %s in the registry", transferID)
 	}
@@ -342,7 +342,7 @@ func TestFilesUpload_RefusesABindingWhoseProviderCannotWrite(t *testing.T) {
 		t.Errorf("message = %q, want %q", env.Error.Message, want)
 	}
 	// And nothing was started: a refusal costs no transfer.
-	if n := len(e.ws.uploads.pick(func(*runningTransfer) bool { return true })); n != 0 {
+	if n := len(e.ws.transfers.pick(func(*runningTransfer) bool { return true })); n != 0 {
 		t.Fatalf("%d transfers registered after a refused upload, want 0", n)
 	}
 }
@@ -482,7 +482,7 @@ func TestFilesUpload_RefusesASourceTicketNothingMinted(t *testing.T) {
 		}
 	}
 	// And nothing started: a refused redemption costs no transfer.
-	if n := len(e.ws.uploads.pick(func(*runningTransfer) bool { return true })); n != 0 {
+	if n := len(e.ws.transfers.pick(func(*runningTransfer) bool { return true })); n != 0 {
 		t.Fatalf("%d transfers registered after refused redemptions, want 0", n)
 	}
 }
@@ -527,7 +527,7 @@ func TestFilesUpload_ACollisionDoesNotSpendTheTicket(t *testing.T) {
 	if got.TransferID == "" {
 		t.Fatalf("the ticket did not survive the collision question: %+v", got)
 	}
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -566,7 +566,7 @@ func TestFilesUpload_ASourceTicketWithSkipMovesNothing(t *testing.T) {
 	if got.Ticket != "" || got.URL != "" {
 		t.Fatalf("skip needs no body: %+v", got)
 	}
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateSkipped {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateSkipped {
 		t.Fatalf("state = %q, want %q", state, uploadStateSkipped)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -601,7 +601,7 @@ func TestFilesUpload_AnExistingDestinationWithNoDecisionCreatesNothing(t *testin
 	if got.TransferID != "" || got.Ticket != "" {
 		t.Fatalf("the collision branch must carry nothing else: %+v", got)
 	}
-	if n := len(e.ws.uploads.pick(func(*runningTransfer) bool { return true })); n != 0 {
+	if n := len(e.ws.transfers.pick(func(*runningTransfer) bool { return true })); n != 0 {
 		t.Fatalf("%d transfers registered, want 0 — nothing starts before the person answers", n)
 	}
 	// Nothing was created and nothing was touched.
@@ -677,7 +677,7 @@ func TestFilesUpload_SkipNeedsNoBodyAndLeavesTheDestinationAlone(t *testing.T) {
 	if got.Ticket != "" || got.URL != "" {
 		t.Fatalf("skip needs no body and must mint no ticket: %+v", got)
 	}
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateSkipped {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateSkipped {
 		t.Fatalf("state = %q, want %q", state, uploadStateSkipped)
 	}
 	// #nosec G304 — dest is under this test's own t.TempDir().
@@ -718,7 +718,7 @@ func TestFilesUpload_ClosingTheBindingCancelsTheTransferInsteadOfWaitingForIt(t 
 	if env.Error != nil {
 		t.Fatalf("files.close: %+v", env.Error)
 	}
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateCancelled {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateCancelled {
 		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
 	}
 	// The destination was never created.
@@ -737,7 +737,7 @@ func TestFilesUpload_ClosingTheBindingCancelsTheTransferInsteadOfWaitingForIt(t 
 // or a server that stopped answering — so the only thing that can let
 // files.close finish is that the transfer holds no use-guard for
 // Binding.close to drain. Before D8 was honoured this did not fail an
-// assertion; it deadlocked, which is the production symptom: cancelUploadsFor
+// assertion; it deadlocked, which is the production symptom: cancelTransfersFor
 // gives up at its bound, logs "closing anyway", and then blocks for ever
 // inside a close that cannot proceed.
 //
@@ -802,7 +802,7 @@ func TestFilesUpload_ClosingTheSessionCancelsItsTransfers(t *testing.T) {
 
 	got := callUpload(t, e.conn, uploadParams(bid, dir, "a.txt", 1<<20), 3).mustResult(t)
 	e.ws.filesSessionClosed(session.ID(sid))
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateCancelled {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateCancelled {
 		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
 	}
 }
@@ -831,7 +831,7 @@ func TestFilesUploadCancel_CancelsAndIsIdempotent(t *testing.T) {
 		}
 	}
 	cancel(4, got.TransferID)
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateCancelled {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateCancelled {
 		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
 	}
 	// Cancelling a finished transfer is not an error, and neither is
@@ -855,7 +855,7 @@ func TestFilesUploadCancel_RefusesATransferAnotherConnectionOwns(t *testing.T) {
 	defer func() { _ = connB.Close() }()
 	_ = jsonrpcCallWithID(t, connB, "files.uploadCancel", map[string]any{"transferId": got.TransferID}, 4)
 
-	rt := e.ws.uploads.get(got.TransferID)
+	rt := e.ws.transfers.get(got.TransferID)
 	if rt == nil {
 		t.Fatal("the transfer vanished")
 	}
@@ -913,7 +913,7 @@ func TestFilesUpload_ASourceTicketMovesTheBytesToTheSink(t *testing.T) {
 	if got.Ticket != "" || got.URL != "" {
 		t.Fatalf("a path upload needs no body and must mint no sink ticket: %+v", got)
 	}
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 
@@ -1028,7 +1028,7 @@ func TestFilesUpload_ATicketIsRedeemedByTheTabItWasDroppedOn(t *testing.T) {
 	p := uploadParams(bid, dir, "here.txt", pick.Size)
 	p["sourceTicket"] = pick.Ticket
 	got := callUpload(t, e.conn, p, 3).mustResult(t)
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -1065,7 +1065,7 @@ func TestFilesUpload_APickerTicketIsBoundByTheTabThatRedeemsIt(t *testing.T) {
 	p := uploadParams(bidB, dirB, "picked.txt", pick.Size)
 	p["sourceTicket"] = pick.Ticket
 	got := callUpload(t, e.conn, p, 4).mustResult(t)
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().

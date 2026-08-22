@@ -146,6 +146,38 @@ func (f *fakeFS) ReadFile(ctx context.Context, p string, maxBytes int64) ([]byte
 	return buf[:n], truncated, nil
 }
 
+// --- the read-stream half (transfer.RemoteReadFS) ---------------------------
+
+// Open mirrors the lease's Open contract: it refuses anything that is not a
+// regular file BEFORE opening it (a fifo with no writer blocks on open), and
+// it measures the size on the OPEN handle rather than on the name.
+func (f *fakeFS) Open(p string) (transfer.RemoteReader, int64, error) {
+	if f.closed {
+		return nil, 0, errLeaseClosed
+	}
+	byName, err := os.Stat(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !byName.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("%w: %s", transfer.ErrNotRegular, p)
+	}
+	fh, err := os.Open(p) // #nosec G304 — the fake opens exactly the fixture path the test under it built from tempDir(t)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := fh.Stat()
+	if err != nil {
+		_ = fh.Close()
+		return nil, 0, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = fh.Close()
+		return nil, 0, fmt.Errorf("%w: %s", transfer.ErrNotRegular, p)
+	}
+	return fh, info.Size(), nil
+}
+
 // --- the write half (transfer.RemoteFS) -------------------------------------
 //
 // Backed by the real local filesystem like the read half, so the provider's

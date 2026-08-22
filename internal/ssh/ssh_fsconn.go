@@ -70,6 +70,22 @@ type FSConn interface {
 	// point: the create, not an earlier stat, is what arbitrates a
 	// collision, because a stat is a moment and a transfer is a span.
 	Create(path string) (FSFile, error)
+	// Open opens path for READING and reports the size of the object it
+	// actually opened. It is Create's mirror: the handle exists between
+	// lane calls and every call it makes is a lane call, so no read
+	// escapes the lane, the watchdog, the classification or cancellation,
+	// and a download is bounded per chunk rather than in total (design D2
+	// in the read direction). A multi-gigabyte download over a slow link
+	// is a working download; a single chunk that outlives fsHardTimeout
+	// means the link is gone.
+	//
+	// It refuses anything that is not a regular file. The kind is asked by
+	// NAME first and then of the OPEN handle, both inside the one lane
+	// call: the first refusal is what keeps a fifo from blocking the
+	// server's own open, and the second is what makes the size and the
+	// bytes the same object — a name can be renamed or replaced between a
+	// stat and a read, and an open handle cannot.
+	Open(path string) (FSReadFile, int64, error)
 	// PosixRename renames old to new with the posix-rename@openssh.com
 	// extension, which replaces an existing destination atomically. A
 	// server that does not implement the extension is reported as
@@ -114,6 +130,20 @@ type FSFile interface {
 	Close() error
 }
 
+// FSReadFile is a read handle on a lease, returned by FSConn.Open. Like
+// FSFile it exists BETWEEN lane calls and makes every call inside one,
+// which is the property that matters: poisoning the lease closes the
+// subsystem, which invalidates this handle and is what unblocks a wedged
+// read.
+type FSReadFile interface {
+	// Read reads into p as one lane call, reporting counts and errors the
+	// way io.Reader requires.
+	Read(p []byte) (int, error)
+	// Close closes the remote file as one lane call. It does not release
+	// the lease; the lease is closed by its own Close.
+	Close() error
+}
+
 // FSConn errors. These are the SFTP half of the lease contract (spec §3, D3):
 // a refused session, a refused subsystem and a lost connection are different
 // facts and must map to different file-manager states.
@@ -148,9 +178,17 @@ var (
 	// tell "the server lacks the extension" from "the rename failed" either
 	// never runs or runs when it must not (design D6). The sink keys on
 	// internal/transfer's own sentinel; the two are joined by the adapter
-	// the composition root builds (internal/app, fsUploadLease), because
+	// the composition root builds (internal/app, fsTransferLease), because
 	// neither this package nor internal/transfer may import the other.
 	ErrPosixRenameUnsupported = errors.New("ssh: server does not support posix-rename@openssh.com")
+	// ErrNotRegularFile is returned by Open for a path that is a directory,
+	// a device, a socket or a fifo. It is distinguishable because a
+	// download refuses it as a request-shaped refusal a person can act on
+	// — "that is a folder" — and not as a transport failure. The composition
+	// root joins it to internal/transfer's own sentinel, the way it already
+	// joins ErrPosixRenameUnsupported, because neither package may import
+	// the other.
+	ErrNotRegularFile = errors.New("ssh: not a regular file")
 )
 
 // fsLaneCap bounds concurrent in-flight SFTP calls per lease. One SFTP
@@ -627,6 +665,83 @@ func (c *fsConn) Create(path string) (FSFile, error) {
 		return nil, c.classify(err)
 	}
 	return &fsFile{c: c, f: f}, nil
+}
+
+// fsReadFile is the concrete FSReadFile. It keeps the lease for the same
+// reason fsFile does: handing the *sftp.File out raw would put every
+// subsequent read outside the lane, the watchdog, the classification and
+// cancellation.
+type fsReadFile struct {
+	c *fsConn
+	f *sftp.File
+}
+
+func (r *fsReadFile) Read(p []byte) (int, error) {
+	var n int
+	err := r.c.run(context.Background(), func() error {
+		var err error
+		n, err = r.f.Read(p)
+		return err
+	})
+	if err != nil {
+		// io.EOF is the read loop's terminator and not a lease failure, so
+		// it passes through unclassified — classify would otherwise report
+		// a closed lease for the last read of every successful download.
+		if errors.Is(err, io.EOF) {
+			return n, io.EOF
+		}
+		return n, r.c.classify(err)
+	}
+	return n, nil
+}
+
+func (r *fsReadFile) Close() error {
+	err := r.c.run(context.Background(), func() error { return r.f.Close() })
+	if err != nil {
+		return r.c.classify(err)
+	}
+	return nil
+}
+
+// Open opens path for reading. See FSConn.Open.
+//
+// The stat-by-name, the open and the fstat are ONE lane call between them:
+// three round trips is what the kind and the identity cost, and splitting
+// them across lane calls would let a poisoning land between two halves of
+// one answer.
+func (c *fsConn) Open(path string) (FSReadFile, int64, error) {
+	var f *sftp.File
+	var size int64
+	err := c.run(context.Background(), func() error {
+		byName, err := c.sftp.Stat(path)
+		if err != nil {
+			return err
+		}
+		if !byName.Mode().IsRegular() {
+			return fmt.Errorf("%w: %s", ErrNotRegularFile, path)
+		}
+		f, err = c.sftp.Open(path)
+		if err != nil {
+			return err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			f = nil
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			_ = f.Close()
+			f = nil
+			return fmt.Errorf("%w: %s", ErrNotRegularFile, path)
+		}
+		size = info.Size()
+		return nil
+	})
+	if err != nil {
+		return nil, 0, c.classify(err)
+	}
+	return &fsReadFile{c: c, f: f}, size, nil
 }
 
 func (c *fsConn) PosixRename(old, new string) error {

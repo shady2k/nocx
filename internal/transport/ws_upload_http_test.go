@@ -178,7 +178,7 @@ func TestFilesUpload_ALocalBindingWritesOntoTheBackendsOwnMachine(t *testing.T) 
 		t.Fatalf("want 200, got %d (%s)", status, body)
 	}
 
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -252,7 +252,7 @@ func TestUploadEndpoint_MintedAndUnclaimedReadsTheBodyAndWritesTheFile(t *testin
 	if status, body := postUpload(t, e.ws, ticket, payload); status != http.StatusOK {
 		t.Fatalf("want 200, got %d (%s)", status, body)
 	}
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -272,7 +272,7 @@ func TestUploadEndpoint_MintedAndUnclaimedReadsTheBodyAndWritesTheFile(t *testin
 		t.Fatalf("directory holds %d entries, want 1 (no temp left behind)", len(entries))
 	}
 	// And progress really advanced — the byte total is not decorative.
-	rt := e.ws.uploads.get(tid)
+	rt := e.ws.transfers.get(tid)
 	if _, _, n, _ := rt.snapshot(); n != int64(len(payload)) {
 		t.Errorf("progress reported %d bytes, want %d", n, len(payload))
 	}
@@ -312,7 +312,7 @@ func TestUploadEndpoint_SecondClaimWhileRunningIs409AndLeavesTheFirstAlone(t *te
 	if _, writeErr := pw.Write(half); writeErr != nil {
 		t.Fatalf("write first half: %v", writeErr)
 	}
-	rt := e.ws.uploads.get(tid)
+	rt := e.ws.transfers.get(tid)
 	waitFor(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
 		_, _, n, _ := rt.snapshot()
 		return n > 0
@@ -328,7 +328,7 @@ func TestUploadEndpoint_SecondClaimWhileRunningIs409AndLeavesTheFirstAlone(t *te
 	_ = pw.Close()
 	wg.Wait()
 
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("the FIRST claimant must keep its transfer; state = %q", state)
 	}
 	if firstStatus != http.StatusOK {
@@ -354,7 +354,7 @@ func TestUploadEndpoint_ClaimAfterCompletionIsGone(t *testing.T) {
 	if status, body := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusOK {
 		t.Fatalf("first POST: %d (%s)", status, body)
 	}
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	if status, _ := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusGone {
@@ -368,15 +368,15 @@ func TestUploadEndpoint_ClaimAfterCompletionIsGone(t *testing.T) {
 	// branch is what is asserted, and the contrast is what makes it
 	// evidence: the same call on a ticket nothing ever minted answers
 	// differently.
-	rt, claim := e.ws.uploads.claim(ticket, 5)
-	if claim != uploadClaimFinished {
-		t.Fatalf("claim = %d, want uploadClaimFinished (%d): the finished ticket must be RETAINED", claim, uploadClaimFinished)
+	rt, claim := e.ws.transfers.claim(ticket, dirUpload, 5)
+	if claim != transferClaimFinished {
+		t.Fatalf("claim = %d, want transferClaimFinished (%d): the finished ticket must be RETAINED", claim, transferClaimFinished)
 	}
 	if rt != nil {
 		t.Fatal("the finished branch handed back a transfer; it names nothing to claim")
 	}
-	if _, other := e.ws.uploads.claim(strings.Repeat("ab", uploadTicketHexLen/2), 5); other != uploadClaimUnknown {
-		t.Fatalf("a never-minted ticket claims as %d, want uploadClaimUnknown (%d)", other, uploadClaimUnknown)
+	if _, other := e.ws.transfers.claim(strings.Repeat("ab", uploadTicketHexLen/2), dirUpload, 5); other != transferClaimUnknown {
+		t.Fatalf("a never-minted ticket claims as %d, want transferClaimUnknown (%d)", other, transferClaimUnknown)
 	}
 }
 
@@ -390,13 +390,13 @@ func TestUploadEndpoint_ClaimAfterCompletionIsGone(t *testing.T) {
 // already happened by the time the request arrives — no sleep, and the wait
 // below is on the transfer's own settled state.
 func TestUploadEndpoint_ExpiredTicketWasAlreadyCancelledAndReadsAsUnknown(t *testing.T) {
-	e := newUploadTestEnv(t, WithUploadTicketTTL(0))
+	e := newUploadTestEnv(t, WithTransferTicketTTL(0))
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 	tid, ticket := startStreamUpload(t, e, bid, dir, "a.txt", 5, 3)
 
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateCancelled {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateCancelled {
 		t.Fatalf("expiry cancels the transfer AT EXPIRY; state = %q", state)
 	}
 	if status, _ := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusGone {
@@ -487,7 +487,7 @@ func TestUploadEndpoint_AShortBodyFailsTheTransferAndLeavesTheDestinationAlone(t
 		_ = c.CloseWrite() // the body ends four bytes in
 	})
 
-	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateFailed {
+	if state := awaitTransferState(t, e.ws, got.TransferID); state != uploadStateFailed {
 		t.Fatalf("state = %q, want %q", state, uploadStateFailed)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -502,7 +502,7 @@ func TestUploadEndpoint_AShortBodyFailsTheTransferAndLeavesTheDestinationAlone(t
 	if len(entries) != 1 {
 		t.Fatalf("directory holds %d entries, want 1 — the temp must have been removed", len(entries))
 	}
-	rt := e.ws.uploads.get(got.TransferID)
+	rt := e.ws.transfers.get(got.TransferID)
 	if _, out, _, _ := rt.snapshot(); len(out.Stranded) != 0 {
 		t.Errorf("stranded = %v, want none: the temp was removable", out.Stranded)
 	}
@@ -528,7 +528,7 @@ func TestUploadEndpoint_ABodyLongerThanContentLengthFailsAtTheBound(t *testing.T
 		_, _ = c.Write([]byte("helloAND MORE THAN IT SAID"))
 		_ = c.CloseWrite()
 	})
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateFailed {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateFailed {
 		t.Fatalf("state = %q, want %q", state, uploadStateFailed)
 	}
 	// Nothing at the destination and no temp: a body that overran its own
@@ -541,7 +541,7 @@ func TestUploadEndpoint_ABodyLongerThanContentLengthFailsAtTheBound(t *testing.T
 	if len(entries) != 0 {
 		t.Fatalf("directory holds %d entries, want 0", len(entries))
 	}
-	rt := e.ws.uploads.get(tid)
+	rt := e.ws.transfers.get(tid)
 	if _, out, _, _ := rt.snapshot(); len(out.Stranded) != 0 {
 		t.Errorf("stranded = %v, want none: the temp was removable", out.Stranded)
 	}
@@ -561,7 +561,7 @@ func TestUploadEndpoint_ABodyThatEndsExactlyAtTheBoundIsNotAnOverrun(t *testing.
 		_, _ = c.Write([]byte("hello"))
 		_ = c.CloseWrite()
 	})
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -577,7 +577,7 @@ func TestUploadEndpoint_ABodyThatEndsExactlyAtTheBoundIsNotAnOverrun(t *testing.
 // stall deadline is re-armed before every read, so the bound is "no
 // progress", never "the whole transfer inside one duration".
 func TestUploadEndpoint_HeadersThenSilenceEndsTheTransfer(t *testing.T) {
-	e := newUploadTestEnv(t, WithUploadStallTimeout(150*time.Millisecond))
+	e := newUploadTestEnv(t, WithTransferStallTimeout(150*time.Millisecond))
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
@@ -587,7 +587,7 @@ func TestUploadEndpoint_HeadersThenSilenceEndsTheTransfer(t *testing.T) {
 	rawUploadNoReply(t, e.ws, ticket, "Content-Length: 10\r\n", func(*net.TCPConn) {
 		// Headers, then silence. Nothing is ever written on this
 		// connection again; the transfer must end anyway.
-		state = awaitUploadState(t, e.ws, tid)
+		state = awaitTransferState(t, e.ws, tid)
 	})
 	if state != uploadStateFailed {
 		t.Fatalf("state = %q, want %q", state, uploadStateFailed)
@@ -609,7 +609,7 @@ func TestUploadEndpoint_HeadersThenSilenceEndsTheTransfer(t *testing.T) {
 // is the production symptom (a stalled upload holding a temp file and a
 // lease open indefinitely).
 func TestUploadEndpoint_CancellingAStalledBodyUnwindsTheTransfer(t *testing.T) {
-	e := newUploadTestEnv(t, WithUploadStallTimeout(10*time.Minute))
+	e := newUploadTestEnv(t, WithTransferStallTimeout(10*time.Minute))
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
@@ -636,7 +636,7 @@ func TestUploadEndpoint_CancellingAStalledBodyUnwindsTheTransfer(t *testing.T) {
 	if _, writeErr := pw.Write(bytes.Repeat([]byte("a"), size/2)); writeErr != nil {
 		t.Fatalf("write half: %v", writeErr)
 	}
-	rt := e.ws.uploads.get(tid)
+	rt := e.ws.transfers.get(tid)
 	waitFor(t, "the sink to be reading the body", 30*time.Second, func() bool {
 		_, _, n, _ := rt.snapshot()
 		return n > 0
@@ -644,7 +644,7 @@ func TestUploadEndpoint_CancellingAStalledBodyUnwindsTheTransfer(t *testing.T) {
 
 	// The body now says nothing more. Cancel.
 	_ = jsonrpcCallWithID(t, e.conn, "files.uploadCancel", map[string]any{"transferId": tid}, 4)
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateCancelled {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateCancelled {
 		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
 	}
 	_ = pw.Close()
@@ -869,7 +869,7 @@ func TestUploadEndpoint_NeverLogsOrEchoesTheTicket(t *testing.T) {
 	var said []string
 	_, body := postUpload(t, e.ws, ticket, []byte("hello"))
 	said = append(said, body)
-	awaitUploadState(t, e.ws, tid)
+	awaitTransferState(t, e.ws, tid)
 
 	_, body = postUpload(t, e.ws, ticket, []byte("hello")) // now finished → 410
 	said = append(said, body)
@@ -1047,7 +1047,7 @@ func TestUploadCORS_PreflightDoesNotConsumeTheTicket(t *testing.T) {
 	if status, body := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusOK {
 		t.Fatalf("the preflight consumed the ticket: POST answered %d (%s)", status, body)
 	}
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 	// #nosec G304 — under this test's own t.TempDir().
@@ -1094,7 +1094,7 @@ func TestUploadCORS_ARefusedOriginIsNamedBackToNobodyAndKeepsItsHandsOffTheTicke
 	if status, body := postUpload(t, e.ws, ticket, []byte("hello")); status != http.StatusOK {
 		t.Fatalf("a refused origin consumed the ticket: got %d (%s)", status, body)
 	}
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 }
@@ -1170,7 +1170,7 @@ func TestUploadCORS_TheHeadersAreOnEveryReplyIncludingTheRefusals(t *testing.T) 
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
 	assertNamesTheOrigin(t, resp.Header, browserOrigin)
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
 	}
 }
@@ -1200,7 +1200,7 @@ func TestUploadCORS_TheHeadersAreOnAFailedTransferToo(t *testing.T) {
 		t.Fatalf("a short body: want 500, got %d", resp.StatusCode)
 	}
 	assertNamesTheOrigin(t, resp.Header, browserOrigin)
-	if state := awaitUploadState(t, e.ws, tid); state == uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state == uploadStateWritten {
 		t.Fatal("a short body must not write the destination")
 	}
 }
@@ -1236,7 +1236,7 @@ func TestUploadCORS_TheHeadersAreOnAConflictToo(t *testing.T) {
 	if _, err := pw.Write(bytes.Repeat([]byte("a"), size/2)); err != nil {
 		t.Fatalf("write first half: %v", err)
 	}
-	rt := e.ws.uploads.get(tid)
+	rt := e.ws.transfers.get(tid)
 	waitFor(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
 		_, _, n, _ := rt.snapshot()
 		return n > 0
@@ -1253,7 +1253,7 @@ func TestUploadCORS_TheHeadersAreOnAConflictToo(t *testing.T) {
 	}
 	_ = pw.Close()
 	wg.Wait()
-	if state := awaitUploadState(t, e.ws, tid); state != uploadStateWritten {
+	if state := awaitTransferState(t, e.ws, tid); state != uploadStateWritten {
 		t.Fatalf("the first claimant must keep its transfer; state = %q", state)
 	}
 }

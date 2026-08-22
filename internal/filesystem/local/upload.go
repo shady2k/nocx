@@ -63,7 +63,7 @@ func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(osFS{}) }
 
 // osFS presents this machine's filesystem as the write surface
 // internal/transfer declares. It is the local counterpart of the
-// composition root's fsUploadLease, and it is far shorter for one reason:
+// composition root's fsTransferLease, and it is far shorter for one reason:
 // the two contracts RemoteFS documents and cannot check are properties `os`
 // already has.
 //

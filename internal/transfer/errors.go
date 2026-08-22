@@ -17,6 +17,13 @@ var ErrPosixRenameUnsupported = errors.New("transfer: server does not support po
 // put the file somewhere other than where the caller named.
 var ErrInvalidUpload = errors.New("transfer: invalid upload")
 
+// ErrInvalidDownload marks a Download the source cannot express. Path
+// policy is the transport's and the provider's (§5.3, which the download
+// half applies unchanged); this is the read half refusing what it could
+// only guess at — an empty path, a length no framing can carry, or a
+// Download that names no open handle because it was never opened here.
+var ErrInvalidDownload = errors.New("transfer: invalid download")
+
 // SizeMismatchError is a reader that did not deliver what the caller
 // declared, in either direction. Both are failures: the declared size is
 // what the person and the progress bar were told, and a file of a different

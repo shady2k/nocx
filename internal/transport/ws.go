@@ -465,13 +465,20 @@ type WSServer struct {
 	// session closes — a late ack is rejected (session death wins).
 	recoveryMu sync.Mutex
 	recoveries map[session.ID]*recoveryState
-	// uploads is the running-transfer registry and the sink tickets that
-	// name their bodies (ws_upload.go). Its zero value is usable, so it is
-	// a value rather than a pointer and needs no line in the constructor.
-	// A transfer is registered per SESSION (design D8): closing the
-	// binding, closing the session or stopping the server cancels the set
-	// and waits for it to unwind, bounded — never for the upload.
-	uploads uploadRegistry
+	// transfers is the running-transfer registry and the one-shot tickets
+	// that name their bodies (ws_upload.go), in BOTH directions: an upload
+	// waiting for a body and a download waiting for a reader are the same
+	// record with the same lifetime, so they share one map, one TTL, one
+	// bound and — the part that matters — one cancellation fan-out.
+	// Registering downloads in a second registry would be a second place
+	// for files.close and session teardown to remember to look.
+	//
+	// Its zero value is usable, so it is a value rather than a pointer and
+	// needs no line in the constructor. A transfer is registered per
+	// SESSION (design D8): closing the binding, closing the session or
+	// stopping the server cancels the set and waits for it to unwind,
+	// bounded — never for the transfer.
+	transfers transferRegistry
 
 	// sources is the SOURCE-ticket mint (ws_upload_source.go) — the other
 	// half of R2. The server owns it rather than being handed one, because
@@ -1117,6 +1124,20 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// come to.
 	mux.HandleFunc("POST "+uploadRoutePrefix+"{ticket}", s.handleUpload)
 	mux.HandleFunc("OPTIONS "+uploadRoutePrefix+"{ticket}", s.handleUploadPreflight)
+	// The download route, and the argument for it being HTTP is the
+	// upload's argument with every term stronger (ws_download.go): the
+	// bytes travel the SAME direction as bulk PTY output, the outbound
+	// queue is deliberately lossy and a file's bytes may not be dropped,
+	// and a browser can stream a response to disk where a page holding
+	// WebSocket messages would have to buffer the whole file in the
+	// renderer's heap first.
+	//
+	// GET only, and no OPTIONS beside it: a GET with no request header
+	// outside the CORS safelist is a simple request, so a browser never
+	// preflights it, and a route answering a request nobody makes is a
+	// route nobody exercises. The origin headers still go on the reply,
+	// because a page reading this with fetch needs them.
+	mux.HandleFunc("GET "+downloadRoutePrefix+"{ticket}", s.handleDownloadFetch)
 
 	addr := s.listenAddr
 	if addr == "" {
@@ -1162,7 +1183,7 @@ func (s *WSServer) Start(ctx context.Context) error {
 			}
 		},
 	}
-	guarded := uploadGuardListener{Listener: listener, timeout: s.uploads.headerDeadline}
+	guarded := uploadGuardListener{Listener: listener, timeout: s.transfers.headerDeadline}
 	go func() {
 		if err := s.server.Serve(guarded); err != nil && err != http.ErrServerClosed {
 			s.log.Error("ws server error", "error", err)
@@ -1185,7 +1206,7 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// teardown would release it, and the POST that carries its body waits
 	// on the transfer — so an uncancelled one would also hold Shutdown open
 	// below. The wait inside is bounded and never waits for the upload.
-	s.cancelAllUploads()
+	s.cancelAllTransfers()
 	// And let go of every unredeemed source ticket. Each holds an open
 	// descriptor on a file a person chose (ws_upload_source.go), and a
 	// stopped server is the last of the three events that end that

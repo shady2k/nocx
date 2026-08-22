@@ -98,7 +98,7 @@ func anUpload() transfer.Upload {
 // this asserts and what the next provider that cannot write will inherit.
 func TestHandle_UploaderIsRefusedOnABindingWithNoWriteHalf(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(touchyProvider{t: t}, "s1", "", nil) // nil sink = no write half
+	id, err := reg.Register(touchyProvider{t: t}, "s1", "", Capabilities{}) // nil sink = no write half
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestHandle_UploaderIsRefusedOnABindingWithNoWriteHalf(t *testing.T) {
 func TestHandle_UploaderReachesTheSinkOnARemoteBinding(t *testing.T) {
 	sink := &stubSink{out: transfer.Outcome{State: transfer.StateWritten, FinalName: "a.txt"}}
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "v1:abc", sink)
+	id, err := reg.Register(newStubProvider(), "s1", "v1:abc", Capabilities{Sink: sink})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestHandle_UploaderReachesTheSinkOnARemoteBinding(t *testing.T) {
 func TestHandle_UploaderAfterReleaseIsRefused(t *testing.T) {
 	sink := &stubSink{}
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "", sink)
+	id, err := reg.Register(newStubProvider(), "s1", "", Capabilities{Sink: sink})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestHandle_UploaderAfterReleaseIsRefused(t *testing.T) {
 func TestHandle_UploaderAfterBindingCloseIsRefused(t *testing.T) {
 	sink := &stubSink{}
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "", sink)
+	id, err := reg.Register(newStubProvider(), "s1", "", Capabilities{Sink: sink})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestClose_DoesNotWaitForATransferRunningOnTheSink(t *testing.T) {
 	sink := &stubSink{entered: make(chan struct{}), release: make(chan struct{})}
 	p := newStubProvider()
 	reg := New()
-	id, err := reg.Register(p, "s1", "", sink)
+	id, err := reg.Register(p, "s1", "", Capabilities{Sink: sink})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -192,3 +192,25 @@ type ErrUploadUnsupported struct {
 func (e *ErrUploadUnsupported) Error() string {
 	return fmt.Sprintf("filesystem: binding %q has no write seam; files cannot be uploaded to this tab", e.BindingID)
 }
+
+// ErrDownloadUnsupported — Downloader was called on a binding with no
+// read-stream seam, which is a binding whose provider did not implement
+// Downloader. It is rule R1 in the read direction, arriving as a typed
+// refusal rather than as a check somebody performs: a provider that cannot
+// stream contributes no source, and the binding then has nothing to read
+// through.
+//
+// Both shipped providers CAN stream, so no binding the composition root
+// mints takes this refusal today. The refusal is the seam's shape, not a
+// case that has gone away: the next provider that cannot stream inherits it
+// without anybody adding a check.
+//
+// It names the binding rather than the path, because the refusal is a
+// property of the binding and not of what was being read.
+type ErrDownloadUnsupported struct {
+	BindingID string
+}
+
+func (e *ErrDownloadUnsupported) Error() string {
+	return fmt.Sprintf("filesystem: binding %q has no read-stream seam; files cannot be downloaded from this tab", e.BindingID)
+}

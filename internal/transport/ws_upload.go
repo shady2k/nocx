@@ -71,20 +71,20 @@ const (
 	// also meaning "cancel what it names".
 	defaultUploadTicketTTL = 60 * time.Second
 
-	// maxUploadTickets and maxUploadTransfers bound the two maps. Both are
+	// maxTransferTickets and maxTransfers bound the two maps. Both are
 	// far above the product's one-transfer-at-a-time-per-binding rule (§4)
 	// and exist so a client that mints without ever finishing cannot grow
 	// the server's memory without limit.
-	maxUploadTickets   = 64
-	maxUploadTransfers = 128
+	maxTransferTickets = 64
+	maxTransfers       = 128
 
-	// maxRetainedUploadDone bounds the files.uploadDone notifications one
+	// maxRetainedDone bounds the files.uploadDone notifications one
 	// session may accumulate while nothing is attached to it. Retention is
 	// what stops a terminal outcome being lost across a reconnect, and a
 	// bound is what stops it becoming an unbounded queue keyed by a session
 	// nobody ever comes back to.
 	//
-	// 64 is maxUploadTickets, and deliberately the same number: a session
+	// 64 is maxTransferTickets, and deliberately the same number: a session
 	// can only accumulate a done for a transfer it started, tickets are
 	// what starting one costs, and §4 limits the product to one transfer at
 	// a time per binding — so this is two orders of magnitude above the
@@ -92,16 +92,16 @@ const (
 	// the OLDEST: the outcomes a returning person is still looking at are
 	// the recent ones, and a queue that discarded the newest would answer
 	// the reconnect with ancient history.
-	maxRetainedUploadDone = 64
+	maxRetainedDone = 64
 
-	// uploadDoneRetention is how long a finished transfer stays in the
+	// transferDoneRetention is how long a finished transfer stays in the
 	// registry after it ends. It is what makes files.uploadCancel
 	// idempotent over a transfer that has already finished, and what lets
 	// the §5.4 table tell "claimed, finished" apart from "unknown" instead
 	// of collapsing both into a bare miss.
-	uploadDoneRetention = 5 * time.Minute
+	transferDoneRetention = 5 * time.Minute
 
-	// uploadHeaderTimeout and defaultUploadStallTimeout are this route's OWN
+	// transferHeaderTimeout and defaultTransferStallTimeout are this route's OWN
 	// deadlines. The shared http.Server keeps ReadHeaderTimeout: 0
 	// deliberately, because /session is a long-lived upgrade (ws.go), so
 	// nothing above this handler bounds a request that goes quiet.
@@ -110,20 +110,26 @@ const (
 	// parses the COMPLETE header block before dispatching, so a request whose
 	// headers never end does not reach this handler and nothing inside it can
 	// bound the wait; that interval belongs to uploadGuardConn below, which
-	// sits under the server and applies uploadHeaderTimeout to it. The same
+	// sits under the server and applies transferHeaderTimeout to it. The same
 	// bound then covers handler entry until the first body read, and the
 	// stall deadline — re-armed before EVERY read — is what bounds "valid
 	// headers followed by silence", which is the failure the spec names:
 	// without it a body that stops holds a transfer, a temp file and a lease
 	// open indefinitely.
-	uploadHeaderTimeout       = 10 * time.Second
-	defaultUploadStallTimeout = 30 * time.Second
+	transferHeaderTimeout       = 10 * time.Second
+	defaultTransferStallTimeout = 30 * time.Second
 
 	// uploadRoutePrefix is the path a claimed body is POSTed to, and
 	// uploadTicketHexLen the hex width of the ticket in it: 32 random bytes
 	// from crypto/rand, comfortably past D4's 128-bit floor.
-	uploadRoutePrefix  = "/upload/"
-	uploadTicketHexLen = 64
+	uploadRoutePrefix = "/upload/"
+	// downloadRoutePrefix is the path a claimed download is fetched from.
+	// Both routes carry their one-shot ticket in the PATH and both are
+	// guarded by the same OriginPolicy; see ws_download.go for why the
+	// bytes travel over HTTP in this direction too, and why the argument
+	// is stronger here than D3's was for the upload.
+	downloadRoutePrefix = "/download/"
+	uploadTicketHexLen  = 64
 
 	// sourceTicketHexLen is the hex width of a SOURCE ticket, which is a
 	// different credential of a different width: sourceTicketBytes = 16,
@@ -207,14 +213,22 @@ type filesUploadCancelParams struct {
 	TransferID string `json:"transferId"`
 }
 
-// filesUploadProgressParams is the files.uploadProgress notification
-// (contracts/files.uploadProgress.schema.json). It is an INDICATOR and not
-// a ledger: it is addressed to the binding's session's current subscriber,
+// filesTransferProgressParams is the files.uploadProgress notification AND
+// the files.downloadProgress one (contracts/files.uploadProgress.schema.json,
+// contracts/files.downloadProgress.schema.json). One SHAPE for both
+// directions because the question is one question — how far has this
+// transfer got — and two structs saying {transferId, bytes, total} would be
+// two places for the answer to drift; two METHODS because the surfaces that
+// draw them differ and a renderer must be able to tell which row moved.
+//
+// It is an INDICATOR and not a ledger: it is addressed to the binding's session's current subscriber,
 // resolved at emit time, and dropped when there is none, so nothing may be
 // derived from having seen one. Total is the size declared at mint time,
 // carried on every frame so a renderer that missed every earlier one can
-// still draw a bar from a single notification.
-type filesUploadProgressParams struct {
+// still draw a bar from a single notification — the size the renderer
+// declared for an upload, or the size measured on the open handle for a
+// download.
+type filesTransferProgressParams struct {
 	TransferID string `json:"transferId"`
 	Bytes      int64  `json:"bytes"`
 	Total      int64  `json:"total"`
@@ -355,11 +369,41 @@ type runningTransfer struct {
 	id        string
 	sessionID session.ID
 	bindingID string
+	// dir is which way this transfer's bytes travel. It is what the shared
+	// machinery below branches on, and it is deliberately the ONLY thing
+	// that differs at this level: an upload waiting for a request body and
+	// a download waiting for a response writer have the same identity, the
+	// same session, the same one-shot ticket, the same TTL, the same
+	// bounded map and — the part that made sharing them the honest answer
+	// rather than the cheap one — the same cancellation fan-out from
+	// files.close, session teardown and shutdown. A second registry would
+	// be a second place for each of those three to remember to look, and
+	// the day one of them forgot, a download would go on reading a host
+	// whose tab had closed.
+	dir transferDir
 	// ticket is the sink ticket that names this transfer's body, empty for
 	// a transfer that needs none. It is here so the ticket can be retired
 	// the instant the transfer ends, and it is never logged (D4).
 	ticket string
 	upload transfer.Upload
+	// download is the pinned source of a dirDownload transfer: an OPEN
+	// handle on the far host plus the size and name measured on it, taken
+	// while files.download still held the binding's use-guard. It is nil
+	// for an upload.
+	//
+	// It is pinned at mint rather than opened at fetch for the reason
+	// SourceTicketStore already gives about the other direction: a name is
+	// not an identity. Between the answer to files.download and the fetch
+	// that redeems it, the name can be renamed, replaced, or be a symlink
+	// whose target moved — and the size the fetch declares as its
+	// Content-Length would then describe different bytes from the ones it
+	// sends. An open handle cannot be raced at all.
+	download *transfer.Download
+	// dest carries the claimed response writer from the GET handler to the
+	// goroutine running the source — the mirror of body. Buffered by one,
+	// for body's reason: the claim happens once, so nothing can queue
+	// behind it.
+	dest chan io.Writer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -379,7 +423,7 @@ type runningTransfer struct {
 	// without blocking, read by the transfer's progress emitter. It carries
 	// no value — the emitter reads the LATEST byte count off rt.bytes — so
 	// a burst of chunks collapses into one notification instead of one per
-	// chunk. See progress and emitUploadProgress.
+	// chunk. See progress and emitTransferProgress.
 	progressWake chan struct{}
 
 	mu      sync.Mutex
@@ -389,6 +433,28 @@ type runningTransfer struct {
 	outcome transfer.Outcome
 	err     error
 	endedAt time.Time
+}
+
+// transferDir is which way a transfer's bytes travel.
+type transferDir int
+
+const (
+	dirUpload   transferDir = iota // renderer → the tab's host
+	dirDownload                    // the tab's host → renderer
+)
+
+// size is the number of bytes this transfer is framed for: the declared
+// upload size, or the size measured on the download's OPEN handle. It is
+// what the ticket is minted against and what the progress notification
+// carries as its total.
+func (rt *runningTransfer) size() int64 {
+	if rt.dir == dirDownload {
+		if rt.download == nil {
+			return 0
+		}
+		return rt.download.Size
+	}
+	return rt.upload.Size
 }
 
 // stop cancels the transfer AND unblocks its reader.
@@ -467,25 +533,33 @@ func (rt *runningTransfer) snapshot() (state string, out transfer.Outcome, bytes
 	return rt.state, rt.outcome, rt.bytes, rt.err
 }
 
-// uploadTicket is one minted sink ticket. The three flags are the four
+// transferTicket is one minted sink ticket. The three flags are the four
 // states of §5.4: absent from the map is "unknown", finished is "claimed
 // and over", claimed alone is "claimed and running", and neither is
 // "minted, unclaimed".
-type uploadTicket struct {
+type transferTicket struct {
 	transferID string
-	size       int64
-	createdAt  time.Time
-	claimed    bool
-	finished   bool
-	timer      *time.Timer
+	// dir is the direction of the transfer this ticket names, recorded at
+	// mint so the route check can happen on the TICKET rather than on the
+	// transfer it resolves to. That ordering is the point: checking it
+	// after the claimed/finished flags would answer a sink ticket
+	// presented at the download route with 409 rather than 410, which
+	// tells the caller the ticket exists — an oracle for a credential that
+	// reads somebody's file.
+	dir       transferDir
+	size      int64
+	createdAt time.Time
+	claimed   bool
+	finished  bool
+	timer     *time.Timer
 }
 
-// uploadRegistry holds the transport's running transfers and the tickets
+// transferRegistry holds the transport's running transfers and the tickets
 // that name them. The zero value is usable.
-type uploadRegistry struct {
-	mu        sync.Mutex
-	transfers map[string]*runningTransfer
-	tickets   map[string]*uploadTicket
+type transferRegistry struct {
+	mu      sync.Mutex
+	running map[string]*runningTransfer
+	tickets map[string]*transferTicket
 	// retained holds the files.uploadDone notifications a session could
 	// not be told about because nothing was attached, in the order they
 	// happened, flushed on the next attach and cleared as each one is
@@ -498,7 +572,7 @@ type uploadRegistry struct {
 	// it is the lifetime that bounds the map: the entries of a session
 	// that ends are dropped with it (forgetDone), so a key can only exist
 	// while something can still attach to it.
-	retained map[session.ID][]filesUploadDoneParams
+	retained map[session.ID][]retainedDone
 
 	// ttl/ttlSet is the unclaimed-ticket TTL. ttlSet exists so that a test
 	// can ask for zero — expire as soon as the timer goroutine can run —
@@ -525,57 +599,59 @@ type uploadRegistry struct {
 	now func() time.Time
 }
 
-func (u *uploadRegistry) stallTimeout() time.Duration {
+func (u *transferRegistry) stallTimeout() time.Duration {
 	if u.stall > 0 {
 		return u.stall
 	}
-	return defaultUploadStallTimeout
+	return defaultTransferStallTimeout
 }
 
-func (u *uploadRegistry) headerDeadline() time.Duration {
+func (u *transferRegistry) headerDeadline() time.Duration {
 	if u.header > 0 {
 		return u.header
 	}
-	return uploadHeaderTimeout
+	return transferHeaderTimeout
 }
 
-func (u *uploadRegistry) unwindTimeout() time.Duration {
+func (u *transferRegistry) unwindTimeout() time.Duration {
 	if u.unwind > 0 {
 		return u.unwind
 	}
 	return uploadUnwindTimeout
 }
 
-func (u *uploadRegistry) clock() time.Time {
+func (u *transferRegistry) clock() time.Time {
 	if u.now != nil {
 		return u.now()
 	}
 	return time.Now()
 }
 
-func (u *uploadRegistry) ticketTTL() time.Duration {
+func (u *transferRegistry) ticketTTL() time.Duration {
 	if u.ttlSet {
 		return u.ttl
 	}
 	return defaultUploadTicketTTL
 }
 
-// WithUploadStallTimeout bounds how long ONE read of an upload body may go
+// WithTransferStallTimeout bounds how long ONE read of an upload body — or
+// ONE write of a download's response — may go
 // without progress. It is a stall rule and never a rule about the
 // transfer's total duration (D2): a 2 GB upload over a slow link is a
 // working upload, and only a body that has stopped is a broken one.
-func WithUploadStallTimeout(d time.Duration) WSServerOption {
-	return func(s *WSServer) { s.uploads.stall = d }
+func WithTransferStallTimeout(d time.Duration) WSServerOption {
+	return func(s *WSServer) { s.transfers.stall = d }
 }
 
-// WithUploadTicketTTL bounds how long an unclaimed sink ticket lives. Zero
+// WithTransferTicketTTL bounds how long an unclaimed ticket lives, in
+// either direction. Zero
 // is legitimate and means "expire as soon as the mint-side timer can run" —
 // the tests use it to reach the expiry path through the SAME code
 // production takes, rather than by sleeping.
-func WithUploadTicketTTL(d time.Duration) WSServerOption {
+func WithTransferTicketTTL(d time.Duration) WSServerOption {
 	return func(s *WSServer) {
-		s.uploads.ttl = d
-		s.uploads.ttlSet = true
+		s.transfers.ttl = d
+		s.transfers.ttlSet = true
 	}
 }
 
@@ -589,17 +665,17 @@ func WithUploadTicketTTL(d time.Duration) WSServerOption {
 // ("claimed, finished") rather than 409. Retained forever it would fill the
 // bound, so its closing event is its transfer's eviction: a ticket whose
 // transfer is gone names nothing and goes.
-func (u *uploadRegistry) sweepLocked(now time.Time) {
-	for id, rt := range u.transfers {
+func (u *transferRegistry) sweepLocked(now time.Time) {
+	for id, rt := range u.running {
 		rt.mu.Lock()
 		ended, over := rt.endedAt, rt.state != ""
 		rt.mu.Unlock()
-		if over && now.Sub(ended) > uploadDoneRetention {
-			delete(u.transfers, id)
+		if over && now.Sub(ended) > transferDoneRetention {
+			delete(u.running, id)
 		}
 	}
 	for ticket, e := range u.tickets {
-		if _, ok := u.transfers[e.transferID]; !ok {
+		if _, ok := u.running[e.transferID]; !ok {
 			if e.timer != nil {
 				e.timer.Stop()
 			}
@@ -610,33 +686,33 @@ func (u *uploadRegistry) sweepLocked(now time.Time) {
 
 // add registers a running transfer. It refuses once the map is full rather
 // than growing without limit.
-func (u *uploadRegistry) add(rt *runningTransfer) error {
+func (u *transferRegistry) add(rt *runningTransfer) error {
 	now := u.clock()
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.transfers == nil {
-		u.transfers = make(map[string]*runningTransfer)
+	if u.running == nil {
+		u.running = make(map[string]*runningTransfer)
 	}
 	u.sweepLocked(now)
-	if len(u.transfers) >= maxUploadTransfers {
+	if len(u.running) >= maxTransfers {
 		return errors.New("too many transfers in flight")
 	}
-	u.transfers[rt.id] = rt
+	u.running[rt.id] = rt
 	return nil
 }
 
 // remove drops a transfer that never started — the mint failed after it was
 // registered, so nothing will ever settle it.
-func (u *uploadRegistry) remove(transferID string) {
+func (u *transferRegistry) remove(transferID string) {
 	u.mu.Lock()
-	delete(u.transfers, transferID)
+	delete(u.running, transferID)
 	u.mu.Unlock()
 }
 
-func (u *uploadRegistry) get(transferID string) *runningTransfer {
+func (u *transferRegistry) get(transferID string) *runningTransfer {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.transfers[transferID]
+	return u.running[transferID]
 }
 
 // mintTicket mints the sink ticket for a transfer and arms its expiry.
@@ -646,7 +722,7 @@ func (u *uploadRegistry) get(transferID string) *runningTransfer {
 // in that order and at that moment. So a POST that arrives afterwards finds
 // an unknown ticket and is told 410 — which never has to mean "cancel what
 // this names", because expiry already did.
-func (u *uploadRegistry) mintTicket(rt *runningTransfer) (string, error) {
+func (u *transferRegistry) mintTicket(rt *runningTransfer) (string, error) {
 	var buf [32]byte // 256 bits, comfortably past D4's 128-bit floor
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("upload ticket: %w", err)
@@ -656,14 +732,14 @@ func (u *uploadRegistry) mintTicket(rt *runningTransfer) (string, error) {
 
 	u.mu.Lock()
 	if u.tickets == nil {
-		u.tickets = make(map[string]*uploadTicket)
+		u.tickets = make(map[string]*transferTicket)
 	}
 	u.sweepLocked(now)
-	if len(u.tickets) >= maxUploadTickets {
+	if len(u.tickets) >= maxTransferTickets {
 		u.mu.Unlock()
 		return "", errors.New("too many upload tickets outstanding")
 	}
-	u.tickets[ticket] = &uploadTicket{transferID: rt.id, size: rt.upload.Size, createdAt: now}
+	u.tickets[ticket] = &transferTicket{transferID: rt.id, dir: rt.dir, size: rt.size(), createdAt: now}
 	u.mu.Unlock()
 
 	// Armed outside the lock and recorded back under it, because a zero
@@ -683,7 +759,7 @@ func (u *uploadRegistry) mintTicket(rt *runningTransfer) (string, error) {
 // expire runs on the mint-side timer. An unclaimed ticket is forgotten and
 // the transfer it named is cancelled; a claimed one is left alone, because
 // the claim is the event the TTL closes at (§5.4).
-func (u *uploadRegistry) expire(ticket string) {
+func (u *transferRegistry) expire(ticket string) {
 	u.mu.Lock()
 	e, ok := u.tickets[ticket]
 	if !ok || e.claimed {
@@ -691,7 +767,7 @@ func (u *uploadRegistry) expire(ticket string) {
 		return
 	}
 	delete(u.tickets, ticket)
-	rt := u.transfers[e.transferID]
+	rt := u.running[e.transferID]
 	u.mu.Unlock()
 	if rt != nil {
 		rt.stop()
@@ -702,15 +778,15 @@ func (u *uploadRegistry) expire(ticket string) {
 // the last two are the Content-Length rule, which is checked in the same
 // critical section so that "before the body is read" is not a window
 // somebody has to keep closed but a property of the lock.
-type uploadClaim int
+type transferClaim int
 
 const (
-	uploadClaimUnknown      uploadClaim = iota // never minted, or already forgotten → 410
-	uploadClaimOK                              // minted, unclaimed → the body is read
-	uploadClaimRunning                         // claimed, transfer still running → 409
-	uploadClaimFinished                        // claimed, transfer finished → 410
-	uploadClaimNoLength                        // no Content-Length → 400
-	uploadClaimSizeMismatch                    // Content-Length disagrees with the declared size → 400
+	transferClaimUnknown      transferClaim = iota // never minted, or already forgotten → 410
+	transferClaimOK                                // minted, unclaimed → the body is read
+	transferClaimRunning                           // claimed, transfer still running → 409
+	transferClaimFinished                          // claimed, transfer finished → 410
+	transferClaimNoLength                          // no Content-Length → 400
+	transferClaimSizeMismatch                      // Content-Length disagrees with the declared size → 400
 )
 
 // claim resolves a ticket to its transfer and marks it taken.
@@ -722,44 +798,67 @@ const (
 //
 // The claim is the enforceable event the TTL closes at (§5.4), so a
 // successful one also disarms the mint-side timer.
-func (u *uploadRegistry) claim(ticket string, contentLength int64) (*runningTransfer, uploadClaim) {
+func (u *transferRegistry) claim(ticket string, dir transferDir, contentLength int64) (*runningTransfer, transferClaim) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	e, ok := u.tickets[ticket]
 	if !ok {
-		return nil, uploadClaimUnknown
+		return nil, transferClaimUnknown
+	}
+	if e.dir != dir {
+		// One map holds both directions' tickets, so a sink ticket
+		// presented at /download/ and a download ticket presented at
+		// /upload/ are expressible and must not be honoured: the first
+		// would hand a caller the bytes of a file it only had permission
+		// to overwrite, and the second would let a caller write into a
+		// transfer that was only ever authorised to read.
+		//
+		// On the wrong route a ticket names nothing, and it is answered
+		// exactly as an unknown one is — the ticket is NOT claimed and NOT
+		// retired, so a misrouted request cannot burn somebody's one-shot
+		// credential. It is checked FIRST, before claimed and finished,
+		// so the answer is no oracle for whether a live ticket happens to
+		// be the other direction's.
+		return nil, transferClaimUnknown
 	}
 	if e.finished {
-		return nil, uploadClaimFinished
+		return nil, transferClaimFinished
 	}
 	if e.claimed {
-		return nil, uploadClaimRunning
+		return nil, transferClaimRunning
 	}
-	rt := u.transfers[e.transferID]
+	rt := u.running[e.transferID]
 	if rt == nil {
 		// The ticket outlived the transfer it named, so it names nothing —
 		// which is exactly "unknown", not a fifth state.
 		delete(u.tickets, ticket)
-		return nil, uploadClaimUnknown
+		return nil, transferClaimUnknown
 	}
-	if contentLength < 0 {
-		return nil, uploadClaimNoLength
-	}
-	if contentLength != e.size {
-		return nil, uploadClaimSizeMismatch
+	// The Content-Length rules are the UPLOAD's, because they are about a
+	// body the claimant is sending. A download's fetch carries no body and
+	// declares no length; the length in that direction is the server's to
+	// state, from the size measured on the pinned handle, and the claimant
+	// has nothing to agree or disagree with.
+	if rt.dir == dirUpload {
+		if contentLength < 0 {
+			return nil, transferClaimNoLength
+		}
+		if contentLength != e.size {
+			return nil, transferClaimSizeMismatch
+		}
 	}
 	e.claimed = true
 	if e.timer != nil {
 		e.timer.Stop()
 	}
-	return rt, uploadClaimOK
+	return rt, transferClaimOK
 }
 
 // retireTicket marks a ticket's transfer over. An unclaimed ticket is
 // forgotten outright — nothing may claim a transfer that has ended — and a
 // claimed one is kept as "finished" so a second POST is told 410 rather
 // than 409.
-func (u *uploadRegistry) retireTicket(ticket string) {
+func (u *transferRegistry) retireTicket(ticket string) {
 	if ticket == "" {
 		return
 	}
@@ -780,7 +879,7 @@ func (u *uploadRegistry) retireTicket(ticket string) {
 }
 
 // cancel stops one transfer by id and reports whether it existed.
-func (u *uploadRegistry) cancel(transferID string) bool {
+func (u *transferRegistry) cancel(transferID string) bool {
 	rt := u.get(transferID)
 	if rt == nil {
 		return false
@@ -790,11 +889,11 @@ func (u *uploadRegistry) cancel(transferID string) bool {
 }
 
 // pick returns the transfers matching a predicate.
-func (u *uploadRegistry) pick(match func(*runningTransfer) bool) []*runningTransfer {
+func (u *transferRegistry) pick(match func(*runningTransfer) bool) []*runningTransfer {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	var out []*runningTransfer
-	for _, rt := range u.transfers {
+	for _, rt := range u.running {
 		if match(rt) {
 			out = append(out, rt)
 		}
@@ -804,19 +903,34 @@ func (u *uploadRegistry) pick(match func(*runningTransfer) bool) []*runningTrans
 
 // ── retained terminal outcomes ───────────────────────────────────────────
 
+// retainedDone is one terminal outcome waiting for somebody to attach: the
+// notification's method name and its already-marshalled params.
+//
+// It holds the marshalled form rather than a typed struct because the two
+// directions send different shapes on different methods, and the retention
+// rule is about neither — it is "the outcome of a transfer must not be lost
+// because nobody was listening when it ended", which is the same sentence
+// for both. Keeping one queue per session, in the order things happened,
+// is also what makes a reconnect replay them in that order rather than in
+// two independent orders that interleave arbitrarily.
+type retainedDone struct {
+	method string
+	params json.RawMessage
+}
+
 // retainDone keeps one files.uploadDone for a session that has nothing
 // attached. It reports whether the bound evicted an older entry, so the
 // caller can say so out loud — a retention that silently forgets is a
 // retention nobody can trust.
-func (u *uploadRegistry) retainDone(sid session.ID, p filesUploadDoneParams) (evicted bool) {
+func (u *transferRegistry) retainDone(sid session.ID, p retainedDone) (evicted bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.retained == nil {
-		u.retained = make(map[session.ID][]filesUploadDoneParams)
+		u.retained = make(map[session.ID][]retainedDone)
 	}
 	q := append(u.retained[sid], p)
-	if len(q) > maxRetainedUploadDone {
-		q = q[len(q)-maxRetainedUploadDone:]
+	if len(q) > maxRetainedDone {
+		q = q[len(q)-maxRetainedDone:]
 		evicted = true
 	}
 	u.retained[sid] = q
@@ -827,12 +941,12 @@ func (u *uploadRegistry) retainDone(sid session.ID, p filesUploadDoneParams) (ev
 // delivers them in the order they happened. It is removed by the take, and
 // pushBackDone is what returns it when the delivery failed — "cleared on
 // delivery" is a claim only if nothing is cleared before one.
-func (u *uploadRegistry) popDone(sid session.ID) (filesUploadDoneParams, bool) {
+func (u *transferRegistry) popDone(sid session.ID) (retainedDone, bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	q := u.retained[sid]
 	if len(q) == 0 {
-		return filesUploadDoneParams{}, false
+		return retainedDone{}, false
 	}
 	p := q[0]
 	if len(q) == 1 {
@@ -845,26 +959,26 @@ func (u *uploadRegistry) popDone(sid session.ID) (filesUploadDoneParams, bool) {
 
 // pushBackDone returns an outcome to the FRONT of the session's queue after
 // a delivery that failed, keeping the order the transfers finished in.
-func (u *uploadRegistry) pushBackDone(sid session.ID, p filesUploadDoneParams) {
+func (u *transferRegistry) pushBackDone(sid session.ID, p retainedDone) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.retained == nil {
-		u.retained = make(map[session.ID][]filesUploadDoneParams)
+		u.retained = make(map[session.ID][]retainedDone)
 	}
-	u.retained[sid] = append([]filesUploadDoneParams{p}, u.retained[sid]...)
+	u.retained[sid] = append([]retainedDone{p}, u.retained[sid]...)
 }
 
 // forgetDone drops a session's retained outcomes. Called from the session
 // teardown path: once the session is gone nothing can ever attach to it, so
 // keeping its outcomes is a leak and not a courtesy.
-func (u *uploadRegistry) forgetDone(sid session.ID) {
+func (u *transferRegistry) forgetDone(sid session.ID) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	delete(u.retained, sid)
 }
 
 // forgetAllDone drops every session's retained outcomes — server shutdown.
-func (u *uploadRegistry) forgetAllDone() {
+func (u *transferRegistry) forgetAllDone() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.retained = nil
@@ -872,8 +986,8 @@ func (u *uploadRegistry) forgetAllDone() {
 
 // ── the D8 teardown path ─────────────────────────────────────────────────
 
-// cancelUploadsFor cancels a set of transfers and waits, BOUNDED, for them
-// to unwind. It returns whether every one of them ended within the bound.
+// cancelTransfersFor cancels a set of transfers — uploads and downloads
+// alike — and waits, BOUNDED, for them to unwind. It returns whether every one of them ended within the bound.
 //
 // This is D8, and the bound is only honest because of what a running
 // transfer does NOT hold. It holds the binding's sink and no use-guard:
@@ -887,14 +1001,14 @@ func (u *uploadRegistry) forgetAllDone() {
 // A transfer that outlives the bound is not abandoned to write into a
 // closed binding, either: closing the provider closes the lease under the
 // sink, which unblocks the call in flight and fails every later one.
-func (s *WSServer) cancelUploadsFor(transfers []*runningTransfer) bool {
+func (s *WSServer) cancelTransfersFor(transfers []*runningTransfer) bool {
 	if len(transfers) == 0 {
 		return true
 	}
 	for _, rt := range transfers {
 		rt.stop()
 	}
-	bound := s.uploads.unwindTimeout()
+	bound := s.transfers.unwindTimeout()
 	deadline := time.NewTimer(bound)
 	defer deadline.Stop()
 	for _, rt := range transfers {
@@ -909,28 +1023,28 @@ func (s *WSServer) cancelUploadsFor(transfers []*runningTransfer) bool {
 	return true
 }
 
-// cancelBindingUploads cancels every transfer of one binding — files.close.
-func (s *WSServer) cancelBindingUploads(bid string) {
-	s.cancelUploadsFor(s.uploads.pick(func(rt *runningTransfer) bool { return rt.bindingID == bid }))
+// cancelBindingTransfers cancels every transfer of one binding — files.close.
+func (s *WSServer) cancelBindingTransfers(bid string) {
+	s.cancelTransfersFor(s.transfers.pick(func(rt *runningTransfer) bool { return rt.bindingID == bid }))
 }
 
-// cancelSessionUploads cancels every transfer of one session — the terminal
+// cancelSessionTransfers cancels every transfer of one session — the terminal
 // closing, which closes its bindings (spec §5.1).
 // The retained outcomes go with the session, and AFTER the cancels: a
 // transfer cancelled here settles and retains its "cancelled" outcome on
 // the way out, and keeping that for a session nobody can attach to again
 // would be a map entry with no reader.
-func (s *WSServer) cancelSessionUploads(sid session.ID) {
-	s.cancelUploadsFor(s.uploads.pick(func(rt *runningTransfer) bool { return rt.sessionID == sid }))
-	s.uploads.forgetDone(sid)
+func (s *WSServer) cancelSessionTransfers(sid session.ID) {
+	s.cancelTransfersFor(s.transfers.pick(func(rt *runningTransfer) bool { return rt.sessionID == sid }))
+	s.transfers.forgetDone(sid)
 }
 
-// cancelAllUploads cancels every transfer — server shutdown. Without it a
+// cancelAllTransfers cancels every transfer — server shutdown. Without it a
 // transfer outlives the server that started it, holding a pooled SSH
 // reference nothing will ever release.
-func (s *WSServer) cancelAllUploads() {
-	s.cancelUploadsFor(s.uploads.pick(func(*runningTransfer) bool { return true }))
-	s.uploads.forgetAllDone()
+func (s *WSServer) cancelAllTransfers() {
+	s.cancelTransfersFor(s.transfers.pick(func(*runningTransfer) bool { return true }))
+	s.transfers.forgetAllDone()
 }
 
 // ── running one transfer ─────────────────────────────────────────────────
@@ -967,9 +1081,9 @@ func (s *WSServer) bindingSession(bid string) (session.ID, bool) {
 	return b.sessionID, true
 }
 
-func (s *WSServer) uploadFor(transferID string) *runningTransfer { return s.uploads.get(transferID) }
+func (s *WSServer) uploadFor(transferID string) *runningTransfer { return s.transfers.get(transferID) }
 
-func (s *WSServer) cancelUpload(transferID string) bool { return s.uploads.cancel(transferID) }
+func (s *WSServer) cancelUpload(transferID string) bool { return s.transfers.cancel(transferID) }
 
 func (s *WSServer) uploadURL(ticket string) string { return uploadRoutePrefix + ticket }
 
@@ -983,19 +1097,29 @@ func (s *WSServer) uploadURL(ticket string) string { return uploadRoutePrefix + 
 // goroutine starts — which the goroutine then observes as a cancelled
 // context, which is correct.
 func (s *WSServer) startUpload(rt *runningTransfer, needsBody bool, sink transfer.Sink) error {
-	if err := s.uploads.add(rt); err != nil {
+	if err := s.registerAndMint(rt, needsBody); err != nil {
 		return err
 	}
-	if needsBody {
-		ticket, err := s.uploads.mintTicket(rt)
-		if err != nil {
-			s.uploads.remove(rt.id)
-			return err
-		}
-		rt.ticket = ticket
-	}
-	go s.emitUploadProgress(rt)
+	go s.emitTransferProgress(rt)
 	go s.runUpload(rt, sink)
+	return nil
+}
+
+// registerAndMint is the register-then-mint order both directions need, in
+// one place because the race it fixes is one race and not two.
+func (s *WSServer) registerAndMint(rt *runningTransfer, needsTicket bool) error {
+	if err := s.transfers.add(rt); err != nil {
+		return err
+	}
+	if !needsTicket {
+		return nil
+	}
+	ticket, err := s.transfers.mintTicket(rt)
+	if err != nil {
+		s.transfers.remove(rt.id)
+		return err
+	}
+	rt.ticket = ticket
 	return nil
 }
 
@@ -1016,8 +1140,8 @@ func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 		select {
 		case body = <-rt.body:
 		case <-rt.ctx.Done():
-			rt.finish(uploadStateCancelled, transfer.Outcome{}, rt.ctx.Err(), s.uploads.clock())
-			s.uploads.retireTicket(rt.ticket)
+			rt.finish(uploadStateCancelled, transfer.Outcome{}, rt.ctx.Err(), s.transfers.clock())
+			s.transfers.retireTicket(rt.ticket)
 			s.settleUpload(rt)
 			return
 		}
@@ -1027,8 +1151,8 @@ func (s *WSServer) runUpload(rt *runningTransfer, sink transfer.Sink) {
 	if body != nil {
 		_ = body.Close()
 	}
-	rt.finish(uploadStateOf(out, err, rt.ctx.Err()), out, err, s.uploads.clock())
-	s.uploads.retireTicket(rt.ticket)
+	rt.finish(uploadStateOf(out, err, rt.ctx.Err()), out, err, s.transfers.clock())
+	s.transfers.retireTicket(rt.ticket)
 	// Before the deferred close(rt.done), on every path: anything that
 	// observes a transfer as over — the POST handler, the teardown wait, a
 	// test — must find the terminal outcome already delivered or already
@@ -1071,7 +1195,8 @@ func uploadStateOf(out transfer.Outcome, err, ctxErr error) string {
 // a bar that jumps, and a lost uploadDone leaves the UI saying "uploading"
 // for the rest of the session about a transfer that ended ten minutes ago.
 
-// emitUploadProgress is one transfer's progress emitter: the goroutine that
+// emitTransferProgress is one transfer's progress emitter, in either
+// direction: the goroutine that
 // turns the mailbox rt.progress pokes into notifications. It exists so that
 // the sink's copy loop never marshals, never enqueues and never waits — and
 // so that at most ONE progress notification per transfer is outstanding at
@@ -1083,18 +1208,18 @@ func uploadStateOf(out transfer.Outcome, err, ctxErr error) string {
 // §5.5 derives in-flight state from files.upload's result and
 // files.uploadDone and never from having seen a progress notification, so a
 // late indicator cannot contradict a terminal outcome.
-func (s *WSServer) emitUploadProgress(rt *runningTransfer) {
+func (s *WSServer) emitTransferProgress(rt *runningTransfer) {
 	for {
 		select {
 		case <-rt.done:
 			return
 		case <-rt.progressWake:
-			s.notifyUploadProgress(rt)
+			s.notifyTransferProgress(rt)
 		}
 	}
 }
 
-// notifyUploadProgress sends one progress frame to whoever is attached to
+// notifyTransferProgress sends one progress frame to whoever is attached to
 // the transfer's session NOW.
 //
 // Everything about it is droppable, and each drop is a decision rather than
@@ -1103,7 +1228,7 @@ func (s *WSServer) emitUploadProgress(rt *runningTransfer) {
 // full of PTY output, which is the traffic that must win). Nothing is
 // retained, nothing is retried and nothing is logged — an indicator that
 // announced its own losses would be a ledger with extra steps.
-func (s *WSServer) notifyUploadProgress(rt *runningTransfer) {
+func (s *WSServer) notifyTransferProgress(rt *runningTransfer) {
 	rx := s.getRx(rt.sessionID)
 	if rx == nil {
 		return
@@ -1113,10 +1238,19 @@ func (s *WSServer) notifyUploadProgress(rt *runningTransfer) {
 		return
 	}
 	_, _, sent, _ := rt.snapshot()
-	_ = wconn.TryNotify("files.uploadProgress", mustMarshal(filesUploadProgressParams{
+	method := "files.uploadProgress"
+	if rt.dir == dirDownload {
+		method = "files.downloadProgress"
+	}
+	// One params SHAPE for both directions, because the question is the
+	// same one — how far has this transfer got — and two schemas that said
+	// {transferId, bytes, total} in two files would be two places for the
+	// answer to drift. The METHOD differs because the surfaces that draw
+	// them differ and a renderer must be able to tell which row moved.
+	_ = wconn.TryNotify(method, mustMarshal(filesTransferProgressParams{
 		TransferID: rt.id,
 		Bytes:      sent,
-		Total:      rt.upload.Size,
+		Total:      rt.size(),
 	}))
 }
 
@@ -1152,7 +1286,9 @@ func (s *WSServer) settleUpload(rt *runningTransfer) {
 	if state == uploadStateWritten {
 		s.invalidateUploadDest(rt)
 	}
-	s.deliverUploadDone(rt.sessionID, p)
+	s.deliverTransferDone(rt.sessionID, rt.id, retainedDone{
+		method: "files.uploadDone", params: mustMarshal(p),
+	})
 }
 
 // deliverUploadDone sends the terminal outcome to the session's current
@@ -1165,23 +1301,23 @@ func (s *WSServer) settleUpload(rt *runningTransfer) {
 // longer exists. Nothing can attach to it again, so a retained outcome for
 // it would be a map entry with no possible reader — the same answer
 // emitFilesChanged gives when its rx is nil.
-func (s *WSServer) deliverUploadDone(sid session.ID, p filesUploadDoneParams) {
+func (s *WSServer) deliverTransferDone(sid session.ID, transferID string, done retainedDone) {
 	rx := s.getRx(sid)
 	if rx == nil {
-		s.log.Debug("upload outcome dropped: the session is gone",
-			"transfer_id", p.TransferID, "outcome", p.Outcome)
+		s.log.Debug("transfer outcome dropped: the session is gone",
+			"transfer_id", transferID, "method", done.method)
 		return
 	}
 	if wconn, _ := rx.getSubscriber(); wconn != nil {
-		if err := wconn.TryNotify("files.uploadDone", mustMarshal(p)); err == nil {
+		if err := wconn.TryNotify(done.method, done.params); err == nil {
 			return
 		}
 		// The subscriber's socket is going down; a terminal outcome must
 		// not go down with it.
 	}
-	if s.uploads.retainDone(sid, p) {
-		s.log.Warn("retained upload outcomes overflowed; the oldest was dropped",
-			"session_id", sid, "max", maxRetainedUploadDone)
+	if s.transfers.retainDone(sid, done) {
+		s.log.Warn("retained transfer outcomes overflowed; the oldest was dropped",
+			"session_id", sid, "max", maxRetainedDone)
 	}
 }
 
@@ -1196,12 +1332,12 @@ func (s *WSServer) deliverUploadDone(sid session.ID, p filesUploadDoneParams) {
 // flush, so the notifications resolve to the connection that just arrived.
 func (s *WSServer) flushUploadDone(sid session.ID, wconn Responder) {
 	for {
-		p, ok := s.uploads.popDone(sid)
+		p, ok := s.transfers.popDone(sid)
 		if !ok {
 			return
 		}
-		if err := wconn.TryNotify("files.uploadDone", mustMarshal(p)); err != nil {
-			s.uploads.pushBackDone(sid, p)
+		if err := wconn.TryNotify(p.method, p.params); err != nil {
+			s.transfers.pushBackDone(sid, p)
 			return // the socket is dying; whatever remains stays retained
 		}
 	}
@@ -1381,7 +1517,7 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			sourceReader = src.File
 		}
 
-		id, err := newUploadID()
+		id, err := newTransferID()
 		if err != nil {
 			closeSource(sourceReader)
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
@@ -1392,7 +1528,7 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 		// request's context. Owner: the transfer, bounded by its SESSION
 		// exactly as its binding is (spec §5.1), never by the WebSocket,
 		// which an AD-9 reconnect replaces underneath a running upload.
-		// Closing event: cancelUploadsFor, reached from files.close, from
+		// Closing event: cancelTransfersFor, reached from files.close, from
 		// session teardown, from files.uploadCancel, from the ticket's
 		// mint-side expiry timer and from server shutdown.
 		tctx, cancel := context.WithCancel(context.Background())
@@ -1465,7 +1601,12 @@ func (h uploadHandlers) handleUploadCancel(ctx context.Context, state *connState
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
-	if rt := h.machine.uploadFor(params.TransferID); rt != nil && state.has(rt.sessionID) {
+	// The direction is checked as well as the ownership. Upload and
+	// download ids are the same shape and live in one registry, so naming
+	// a download here is expressible; honouring it would stop a transfer
+	// on a surface the person was not looking at, and they would watch the
+	// wrong row stop.
+	if rt := h.machine.uploadFor(params.TransferID); rt != nil && rt.dir == dirUpload && state.has(rt.sessionID) {
 		h.machine.cancelUpload(params.TransferID)
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
@@ -1509,11 +1650,11 @@ func closeSource(r io.ReadCloser) {
 	}
 }
 
-// newUploadID mints a transfer id — the same 16-byte crypto/rand shape as
+// newTransferID mints a transfer id, in either direction — the same 16-byte crypto/rand shape as
 // every other backend-minted id on this surface. Unlike the sink ticket it
 // is not a credential: cancelling by it still re-checks that the caller
 // owns the transfer's session.
-func newUploadID() (string, error) {
+func newTransferID() (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("upload id: %w", err)
@@ -1655,7 +1796,7 @@ func (c *uploadGuardConn) scan(b []byte) {
 				}
 				continue
 			}
-			if !uploadRequestLine(c.line) {
+			if !guardedRequestLine(c.line) {
 				c.phase = uploadGuardOff
 				c.releaseLocked()
 				return
@@ -1754,11 +1895,25 @@ func uploadOverran(r *http.Request) bool {
 	return g.bytesRead() > end+r.ContentLength
 }
 
-// uploadRequestLine reports whether a request line names this route. The
-// method is part of the answer: the mux answers 405 for anything else, and a
-// GET of an upload URL has no header block worth bounding.
-func uploadRequestLine(line []byte) bool {
-	return bytes.HasPrefix(line, []byte(http.MethodPost+" "+uploadRoutePrefix))
+// guardedRequestLine reports whether a request line names one of the two
+// byte routes, which are the two whose header block this guard bounds.
+//
+// The method is part of the answer: the mux answers 405 for anything else,
+// so a request line naming the right path with the wrong method has no
+// header block worth bounding.
+//
+// The download route is here for the same reason the upload route is, and
+// the reason is about the header block rather than about the body. Go's
+// server parses the COMPLETE header block before dispatching, and the
+// shared http.Server keeps ReadHeaderTimeout at zero because /session is a
+// long-lived upgrade — so a client that opens a connection and dribbles
+// header bytes for ever holds a connection that nothing above this can
+// bound. That is true of a GET exactly as it is of a POST; only the body
+// half differs, and the body half of a download is the RESPONSE, which the
+// download handler bounds with its own per-write deadline.
+func guardedRequestLine(line []byte) bool {
+	return bytes.HasPrefix(line, []byte(http.MethodPost+" "+uploadRoutePrefix)) ||
+		bytes.HasPrefix(line, []byte(http.MethodGet+" "+downloadRoutePrefix))
 }
 
 // ── POST /upload/{ticket} — the data half (spec §5.4) ────────────────────
@@ -1880,10 +2035,16 @@ const (
 	uploadAllowHeaders = "Content-Type"
 )
 
-// allowUploadOrigin applies the part of the CORS reply that belongs on every
-// answer, and reports whether the request may proceed. It writes the refusal
-// itself and returns false when it may not.
-func (s *WSServer) allowUploadOrigin(w http.ResponseWriter, r *http.Request) bool {
+// allowTransferOrigin applies the part of the CORS reply that belongs on
+// every answer, and reports whether the request may proceed. It writes the
+// refusal itself and returns false when it may not.
+//
+// It serves BOTH byte routes. Two origin matchers that must agree is a
+// defect with a delay fuse — the comment above says so about /session and
+// this route, and it is no less true of this route and the download's — so
+// there is one function, it asks the one OriginPolicy, and the route it is
+// serving reaches it as a parameter for the log line and for nothing else.
+func (s *WSServer) allowTransferOrigin(w http.ResponseWriter, r *http.Request, route string) bool {
 	// Unconditionally, and before the decision: Vary describes what the
 	// answer depends on, which is as true of the refusal as of the reply.
 	w.Header().Set("Vary", "Origin")
@@ -1902,7 +2063,7 @@ func (s *WSServer) allowUploadOrigin(w http.ResponseWriter, r *http.Request) boo
 			"origin", origin,
 			"host", r.Host,
 			"method", r.Method,
-			"route", uploadRoutePrefix)
+			"route", route)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
@@ -1929,7 +2090,7 @@ func (s *WSServer) handleUploadPreflight(w http.ResponseWriter, r *http.Request)
 	// it keeps "an upload is always the FIRST request on its connection"
 	// true, which is the premise the guard's byte offsets are read against.
 	w.Header().Set("Connection", "close")
-	if !s.allowUploadOrigin(w, r) {
+	if !s.allowTransferOrigin(w, r, uploadRoutePrefix) {
 		return
 	}
 	w.Header().Set("Access-Control-Allow-Methods", uploadAllowMethods)
@@ -1961,16 +2122,16 @@ func (s *WSServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Before the ticket is read out of the path, let alone claimed. An
 	// origin we refuse must not learn whether a well-formed guess names a
 	// live transfer, and must not consume one.
-	if !s.allowUploadOrigin(w, r) {
+	if !s.allowTransferOrigin(w, r, uploadRoutePrefix) {
 		return
 	}
 
 	rc := http.NewResponseController(w)
 	// The route's own deadlines: the shared server has none for this (see
-	// uploadHeaderTimeout). Cleared before returning so the connection can
+	// transferHeaderTimeout). Cleared before returning so the connection can
 	// be reused — a deadline left in the past would kill keep-alive.
 	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
-	if err := rc.SetReadDeadline(time.Now().Add(s.uploads.headerDeadline())); err != nil {
+	if err := rc.SetReadDeadline(time.Now().Add(s.transfers.headerDeadline())); err != nil {
 		// Sink.Put is explicit: a reader that cannot be unblocked at all
 		// must not be handed to it. Without a settable deadline this body
 		// is exactly that, so it is refused rather than started.
@@ -1988,35 +2149,35 @@ func (s *WSServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rt, claim := s.uploads.claim(ticket, r.ContentLength)
+	rt, claim := s.transfers.claim(ticket, dirUpload, r.ContentLength)
 	switch claim {
-	case uploadClaimUnknown, uploadClaimFinished:
+	case transferClaimUnknown, transferClaimFinished:
 		// §5.4: both are 410, and 410 means only "this names nothing".
 		// Expiry is not one of these states — the mint-side timer already
 		// cancelled the transfer at expiry — so nothing here cancels
 		// anything.
 		http.Error(w, "gone", http.StatusGone)
 		return
-	case uploadClaimRunning:
+	case transferClaimRunning:
 		// The first claimant keeps its transfer, untouched.
 		http.Error(w, "this upload already has a body", http.StatusConflict)
 		return
-	case uploadClaimNoLength:
+	case transferClaimNoLength:
 		http.Error(w, "Content-Length is required", http.StatusBadRequest)
 		return
-	case uploadClaimSizeMismatch:
+	case transferClaimSizeMismatch:
 		// Refused BEFORE the body is read, which is also what makes a body
 		// longer than the declared size a refusal rather than a partial
 		// write: the excess is never accepted onto the wire at all.
 		http.Error(w, "Content-Length does not match the declared size", http.StatusBadRequest)
 		return
-	case uploadClaimOK:
+	case transferClaimOK:
 	}
 
 	body := &uploadBody{
 		r:       r.Body,
 		setRead: rc.SetReadDeadline,
-		stall:   s.uploads.stallTimeout(),
+		stall:   s.transfers.stallTimeout(),
 		overran: func() bool { return uploadOverran(r) },
 	}
 	if !rt.attach(body) {

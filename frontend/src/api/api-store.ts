@@ -17,9 +17,18 @@
 //    gone out, so sending would put the OLD request on the wire under the new
 //    request's name.
 //
-// 2. A FAILED SEND IS A RUN, NOT A DISAPPEARANCE. Refused connection, TLS
-//    error, a dead handle — each becomes a row in the list saying why. A run
-//    that vanishes on failure teaches that nothing happened.
+// 2. A RUN EXISTS FROM THE MOMENT SEND IS PRESSED, and it is FILLED IN when
+//    the exchange settles rather than replaced. The row used to be built
+//    from the RESULT, so it could not exist before the answer did: there was
+//    nothing on screen while a request was in flight, nothing to name a
+//    running exchange by, and a failure was not a run at all — it arrived as
+//    a JSON-RPC error. Now the same row (the same id) is appended pending
+//    and settled in place, so a person watches one thing happen instead of
+//    watching nothing and then seeing something appear.
+//
+//    A FAILED SEND IS STILL A RUN, and now it is a run with the request text,
+//    the route, how far it got and which phase it stopped at — the same
+//    detail an answered run gets, minus what never came back.
 //
 // 3. ONE LIST OF COLLECTIONS, WHICHEVER DOOR THE FOLDER CAME THROUGH.
 //    `api.collections.open` answers a handle plus a collection, and so does
@@ -40,13 +49,18 @@ import {
   adoptCreatedCollection,
   adoptImportedRequest,
   adoptOpenedCollection,
+  type ApiCertificate,
   type ApiEnvironment,
   type ApiEnvironmentRef,
+  type ApiFailure,
   type ApiImportNote,
   type ApiOpenCollection,
+  type ApiRaw,
   type ApiRequest,
   type ApiResponse,
+  type ApiSendResult,
   type ApiSentRoute,
+  type ApiTimings,
 } from './api-model'
 import { slugify } from './api-paths'
 import { foldQueryIntoParams } from './api-url'
@@ -58,9 +72,36 @@ import type { Unsupported as PostmanNote } from '../generated/api.import.postman
  *  looks at one at a time. */
 export type ApiRunView = 'body' | 'headers' | 'raw'
 
-/** One exchange, as the list holds it. Exactly one of `response` and `error`
- *  is set: an exchange either came back or did not, and a row that could
- *  hold both would have to decide which one to believe. */
+/**
+ * HOW A RUN ENDED, or that it has not.
+ *
+ * The wire's three plus two only this side can have, spelt as that union so
+ * an outcome added to the schema arrives here rather than being restated.
+ *
+ * `pending` is the one the backend
+ * cannot report, because it is true exactly while there is no answer to
+ * report anything with. It is the state this whole change exists to make
+ * representable — before it, a run and its answer were the same object, so
+ * "in flight" had nowhere to live and the only signal was a disabled button.
+ *
+ * `refused` is the other one the wire does not send, and it is a different
+ * fact from `failed`: the method REFUSED the ask — an unknown handle, an
+ * auth variable nothing can resolve — so no exchange was ever attempted and
+ * there is no request text, no route and no phase. A run that showed a
+ * refusal as a failed exchange would be claiming an attempt that never
+ * happened.
+ */
+type ApiRunOutcome = ApiSendResult['outcome'] | 'pending' | 'refused'
+
+/**
+ * One exchange, as the list holds it — from the moment Send is pressed.
+ *
+ * The fields are filled in as facts arrive: a pending run has the method,
+ * the URL and the environment it was sent under, and everything else is null
+ * or empty until the exchange settles. The row is never replaced, so its id
+ * is stable from the first render to the last and nothing renumbers under a
+ * person who is reading it.
+ */
 export interface ApiRun {
   /**
    * WHICH REQUEST this run belongs to — the collection handle and the path
@@ -75,33 +116,67 @@ export interface ApiRun {
   readonly handle: string
   readonly relPath: string
   readonly id: number
+  /**
+   * The name this surface gave the exchange, which is what Stop names.
+   *
+   * It is ours rather than the JSON-RPC id: the dispatcher mints one per
+   * call and never hands it to the caller, so a button that wanted to name a
+   * request would have needed a second addressing scheme over the same thing
+   * (api-client.ts). It stays on the row after the run settles, because the
+   * row is the record of what happened and the token is part of it.
+   */
+  readonly token: string
   /** The method and URL as the FORM had them when Send was pressed — what
    *  the person asked for. Kept on the run so scrolling back through twenty
-   *  of them does not require remembering what the form held at the time.
-   *
-   *  The REQUEST itself is deliberately not kept. The raw view draws the
-   *  request from `response.raw.request` — the backend's own account of what
-   *  it put on the socket, with the spans it placed (§11.2) — so a copy of
-   *  the model here would be a second, unread answer to "what was sent", and
-   *  a field written by two call sites and read by none is the shape this
-   *  repo has shipped before. */
+   *  of them does not require remembering what the form held at the time. */
   readonly method: string
   readonly url: string
+  /** How it ended, or that it has not yet. */
+  readonly outcome: ApiRunOutcome
   /** The NAME of the environment this exchange went out under, in the
    *  BACKEND's words — read off the send result rather than off what the
    *  form was pointed at, because the renderer names an environment by its
-   *  path and the name lives inside the file. '' is a send that named none.
+   *  path and the name lives inside the file. '' is a send that named none,
+   *  and '' is also a run that has not come back yet: nothing has said which
+   *  record answered, and the panel's own choice is not written here
+   *  instead — that would be the guess this field exists to avoid.
    *
    *  A run recording what the renderer BELIEVED it asked for would be
    *  `vault.status.defaultProvider` in reverse: a value one side writes and
-   *  the other never reads back. It is on the run rather than on the panel
-   *  because the panel's picker says what the NEXT send will do, and a
-   *  scrollback of twenty runs is asking what a past one did. */
+   *  the other never reads back. */
   readonly environment: string
   /** How it went out (§6.5) — the backend's account, never the panel's. */
   readonly route: ApiSentRoute
+  /**
+   * WHAT WENT OUT, segmented — present whatever the outcome, because the
+   * sender composes it before it dials.
+   *
+   * It is null only while the run is pending and on a run that was refused
+   * before it became an exchange. Before this change it was reachable only
+   * through `response`, so the runs that most needed it — the ones that
+   * never got a response — were exactly the ones that did not have it.
+   */
+  readonly request: ApiRaw | null
+  /** What answered the dial, '' when nothing did or nothing has yet. */
+  readonly remoteAddr: string
+  /** The phases as far as the attempt got, or null while pending. */
+  readonly timings: ApiTimings | null
+  /** The chain the server presented. Never null once the run has settled. */
+  readonly certificates: readonly ApiCertificate[]
+  /** What came back — null unless the outcome is `answered`. */
   readonly response: ApiResponse | null
-  readonly error: string | null
+  /** Why it ended without an answer — null while pending, on an answered
+   *  run, and on a refusal, which never became an exchange. */
+  readonly failure: ApiFailure | null
+  /** Why the method refused the ask, for the one outcome that is not an
+   *  exchange at all. '' otherwise. */
+  readonly error: string
+  /** The renderer's own clock at the moment Send was pressed, in
+   *  milliseconds. It is what the pending row counts up from, and it is
+   *  CLIENT-side deliberately: the backend reports timings for an exchange
+   *  that has ended, and this is the one number that exists while it has
+   *  not. */
+  readonly startedAt: number
   readonly view: ApiRunView
 }
 
@@ -148,7 +223,13 @@ export interface ApiStore {
    *  release. */
   error(): string
   loading(): boolean
-  sending(): boolean
+  /** The run of the OPEN request that is still in flight, or null.
+   *
+   *  A run rather than a boolean, because the surface needs the token to
+   *  stop it and the row to point at. It answers about the open request
+   *  only: a send left running in another request is that request's business
+   *  and its Stop lives on its own line. */
+  pending(): ApiRun | null
 
   /** The backend's reported refresh mode for the collection watch set, or
    *  null until the first `files.watch` answers — and for a build that
@@ -234,6 +315,17 @@ export interface ApiStore {
    *  states here rather than one. */
   setEnvironment(relPath: string): void
   send(): Promise<void>
+  /**
+   * Stop the run of the open request that is in flight.
+   *
+   * It does NOT settle the row. The stopped exchange reports itself on the
+   * send's own result, which comes back as `stopped` and fills the row the
+   * same way an answer does — so there is one writer of a run's ending and
+   * it is the same one for all three outcomes. A store that also wrote
+   * "stopped" here would be the second account of one exchange, and the two
+   * would disagree the day a stop arrived too late to take effect.
+   */
+  stop(): Promise<void>
   /** Read ONE environment whole, for an ask that is about to edit it. It
    *  answers null when the read failed — the reason is on `error()`, the way
    *  every other failed call reports — because there is nothing to open an
@@ -245,6 +337,26 @@ export interface ApiStore {
   importCurl(line: string): Promise<void>
   importPostman(path: string, dest: string): Promise<void>
   setRunView(id: number, view: ApiRunView): void
+}
+
+/**
+ * A name for one exchange, minted here because the dispatcher's id is not
+ * ours to use (api-client.ts).
+ *
+ * `crypto.randomUUID` where there is one, which is every browser this ships
+ * in and the test runner; the counter is for a context that has none, and it
+ * is per module rather than global time so two tokens minted in the same
+ * millisecond still differ. Collision is what must not happen: the backend
+ * refuses a second send under a token already in flight, and two windows
+ * choosing one name would each be refused by the other's run — except that
+ * the registry is keyed by connection too, so it could not happen anyway.
+ */
+let tokenCounter = 0
+function newToken(): string {
+  const c: Crypto | undefined = globalThis.crypto
+  if (typeof c?.randomUUID === 'function') return c.randomUUID()
+  tokenCounter += 1
+  return `run-${tokenCounter}`
 }
 
 /**
@@ -305,7 +417,6 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const [notes, setNotes] = createSignal<readonly ApiImportNote[]>([])
   const [error, setError] = createSignal('')
   const [loading, setLoading] = createSignal(false)
-  const [sending, setSending] = createSignal(false)
 
   // Run ids come from a counter rather than a clock: `Date.now()` gives two
   // runs fired in the same millisecond one id, and a list keyed by a
@@ -510,6 +621,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     if (target === null) return []
     return runs().filter((r) => r.handle === target.handle && r.relPath === target.relPath)
   }
+
+  /** The in-flight run of the OPEN request, or null. There is at most one:
+   *  the line offers Stop rather than Send while it lasts, so the button
+   *  cannot start a second. */
+  const pending = (): ApiRun | null => visibleRuns().find((r) => r.outcome === 'pending') ?? null
 
   const environments = (): readonly ApiEnvironmentRef[] => environmentsOf(activeCollection())
   const activeEnvironment = (): string => environmentFor(activeCollection())
@@ -827,15 +943,60 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
     const target = untrack(selected)
     if (target === null || request === null) return
-    setSending(true)
-    try {
-      if (dirty()) {
-        // Rule 1: the file is what gets sent, so it holds the draft before
-        // the exchange — and a refused write stops here, never sending the
-        // request the file still contains under the draft's name.
+
+    if (untrack(dirty)) {
+      // Rule 1: the file is what gets sent, so it holds the draft before
+      // the exchange — and a refused write stops here, never sending the
+      // request the file still contains under the draft's name.
+      //
+      // NO RUN IS APPENDED FOR THIS. The write is the step that failed:
+      // nothing went out, so there is no exchange to record — only a reason
+      // the file could not be saved. A row here would say a request was
+      // attempted when none was.
+      try {
         await services.writeRequest(target.handle, target.relPath, request)
         setSaved(request)
+      } catch (err) {
+        setError(message(err))
+        return
       }
+    }
+
+    // THE ROW EXISTS FROM HERE. Everything below fills it in; nothing below
+    // replaces it, so the id a person's eye landed on is the id that carries
+    // the answer.
+    const id = nextRunId++
+    const token = newToken()
+    const sent = request
+    setRuns((prev) => [
+      {
+        id,
+        token,
+        handle: target.handle,
+        relPath: target.relPath,
+        method: sent.method,
+        url: sent.url,
+        outcome: 'pending',
+        // Nothing has said which record answered or how it went out, and
+        // the panel's own choice is not written here instead: that would be
+        // the guess these fields exist to avoid. They are filled from the
+        // result, which is the backend's account.
+        environment: '',
+        route: { kind: 'direct', profileId: '', insecureTls: false },
+        request: null,
+        remoteAddr: '',
+        timings: null,
+        certificates: [],
+        response: null,
+        failure: null,
+        error: '',
+        startedAt: Date.now(),
+        view: 'body',
+      },
+      ...prev,
+    ])
+
+    try {
       // The environment of the collection the FILE is in, not of whatever
       // the tree happens to be pointed at: `activeCollection` follows a
       // request the moment it is opened (openRequest sets it), so the two
@@ -846,60 +1007,61 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         target.handle,
         target.relPath,
         environmentFor(target.handle),
+        token,
       )
-      setRuns((prev) => [
-        {
-          id: nextRunId++,
-          handle: target.handle,
-          relPath: target.relPath,
-          method: request.method,
-          url: request.url,
-          // The backend's account of which record answered, never an echo
-          // of the path we sent.
-          environment: result.environment,
-          // WHERE IT WENT OUT FROM, in the backend's account. The panel knows
-          // which route it configured; what it must show is the one the send
-          // actually took, read off the same record the address came from.
-          route: result.route,
-          response: result.response,
-          error: null,
-          view: 'body',
-        },
-        ...prev,
-      ])
+      fillRun(id, (run) => settledRun(run, result))
       setError('')
     } catch (err) {
+      // NOT AN EXCHANGE. What still arrives as a JSON-RPC error is what
+      // never became one: an unknown handle, a request file that will not
+      // read, an auth variable nothing can resolve. The row says so in its
+      // own outcome rather than borrowing a phase from an attempt that was
+      // never made.
       const reason = message(err)
-      if (dirty()) {
-        // The write is the step that failed: nothing went out, so there is
-        // no exchange to record — only a reason the file could not be saved.
-        setError(reason)
-      } else {
-        setRuns((prev) => [
-          {
-            id: nextRunId++,
-            handle: target.handle,
-            relPath: target.relPath,
-            method: request.method,
-            url: request.url,
-            // Nothing came back, so nothing said which environment answered.
-            // The panel's own choice is not written here instead: a run that
-            // reported an environment the backend never confirmed would be
-            // the guess this field exists to avoid.
-            environment: '',
-            // Nothing went out, so nothing says how it would have. Direct is
-            // the zero value and not a claim: the failure card carries the
-            // reason, which is the only thing true about this run.
-            route: { kind: 'direct', profileId: '', insecureTls: false },
-            response: null,
-            error: reason,
-            view: 'body',
-          },
-          ...prev,
-        ])
-      }
-    } finally {
-      setSending(false)
+      fillRun(id, (run) => ({ ...run, outcome: 'refused', error: reason }))
+    }
+  }
+
+  /** Fill one run in place. The row is found by id and rewritten; a run that
+   *  is no longer in the list — its request was deleted while the exchange
+   *  was in flight — is simply not there, and the answer goes nowhere, which
+   *  is right: the question it belonged to is gone. */
+  const fillRun = (id: number, fill: (run: ApiRun) => ApiRun): void => {
+    setRuns((prev) => prev.map((r) => (r.id === id ? fill(r) : r)))
+  }
+
+  /** What the row becomes when the exchange settles — every field the
+   *  backend's account of the attempt has, whichever way it ended. */
+  const settledRun = (run: ApiRun, result: ApiSendResult): ApiRun => ({
+    ...run,
+    outcome: result.outcome,
+    // The backend's account of which record answered, never an echo of the
+    // path we sent.
+    environment: result.environment,
+    // WHERE IT WENT OUT FROM, in the backend's account. The panel knows
+    // which route it configured; what it must show is the one the send
+    // actually took, read off the same record the address came from.
+    route: result.route,
+    request: result.request,
+    remoteAddr: result.remoteAddr,
+    timings: result.timings,
+    certificates: result.certificates,
+    response: result.response,
+    failure: result.failure,
+  })
+
+  const stop = async (): Promise<void> => {
+    const run = untrack(pending)
+    if (run === null) return
+    try {
+      await services.cancelRequest(run.token)
+    } catch (err) {
+      // The Stop was refused — the exchange settled between the click and
+      // the call, which is a race a person cannot see and does not need to.
+      // The reason goes to the surface's one error line rather than onto the
+      // run: the run's own ending is whatever its send answers, and this
+      // must not overwrite it.
+      setError(message(err))
     }
   }
 
@@ -1016,7 +1178,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     notes,
     error,
     loading,
-    sending,
+    pending,
     watchMode,
     watchDegradedReason,
     watchFailed,
@@ -1037,6 +1199,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     editDraft,
     setEnvironment,
     send,
+    stop,
     readEnvironment,
     writeEnvironment,
     importCurl,

@@ -14,7 +14,6 @@ import type { FilesCloseResult } from '../generated/files.close'
 import type {
   ApiCollection,
   ApiEnvironmentRef,
-  ApiExchange,
   ApiOpenCollection,
   ApiRequest,
   ApiResponse,
@@ -100,19 +99,25 @@ function tiledRaw(parts: readonly RawPart[]): Raw {
 /** A run of ordinary text, or one secret whose bytes the backend replaced. */
 type RawPart = string | { name: string; placeholder: string; damage: string }
 
-/** The design's worked example (§11), with an intact secret on the request
- *  side. `damage` decides which of §11.1's two secret states it is. */
-export function exchangeFixture(damage = ''): ApiExchange {
-  return {
-    request: tiledRaw([
-      'POST /users HTTP/1.1\r\nHost: api.internal\r\nAuthorization: Bearer ',
-      { name: 'API_TOKEN', placeholder: SECRET_PLACEHOLDER, damage },
-      '\r\nContent-Type: application/json\r\n\r\n{"email":"a@b.c","name":"A"}',
-    ]),
-    response: tiledRaw([
-      'HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{"id":"usr_8f21"}',
-    ]),
-  }
+/** The REQUEST side of the design's worked example (§11), with an intact
+ *  secret in it. `damage` decides which of §11.1's two secret states it is.
+ *
+ *  It is its own fixture rather than half a pair because that is where it
+ *  lives on the wire now: the sender composes it before it dials, so it is
+ *  on the exchange and a run that never answered still carries it. */
+export function requestRawFixture(damage = ''): Raw {
+  return tiledRaw([
+    'POST /users HTTP/1.1\r\nHost: api.internal\r\nAuthorization: Bearer ',
+    { name: 'API_TOKEN', placeholder: SECRET_PLACEHOLDER, damage },
+    '\r\nContent-Type: application/json\r\n\r\n{"email":"a@b.c","name":"A"}',
+  ])
+}
+
+/** The RESPONSE side — which exists only when something answered. */
+export function responseRawFixture(): Raw {
+  return tiledRaw([
+    'HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{"id":"usr_8f21"}',
+  ])
 }
 
 /** The folder's CONTENTS, so a test about one field of them names that field
@@ -148,34 +153,77 @@ function responseFixture(over: Partial<ApiResponse> = {}): ApiResponse {
     headers: [{ name: 'Content-Type', value: 'application/json', enabled: true }],
     text: '{"id":"usr_8f21"}',
     tlsCipherSuite: '',
-    certificates: [],
     binary: false,
     lossy: false,
     truncated: false,
     size: 1229,
-    timings: { dnsMs: 4, connectMs: 21, tlsMs: 38, ttfbMs: 118, totalMs: 184 },
     tlsVersion: 'TLS 1.3',
-    remoteAddr: '10.0.3.17:443',
     // raw is REQUIRED on the contract, not optional, and its spans are what
     // the badges are drawn from — so the default fixture carries a real
     // tiling rather than an empty one. An empty `spans` is a legitimate
     // payload for a side with nothing to mark, and api-model.test.ts covers
     // it; a fixture that used it everywhere would let a renderer that ignores
     // spans pass every test in this file.
-    raw: exchangeFixture(),
+    raw: responseRawFixture(),
     ...over,
   }
 }
 
-/** What `api.request.send` answers. `environment` is the NAME the backend
- *  read out of the environment file — never an echo of the path the caller
- *  named — and '' is the send that named none. */
+/** What `api.request.send` answers when it ANSWERED. `environment` is the
+ *  NAME the backend read out of the environment file — never an echo of the
+ *  path the caller named — and '' is the send that named none. */
 export function sendFixture(
   over: Partial<ApiResponse> = {},
   environment = '',
   route: ApiRequestSendResult['route'] = { kind: 'direct', profileId: '', insecureTls: false },
 ): ApiRequestSendResult {
-  return { response: responseFixture(over), environment, route }
+  return {
+    outcome: 'answered',
+    request: requestRawFixture(),
+    response: responseFixture(over),
+    failure: null,
+    environment,
+    route,
+    remoteAddr: '10.0.3.17:443',
+    timings: { dnsMs: 4, connectMs: 21, tlsMs: 38, ttfbMs: 118, totalMs: 184 },
+    certificates: [],
+  }
+}
+
+/**
+ * What it answers when the attempt did NOT answer — a run all the same.
+ *
+ * It carries the request text and the route, because that is the whole point
+ * of the shape: the sender holds both before it dials, so a failure is a row
+ * with the same detail an answered one has minus what never came back. A
+ * fixture that left them out would let a renderer that drops them pass.
+ */
+export function failedSendFixture(
+  failure: ApiRequestSendResult['failure'] = { phase: 'dial', reason: 'connection refused' },
+  over: Partial<ApiRequestSendResult> = {},
+): ApiRequestSendResult {
+  return {
+    outcome: 'failed',
+    request: requestRawFixture(),
+    response: null,
+    failure,
+    environment: '',
+    route: { kind: 'direct', profileId: '', insecureTls: false },
+    remoteAddr: '',
+    timings: { dnsMs: 3, connectMs: 0, tlsMs: 0, ttfbMs: 0, totalMs: 3 },
+    certificates: [],
+    ...over,
+  }
+}
+
+/** And what it answers for a run the person stopped: an outcome of its own,
+ *  never a failure, so nothing downstream has to word or tone somebody's own
+ *  Stop as something that went wrong. */
+export function stoppedSendFixture(): ApiRequestSendResult {
+  return failedSendFixture(
+    { phase: 'stopped', reason: 'context canceled' },
+    { outcome: 'stopped', remoteAddr: '10.0.3.17:443' },
+  )
 }
 
 /**
@@ -314,6 +362,7 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
     readRequest: vi.fn().mockResolvedValue({ request: REQUEST }),
     writeRequest: vi.fn().mockResolvedValue({}),
     sendRequest: vi.fn().mockResolvedValue(sendFixture()),
+    cancelRequest: vi.fn().mockResolvedValue({}),
     importPostman: vi.fn().mockResolvedValue({ unsupported: [] }),
     importCurl: vi.fn().mockResolvedValue({ request: REQUEST, unsupported: [] }),
     ...over,

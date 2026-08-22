@@ -17,6 +17,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -134,6 +135,13 @@ func apiAuthStore(t *testing.T) (*apibind.JSONStore, *apiAuthVault) {
 // renderer knows which field it was in.
 func sendRaw(t *testing.T, conn *websocket.Conn, params map[string]any, id int) (*vaultRPCResult, []byte) {
 	t.Helper()
+	// Every send names itself, because the method requires it: a run that
+	// could not be named is a run with no Stop. These tests are about the
+	// credential rather than about the token, so the helper mints one and
+	// the cases below stay about what they are about.
+	if _, named := params["token"]; !named {
+		params["token"] = fmt.Sprintf("t-%d", id)
+	}
 	req, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": "api.request.send", "params": params,
 	})
@@ -204,9 +212,12 @@ func TestAPIRequestSend_ABoundAuthVariableBecomesTheHeaderAndNeverCrosses(t *tes
 	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatalf("unmarshal send result: %v", err)
 	}
-	if !strings.Contains(got.Response.Raw.Request.Text, "⟦token⟧") {
+	// The request side is on the EXCHANGE now, not inside the response —
+	// the sender has it before it dials, so a run that never got an answer
+	// still shows it (contracts/api.request.send).
+	if !strings.Contains(got.Request.Text, "⟦token⟧") {
 		t.Errorf("the raw request reads %q; the credential's place must carry the variable's NAME",
-			got.Response.Raw.Request.Text)
+			got.Request.Text)
 	}
 }
 

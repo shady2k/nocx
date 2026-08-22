@@ -19,7 +19,7 @@
 // headers off screen and twenty-four headers pushed the body off — two things
 // competing for one column when a person looks at one of them at a time.
 
-import { For, Show, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from 'solid-js'
 import { Badge } from '../ui/badge'
 import { Caption } from '../ui/caption'
 import { CodeBlock } from '../ui/code-block'
@@ -32,7 +32,7 @@ import { ResponseBody } from './response-body'
 import type { ApiRun, ApiRunView } from './api-store'
 import {
   type ApiCertificate,
-  type ApiExchange,
+  type ApiRaw,
   type ApiRawSegment,
   bodySummary,
   certificateText,
@@ -41,6 +41,7 @@ import {
   formatSize,
   hasBodyText,
   isJSONResponse,
+  phaseSentence,
   rawSegments,
   responseHeaderText,
   statusTone,
@@ -82,9 +83,80 @@ function Run(props: {
 }) {
   const run = () => props.run
   const response = () => props.run.response
+  const elapsed = pendingElapsed(props)
+
+  // THE TABS EXIST FOR AN ATTEMPT, not for an answer. A failed run has a
+  // request, a route and how far it got, and the raw view is where a person
+  // reads them — so the tab row appears as soon as there is an exchange to
+  // show, and Body and Headers simply are not among the tabs when nothing
+  // answered. Before this the whole viewer was behind `response`, which is
+  // why a failure was one red sentence and nothing else.
+  const tabs = () => {
+    const items = []
+    const res = response()
+    if (res) {
+      items.push({
+        id: 'body',
+        label: 'Body',
+        content: () => (
+          <Show when={hasBodyText(res)} fallback={<Caption>{bodySummary(res)}</Caption>}>
+            <ResponseBody
+              ariaLabel="Response body"
+              text={res.text}
+              language={isJSONResponse(res) ? 'json' : 'text'}
+            />
+            {/* The summary stays for the three states that are not
+                "here it is": truncated, lossy, and the size itself
+                (§12.3). Four sentences, still four. */}
+            <Caption>{bodySummary(res)}</Caption>
+          </Show>
+        ),
+      })
+      items.push({
+        id: 'headers',
+        label: `Headers ${res.headers.length}`,
+        content: () => (
+          <ResponseBody
+            ariaLabel="Response headers"
+            text={responseHeaderText(res)}
+            language="text"
+          />
+        ),
+      })
+    }
+    const request = run().request
+    if (request) {
+      items.push({
+        id: 'raw',
+        label: 'Raw',
+        content: () => (
+          <RawExchange
+            request={request}
+            response={res?.raw ?? null}
+            connection={connectionRawText({
+              remoteAddr: run().remoteAddr,
+              timings: run().timings ?? EMPTY_TIMINGS,
+              tlsVersion: res?.tlsVersion,
+              tlsCipherSuite: res?.tlsCipherSuite,
+            })}
+            certificates={run().certificates}
+          />
+        ),
+      })
+    }
+    return items
+  }
+
+  // Which tab is showing has to be one the run HAS. A failed run offers only
+  // Raw, and a stored choice of "body" from a previous look would select
+  // nothing at all — an empty pane where the one thing there is to read was.
+  const active = () => {
+    const items = tabs()
+    return items.some((i) => i.id === run().view) ? run().view : (items[0]?.id ?? 'raw')
+  }
 
   return (
-    <div class="api-run" data-run-id={run().id}>
+    <div class="api-run" data-run-id={run().id} data-outcome={run().outcome}>
       {/* WHAT WAS SENT, which the response pane owes a person as much as what
           came back: this is a LIST, so a card that only said "404" would be a
           number with no question attached to it. */}
@@ -135,91 +207,118 @@ function Run(props: {
         </div>
       </Show>
 
-      {/* A SEND THAT NEVER LANDED IS STILL A RUN. It used to be one red line
-          under the head — the same weight as a caption, in a column where
-          everything else has a box — so the one state a person most needs to
-          read was the one that looked like an aside. It is the kit's danger
-          card now, which is what "this did not work, and here is what was
-          said" looks like everywhere else in the product. */}
-      <Show when={run().error}>
-        {(reason) => (
-          <StatusCard tone="danger" title="The request did not go out" description={reason()} />
+      {/* THE RUN THAT HAS NOT ANSWERED YET. It is the whole reason this row
+          exists before its answer does: a person who has pressed Send can see
+          that something is happening and how long it has been happening for.
+          The clock is the RENDERER's — the backend reports timings for an
+          exchange that has ended, and this is the one number that exists
+          while it has not. */}
+      <Show when={run().outcome === 'pending'}>
+        <div class="api-run__state">
+          <Badge tone="info">Sending…</Badge>
+          <span class="api-run__elapsed">{formatElapsed(elapsed())}</span>
+        </div>
+      </Show>
+
+      {/* THE ASK THAT NEVER BECAME AN EXCHANGE — an unknown handle, an auth
+          variable nothing can resolve. There is no request, no route and no
+          phase, because nothing was attempted, so the card IS the whole
+          story here. It is the kit's danger card, which is what "this did
+          not work, and here is what was said" looks like everywhere else in
+          the product. */}
+      <Show when={run().outcome === 'refused' && run().error !== ''}>
+        <StatusCard tone="danger" title="The request did not go out" description={run().error} />
+      </Show>
+
+      {/* AN ATTEMPT THAT ENDED WITHOUT AN ANSWER. The card says WHERE it
+          stopped in the product's words and what the backend said underneath;
+          the tabs below carry the rest — the request text, the route, how far
+          it got. So the card is no longer the whole story of a failure.
+          A STOP IS NOT TONED AS ONE: the person ended it on purpose, and a
+          red box telling them so would be the product disagreeing with them
+          about something they did. */}
+      <Show when={run().failure}>
+        {(failure) => (
+          <StatusCard
+            tone={run().outcome === 'stopped' ? 'neutral' : 'danger'}
+            title={run().outcome === 'stopped' ? 'Stopped' : phaseSentence(failure().phase)}
+            description={failure().reason}
+          />
         )}
       </Show>
 
-      <Show when={response()}>
-        {(res) => (
-          <Tabs
-            orientation="horizontal"
-            ariaLabel="This exchange"
-            active={run().view}
-            onChange={(v) => props.onView(run().id, v as ApiRunView)}
-            // THE NUMBERS RIDE THE TAB ROW, which is where the owner's
-            // reference puts them and where they cost no line of their own:
-            // what came back, how long it took and how much of it there was
-            // are one glance, beside the choice of what to look at.
-            actions={
-              <span class="api-run__stats">
-                <StatusDot
-                  tone={statusTone(res().status)}
-                  accessibleName={`HTTP status ${res().status}`}
-                >
-                  <span>{String(res().status)}</span>
-                </StatusDot>
-                <span class="api-run__elapsed">{formatElapsed(res().timings.totalMs)}</span>
-                <span class="api-run__size">{formatSize(res().size)}</span>
-              </span>
-            }
-            items={[
-              {
-                id: 'body',
-                label: 'Body',
-                content: () => (
-                  <Show
-                    when={hasBodyText(res())}
-                    fallback={<Caption>{bodySummary(res())}</Caption>}
-                  >
-                    <ResponseBody
-                      ariaLabel="Response body"
-                      text={res().text}
-                      language={isJSONResponse(res()) ? 'json' : 'text'}
-                    />
-                    {/* The summary stays for the three states that are not
-                        "here it is": truncated, lossy, and the size itself
-                        (§12.3). Four sentences, still four. */}
-                    <Caption>{bodySummary(res())}</Caption>
-                  </Show>
-                ),
-              },
-              {
-                id: 'headers',
-                label: `Headers ${res().headers.length}`,
-                content: () => (
-                  <ResponseBody
-                    ariaLabel="Response headers"
-                    text={responseHeaderText(res())}
-                    language="text"
-                  />
-                ),
-              },
-              {
-                id: 'raw',
-                label: 'Raw',
-                content: () => (
-                  <RawExchange
-                    exchange={res().raw}
-                    connection={connectionRawText(res())}
-                    certificates={res().certificates}
-                  />
-                ),
-              },
-            ]}
-          />
-        )}
+      <Show when={tabs().length > 0}>
+        <Tabs
+          orientation="horizontal"
+          ariaLabel="This exchange"
+          active={active()}
+          onChange={(v) => props.onView(run().id, v as ApiRunView)}
+          // THE NUMBERS RIDE THE TAB ROW, which is where the owner's
+          // reference puts them and where they cost no line of their own:
+          // what came back, how long it took and how much of it there was
+          // are one glance, beside the choice of what to look at.
+          actions={
+            <span class="api-run__stats">
+              <Show when={response()}>
+                {(res) => (
+                  <>
+                    <StatusDot
+                      tone={statusTone(res().status)}
+                      accessibleName={`HTTP status ${res().status}`}
+                    >
+                      <span>{String(res().status)}</span>
+                    </StatusDot>
+                    <span class="api-run__size">{formatSize(res().size)}</span>
+                  </>
+                )}
+              </Show>
+              {/* The time is the ATTEMPT's, so it is here for a run that
+                  failed as well: how long it spent before it gave up is the
+                  difference between a refusal and a hang. */}
+              <Show when={run().timings}>
+                {(t) => <span class="api-run__elapsed">{formatElapsed(t().totalMs)}</span>}
+              </Show>
+            </span>
+          }
+          items={tabs()}
+        />
       </Show>
     </div>
   )
 }
+
+/** A run that never reached the network has no phases, and zeroes are what
+ *  "never reached" means for every one of them (contracts/api.request.send).
+ *  It is a constant rather than a literal at the call site so the shape is
+ *  declared once. */
+const EMPTY_TIMINGS = { dnsMs: 0, connectMs: 0, tlsMs: 0, ttfbMs: 0, totalMs: 0 }
+
+/**
+ * How long the run in front of a person has been going, in milliseconds.
+ *
+ * A ticking signal rather than a duration anybody waits on: it exists ONLY
+ * while the run is pending, is disposed with the component, and stops the
+ * moment the exchange settles — after which the run's own totalMs is the
+ * number, because that one is the backend's measurement of the exchange
+ * rather than the renderer's of the round trip.
+ */
+function pendingElapsed(props: { run: ApiRun }): () => number {
+  const [now, setNow] = createSignal(Date.now())
+  // The props object rather than an accessor over it, so every read of the
+  // run happens inside a tracked scope: the effect that owns the timer, and
+  // the memo that computes the number.
+  createEffect(() => {
+    if (props.run.outcome !== 'pending') return
+    const timer = setInterval(() => setNow(Date.now()), TICK_MS)
+    onCleanup(() => clearInterval(timer))
+  })
+  const elapsed = createMemo(() => Math.max(0, now() - props.run.startedAt))
+  return elapsed
+}
+
+/** Often enough that the number visibly moves, rarely enough that a column
+ *  of runs is not re-rendering continuously. */
+const TICK_MS = 100
 
 /**
  * The full text of both sides, and where it went — §11's first-class
@@ -233,7 +332,12 @@ function Run(props: {
  * one fact is written against.
  */
 function RawExchange(props: {
-  exchange: ApiExchange
+  request: ApiRaw
+  /** The response side, or null when nothing answered. Two props rather than
+   *  one pair, because they are known at two different times: the request is
+   *  composed before the dial and the response exists only if there was one
+   *  (api-model.ts). */
+  response: ApiRaw | null
   connection: string
   certificates: readonly ApiCertificate[]
 }) {
@@ -241,7 +345,7 @@ function RawExchange(props: {
     <div class="api-run__raw">
       <Caption>── request ──</Caption>
       <CodeBlock ariaLabel="Raw request">
-        <For each={rawSegments(props.exchange.request)}>{(seg) => rawSegment(seg)}</For>
+        <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg)}</For>
       </CodeBlock>
       <Caption>── connection ──</Caption>
       <CodeBlock ariaLabel="Connection">{props.connection}</CodeBlock>
@@ -260,10 +364,19 @@ function RawExchange(props: {
           )}
         </For>
       </Show>
-      <Caption>── response ──</Caption>
-      <CodeBlock ariaLabel="Raw response">
-        <For each={rawSegments(props.exchange.response)}>{(seg) => rawSegment(seg)}</For>
-      </CodeBlock>
+      {/* ABSENT rather than empty when nothing answered. A "── response ──"
+          heading over an empty block would be the product saying a server
+          replied with nothing, which is a different fact from not replying. */}
+      <Show when={props.response}>
+        {(raw) => (
+          <>
+            <Caption>── response ──</Caption>
+            <CodeBlock ariaLabel="Raw response">
+              <For each={rawSegments(raw())}>{(seg) => rawSegment(seg)}</For>
+            </CodeBlock>
+          </>
+        )}
+      </Show>
     </div>
   )
 }

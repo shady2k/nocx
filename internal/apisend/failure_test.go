@@ -40,7 +40,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -112,13 +112,33 @@ func onceClose(c chan struct{}) func() {
 	return func() { once.Do(func() { close(c) }) }
 }
 
-// noRun is the "and never produces a run" half, spelled once. A run is a
-// Response; a cancelled or refused send must hand back the zero value of
-// one, not a partly filled one that a surface would render as a result.
-func noRun(t *testing.T, got Response, what string) {
+// noAnswer is the "and never produces a run" half, spelled once — and what
+// it means has changed with the shape of the result.
+//
+// A refused or cancelled send DOES produce a run now: the exchange exists
+// from the moment Send is called, and a person who pressed Send has a row
+// whatever the world did next. What it must not produce is a RESPONSE — a
+// status, headers and a body that a surface would render as an answer. So
+// the assertion is on that field rather than on the whole value, and the
+// second half of it is the one that would have been lost: the exchange still
+// carries what was attempted.
+func noAnswer(t *testing.T, ex Exchange, what string) {
 	t.Helper()
-	if !reflect.DeepEqual(got, Response{}) {
-		t.Errorf("%s produced a run: %+v", what, got)
+	noAnswerAtAll(t, ex, what)
+	if ex.Request.Text == "" {
+		t.Errorf("%s dropped the request it had already composed", what)
+	}
+}
+
+// noAnswerAtAll is the half that holds even at phase compose, where there was
+// never a request text to keep.
+func noAnswerAtAll(t *testing.T, ex Exchange, what string) {
+	t.Helper()
+	if ex.Response != nil {
+		t.Errorf("%s produced a response: %+v", what, *ex.Response)
+	}
+	if ex.Outcome == Answered {
+		t.Errorf("%s reported outcome %q", what, ex.Outcome)
 	}
 }
 
@@ -136,12 +156,13 @@ func TestSend_APoolThatRefusesALeaseSendsNothingAtAll(t *testing.T) {
 	pool := newLeasePool()
 	pool.refuse = errors.New("no connection in the pool for this environment")
 
-	got, err := New(WithRoutes(pool.routes(time.Minute))).
+	ex, err := New(WithRoutes(pool.routes(time.Minute))).
 		Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
-	if !errors.Is(err, pool.refuse) {
-		t.Fatalf("Send: err = %v, want the pool's refusal", err)
+	fail := failedAt(t, ex, err, PhaseConnection)
+	if !strings.Contains(fail.Reason, pool.refuse.Error()) {
+		t.Fatalf("reason = %q, want the pool's refusal in it", fail.Reason)
 	}
-	noRun(t, got, "a refused lease")
+	noAnswer(t, ex, "a refused lease")
 	if n := cs.hits.Load(); n != 0 {
 		t.Fatalf("the server was reached %d times without a lease — the request went around the bastion", n)
 	}
@@ -160,15 +181,14 @@ func TestSend_APoolThatGrantsALeaseSendsThroughIt(t *testing.T) {
 	pool.refuse = errors.New("no connection in the pool for this environment")
 	c := New(WithRoutes(pool.routes(time.Minute)))
 
-	if _, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"}); err == nil {
-		t.Fatal("Send succeeded while the pool was refusing; the pair below would prove nothing")
+	if refused, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"}); err != nil || refused.Outcome != Failed {
+		t.Fatalf("Send with the pool refusing: outcome %q err %v, want a failed exchange; "+
+			"the pair below would prove nothing", refused.Outcome, err)
 	}
 
 	pool.refuse = nil
-	got, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
-	if err != nil {
-		t.Fatalf("Send with a granted lease: %v", err)
-	}
+	ex, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
+	got := answered(t, ex, err)
 	if got.Status != http.StatusOK || got.Text != "through the tunnel" {
 		t.Fatalf("status %d body %q, want 200 and the body", got.Status, got.Text)
 	}
@@ -202,11 +222,12 @@ func TestSend_ABoundedDialDeadlineEndsTheRun(t *testing.T) {
 	defer unblock()
 	c := New(WithRoutes(pool.routes(time.Millisecond)))
 
-	got, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
-	if !errors.Is(err, ErrSSHDialTimeout) {
-		t.Fatalf("Send: err = %v, want ErrSSHDialTimeout", err)
+	ex, err := c.Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
+	fail := failedAt(t, ex, err, PhaseConnection)
+	if !strings.Contains(fail.Reason, ErrSSHDialTimeout.Error()) {
+		t.Fatalf("reason = %q, want the dial timeout named in it", fail.Reason)
 	}
-	noRun(t, got, "a dial that timed out")
+	noAnswer(t, ex, "a dial that timed out")
 	if n := cs.hits.Load(); n != 0 {
 		t.Errorf("the server was reached %d times by a run whose dial timed out", n)
 	}
@@ -232,11 +253,9 @@ func TestSend_ADialThatAnswersWithinTheDeadlineProducesARun(t *testing.T) {
 	cs := newCountingServer(t, "answered")
 	pool := newLeasePool()
 
-	got, err := New(WithRoutes(pool.routes(time.Minute))).
+	ex, err := New(WithRoutes(pool.routes(time.Minute))).
 		Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Status != http.StatusOK || got.Text != "answered" {
 		t.Fatalf("status %d body %q, want 200 answered", got.Status, got.Text)
 	}
@@ -275,13 +294,13 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 
 	ctx, cancel := context.WithCancel(context.Background())
 	type result struct {
-		resp Response
-		err  error
+		ex  Exchange
+		err error
 	}
 	done := make(chan result, 1)
 	go func() {
 		r, sendErr := c.Send(ctx, apicollGet(cs.URL), Key{RouteID: "prod"})
-		done <- result{resp: r, err: sendErr}
+		done <- result{ex: r, err: sendErr}
 	}()
 
 	// Cancel only once the remote dial is genuinely in flight; cancelling
@@ -293,10 +312,17 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 	cancel()
 
 	got := <-done
-	if !errors.Is(got.err, context.Canceled) {
-		t.Fatalf("Send: err = %v, want context.Canceled", got.err)
+	// A STOP, NOT A FAILURE. The person who started this exchange ended it,
+	// and the outcome says so in the one field a surface can tone from —
+	// before this, a cancellation was a transport error indistinguishable
+	// from a server that hung up.
+	if fail := failedAt(t, got.ex, got.err, PhaseStopped); !strings.Contains(fail.Reason, context.Canceled.Error()) {
+		t.Errorf("reason = %q, want the cancellation named in it", fail.Reason)
 	}
-	noRun(t, got.resp, "a cancelled send")
+	if got.ex.Outcome != Stopped {
+		t.Errorf("outcome = %q, want stopped — a cancelled exchange is never a failure", got.ex.Outcome)
+	}
+	noAnswer(t, got.ex, "a cancelled send")
 	if n := cs.hits.Load(); n != 0 {
 		t.Fatalf("the server was reached %d times by a cancelled run", n)
 	}
@@ -323,11 +349,9 @@ func TestSend_ARunThatIsNotCancelledKeepsItsConnection(t *testing.T) {
 	cs := newCountingServer(t, "served")
 	pool := newLeasePool()
 
-	got, err := New(WithRoutes(pool.routes(time.Minute))).
+	ex, err := New(WithRoutes(pool.routes(time.Minute))).
 		Send(context.Background(), apicollGet(cs.URL), Key{RouteID: "prod"})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "served" || cs.hits.Load() != 1 {
 		t.Fatalf("body %q, %d hits; want the served body and one hit", got.Text, cs.hits.Load())
 	}
@@ -368,24 +392,25 @@ func TestSend_CancellingMidBodyLeavesNoHalfWrittenRun(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	type result struct {
-		resp Response
-		err  error
+		ex  Exchange
+		err error
 	}
 	done := make(chan result, 1)
 	go func() {
 		r, err := New().Send(ctx, apicollGet(srv.URL), Key{})
-		done <- result{resp: r, err: err}
+		done <- result{ex: r, err: err}
 	}()
 
 	<-wrote
 	cancel()
 
 	got := <-done
-	if got.err == nil {
-		t.Fatal("a send cancelled mid-body returned no error")
+	fail := failedAt(t, got.ex, got.err, PhaseStopped)
+	if !strings.Contains(fail.Reason, context.Canceled.Error()) {
+		t.Fatalf("reason = %q, want the cancellation named in it", fail.Reason)
 	}
-	if !errors.Is(got.err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", got.err)
+	if got.ex.Outcome != Stopped {
+		t.Errorf("outcome = %q, want stopped", got.ex.Outcome)
 	}
 	// Which STEP reports it — the round trip or the body read — is not
 	// asserted, and deliberately: the response has been written and flushed
@@ -393,7 +418,7 @@ func TestSend_CancellingMidBodyLeavesNoHalfWrittenRun(t *testing.T) {
 	// the transport's own scheduling. Asserting one of the two would be a
 	// test that depends on timing, which AGENTS.md forbids. The claim that
 	// matters is the same either way and is made below.
-	noRun(t, got.resp, "a send cancelled mid-body")
+	noAnswer(t, got.ex, "a send cancelled mid-body")
 }
 
 // TestSend_TheSameBodyReadToTheEndProducesTheWholeRun is that pair: the
@@ -406,10 +431,8 @@ func TestSend_TheSameBodyReadToTheEndProducesTheWholeRun(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	got := answered(t, ex, err)
 	if got.Status != http.StatusOK || got.Text != body {
 		t.Fatalf("status %d body %q, want 200 and the whole body", got.Status, got.Text)
 	}
@@ -423,12 +446,14 @@ func TestSend_TheSameBodyReadToTheEndProducesTheWholeRun(t *testing.T) {
 // touched must also hand back nothing, and must not take a lease to do it.
 func TestSend_ARequestTheSenderCannotBuildNeverReachesTheRoute(t *testing.T) {
 	pool := newLeasePool()
-	got, err := New(WithRoutes(pool.routes(time.Minute))).Send(context.Background(),
+	ex, err := New(WithRoutes(pool.routes(time.Minute))).Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: "not-an-absolute-url"}, Key{RouteID: "prod"})
-	if err == nil {
-		t.Fatal("Send succeeded on a request that is not an absolute URL")
-	}
-	noRun(t, got, "a request that could not be built")
+	// A run all the same, at phase `compose` — the one phase with no request
+	// text, because there was none to compose. It is a run rather than an
+	// error because a person pressed Send: the address they typed is what
+	// they have to fix, and a row saying so is where they will read it.
+	failedAt(t, ex, err, PhaseCompose)
+	noAnswerAtAll(t, ex, "a request that could not be built")
 	if n := pool.leaseCount(); n != 0 {
 		t.Errorf("%d leases were taken for a request that never left the sender", n)
 	}

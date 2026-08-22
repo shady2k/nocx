@@ -1130,9 +1130,10 @@ export function ApiPane(props: ApiPaneProps) {
             // (api-store.ts): the send path already writes a dirty draft
             // before the exchange, and "not saved yet" is that same rule.
             sendable={store.draft() !== null}
-            sending={store.sending()}
+            sending={store.pending() !== null}
             onEdit={(next) => store.editDraft(next)}
             onSend={() => void store.send()}
+            onStop={() => void store.stop()}
             onImportCurl={askForCurl}
           />
         </div>

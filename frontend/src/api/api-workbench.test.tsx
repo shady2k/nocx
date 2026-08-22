@@ -39,7 +39,10 @@ import {
   collectionFixture,
   collectionsFixture,
   createdFixture,
-  exchangeFixture,
+  failedSendFixture,
+  requestRawFixture,
+  responseRawFixture,
+  stoppedSendFixture,
   noCollections,
   sendFixture,
   servicesFixture,
@@ -500,8 +503,146 @@ describe('a request goes out from the workbench', () => {
 
     // No environment: the default fixture's collection declares none, so the
     // send names none — the request as written, on the direct route.
-    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, '', expect.any(String)),
+    )
     await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+  })
+
+  // ── the run exists from the moment Send is pressed (nocx-pgp9c.4) ───────
+  //
+  // Every test in this block goes through the seam a person reaches — the
+  // button, the row — and never the store. And none of them waits on a
+  // duration: the send is a promise this test resolves, so "in flight" is a
+  // state the test holds open rather than a moment it hopes to catch.
+
+  it('Send puts a row on screen before any answer exists, and the SAME row carries the answer', async () => {
+    let answer: (result: unknown) => void = () => {}
+    const send = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const { bar } = await mountApp({ sendRequest: send })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+
+    // Before anything has answered. This is what did not exist at all
+    // before: the only signal a request was in flight was a disabled button.
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+    const pending = runCards()[0]
+    expect(pending.dataset.outcome).toBe('pending')
+    const runId = pending.dataset.runId
+    // …and it says what is being sent, so the row is worth looking at.
+    expect(pending.textContent).toContain('POST')
+    expect(pending.textContent).toContain('{{baseUrl}}/users')
+
+    answer(sendFixture())
+
+    await vi.waitFor(() => expect(runCards()[0].dataset.outcome).toBe('answered'))
+    // THE SAME ROW. A second one would mean the pending row was a placeholder
+    // rather than the run.
+    expect(runCards()).toHaveLength(1)
+    expect(runCards()[0].dataset.runId).toBe(runId)
+    expect(runCards()[0].textContent).toContain('201')
+  })
+
+  it('Send becomes Stop while the run is in flight, is enabled, and reaches the cancel method', async () => {
+    let answer: (result: unknown) => void = () => {}
+    const send = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const cancelRequest = vi.fn().mockResolvedValue({})
+    const { bar } = await mountApp({ sendRequest: send, cancelRequest })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+
+    await vi.waitFor(() => expect(buttonNames()).toContain('Stop'))
+    const stop = button('Stop')
+    // ENABLED, which is the whole point: a disabled button was the old
+    // signal, and the moment something is happening is the moment a person
+    // most needs a control.
+    expect(stop.disabled).toBe(false)
+    expect(buttonNames()).not.toContain('Send')
+
+    fireEvent.click(stop)
+    await vi.waitFor(() => expect(cancelRequest).toHaveBeenCalledTimes(1))
+
+    answer(stoppedSendFixture())
+    await vi.waitFor(() => expect(runCards()[0].dataset.outcome).toBe('stopped'))
+    // And the line goes back to offering a send.
+    expect(buttonNames()).toContain('Send')
+  })
+
+  it('a failed run shows what was sent and how far it got — the card is not the whole story', async () => {
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockResolvedValue(
+        failedSendFixture({
+          phase: 'resolve',
+          reason: 'apisend: resolving "api.internal": no such host',
+        }),
+      ),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('failed')
+    // WHERE it stopped, in the product's words rather than the wire's token.
+    expect(card.textContent).toContain('the name did not resolve')
+    expect(card.textContent).toContain('no such host')
+
+    // AND WHAT WENT OUT. The raw view is reachable on a run that never got
+    // an answer, which is exactly the run that most needs it.
+    fireEvent.click(optionIn(card, 'Raw'))
+    await vi.waitFor(() =>
+      expect(rawBlockText(runCards()[0], 'Raw request')).toContain('POST /users HTTP/1.1'),
+    )
+    // There is no response side, and none is drawn: a heading over an empty
+    // block would say a server replied with nothing.
+    expect(runCards()[0].querySelector('[aria-label="Raw response"]')).toBeNull()
+    // Body and Headers are not offered either — there is no body to show.
+    expect(() => optionIn(runCards()[0], 'Body')).toThrow()
+  })
+
+  it('a stopped run is neither worded nor toned as a failure', async () => {
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockResolvedValue(stoppedSendFixture()),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('stopped')
+    const status = card.querySelector<HTMLElement>('.ui-status-card')
+    expect(status).not.toBeNull()
+    // The kit's own account of its tone, rather than a colour read off a
+    // stylesheet: `danger` is what the product uses for "this went wrong".
+    expect(status?.dataset.tone).not.toBe('danger')
+    expect(card.textContent).toContain('Stopped')
+    // A person's own Stop is not described to them as an error.
+    expect(card.textContent).not.toContain('did not go out')
+  })
+
+  it('an ask the backend REFUSED says so, and claims no attempt', async () => {
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockRejectedValue(new Error('unknown collection handle')),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('refused')
+    expect(card.textContent).toContain('The request did not go out')
+    expect(card.textContent).toContain('unknown collection handle')
+    // No raw view: nothing was composed, so there is nothing to show and the
+    // card genuinely IS the whole story for this one.
+    expect(card.querySelector('[aria-label="Raw request"]')).toBeNull()
   })
 
   it('the run shows the status, the elapsed time and the size', async () => {
@@ -974,9 +1115,13 @@ describe('the raw view and the body', () => {
 
   it('a damaged secret is a visibly different chip carrying the damage', async () => {
     const { bar } = await mountApp({
-      sendRequest: vi
-        .fn()
-        .mockResolvedValue(sendFixture({ raw: exchangeFixture('truncated, 24 of 214 bytes') })),
+      // The DAMAGE is on the request side, which is where a placement can be
+      // damaged at all — the response side is a search over what actually
+      // crossed (§11.3) — and the request side now rides the exchange.
+      sendRequest: vi.fn().mockResolvedValue({
+        ...sendFixture(),
+        request: requestRawFixture('truncated, 24 of 214 bytes'),
+      }),
     })
     await openRequest(bar)
     fireEvent.click(button('Send'))
@@ -1011,26 +1156,21 @@ describe('the raw view and the body', () => {
     fireEvent.click(optionIn(runCards()[0], 'Raw'))
     await vi.waitFor(() => expect(rawChips(runCards()[0])).toHaveLength(1))
 
-    const wire = exchangeFixture()
     const chipReading = (rawChips(runCards()[0])[0].textContent ?? '').trim()
     // What the reader should end up with: the wire's own text, with the
     // elided placeholder replaced by what the chip says in its place.
-    const expected = wire.request.text.replace(SECRET_PLACEHOLDER, chipReading)
+    const expected = requestRawFixture().text.replace(SECRET_PLACEHOLDER, chipReading)
 
     expect(rawBlockText(runCards()[0], 'Raw request')).toBe(expected)
-    expect(rawBlockText(runCards()[0], 'Raw response')).toBe(wire.response.text)
+    expect(rawBlockText(runCards()[0], 'Raw response')).toBe(responseRawFixture().text)
   })
 
   it('a side with nothing to mark still shows all of its text', async () => {
     const { bar } = await mountApp({
-      sendRequest: vi.fn().mockResolvedValue(
-        sendFixture({
-          raw: {
-            request: { text: 'GET /health HTTP/1.1\r\n\r\n', spans: [] },
-            response: { text: 'HTTP/1.1 204 No Content\r\n\r\n', spans: [] },
-          },
-        }),
-      ),
+      sendRequest: vi.fn().mockResolvedValue({
+        ...sendFixture({ raw: { text: 'HTTP/1.1 204 No Content\r\n\r\n', spans: [] } }),
+        request: { text: 'GET /health HTTP/1.1\r\n\r\n', spans: [] },
+      }),
     })
     await openRequest(bar)
     fireEvent.click(button('Send'))
@@ -1183,7 +1323,12 @@ describe('the environment a request goes out under', () => {
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() =>
-      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, DEV_ENV.relPath),
+      expect(sendRequest).toHaveBeenCalledWith(
+        HANDLE,
+        CREATE_REL_PATH,
+        DEV_ENV.relPath,
+        expect.any(String),
+      ),
     )
   })
 
@@ -1201,7 +1346,12 @@ describe('the environment a request goes out under', () => {
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() =>
-      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, PROD_ENV.relPath),
+      expect(sendRequest).toHaveBeenCalledWith(
+        HANDLE,
+        CREATE_REL_PATH,
+        PROD_ENV.relPath,
+        expect.any(String),
+      ),
     )
   })
 
@@ -1216,7 +1366,9 @@ describe('the environment a request goes out under', () => {
     fireEvent.click(none)
 
     fireEvent.click(button('Send'))
-    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
+    await vi.waitFor(() =>
+      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, '', expect.any(String)),
+    )
   })
 
   it('a collection with no environments offers no rows and says so', async () => {

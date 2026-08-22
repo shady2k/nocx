@@ -7,6 +7,15 @@ package apisend
 //
 // The four calls a send makes: resolve the name, open the socket, complete
 // the TLS handshake, read the body.
+//
+// EACH OF THEM ASSERTS A PHASE, and none of them asserts an error, because
+// none of them is one any more. A network outcome is an EXCHANGE with a
+// failure on it — an attempt that got as far as it got — and the phase is
+// the field a surface can act on: "resolve" is a name to fix, "dial" is a
+// server to start, "connection" is a bastion to open. `failedAt` also
+// checks, for every one of these, that the composed request survived the
+// failure; before this change every test below discarded it with the value
+// it was asserting about.
 
 import (
 	"bufio"
@@ -18,6 +27,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --- 1. Resolving the name ---
@@ -31,26 +41,35 @@ func TestSend_DNSFailureIsReported(t *testing.T) {
 			return nil, errors.New("must not dial")
 		},
 	}
-	_, err := New(WithRoutes(fixedRoute(route))).Send(context.Background(),
+	ex, err := New(WithRoutes(fixedRoute(route))).Send(context.Background(),
 		apicollGet("http://api.example.com/v1"), Key{})
-	if err == nil {
-		t.Fatal("send with a failing resolver succeeded")
+	fail := failedAt(t, ex, err, PhaseResolve)
+	if !strings.Contains(fail.Reason, boom.Error()) {
+		t.Fatalf("reason = %q, want the resolver's error in it", fail.Reason)
 	}
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the resolver's error", err)
+	// AND THE REQUEST IS THERE. This is the acceptance in one line: a send
+	// to a name that does not resolve comes back with the text that would
+	// have gone out, so the person reading the row can see the address they
+	// typed rather than only the sentence saying it did not work.
+	if !strings.Contains(ex.Request.Text, "GET /v1 HTTP/1.1") {
+		t.Errorf("the failed exchange carries no request line:\n%s", ex.Request.Text)
+	}
+	if ex.Response != nil {
+		t.Error("a resolve failure carries a response")
 	}
 }
 
 // TestSend_DNSFailureOnAnOrdinaryMachine is the same failure without a fake:
 // .invalid is reserved never to resolve (RFC 2606).
 func TestSend_DNSFailureOnAnOrdinaryMachine(t *testing.T) {
-	_, err := New().Send(context.Background(),
+	ex, err := New().Send(context.Background(),
 		apicollGet("http://nocx-no-such-host.invalid/v1"), Key{})
-	if err == nil {
-		t.Fatal("send to an unresolvable name succeeded")
+	fail := failedAt(t, ex, err, PhaseResolve)
+	if !strings.Contains(fail.Reason, "resolving") {
+		t.Fatalf("reason = %q, want it to name the resolve step", fail.Reason)
 	}
-	if !strings.Contains(err.Error(), "resolving") {
-		t.Fatalf("err = %v, want it to name the resolve step", err)
+	if !strings.Contains(ex.Request.Text, "nocx-no-such-host.invalid") {
+		t.Errorf("the failed exchange does not show the host that was asked for:\n%s", ex.Request.Text)
 	}
 }
 
@@ -66,15 +85,13 @@ func TestSend_ResolvesOnAnOrdinaryMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := New().Send(context.Background(),
+	ex, err := New().Send(context.Background(),
 		apicollGet("http://localhost:"+port+"/"), Key{})
-	if err != nil {
-		t.Fatalf("send to localhost by name: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "ok" {
 		t.Fatalf("Text = %q, want ok", got.Text)
 	}
-	if got.Timings.DNS <= 0 {
+	if ex.Timings.DNS <= 0 {
 		t.Error("Timings.DNS = 0 — the name was resolved, and the timing says how long it took")
 	}
 }
@@ -89,12 +106,15 @@ func TestSend_ConnectionRefusedIsReported(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close() // nothing listens on that port now
 
-	_, err = New().Send(context.Background(), apicollGet("http://"+addr+"/"), Key{})
-	if err == nil {
-		t.Fatal("send to a closed port succeeded")
+	ex, err := New().Send(context.Background(), apicollGet("http://"+addr+"/"), Key{})
+	fail := failedAt(t, ex, err, PhaseDial)
+	if !strings.Contains(fail.Reason, "refused") {
+		t.Fatalf("reason = %q, want a connection refusal", fail.Reason)
 	}
-	if !strings.Contains(err.Error(), "refused") {
-		t.Fatalf("err = %v, want a connection refusal", err)
+	// Nothing answered, so there is no address to report — which is the
+	// same fact the phase was derived from.
+	if ex.RemoteAddr != "" {
+		t.Errorf("RemoteAddr = %q for a dial nothing accepted", ex.RemoteAddr)
 	}
 }
 
@@ -106,10 +126,8 @@ func TestSend_ConnectsOnAnOrdinaryMachine(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	got := answered(t, ex, err)
 	if got.Status != http.StatusOK || got.Text != "ok" {
 		t.Fatalf("status %d body %q, want 200 ok", got.Status, got.Text)
 	}
@@ -125,12 +143,22 @@ func TestSend_TLSHandshakeFailureIsReported(t *testing.T) {
 
 	// No trust configured: the server's self-signed certificate is not one
 	// this machine has any reason to accept.
-	_, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err == nil {
-		t.Fatal("handshake with an untrusted certificate succeeded")
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	fail := failedAt(t, ex, err, PhaseTLS)
+	if !strings.Contains(fail.Reason, "certificate") {
+		t.Fatalf("reason = %q, want a certificate failure", fail.Reason)
 	}
-	if !strings.Contains(err.Error(), "certificate") {
-		t.Fatalf("err = %v, want a certificate failure", err)
+	// The dial LANDED — which is what makes this a tls failure rather than
+	// a dial one, and is the fact a person needs: the host is up, and it is
+	// the certificate that is the problem.
+	if ex.RemoteAddr == "" {
+		t.Error("RemoteAddr is empty for a handshake that reached a server")
+	}
+	// And the chain is empty, deliberately: net/http hands the trace an
+	// empty connection state when the handshake fails. Asserted rather than
+	// left to be discovered, because the contract says so to the renderer.
+	if len(ex.Certificates) != 0 {
+		t.Errorf("Certificates = %d for a refused handshake; the contract says this list is empty here", len(ex.Certificates))
 	}
 }
 
@@ -142,10 +170,8 @@ func TestSend_TLSHandshakeSucceedsWithTrust(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := newTrusting(trust(srv)).Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ex, err := newTrusting(trust(srv)).Send(context.Background(), apicollGet(srv.URL), Key{})
+	got := answered(t, ex, err)
 	if got.Text != "secure" {
 		t.Fatalf("Text = %q, want secure", got.Text)
 	}
@@ -174,15 +200,23 @@ func TestSend_ServerClosingMidBodyIsReported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err == nil {
-		t.Fatal("a truncated body was accepted as a response")
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	// PHASE `exchange`: the connection was open and it broke on it. That is
+	// a different remedy from every phase above — nothing about the name,
+	// the route or the certificate is wrong — and a run that said only
+	// "unexpected EOF" made a person work that out for themselves.
+	fail := failedAt(t, ex, err, PhaseExchange)
+	if !strings.Contains(fail.Reason, io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("reason = %q, want the unexpected EOF the transport reported", fail.Reason)
 	}
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("err = %v, want the unexpected EOF the transport reported", err)
+	if !strings.Contains(fail.Reason, "reading the response body") {
+		t.Fatalf("reason = %q, want it to name the step that failed", fail.Reason)
 	}
-	if !strings.Contains(err.Error(), "reading the response body") {
-		t.Fatalf("err = %v, want it to name the step that failed", err)
+	// The seven bytes are NOT handed back as a body. A partial answer
+	// rendered as an answer is the defect this test has always been about,
+	// and it survives the shape change: there is no response at all.
+	if ex.Response != nil {
+		t.Errorf("a truncated body produced a response: %+v", *ex.Response)
 	}
 }
 
@@ -195,10 +229,8 @@ func TestSend_ReadsACompleteBodyOnAnOrdinaryMachine(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	got := answered(t, ex, err)
 	if got.Text != "partial" || got.Size != 7 {
 		t.Fatalf("Text = %q, Size = %d, want the whole seven bytes", got.Text, got.Size)
 	}
@@ -208,7 +240,9 @@ func TestSend_ReadsACompleteBodyOnAnOrdinaryMachine(t *testing.T) {
 }
 
 // TestSend_CancelledContextStopsTheExchange: the caller's cancellation is
-// the only timeout this package has, so it must reach the network.
+// the only timeout this package has, so it must reach the network — and it
+// comes back as a STOP rather than as a failure, because the person who
+// started the exchange is the one who ended it.
 func TestSend_CancelledContextStopsTheExchange(t *testing.T) {
 	released := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -219,9 +253,55 @@ func TestSend_CancelledContextStopsTheExchange(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := New().Send(ctx, apicollGet(srv.URL), Key{})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
+	ex, err := New().Send(ctx, apicollGet(srv.URL), Key{})
+	fail := failedAt(t, ex, err, PhaseStopped)
+	if ex.Outcome != Stopped {
+		t.Fatalf("outcome = %q, want stopped — a stop is never a failure", ex.Outcome)
+	}
+	if !strings.Contains(fail.Reason, context.Canceled.Error()) {
+		t.Errorf("reason = %q, want the cancellation named in it", fail.Reason)
+	}
+	// The request is still on it, which is what makes a stopped run
+	// readable: the row says what was being sent when it was stopped.
+	if !strings.Contains(ex.Request.Text, "GET / HTTP/1.1") {
+		t.Errorf("a stopped exchange carries no request text:\n%s", ex.Request.Text)
+	}
+}
+
+// --- 5. a bound that elapses ---
+
+// TestSend_ADeadlineThatHasPassedIsATimeoutAndNotAStop: the two ways an
+// exchange can be ended from outside look alike underneath — both arrive as
+// a context that is done — and they are opposite facts about the run. A
+// stop is somebody's decision; a timeout is a bound nobody chose in the
+// moment. The phase is where that distinction survives.
+//
+// THE DEADLINE IS ALREADY PAST, so nothing here waits: the send returns on
+// its first look at the context, on any machine, at any speed.
+func TestSend_ADeadlineThatHasPassedIsATimeoutAndNotAStop(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	ex, err := New().Send(ctx, apicollGet("https://127.0.0.1:1/v1"), Key{})
+	failedAt(t, ex, err, PhaseTimeout)
+	if ex.Outcome != Failed {
+		t.Errorf("outcome = %q, want failed — nobody stopped this one", ex.Outcome)
+	}
+}
+
+// TestSend_TheSameRequestWithinItsDeadlineAnswers is the pair: the identical
+// bound, not elapsed.
+func TestSend_TheSameRequestWithinItsDeadlineAnswers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "in time")
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Minute))
+	defer cancel()
+	ex, err := New().Send(ctx, apicollGet(srv.URL), Key{})
+	if got := answered(t, ex, err); got.Text != "in time" {
+		t.Fatalf("Text = %q, want the answer", got.Text)
 	}
 }
 

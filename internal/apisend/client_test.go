@@ -90,13 +90,11 @@ func TestCookies_StayInsideTheirScope(t *testing.T) {
 // TestUnknownRouteIsRefusedByName: a request the user routed through a
 // connection must never quietly go out of this machine's own interface.
 func TestUnknownRouteIsRefusedByName(t *testing.T) {
-	_, err := New().Send(context.Background(),
+	ex, err := New().Send(context.Background(),
 		apicollGet("http://127.0.0.1:1/"), Key{RouteID: "prod-bastion"})
-	if err == nil {
-		t.Fatal("an unknown route sent anyway")
-	}
-	if !strings.Contains(err.Error(), "prod-bastion") {
-		t.Fatalf("err = %v, want it to name the route it does not know", err)
+	fail := failedAt(t, ex, err, PhaseConnection)
+	if !strings.Contains(fail.Reason, "prod-bastion") {
+		t.Fatalf("reason = %q, want it to name the route it does not know", fail.Reason)
 	}
 }
 
@@ -160,22 +158,22 @@ func TestNoGlobalGateAcrossNetworkIO(t *testing.T) {
 // failing test and a succeeding one.
 func TestRouteFailureIsReportedNotSwallowed(t *testing.T) {
 	boom := errors.New("no lease available")
-	_, err := New(WithRoutes(func(context.Context, string) (Route, error) {
+	ex, err := New(WithRoutes(func(context.Context, string) (Route, error) {
 		return nil, boom
 	})).Send(context.Background(), apicollGet("http://127.0.0.1:1/"), Key{})
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the route table's error", err)
+	if fail := failedAt(t, ex, err, PhaseConnection); !strings.Contains(fail.Reason, boom.Error()) {
+		t.Fatalf("reason = %q, want the route table's error in it", fail.Reason)
 	}
 }
 
 // TestNilRouteIsRefused: a table that answers with nothing is a bug in the
 // table, and a nil route would be a panic in the dial rather than a message.
 func TestNilRouteIsRefused(t *testing.T) {
-	_, err := New(WithRoutes(func(context.Context, string) (Route, error) {
+	ex, err := New(WithRoutes(func(context.Context, string) (Route, error) {
 		return nil, nil
 	})).Send(context.Background(), apicollGet("http://127.0.0.1:1/"), Key{RouteID: "empty"})
-	if err == nil || !strings.Contains(err.Error(), "resolved to nothing") {
-		t.Fatalf("err = %v, want a refusal naming the empty route", err)
+	if fail := failedAt(t, ex, err, PhaseConnection); !strings.Contains(fail.Reason, "resolved to nothing") {
+		t.Fatalf("reason = %q, want a refusal naming the empty route", fail.Reason)
 	}
 }
 

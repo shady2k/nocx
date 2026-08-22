@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,18 +36,59 @@ type recordingSender struct {
 	mu   sync.Mutex
 	keys []apisend.Key
 	reqs []apicoll.Request
-	err  error
+	// err is what the sender REFUSES with — the calling-contract violation
+	// that is still an error (apisend.Send). failure is the other half: an
+	// attempt that did not answer, which is an exchange and not an error.
+	err     error
+	failure *apisend.Failure
+	// block holds the exchange open until it is closed or the context is
+	// cancelled, so a test can act on a send that is genuinely in flight.
+	block chan struct{}
 }
 
-func (s *recordingSender) Send(_ context.Context, r apicoll.Request, k apisend.Key, _ ...apisend.NamedSecret) (apisend.Response, error) {
+func (s *recordingSender) Send(ctx context.Context, r apicoll.Request, k apisend.Key, _ ...apisend.NamedSecret) (apisend.Exchange, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.keys = append(s.keys, k)
 	s.reqs = append(s.reqs, r)
-	if s.err != nil {
-		return apisend.Response{}, s.err
+	block, failure, err := s.block, s.failure, s.err
+	s.mu.Unlock()
+	if err != nil {
+		return apisend.Exchange{}, err
 	}
-	return apisend.Response{Status: 204, Headers: []apicoll.Header{}}, nil
+	// block lets a test hold an exchange open while it does something else
+	// to the same socket — pressing Stop, most of the time. It waits on the
+	// CONTEXT as well, so a cancelled send returns without the test having
+	// to release it, which is what makes the cancel path observable.
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return apisend.Exchange{
+				Outcome:      apisend.Stopped,
+				Request:      apisend.Raw{Text: "GET /stopped HTTP/1.1\n\n", Spans: []apisend.Span{}},
+				Certificates: []apisend.Certificate{},
+				Failure:      &apisend.Failure{Phase: apisend.PhaseStopped, Reason: ctx.Err().Error()},
+			}, nil
+		}
+	}
+	if failure != nil {
+		return apisend.Exchange{
+			Outcome:      apisend.Failed,
+			Request:      apisend.Raw{Text: "GET /failed HTTP/1.1\n\n", Spans: []apisend.Span{}},
+			Certificates: []apisend.Certificate{},
+			Failure:      failure,
+		}, nil
+	}
+	return apisend.Exchange{
+		Outcome:      apisend.Answered,
+		Request:      apisend.Raw{Text: "GET / HTTP/1.1\n\n", Spans: []apisend.Span{}},
+		Certificates: []apisend.Certificate{},
+		Response: &apisend.Response{
+			Status:  204,
+			Headers: []apicoll.Header{},
+			Raw:     apisend.Raw{Spans: []apisend.Span{}},
+		},
+	}, nil
 }
 
 func (s *recordingSender) last(t *testing.T) (apisend.Key, apicoll.Request) {
@@ -68,6 +110,15 @@ func (s *recordingSender) count() int {
 // newAPIWSServerWithSender builds a server whose sender is the caller's.
 func newAPIWSServerWithSender(t *testing.T, sender apisend.Sender) *websocket.Conn {
 	t.Helper()
+	_, conn := newAPIServerAndConn(t, sender)
+	return conn
+}
+
+// newAPIServerAndConn is the same thing plus the SERVER, which a test needs
+// when it has to open a second socket of it — a token is a name one window
+// chose, so "two windows" is only expressible with two connections.
+func newAPIServerAndConn(t *testing.T, sender apisend.Sender) (*WSServer, *websocket.Conn) {
+	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	ws := NewWSServer(logger, newRegWithStub(logger),
 		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender))
@@ -76,7 +127,7 @@ func newAPIWSServerWithSender(t *testing.T, sender apisend.Sender) *websocket.Co
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
-	return connectWS(t, ws)
+	return ws, connectWS(t, ws)
 }
 
 // apiEnvironmentFolder writes a collection whose request is written in
@@ -117,7 +168,7 @@ func TestAPIRequestSend_TheEnvironmentsRouteAndAddressReachTheSender(t *testing.
 
 	// prod: through the bastion, at the internal address.
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/prod.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/prod.json", "token": "t-prod"}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send under prod: %+v", resp.Error)
 	}
@@ -138,7 +189,7 @@ func TestAPIRequestSend_TheEnvironmentsRouteAndAddressReachTheSender(t *testing.
 
 	// dev: out of this machine, at the local address. Same request file.
 	resp = vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/dev.json"}, 3)
+		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/dev.json", "token": "t-dev"}, 3)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send under dev: %+v", resp.Error)
 	}
@@ -169,6 +220,7 @@ func TestAPIRequestSend_TheResultNamesTheEnvironmentThatAnswered(t *testing.T) {
 
 	environmentOf := func(t *testing.T, params map[string]any, id int) string {
 		t.Helper()
+		params["token"] = fmt.Sprintf("t-%d", id)
 		resp := vaultCall(t, conn, "api.request.send", params, id)
 		if resp.Error != nil {
 			t.Fatalf("api.request.send: %+v", resp.Error)
@@ -212,7 +264,7 @@ func TestAPIRequestSend_WithNoEnvironmentIsStillTheDirectRoute(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "ping.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-ping"}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
@@ -235,7 +287,7 @@ func TestAPIRequestSend_AnUnresolvedVariableBlocksTheSendAndNamesItself(t *testi
 	handle := openAPICollection(t, conn, root, 1)
 
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/nobase.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/nobase.json", "token": "t-nobase"}, 2)
 	if resp.Error == nil {
 		t.Fatal("api.request.send succeeded with an unresolved variable")
 	}
@@ -264,7 +316,7 @@ func TestAPIRequestSend_RefusesAnEnvironmentPathTheCollectionDoesNotOwn(t *testi
 		t.Run(name, func(t *testing.T) {
 			id++
 			resp := vaultCall(t, conn, "api.request.send",
-				map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": rel}, id)
+				map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": rel, "token": fmt.Sprintf("t-%d", id)}, id)
 			if resp.Error == nil {
 				t.Fatalf("api.request.send accepted envRelPath %q", rel)
 			}

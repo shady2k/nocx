@@ -26,6 +26,7 @@ import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
 import type { ApiRequestSendResult } from '../generated/api.request.send'
+import type { ApiRequestCancelResult } from '../generated/api.request.cancel'
 import type { ApiImportPostmanResult } from '../generated/api.import.postman'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
 import type { FilesOpenResult } from '../generated/files.open'
@@ -136,12 +137,38 @@ class ApiClient {
    *  this", and the two would agree until somebody renamed an environment
    *  without renaming its file. '' is no environment, which is the request
    *  as written on the direct route. */
-  sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult> {
+  sendRequest(
+    handle: string,
+    relPath: string,
+    envRelPath: string,
+    token: string,
+  ): Promise<ApiRequestSendResult> {
     return this.dispatcher.call<ApiRequestSendResult>('api.request.send', {
       handle,
       relPath,
       envRelPath,
+      token,
     })
+  }
+
+  /** Stop the exchange running under `token`.
+   *
+   *  THE TOKEN IS OURS, and that is the whole design of this pair. The
+   *  dispatcher mints a JSON-RPC id per call and consumes it when the result
+   *  arrives; it is never handed to the caller that asked, and opening it up
+   *  so one button could name a request would be a second addressing scheme
+   *  over the same thing. So the store mints a name, sends it, and stops it
+   *  by that name.
+   *
+   *  It answers EMPTY. The stopped exchange reports itself on the
+   *  `api.request.send` result of the very request that was stopped, which
+   *  comes back as `outcome: "stopped"` — two methods reporting one
+   *  exchange's end would be two accounts of it, and this surface would have
+   *  to decide which to believe. A token naming nothing that is running is
+   *  REFUSED rather than answered, because "there was nothing to stop" and
+   *  "it is stopped" are different facts. */
+  cancelRequest(token: string): Promise<ApiRequestCancelResult> {
+    return this.dispatcher.call<ApiRequestCancelResult>('api.request.cancel', { token })
   }
 
   /** Convert a Postman v2.1 export into a collection folder at `dest`, and
@@ -255,7 +282,14 @@ export interface ApiWorkbenchServices {
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
   deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult>
-  sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult>
+  sendRequest(
+    handle: string,
+    relPath: string,
+    envRelPath: string,
+    token: string,
+  ): Promise<ApiRequestSendResult>
+  /** Stop the exchange running under a token this surface minted. */
+  cancelRequest(token: string): Promise<ApiRequestCancelResult>
   importPostman(path: string, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
@@ -335,7 +369,9 @@ export function createApiWorkbenchServices(
     deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),
-    sendRequest: (handle, relPath, envRelPath) => client.sendRequest(handle, relPath, envRelPath),
+    sendRequest: (handle, relPath, envRelPath, token) =>
+      client.sendRequest(handle, relPath, envRelPath, token),
+    cancelRequest: (token) => client.cancelRequest(token),
     importPostman: (path, dest) => client.importPostman(path, dest),
     importCurl: (line) => client.importCurl(line),
   }

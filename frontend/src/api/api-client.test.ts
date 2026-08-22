@@ -85,12 +85,13 @@ describe('ApiClient — one method per contract', () => {
     })
   })
 
-  it('sends the request the FILE holds — the handle, the path and the environment, nothing else', async () => {
+  it('sends the request the FILE holds — the handle, the path, the environment and the token it can be stopped by', async () => {
     const { dispatcher, call } = fakeDispatcher({ response: {} })
     await createApiWorkbenchServices(dispatcher).sendRequest(
       'h1',
       'users/create.json',
       'environments/prod.json',
+      'run-7',
     )
     // The environment is named by its PATH inside the collection, exactly as
     // the request is. There is no field here for its NAME, and that is the
@@ -101,16 +102,27 @@ describe('ApiClient — one method per contract', () => {
       handle: 'h1',
       relPath: 'users/create.json',
       envRelPath: 'environments/prod.json',
+      token: 'run-7',
     })
+  })
+
+  it('stops a run by the token it was sent under — never by the JSON-RPC id', async () => {
+    const { dispatcher, call } = fakeDispatcher({})
+    await createApiWorkbenchServices(dispatcher).cancelRequest('run-7')
+    // The token and NOTHING else. No handle and no path: the token already
+    // names exactly one running exchange, and a second way to address it
+    // would be a second answer to "which run is this".
+    expect(call).toHaveBeenCalledWith('api.request.cancel', { token: 'run-7' })
   })
 
   it('no environment is an empty envRelPath, not an absent one', async () => {
     const { dispatcher, call } = fakeDispatcher({ response: {} })
-    await createApiWorkbenchServices(dispatcher).sendRequest('h1', 'users/create.json', '')
+    await createApiWorkbenchServices(dispatcher).sendRequest('h1', 'users/create.json', '', 'run-1')
     expect(call).toHaveBeenCalledWith('api.request.send', {
       handle: 'h1',
       relPath: 'users/create.json',
       envRelPath: '',
+      token: 'run-1',
     })
   })
 
@@ -137,7 +149,8 @@ describe('ApiClient — one method per contract', () => {
     await s.closeCollection('h1')
     await s.readRequest('h1', 'a.json')
     await s.writeRequest('h1', 'a.json', REQUEST)
-    await s.sendRequest('h1', 'a.json', 'environments/dev.json')
+    await s.sendRequest('h1', 'a.json', 'environments/dev.json', 'run-1')
+    await s.cancelRequest('run-1')
     for (const [, params] of call.mock.calls) {
       expect(Object.keys(params as object)).not.toContain('path')
       expect(Object.keys(params as object)).not.toContain('root')
@@ -155,7 +168,8 @@ describe('ApiClient — every call has a test where it fails', () => {
     ['closeCollection', (s) => s.closeCollection('h1')],
     ['readRequest', (s) => s.readRequest('h1', 'a.json')],
     ['writeRequest', (s) => s.writeRequest('h1', 'a.json', REQUEST)],
-    ['sendRequest', (s) => s.sendRequest('h1', 'a.json', 'environments/dev.json')],
+    ['sendRequest', (s) => s.sendRequest('h1', 'a.json', 'environments/dev.json', 'run-1')],
+    ['cancelRequest', (s) => s.cancelRequest('run-1')],
     ['importPostman', (s) => s.importPostman('/w/a.json', '/w/b')],
     ['importCurl', (s) => s.importCurl('curl https://a')],
   ]

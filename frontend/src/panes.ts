@@ -1067,11 +1067,6 @@ export class PaneManager {
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         sandbox,
         initialCwd,
-        onSandboxedChange: (confirmed) => {
-          if (!confirmed) return
-          paneRef.current?.setSandboxed()
-          this.onActivePaneChange?.()
-        },
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
         // chain did not take costs the NEXT restore its cwd — it falls back
@@ -1102,6 +1097,13 @@ export class PaneManager {
     }
     const pane = this.addPane(content, descriptor, identity.paneId, activateNow)
     paneRef.current = pane
+    if (sandbox) {
+      void content.ready.then((started) => {
+        if (!started || !this.panes.includes(pane)) return
+        pane.setSandboxed()
+        if (pane === this.activePane) this.onActivePaneChange?.()
+      })
+    }
     return pane
   }
 

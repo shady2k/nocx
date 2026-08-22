@@ -276,7 +276,6 @@ describe('sandboxed session tooltip (ADR-0037 §8, ADR-0040)', () => {
   }
 
   it('reports both installed root classes and populated HOME projections', async () => {
-    const onSandboxedChange = vi.fn()
     const client = makeClient({
       openSandboxedSession: vi.fn(() =>
         Promise.resolve(
@@ -299,7 +298,7 @@ describe('sandboxed session tooltip (ADR-0037 §8, ADR-0040)', () => {
     })
     const { tab, teardown } = await mountTerminal(
       makeClipboard(),
-      { hooks: { sandbox: sandboxRequest, onSandboxedChange } },
+      { hooks: { sandbox: sandboxRequest } },
       client,
     )
     try {
@@ -308,7 +307,6 @@ describe('sandboxed session tooltip (ADR-0037 §8, ADR-0040)', () => {
       expect(tab.tooltip).toContain(
         'Home projections: ~/.config/opencode -> /host/home/.config/opencode',
       )
-      expect(onSandboxedChange).toHaveBeenCalledWith(true)
     } finally {
       teardown()
     }

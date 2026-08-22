@@ -220,3 +220,55 @@ describe("the sidebar body is a panel's one scroll owner", () => {
     expect(declared.filter((c) => !KNOWN_EXCEPTIONS.includes(c))).toEqual([])
   })
 })
+
+describe("the room under a panel's name is the shell's", () => {
+  /** The top/bottom halves of a `padding` or `margin` shorthand — the
+   *  block-axis twin of `inlineSides` above. */
+  function blockSides(shorthand: string | null): [string, string] | null {
+    if (shorthand === null) return null
+    const parts = shorthand.split(/\s+/).filter((p) => p !== '')
+    switch (parts.length) {
+      case 1:
+        return [parts[0], parts[0]]
+      case 2:
+        return [parts[0], parts[0]]
+      case 3:
+      case 4:
+        return [parts[0], parts[2]]
+      default:
+        return null
+    }
+  }
+
+  /** `shipped`, for a selector that is not a bare class. */
+  function shippedFor(selector: string, property: string): string | null {
+    let found: string | null = null
+    const pattern = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`)
+    for (const rule of RULES) {
+      if (!rule.selectors.some((s) => s === selector)) continue
+      const m = rule.body.match(pattern)
+      if (m) found = m[1].trim()
+    }
+    return found
+  }
+
+  // The header carries no room below it on purpose, and the row under it
+  // supplies it — which the filter row does, and the body did not. So the
+  // one panel with no filter row (Operations) had NOTHING between its name
+  // and its first line of content, while the other four had the filter's
+  // own 8px. The owner reported it as "the padding is wrong on the
+  // operations screen"; it is the shell's rule that was wrong, for any
+  // panel that does not happen to want a filter (nocx-708q.4).
+  it('leaves no room below the header itself, so the room has one owner', () => {
+    const header = blockSides(shipped('ui-sidebar-view__header', 'padding'))
+    expect(header, 'the header declares no padding shorthand').not.toBeNull()
+    expect((header as [string, string])[1]).toBe('0')
+  })
+
+  it('gives a filterless panel the same room under the name as a filtered one', () => {
+    const filterTop = blockSides(shipped('ui-sidebar-view__filter', 'padding'))
+    expect(filterTop, 'the filter row declares no padding shorthand').not.toBeNull()
+    const bodyTop = shippedFor('.ui-sidebar-view__header + .ui-sidebar-view__body', 'padding-top')
+    expect(bodyTop).toBe((filterTop as [string, string])[0])
+  })
+})

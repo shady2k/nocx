@@ -417,6 +417,19 @@ select:focus-visible {
   padding: 0 var(--space-2);
 }
 
+/* AND WHEN THERE IS NO FILTER ROW, THE BODY SUPPLIES THE ROOM IT WOULD HAVE.
+   The header carries nothing below it on purpose (see above) on the argument
+   that whatever follows it does — and for four panels that is the filter row,
+   whose own `var(--space-2)` is exactly this room. Operations has no filter,
+   so nothing followed the header and nothing supplied it: its panel name and
+   its first group heading touched, which is the one place the family visibly
+   broke (owner, 2026-08-23). The room is the SHELL's either way, so a panel
+   that wants no filter does not have to remember it — and a panel that has
+   one is untouched, because the filter is then the adjacent sibling. */
+.ui-sidebar-view__header + .ui-sidebar-view__body {
+  padding-top: var(--space-2);
+}
+
 /* ── Settings-specific fix: .st-container needs min-height: 0 ──────── */
 
 .st-container {

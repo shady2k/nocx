@@ -210,7 +210,6 @@ export function RequestLine(props: RequestLineProps) {
           id="api-url"
           ariaLabel="URL"
           value={typedUrl()}
-          placeholder="{{baseUrl}}/users"
           disabled={request() === null}
           onInput={editUrl}
           marks={variableMarks()}

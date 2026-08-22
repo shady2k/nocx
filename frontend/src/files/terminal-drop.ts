@@ -45,6 +45,22 @@
 // upload-eligibility.ts, because the Files panel's menus ask the same
 // question and the two used to answer it differently (nocx-9le.5.24).
 //
+// ## A dropped FOLDER is refused here, at the gesture
+//
+// Directories are out of scope (design §4) and the browser does not make
+// that easy: a dropped folder arrives in `dataTransfer.files` as an
+// ordinary `File` with the folder's name and its directory entry's size,
+// and it simply cannot be read. Attempted, it produced two rows with no
+// file name, `0%`, "Waiting for the server" and a toast reading "Failed to
+// fetch" — a network error offered as the answer to "can I send a folder"
+// (owner, 2026-08-22). `webkitGetAsEntry().isDirectory` is what says so
+// before anything is registered; see `droppedDirectories` for why neither
+// the size nor the MIME type can be used instead, and `folderRefusal` for
+// why a mixed drop sends the files and refuses only the folder.
+//
+// The Wails half needs none of it — Go stats the path and refuses anything
+// that is not a regular file before it mints a ticket.
+//
 // ## What is deliberately NOT here
 //
 // **Dropping onto an individual folder row.** Out, in `§4` and in `§5.5`:
@@ -115,6 +131,83 @@ export interface TerminalDropDeps {
   /** Injected so a test can drive both halves; production asks the one
    *  module that owns the question. */
   native?: () => boolean
+}
+
+/**
+ * WHICH OF A BROWSER DROP'S ITEMS ARE DIRECTORIES — a parallel array to
+ * `dataTransfer.files`, `true` where that entry is a folder.
+ *
+ * Directories are deliberately out of scope (design §4: a recursive walk,
+ * mkdir, partial failure mid-tree, symlinks and modes are a materially
+ * larger problem on the same mechanism, deferred to the next wave). The
+ * browser does not spare us the decision: a dropped folder arrives in
+ * `dataTransfer.files` as an ordinary `File` carrying the folder's name and
+ * the size of its directory ENTRY — 192 B on APFS — which cannot be read.
+ * Left to itself the body POST fails and the person is told "Failed to
+ * fetch" about a question they never asked (owner, 2026-08-22).
+ *
+ * `webkitGetAsEntry().isDirectory` is the web platform's own answer and the
+ * only reliable one. The two tempting substitutes are both wrong: 192 B is
+ * a coincidence of one filesystem, and an empty `File.type` is what plenty
+ * of real files have.
+ *
+ * The ITEMS are what carry it and the FILES are what the upload needs, so
+ * the two lists are aligned by position — which holds because a drop
+ * appends one file item per file, in order. Items of kind `string` (a drag
+ * that also carries text) are dropped first, since those have no `File` at
+ * all and would shift every index after them.
+ *
+ * An engine with no `items` yields nothing rather than guessing, and the
+ * caller then treats every entry as a file — which is exactly what happened
+ * before this existed. The Wails half needs none of it: Go stats the path
+ * and refuses anything that is not a regular file already
+ * (`describeSource`, `SourceTicketStore.mint`).
+ */
+function droppedDirectories(transfer: DataTransfer): boolean[] {
+  const items: DataTransferItemList | undefined = transfer.items
+  if (items === undefined || items === null) return []
+  const flags: boolean[] = []
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (item.kind !== 'file') continue
+    // Absent in an engine that does not implement it, and null for an item
+    // that cannot answer. Neither is a claim that this IS a directory.
+    const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null
+    flags.push(entry !== null && entry.isDirectory)
+  }
+  return flags
+}
+
+/**
+ * What the person is told about the folders in their drop.
+ *
+ * It names the LIMIT rather than reporting whatever went wrong downstream,
+ * and it names the way round it — somebody dropping a folder has asked for
+ * something reasonable, and "unsupported" on its own tells them nothing
+ * they can do next.
+ *
+ * A MIXED DROP SENDS THE FILES AND REFUSES THE FOLDER. Dropping the whole
+ * batch because one item cannot be sent punishes the three that could;
+ * sending three quietly while saying nothing about the fourth is worse
+ * still, because the person watches three rows appear and has to work out
+ * for themselves which item is missing. So the message says exactly which
+ * was refused, and — since the rows for the rest are about to appear — how
+ * many are on their way.
+ */
+function folderRefusal(folders: string[], sending: number): string {
+  const what = folders.length === 1 ? 'a folder' : 'folders'
+  const named = folders.join(', ')
+  const were = folders.length === 1 ? 'was' : 'were'
+  const rest =
+    sending === 0
+      ? ''
+      : sending === 1
+        ? ' The other file is being uploaded.'
+        : ` The other ${sending} files are being uploaded.`
+  return (
+    `nocx cannot upload ${what} yet, so ${named} ${were} not sent. ` +
+    `Send the files inside it, or archive it and send the archive.${rest}`
+  )
 }
 
 /** A drag we act on. v3's runtime uses exactly this test before it touches
@@ -232,8 +325,27 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
     // tickets for it; acting on the DOM event too would send every file
     // twice, once as a stream and once as a path.
     if (native()) return
-    const files = Array.from(e.dataTransfer?.files ?? [])
-    void handle(files.map((f) => ({ name: f.name, size: f.size, blob: f })))
+    const transfer = e.dataTransfer
+    if (transfer === null) return
+    const files = Array.from(transfer.files)
+    // REFUSED BEFORE ANYTHING IS REGISTERED, and that is the point: a row
+    // implies something is happening to the thing it names, and nothing is
+    // ever going to happen to a folder. It never reaches the flow, so it
+    // never becomes a queued row and never becomes a transfer.
+    const isDirectory = droppedDirectories(transfer)
+    const folders = files.filter((_, i) => isDirectory[i] === true)
+    const sendable = files.filter((_, i) => isDirectory[i] !== true)
+    if (folders.length > 0) {
+      report(
+        folderRefusal(
+          folders.map((f) => f.name),
+          sendable.length,
+        ),
+        'warning',
+      )
+    }
+    if (sendable.length === 0) return
+    void handle(sendable.map((f) => ({ name: f.name, size: f.size, blob: f })))
   }
 
   element.addEventListener('dragover', onDragOver)

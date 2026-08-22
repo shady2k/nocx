@@ -1512,3 +1512,158 @@ describe('downloading a file from the tree', () => {
     expect(app.store!.transfers()).toEqual([])
   })
 })
+
+// ── The filter (nocx-708q.2) ──────────────────────────────────────────────
+//
+// The Files panel had no filter while Ports, Git, Settings and quick-connect
+// all had one, and the file-manager design put a name filter in scope. This
+// is the second panel to ship without the filter its design promised
+// (nocx-52by was the first), so what these assert is not only that it
+// filters but that it filters the way Git's does — and the one property
+// that separates a filter from a new listing.
+describe('filtering the tree by name', () => {
+  /** A root with two folders and a file, where each folder holds a file. It
+   *  takes a nested match to tell "narrows" from "collapses". */
+  const nestedTree = () =>
+    fakeServices({
+      list: vi
+        .fn()
+        .mockImplementation((_b: string, path: string) =>
+          Promise.resolve(
+            path === '/'
+              ? listFixture('C:/', [
+                  entryFixture({ name: 'src', path: '/src', kind: 'dir' }),
+                  entryFixture({ name: 'docs', path: '/docs', kind: 'dir' }),
+                  entryFixture({ name: 'notes.md', path: '/notes.md' }),
+                ])
+              : path === '/src'
+                ? listFixture('C:/src', [
+                    entryFixture({ name: 'button.tsx', path: '/src/button.tsx' }),
+                  ])
+                : listFixture(`C:${path}`, []),
+          ),
+        ),
+    })
+
+  const box = (panel: HTMLElement): HTMLInputElement => {
+    const el = panel.querySelector<HTMLInputElement>(
+      '[data-testid="files-filter"] .ui-search-field__input',
+    )
+    if (!el) throw new Error('no filter field')
+    return el
+  }
+
+  const shown = (panel: HTMLElement): string[] =>
+    rowsOf(panel).map((r) => r.textContent?.trim() ?? '')
+
+  async function mountWithTree() {
+    const app = await mountApp(nestedTree())
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'notes.md')).not.toBeUndefined())
+    return app
+  }
+
+  it('is the kit`s SearchField, not a hand-rolled input', () => {
+    // A surface may place a kit component and may never draw its own. The
+    // identity class is what says which one is here.
+    return mountWithTree().then(({ panel }) => {
+      const field = panel.querySelector('[data-testid="files-filter"] .ui-search-field')
+      expect(field).not.toBeNull()
+      expect(box(panel).getAttribute('aria-label')).toBe('Filter files by name')
+    })
+  })
+
+  it('narrows the rows to the names that match', async () => {
+    const { panel } = await mountWithTree()
+    expect(shown(panel)).toHaveLength(3)
+    fireEvent.input(box(panel), { target: { value: 'notes' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(1))
+    expect(shown(panel)[0]).toContain('notes.md')
+  })
+
+  it('DOES NOT COLLAPSE what the person expanded, and shows the match under it', async () => {
+    // The property that makes this a filter. A filter that collapsed the
+    // tree and re-expanded the matches would throw away the person's own
+    // work of opening four levels.
+    const { panel } = await mountWithTree()
+    rowNamed(panel, 'src').click()
+    await vi.waitFor(() => expect(rowNamed(panel, 'button.tsx')).not.toBeUndefined())
+
+    fireEvent.input(box(panel), { target: { value: 'button' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(2))
+    // The match, and the folder it is in — an indented row with no parent
+    // above it is a lie about where the file lives.
+    expect(shown(panel)[0]).toContain('src')
+    expect(shown(panel)[1]).toContain('button.tsx')
+    // Still expanded, because nothing wrote to the store.
+    expect(
+      rowNamed(panel, 'src').querySelector('[aria-expanded]')?.getAttribute('aria-expanded'),
+    ).toBe('true')
+  })
+
+  it('clearing RESTORES the view rather than resetting it', async () => {
+    const { panel } = await mountWithTree()
+    rowNamed(panel, 'src').click()
+    await vi.waitFor(() => expect(rowNamed(panel, 'button.tsx')).not.toBeUndefined())
+    const before = shown(panel)
+
+    fireEvent.input(box(panel), { target: { value: 'button' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(2))
+    fireEvent.input(box(panel), { target: { value: '' } })
+
+    // Exactly what was there: the same rows, in the same order, with src
+    // still open. A re-listing would have to re-fetch and would lose it.
+    await vi.waitFor(() => expect(shown(panel)).toEqual(before))
+  })
+
+  it('Escape drops the filter, the way the Git panel`s does', async () => {
+    const { panel } = await mountWithTree()
+    fireEvent.input(box(panel), { target: { value: 'notes' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(1))
+    fireEvent.keyDown(box(panel), { key: 'Escape' })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(3))
+  })
+
+  it('a filter that matches nothing is a state with a way out, never a blank tree', async () => {
+    const { panel } = await mountWithTree()
+    fireEvent.input(box(panel), { target: { value: 'zzzz' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(0))
+
+    const clear = panel.querySelector<HTMLElement>('[data-testid="files-filter-clear"]')
+    expect(clear).not.toBeNull()
+    clear!.click()
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(3))
+  })
+
+  it('the Names/Contents toggle offers Contents disabled AND says why', async () => {
+    // A disabled control that does not say why is a dead control, and it
+    // teaches people the panel is broken. The design allows Contents to
+    // ship unbuilt; it does not allow it to ship mute.
+    const { panel } = await mountWithTree()
+    const segments = [
+      ...panel.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="files-filter"] .ui-segmented-control__option',
+      ),
+    ]
+    expect(segments.map((s) => s.textContent)).toEqual(['Names', 'Contents'])
+    const [names, contents] = segments
+    expect(names.disabled).toBe(false)
+    expect(names.getAttribute('aria-checked')).toBe('true')
+    expect(contents.disabled).toBe(true)
+    expect(contents.title).toContain('not built yet')
+  })
+
+  it('the filter survives the panel being swapped out and back', async () => {
+    // It lives in the store, the way the Git panel's does: the panel
+    // unmounts whenever another sidebar view is in front, and a filter that
+    // evaporated on a glance at Ports would be a control nobody can rely on.
+    const { panel, bar } = await mountWithTree()
+    fireEvent.input(box(panel), { target: { value: 'notes' } })
+    await vi.waitFor(() => expect(shown(panel)).toHaveLength(1))
+
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    await vi.waitFor(() => expect(box(panel).value).toBe('notes'))
+  })
+})

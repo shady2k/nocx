@@ -15,7 +15,7 @@
 // there to report. The root the panel is actually showing lives on the panel
 // element as data-root, which is what the checks read.
 
-import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
@@ -27,6 +27,8 @@ import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
 import { ArrowDownIcon, ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
+import { SearchField } from '../ui/search-field'
+import { SegmentedControl } from '../ui/segmented-control'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -39,6 +41,7 @@ import {
 } from './files-store'
 import { downloadReachesTheBytes } from './download-eligibility'
 import type { DownloadSurface } from './download-surface'
+import { filterIsActive, narrowFilesRows } from './files-filter'
 import { uploadMovesTheFile } from './upload-eligibility'
 import { pickUploadSources } from './upload-picker'
 import type { UploadDestination, UploadSource } from './upload-flow'
@@ -437,6 +440,26 @@ function FilesPanel(props: FilesPanelProps) {
   const openable = (node: FilesNode): boolean =>
     node.kind === 'regular' || (node.kind === 'symlink' && node.linkKind === 'regular')
 
+  /**
+   * The rows after the name filter (nocx-708q.2).
+   *
+   * NOTHING HERE WRITES TO THE STORE, and that is the whole difference
+   * between a filter and a new listing: no folder is collapsed, no page is
+   * dropped, no reveal is re-run. Clearing the box therefore restores the
+   * exact view the person had built, because that view never went anywhere
+   * — it was only being drawn through a narrower opening.
+   */
+  const visibleRows = createMemo<FilesFlatRow[]>(() =>
+    narrowFilesRows(props.store.rows(), props.store.filter()),
+  )
+  /** A filter is typed AND the tree has nothing to show for it. Not "the
+   *  tree is empty": an empty directory with no filter is a different state
+   *  and says a different thing. A memo because both this and the list read
+   *  the narrowing, and walking the tree twice per render for one answer is
+   *  the kind of waste a long tree makes visible. */
+  const filterMatchedNothing = (): boolean =>
+    filterIsActive(props.store.filter()) && visibleRows().length === 0
+
   const renderRow = (row: FilesFlatRow) => {
     if (row.kind === 'entry') {
       const node = row.node
@@ -603,8 +626,79 @@ function FilesPanel(props: FilesPanelProps) {
             </Button>
           </div>
         </Show>
+        {/* ── The filter (nocx-708q.2) ──────────────────────────────────
+            The kit's SearchField, placed and never repainted (ADR-0014),
+            beside the Names/Contents toggle the file-manager design put in
+            scope. Built the way the Git panel's was (nocx-52by) down to the
+            Escape-clears behaviour, because this is the second panel to
+            ship without the filter its design promised and a third
+            invention is how three panels come to filter differently.
+
+            Renderer-side: typing narrows the rows already in the store and
+            issues no request, so it can neither churn the watch set nor
+            race a reveal walk. */}
+        <div class="files-filter" data-testid="files-filter">
+          <SearchField
+            value={props.store.filter()}
+            onInput={(v) => props.store.setFilter(v)}
+            placeholder="Filter by name…"
+            ariaLabel="Filter files by name"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && props.store.filter() !== '') {
+                e.stopPropagation()
+                props.store.setFilter('')
+              }
+            }}
+          />
+          {/* Names is the only mode that exists, and Contents is drawn
+              DISABLED rather than left out. The design put both in scope, so
+              hiding the half that is not built would present the built half
+              as the whole intention — and offering it live would be a
+              control that does nothing. A disabled control has to say why it
+              is disabled or it teaches people the panel is broken, so the
+              title is not decoration here: it is what makes the segment
+              honest instead of dead.
+
+              The value is the literal 'names' and the handler is empty
+              because there is nothing a person can change it to: the only
+              other segment refuses the click. A mode signal would be state
+              that cannot move. */}
+          <SegmentedControl
+            ariaLabel="What the filter searches"
+            value="names"
+            onChange={() => {}}
+            options={[
+              { value: 'names', label: 'Names' },
+              {
+                value: 'contents',
+                label: 'Contents',
+                disabled: true,
+                title: 'Searching file contents is not built yet — this filter matches names only.',
+              },
+            ]}
+          />
+        </div>
+        {/* A filter that matches nothing is a STATE, never a blank tree —
+            the Git panel's rule, and the same one action: drop the filter.
+            Without it the panel is indistinguishable from a machine with no
+            files on it. */}
+        <Show when={filterMatchedNothing()}>
+          <EmptyState
+            title="No files match"
+            description="Only the folders you have opened are searched."
+            action={
+              <Button
+                size="sm"
+                data-testid="files-filter-clear"
+                onClick={() => props.store.setFilter('')}
+              >
+                Clear filter
+              </Button>
+            }
+          />
+        </Show>
         <div class="files-tree" role="tree" aria-label="Files" ref={treeEl}>
-          <For each={props.store.rows()}>{(row) => renderRow(row)}</For>
+          <For each={visibleRows()}>{(row) => renderRow(row)}</For>
         </div>
       </Show>
       <ContextMenu

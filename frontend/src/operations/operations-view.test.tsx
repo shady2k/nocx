@@ -11,7 +11,7 @@
 // the ICON goes on saying what is happening when the panel is not showing
 // the list, and that the LIST cancels for real when it is.
 import { cleanup, fireEvent } from '@solidjs/testing-library'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { fakeClock, fakeUploadServices } from '../files/upload-fixtures'
 import { uploadOperations } from '../files/upload-operations'
@@ -19,7 +19,11 @@ import { createUploadStore, type UploadStore } from '../files/upload-store'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
 import { ArrowUpIcon, SettingsIcon } from '../ui/icons'
 import { createOperationsModel } from './operations'
-import { createOperationsView, OPERATIONS_VIEW_ID } from './operations-view'
+import {
+  createOperationsView,
+  OPERATIONS_VIEW_ID,
+  type OperationsViewDeps,
+} from './operations-view'
 
 const OTHER_VIEWS: readonly SidebarViewDescriptor[] = [
   { id: 'files', title: 'Files', icon: ArrowUpIcon, view: () => <div>files</div>, order: 0 },
@@ -28,9 +32,12 @@ const OTHER_VIEWS: readonly SidebarViewDescriptor[] = [
 
 let handle: SidebarHandle | null = null
 
-function mount(): { store: UploadStore; services: ReturnType<typeof fakeUploadServices> } {
+function mount(
+  deps: OperationsViewDeps = {},
+  storeClock: () => number = fakeClock().now,
+): { store: UploadStore; services: ReturnType<typeof fakeUploadServices> } {
   const services = fakeUploadServices()
-  const store = createUploadStore({ services, now: fakeClock().now })
+  const store = createUploadStore({ services, now: storeClock })
   const model = createOperationsModel([uploadOperations(store)])
 
   const bar = document.createElement('div')
@@ -42,13 +49,14 @@ function mount(): { store: UploadStore; services: ReturnType<typeof fakeUploadSe
   handle = mountSidebar(
     bar,
     panel,
-    [...OTHER_VIEWS, createOperationsView(model)],
+    [...OTHER_VIEWS, createOperationsView(model, deps)],
     [{ id: 'settings', title: 'Settings', icon: SettingsIcon, onActivate: () => {} }],
   )
   return { store, services }
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   handle?.destroy()
   handle = null
   document.body.replaceChildren()
@@ -75,7 +83,13 @@ function cancelButton(): HTMLElement {
 }
 
 function startTransfer(store: UploadStore, id = 't1'): void {
-  store.begin({ transferId: id, name: 'big.iso', destDir: '/srv/data', size: 400 })
+  store.begin({
+    transferId: id,
+    name: 'big.iso',
+    destDir: '/srv/data',
+    machine: 'deploy@srv-01',
+    size: 400,
+  })
 }
 
 describe('the icon reports from anywhere; the list opens the panel', () => {
@@ -247,7 +261,13 @@ describe('the list itself', () => {
     const { store, services } = mount()
     startTransfer(store, 'done')
     services.emitDone({ transferId: 'done', outcome: 'written', finalName: 'done', stranded: [] })
-    store.begin({ transferId: 'live', name: 'live.iso', destDir: '/srv', size: 10 })
+    store.begin({
+      transferId: 'live',
+      name: 'live.iso',
+      destDir: '/srv',
+      machine: 'deploy@srv-01',
+      size: 10,
+    })
 
     openTheList()
     expect(rows().map((r) => r.getAttribute('data-phase'))).toEqual(['running', 'written'])
@@ -282,7 +302,13 @@ describe('the list itself', () => {
 
     services.emitProgress({ transferId: 't1', bytes: 100, total: 400 })
     // A second transfer arriving moves the list itself, not just one row.
-    store.begin({ transferId: 't2', name: 'other.iso', destDir: '/srv/data', size: 8 })
+    store.begin({
+      transferId: 't2',
+      name: 'other.iso',
+      destDir: '/srv/data',
+      machine: 'deploy@srv-01',
+      size: 8,
+    })
     services.emitProgress({ transferId: 't1', bytes: 200, total: 400 })
 
     expect(rows()).toHaveLength(2)
@@ -292,5 +318,148 @@ describe('the list itself', () => {
     // And it is still the right operation's cancel.
     buttonBefore.click()
     expect(services.cancels).toEqual(['t1'])
+  })
+})
+
+// ── Which machine, and it is not a rendering tweak (amendment) ───────────
+//
+// The list is GLOBAL: one list for every tab. A row saying `/home/dev` is
+// unambiguous with one connection open and meaningless with three — and by
+// the time the row is drawn there is no tab to ask, so the answer has to
+// have been recorded when the transfer started.
+describe('the list says which machine each operation is on', () => {
+  it('distinguishes two transfers going to two different hosts', () => {
+    // THE TEST THAT WOULD HAVE CAUGHT THIS. Two rows whose paths are the
+    // same word and whose machines are not: without the machine they are
+    // one row printed twice.
+    const { store } = mount()
+    store.begin({
+      transferId: 't1',
+      name: 'a.zip',
+      destDir: '/var/www',
+      machine: 'deploy@web-01',
+      size: 4,
+    })
+    store.begin({
+      transferId: 't2',
+      name: 'b.zip',
+      destDir: '/var/www',
+      machine: 'deploy@web-02',
+      size: 4,
+    })
+
+    openTheList()
+    const where = [...document.querySelectorAll('.ui-operation-row__destination')].map(
+      (e) => e.textContent,
+    )
+    expect(where).toEqual(['deploy@web-01 · /var/www', 'deploy@web-02 · /var/www'])
+  })
+
+  it('names the local machine too, rather than leaving that row blank', () => {
+    const { store } = mount()
+    store.begin({
+      transferId: 't1',
+      name: 'a.zip',
+      destDir: '/home/dev',
+      machine: 'This machine',
+      size: 4,
+    })
+    openTheList()
+    expect(document.querySelector('.ui-operation-row__destination')?.textContent).toBe(
+      'This machine · /home/dev',
+    )
+  })
+})
+
+// ── What a finished row is worth reading (nocx-hbdw4.4) ─────────────────
+describe('a finished row in the real list', () => {
+  it('carries its size, when it landed and how long it took', () => {
+    const clock = fakeClock()
+    // One clock for the store (which stamps the record) and for the view
+    // (which reads the age against it), so the test states one time.
+    const { store, services } = mount({ now: clock.now }, clock.now)
+    store.begin({
+      transferId: 't1',
+      name: 'big.iso',
+      destDir: '/srv',
+      machine: 'deploy@srv-01',
+      size: 4_000_000,
+    })
+    clock.advance(14_000)
+    services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
+    clock.advance(5 * 60_000)
+
+    openTheList()
+    expect(document.querySelector('.ui-operation-row__summary')?.textContent).toBe(
+      '4.0 MB · 5 min ago · took 14 s',
+    )
+  })
+})
+
+// ── Numbers a person can read (nocx-hbdw4.4) ────────────────────────────
+//
+// Smoothing is the store's (SPEED_SMOOTHING) and the repaint rate is the
+// view's, and fixing either alone leaves the other: a steady number
+// repainted thirty times a second is unreadable, and a calm repaint of a
+// value that swings is a calm display of noise.
+describe('the list repaints a few times a second, whatever the wire does', () => {
+  /** Both clocks at once — the injected one the throttle reads, and the
+   *  fake timer its release is scheduled on. */
+  function ticking(): { deps: OperationsViewDeps; advance: (ms: number) => void } {
+    vi.useFakeTimers()
+    let t = 1000
+    return {
+      deps: { now: () => t },
+      advance: (ms: number) => {
+        t += ms
+        vi.advanceTimersByTime(ms)
+      },
+    }
+  }
+
+  const detail = (): string =>
+    document.querySelector('.ui-operation-row__detail')?.textContent ?? ''
+
+  it('holds a byte count that moves inside the window, and lands it after', () => {
+    const c = ticking()
+    const { store, services } = mount(c.deps)
+    startTransfer(store)
+    openTheList()
+
+    c.advance(250)
+    services.emitProgress({ transferId: 't1', bytes: 100, total: 400 })
+    expect(detail()).toBe('100 B of 400 B')
+
+    // Three frames inside one window: the row does not flicker through them.
+    c.advance(10)
+    services.emitProgress({ transferId: 't1', bytes: 200, total: 400 })
+    services.emitProgress({ transferId: 't1', bytes: 300, total: 400 })
+    expect(detail()).toBe('100 B of 400 B')
+
+    // And the newest of them lands when the window closes — not the oldest,
+    // and not never.
+    c.advance(250)
+    expect(detail()).toBe('300 B of 400 B')
+  })
+
+  it('shows the outcome the moment it arrives, mid-window', () => {
+    // THE DEFECT A THROTTLE INTRODUCES: a held last update is a row frozen
+    // at 98% for the rest of the session.
+    const c = ticking()
+    const { store, services } = mount(c.deps)
+    startTransfer(store)
+    openTheList()
+
+    c.advance(250)
+    services.emitProgress({ transferId: 't1', bytes: 392, total: 400 })
+    c.advance(10)
+    services.emitProgress({ transferId: 't1', bytes: 399, total: 400 })
+    expect(detail()).toBe('392 B of 400 B')
+
+    services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
+    expect(rows()[0].getAttribute('data-phase')).toBe('written')
+    expect(rows()[0].textContent).toContain('Done')
+    // No bar and no held progress line left behind it.
+    expect(document.querySelector('[role="progressbar"]')).toBeNull()
   })
 })

@@ -57,6 +57,25 @@ export interface UploadDestination {
   /** Absolute, in the provider's syntax. Shown to the person in the
    *  collision question, so it is the destination as they know it. */
   destDir: string
+  /**
+   * WHICH MACHINE `destDir` is on, as a person names it — the string
+   * `machine-name.ts` produces, and the same one the tab strip's second
+   * line shows for that tab.
+   *
+   * Required, and supplied by the caller rather than derived here, because
+   * this is the LAST place that can know it. The upload store is global and
+   * deliberately holds neither binding nor session; the operations list is
+   * global too, one list for every tab, so a row that said `/var/www` with
+   * three connections open named no machine at all (owner, 2026-08-22). The
+   * gesture knows which tab raised it; nothing downstream does.
+   *
+   * The composition root cannot fill it in either, and that was checked:
+   * only the Files panel's binding is opened through the root's wrapper
+   * (main.tsx), the terminal drop opens its own inside the pane, and no
+   * sessionId → machine lookup exists on PaneManager — the mapping lives in
+   * the surfaces, so the surfaces pass it.
+   */
+  machine: string
 }
 
 /** Ask the person about one collision. The surface supplies this because
@@ -173,6 +192,7 @@ export function createUploadFlow(deps: UploadFlowDeps): UploadFlow {
       transferId: result.transferId,
       name: source.name,
       destDir: destination.destDir,
+      machine: destination.machine,
       size: source.size,
     })
     if ('url' in result) await sendBody(result.transferId, result.url, source)

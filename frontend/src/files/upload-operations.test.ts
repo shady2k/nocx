@@ -16,7 +16,13 @@ function fixture() {
 describe('an upload as an operation', () => {
   it('carries what the row draws, and nothing the store did not say', () => {
     const f = fixture()
-    f.store.begin({ transferId: 't1', name: 'big.iso', destDir: '/srv/data', size: 400 })
+    f.store.begin({
+      transferId: 't1',
+      name: 'big.iso',
+      destDir: '/srv/data',
+      machine: 'deploy@srv-01',
+      size: 400,
+    })
     const [op, ...rest] = f.ops()
     expect(rest).toEqual([])
     // The WHOLE record but for the closure, which is asserted below and in
@@ -28,11 +34,13 @@ describe('an upload as an operation', () => {
       kind: 'upload',
       title: 'big.iso',
       destination: '/srv/data',
+      machine: 'deploy@srv-01',
       phase: 'running',
       done: null,
       total: 400,
       speedBytesPerSecond: null,
       error: null,
+      startedAt: 1000,
       endedAt: null,
     })
     expect(typeof cancel).toBe('function')
@@ -41,7 +49,13 @@ describe('an upload as an operation', () => {
   it('says the name that was actually written, once there is one', () => {
     // keepBoth changes it, and the row must say what is on the far side.
     const f = fixture()
-    f.store.begin({ transferId: 't1', name: 'notes.txt', destDir: '/srv', size: 4 })
+    f.store.begin({
+      transferId: 't1',
+      name: 'notes.txt',
+      destDir: '/srv',
+      machine: 'deploy@srv-01',
+      size: 4,
+    })
     f.services.emitDone({
       transferId: 't1',
       outcome: 'written',
@@ -53,7 +67,13 @@ describe('an upload as an operation', () => {
 
   it('offers a cancel while the work is live, on both non-terminal phases', () => {
     const f = fixture()
-    f.store.begin({ transferId: 't1', name: 'a', destDir: '/srv', size: 1 })
+    f.store.begin({
+      transferId: 't1',
+      name: 'a',
+      destDir: '/srv',
+      machine: 'deploy@srv-01',
+      size: 1,
+    })
     expect(f.ops()[0].cancel).not.toBeNull()
 
     // `unsettled` especially: the renderer lost sight of a transfer the
@@ -67,7 +87,13 @@ describe('an upload as an operation', () => {
   it('offers none once it is over, on every terminal outcome', () => {
     for (const outcome of ['written', 'skipped', 'cancelled', 'failed'] as const) {
       const f = fixture()
-      f.store.begin({ transferId: 't1', name: 'a', destDir: '/srv', size: 1 })
+      f.store.begin({
+        transferId: 't1',
+        name: 'a',
+        destDir: '/srv',
+        machine: 'deploy@srv-01',
+        size: 1,
+      })
       f.services.emitDone({ transferId: 't1', outcome, finalName: 'a', stranded: [] })
       expect(f.ops()[0].cancel).toBeNull()
     }
@@ -77,7 +103,13 @@ describe('an upload as an operation', () => {
     // Not by deciding a phase locally: the person's cancel races the
     // transfer's own completion every time, and uploadDone says which won.
     const f = fixture()
-    f.store.begin({ transferId: 't1', name: 'a', destDir: '/srv', size: 1 })
+    f.store.begin({
+      transferId: 't1',
+      name: 'a',
+      destDir: '/srv',
+      machine: 'deploy@srv-01',
+      size: 1,
+    })
     f.ops()[0].cancel?.()
     expect(f.services.cancels).toEqual(['t1'])
     expect(f.ops()[0].phase).toBe('running')

@@ -9,7 +9,7 @@ import { fakeClock, fakeUploadServices } from './upload-fixtures'
 import type { CollisionRequest, CollisionResult } from '../ui/collision-dialog'
 import type { ToastLevel } from '../ui/toast'
 
-const DEST = { bindingId: 'b1', destDir: '/srv/data' }
+const DEST = { bindingId: 'b1', destDir: '/srv/data', machine: 'deploy@srv-01' }
 
 function blobOf(size: number): Blob {
   return new Blob([new Uint8Array(size)])
@@ -316,5 +316,16 @@ describe('what the renderer does not know, it does not claim', () => {
     expect(h.said.said[0]).toContain('already claimed')
     expect(h.said.said[0]).toContain('waiting for the server')
     expect(h.said.said[0].toLowerCase()).not.toContain('failed')
+  })
+})
+
+describe('the machine the transfer is going to', () => {
+  it('is recorded on the row from the destination the gesture resolved', async () => {
+    // The list is global and the store knows neither binding nor session,
+    // so this is the last place that can know it (amendment to nocx-hbdw4.4).
+    const h = harness()
+    h.services.nextResult = [started('t1')]
+    await h.flow.send(DEST, [streamSource('a.txt')])
+    expect(h.store.transfer('t1')?.machine).toBe('deploy@srv-01')
   })
 })

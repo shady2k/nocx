@@ -79,15 +79,30 @@ export interface UploadTransfer {
    *  keepBoth may have changed. */
   name: string
   destDir: string
+  /** WHICH MACHINE `destDir` is on, as a person names it (machine-name.ts).
+   *  '' only where it is genuinely unknown — an adopted transfer, which
+   *  never saw the call that started it. The list is GLOBAL, one list for
+   *  every tab, so a path without a machine beside it answers nothing the
+   *  moment two connections are open (owner, 2026-08-22). It is recorded
+   *  HERE, at the start, because this store is deliberately global and
+   *  knows neither binding nor session: there is nothing to derive it from
+   *  later. */
+  machine: string
   /** The declared size, refreshed from any progress frame's `total`. Zero
-   *  is legitimate: an empty file is a file. */
-  size: number
+   *  is legitimate: an empty file is a file — and null is the ABSENCE of a
+   *  declaration, which is what an adopted transfer has. */
+  size: number | null
   /** Bytes confirmed onto the server, or null while nothing has been
    *  observed. NOT zero — zero is a measurement and this is its absence. */
   bytes: number | null
   /** Derived, never on the wire. Null until two samples exist. */
   speedBytesPerSecond: number | null
   phase: OperationPhase
+  /** When `begin` was called, on the store's own clock; null for an adopted
+   *  transfer, which this renderer never saw start. The other end of the
+   *  duration a finished row reports — a span needs both, and naming only
+   *  the end is how a "how long did it take" becomes a moment. */
+  startedAt: number | null
   /** When the transfer reached a terminal phase, on the store's own clock;
    *  null while it is still live. It is what orders the finished half of
    *  the operations list and what decides which one falls off the end —
@@ -117,7 +132,13 @@ export interface UploadStore {
   transfer(transferId: string): UploadTransfer | undefined
   /** Seed a row from files.upload's RESULT. This — not a progress frame —
    *  is what says a transfer exists. */
-  begin(t: { transferId: string; name: string; destDir: string; size: number }): void
+  begin(t: {
+    transferId: string
+    name: string
+    destDir: string
+    machine: string
+    size: number
+  }): void
   /**
    * Record a failure only the renderer can know about, and that is the
    * whole story: no bytes left this machine and none are going to — the
@@ -219,8 +240,15 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     })
   }
 
-  function begin(t: { transferId: string; name: string; destDir: string; size: number }): void {
+  function begin(t: {
+    transferId: string
+    name: string
+    destDir: string
+    machine: string
+    size: number
+  }): void {
     if (disposed) return
+    const startedAt = now()
     setTransfers((list) => {
       // A transfer the retained done frame already adopted, now being
       // begun: one row, not two. The id is the identity.
@@ -231,10 +259,12 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
           transferId: t.transferId,
           name: t.name,
           destDir: t.destDir,
+          machine: t.machine,
           size: t.size,
           bytes: null,
           speedBytesPerSecond: null,
           phase: 'running',
+          startedAt,
           endedAt: null,
           finalName: '',
           error: null,
@@ -286,10 +316,15 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
             transferId: p.transferId,
             name: p.finalName,
             destDir: '',
-            size: 0,
+            // Unknown, and saying so: this renderer never saw the call that
+            // would have carried the machine, the destination or the size,
+            // and a guess at any of the three reads exactly like a fact.
+            machine: '',
+            size: null,
             bytes: null,
             speedBytesPerSecond: null,
             phase,
+            startedAt: null,
             endedAt,
             finalName: p.finalName,
             error: p.outcome === 'failed' ? (p.error ?? null) : null,
@@ -356,5 +391,13 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     setTransfers([])
   }
 
-  return { transfers, transfer: find, begin, failLocally, unsettle, cancel, dispose }
+  return {
+    transfers,
+    transfer: find,
+    begin,
+    failLocally,
+    unsettle,
+    cancel,
+    dispose,
+  }
 }

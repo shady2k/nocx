@@ -21,7 +21,13 @@ import type { UploadServices } from './upload-client'
 import { fakeClock, fakeUploadServices } from './upload-fixtures'
 
 function seeded(store: UploadStore, size = 400): void {
-  store.begin({ transferId: 't1', name: 'big.iso', destDir: '/srv/data', size })
+  store.begin({
+    transferId: 't1',
+    name: 'big.iso',
+    destDir: '/srv/data',
+    machine: 'deploy@srv-01',
+    size,
+  })
 }
 
 describe('in-flight state never comes from a progress notification', () => {
@@ -111,10 +117,12 @@ describe('the row a result seeds', () => {
       transferId: 't1',
       name: 'big.iso',
       destDir: '/srv/data',
+      machine: 'deploy@srv-01',
       size: 400,
       bytes: null,
       speedBytesPerSecond: null,
       phase: 'running',
+      startedAt: 1000,
       endedAt: null,
       finalName: '',
       error: null,
@@ -346,8 +354,20 @@ describe('the store as a surface', () => {
   it('lists transfers in the order they started', () => {
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
-    store.begin({ transferId: 'a', name: 'a.txt', destDir: '/d', size: 1 })
-    store.begin({ transferId: 'b', name: 'b.txt', destDir: '/d', size: 2 })
+    store.begin({
+      transferId: 'a',
+      name: 'a.txt',
+      destDir: '/d',
+      machine: 'deploy@srv-01',
+      size: 1,
+    })
+    store.begin({
+      transferId: 'b',
+      name: 'b.txt',
+      destDir: '/d',
+      machine: 'deploy@srv-01',
+      size: 2,
+    })
     expect(store.transfers().map((t) => t.transferId)).toEqual(['a', 'b'])
   })
 
@@ -359,8 +379,20 @@ describe('the store as a surface', () => {
     const clock = fakeClock()
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: clock.now })
-    store.begin({ transferId: 'a', name: 'a.txt', destDir: '/d', size: 1 })
-    store.begin({ transferId: 'b', name: 'b.txt', destDir: '/d', size: 2 })
+    store.begin({
+      transferId: 'a',
+      name: 'a.txt',
+      destDir: '/d',
+      machine: 'deploy@srv-01',
+      size: 1,
+    })
+    store.begin({
+      transferId: 'b',
+      name: 'b.txt',
+      destDir: '/d',
+      machine: 'deploy@srv-01',
+      size: 2,
+    })
 
     clock.advance(50)
     services.emitDone({ transferId: 'b', outcome: 'written', finalName: 'b.txt', stranded: [] })
@@ -408,7 +440,13 @@ describe('the store as a surface', () => {
     const store = createUploadStore({ services, now: clock.now })
     const total = FINISHED_TRANSFERS_RETAINED + 3
     for (let i = 0; i < total; i++) {
-      store.begin({ transferId: `t${i}`, name: `f${i}`, destDir: '/d', size: 1 })
+      store.begin({
+        transferId: `t${i}`,
+        name: `f${i}`,
+        destDir: '/d',
+        machine: 'deploy@srv-01',
+        size: 1,
+      })
     }
     // Finished in REVERSE start order, so "oldest" cannot be read off the
     // array — only `endedAt` answers it.
@@ -437,9 +475,21 @@ describe('the store as a surface', () => {
     const clock = fakeClock()
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: clock.now })
-    store.begin({ transferId: 'live', name: 'big.iso', destDir: '/d', size: 400 })
+    store.begin({
+      transferId: 'live',
+      name: 'big.iso',
+      destDir: '/d',
+      machine: 'deploy@srv-01',
+      size: 400,
+    })
     for (let i = 0; i < FINISHED_TRANSFERS_RETAINED + 5; i++) {
-      store.begin({ transferId: `t${i}`, name: `f${i}`, destDir: '/d', size: 1 })
+      store.begin({
+        transferId: `t${i}`,
+        name: `f${i}`,
+        destDir: '/d',
+        machine: 'deploy@srv-01',
+        size: 1,
+      })
       clock.advance(1)
       services.emitDone({
         transferId: `t${i}`,
@@ -476,5 +526,41 @@ describe('the store as a surface', () => {
     // The transfer is still running as far as anybody knows: nothing was
     // told to it, so nothing about it changed.
     expect(store.transfer('t1')?.phase).toBe('running')
+  })
+})
+
+// What a finished row needs and the store is the only place that can stamp
+// (nocx-hbdw4.4).
+describe('the store stamps both ends of the work', () => {
+  it('records when it started, on its own clock', () => {
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    seeded(store, 400)
+    const startedAt = store.transfer('t1')?.startedAt
+    expect(startedAt).not.toBeNull()
+
+    clock.advance(14_000)
+    services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
+    const t = store.transfer('t1')
+    if (t === undefined || t.startedAt === null || t.endedAt === null) {
+      throw new Error('a finished transfer must carry both ends')
+    }
+    // Both ends, which is what makes a duration a span rather than a moment.
+    expect(t.endedAt - t.startedAt).toBe(14_000)
+  })
+
+  it('leaves an adopted transfer with no start and no size, rather than a zero of each', () => {
+    // The row lived in a page that was reloaded: this renderer never saw
+    // the call that would have carried them. "0 B, took 0 ms" would be an
+    // answer to a question nobody could answer.
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: fakeClock().now })
+    services.emitDone({ transferId: 'x', outcome: 'written', finalName: 'a.txt', stranded: [] })
+    const t = store.transfer('x')
+    expect(t?.adopted).toBe(true)
+    expect(t?.startedAt).toBeNull()
+    expect(t?.size).toBeNull()
+    expect(t?.machine).toBe('')
   })
 })

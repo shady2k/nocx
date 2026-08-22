@@ -4943,6 +4943,57 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       teardown()
     }
   })
+
+  it('names the machine with the SAME string the strip prints, never a second spelling', async () => {
+    // The amendment to nocx-hbdw4.4. The operations list is global — one
+    // list for every tab — so each row has to say which machine, and the
+    // name must be the one the person already reads on the tab. A second
+    // `${user}@${host}` beside this one would agree everywhere anybody
+    // looked and disagree the day there is no user, which is why the
+    // derivation moved to machine-name.ts and both sides call it.
+    //
+    // Asserted against the strip's OWN value rather than against a literal:
+    // if the two ever part, this fails.
+    const onSubtitleChange = vi.fn()
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onSubtitleChange } },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // A program title is a name of its own, so the strip's second line is
+      // the LOCATION line — which is where the strip names a machine.
+      renderer._fireTitle('herdr')
+
+      // Local: the strip has nothing but the directory to show, and the
+      // origin still names the machine, in words rather than a blank.
+      expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
+      expect(content.activeOrigin()?.machine).toBe('This machine')
+
+      // Walk into a hand-typed ssh (protocol §9: the parent suspends first).
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '192.168.0.93', user: 'pi' },
+      })
+
+      const subtitle = onSubtitleChange.mock.lastCall?.[0] as string
+      expect(subtitle).toBe('pi@192.168.0.93')
+      expect(content.activeOrigin()?.machine).toBe(subtitle)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
 })
 
 // A session the backend cannot currently reach (nocx-iarf9). Nothing has

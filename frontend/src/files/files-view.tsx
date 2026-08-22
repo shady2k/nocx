@@ -154,6 +154,12 @@ interface FilesPanelProps {
    *  the panel then shows no transfers and offers no Upload action, rather
    *  than offering one that reaches nothing. */
   upload: UploadSurface | null
+  /** How the person names the files to upload — the descriptor's own `pick`,
+   *  handed down so the row menu and the header overflow raise the SAME
+   *  picker. Building a second one here is how the two placements would come
+   *  to differ, and they would differ first over which services the picker
+   *  asks, which is the half a test substitutes. */
+  pickSources: () => Promise<UploadSource[]>
 }
 
 function FilesPanel(props: FilesPanelProps) {
@@ -276,9 +282,33 @@ function FilesPanel(props: FilesPanelProps) {
     }
   }
 
+  /**
+   * Upload into the directory the menu was opened on (nocx-9le.5.21).
+   *
+   * THE ROW IS THE DESTINATION, which is what makes this a different thing
+   * from the header's Upload: that one puts files in the folder the panel is
+   * SHOWING and has to say so when no reveal has landed, while here the
+   * person has named the folder by right-clicking it, so there is nothing to
+   * derive and nothing that can be unknown.
+   *
+   * It reuses the flow and the picker the panel already has — a second path
+   * to "send these files there" would be a second answer to one question,
+   * and the two would first disagree over collisions, which is the part a
+   * person is asked about.
+   */
+  const uploadInto = async (node: FilesNode): Promise<void> => {
+    const u = props.upload
+    const b = props.store.binding()
+    if (u === null || b === null) return
+    const sources = await props.pickSources()
+    if (sources.length === 0) return
+    await u.flow.send({ bindingId: b.bindingId, destDir: node.path }, sources)
+  }
+
   /** The menu's items for the row it is open on. The two copy entries are
    *  always there — they are two different answers, and both were asked
-   *  for. Show in Finder joins only on a LOCAL origin.
+   *  for. Upload joins only on a REMOTE origin and only on a folder; Show in
+   *  Finder joins only on a LOCAL one.
    *
    *  EVERY ROW CARRIES ITS MARK, from the kit's set and nowhere else
    *  (nocx-inbw1). The column is reserved whether or not one is passed, so
@@ -307,6 +337,39 @@ function FilesPanel(props: FilesPanelProps) {
       },
     ]
     const o = props.store.origin()
+    // Upload joins only on a REMOTE origin (R1), expressed as ABSENCE — the
+    // same mechanism "Show in Finder" uses below in the opposite direction,
+    // and for the same reason: a local binding has no uploader at all, so
+    // the capability does not apply to that machine and a greyed-out row
+    // would be a promise the product cannot keep. It also joins only on a
+    // folder, because a file is not a place to put a file.
+    //
+    // This is NOT the drop-on-a-folder-row that design §4 refuses. That
+    // refused a GESTURE — a third target rule for a drag, where the folder
+    // under the pointer is a guess about what the person meant. A menu item
+    // on a row they right-clicked is an explicit choice with an unambiguous
+    // target, and the panel's own Upload keeps its single derivation.
+    //
+    // Directory-ness is asked of isExpandable, which already owns it here
+    // (the row that draws a disclosure is the row that is a folder). That
+    // puts a cyclic symlink out of the set: it is drawn as a leaf, so the
+    // menu offers what the tree shows rather than a second reading of the
+    // same row.
+    if (
+      props.upload !== null &&
+      o !== null &&
+      o.kind === 'ssh' &&
+      isExpandable(m.node.kind, m.node.linkKind, m.node.cyclic)
+    ) {
+      items.push({
+        id: 'upload-into',
+        label: 'Upload…',
+        // The mark the panel's other Upload already wears: one action, one
+        // glyph, whichever surface raises it.
+        icon: ArrowUpIcon,
+        onSelect: () => void uploadInto(m.node),
+      })
+    }
     if (o !== null && o.kind === 'local') {
       items.push({
         id: 'reveal',
@@ -771,6 +834,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         clipboard={clipboard}
         activeOrigin={props.activeOrigin}
         upload={upload}
+        pickSources={pick}
       />
     ),
     order: FILES_VIEW_ORDER,

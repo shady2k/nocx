@@ -126,6 +126,20 @@ export interface RequestLineProps {
    * without an owner for the ask simply does not offer it.
    */
   onImportCurl?: () => void
+  /**
+   * What the active environment says about a name: `bound` when it answers
+   * it, `unbound` when it does not, and `unknown` when nobody has said —
+   * which is not the same thing and must not be painted as `unbound`.
+   *
+   * Handed in rather than read here: which environment is active and what it
+   * holds is the store's, and a form that fetched it would be a second
+   * answer to a question that already has one.
+   */
+  variableState?: (name: string) => 'bound' | 'unbound' | 'unknown'
+  /** Somebody clicked a variable in the address. The surface decides what to
+   *  say about it — this line only knows where it was and what it is
+   *  called. */
+  onVariable?: (name: string, at: { x: number; y: number }) => void
 }
 
 /** The line: the verb, the address, what it goes out under, and Send. */
@@ -176,7 +190,21 @@ export function RequestLine(props: RequestLineProps) {
    * The kit paints them; nothing here says how they look.
    */
   const variableMarks = (): TextFieldMark[] =>
-    findVariables(typedUrl()).map(({ from, to }) => ({ from, to }))
+    findVariables(typedUrl()).map(({ from, to, name }) => ({
+      from,
+      to,
+      // `unknown` is the kit's word for "a reference nothing answers", and it
+      // is used ONLY when somebody can say so: an environment that has not
+      // been read yet leaves every mark in the ordinary tone rather than
+      // painting the address as broken while a listing is in flight.
+      tone:
+        props.variableState?.(name) === 'unbound' ? ('unknown' as const) : ('reference' as const),
+    }))
+
+  /** Which variable a marked span is, by where it starts. The scan is the
+   *  same one that produced the marks, so the two cannot disagree. */
+  const variableAt = (from: number): string =>
+    findVariables(typedUrl()).find((v) => v.from === from)?.name ?? ''
 
   const methodOptions = () => {
     const current = request()?.method ?? ''
@@ -213,6 +241,14 @@ export function RequestLine(props: RequestLineProps) {
           disabled={request() === null}
           onInput={editUrl}
           marks={variableMarks()}
+          onMarkClick={
+            props.onVariable
+              ? (mark, at) => {
+                  const name = variableAt(mark.from)
+                  if (name !== '') props.onVariable?.(name, at)
+                }
+              : undefined
+          }
         />
       </div>
       {/* The import mark is the collections menu's own (ArrowDownIcon),

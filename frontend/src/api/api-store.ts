@@ -190,6 +190,15 @@ interface ApiSelection {
   readonly relPath: string
 }
 
+/** What the active environment answers, as the store holds it: the plain
+ *  values, and the NAMES of the ones whose value lives in the vault. It is
+ *  the environment document's own two fields — nothing derived, so nothing
+ *  to fall out of step. */
+interface EnvironmentKnowledge {
+  readonly values: Readonly<Record<string, string>>
+  readonly secretVars: readonly string[]
+}
+
 export interface ApiStore {
   collections(): readonly ApiOpenCollection[]
   /** The handle of the collection the workbench is pointed at — the one just
@@ -243,6 +252,22 @@ export interface ApiStore {
    *  only: a send left running in another request is that request's business
    *  and its Stop lives on its own line. */
   pending(): ApiRun | null
+
+  /**
+   * The names the active environment answers, or null for "nobody has said
+   * yet" — a read that has not happened or one that failed.
+   *
+   * Null is not an empty set and a surface must not treat it as one: empty
+   * means this environment answers nothing, null means do not claim either
+   * way. Marking every reference as unanswered while a listing is in flight
+   * is how a person learns to ignore the colour.
+   */
+  knownVariables(): ReadonlySet<string> | null
+
+  /** What a PLAIN variable answers in the active environment — null for a
+   *  secret one (its value is the vault's and never the renderer's), for a
+   *  name nothing answers, and for an environment nobody has read yet. */
+  variableValue(name: string): string | null
 
   /** The backend's reported refresh mode for the collection watch set, or
    *  null until the first `files.watch` answers — and for a build that
@@ -644,10 +669,77 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const environments = (): readonly ApiEnvironmentRef[] => environmentsOf(activeCollection())
   const activeEnvironment = (): string => environmentFor(activeCollection())
 
+  /**
+   * The names the ACTIVE environment answers — or null for "nobody has said
+   * yet".
+   *
+   * NULL IS A THIRD STATE AND IT CARRIES ITS WEIGHT. A surface marking an
+   * unanswered variable must not do it from an empty set it got because a
+   * read failed, or because none has been made yet: that paints every
+   * reference as broken for as long as the panel is starting, which teaches
+   * the reader to ignore the colour. Empty means "this environment answers
+   * nothing"; null means "do not say".
+   *
+   * A SECRET VARIABLE COUNTS AS ANSWERED. Its value lives in the vault and
+   * the renderer will never see it (ADR-0021); what the environment file
+   * declares is the NAME, and a name that is declared is a name that
+   * resolves at send time.
+   */
+  const [environmentKnowledge, setEnvironmentKnowledge] = createSignal<EnvironmentKnowledge | null>(
+    null,
+  )
+
+  /** The names it answers. Derived rather than stored beside the values: one
+   *  fact, one owner, and a set that could disagree with the map it came
+   *  from is the shape this codebase keeps finding. */
+  const knownVariables = (): ReadonlySet<string> | null => {
+    const known = environmentKnowledge()
+    if (known === null) return null
+    return new Set([...Object.keys(known.values), ...known.secretVars])
+  }
+
+  /** What a PLAIN variable answers, and null for one that is secret, one
+   *  nothing answers, and one nobody has read yet. Never a secret's value:
+   *  the renderer does not have it and must not learn to want it
+   *  (ADR-0021). */
+  const variableValue = (name: string): string | null => {
+    const known = environmentKnowledge()
+    if (known === null) return null
+    return Object.prototype.hasOwnProperty.call(known.values, name) ? known.values[name] : null
+  }
+
+  /**
+   * Re-read what the active environment answers.
+   *
+   * Called where the answer can change: after a listing (a colleague's edit
+   * arrives that way), and when the environment is switched. Not an effect —
+   * this store has none, and a read that fires from a signal read is a read
+   * nobody can find later.
+   */
+  const refreshVariables = async (): Promise<void> => {
+    const handle = untrack(activeCollection)
+    const relPath = untrack(() => environmentFor(handle))
+    if (handle === '' || relPath === '') {
+      // No environment chosen answers nothing, and that is a FACT rather than
+      // an absence of one: every `{{name}}` in the address is unanswered, and
+      // saying so is the whole reason a person can be told what to do next.
+      setEnvironmentKnowledge({ values: {}, secretVars: [] })
+      return
+    }
+    const env = await readEnvironment(relPath)
+    // A read that failed is not a claim that nothing is bound.
+    if (env === null) {
+      setEnvironmentKnowledge(null)
+      return
+    }
+    setEnvironmentKnowledge({ values: env.values, secretVars: env.secretVars })
+  }
+
   const setEnvironment = (relPath: string): void => {
     const handle = untrack(activeCollection)
     if (handle === '') return
     setChosenEnvironments((prev) => new Map(prev).set(handle, relPath))
+    void refreshVariables()
   }
 
   /** The draft differs from what the file last answered. Compared by value —
@@ -703,6 +795,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     await readCollections()
     publishedPaths = null
     await syncWatchSet()
+    // The listing is also how a colleague's edit to an environment file
+    // arrives, so what that environment ANSWERS is re-read with it. After
+    // the listing rather than beside it: which environment is active can
+    // depend on what the listing just brought (a collection with exactly one
+    // environment is that environment's).
+    await refreshVariables()
   }
 
   const openFolder = async (path: string): Promise<void> => {
@@ -1204,6 +1302,8 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     watchMode,
     watchDegradedReason,
     watchFailed,
+    knownVariables,
+    variableValue,
     startWatching,
     dispose,
     refresh,

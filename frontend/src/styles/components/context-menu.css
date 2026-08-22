@@ -84,3 +84,18 @@
   background: var(--color-surface-hover);
   outline: none;
 }
+
+/* The header: what the menu is ABOUT, when it was opened at a thing rather
+   than at a place. Quieter than a row and separated from the rows by a rule,
+   so it cannot be mistaken for one that can be chosen. */
+.ui-context-menu__header {
+  padding: 6px 10px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-divider);
+  margin-bottom: 4px;
+  max-width: 32rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

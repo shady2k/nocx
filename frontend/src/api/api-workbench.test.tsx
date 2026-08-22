@@ -1668,3 +1668,72 @@ describe('ApiContent lifecycle', () => {
     content.dispose()
   })
 })
+
+describe('a variable in the address says whether anything answers it', () => {
+  const marks = (): HTMLElement[] => [
+    ...workbench().querySelectorAll<HTMLElement>('.ui-text-field__mark'),
+  ]
+
+  const variableMenu = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[data-testid="api-variable-menu"]')
+
+  /** A collection with ONE environment, so it is the active one without
+   *  anybody choosing — and a read that answers whatever the test says. */
+  const withEnvironment = (values: Record<string, string>): Partial<ApiWorkbenchServices> => ({
+    listCollections: vi.fn().mockResolvedValue({
+      collections: [
+        collectionsFixture({
+          collection: collectionFixture({ environments: [DEV_ENV] }),
+        }),
+      ],
+      defaultRoot: '/data/collections',
+    }),
+    readEnvironment: vi.fn().mockResolvedValue({
+      environment: {
+        name: 'dev',
+        values,
+        secretVars: [],
+        route: { kind: 'direct' as const, profileId: '', insecureTls: false },
+      },
+    }),
+  })
+
+  it('an environment that answers the name leaves the mark ordinary, and says what it is', async () => {
+    const { bar } = await mountApp(withEnvironment({ baseUrl: 'https://api.example.test' }))
+    await openRequest(bar)
+
+    await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('reference'))
+
+    fireEvent.click(marks()[0])
+    await vi.waitFor(() => expect(variableMenu()).toBeTruthy())
+    // The VALUE, because that is what a person clicked the thing to find out.
+    expect(variableMenu()?.textContent).toContain('https://api.example.test')
+  })
+
+  it('a name nothing answers is marked, and the menu offers to define it', async () => {
+    // An environment that answers something ELSE: the state a person is in
+    // when they have typed a variable and not yet said what it is.
+    const { bar } = await mountApp(withEnvironment({ other: 'x' }))
+    await openRequest(bar)
+
+    await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('unknown'))
+
+    fireEvent.click(marks()[0])
+    await vi.waitFor(() => expect(variableMenu()).toBeTruthy())
+    expect(variableMenu()?.textContent).toContain('does not answer it')
+
+    // And the one action takes them where it is fixed, with a row for that
+    // very name already in the editor.
+    const define = [...(variableMenu()?.querySelectorAll('button') ?? [])].find((b) =>
+      (b.textContent ?? '').includes('baseUrl'),
+    )
+    expect(define, 'the menu offers to define the variable').toBeTruthy()
+    fireEvent.click(define as HTMLButtonElement)
+    await vi.waitFor(() => {
+      const values = [...workbench().querySelectorAll<HTMLInputElement>('input')].map(
+        (i) => i.value,
+      )
+      expect(values).toContain('baseUrl')
+    })
+  })
+})

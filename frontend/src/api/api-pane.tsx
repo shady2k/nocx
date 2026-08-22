@@ -33,6 +33,7 @@ import {
   CloseIcon,
   FolderOpenIcon,
   MoreIcon,
+  PencilIcon,
   PlusIcon,
   RefreshIcon,
   TrashIcon,
@@ -200,6 +201,12 @@ export function ApiPane(props: ApiPaneProps) {
   const [filter, setFilter] = createSignal('')
   const [menuOpen, setMenuOpen] = createSignal(false)
   const [menuAt, setMenuAt] = createSignal({ x: 0, y: 0 })
+
+  // THE VARIABLE A PERSON CLICKED in the address, and where. Its own state
+  // rather than the collections menu's: two menus that shared one open flag
+  // would be two surfaces owning one input, and the second one to open would
+  // close the first from underneath the pointer.
+  const [varMenu, setVarMenu] = createSignal<{ name: string; x: number; y: number } | null>(null)
 
   const [curling, setCurling] = createSignal(false)
   const [curlLine, setCurlLine] = createSignal('')
@@ -498,6 +505,114 @@ export function ApiPane(props: ApiPaneProps) {
 
   /** Open the surface, on whatever is currently being sent under — the
    *  environment somebody came here about is nearly always that one. */
+  /**
+   * What the active environment says about a name.
+   *
+   * `unknown` is not a hedge: the store answers null until an environment has
+   * actually been read, and painting every reference as unanswered in that
+   * window is how a person learns to ignore the colour.
+   */
+  const variableState = (name: string): 'bound' | 'unbound' | 'unknown' => {
+    const known = store.knownVariables()
+    if (known === null) return 'unknown'
+    return known.has(name) ? 'bound' : 'unbound'
+  }
+
+  /** What the panel says about the variable that was clicked — one line,
+   *  and never a secret's value: the renderer does not have it (ADR-0021)
+   *  and the sentence says where it lives instead. */
+  const variableHeader = (name: string): string => {
+    const state = variableState(name)
+    if (state === 'unknown') return `{{${name}}} — no environment has been read yet`
+    if (state === 'unbound') {
+      const env = store.activeEnvironment()
+      return env === ''
+        ? `{{${name}}} — no environment is chosen, so nothing answers it`
+        : `{{${name}}} — ${environmentName(env)} does not answer it`
+    }
+    const value = store.variableValue(name)
+    return value === null ? `{{${name}}} = a secret, from the vault` : `{{${name}}} = ${value}`
+  }
+
+  /**
+   * What the person can DO about the variable they clicked.
+   *
+   * One row, and which row depends on the answer they already have in the
+   * header: a name nothing answers offers to define it, and a name that IS
+   * answered offers the place it is answered — the same door, walked in
+   * from the two directions a person arrives from.
+   */
+  const variableMenuItems = () => {
+    const name = varMenu()?.name ?? ''
+    if (name === '') return []
+    const state = variableState(name)
+    const env = store.activeEnvironment()
+    if (state === 'bound') {
+      return [
+        {
+          id: 'api-variable-open-env',
+          label: `Edit ${environmentName(env)}`,
+          icon: PencilIcon,
+          onSelect: () => {
+            setVarMenu(null)
+            openEnvironments()
+          },
+        },
+      ]
+    }
+    return [
+      {
+        id: 'api-variable-define',
+        label:
+          env === ''
+            ? `Add ${name} to a new environment`
+            : `Add ${name} to ${environmentName(env)}`,
+        icon: PlusIcon,
+        onSelect: () => defineVariable(name),
+      },
+    ]
+  }
+
+  /** The environment's own NAME, by the path the picker chose it under. */
+  const environmentName = (relPath: string): string =>
+    store.environments().find((e) => e.relPath === relPath)?.name ?? relPath
+
+  /**
+   * Open the environment editor with this name in it, ready to be given a
+   * value — the path from the problem to the place it is fixed, in one
+   * gesture from where the person typed it.
+   *
+   * A name the environment ALREADY answers is not added twice: the editor
+   * opens on the row that is there. That is why this reads the rows it just
+   * filled rather than appending blind.
+   */
+  const defineVariable = (name: string): void => {
+    setVarMenu(null)
+    setEnvOpen(true)
+    void store.loadConnections()
+    const current = store.activeEnvironment()
+    // Through pickEnvironment's own parameter rather than after it: filling
+    // the editor is a READ, so a row appended out here would race it and
+    // sometimes be overwritten by the answer. Nothing in this surface may
+    // depend on which of two callbacks ran first.
+    if (current !== '') {
+      pickEnvironment(current, name)
+      return
+    }
+    if (store.environments().length === 0) newEnvironment()
+    ensureRow(name)
+  }
+
+  /** Put a row for `name` in the editor if it has none. Never a second one:
+   *  a name is a key, and two rows claiming it is a file that cannot say
+   *  what it answers. */
+  const ensureRow = (name: string): void => {
+    setEnvRows((rows) =>
+      rows.some((r) => r.name === name) ? rows : [...rows, { name, value: '', secret: false }],
+    )
+    setEnvDirty(true)
+  }
+
   const openEnvironments = (): void => {
     setEnvOpen(true)
     // Read on every open: a person may have added the connection they are
@@ -529,7 +644,7 @@ export function ApiPane(props: ApiPaneProps) {
    * empty form that populates a moment later, which is a form somebody types
    * into before it has finished arriving.
    */
-  const pickEnvironment = (relPath: string): void => {
+  const pickEnvironment = (relPath: string, ensure = ''): void => {
     void store.readEnvironment(relPath).then((env) => {
       if (!env) return
       setEnvCreating(false)
@@ -540,6 +655,11 @@ export function ApiPane(props: ApiPaneProps) {
       setEnvRoute(env.route)
       setEnvRefused('')
       setEnvDirty(false)
+      // `ensure` is how a person arrives here FROM a variable they clicked in
+      // the address: the row they came to fill is put in by the same step
+      // that fills the editor, so there is no window in which the read
+      // overwrites it.
+      if (ensure !== '') ensureRow(ensure)
     })
   }
 
@@ -784,6 +904,22 @@ export function ApiPane(props: ApiPaneProps) {
               },
             },
           ]}
+        />
+        {/* WHAT THIS VARIABLE IS, where it was clicked. A menu rather than a
+            panel of its own: the kit already owns "a small thing anchored at
+            a point that dismisses itself", including the Escape, the
+            outside-click and the focus return, and a second surface with its
+            own copy of those would be the two-owners defect with a popover
+            on top. The header carries the fact and the row carries the one
+            action there is. */}
+        <ContextMenu
+          open={varMenu() !== null}
+          x={varMenu()?.x ?? 0}
+          y={varMenu()?.y ?? 0}
+          header={varMenu() ? variableHeader(varMenu()?.name ?? '') : undefined}
+          data-testid="api-variable-menu"
+          onClose={() => setVarMenu(null)}
+          items={variableMenuItems()}
         />
         <CollectionDialog
           open={naming()}
@@ -1209,6 +1345,8 @@ export function ApiPane(props: ApiPaneProps) {
             sendable={store.draft() !== null}
             sending={store.pending() !== null}
             onEdit={(next) => store.editDraft(next)}
+            variableState={variableState}
+            onVariable={(name, at) => setVarMenu({ name, x: at.x, y: at.y })}
             onSend={() => void store.send()}
             onStop={() => void store.stop()}
             onImportCurl={askForCurl}

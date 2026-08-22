@@ -16,6 +16,17 @@ import { mirrorControlledValue } from './controlled-value'
 export interface TextFieldMark {
   from: number
   to: number
+  /**
+   * What the mark says about the span — `reference` (the default) is "this
+   * is a reference", `unknown` is "and nothing answers it".
+   *
+   * Two tones and not a boolean because the third state is real and must not
+   * be drawn as either: a surface that does not yet KNOW whether a name is
+   * answered passes `reference`, and a warning colour appears only once
+   * somebody can say it is warranted. Crying wolf while a listing is in
+   * flight is how a person learns to ignore the colour.
+   */
+  tone?: 'reference' | 'unknown'
 }
 
 export interface TextFieldProps {
@@ -104,6 +115,17 @@ export interface TextFieldProps {
    * ink layer follows one, so `multiline` ignores this.
    */
   marks?: readonly TextFieldMark[]
+  /**
+   * What a click on a marked span does. Absent means a mark is decoration
+   * and the click falls through to the field, which is what a caret needs.
+   *
+   * THE MARK TAKES THE CLICK when this is present: the span is the one place
+   * on the line where the pointer means "tell me about this", and the rest of
+   * the field still places the caret. It is a trade rather than a free win —
+   * clicking the middle of `{{baseUrl}}` no longer puts the caret there — and
+   * it is the same one Postman makes for the same reason.
+   */
+  onMarkClick?: (mark: TextFieldMark, at: { x: number; y: number }) => void
   /**
    * Which edge the caption is flush with — 'start' (the default) or 'end'.
    *
@@ -209,14 +231,29 @@ export function TextField(props: TextFieldProps) {
    * width would put every character after it in a different place than the
    * caret believes it is.
    */
-  const runs = (): Array<{ text: string; marked: boolean }> => {
+  const runs = (): Array<{
+    text: string
+    marked: boolean
+    tone?: 'reference' | 'unknown'
+    mark?: TextFieldMark
+  }> => {
     const text = String(props.value)
-    const out: Array<{ text: string; marked: boolean }> = []
+    const out: Array<{
+      text: string
+      marked: boolean
+      tone?: 'reference' | 'unknown'
+      mark?: TextFieldMark
+    }> = []
     let at = 0
     for (const m of props.marks ?? []) {
       if (m.from < at || m.to > text.length || m.from >= m.to) continue
       if (m.from > at) out.push({ text: text.slice(at, m.from), marked: false })
-      out.push({ text: text.slice(m.from, m.to), marked: true })
+      out.push({
+        text: text.slice(m.from, m.to),
+        marked: true,
+        tone: m.tone ?? 'reference',
+        mark: m,
+      })
       at = m.to
     }
     if (at < text.length) out.push({ text: text.slice(at), marked: false })
@@ -255,7 +292,18 @@ export function TextField(props: TextFieldProps) {
             <For each={runs()}>
               {(run) => (
                 <Show when={run.marked} fallback={<span>{run.text}</span>}>
-                  <span class="ui-text-field__mark">{run.text}</span>
+                  <span
+                    class="ui-text-field__mark"
+                    data-tone={run.tone}
+                    data-interactive={props.onMarkClick ? 'true' : undefined}
+                    onClick={(e: MouseEvent) => {
+                      const mark = run.mark
+                      if (!mark) return
+                      props.onMarkClick?.(mark, { x: e.clientX, y: e.clientY })
+                    }}
+                  >
+                    {run.text}
+                  </span>
                 </Show>
               )}
             </For>

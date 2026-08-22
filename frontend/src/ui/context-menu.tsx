@@ -46,6 +46,17 @@ export interface ContextMenuItem {
 }
 
 export interface ContextMenuProps {
+  /**
+   * One non-interactive line at the top, naming what the menu is ABOUT.
+   *
+   * A menu whose rows are all actions cannot state a fact, and some menus are
+   * opened at a thing rather than at a place — a variable in an address, say,
+   * where "what is this and is it answered" is most of what the person came
+   * for and the action is the smaller half. It is not a row: it takes no
+   * focus, answers no key and is skipped by the keyboard walk, because a line
+   * that cannot be chosen must not look like one that can.
+   */
+  header?: string
   /** Show the menu at (x, y) viewport coordinates. */
   open: boolean
   x: number
@@ -168,6 +179,12 @@ export function ContextMenu(props: ContextMenuProps) {
             element = el
           }}
         >
+          {/* Not a row: no role, no tabindex, nothing the keyboard walk can
+              land on. A line that cannot be chosen must not look like one
+              that can. */}
+          <Show when={props.header !== undefined}>
+            <div class="ui-context-menu__header">{props.header}</div>
+          </Show>
           <For each={props.items}>
             {(item) => (
               <button

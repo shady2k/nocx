@@ -84,6 +84,26 @@
   color: var(--color-accent);
 }
 
+/* And a reference NOTHING ANSWERS is the warning tone — the same one a badge
+   uses to say "this will not do what it looks like". It is a different colour
+   AND, through the field's own title, a different sentence: a reader who
+   cannot separate the two hues still gets the fact (WCAG 1.4.1). */
+.ui-text-field__mark[data-tone='unknown'] {
+  background: color-mix(in srgb, var(--color-warning), transparent 80%);
+  color: var(--color-warning);
+}
+
+/* A mark that answers a click takes the pointer for its own span — the rest
+   of the ink stays inert so the field keeps the caret. */
+.ui-text-field__mark[data-interactive='true'] {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.ui-text-field__mark[data-interactive='true']:hover {
+  text-decoration: underline;
+}
+
 .ui-text-field__trailing {
   position: absolute;
   top: 50%;

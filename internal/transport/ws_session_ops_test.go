@@ -352,30 +352,16 @@ func TestRapidResizesSettleOnLastDimensions(t *testing.T) {
 		"rapid resize burst")
 }
 
-// awaitResponse reads frames until the response with the given id arrives,
-// discarding notifications and other ids (they are collected separately
-// afterwards). It is the sync point for "the read loop has processed a
-// specific request".
+// awaitResponse waits for the response with the given id. It is the sync
+// point for "the read loop has processed a specific request".
+//
+// Notifications and other ids seen on the way are RETAINED, not discarded:
+// the tests that use this collect them afterwards, and this used to be the
+// reader that had already thrown them away (ws_inbox_test.go).
 func awaitResponse(t *testing.T, conn *websocket.Conn, id int, d time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	_ = conn.SetReadDeadline(deadline)
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("await response %d: %v", id, err)
-		}
-		var env struct {
-			ID json.RawMessage `json:"id"`
-		}
-		if json.Unmarshal(data, &env) != nil || len(env.ID) == 0 || string(env.ID) == "null" {
-			continue // notification
-		}
-		var got int
-		if json.Unmarshal(env.ID, &got) != nil || got != id {
-			continue
-		}
-		return
+	if _, err := awaitFrame(conn, time.Now().Add(d), isResponseTo(id)); err != nil {
+		t.Fatalf("await response %d: %v", id, err)
 	}
 }
 

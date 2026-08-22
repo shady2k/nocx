@@ -187,23 +187,21 @@ func vaultCall(t *testing.T, conn *websocket.Conn, method string, params map[str
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
-		t.Fatalf("write request: %v", err)
+	if werr := conn.WriteMessage(websocket.TextMessage, req); werr != nil {
+		t.Fatalf("write request: %v", werr)
 	}
-	for {
-		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read response: %v", err)
-		}
-		var msg vaultRPCResult
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue
-		}
-		if msg.ID == id {
-			return &msg
-		}
+	// Through the inbox: this loop used to drop every frame that was not
+	// its own response, which cost TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop
+	// the open response it read for afterwards (nocx-2h08).
+	data, err := awaitFrame(conn, time.Now().Add(wantWithin), isResponseTo(id))
+	if err != nil {
+		t.Fatalf("read response to %s (id %d): %v", method, id, err)
 	}
+	var msg vaultRPCResult
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("%s response: decode: %v", method, err)
+	}
+	return &msg
 }
 
 // ── vault.status ──────────────────────────────────────────────────────

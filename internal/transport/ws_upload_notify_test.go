@@ -507,23 +507,11 @@ func awaitDoneCollectingChanges(t *testing.T, conn *websocket.Conn) (uploadDone,
 	var changed []string
 	deadline := time.Now().Add(wantWithin)
 	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatal("timed out waiting for files.uploadDone")
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(remaining))
-		_, msg, err := conn.ReadMessage()
+		msg, err := awaitFrame(conn, deadline, isAnyNotification("files.changed", "files.uploadDone"))
 		if err != nil {
 			t.Fatalf("waiting for files.uploadDone: %v", err)
 		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil || n.ID != nil {
-			continue
-		}
+		n, _ := decodeFrame(msg)
 		switch n.Method {
 		case "files.changed":
 			var p filesChangedParams

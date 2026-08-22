@@ -43,14 +43,11 @@ import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
+import { dropFileOnActivePane } from './drop-gesture'
 import { test, expect } from './harness'
 import { readStand } from './stand'
 import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
 
-/** The pane element is the drop target: TerminalContent marks it when the
- *  session opens and clears it when the session dies, so the selector also
- *  asserts there IS a session behind the tab. */
-const DROP_TARGET = '.pane.active[data-file-drop-target]'
 const FILES_PANEL = '[data-testid="files-panel"]'
 const TREE_ROW = '.ui-tree-row'
 
@@ -134,39 +131,9 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
     const payload = randomBytes(PAYLOAD_BYTES)
     const expected = createHash('sha256').update(payload).digest('hex')
     const fileName = `dropped-${Date.now()}.bin`
-    const target = page.locator(DROP_TARGET)
-    await expect(target).toHaveCount(1)
-
-    // dragover first, and its own assertion: `data-drop-active` is the drop
-    // module's statement that it recognised a files drag and took the event.
-    // Without it, a drop that does nothing is indistinguishable from a drop
-    // the handler never saw. The DataTransfer is parked on `window` because a
-    // second page.evaluate cannot be handed one built in the first.
-    await page.evaluate(
-      ({ selector, name, b64 }) => {
-        const el = document.querySelector(selector)
-        if (!(el instanceof HTMLElement)) throw new Error(`no drop target for ${selector}`)
-        const binary = atob(b64)
-        const bytes = new Uint8Array(binary.length)
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-        const dt = new DataTransfer()
-        dt.items.add(new File([bytes], name, { type: 'application/octet-stream' }))
-        ;(window as unknown as { __nocxDrop?: DataTransfer }).__nocxDrop = dt
-        el.dispatchEvent(
-          new DragEvent('dragover', { dataTransfer: dt, bubbles: true, cancelable: true }),
-        )
-      },
-      { selector: DROP_TARGET, name: fileName, b64: payload.toString('base64') },
-    )
-    await expect(target).toHaveAttribute('data-drop-active', '')
-
-    await page.evaluate((selector) => {
-      const el = document.querySelector(selector)
-      if (!(el instanceof HTMLElement)) throw new Error(`no drop target for ${selector}`)
-      const dt = (window as unknown as { __nocxDrop?: DataTransfer }).__nocxDrop
-      if (dt === undefined) throw new Error('the drag transfer did not survive to the drop')
-      el.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }))
-    }, DROP_TARGET)
+    // The gesture is e2e/drop-gesture.ts — one owner, shared with the local
+    // branch's spec, which asserts against a different filesystem entirely.
+    await dropFileOnActivePane(page, fileName, payload)
 
     // ── 1: the row appears, with nobody pressing anything ─────────────────
     await expect(page.locator('.ui-tree-row__name').filter({ hasText: fileName })).toBeVisible({

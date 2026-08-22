@@ -19,6 +19,8 @@ Schema version remains 12. The previous v12 shape existed only on this unmerged 
 
 The only launch entry is the shield in the activity bar's top zone beside the Files view icon; it is not part of the Files panel header. It is hidden while `sandbox.enabled` is false. It is disabled when the backend is unavailable, the active surface is not a local terminal, or OSC 7 has not verified a cwd. Quick Connect, the tab-strip More menu, `+`, and Cmd/Ctrl+T contain no sandbox action.
 
+After native readiness confirms the sandbox, the replacement tab's title line is prefixed with the shield icon. The shield is the first name-line element, before pin, warning, activity, program title, cwd, or other status.
+
 Conversion creates a new sandbox pane using the source cwd, waits for its durable create acknowledgement, moves the new tab to the source tab's strip position, and then closes the source. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
 
 Generalizing `authority_grants` to multiple subject kinds is deferred. Reopening a grant or changing a running pane's grant is also deferred; both require explicit user consent and a restart design.

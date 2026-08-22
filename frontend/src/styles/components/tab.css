@@ -809,7 +809,15 @@
 
 .nocx-tab-sandboxed-marker {
   flex: none;
-  align-self: center;
-  font-size: 0.7em;
+  display: inline-flex;
+  align-items: center;
+  width: 12px;
+  height: 12px;
+  margin: 0 5px 0 0;
   color: var(--color-text-muted);
+}
+
+.nocx-tab-sandboxed-marker svg {
+  width: 100%;
+  height: 100%;
 }

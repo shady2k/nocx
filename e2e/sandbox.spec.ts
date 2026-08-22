@@ -84,6 +84,10 @@ test.describe('sandbox shield', () => {
       await expect(page.getByRole('heading', { name: 'Sandbox permissions' })).toBeVisible()
       await page.getByRole('button', { name: 'Open sandboxed tab' }).click()
       await expect(page.getByRole('tab')).toHaveCount(before)
+      const selected = page.getByRole('tab', { selected: true })
+      await expect(selected.locator('.nocx-tab-line > :first-child')).toHaveClass(
+        /nocx-tab-sandboxed-marker/,
+      )
     }
   })
 })

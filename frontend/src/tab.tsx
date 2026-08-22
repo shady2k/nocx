@@ -1,7 +1,7 @@
 import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
 import { TAB_DRAG_TYPE } from './layout/strip-drag'
-import { PinIcon } from './ui/icons'
+import { PinIcon, ShieldIcon } from './ui/icons'
 import type { AgentStatus } from './agent-status'
 
 /**
@@ -244,6 +244,15 @@ export function Tab(props: TabProps) {
             is not showing — and pushed the two visible lines below the row's
             centre. Wrapping the pair keeps the column at exactly two children. */}
         <span class="nocx-tab-line">
+          <Show when={props.sandboxed === true}>
+            <span
+              class="nocx-tab-sandboxed-marker"
+              aria-label="Sandboxed"
+              title="Filesystem-isolated"
+            >
+              <ShieldIcon />
+            </span>
+          </Show>
           <span class="nocx-tab-status" />
           {/* Why this tab is at the head of the strip. Without the mark the
               pinning is invisible until the strip is long enough for the
@@ -260,15 +269,6 @@ export function Tab(props: TabProps) {
               aria-label={props.warningLabel ?? 'Environment degraded'}
               title={props.warningLabel ?? 'Shell integration degraded or uncertain'}
             />
-          </Show>
-          <Show when={props.sandboxed === true}>
-            <span
-              class="nocx-tab-sandboxed-marker"
-              aria-label="Sandboxed"
-              title="Filesystem-isolated"
-            >
-              {'\u26e8'}
-            </span>
           </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>

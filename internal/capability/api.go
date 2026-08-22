@@ -62,6 +62,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -133,6 +134,46 @@ type SendInputs struct {
 	// onto the other is apisend's (RouteIDFor), and this layer does not
 	// learn a second spelling of it.
 	Route apicoll.Route
+	// Secrets are the values the binding document answered for this
+	// substitution — the ones now sitting inside Request's URL, headers,
+	// query or body. Empty when the environment declared none.
+	//
+	// The caller hands them to the sender so they can be elided from the
+	// diagnostic. They are recorded by WHICH LOOKUP ANSWERED rather than by
+	// guessing at the text: the environment's plain values are tried first
+	// and the binding document second (apicoll.Chain), so a name the second
+	// one answers is a secret by construction — there is no heuristic here
+	// and nothing that could mistake a plain value for a credential or the
+	// other way round.
+	Secrets []PlacedSecret
+}
+
+// SecretValues is the binding document's READ half, narrowed to the one call
+// the snapshot makes. Declared here as a consumer contract, like Secrets and
+// SecretVault beside it: this layer asks what a variable is worth and has no
+// parameter through which an identifier could travel in either direction
+// (design §8, apibind.ValueResolver).
+type SecretValues interface {
+	Variables(ctx context.Context, collection, environment string) apicoll.Lookup
+}
+
+// PlacedSecret is one secret value that WAS substituted into the request, by
+// name.
+//
+// It exists so the sender can find those bytes in the text it composes and
+// elide them (apisend.MarkRequest, locate) — which is what makes the raw view
+// show a chip where a token went rather than the token. Without it a secret
+// resolved into a URL would cross to the renderer in the clear inside the
+// diagnostic whose entire purpose is to show everything (§11.2).
+//
+// It carries the VALUE, and it is the one thing in SendInputs that does.
+// That is not a new exposure: the resolved request beside it already has the
+// value substituted into its URL, its headers or its body — that is what
+// substitution IS. What this adds is the sender's ability to know which
+// bytes those are.
+type PlacedSecret struct {
+	Name  string
+	Value string
 }
 
 // APICollectionService is the collection surface: the opened-folder list,
@@ -150,6 +191,18 @@ type APICollectionService interface {
 	// this list exactly as Open's folder does, so a caller has one thing to
 	// do afterwards rather than two.
 	Create(name string) (apicoll.Created, error)
+	// BindingKeyFor answers the pair a binding under this environment is
+	// keyed by: the collection's canonical root and the environment's NAME
+	// as its file declares it.
+	//
+	// It exists so the write half of a binding is keyed by exactly what the
+	// READ half is keyed by. Snapshot reports the same two values for the
+	// send (CookieScope and Environment), and apibind.Key is a triple for a
+	// reason — two collections with a variable of one name must not share a
+	// value. A handler that assembled the pair itself would be a second
+	// derivation of the binding key, and the two would agree until somebody
+	// renamed an environment without renaming its file.
+	BindingKeyFor(h apicoll.HandleID, envRelPath string) (collection, environment string, err error)
 	// DefaultRoot is where that default location IS, so a surface can show
 	// a person where a collection is about to land rather than asking them
 	// to name a place with nothing proposed. "" is a build with no app
@@ -199,7 +252,11 @@ type APICollectionService interface {
 	// released before the dial. envRelPath names the environment to send
 	// under, addressed inside the collection like everything else; "" is no
 	// environment, which is the request as written on the direct route.
-	Snapshot(h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error)
+	//
+	// It takes a context because resolving a secret variable reads the
+	// vault, which is a call that can be cancelled — the only thing in the
+	// snapshot that is not a file read.
+	Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error)
 }
 
 // APICollectionOperation is the typed operation for every api.collections.*
@@ -216,22 +273,31 @@ type APICollectionOperation interface {
 // It takes the WHOLE folder surface — requests, environments and creation —
 // because all three are reached from this one domain and all three must go
 // through one handle table and one root re-validation.
-func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections) APICollectionOperation {
+//
+// values is the binding document's read half, and it is a parameter rather
+// than a field set afterwards because the snapshot needs it on the first
+// call: a build wired without one resolves no secret variable at all, which
+// is a coherent half of the feature and says so by leaving them unresolved.
+func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections, values SecretValues) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
 		control.NewComposite(apiGate, lane),
 		g,
-		newAPICollectionService(g, svc),
+		newAPICollectionService(g, svc, values),
 	)
 }
 
-func newAPICollectionService(g *guard, svc apicoll.Collections) *apiCollectionService {
-	return &apiCollectionService{guard: g, svc: svc}
+func newAPICollectionService(g *guard, svc apicoll.Collections, values SecretValues) *apiCollectionService {
+	return &apiCollectionService{guard: g, svc: svc, values: values}
 }
 
 type apiCollectionService struct {
 	guard *guard
 	svc   apicoll.Collections
+	// values is the binding document's read half. nil is a build with no
+	// binding store, and then a secret variable resolves to nothing — which
+	// is the same answer a misspelled variable gets, and an honest one.
+	values SecretValues
 
 	// mu guards the opened-folder list. The api gate already serialises
 	// every caller at capacity 1, so this is the lock that keeps the list
@@ -374,6 +440,21 @@ func (s *apiCollectionService) register(h apicoll.HandleID, root string) {
 // back here is an opened folder and the only question left is which list it
 // belongs in. A folder that could not be created registers nothing — there
 // is no row naming a collection nobody made.
+func (s *apiCollectionService) BindingKeyFor(h apicoll.HandleID, envRelPath string) (string, string, error) {
+	if err := s.guard.check(); err != nil {
+		return "", "", err
+	}
+	scope, err := s.pathFor(h)
+	if err != nil {
+		return "", "", err
+	}
+	env, err := s.svc.ReadEnvironment(h, envRelPath)
+	if err != nil {
+		return "", "", err
+	}
+	return scope, env.Name, nil
+}
+
 func (s *apiCollectionService) DefaultRoot() (string, error) {
 	if err := s.guard.check(); err != nil {
 		return "", err
@@ -507,7 +588,7 @@ func (s *apiCollectionService) DeleteRequest(h apicoll.HandleID, relPath string)
 	return s.svc.DeleteRequest(h, relPath)
 }
 
-func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {
+func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {
 	if err := s.guard.check(); err != nil {
 		return SendInputs{}, err
 	}
@@ -535,6 +616,7 @@ func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath 
 	// request goes out exactly as written when it HAS no references, and
 	// says which ones it cannot resolve when it has.
 	var look apicoll.Lookup
+	var secrets apicoll.Lookup
 	if envRelPath != "" {
 		env, envErr := s.svc.ReadEnvironment(h, envRelPath)
 		if envErr != nil {
@@ -543,9 +625,26 @@ func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath 
 		inputs.Environment = env.Name
 		inputs.Route = env.Route
 		look = env.Lookup()
+		// THE SECOND LOOKUP, which is what Chain has always existed for and
+		// what was never built. A vault-held value reached exactly one field
+		// — the auth variable, resolved by the sender — so a token that goes
+		// in a PATH could only be sent by typing it into a file that goes
+		// into git. Telegram is the shape that names the gap:
+		// `/bot<TOKEN>/sendMessage`.
+		//
+		// BEHIND the environment, never in front of it. Environment.Value
+		// already refuses a name the file declares secret, so the two halves
+		// cannot both answer one name; the ORDER is what makes a collection
+		// arriving in a pull request unable to choose what a reader's
+		// request sends (§8) — a file's plain value can never shadow a
+		// binding, and a binding is only reached for a name the file did not
+		// answer.
+		if s.values != nil {
+			secrets = recordPlaced(s.values.Variables(ctx, scope, env.Name), &inputs.Secrets)
+		}
 	}
 
-	resolved, err := apicoll.Substitute(req, apicoll.Chain(look))
+	resolved, err := apicoll.Substitute(req, apicoll.Chain(look, secrets))
 	if err != nil {
 		// THE INPUTS COME BACK WITH THE ERROR, and that is the one thing
 		// this signature does that a plain failure would not. An unresolved
@@ -561,6 +660,38 @@ func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath 
 	}
 	inputs.Request = resolved
 	return inputs, nil
+}
+
+// recordPlaced wraps a lookup so the caller learns WHICH values it answered.
+//
+// It is a decorator rather than a change to apicoll.Substitute, and that is
+// the point: substitution's contract is that it knows nothing about where an
+// answer came from, so "which of these came from the vault" is a question
+// only the composer of the Chain can answer. Wrapping the second lookup
+// alone means the answer is exact — no scan of the text, no heuristic about
+// what a credential looks like.
+//
+// BY NAME, ONCE. A variable referenced three times is answered three times
+// and recorded once: the sender locates every occurrence of a value itself,
+// so a second identical placement would be dropped by collapse anyway, and
+// recording it would only make the list say something it does not mean.
+func recordPlaced(look apicoll.Lookup, into *[]PlacedSecret) apicoll.Lookup {
+	if look == nil {
+		return nil
+	}
+	return func(name string) (string, bool, error) {
+		value, found, err := look(name)
+		if err != nil || !found {
+			return value, found, err
+		}
+		for _, already := range *into {
+			if already.Name == name {
+				return value, true, nil
+			}
+		}
+		*into = append(*into, PlacedSecret{Name: name, Value: value})
+		return value, true, nil
+	}
 }
 
 // stillOpen refuses a handle the user has closed — or never opened — before
@@ -602,6 +733,67 @@ type APIImportService interface {
 	// accepts a path (§13.1) — and it accepts two, because an import names
 	// both what to read and where to put it.
 	ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error)
+}
+
+// SecretBinder is the binding document's WRITE half, narrowed to the one
+// call this operation makes. Declared here as a consumer contract, the way
+// apiimport declares its own BindWriter for the same method: this layer
+// needs to put one value away and has no part in the document's lifecycle.
+type SecretBinder interface {
+	Bind(ctx context.Context, k apibind.Key, value []byte) error
+}
+
+// APIBindingService is the write a person makes when they give a secret
+// variable its value: the VALUE goes to the vault under a
+// collection-and-environment binding, and the environment FILE keeps only
+// the NAME (design §8).
+//
+// Until this, only an IMPORT could mint one — apiimport's BindWriter — so a
+// variable a person declared secret in the editor had no way to be given a
+// value at all, and the only way to send a token in a URL was to type it
+// into a file that goes into git.
+type APIBindingService interface {
+	// BindSecret stores value under k. It takes the key rather than a
+	// handle and a path because the key is the collection service's to
+	// derive (BindingKeyFor) — this operation writes the vault and knows
+	// nothing about collection folders.
+	BindSecret(ctx context.Context, k apibind.Key, value []byte) error
+}
+
+// APIBindingOperation is the typed operation for the binding write. Its
+// gates are [vault, api]: it puts a value in the vault, and it writes the
+// binding document that api.import.postman also writes — the two must
+// exclude each other, and the vault gate is what makes them.
+type APIBindingOperation interface {
+	Run(context.Context, func(context.Context, APIBindingService) error) error
+}
+
+// NewAPIBindingOperation builds it over the binding store.
+func NewAPIBindingOperation(vaultGate, apiGate, lane control.Admission, bindings SecretBinder) APIBindingOperation {
+	g := &guard{}
+	return newOperation[APIBindingService](
+		control.NewComposite(vaultGate, apiGate, lane),
+		g,
+		&apiBindingService{guard: g, bindings: bindings},
+	)
+}
+
+type apiBindingService struct {
+	guard    *guard
+	bindings SecretBinder
+}
+
+// BindSecret hands the value to the binding store and nothing else.
+//
+// IT LOGS NOTHING AND WRAPS NOTHING WITH THE VALUE IN IT. The one argument
+// that is a credential appears in no message this function can produce: a
+// failure names the VARIABLE, which is what the person has to fix, and the
+// store's own errors do the same (apibind).
+func (s *apiBindingService) BindSecret(ctx context.Context, k apibind.Key, value []byte) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.bindings.Bind(ctx, k, value)
 }
 
 // APIImportOperation is the typed operation for api.import.postman. Its

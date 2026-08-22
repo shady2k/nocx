@@ -250,11 +250,33 @@ func (t *Transport) dial(ctx context.Context, network, addr string) (net.Conn, e
 // requests), and exactly those names are dropped on a crossing — never a
 // guess from arbitrary request headers, which would strip headers the user
 // deliberately set on an endpoint that is supposed to keep them.
+// A SECRET IN THE URL CANNOT BE STRIPPED, SO THE HOP IS REFUSED. The rule
+// above works by DELETION: a header is a thing beside the request, so it can
+// be dropped and the request still means what it meant. A value in a path or
+// a query is not beside the request — it IS the target, and a redirect that
+// carried it would hand a credential to an origin the person never named,
+// while a redirect that removed it would ask for a resource nobody meant.
+// Neither is a thing to do quietly, so the chain stops and says so.
+//
+// It is here rather than beside the one caller that can produce it, because
+// this function IS the credential boundary — a second rule about credentials
+// crossing origins would be two owners of one property, agreeing until the
+// day one of them was edited. Callers that never mark a request are
+// unaffected: the flag rides the same context channel the custom header
+// names do, and nothing sets it by default.
 func (t *Transport) CheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= t.maxRedirects {
 		return fmt.Errorf("%s: stopped after %d redirects", t.component, t.maxRedirects)
 	}
 	if len(via) > 0 && Origin(req.URL) != Origin(via[0].URL) {
+		if secretInURL(req.Context()) {
+			// The ORIGIN and never the URL: the URL is the thing carrying
+			// the credential, and this message reaches a log the person did
+			// not choose.
+			return fmt.Errorf("%s: refusing to follow a redirect to %s: this request carries a "+
+				"secret in its address, and a value in a path or a query cannot be dropped on the "+
+				"way the Authorization header can", t.component, Origin(req.URL))
+		}
 		req.Header.Del("Authorization")
 		req.Header.Del("Www-Authenticate")
 		req.Header.Del("Cookie")
@@ -272,6 +294,29 @@ func (t *Transport) CheckRedirect(req *http.Request, via []*http.Request) error 
 // request into every redirect hop (net/http clones the initial request's
 // context), so the names are available exactly when they are needed.
 type customHeaderNamesKey struct{}
+
+// secretInURLKey marks a request whose ADDRESS carries a credential. It is a
+// bool and never the value: the redirect rule needs to know that there is
+// one, and nothing in this package needs to know what it is.
+type secretInURLKey struct{}
+
+// WithSecretInURL marks ctx as a request whose path or query carries a
+// secret. Set by the caller that placed it — internal/apisend, which is the
+// only one that substitutes a vault-held value into an address and therefore
+// the only one that can know.
+//
+// The context is the channel that survives into every redirect hop (net/http
+// clones the initial request's context), which is why the custom header
+// names travel the same way.
+func WithSecretInURL(ctx context.Context) context.Context {
+	return context.WithValue(ctx, secretInURLKey{}, true)
+}
+
+// secretInURL reads the mark back.
+func secretInURL(ctx context.Context) bool {
+	marked, _ := ctx.Value(secretInURLKey{}).(bool)
+	return marked
+}
 
 // WithCustomHeaderNames tags ctx with the canonical names of the custom
 // headers the request carries. Set by the request builders (the assistant's

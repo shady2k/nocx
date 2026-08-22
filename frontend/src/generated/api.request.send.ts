@@ -10,10 +10,22 @@
  */
 
 /**
- * Result of the api.request.send JSON-RPC method: what came back from one exchange, bounded. The body is captured behind the 2 MiB ceiling files.read already uses (design §12.3), so a response larger than that arrives truncated rather than not at all.
+ * Result of the api.request.send JSON-RPC method: ONE EXCHANGE, which exists from the moment Send is pressed and ends `answered`, `failed` or `stopped`. It is not "the response", and the difference is the whole shape of this file. A run that WAS its answer could not exist before the answer did, so a request in flight had nothing to show, a running exchange had nothing to name it by, and a failure was not a run at all — it came back as a JSON-RPC error, one sentence, while the sender was holding the composed request, the route, the phases and the remote address at the moment it failed. Everything the attempt reached is here whatever the outcome; only `response` waits for an answer. The body is captured behind the 2 MiB ceiling files.read already uses (design §12.3), so a response larger than that arrives truncated rather than not at all. What is still a JSON-RPC error is what is not an exchange at all: an unknown handle, a request file that will not read, an auth variable nothing can resolve.
  */
 export interface ApiRequestSendResult {
-  response: Response
+  /**
+   * How this exchange ended. `answered` a response came back and was read; `failed` it did not; `stopped` the person who started it stopped it. Three and not two, because a stop is not a failure — it is the answer arriving on purpose — and a surface that had to infer the difference from a reason string would word and tone somebody's own Stop as something that went wrong.
+   */
+  outcome: 'answered' | 'failed' | 'stopped'
+  request: Raw
+  /**
+   * What came back — NULL unless the outcome is `answered`. Null is the honest shape: a failed exchange has no status, no headers and no body, and a zeroed response would render as an HTTP 0 with an empty body, which is a lie the renderer cannot tell from a real one.
+   */
+  response: Response | null
+  /**
+   * Why it ended — NULL exactly when the outcome is `answered`, and present for `failed` and `stopped` alike. See $defs/failure: the outcome decides how it reads, the phase says how far it got.
+   */
+  failure: Failure | null
   /**
    * The NAME of the environment this exchange actually went out under, as the environment FILE declares it — and "" when the send named none, which is the request as written on the direct route. It is the backend's own account rather than an echo of the caller's `envRelPath`: the renderer names an environment by its path and the name is read out of the file at the moment the address and the route are (capability.SendInputs), so this is the one field that says which record answered. A run list drawn from what the renderer BELIEVED it asked for is the vault.status defect in reverse — a value written by one side and never read back from the other.
    */
@@ -29,73 +41,20 @@ export interface ApiRequestSendResult {
      */
     insecureTls: boolean
   }
-}
-export interface Response {
-  status: number
   /**
-   * Never null — a response with no headers is [].
+   * The address that actually answered the dial, and "" when nothing did. It is on the EXCHANGE rather than on the response because it is a fact about the attempt: a run that failed at `tls` still reached a machine, and which machine it reached is the first thing anybody asks. Its presence is also what distinguishes a dial that never landed from a connection that broke later, which is how the phase is classified.
    */
-  headers: Header[]
-  /**
-   * The decoded body, always valid UTF-8, and EMPTY when binary: the run says "binary body, N bytes" and never base64.
-   */
-  text: string
-  /**
-   * A NUL byte among the bytes actually read — the files.read heuristic, labelled as one.
-   */
-  binary: boolean
-  /**
-   * The bytes read were not valid UTF-8 and invalid sequences were replaced. Distinct from binary: a NUL-free latin-1 body is lossy text, not a binary body. Three separate facts because they are three separate sentences in the run, and collapsing any two of them loses one.
-   */
-  lossy: boolean
-  /**
-   * The ceiling was reached and one further byte was readable — the body shown is a prefix.
-   */
-  truncated: boolean
-  /**
-   * Body bytes actually read and kept, which is the ceiling when truncated. Not a claim about what the server holds: a Content-Length can lie and a chunked response declares nothing.
-   */
-  size: number
-  timings: Timings
-  tlsVersion: string
   remoteAddr: string
-  raw: Exchange
+  timings: Timings
   /**
-   * The negotiated cipher suite's name, and "" when the exchange was not over TLS.
-   */
-  tlsCipherSuite: string
-  /**
-   * The chain the SERVER PRESENTED, leaf first — not the chain that was verified, which is a different list and is empty when verification was off. It is the answer to the only question left once an environment accepts self-signed certificates: which certificate did I actually just trust. Described by the side that saw the bytes and never sent as DER: a renderer that parsed certificates would be a second X.509 implementation, and the fingerprint — the field somebody compares against a value read out over the phone — must be computed once. Never null: a plain http exchange presents none and that is [].
+   * The chain the SERVER PRESENTED, leaf first, described by the side that saw the bytes. Never null: a plain http exchange presents none and that is []. It is EMPTY for a failure at phase `tls`, and that is a real limit rather than an oversight — net/http hands the trace an empty connection state when the handshake fails, and recovering the chain from a rejected handshake would mean turning verification off and re-implementing it here, which is the second X.509 implementation apisend.Certificate exists to refuse.
    */
   certificates: Certificate[]
 }
-export interface Header {
-  name: string
-  value: string
-  /**
-   * A disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.
-   */
-  enabled: boolean
-}
 /**
- * The phases of one exchange, in milliseconds. On a redirect chain dns, connect and tls describe the LAST hop — the one the body came from — ttfb is measured from the start of the exchange, and total adds the body read. A reused connection has a zero dns and connect, which is the honest answer: nothing was resolved and nothing was dialled.
- */
-export interface Timings {
-  dnsMs: number
-  connectMs: number
-  tlsMs: number
-  ttfbMs: number
-  totalMs: number
-}
-/**
- * The raw text of both sides, segmented (design §11). It rides on the send result rather than on a method of its own because the raw text belongs to a PARTICULAR run — this exchange, these substitutions, this truncation — so a second round trip could only fetch the raw of a different send. The two sides are two fields because they are two mechanisms with two different guarantees (§11.3): the request side verifies placements the sender itself made, the response side runs a bounded known-plaintext search.
- */
-export interface Exchange {
-  request: Raw
-  response: Raw
-}
-/**
- * One side of the exchange, already segmented. A secret's VALUE never appears here in any state: the bytes are elided and a placeholder naming the secret takes their place, so a renderer that ignores spans entirely still shows no credential (§11.2, ADR-0011).
+ * ONE SIDE of the exchange, already segmented. A secret's VALUE never appears here in any state: the bytes are elided and a placeholder naming the secret takes their place, so a renderer that ignores spans entirely still shows no credential (§11.2, ADR-0011).
+ *
+ * The two sides live at two LEVELS rather than in a pair, because they are known at two different times. `request` is on the exchange: the sender composes it and places its spans BEFORE it dials, so it is PRESENT WHATEVER THE OUTCOME — dropping it on the failure path is what left a person reading "connection refused" with no way to see the address, the headers or the body they had just sent. It is empty, with no spans, only at phase `compose`, where there was nothing to compose. `response.raw` is the other side and exists only when something answered, which is why it is inside `response`: a pair type would have had to sit at one level or the other, and either way it would have taken the request text away from exactly the runs that need it most (§11.3).
  */
 export interface Raw {
   /**
@@ -131,6 +90,70 @@ export interface Span {
    * The shape of the damage — "truncated, 24 of 214 bytes" — carrying only lengths, because the surviving bytes are the beginning of a live credential. Empty unless the kind is secret-damaged.
    */
   damage: string
+}
+export interface Response {
+  status: number
+  /**
+   * Never null — a response with no headers is [].
+   */
+  headers: Header[]
+  /**
+   * The decoded body, always valid UTF-8, and EMPTY when binary: the run says "binary body, N bytes" and never base64.
+   */
+  text: string
+  /**
+   * A NUL byte among the bytes actually read — the files.read heuristic, labelled as one.
+   */
+  binary: boolean
+  /**
+   * The bytes read were not valid UTF-8 and invalid sequences were replaced. Distinct from binary: a NUL-free latin-1 body is lossy text, not a binary body. Three separate facts because they are three separate sentences in the run, and collapsing any two of them loses one.
+   */
+  lossy: boolean
+  /**
+   * The ceiling was reached and one further byte was readable — the body shown is a prefix.
+   */
+  truncated: boolean
+  /**
+   * Body bytes actually read and kept, which is the ceiling when truncated. Not a claim about what the server holds: a Content-Length can lie and a chunked response declares nothing.
+   */
+  size: number
+  tlsVersion: string
+  raw: Raw
+  /**
+   * The negotiated cipher suite's name, and "" when the exchange was not over TLS.
+   */
+  tlsCipherSuite: string
+}
+export interface Header {
+  name: string
+  value: string
+  /**
+   * A disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.
+   */
+  enabled: boolean
+}
+/**
+ * How the attempt ended when it did not answer. It is present for a `failed` AND for a `stopped` exchange, because both are asks about the same thing — how far did it get — and only the outcome says how to read it: a phase is a POSITION on the way to an answer, not a verdict. The reason is the backend's own words, already redacted (apisend.redact): userinfo and the query string never reach it.
+ */
+export interface Failure {
+  /**
+   * WHERE it stopped, as a closed set, so the renderer picks its own sentence rather than parsing prose. `compose` the request could not be built at all — an address that will not parse — and it is the one phase with no request text, because there was none to compose. `resolve` the name did not resolve. `dial` nothing accepted a connection. `connection` the route itself was unavailable: no lease on the SSH profile, or a name only the far side can resolve. `tls` the handshake did not complete. `exchange` the connection was open and the exchange broke on it — a truncated body, a malformed response. `timeout` a bound elapsed. `stopped` the person pressed Stop.
+   */
+  phase: 'compose' | 'resolve' | 'dial' | 'connection' | 'tls' | 'exchange' | 'timeout' | 'stopped'
+  /**
+   * What went wrong, in the backend's words. A sentence for a person and never a code to branch on — that is what `phase` is for.
+   */
+  reason: string
+}
+/**
+ * The phases of the attempt, AS FAR AS IT GOT — a phase never reached is 0, which is the honest answer rather than an absence. On the exchange for the same reason remoteAddr is: a failed run took time too, and how long it spent before it gave up is the difference between a refusal and a hang.
+ */
+export interface Timings {
+  dnsMs: number
+  connectMs: number
+  tlsMs: number
+  ttfbMs: number
+  totalMs: number
 }
 export interface Certificate {
   subject: string

@@ -56,6 +56,27 @@ type Creator interface {
 	// fresh manifest over somebody's collection is data loss wearing the
 	// word "create".
 	Create(name string) (Created, error)
+	// DefaultRoot is WHERE a collection created with no place named goes —
+	// the directory that holds them, not a collection inside it.
+	//
+	// It exists so a surface can SHOW a person where their collection is
+	// about to land. The import ask names its destination as an absolute
+	// path and had no default at all, while Create next door takes a name
+	// and puts the folder here: two doors to one concept, and the one that
+	// asks more is the one somebody arriving from Postman meets. This is
+	// the half that was missing — the location was derived inside this
+	// package and never told to anybody.
+	//
+	// "" when this service was built without an app directory, which is the
+	// state Create names by ErrNoDefaultLocation. A surface that gets ""
+	// offers no default and the person types a path, which is exactly what
+	// they do today; it is not a degrade to report, because nothing was
+	// promised.
+	//
+	// It answers a location rather than accepting one: §13.1's property is
+	// that Open is the only entry point that takes a root, and this hands
+	// one OUT, for a field the person can then rewrite.
+	DefaultRoot() string
 }
 
 var _ Creator = (*service)(nil)
@@ -75,6 +96,14 @@ var _ Creator = (*service)(nil)
 // that works in order to report a thing that did not would be the worse
 // answer. What the user sees is the error, and the folder waiting under the
 // name they chose — which the next Create with that name refuses by name.
+// DefaultRoot implements Creator.
+func (s *service) DefaultRoot() string {
+	if s.paths == nil {
+		return ""
+	}
+	return filepath.Join(s.paths.DataDir(), DefaultCollectionsDirName)
+}
+
 func (s *service) Create(name string) (Created, error) {
 	if s.paths == nil {
 		return Created{}, ErrNoDefaultLocation

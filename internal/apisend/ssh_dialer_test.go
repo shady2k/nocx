@@ -188,11 +188,9 @@ func TestSSHDialer_SendsThroughTheLease(t *testing.T) {
 	lease := pool.acquire("user@bastion:22")
 	route := sshRoute(NewSSHDialer(lease, time.Minute))
 
-	got, err := New(WithRoutes(func(context.Context, string) (Route, error) { return route, nil })).
+	ex, err := New(WithRoutes(func(context.Context, string) (Route, error) { return route, nil })).
 		Send(context.Background(), apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: "prod"})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "through the tunnel" {
 		t.Errorf("Text = %q, want the response from the far side", got.Text)
 	}
@@ -432,10 +430,12 @@ func TestSSHDialer_ASpentLeaseRefusesRatherThanDiallingLocally(t *testing.T) {
 	// And the whole executor, which is where a fallback would actually be
 	// reachable.
 	route := sshRoute(NewSSHDialer(lease, time.Minute))
-	if _, err := New(WithRoutes(func(context.Context, string) (Route, error) { return route, nil })).
-		Send(context.Background(), apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: "prod"}); err == nil {
-		t.Error("Send succeeded through a spent lease")
-	}
+	ex, sendErr := New(WithRoutes(func(context.Context, string) (Route, error) { return route, nil })).
+		Send(context.Background(), apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: "prod"})
+	// A run at phase `dial`: the route existed and its dial refused, which
+	// is the sentence a person needs — the connection is spent, and nothing
+	// fell back to this machine's own interface.
+	failedAt(t, ex, sendErr, PhaseDial)
 
 	if n := reached.Load(); n != 0 {
 		t.Fatalf("the server was reached %d times through a spent lease — the request went out around the bastion", n)

@@ -20,8 +20,11 @@ import {
   WATCH_SESSION,
   collectionFixture,
   collectionsFixture,
+  DEFAULT_ROOT,
   createdFixture,
   sendFixture,
+  failedSendFixture,
+  stoppedSendFixture,
   servicesFixture,
   watchFixture,
   type WatchFixture,
@@ -57,6 +60,7 @@ describe('ApiStore — the collections', () => {
         collections: [
           { handle: 'h1', path: '/w/gone', collection: emptyCollection(), error: 'no such folder' },
         ],
+        defaultRoot: DEFAULT_ROOT,
       }),
     })
     await store.refresh()
@@ -181,7 +185,9 @@ describe('ApiStore — sending', () => {
     // The third argument is the environment, and '' is the right one here:
     // the fixture's collection declares none, so the request goes out
     // exactly as its file has it (§6.2).
-    expect(send).toHaveBeenCalledWith('h1', 'users/create.json', '')
+    // The third argument is the environment; the fourth is the name this
+    // surface gave the exchange, which is what Stop names later.
+    expect(send).toHaveBeenCalledWith('h1', 'users/create.json', '', expect.any(String))
   })
 
   it('does not write a draft nobody edited', async () => {
@@ -199,8 +205,12 @@ describe('ApiStore — sending', () => {
     await store.openRequest('h1', 'users/create.json')
     await store.send()
     const run = store.runs()[0]
+    expect(run.outcome).toBe('answered')
     expect(run.response?.status).toBe(201)
-    expect(run.response?.timings.totalMs).toBe(184)
+    // The time and the address are the ATTEMPT's, not the answer's — a run
+    // that failed took time and reached a machine too.
+    expect(run.timings?.totalMs).toBe(184)
+    expect(run.remoteAddr).toBe('10.0.3.17:443')
     expect(run.response?.size).toBe(1229)
   })
 
@@ -216,15 +226,114 @@ describe('ApiStore — sending', () => {
     expect(store.runs().map((r) => r.response?.status)).toEqual([422, 201])
   })
 
-  it('a send that fails becomes a run that says so, not a run that vanishes', async () => {
+  it('a failed exchange is a run with the request, the route and the phase on it', async () => {
+    const { store } = storeWith({ sendRequest: vi.fn().mockResolvedValue(failedSendFixture()) })
+    await store.openRequest('h1', 'users/create.json')
+    await store.send()
+    const run = store.runs()[0]
+    expect(run.outcome).toBe('failed')
+    expect(run.response).toBeNull()
+    expect(run.failure?.phase).toBe('dial')
+    expect(run.failure?.reason).toBe('connection refused')
+    // THE POINT OF THE WHOLE CHANGE: what was sent survives the failure.
+    expect(run.request?.text).toContain('POST /users HTTP/1.1')
+    expect(run.timings?.totalMs).toBe(3)
+    // …and it is not a refusal, which is the other thing a run can be.
+    expect(run.error).toBe('')
+  })
+
+  it('a stop comes back as its own outcome, never as a failure', async () => {
+    const { store } = storeWith({ sendRequest: vi.fn().mockResolvedValue(stoppedSendFixture()) })
+    await store.openRequest('h1', 'users/create.json')
+    await store.send()
+    const run = store.runs()[0]
+    expect(run.outcome).toBe('stopped')
+    expect(run.failure?.phase).toBe('stopped')
+    expect(run.request?.text).toContain('POST /users HTTP/1.1')
+  })
+
+  it('an ask the method REFUSED is a run that says so, and claims no attempt', async () => {
+    // What still arrives as a JSON-RPC error is what never became an
+    // exchange: an unknown handle, an auth variable nothing can resolve.
     const { store } = storeWith({
-      sendRequest: vi.fn().mockRejectedValue(new Error('dial tcp: connection refused')),
+      sendRequest: vi.fn().mockRejectedValue(new Error('unknown collection handle')),
     })
     await store.openRequest('h1', 'users/create.json')
     await store.send()
+    const run = store.runs()[0]
     expect(store.runs()).toHaveLength(1)
-    expect(store.runs()[0].error).toBe('dial tcp: connection refused')
-    expect(store.runs()[0].response).toBeNull()
+    expect(run.outcome).toBe('refused')
+    expect(run.error).toBe('unknown collection handle')
+    expect(run.response).toBeNull()
+    // No phase and no request text: nothing was attempted, and a run
+    // borrowing either would be claiming an attempt that never happened.
+    expect(run.failure).toBeNull()
+    expect(run.request).toBeNull()
+  })
+
+  it('the row exists before the answer does, and the SAME row carries it', async () => {
+    // The defect this replaces in one test: the run was built from the
+    // result, so nothing existed while the request was in flight.
+    let answer: (result: unknown) => void = () => {}
+    const send = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const { store } = storeWith({ sendRequest: send })
+    await store.openRequest('h1', 'users/create.json')
+    const sending = store.send()
+
+    // Before any answer exists.
+    expect(store.runs()).toHaveLength(1)
+    const pendingRun = store.runs()[0]
+    expect(pendingRun.outcome).toBe('pending')
+    expect(pendingRun.method).toBe('POST')
+    expect(pendingRun.url).toBe('{{baseUrl}}/users')
+    expect(store.pending()?.id).toBe(pendingRun.id)
+
+    answer(sendFixture())
+    await sending
+
+    // The SAME row, never a second one.
+    expect(store.runs()).toHaveLength(1)
+    expect(store.runs()[0].id).toBe(pendingRun.id)
+    expect(store.runs()[0].outcome).toBe('answered')
+    expect(store.pending()).toBeNull()
+  })
+
+  it('stop names the run by the token it was sent under', async () => {
+    let answer: (result: unknown) => void = () => {}
+    const send = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const cancel = vi.fn().mockResolvedValue({})
+    const { store } = storeWith({ sendRequest: send, cancelRequest: cancel })
+    await store.openRequest('h1', 'users/create.json')
+    const sending = store.send()
+
+    const token = store.pending()?.token
+    expect(token).toBeTruthy()
+    await store.stop()
+    expect(cancel).toHaveBeenCalledWith(token)
+
+    // The store does NOT settle the row itself: the send's own result is
+    // what ends a run, whichever way it ended.
+    expect(store.runs()[0].outcome).toBe('pending')
+    answer(stoppedSendFixture())
+    await sending
+    expect(store.runs()[0].outcome).toBe('stopped')
+  })
+
+  it('stop with nothing in flight asks the backend nothing', async () => {
+    const cancel = vi.fn().mockResolvedValue({})
+    const { store } = storeWith({ cancelRequest: cancel })
+    await store.openRequest('h1', 'users/create.json')
+    await store.send()
+    await store.stop()
+    expect(cancel).not.toHaveBeenCalled()
   })
 
   it('a write that fails stops the send — the file never held what would go out', async () => {
@@ -238,6 +347,8 @@ describe('ApiStore — sending', () => {
     await store.send()
     expect(send).not.toHaveBeenCalled()
     expect(store.error()).toBe('read-only file system')
+    // NO ROW. Nothing went out, so there is no exchange to record — a row
+    // here would say a request was attempted when none was.
     expect(store.runs()).toEqual([])
   })
 
@@ -523,6 +634,7 @@ describe('ApiStore — the environment', () => {
         collections: [
           collectionsFixture({ collection: collectionFixture({ environments: envs }) }),
         ],
+        defaultRoot: DEFAULT_ROOT,
       }),
     }
   }
@@ -545,7 +657,7 @@ describe('ApiStore — the environment', () => {
 
     await store.openRequest(HANDLE, 'users/create.json')
     await store.send()
-    expect(send).toHaveBeenCalledWith(HANDLE, 'users/create.json', '')
+    expect(send).toHaveBeenCalledWith(HANDLE, 'users/create.json', '', expect.any(String))
   })
 
   it('several environments choose nothing until somebody does', async () => {

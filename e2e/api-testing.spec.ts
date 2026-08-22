@@ -291,12 +291,17 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     // 201, and the number is the credential check as much as the route one:
     // the test server answers 401 for a request that arrives without exactly
     // the token the export declared (fixtures/api-test-server.ts).
-    await expect(run.locator('.api-run__status')).toContainText('HTTP status 201')
+    // The status through the kit's own account of it: StatusDot puts the
+    // meaning in a visually-hidden span beside a decorative dot, so
+    // "HTTP status 201" is the text a screen reader and this spec both read.
+    await expect(run.locator('.api-run__stats')).toContainText('HTTP status 201')
     // …and the DECODED body, as a body rather than as base64 (§12.3).
-    await expect(run.locator('.api-run__body')).toContainText(CREATED_USER_BODY)
+    await expect(run.locator('[aria-label="Response body"]')).toContainText(CREATED_USER_BODY)
 
     // ── Step 5: raw, where the token is a badge and never its bytes ─────────
-    await run.getByRole('radio', { name: 'Raw' }).click()
+    // A TAB, not a radio: the three parts of an exchange were a segmented
+    // control of two and are a tab row of three (run-list.tsx).
+    await run.getByRole('tab', { name: 'Raw' }).click()
     const raw = run.locator('.api-run__raw')
     await expect(raw).toBeVisible()
     // The badge NAMES the secret — design §11.1's first state, where the badge

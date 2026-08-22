@@ -63,7 +63,12 @@ type apiCollectionHandlers struct {
 	// could arrive (design §8). nil is a build with no binding store, and
 	// then an auth variable resolves to nothing.
 	values apibind.ValueResolver
-	r      Responder
+	// cancels is which running exchange a token names, and conn is which
+	// window minted it. Both are nil/zero for the handlers that cannot
+	// send: a read has nothing to stop (ws_api_cancel.go).
+	cancels *sendCancels
+	conn    uint64
+	r       Responder
 }
 
 func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
@@ -75,7 +80,16 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				h.fail(req, err)
 				return nil
 			}
-			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(svc, open)))
+			// Inside the operation the only failure this can have is the
+			// guard, which is held — so it is answered rather than
+			// swallowed into "", which would report a build with no app
+			// directory and a service somebody escaped as the same state.
+			root, err := svc.DefaultRoot()
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(wireOpenCollections(svc, open, root)))
 		case "api.collections.open":
 			var p apiCollectionsOpenParams
 			if !h.decode(req, &p) {
@@ -207,27 +221,57 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 // handleSend is api.request.send, and its shape is the point: the gate is
 // held for the snapshot and released before the dial.
 //
-// The interval, both ends: the api gate is acquired before the request file
-// is opened and released when Run returns with the request value in hand;
-// from that moment until the response is captured no domain gate is held at
-// all, so a server that never answers delays this one request and nothing
-// else. The context still bounds the exchange — a cancelled request stops
-// where it is.
+// TWO INTERVALS, both stated with both ends.
+//
+// The GATE: the api gate is acquired before the request file is opened and
+// released when Run returns with the request value in hand; from that moment
+// until the response is captured no domain gate is held at all, so a server
+// that never answers delays this one request and nothing else.
+//
+// The TOKEN: registered before anything else happens — before the gate is
+// even asked for — and dropped in a defer when this function returns,
+// whichever way it returns. It is that early on purpose. The renderer draws
+// its Stop the instant a person presses Send, so a registration that waited
+// for the snapshot would leave a window in which a visible, stoppable-looking
+// run answers "no request is running under this token"; and the window is
+// widest exactly when the api gate is busy, which is when a person is most
+// likely to be reaching for Stop. Because the snapshot runs under the
+// cancellable context too, a Stop pressed during it ends the operation rather
+// than being remembered until the dial.
 func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcRequest) {
 	var p apiRequestSendParams
+	if !h.decode(req, &p) {
+		return
+	}
+
+	sendCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// A token already in flight refuses the SEND rather than replacing the
+	// registration: two exchanges under one name would leave Stop guessing
+	// which it meant.
+	if taken := h.cancels.register(h.conn, p.Token, cancel); taken != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: taken.Error()})
+		return
+	}
+	defer h.cancels.drop(h.conn, p.Token)
+
 	var inputs capability.SendInputs
+	// unresolved is the one snapshot failure that is a RUN rather than an
+	// error: a variable with no value. Carried out of the callback rather
+	// than answered inside it, because the answer needs the route and the
+	// environment the snapshot read, and building it under the gate would
+	// hold the whole domain to render a string.
+	var unresolved error
 	snapshotted := false
 
-	err := h.op.Run(ctx, func(_ context.Context, svc capability.APICollectionService) error {
-		if !h.decode(req, &p) {
-			return nil
-		}
+	err := h.op.Run(sendCtx, func(_ context.Context, svc capability.APICollectionService) error {
 		got, err := svc.Snapshot(apicoll.HandleID(p.Handle), p.RelPath, p.EnvRelPath)
-		if err != nil {
+		if err != nil && !errors.Is(err, apicoll.ErrUnresolvedVariable) {
 			h.fail(req, err)
 			return nil
 		}
 		inputs = got
+		unresolved = err
 		snapshotted = true
 		return nil
 	})
@@ -237,6 +281,23 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	}
 	if !snapshotted {
 		return // the callback has already answered
+	}
+
+	// A VARIABLE WITH NO VALUE IS A RUN, at the `compose` phase, and it
+	// answers with the unresolved reason — which names every missing
+	// variable and the field each was used in (apicoll.UnresolvedError) —
+	// rather than with a complaint about a URL nobody typed. Before this the
+	// substitution simply did not happen when no environment was named, so
+	// `{{baseUrl}}/zen` reached the sender as text and came back as
+	// `"{{baseUrl}}/zen" is not an absolute URL`.
+	//
+	// It is answered here rather than sent, because there is nothing to
+	// send: the request is the one the file holds, references and all.
+	if unresolved != nil {
+		_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
+			apisend.Unsent(inputs.Request, apisend.PhaseCompose, unresolved),
+			inputs.Environment, inputs.Route)))
+		return
 	}
 
 	// The route comes off the environment the snapshot read, in the same
@@ -265,17 +326,29 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 	// credential (§6.5).
 	var look apicoll.Lookup
 	if h.values != nil {
-		look = h.values.Variables(ctx, inputs.CookieScope, inputs.Environment)
+		look = h.values.Variables(sendCtx, inputs.CookieScope, inputs.Environment)
 	}
 	sending, used, err := apisend.Apply(inputs.Request, look)
 	if err != nil {
+		// The SAME division as the snapshot's above, at the fourth place a
+		// variable can be used: an auth variable nothing can resolve is a
+		// run at `compose`, because it is a thing that happened to somebody
+		// who pressed Send. Anything else Apply refuses — a scheme this
+		// build does not implement — is the caller's to fix and stays an
+		// error.
+		if errors.Is(err, apicoll.ErrUnresolvedVariable) {
+			_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
+				apisend.Unsent(inputs.Request, apisend.PhaseCompose, err),
+				inputs.Environment, inputs.Route)))
+			return
+		}
 		_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
 		return
 	}
 
 	// No gate from here on. The cookie scope is the collection, so two
 	// collections never share a jar.
-	resp, err := h.sender.Send(ctx, sending, apisend.Key{
+	ex, err := h.sender.Send(sendCtx, sending, apisend.Key{
 		RouteID:     routeID,
 		CookieScope: inputs.CookieScope,
 		// The environment's own declaration, carried into the KEY so a
@@ -284,14 +357,47 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		InsecureTLS: inputs.Route.InsecureTLS,
 	}, used...)
 	if err != nil {
+		// An ERROR from the sender is now one thing only: a request it
+		// refuses to send at all (apisend.Send). Everything that happened
+		// to an attempt — a name that did not resolve, a refused port, a
+		// rejected certificate, a stop — comes back as an exchange below,
+		// because a person who pressed Send has a run whatever the world
+		// did next.
 		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(apiSendResponse{
-		Response:    wireSendResponse(resp),
-		Environment: inputs.Environment,
-		Route:       wireRoute(inputs.Route),
-	}))
+	_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(ex, inputs.Environment, inputs.Route)))
+}
+
+// handleCancel is api.request.cancel: stop the exchange running under this
+// connection's token.
+//
+// It holds NO gate and takes no operation. There is nothing here to
+// serialise — it fires a context cancel and touches no folder, no file and
+// no vault — and putting it behind the api gate would be worse than
+// pointless: the gate is capacity one, so a Stop would queue behind whatever
+// the api domain was doing, which on a busy panel is the very send it is
+// trying to stop.
+func (h apiCollectionHandlers) handleCancel(_ context.Context, req jsonrpcRequest) {
+	var p apiRequestCancelParams
+	if !h.decode(req, &p) {
+		return
+	}
+	if !h.cancels.stop(h.conn, p.Token) {
+		// -32602 and not a success: the caller asked to stop something, and
+		// "there was nothing to stop" is an answer it needs to be able to
+		// tell apart from "it is stopped".
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: fmt.Errorf("%w (token %q)", errUnknownToken, p.Token).Error(),
+		})
+		return
+	}
+	// EMPTY, deliberately. The stopped exchange reports itself, on the
+	// api.request.send result of the very request that was stopped, as
+	// outcome "stopped" — two methods reporting one exchange's end would be
+	// two accounts of it (contracts/api.request.cancel.schema.json).
+	_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
 }
 
 // decode reads the method's params and answers -32602 itself when they will
@@ -450,6 +556,20 @@ type apiRequestSendParams struct {
 	Handle     string `json:"handle"`
 	RelPath    string `json:"relPath"`
 	EnvRelPath string `json:"envRelPath"`
+	// Token is the caller's OWN name for this exchange, and it is required:
+	// a send that could not be named is a run with no Stop, and "usually
+	// stoppable" is the kind of capability a surface cannot draw a button
+	// for. It is the renderer's rather than the JSON-RPC id because the id
+	// belongs to the dispatcher and is never handed to the caller that
+	// asked (ws_api_cancel.go).
+	Token string `json:"token"`
+}
+
+// apiRequestCancelParams names an exchange and nothing else. No handle and
+// no path: the token already identifies exactly one running exchange, and a
+// second way to address it would be a second answer to "which run is this".
+type apiRequestCancelParams struct {
+	Token string `json:"token"`
 }
 
 // apiEnvironmentParams addresses one environment file the way every other
@@ -493,6 +613,12 @@ type apiEmptyResponse struct{}
 
 type apiCollectionsListResponse struct {
 	Collections []apiOpenCollectionWire `json:"collections"`
+	// DefaultRoot is where a collection made with no place named goes, so an
+	// ask can PROPOSE a destination rather than demand one. It rides the
+	// listing because it is a fact about this build rather than about any
+	// one folder, and the listing is the call every surface already makes.
+	// "" is a build with no app directory to derive it from.
+	DefaultRoot string `json:"defaultRoot"`
 }
 
 type apiOpenCollectionWire struct {
@@ -702,8 +828,36 @@ type apiAuthWire struct {
 	User string `json:"user"`
 }
 
+// apiSendResponse is ONE EXCHANGE — what was attempted, how far it got, and
+// what came back if anything did. It is not "the response", and the field
+// list is where that stops being a slogan: `request`, `remoteAddr`,
+// `timings` and `certificates` are on the exchange rather than inside
+// `response`, so a run that never got an answer still carries every one of
+// them that the attempt reached.
 type apiSendResponse struct {
-	Response apiSendResponseWire `json:"response"`
+	// Outcome is the one field that says how the rest reads: `answered`,
+	// `failed` or `stopped`.
+	Outcome string `json:"outcome"`
+	// Request is what went out, segmented — present whatever the outcome,
+	// because apisend composes it and places its spans before it dials.
+	Request apiRawWire `json:"request"`
+	// Response is null unless the outcome is `answered`. A POINTER and not
+	// a value: a zeroed response marshals as an HTTP 0 with an empty body,
+	// which the renderer cannot tell from a real one.
+	Response *apiSendResponseWire `json:"response"`
+	// Failure is null exactly when the outcome is `answered` — present for
+	// a stop as well as for a failure, because "how far did it get" is a
+	// question a stop answers too.
+	Failure *apiSendFailureWire `json:"failure"`
+	// RemoteAddr is what answered the dial, "" when nothing did.
+	RemoteAddr string `json:"remoteAddr"`
+	// Timings are the phases as far as the attempt got; one never reached
+	// is 0.
+	Timings apiTimingsWire `json:"timings"`
+	// Certificates is the chain the server presented, leaf first, described
+	// by the side that saw the bytes — never DER for the renderer to parse
+	// (apisend.Certificate says why). Never null.
+	Certificates []apiCertificateWire `json:"certificates"`
 	// Environment is the NAME of the environment the exchange went out
 	// under, as the file declares it, and "" when none was named. It is the
 	// backend's own account rather than an echo of the caller's envRelPath:
@@ -725,32 +879,35 @@ type apiSendResponse struct {
 	Route apiRouteWire `json:"route"`
 }
 
+// apiSendResponseWire is what CAME BACK, and only that. Everything an
+// attempt reaches whether or not it is answered has moved up to the
+// exchange; what is left here has no meaning without a response behind it.
 type apiSendResponseWire struct {
 	Status  int             `json:"status"`
 	Headers []apiHeaderWire `json:"headers"`
 	// Text is empty when Binary. Binary, Lossy and Truncated are three
 	// separate facts because they are three separate sentences in the run,
 	// and collapsing any two of them loses one (apisend.Response).
-	Text       string         `json:"text"`
-	Binary     bool           `json:"binary"`
-	Lossy      bool           `json:"lossy"`
-	Truncated  bool           `json:"truncated"`
-	Size       int64          `json:"size"`
-	Timings    apiTimingsWire `json:"timings"`
-	TLSVersion string         `json:"tlsVersion"`
+	Text       string `json:"text"`
+	Binary     bool   `json:"binary"`
+	Lossy      bool   `json:"lossy"`
+	Truncated  bool   `json:"truncated"`
+	Size       int64  `json:"size"`
+	TLSVersion string `json:"tlsVersion"`
 	// TLSCipherSuite is the negotiated suite, "" off TLS.
 	TLSCipherSuite string `json:"tlsCipherSuite"`
-	// Certificates is the chain the SERVER PRESENTED, leaf first, described
-	// by the side that saw the bytes — never DER for the renderer to parse
-	// (apisend.Certificate says why). Never null: a plain http exchange
-	// presents none and that is [].
-	Certificates []apiCertificateWire `json:"certificates"`
-	RemoteAddr   string               `json:"remoteAddr"`
-	// Raw is the diagnostic text of both sides, already segmented. It rides
-	// on the send result rather than on a method of its own because the raw
-	// text belongs to a PARTICULAR run, and a second round trip could only
-	// fetch the raw of a different send (apisend/spans.go).
-	Raw apiRawExchangeWire `json:"raw"`
+	// Raw is the RESPONSE SIDE of the segmented text. The request side is
+	// on the exchange, because the sender has it before it dials
+	// (apisend/spans.go).
+	Raw apiRawWire `json:"raw"`
+}
+
+// apiSendFailureWire is how an attempt ended when it did not answer: WHERE
+// it stopped, as a closed vocabulary the renderer picks its own sentence
+// from, and the backend's own words for what went wrong.
+type apiSendFailureWire struct {
+	Phase  string `json:"phase"`
+	Reason string `json:"reason"`
 }
 
 // apiCertificateWire is one certificate of the presented chain, in the fields
@@ -794,15 +951,10 @@ func wireCertificates(in []apisend.Certificate) []apiCertificateWire {
 	return out
 }
 
-// apiRawExchangeWire and the two below carry §11's segmented text. A
-// secret's VALUE is in none of them: the bytes are elided by the sender and
-// a placeholder naming the secret takes their place, so this side has
-// nothing to redact and no field in which a value could ride.
-type apiRawExchangeWire struct {
-	Request  apiRawWire `json:"request"`
-	Response apiRawWire `json:"response"`
-}
-
+// apiRawWire and apiRawSpanWire carry §11's segmented text. A secret's
+// VALUE is in neither: the bytes are elided by the sender and a placeholder
+// naming the secret takes their place, so this side has nothing to redact
+// and no field in which a value could ride.
 type apiRawWire struct {
 	Text string `json:"text"`
 	// Spans is never null: a renderer walking null is a crash rather than
@@ -857,7 +1009,7 @@ type apiUnsupportedWire struct {
 // already has for "this one folder is in trouble" (capability.OpenCollection).
 // A dead folder hiding every live one is the defect that field exists to
 // prevent, and a soft degrade the UI cannot see is the one AGENTS.md names.
-func wireOpenCollections(svc capability.APICollectionService, open []capability.OpenCollection) apiCollectionsListResponse {
+func wireOpenCollections(svc capability.APICollectionService, open []capability.OpenCollection, defaultRoot string) apiCollectionsListResponse {
 	out := make([]apiOpenCollectionWire, 0, len(open))
 	for _, c := range open {
 		row := apiOpenCollectionWire{
@@ -878,7 +1030,7 @@ func wireOpenCollections(svc capability.APICollectionService, open []capability.
 		row.Collection = wire
 		out = append(out, row)
 	}
-	return apiCollectionsListResponse{Collections: out}
+	return apiCollectionsListResponse{Collections: out, DefaultRoot: defaultRoot}
 }
 
 // joinReasons puts two failures in one sentence, and answers the one that
@@ -1040,30 +1192,57 @@ func wireParams(ps []apicoll.Param) []apiParamWire {
 	return out
 }
 
-func wireSendResponse(r apisend.Response) apiSendResponseWire {
-	return apiSendResponseWire{
-		Status:    r.Status,
-		Headers:   wireHeaders(r.Headers),
-		Text:      r.Text,
-		Binary:    r.Binary,
-		Lossy:     r.Lossy,
-		Truncated: r.Truncated,
-		Size:      r.Size,
-		Timings: apiTimingsWire{
-			DNSMs:     float64(r.Timings.DNS.Microseconds()) / 1000,
-			ConnectMs: float64(r.Timings.Connect.Microseconds()) / 1000,
-			TLSMs:     float64(r.Timings.TLS.Microseconds()) / 1000,
-			TTFBMs:    float64(r.Timings.TTFB.Microseconds()) / 1000,
-			TotalMs:   float64(r.Timings.Total.Microseconds()) / 1000,
-		},
+// wireExchange renders one exchange for the renderer. It is the ONE place a
+// send result is built, so the contract's invariants — a request block
+// whatever the outcome, a never-null certificate list, `response` and
+// `failure` mutually exclusive — hold here or nowhere.
+func wireExchange(ex apisend.Exchange, environment string, route apicoll.Route) apiSendResponse {
+	out := apiSendResponse{
+		Outcome:      string(ex.Outcome),
+		Request:      wireRaw(ex.Request),
+		RemoteAddr:   ex.RemoteAddr,
+		Timings:      wireTimings(ex.Timings),
+		Certificates: wireCertificates(ex.Certificates),
+		Environment:  environment,
+		Route:        wireRoute(route),
+	}
+	if ex.Response != nil {
+		out.Response = wireSendResponse(*ex.Response)
+	}
+	if ex.Failure != nil {
+		out.Failure = &apiSendFailureWire{
+			Phase:  string(ex.Failure.Phase),
+			Reason: ex.Failure.Reason,
+		}
+	}
+	return out
+}
+
+func wireSendResponse(r apisend.Response) *apiSendResponseWire {
+	return &apiSendResponseWire{
+		Status:         r.Status,
+		Headers:        wireHeaders(r.Headers),
+		Text:           r.Text,
+		Binary:         r.Binary,
+		Lossy:          r.Lossy,
+		Truncated:      r.Truncated,
+		Size:           r.Size,
 		TLSVersion:     r.TLSVersion,
 		TLSCipherSuite: r.TLSCipherSuite,
-		Certificates:   wireCertificates(r.Certificates),
-		RemoteAddr:     r.RemoteAddr,
-		Raw: apiRawExchangeWire{
-			Request:  wireRaw(r.Raw.Request),
-			Response: wireRaw(r.Raw.Response),
-		},
+		Raw:            wireRaw(r.Raw),
+	}
+}
+
+// wireTimings carries milliseconds. A Go duration has no JSON form, and a
+// float keeps sub-millisecond phases from all reading as zero on a fast
+// loopback exchange.
+func wireTimings(t apisend.Timings) apiTimingsWire {
+	return apiTimingsWire{
+		DNSMs:     float64(t.DNS.Microseconds()) / 1000,
+		ConnectMs: float64(t.Connect.Microseconds()) / 1000,
+		TLSMs:     float64(t.TLS.Microseconds()) / 1000,
+		TTFBMs:    float64(t.TTFB.Microseconds()) / 1000,
+		TotalMs:   float64(t.Total.Microseconds()) / 1000,
 	}
 }
 
@@ -1104,6 +1283,11 @@ const (
 	// the request NAMES (§6.4), so an inline body is a phrase a person
 	// typed, generously bounded.
 	maxAPIBodyTextRunes = 1 << 18
+	// maxAPITokenRunes bounds the client-minted token that names one
+	// running exchange. The renderer sends a UUID; this is generous enough
+	// for any identifier a caller might reasonably choose and far below
+	// anything that makes a map key expensive.
+	maxAPITokenRunes = 128
 	// maxAPIRequestRows bounds how many header and query rows one request
 	// may carry. Each row is bounded individually; this bounds the count,
 	// which is the other half of the per-call work bound.
@@ -1216,10 +1400,33 @@ func validateAPIRequestSendRaw(raw json.RawMessage) string {
 	if msg := validateAPIRelPath(p.RelPath); msg != "" {
 		return msg
 	}
+	if msg := validateAPISendToken(p.Token); msg != "" {
+		return msg
+	}
 	if p.EnvRelPath == "" {
 		return ""
 	}
 	return boundedRunes("envRelPath", p.EnvRelPath, maxPathRunes)
+}
+
+func validateAPIRequestCancelRaw(raw json.RawMessage) string {
+	var p apiRequestCancelParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	return validateAPISendToken(p.Token)
+}
+
+// validateAPISendToken bounds the caller's token. Presence and a length,
+// and deliberately no SHAPE: this is the one identifier on the api surface
+// the CLIENT mints, so a spelling rule here would be a format the renderer
+// has to satisfy for no gain — the backend only ever uses it as a map key.
+// The bound is what stops an enormous string reaching that map.
+func validateAPISendToken(token string) string {
+	if token == "" {
+		return "token is required"
+	}
+	return boundedRunes("token", token, maxAPITokenRunes)
 }
 
 func validateAPIEnvironmentRaw(raw json.RawMessage) string {
@@ -1419,9 +1626,26 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 	}
 
 	sub := s.operationQueue("api")
+	// api.request.cancel gets a submission OF ITS OWN, and that is the
+	// point of it rather than tidiness. The api queue is what running sends
+	// occupy, and a Stop that queued behind them would be a Stop that could
+	// not reach the exchange it exists to end — worst exactly when a panel
+	// is busiest. It touches no store, so it shares nothing that would make
+	// a second queue unsafe.
+	cancelSub := s.operationQueue("api-cancel")
+	cancels := newSendCancels()
 	collAvailable := func() bool { return collWired }
 	collHandlers := func(r Responder) apiCollectionHandlers {
 		return apiCollectionHandlers{op: collOp, sender: s.apiSender, values: s.apiVariables, r: r}
+	}
+	// The sending half additionally needs to know WHICH WINDOW is asking:
+	// a token is a name the renderer chose, and two windows may choose the
+	// same one, so the registry is keyed by the connection as well.
+	sendHandlers := func(w *wsConn, r Responder) apiCollectionHandlers {
+		h := collHandlers(r)
+		h.cancels = cancels
+		h.conn = w.id
+		return h
 	}
 
 	return []methodSpec{
@@ -1461,9 +1685,13 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		whenAvailable(regResponder(sub, "api.request.send", params(validateAPIRequestSendRaw), func(r Responder) handlerFunc {
-			h := collHandlers(r)
+		whenAvailable(reg(sub, "api.request.send", params(validateAPIRequestSendRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			h := sendHandlers(w, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSend(ctx, req) }
+		}), func() bool { return sendWired }, "api sending not available"),
+		whenAvailable(reg(cancelSub, "api.request.cancel", params(validateAPIRequestCancelRaw), func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			h := sendHandlers(w, r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
 		}), func() bool { return sendWired }, "api sending not available"),
 		whenAvailable(regResponder(sub, "api.import.postman", params(validateAPIImportPostmanRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{op: importOp, r: r}

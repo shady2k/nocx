@@ -38,8 +38,12 @@ import {
   SECRET_VALUE,
   collectionFixture,
   collectionsFixture,
+  DEFAULT_ROOT,
   createdFixture,
-  exchangeFixture,
+  failedSendFixture,
+  requestRawFixture,
+  responseRawFixture,
+  stoppedSendFixture,
   noCollections,
   sendFixture,
   servicesFixture,
@@ -465,6 +469,7 @@ describe('a request goes out from the workbench', () => {
     const { bar } = await mountApp({
       listCollections: vi.fn().mockResolvedValue({
         collections: [collectionsFixture({ error: 'the folder was replaced' })],
+        defaultRoot: DEFAULT_ROOT,
       }),
     })
     await openWorkbench(bar)
@@ -475,6 +480,7 @@ describe('a request goes out from the workbench', () => {
     const bad = collectionsFixture()
     const { bar } = await mountApp({
       listCollections: vi.fn().mockResolvedValue({
+        defaultRoot: DEFAULT_ROOT,
         collections: [
           {
             ...bad,
@@ -500,8 +506,171 @@ describe('a request goes out from the workbench', () => {
 
     // No environment: the default fixture's collection declares none, so the
     // send names none — the request as written, on the direct route.
-    await vi.waitFor(() => expect(send).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, '', expect.any(String)),
+    )
     await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+  })
+
+  // ── the run exists from the moment Send is pressed (nocx-pgp9c.4) ───────
+  //
+  // Every test in this block goes through the seam a person reaches — the
+  // button, the row — and never the store. And none of them waits on a
+  // duration: the send is a promise this test resolves, so "in flight" is a
+  // state the test holds open rather than a moment it hopes to catch.
+
+  it('Send puts a row on screen before any answer exists, and the SAME row carries the answer', async () => {
+    let answer: (result: unknown) => void = () => {}
+    const send = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const { bar } = await mountApp({ sendRequest: send })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+
+    // Before anything has answered. This is what did not exist at all
+    // before: the only signal a request was in flight was a disabled button.
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+    const pending = runCards()[0]
+    expect(pending.dataset.outcome).toBe('pending')
+    const runId = pending.dataset.runId
+    // …and it says what is being sent, so the row is worth looking at.
+    expect(pending.textContent).toContain('POST')
+    expect(pending.textContent).toContain('{{baseUrl}}/users')
+
+    answer(sendFixture())
+
+    await vi.waitFor(() => expect(runCards()[0].dataset.outcome).toBe('answered'))
+    // THE SAME ROW. A second one would mean the pending row was a placeholder
+    // rather than the run.
+    expect(runCards()).toHaveLength(1)
+    expect(runCards()[0].dataset.runId).toBe(runId)
+    expect(runCards()[0].textContent).toContain('201')
+  })
+
+  it('Send becomes Stop while the run is in flight, is enabled, and reaches the cancel method', async () => {
+    let answer: (result: unknown) => void = () => {}
+    const send = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+    )
+    const cancelRequest = vi.fn().mockResolvedValue({})
+    const { bar } = await mountApp({ sendRequest: send, cancelRequest })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+
+    await vi.waitFor(() => expect(buttonNames()).toContain('Stop'))
+    const stop = button('Stop')
+    // ENABLED, which is the whole point: a disabled button was the old
+    // signal, and the moment something is happening is the moment a person
+    // most needs a control.
+    expect(stop.disabled).toBe(false)
+    expect(buttonNames()).not.toContain('Send')
+
+    fireEvent.click(stop)
+    await vi.waitFor(() => expect(cancelRequest).toHaveBeenCalledTimes(1))
+
+    answer(stoppedSendFixture())
+    await vi.waitFor(() => expect(runCards()[0].dataset.outcome).toBe('stopped'))
+    // And the line goes back to offering a send.
+    expect(buttonNames()).toContain('Send')
+  })
+
+  it('a failed run shows what was sent and how far it got — the card is not the whole story', async () => {
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockResolvedValue(
+        failedSendFixture({
+          phase: 'resolve',
+          reason: 'apisend: resolving "api.internal": no such host',
+        }),
+      ),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('failed')
+    // WHERE it stopped, in the product's words rather than the wire's token.
+    expect(card.textContent).toContain('the name did not resolve')
+    expect(card.textContent).toContain('no such host')
+
+    // AND WHAT WENT OUT. The raw view is reachable on a run that never got
+    // an answer, which is exactly the run that most needs it.
+    fireEvent.click(optionIn(card, 'Raw'))
+    await vi.waitFor(() =>
+      expect(rawBlockText(runCards()[0], 'Raw request')).toContain('POST /users HTTP/1.1'),
+    )
+    // There is no response side, and none is drawn: a heading over an empty
+    // block would say a server replied with nothing.
+    expect(runCards()[0].querySelector('[aria-label="Raw response"]')).toBeNull()
+    // Body and Headers are not offered either — there is no body to show.
+    expect(() => optionIn(runCards()[0], 'Body')).toThrow()
+  })
+
+  it('a variable nothing bound is a run naming the variable, not a complaint about a URL', async () => {
+    // nocx-pgp9c.6, at the surface: the backend answers the unresolved
+    // reason at phase `compose`, and what a person reads is that sentence
+    // beside the request they wrote — never `"{{baseUrl}}/zen" is not an
+    // absolute URL`, which named neither the variable nor where to bind it.
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockResolvedValue(
+        failedSendFixture({
+          phase: 'compose',
+          reason: 'apicoll: the request uses a variable with no value: baseUrl (in the URL)',
+        }),
+      ),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('failed')
+    expect(card.textContent).toContain('the request could not be built')
+    expect(card.textContent).toContain('baseUrl')
+    expect(card.textContent).toContain('in the URL')
+    expect(card.textContent).not.toContain('is not an absolute URL')
+  })
+
+  it('a stopped run is neither worded nor toned as a failure', async () => {
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockResolvedValue(stoppedSendFixture()),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('stopped')
+    const status = card.querySelector<HTMLElement>('.ui-status-card')
+    expect(status).not.toBeNull()
+    // The kit's own account of its tone, rather than a colour read off a
+    // stylesheet: `danger` is what the product uses for "this went wrong".
+    expect(status?.dataset.tone).not.toBe('danger')
+    expect(card.textContent).toContain('Stopped')
+    // A person's own Stop is not described to them as an error.
+    expect(card.textContent).not.toContain('did not go out')
+  })
+
+  it('an ask the backend REFUSED says so, and claims no attempt', async () => {
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockRejectedValue(new Error('unknown collection handle')),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('refused')
+    expect(card.textContent).toContain('The request did not go out')
+    expect(card.textContent).toContain('unknown collection handle')
+    // No raw view: nothing was composed, so there is nothing to show and the
+    // card genuinely IS the whole story for this one.
+    expect(card.querySelector('[aria-label="Raw request"]')).toBeNull()
   })
 
   it('the run shows the status, the elapsed time and the size', async () => {
@@ -974,9 +1143,13 @@ describe('the raw view and the body', () => {
 
   it('a damaged secret is a visibly different chip carrying the damage', async () => {
     const { bar } = await mountApp({
-      sendRequest: vi
-        .fn()
-        .mockResolvedValue(sendFixture({ raw: exchangeFixture('truncated, 24 of 214 bytes') })),
+      // The DAMAGE is on the request side, which is where a placement can be
+      // damaged at all — the response side is a search over what actually
+      // crossed (§11.3) — and the request side now rides the exchange.
+      sendRequest: vi.fn().mockResolvedValue({
+        ...sendFixture(),
+        request: requestRawFixture('truncated, 24 of 214 bytes'),
+      }),
     })
     await openRequest(bar)
     fireEvent.click(button('Send'))
@@ -1011,26 +1184,21 @@ describe('the raw view and the body', () => {
     fireEvent.click(optionIn(runCards()[0], 'Raw'))
     await vi.waitFor(() => expect(rawChips(runCards()[0])).toHaveLength(1))
 
-    const wire = exchangeFixture()
     const chipReading = (rawChips(runCards()[0])[0].textContent ?? '').trim()
     // What the reader should end up with: the wire's own text, with the
     // elided placeholder replaced by what the chip says in its place.
-    const expected = wire.request.text.replace(SECRET_PLACEHOLDER, chipReading)
+    const expected = requestRawFixture().text.replace(SECRET_PLACEHOLDER, chipReading)
 
     expect(rawBlockText(runCards()[0], 'Raw request')).toBe(expected)
-    expect(rawBlockText(runCards()[0], 'Raw response')).toBe(wire.response.text)
+    expect(rawBlockText(runCards()[0], 'Raw response')).toBe(responseRawFixture().text)
   })
 
   it('a side with nothing to mark still shows all of its text', async () => {
     const { bar } = await mountApp({
-      sendRequest: vi.fn().mockResolvedValue(
-        sendFixture({
-          raw: {
-            request: { text: 'GET /health HTTP/1.1\r\n\r\n', spans: [] },
-            response: { text: 'HTTP/1.1 204 No Content\r\n\r\n', spans: [] },
-          },
-        }),
-      ),
+      sendRequest: vi.fn().mockResolvedValue({
+        ...sendFixture({ raw: { text: 'HTTP/1.1 204 No Content\r\n\r\n', spans: [] } }),
+        request: { text: 'GET /health HTTP/1.1\r\n\r\n', spans: [] },
+      }),
     })
     await openRequest(bar)
     fireEvent.click(button('Send'))
@@ -1084,6 +1252,16 @@ describe('the raw view and the body', () => {
 // collections menu now, and the curl half is on the request line, where a
 // person pasting a command is already looking.
 
+/** Open the workbench and the import ask — the entrance a person uses, off
+ *  the collections menu, rather than a signal set from the outside. */
+async function openImportAsk(bar: HTMLElement): Promise<void> {
+  await openWorkbench(bar)
+  fireEvent.click(button('More collection actions'))
+  await vi.waitFor(() => menuItem('Import collection…'))
+  fireEvent.click(menuItem('Import collection…'))
+  await vi.waitFor(() => expect(reachable(field('api-import-postman-file'))).toBe(true))
+}
+
 describe('a Postman export is imported through an ask', () => {
   it('the panel wears no import form — the fields live inside the ask', async () => {
     const { bar } = await mountApp()
@@ -1095,6 +1273,135 @@ describe('a Postman export is imported through an ask', () => {
     const file = workbench().querySelector('#api-import-postman-file')
     expect(file).not.toBeNull()
     expect(reachable(file!)).toBe(false)
+  })
+
+  // ── The export's own picker, and the destination it proposes ────────────
+  //
+  // The ask named the export by PATH and offered no way to choose one: a
+  // person opened a terminal, found the file they had just downloaded from
+  // Postman, copied its path and pasted it back. And it asked for a
+  // destination as an absolute path with nothing in it, while
+  // `api.collections.create` next door takes a name and puts the folder
+  // where nocx keeps collections — the same concept behind two doors of very
+  // different difficulty (nocx-6hg2w.15, nocx-6hg2w.14).
+
+  it('with no file picker there is no control on the export field, and typing still works', async () => {
+    // servicesFixture carries no openFile — the dev-web shape, and the
+    // ordinary one: `dialog.openFile` answers -32601 wherever there is no
+    // Wails runtime, so the absent case may not look broken.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({ importPostman })
+    await openImportAsk(bar)
+
+    expect(buttonNames()).not.toContain('Choose export…')
+    expect(field('api-import-postman-file').disabled).toBe(false)
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith('/w/acme.json', '/w/acme-api'),
+    )
+  })
+
+  it('with a picker, choosing an export fills the field and PROPOSES where the collection lands', async () => {
+    const openFile = vi.fn().mockResolvedValue({ path: '/work/acme.postman_collection.json' })
+    const { bar } = await mountApp({ openFile })
+    await openImportAsk(bar)
+
+    // The control is reachable from the state the ask opens in — which is
+    // the half a test that called the picker directly could not say.
+    expect(buttonNames()).toContain('Choose export…')
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('/work/acme.postman_collection.json'),
+    )
+    expect(openFile).toHaveBeenCalled()
+    // BOTH suffixes go: a folder called `acme.postman_collection` would be
+    // named after our import machinery rather than after the collection.
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-dest').value).toBe(`${DEFAULT_ROOT}/acme`),
+    )
+  })
+
+  it('a destination the person has typed is never overwritten by a later pick', async () => {
+    const openFile = vi.fn().mockResolvedValue({ path: '/work/acme.postman_collection.json' })
+    const { bar } = await mountApp({ openFile })
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/elsewhere/mine' } })
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('/work/acme.postman_collection.json'),
+    )
+    // The person said where it goes. A proposal that argued with them is the
+    // surface deciding something they had already decided.
+    expect(field('api-import-postman-dest').value).toBe('/elsewhere/mine')
+  })
+
+  it("typing an export proposes too — the offer is not the picker's alone", async () => {
+    const { bar } = await mountApp()
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-file'), {
+      target: { value: '/work/orders.postman_collection.json' },
+    })
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-dest').value).toBe(`${DEFAULT_ROOT}/orders`),
+    )
+  })
+
+  it('with no default location the ask proposes nothing and stays typeable', async () => {
+    // '' is what a build with no app directory answers — the state
+    // apicoll.ErrNoDefaultLocation names. Nothing was promised, so nothing
+    // degrades: the person types a path, exactly as before.
+    const { bar } = await mountApp({
+      listCollections: vi.fn().mockResolvedValue({ collections: [], defaultRoot: '' }),
+    })
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-file'), {
+      target: { value: '/work/orders.postman_collection.json' },
+    })
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('/work/orders.postman_collection.json'),
+    )
+    expect(field('api-import-postman-dest').value).toBe('')
+    expect(field('api-import-postman-dest').disabled).toBe(false)
+  })
+
+  it('a file picker that reports itself unavailable retires its control and says why', async () => {
+    // The same interval the folder ask's picker has, and its own signal: the
+    // two dialog methods retire independently, so this must not depend on
+    // the directory picker at all.
+    const { bar } = await mountApp({
+      openFile: vi.fn().mockRejectedValue(new RpcError('method not found', -32601)),
+    })
+    await openImportAsk(bar)
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/half-typed.json' } })
+    expect(buttonNames()).toContain('Choose export…')
+
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Choose export…'))
+    // The refusal costs the person nothing they typed, and is said where
+    // every other refusal in this ask is said.
+    expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
+    expect(workbench().textContent).toContain('method not found')
+  })
+
+  it('cancelling the file picker leaves what was typed untouched', async () => {
+    const { bar } = await mountApp({ openFile: vi.fn().mockResolvedValue({ path: '' }) })
+    await openImportAsk(bar)
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/half-typed.json' } })
+
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() => expect(button('Import')).toBeTruthy())
+    expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
   })
 
   it('entrance, fields, confirm — and the backend is reached', async () => {
@@ -1163,6 +1470,7 @@ async function openRequestWithEnvironments(
   const { bar } = await mountApp({
     listCollections: vi.fn().mockResolvedValue({
       collections: [collectionsFixture({ collection: collectionFixture({ environments: envs }) })],
+      defaultRoot: DEFAULT_ROOT,
     }),
     sendRequest,
     ...over,
@@ -1183,7 +1491,12 @@ describe('the environment a request goes out under', () => {
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() =>
-      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, DEV_ENV.relPath),
+      expect(sendRequest).toHaveBeenCalledWith(
+        HANDLE,
+        CREATE_REL_PATH,
+        DEV_ENV.relPath,
+        expect.any(String),
+      ),
     )
   })
 
@@ -1201,7 +1514,12 @@ describe('the environment a request goes out under', () => {
 
     fireEvent.click(button('Send'))
     await vi.waitFor(() =>
-      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, PROD_ENV.relPath),
+      expect(sendRequest).toHaveBeenCalledWith(
+        HANDLE,
+        CREATE_REL_PATH,
+        PROD_ENV.relPath,
+        expect.any(String),
+      ),
     )
   })
 
@@ -1216,7 +1534,9 @@ describe('the environment a request goes out under', () => {
     fireEvent.click(none)
 
     fireEvent.click(button('Send'))
-    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, ''))
+    await vi.waitFor(() =>
+      expect(sendRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, '', expect.any(String)),
+    )
   })
 
   it('a collection with no environments offers no rows and says so', async () => {

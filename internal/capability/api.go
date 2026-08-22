@@ -150,6 +150,16 @@ type APICollectionService interface {
 	// this list exactly as Open's folder does, so a caller has one thing to
 	// do afterwards rather than two.
 	Create(name string) (apicoll.Created, error)
+	// DefaultRoot is where that default location IS, so a surface can show
+	// a person where a collection is about to land rather than asking them
+	// to name a place with nothing proposed. "" is a build with no app
+	// directory (apicoll.Creator says the rest).
+	//
+	// It is guard-checked like everything else here, although it reaches no
+	// folder and could not be made to: the property this interface has is
+	// that a service which escaped its operation is USELESS, and one method
+	// that still answered would be an exception somebody has to remember.
+	DefaultRoot() (string, error)
 	// Close removes a folder from the list. Every later call naming that
 	// handle is refused.
 	Close(h apicoll.HandleID) error
@@ -364,6 +374,13 @@ func (s *apiCollectionService) register(h apicoll.HandleID, root string) {
 // back here is an opened folder and the only question left is which list it
 // belongs in. A folder that could not be created registers nothing — there
 // is no row naming a collection nobody made.
+func (s *apiCollectionService) DefaultRoot() (string, error) {
+	if err := s.guard.check(); err != nil {
+		return "", err
+	}
+	return s.svc.DefaultRoot(), nil
+}
+
 func (s *apiCollectionService) Create(name string) (apicoll.Created, error) {
 	if err := s.guard.check(); err != nil {
 		return apicoll.Created{}, err
@@ -502,21 +519,48 @@ func (s *apiCollectionService) Snapshot(h apicoll.HandleID, relPath, envRelPath 
 	if err != nil {
 		return SendInputs{}, err
 	}
-	if envRelPath == "" {
-		// No environment: the request as written, out of this machine. A
-		// collection with no environments is a collection (§6.2), so this
-		// is an ordinary state rather than a degraded one.
-		return SendInputs{Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}, nil
+
+	// The request as the FILE has it, with where it would go out. Filled in
+	// before the substitution rather than after, because it is what a run
+	// that CANNOT be substituted has to be built from — see the unresolved
+	// branch below.
+	inputs := SendInputs{Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
+
+	// No environment is a LOOKUP THAT ANSWERS NOTHING, not a substitution
+	// skipped. Skipping it is what made `{{baseUrl}}/zen` with nothing bound
+	// reach the sender as text, so the sender complained about the only
+	// thing it could see — "is not an absolute URL", a sentence about a URL
+	// nobody typed, naming neither the variable nor the environment. A
+	// collection with no environments is still a collection (§6.2): the
+	// request goes out exactly as written when it HAS no references, and
+	// says which ones it cannot resolve when it has.
+	var look apicoll.Lookup
+	if envRelPath != "" {
+		env, envErr := s.svc.ReadEnvironment(h, envRelPath)
+		if envErr != nil {
+			return SendInputs{}, envErr
+		}
+		inputs.Environment = env.Name
+		inputs.Route = env.Route
+		look = env.Lookup()
 	}
-	env, err := s.svc.ReadEnvironment(h, envRelPath)
+
+	resolved, err := apicoll.Substitute(req, apicoll.Chain(look))
 	if err != nil {
-		return SendInputs{}, err
+		// THE INPUTS COME BACK WITH THE ERROR, and that is the one thing
+		// this signature does that a plain failure would not. An unresolved
+		// variable is a run — the `compose` phase of an exchange that never
+		// went out — and a run needs the request to show and the route to
+		// say where it would have gone. Returning the zero value here would
+		// leave the handler with a sentence and nothing to attach it to,
+		// which is the shape this whole epic replaced.
+		//
+		// The request is the UNSUBSTITUTED one, so the reference a person
+		// has to fix is visible in the text they are shown.
+		return inputs, err
 	}
-	resolved, err := apicoll.Substitute(req, apicoll.Chain(env.Lookup()))
-	if err != nil {
-		return SendInputs{}, err
-	}
-	return SendInputs{Request: resolved, CookieScope: scope, Environment: env.Name, Route: env.Route}, nil
+	inputs.Request = resolved
+	return inputs, nil
 }
 
 // stillOpen refuses a handle the user has closed — or never opened — before

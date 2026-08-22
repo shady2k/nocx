@@ -39,6 +39,11 @@ export interface PostmanImportDialogProps {
   /** Open the native directory picker for the DESTINATION. Absent wherever
    *  there is no Wails runtime — see CollectionDialog, same rule. */
   onBrowse?: () => void
+  /** Open the native FILE picker for the EXPORT. Absent for the same reason
+   *  and independently of `onBrowse`: they are two `dialog.*` methods and
+   *  either can be missing on its own, so the ask draws two controls, one
+   *  control or none rather than treating them as one capability. */
+  onBrowseFile?: () => void
   onCancel: () => void
   onSubmit: () => void
 }
@@ -69,6 +74,14 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         </>
       }
     >
+      {/* THE EXPORT HAS A PICKER TOO, and it is the same control in the same
+          slot as the destination's below. Without it this field named a
+          file by PATH with no way to choose one: a person opened a
+          terminal, found the export, copied its path and pasted it back —
+          for a document they had just downloaded from Postman. The
+          capability was there the whole time (`dialog.openFile`, used by
+          Connections and Secrets for a private key); only the wiring was
+          missing (nocx-6hg2w.15). */}
       <TextField
         id="api-import-postman-file"
         label="Postman v2.1 export"
@@ -78,6 +91,18 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         onInput={props.onFile}
         autoFocus
         required
+        trailing={
+          props.onBrowseFile ? (
+            <IconButton
+              size="sm"
+              ariaLabel="Choose export…"
+              title="Choose a Postman export with the system picker"
+              onClick={() => props.onBrowseFile?.()}
+            >
+              <FolderOpenIcon />
+            </IconButton>
+          ) : undefined
+        }
       />
       {/* The picker sits INSIDE the field, in the kit's trailing slot, because
           the field and its picker are one control. Beside it, they were two:

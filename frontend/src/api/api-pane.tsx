@@ -22,7 +22,7 @@
 // comment gives: a picker with nothing in it is a control that governs
 // nothing.
 
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from 'solid-js'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Caption } from '../ui/caption'
@@ -50,13 +50,13 @@ import { showToast } from '../ui/toast'
 import { filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
 import { CollectionDialog } from './collection-dialog'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
-import { environmentPath } from './api-paths'
+import { environmentPath, proposedDestination } from './api-paths'
 import { CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
 import { RequestEditor, RequestLine } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore } from './api-store'
-import type { DirectoryPicker } from './api-client'
+import type { DirectoryPicker, FilePicker } from './api-client'
 import type { ApiRoute } from './api-model'
 
 export interface ApiPaneProps {
@@ -70,6 +70,15 @@ export interface ApiPaneProps {
    * KeyMaterialInput — a capability the surface offers only where it exists.
    */
   openDirectory?: DirectoryPicker
+  /**
+   * The native FILE picker, when the backend offers one.
+   *
+   * Beside the directory picker rather than merged with it: they are two
+   * `dialog.*` methods, each of which can report itself unavailable on its
+   * own, and one signal for both would draw a control this build cannot
+   * honour (api-client.ts).
+   */
+  openFile?: FilePicker
 }
 
 /** Floors for the two seams: a tree column narrower than this cannot show a
@@ -92,6 +101,8 @@ export function ApiPane(props: ApiPaneProps) {
   const store = props.store
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const picker = props.openDirectory
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const filePicker = props.openFile
   const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(new Set())
   // The Import section used to be a collapsible form here, and its
   // disclosure was written `open={false} onToggle={() => undefined}` — a
@@ -222,6 +233,20 @@ export function ApiPane(props: ApiPaneProps) {
   const [postmanFile, setPostmanFile] = createSignal('')
   const [postmanDest, setPostmanDest] = createSignal('')
   const [importRefused, setImportRefused] = createSignal('')
+  /**
+   * Whether the person has TYPED into the destination.
+   *
+   * Both ends: false from the moment the ask opens until a keystroke reaches
+   * that field, true from then until the ask is opened again. It is what
+   * makes the proposal an offer rather than a correction — choosing a second
+   * export re-proposes while nobody has said where the folder goes, and
+   * never once somebody has.
+   *
+   * It is set by the field's own input handler and not by the proposal,
+   * which is the whole reason the two can share the signal underneath: a
+   * value this surface wrote is not a value the person chose.
+   */
+  const [destTyped, setDestTyped] = createSignal(false)
   const [importingBusy, setImportingBusy] = createSignal(false)
 
   // The two asks. Each owns what is typed into it, the reason its last
@@ -253,6 +278,11 @@ export function ApiPane(props: ApiPaneProps) {
    * vanish without a word.
    */
   const [pickerLive, setPickerLive] = createSignal(picker !== undefined)
+
+  /** The same interval for the FILE picker, and its own signal: the two
+   *  methods retire independently, so a build whose `dialog.openDirectory`
+   *  is missing must not take the export's Browse down with it. */
+  const [filePickerLive, setFilePickerLive] = createSignal(filePicker !== undefined)
 
   /**
    * The rows, narrowed by the filter.
@@ -389,6 +419,48 @@ export function ApiPane(props: ApiPaneProps) {
    *  to reach for. */
   const browseForImportDest = (): void => browseInto(setPostmanDest, setImportRefused)
 
+  /**
+   * Choose the EXPORT with the system picker, and propose where its
+   * collection lands.
+   *
+   * The proposal is the second half of the same gesture, and it is here
+   * rather than in the dialog because only this level knows both the chosen
+   * file and the backend's default location. It is skipped once somebody has
+   * typed a destination: a person who has said where the folder goes has
+   * said it, and a later pick that overwrote them would be the surface
+   * arguing.
+   */
+  const chooseExport = (path: string): void => {
+    setPostmanFile(path)
+    // Both reads below are READS AT A MOMENT rather than subscriptions —
+    // this runs from a click or a picker's answer, never from a render — so
+    // they are untracked: nothing here should re-run when the listing
+    // refreshes and rewrite a field somebody is typing into.
+    if (untrack(destTyped)) return
+    const proposal = proposedDestination(
+      untrack(() => store.defaultRoot()),
+      path,
+    )
+    if (proposal !== '') setPostmanDest(proposal)
+  }
+
+  const browseForExport = (): void => {
+    if (!filePicker) return
+    setImportRefused('')
+    void filePicker().then(
+      (chosen) => {
+        // An EMPTY path is a cancellation, not an answer — writing it into
+        // the field would erase what the person typed as the price of
+        // changing their mind (browseInto says the rest).
+        if (chosen.path !== '') chooseExport(chosen.path)
+      },
+      (err: unknown) => {
+        setFilePickerLive(false)
+        setImportRefused(err instanceof Error ? err.message : String(err))
+      },
+    )
+  }
+
   // The two import asks open the way the other two do: empty, with no
   // reason under the field, because a fresh ask holding the last answer is
   // an offer nobody wrote (askForName says the rest).
@@ -419,6 +491,7 @@ export function ApiPane(props: ApiPaneProps) {
   const askForImport = (): void => {
     setPostmanFile('')
     setPostmanDest('')
+    setDestTyped(false)
     setImportRefused('')
     setImporting(true)
   }
@@ -747,10 +820,14 @@ export function ApiPane(props: ApiPaneProps) {
           open={importing()}
           file={postmanFile()}
           dest={postmanDest()}
-          onFile={setPostmanFile}
-          onDest={setPostmanDest}
+          onFile={chooseExport}
+          onDest={(value) => {
+            setDestTyped(true)
+            setPostmanDest(value)
+          }}
           error={importRefused()}
           busy={importingBusy()}
+          onBrowseFile={filePickerLive() ? browseForExport : undefined}
           onBrowse={pickerLive() ? browseForImportDest : undefined}
           onCancel={() => setImporting(false)}
           onSubmit={importPostman}
@@ -1130,9 +1207,10 @@ export function ApiPane(props: ApiPaneProps) {
             // (api-store.ts): the send path already writes a dirty draft
             // before the exchange, and "not saved yet" is that same rule.
             sendable={store.draft() !== null}
-            sending={store.sending()}
+            sending={store.pending() !== null}
             onEdit={(next) => store.editDraft(next)}
             onSend={() => void store.send()}
+            onStop={() => void store.stop()}
             onImportCurl={askForCurl}
           />
         </div>

@@ -5376,6 +5376,16 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	if chosen[0].Path != root {
 		t.Errorf("listed path = %q, want %q", chosen[0].Path, root)
 	}
+	// WHERE A NEW COLLECTION WOULD GO, off the real socket. The renderer
+	// proposes an import destination from it, so a listing that answered ""
+	// on a build that HAS an app directory is an ask back to demanding an
+	// absolute path with nothing in it (nocx-6hg2w.14).
+	if listed.DefaultRoot == "" {
+		t.Error("defaultRoot is empty on a server built with an app directory")
+	}
+	if filepath.Base(listed.DefaultRoot) != apicoll.DefaultCollectionsDirName {
+		t.Errorf("defaultRoot = %q, want the collections directory under the data dir", listed.DefaultRoot)
+	}
 
 	readResp := vaultCall(t, conn, "api.request.read",
 		map[string]any{"handle": opened.Handle, "relPath": "ping.json"}, 4)
@@ -5545,7 +5555,7 @@ func TestAPIRequestSend_OverTheWireConformsToContract(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "ping.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-1"}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
@@ -5602,7 +5612,7 @@ func TestAPIRequestSend_DoesNotHoldTheGateAcrossTheDial(t *testing.T) {
 	// genuinely outstanding while the next call is made.
 	req, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "api.request.send",
-		"params": map[string]any{"handle": handle, "relPath": "ping.json"},
+		"params": map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-inflight"},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -5647,9 +5657,104 @@ func TestAPIRequestSend_DoesNotHoldTheGateAcrossTheDial(t *testing.T) {
 	}
 }
 
-// The send's failure half: a server that is not there. The refusal names
-// the failure and never the whole URL with its query — apisend redacts it.
-func TestAPIRequestSend_ReportsATransportFailure(t *testing.T) {
+// The DTO's own conformance, on ALL THREE OUTCOMES. It is cheap and it is
+// not the test that catches a missing field — the socket test below is —
+// but it is the one that catches the three shapes disagreeing with each
+// other: a `response` pointer that marshals as `{}` rather than `null`, a
+// phase spelt differently from the enum, a certificate list that arrives as
+// null on the path nobody populated it on.
+//
+// A FAILED and a STOPPED case, deliberately, and not only the answered one.
+// The whole change is that a run exists when there is no answer; a
+// conformance table covering only the answer would check the half that was
+// never in doubt.
+func TestAPIRequestSend_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.request.send.schema.json")
+
+	route := apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "ssh:bastion:1", InsecureTLS: true}
+	request := apisend.Raw{Text: "GET /users HTTP/1.1\nHost: api.internal\n\n", Spans: []apisend.Span{}}
+
+	cases := map[string]apisend.Exchange{
+		"answered": {
+			Outcome:      apisend.Answered,
+			Request:      request,
+			RemoteAddr:   "10.0.0.4:443",
+			Timings:      apisend.Timings{DNS: time.Millisecond, Connect: 2 * time.Millisecond, Total: 9 * time.Millisecond},
+			Certificates: []apisend.Certificate{{Subject: "CN=api.internal", Issuer: "CN=api.internal", SelfSigned: true, DNSNames: []string{"api.internal"}, IPAddresses: []string{}}},
+			Response: &apisend.Response{
+				Status:  200,
+				Headers: []apicoll.Header{{Name: "Content-Type", Value: "application/json", Enabled: true}},
+				Text:    `{"ok":true}`,
+				Size:    11,
+				Raw:     apisend.Raw{Text: "HTTP/1.1 200 OK\n\n", Spans: []apisend.Span{}},
+			},
+		},
+		// The failure the whole change exists for: a request, a route, how
+		// far it got — and NO response.
+		"failed at dial": {
+			Outcome:      apisend.Failed,
+			Request:      request,
+			Certificates: []apisend.Certificate{},
+			Timings:      apisend.Timings{DNS: 3 * time.Millisecond},
+			Failure:      &apisend.Failure{Phase: apisend.PhaseDial, Reason: "apisend: GET http://api.internal/users: connection refused"},
+		},
+		// A stop is not a failure, and the wire has to be able to say so:
+		// the outcome differs while the failure block is present in both.
+		"stopped": {
+			Outcome:      apisend.Stopped,
+			Request:      request,
+			RemoteAddr:   "10.0.0.4:443",
+			Certificates: []apisend.Certificate{},
+			Failure:      &apisend.Failure{Phase: apisend.PhaseStopped, Reason: "context canceled"},
+		},
+		// And the phase with nothing composed behind it: the request block
+		// is still there, empty, because the renderer walks it either way.
+		"failed at compose": {
+			Outcome:      apisend.Failed,
+			Request:      apisend.Raw{Spans: []apisend.Span{}},
+			Certificates: []apisend.Certificate{},
+			Failure:      &apisend.Failure{Phase: apisend.PhaseCompose, Reason: `apisend: "users" is not an absolute URL`},
+		},
+	}
+
+	for name, ex := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(wireExchange(ex, "prod", route))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.request.send DTO")
+
+			// `null` and not `{}`: the pointer is the whole reason a reader
+			// can tell "no answer" from "an answer with nothing in it".
+			var probe struct {
+				Response json.RawMessage `json:"response"`
+				Failure  json.RawMessage `json:"failure"`
+			}
+			if err := json.Unmarshal(raw, &probe); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if ex.Response == nil && string(probe.Response) != "null" {
+				t.Errorf("response = %s for an exchange with no answer, want null", probe.Response)
+			}
+			if ex.Failure == nil && string(probe.Failure) != "null" {
+				t.Errorf("failure = %s for an answered exchange, want null", probe.Failure)
+			}
+		})
+	}
+}
+
+// THE FAILED EXCHANGE, OFF THE REAL SOCKET — and this is the one that
+// matters, because a payload the test itself built proves the struct is
+// well formed and says nothing about whether the server sends it.
+//
+// A server that is not there. Before this change the answer was a JSON-RPC
+// error: one sentence, no request text, no route, no timing — while apisend
+// was holding all of it at the moment it failed. Now it is a RUN, and every
+// assertion below is a thing that used to reach the renderer nowhere at all.
+func TestAPIRequestSend_AFailedExchangeIsARunOverTheWire(t *testing.T) {
+	schema := loadSchema(t, "api.request.send.schema.json")
+
 	// A listener opened and immediately closed gives an address nothing is
 	// on, without depending on a port being free by guesswork.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -5664,9 +5769,66 @@ func TestAPIRequestSend_ReportsATransportFailure(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "ping.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-1"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("a send that could not connect answered an ERROR (%+v); it is an exchange "+
+			"that failed, and a person who pressed Send has a run whatever the world did next", resp.Error)
+	}
+	// The SCHEMA on the failure path. Without this the contract would be
+	// checked only on the shape that already worked.
+	validateJSON(t, schema, resp.Result, "api.request.send result (failed)")
+
+	var got apiSendResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal send result: %v", err)
+	}
+	if got.Outcome != "failed" {
+		t.Errorf("outcome = %q, want failed", got.Outcome)
+	}
+	if got.Response != nil {
+		t.Errorf("a failed exchange carries a response: %+v", *got.Response)
+	}
+	if got.Failure == nil {
+		t.Fatal("a failed exchange carries no failure")
+	}
+	if got.Failure.Phase != "dial" {
+		t.Errorf("phase = %q, want dial — nothing accepted a connection", got.Failure.Phase)
+	}
+	if got.Failure.Reason == "" {
+		t.Error("the failure has no reason; the run has nothing to show a person")
+	}
+	// The whole point: what was SENT is on the failed run.
+	if !strings.Contains(got.Request.Text, "GET /gone HTTP/1.1") {
+		t.Errorf("the failed run carries no request line:\n%s", got.Request.Text)
+	}
+	if got.Request.Spans == nil {
+		t.Error("request.spans is null; a side with nothing to mark is []")
+	}
+	if got.Certificates == nil {
+		t.Error("certificates is null; a chain of none is []")
+	}
+	// And the route, which a failed send used to leave the renderer
+	// guessing at — the panel knows what it configured, not what was used.
+	if got.Route.Kind != "direct" {
+		t.Errorf("route.kind = %q, want direct", got.Route.Kind)
+	}
+}
+
+// api.request.cancel refuses a token that names no running exchange, BY
+// NAME. "There was nothing to stop" and "it is stopped" are different facts,
+// and a caller that cannot tell them apart cannot report either.
+func TestAPIRequestCancel_AnUnknownTokenIsRefusedByName(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	resp := vaultCall(t, conn, "api.request.cancel", map[string]any{"token": "nothing-is-running"}, 1)
 	if resp.Error == nil {
-		t.Fatal("api.request.send against a dead address succeeded; a send that cannot connect must say so")
+		t.Fatal("cancelling a token nothing is running under was accepted")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "nothing-is-running") {
+		t.Errorf("message = %q, want it to name the token it does not know", resp.Error.Message)
 	}
 }
 
@@ -5884,16 +6046,23 @@ func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
 		schema string
 		raw    string
 	}{
-		"open with no handle":                 {"api.collections.open.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
-		"create with no handle":               {"api.collections.create.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
-		"create with a field nobody declared": {"api.collections.create.schema.json", `{"handle":"a","collection":{"name":"a","requests":[],"malformed":[]},"path":"/tmp/acme"}`},
-		"open with an undeclared key":         {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":[],"malformed":[]},"root":"/etc"}`},
-		"a null request list":                 {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":null,"malformed":[]}}`},
-		"list with null collections":          {"api.collections.list.schema.json", `{"collections":null}`},
-		"a read with no request":              {"api.request.read.schema.json", `{}`},
-		"a send with no timings":              {"api.request.send.schema.json", `{"response":{"status":200,"headers":[],"text":"","binary":false,"lossy":false,"truncated":false,"size":0,"tlsVersion":"","remoteAddr":""}}`},
-		"an import with null list":            {"api.import.postman.schema.json", `{"unsupported":null}`},
-		"a close that says something":         {"api.collections.close.schema.json", `{"closed":true}`},
+		"open with no handle":                    {"api.collections.open.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
+		"create with no handle":                  {"api.collections.create.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
+		"create with a field nobody declared":    {"api.collections.create.schema.json", `{"handle":"a","collection":{"name":"a","requests":[],"malformed":[]},"path":"/tmp/acme"}`},
+		"open with an undeclared key":            {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":[],"malformed":[]},"root":"/etc"}`},
+		"a null request list":                    {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":null,"malformed":[]}}`},
+		"list with null collections":             {"api.collections.list.schema.json", `{"collections":null,"defaultRoot":""}`},
+		"list with no defaultRoot":               {"api.collections.list.schema.json", `{"collections":[]}`},
+		"a read with no request":                 {"api.request.read.schema.json", `{}`},
+		"a send with no outcome":                 {"api.request.send.schema.json", `{"request":{"text":"","spans":[]},"response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with no request block":           {"api.request.send.schema.json", `{"outcome":"failed","response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with a phase nobody declared":    {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"handshake","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with an outcome nobody declared": {"api.request.send.schema.json", `{"outcome":"cancelled","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"stopped","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a failure with no phase":                {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with null certificates":          {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":null}`},
+		"a cancel that says something":           {"api.request.cancel.schema.json", `{"stopped":true}`},
+		"an import with null list":               {"api.import.postman.schema.json", `{"unsupported":null}`},
+		"a close that says something":            {"api.collections.close.schema.json", `{"closed":true}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			schema := loadSchema(t, tc.schema)

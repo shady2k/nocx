@@ -172,10 +172,21 @@ type tracingRoute struct {
 	Route
 }
 
+// It also reports WHICH STEP FAILED, which is the other thing only this
+// wrapper knows. The policy resolves an http:// name here and then dials an
+// address literal, so a resolve failure is not a *net.DNSError by the time
+// the caller sees it, and a route that dials on the far side produces
+// whatever that side's error type happens to be. Classifying the phase from
+// the error alone would therefore be guesswork exactly where the route is
+// least ordinary; the step that failed is a fact, and this records it.
 func (r tracingRoute) LookupIP(ctx context.Context, host string) ([]net.IP, error) {
 	start := time.Now()
 	ips, err := r.Route.LookupIP(ctx, host)
-	traceFrom(ctx).setDNS(time.Since(start))
+	tr := traceFrom(ctx)
+	tr.setDNS(time.Since(start))
+	if err != nil {
+		tr.failedResolve()
+	}
 	return ips, err
 }
 
@@ -183,8 +194,18 @@ func (r tracingRoute) DialContext(ctx context.Context, network, addr string) (ne
 	start := time.Now()
 	conn, err := r.Route.DialContext(ctx, network, addr)
 	if err != nil {
+		traceFrom(ctx).failedDial()
 		return nil, err
 	}
-	traceFrom(ctx).setConnect(time.Since(start))
+	tr := traceFrom(ctx)
+	tr.setConnect(time.Since(start))
+	// THE ADDRESS IS RECORDED AT THE DIAL, not only at httptrace's GotConn.
+	// GotConn fires when the connection is ready for a REQUEST, which on an
+	// https:// exchange is after the handshake — so a run that reached a
+	// server and was refused by its certificate would report having reached
+	// nothing, which is the opposite of what a person needs to read off it.
+	if conn != nil && conn.RemoteAddr() != nil {
+		tr.setRemote(conn.RemoteAddr().String())
+	}
 	return conn, nil
 }

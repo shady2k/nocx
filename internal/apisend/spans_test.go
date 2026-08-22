@@ -308,12 +308,10 @@ func TestSend_RawRequestNamesTheSecretAndNeverCarriesIt(t *testing.T) {
 		Headers: []apicoll.Header{{Name: "Authorization", Value: "Bearer " + liveToken, Enabled: true}},
 		Body:    apicoll.Body{Kind: apicoll.BodyRaw, Text: `{"email":"a@b.c"}`},
 	}
-	got, err := New().Send(context.Background(), r, Key{}, NamedSecret{Name: "API_TOKEN", Value: liveToken})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ex, err := New().Send(context.Background(), r, Key{}, NamedSecret{Name: "API_TOKEN", Value: liveToken})
+	answered(t, ex, err)
 
-	req := got.Raw.Request
+	req := ex.Request
 	for _, want := range []string{"POST /users HTTP/1.1", "Host: ", "Authorization: Bearer ", `{"email":"a@b.c"}`} {
 		if !strings.Contains(req.Text, want) {
 			t.Errorf("the raw request does not show %q:\n%s", want, req.Text)
@@ -336,19 +334,17 @@ func TestSend_RawResponseFindsATokenTheServerEchoed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{},
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{},
 		NamedSecret{Name: "API_TOKEN", Value: liveToken})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
+	got := answered(t, ex, err)
+	if !hasSpan(got.Raw, SpanSecret, "API_TOKEN") {
+		t.Errorf("the echoed token was not marked: %+v", got.Raw.Spans)
 	}
-	if !hasSpan(got.Raw.Response, SpanSecret, "API_TOKEN") {
-		t.Errorf("the echoed token was not marked: %+v", got.Raw.Response.Spans)
-	}
-	if s := marshalled(t, got.Raw.Response); strings.Contains(s, liveToken) {
+	if s := marshalled(t, got.Raw); strings.Contains(s, liveToken) {
 		t.Fatalf("the echoed token crossed as text: %s", s)
 	}
-	if !strings.Contains(got.Raw.Response.Text, "401") {
-		t.Errorf("the raw response does not show the status line:\n%s", got.Raw.Response.Text)
+	if !strings.Contains(got.Raw.Text, "401") {
+		t.Errorf("the raw response does not show the status line:\n%s", got.Raw.Text)
 	}
 	// Response.Text is the body the run shows; the search elides nothing
 	// there, so the raw view and the body view are two answers to two
@@ -370,15 +366,13 @@ func TestSend_RawResponseSearchesTheDecodedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{},
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{},
 		NamedSecret{Name: "API_TOKEN", Value: liveToken})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
+	got := answered(t, ex, err)
+	if !hasSpan(got.Raw, SpanSecret, "API_TOKEN") {
+		t.Fatalf("a token echoed inside a gzip frame was not found: %+v", got.Raw.Spans)
 	}
-	if !hasSpan(got.Raw.Response, SpanSecret, "API_TOKEN") {
-		t.Fatalf("a token echoed inside a gzip frame was not found: %+v", got.Raw.Response.Spans)
-	}
-	if s := marshalled(t, got.Raw.Response); strings.Contains(s, liveToken) {
+	if s := marshalled(t, got.Raw); strings.Contains(s, liveToken) {
 		t.Fatalf("the token crossed: %s", s)
 	}
 }
@@ -395,25 +389,23 @@ func TestSend_ARawCutShortDamagesTheSpanRatherThanShowingItsBytes(t *testing.T) 
 
 	// "GET /?t=" is 8 bytes, so a 30-byte ceiling leaves 22 bytes of a
 	// 44-byte token — a prefix of a live credential.
-	got, err := newBounded(30).Send(context.Background(),
+	ex, err := newBounded(30).Send(context.Background(),
 		apicollGet(srv.URL+"/?t="+liveToken), Key{}, NamedSecret{Name: "API_TOKEN", Value: liveToken})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	answered(t, ex, err)
 
 	var damaged *Span
-	for i := range got.Raw.Request.Spans {
-		if got.Raw.Request.Spans[i].Kind == SpanSecretDamaged {
-			damaged = &got.Raw.Request.Spans[i]
+	for i := range ex.Request.Spans {
+		if ex.Request.Spans[i].Kind == SpanSecretDamaged {
+			damaged = &ex.Request.Spans[i]
 		}
 	}
 	if damaged == nil {
-		t.Fatalf("no damaged span in %+v (text %q)", got.Raw.Request.Spans, got.Raw.Request.Text)
+		t.Fatalf("no damaged span in %+v (text %q)", ex.Request.Spans, ex.Request.Text)
 	}
 	if want := "truncated, 22 of 47 bytes"; damaged.Damage != want {
 		t.Errorf("Damage = %q, want %q", damaged.Damage, want)
 	}
-	if s := marshalled(t, got.Raw.Request); strings.Contains(s, liveToken[:22]) {
+	if s := marshalled(t, ex.Request); strings.Contains(s, liveToken[:22]) {
 		t.Fatalf("the surviving 22 bytes of a live token crossed: %s", s)
 	}
 }
@@ -427,11 +419,9 @@ func TestSend_RawIsAlwaysPresentAndNeverNull(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	for what, raw := range map[string]Raw{"request": got.Raw.Request, "response": got.Raw.Response} {
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	got := answered(t, ex, err)
+	for what, raw := range map[string]Raw{"request": ex.Request, "response": got.Raw} {
 		if raw.Text == "" {
 			t.Errorf("the raw %s is empty", what)
 		}
@@ -456,17 +446,15 @@ func TestSend_ABinaryRawSaysSoAndCarriesNoBase64(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ex, err := New().Send(context.Background(), apicollGet(srv.URL), Key{})
+	got := answered(t, ex, err)
 	if !got.Binary {
 		t.Fatalf("the body was not read as binary")
 	}
-	if want := "binary body, 6 bytes"; !strings.Contains(got.Raw.Response.Text, want) {
-		t.Errorf("the raw response does not say %q:\n%q", want, got.Raw.Response.Text)
+	if want := "binary body, 6 bytes"; !strings.Contains(got.Raw.Text, want) {
+		t.Errorf("the raw response does not say %q:\n%q", want, got.Raw.Text)
 	}
-	if b64 := base64Of(string(payload)); strings.Contains(got.Raw.Response.Text, b64) {
+	if b64 := base64Of(string(payload)); strings.Contains(got.Raw.Text, b64) {
 		t.Errorf("the raw response carries the body as base64")
 	}
 }

@@ -42,13 +42,11 @@ func TestCapture_StopsAtTheCeilingWithoutBufferingTheBody(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	got, err := New().Send(context.Background(),
+	ex, err := New().Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
 	runtime.ReadMemStats(&after)
 
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if !got.Truncated {
 		t.Error("Truncated = false, want true")
 	}
@@ -95,11 +93,9 @@ func TestCapture_TheCeilingCanOnlyBeLowered(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := newBounded(c.maxByte).Send(context.Background(),
+			ex, err := newBounded(c.maxByte).Send(context.Background(),
 				apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
-			if err != nil {
-				t.Fatalf("Send: %v", err)
-			}
+			got := answered(t, ex, err)
 			if !got.Truncated {
 				t.Error("Truncated = false, want true")
 			}
@@ -148,11 +144,9 @@ func TestCapture_ThreeDistinctStates(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got, err := New().Send(context.Background(),
+			ex, err := New().Send(context.Background(),
 				apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
-			if err != nil {
-				t.Fatalf("Send: %v", err)
-			}
+			got := answered(t, ex, err)
 			if got.Binary != c.want.Binary || got.Lossy != c.want.Lossy || got.Truncated != c.want.Truncated {
 				t.Errorf("binary/lossy/truncated = %v/%v/%v, want %v/%v/%v",
 					got.Binary, got.Lossy, got.Truncated, c.want.Binary, c.want.Lossy, c.want.Truncated)
@@ -184,11 +178,9 @@ func TestCapture_TruncatedTextRemainsValidUTF8(t *testing.T) {
 	defer srv.Close()
 
 	// 9 bytes cuts inside the fifth "é" (2 bytes each).
-	got, err := newBounded(9).Send(context.Background(),
+	ex, err := newBounded(9).Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if !got.Truncated {
 		t.Fatal("Truncated = false, want true")
 	}

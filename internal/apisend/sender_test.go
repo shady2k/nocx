@@ -38,11 +38,9 @@ func TestSend_ReturnsStatusHeadersBodyAndTimings(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(),
+	ex, err := New().Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Status != http.StatusTeapot {
 		t.Errorf("Status = %d, want %d", got.Status, http.StatusTeapot)
 	}
@@ -55,17 +53,17 @@ func TestSend_ReturnsStatusHeadersBodyAndTimings(t *testing.T) {
 	if n := headerCount(got, "X-Multi"); n != 2 {
 		t.Errorf("X-Multi appeared %d times, want 2 — a repeated header is two rows", n)
 	}
-	if got.Timings.Total <= 0 {
+	if ex.Timings.Total <= 0 {
 		t.Error("Timings.Total = 0, want the elapsed time of the exchange")
 	}
-	if got.Timings.TTFB <= 0 {
+	if ex.Timings.TTFB <= 0 {
 		t.Error("Timings.TTFB = 0, want the time to the first response byte")
 	}
-	if got.Timings.Connect <= 0 {
+	if ex.Timings.Connect <= 0 {
 		t.Error("Timings.Connect = 0, want the dial the route performed")
 	}
-	if got.RemoteAddr != strings.TrimPrefix(srv.URL, "http://") {
-		t.Errorf("RemoteAddr = %q, want %q", got.RemoteAddr, strings.TrimPrefix(srv.URL, "http://"))
+	if ex.RemoteAddr != strings.TrimPrefix(srv.URL, "http://") {
+		t.Errorf("RemoteAddr = %q, want %q", ex.RemoteAddr, strings.TrimPrefix(srv.URL, "http://"))
 	}
 	if got.TLSVersion != "" {
 		t.Errorf("TLSVersion = %q over http, want empty", got.TLSVersion)
@@ -80,18 +78,16 @@ func TestSend_OverTLSReportsTheVersion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := newTrusting(trust(srv)).Send(context.Background(),
+	ex, err := newTrusting(trust(srv)).Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "secure" {
 		t.Errorf("Text = %q, want secure", got.Text)
 	}
 	if !strings.HasPrefix(got.TLSVersion, "TLS 1.") {
 		t.Errorf("TLSVersion = %q, want a TLS 1.x version", got.TLSVersion)
 	}
-	if got.Timings.TLS <= 0 {
+	if ex.Timings.TLS <= 0 {
 		t.Error("Timings.TLS = 0, want the handshake time")
 	}
 }
@@ -118,13 +114,14 @@ func TestSend_PublicHTTPRefusedOnTheConnection(t *testing.T) {
 	}
 	s := New(WithRoutes(fixedRoute(route)))
 
-	_, err := s.Send(context.Background(),
+	ex, err := s.Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: "http://api.example.com/v1"}, Key{})
-	if err == nil {
-		t.Fatal("public http:// send succeeded, want a refusal")
-	}
-	if !strings.Contains(err.Error(), "http://") {
-		t.Fatalf("refusal = %v, want an address-rule error naming the scheme", err)
+	// PHASE `dial`: the name resolved and the rule refused the address it
+	// resolved to, so the attempt stopped exactly where a socket would have
+	// been opened — and nothing was.
+	fail := failedAt(t, ex, err, PhaseDial)
+	if !strings.Contains(fail.Reason, "http://") {
+		t.Fatalf("reason = %q, want an address-rule refusal naming the scheme", fail.Reason)
 	}
 }
 
@@ -136,11 +133,9 @@ func TestSend_LoopbackHTTPAllowed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New().Send(context.Background(),
+	ex, err := New().Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{})
-	if err != nil {
-		t.Fatalf("loopback http send: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "ok" {
 		t.Fatalf("Text = %q, want ok", got.Text)
 	}
@@ -166,11 +161,14 @@ func TestSend_EveryRedirectHopIsChecked(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
 	}
-	_, err := New(WithRoutes(fixedRoute(route))).Send(context.Background(),
+	ex, err := New(WithRoutes(fixedRoute(route))).Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: redirector.URL}, Key{})
-	if err == nil {
-		t.Fatal("the hop to a public http:// endpoint was followed, want a refusal")
-	}
+	// The PHASE is not asserted here and that is deliberate: the first hop
+	// landed, so this is a live exchange that was refused part way through,
+	// and which of "dial" and "exchange" describes a refused second hop is
+	// a judgement the run does not need. What it needs is that it failed
+	// and that the public target was never dialled — both below.
+	failed(t, ex, err)
 	mu.Lock()
 	defer mu.Unlock()
 	for _, addr := range dialed {
@@ -377,23 +375,58 @@ func TestSend_RefusesWhatItCannotResolve(t *testing.T) {
 	}
 }
 
-// TestSend_RefusesAMalformedRequest: the errors a user can produce by typing.
+// TestSend_RefusesAMalformedRequest: the errors a user can produce by
+// typing — and they are RUNS, at phase `compose`, not errors.
+//
+// The division is the one apisend.Send states: an error is a violation of
+// this package's calling contract, which the CALLER can fix without asking
+// the user anything (resolve the file, resolve the variable). An address
+// that will not parse is not that. A person typed it, pressed Send, and the
+// answer belongs on a row beside every other thing they have sent — with
+// the phase saying which step never happened.
 func TestSend_RefusesAMalformedRequest(t *testing.T) {
 	cases := []struct {
-		name string
-		req  apicoll.Request
-		want string
+		name  string
+		req   apicoll.Request
+		phase Phase
+		want  string
 	}{
-		{"no URL", apicoll.Request{Method: http.MethodGet}, "not an absolute URL"},
-		{"a bare path", apicoll.Request{Method: http.MethodGet, URL: "/users"}, "not an absolute URL"},
-		{"an unsupported scheme", apicoll.Request{Method: http.MethodGet, URL: "ftp://example.com/x"}, "unsupported URL scheme"},
-		{"an unknown body kind", apicoll.Request{Method: http.MethodGet, URL: "http://127.0.0.1:1/x", Body: apicoll.Body{Kind: "graphql"}}, "unknown body kind"},
+		{"no URL", apicoll.Request{Method: http.MethodGet}, PhaseCompose, "not an absolute URL"},
+		{"a bare path", apicoll.Request{Method: http.MethodGet, URL: "/users"}, PhaseCompose, "not an absolute URL"},
+		// An ftp:// URL builds a perfectly good *http.Request; it is the
+		// address rule that refuses it, at the step where a socket would
+		// have been opened. So this one composes — and its run shows the
+		// request line, which is exactly the point of keeping it.
+		{"an unsupported scheme", apicoll.Request{Method: http.MethodGet, URL: "ftp://example.com/x"}, PhaseDial, "unsupported URL scheme"},
+		{"an unknown body kind", apicoll.Request{Method: http.MethodGet, URL: "http://127.0.0.1:1/x", Body: apicoll.Body{Kind: "graphql"}}, PhaseCompose, "unknown body kind"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := New().Send(context.Background(), c.req, Key{})
-			if err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("err = %v, want it to contain %q", err, c.want)
+			ex, err := New().Send(context.Background(), c.req, Key{})
+			fail := failedAt(t, ex, err, c.phase)
+			if !strings.Contains(fail.Reason, c.want) {
+				t.Fatalf("reason = %q, want it to contain %q", fail.Reason, c.want)
+			}
+			// EVEN AT COMPOSE THE RUN SHOWS WHAT WAS ASKED FOR. There is
+			// no *http.Request to render, so the text is the request as
+			// WRITTEN (composeUnsent) — which is the thing a person has to
+			// look at to see the address they mistyped.
+			if !strings.Contains(ex.Request.Text, c.req.Method) {
+				t.Errorf("the run does not show the method:\n%s", ex.Request.Text)
+			}
+			// The WHOLE address, but only where composeUnsent wrote it. The
+			// ftp:// case built a perfectly good *http.Request and was
+			// refused at the dial, so its text is the real composition —
+			// request-URI plus a Host line, which is what actually would
+			// have crossed.
+			if c.phase == PhaseCompose && c.req.URL != "" && !strings.Contains(ex.Request.Text, c.req.URL) {
+				t.Errorf("the run does not show the address that was refused:\n%s", ex.Request.Text)
+			}
+			if c.phase != PhaseCompose && !strings.Contains(ex.Request.Text, "Host: ") {
+				t.Errorf("a composed run carries no Host line:\n%s", ex.Request.Text)
+			}
+			if ex.Request.Spans == nil {
+				t.Error("Request.Spans is nil; a side with nothing to mark is []")
 			}
 		})
 	}
@@ -410,16 +443,21 @@ func TestSend_ErrorsDoNotCarryTheQueryString(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close() // nothing is listening now: the dial will be refused
 
-	_, err = New().Send(context.Background(), apicoll.Request{
+	ex, err := New().Send(context.Background(), apicoll.Request{
 		Method: http.MethodGet,
 		URL:    "http://" + addr + "/v1?access_token=sk-secret",
 	}, Key{})
-	if err == nil {
-		t.Fatal("send to a closed port succeeded")
+	fail := failedAt(t, ex, err, PhaseDial)
+	if strings.Contains(fail.Reason, "sk-secret") {
+		t.Fatalf("the failure reason carries the credential: %v", fail.Reason)
 	}
-	if strings.Contains(err.Error(), "sk-secret") {
-		t.Fatalf("the error carries the credential: %v", err)
-	}
+	// REDACTION IS UNCHANGED BY THE NEW SHAPE, and this is where that is
+	// checked: the reason is the same redacted sentence the error used to
+	// be, now on a run. The request block beside it carries the query
+	// string, and legitimately — it is the request the person wrote, on
+	// their own screen, with any SECRET in it elided by its spans (§11.2).
+	// The one place a credential must never appear is a message written
+	// somewhere the user did not choose, which is what this reason is.
 }
 
 // fakeRoute is a route whose resolve and dial are the test's.

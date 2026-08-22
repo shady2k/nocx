@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,10 +44,110 @@ import (
 // credential unless it is told. Nothing here stores them, and nothing here
 // puts one on the wire to the renderer — see spans.go.
 type Sender interface {
-	Send(ctx context.Context, r apicoll.Request, k Key, used ...NamedSecret) (Response, error)
+	Send(ctx context.Context, r apicoll.Request, k Key, used ...NamedSecret) (Exchange, error)
 }
 
-// Response is what the run shows. Text, Binary, Lossy and Truncated are four
+// Outcome is how one exchange ended. Three and not two: a stop is not a
+// failure — it is the answer arriving on purpose — and a caller that had to
+// infer the difference from a reason string would word and tone somebody's
+// own Stop as something that went wrong.
+type Outcome string
+
+const (
+	// Answered — a response came back and its body was read.
+	Answered Outcome = "answered"
+	// Failed — it did not.
+	Failed Outcome = "failed"
+	// Stopped — the person who started it stopped it.
+	Stopped Outcome = "stopped"
+)
+
+// Phase is WHERE an exchange stopped, as a closed set. It is a POSITION on
+// the way to an answer rather than a verdict, which is why a stopped
+// exchange carries one too.
+type Phase string
+
+const (
+	// PhaseCompose — the request could not be built at all. The one phase
+	// with no request text, because there was none to compose.
+	PhaseCompose Phase = "compose"
+	// PhaseResolve — the name did not resolve.
+	PhaseResolve Phase = "resolve"
+	// PhaseDial — nothing accepted a connection.
+	PhaseDial Phase = "dial"
+	// PhaseConnection — the ROUTE was unusable: no lease on the SSH
+	// profile, its dial bound elapsed, or a name only the far side can
+	// resolve. Distinct from PhaseDial because the thing to fix is
+	// different — the connection, not the server.
+	PhaseConnection Phase = "connection"
+	// PhaseTLS — the handshake did not complete.
+	PhaseTLS Phase = "tls"
+	// PhaseExchange — the connection was open and the exchange broke on it:
+	// a truncated body, a malformed response.
+	PhaseExchange Phase = "exchange"
+	// PhaseTimeout — a bound elapsed.
+	PhaseTimeout Phase = "timeout"
+	// PhaseStopped — the person pressed Stop.
+	PhaseStopped Phase = "stopped"
+)
+
+// Failure is how the attempt ended when it did not answer. Present for a
+// Failed AND for a Stopped exchange: both are asks about the same thing —
+// how far did it get — and only the Outcome says how to read it.
+type Failure struct {
+	Phase Phase
+	// Reason is what went wrong in this package's words, already redacted:
+	// sendError unwraps the *url.Error whose message is the whole URL, and
+	// redact drops the userinfo and the query string.
+	Reason string
+}
+
+// Exchange is ONE ATTEMPT TO SEND, and it exists from the moment Send is
+// called rather than from the moment an answer arrives.
+//
+// That is the whole difference from what this package used to return. A run
+// that WAS its answer could not exist before the answer did: there was
+// nothing to show while a request was in flight, nothing to name a running
+// exchange by, and a failure was not a run at all — it came back as an
+// error, one sentence, while this function was holding the composed request,
+// the placements, the phases and the remote address at the moment it failed
+// and dropping every one of them on the floor.
+//
+// So everything the attempt REACHED is here whatever the outcome, and only
+// Response waits for an answer. An error from Send now means one thing and
+// one thing only: a violation of this package's calling contract (ErrFileBody,
+// ErrAuthUnresolved) — a request it refuses to send rather than a send that
+// did not work.
+type Exchange struct {
+	Outcome Outcome
+	// Request is what went out, segmented — PRESENT WHATEVER THE OUTCOME,
+	// because it is composed and placed before anything is dialled. Empty
+	// only at PhaseCompose, where there was nothing to compose.
+	Request Raw
+	// RemoteAddr is the address that answered the dial, "" when nothing
+	// did. Its presence is also what distinguishes a dial that never landed
+	// from a connection that broke later (phaseOf).
+	RemoteAddr string
+	// Timings are the phases AS FAR AS THE ATTEMPT GOT — one never reached
+	// is 0, which is the honest answer rather than an absence.
+	Timings Timings
+	// Certificates is the chain the server presented, leaf first. Never nil.
+	// EMPTY for a failure at PhaseTLS, and that is a real limit: net/http
+	// hands the trace an empty connection state when the handshake fails,
+	// and recovering the chain from a rejected handshake would mean turning
+	// verification off and re-implementing it here — the second X.509
+	// implementation Certificate's own doc refuses.
+	Certificates []Certificate
+	// Response is what came back, and nil unless the outcome is Answered.
+	// Nil rather than a zero value: a zeroed response is an HTTP 0 with an
+	// empty body, which a reader cannot tell from a real one.
+	Response *Response
+	// Failure is why it ended, and nil exactly when the outcome is
+	// Answered.
+	Failure *Failure
+}
+
+// Response is what came back. Text, Binary, Lossy and Truncated are four
 // separate facts because they are four separate sentences in the UI, and
 // collapsing any two of them loses one.
 type Response struct {
@@ -68,24 +170,18 @@ type Response struct {
 	// ceiling when Truncated. It is not a claim about what the server holds:
 	// a Content-Length can lie and a chunked response declares nothing.
 	Size       int64
-	Timings    Timings
 	TLSVersion string
-	RemoteAddr string
 	// TLSCipherSuite is the negotiated suite's name, and "" when the
 	// exchange was not over TLS.
 	TLSCipherSuite string
-	// Certificates is the chain the SERVER PRESENTED, leaf first — not the
-	// chain that was verified, which is a different list and is empty when
-	// verification was off. It is what the panel shows for an environment
-	// that accepts self-signed certificates: with verification off, "which
-	// certificate did I actually just trust" is the only question left, and
-	// before this the answer existed nowhere in the product.
-	Certificates []Certificate
-	// Raw is the diagnostic text of both sides, segmented and carrying no
-	// secret value (design §11). It rides on the result of the send that
-	// produced it: the raw text belongs to a PARTICULAR run, so a second
-	// round trip could only fetch the raw of a different one.
-	Raw Exchange
+	// Raw is the RESPONSE SIDE of §11's segmented text — what came back,
+	// with the bounded known-plaintext search run over it.
+	//
+	// One side, not two. The request side is on the Exchange, because the
+	// sender composes it before it dials: a field that only a Response
+	// could carry would take the request text away from exactly the runs
+	// that need it most, the ones that never got a response at all.
+	Raw Raw
 }
 
 // Timings are the phases of one exchange. On a redirect chain DNS, Connect
@@ -118,11 +214,34 @@ var ErrAuthUnresolved = errors.New(component + ": auth names a variable this pac
 
 var _ Sender = (*Client)(nil)
 
-// Send performs one request and captures the response.
-func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...NamedSecret) (Response, error) {
+// Send performs one request and returns the EXCHANGE — what was attempted,
+// how far it got, and what came back if anything did.
+//
+// It returns an error for one thing only: a request this package refuses to
+// send at all (ErrFileBody, ErrAuthUnresolved), which is a violation of its
+// calling contract and is fixed by editing the request. Every network
+// outcome — a name that does not resolve, a refused port, a rejected
+// certificate, a body that stops half way, a cancellation — is an Exchange
+// with a Failure on it and a nil error, because all of them are things that
+// HAPPENED TO AN ATTEMPT TO SEND and the attempt is what the caller needs.
+func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...NamedSecret) (Exchange, error) {
+	// The tracer is built first so it can be handed to a failure that
+	// happens before there is anything to trace — it answers zeroes, which
+	// is what "never reached" means for a phase.
+	tr := &tracer{}
+
 	req, custom, bodyText, err := buildRequest(ctx, r)
 	if err != nil {
-		return Response{}, err
+		if errors.Is(err, ErrFileBody) || errors.Is(err, ErrAuthUnresolved) {
+			return Exchange{}, err
+		}
+		// Everything else buildRequest refuses — an address that will not
+		// parse, one that is not absolute, a method net/http will not take
+		// — is a send a person attempted, and the attempt is the run. It
+		// carries the request AS WRITTEN, because there is no *http.Request
+		// to compose from and what the person needs to see is what they
+		// typed.
+		return settled(c.mark(composeUnsent(r), used), tr, 0, PhaseCompose, err), nil
 	}
 
 	// The raw request is composed and PLACED before the send, against the
@@ -130,17 +249,28 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 	// whole mechanism: the placement is what the sender did and the text is
 	// what fitted, so MarkRequest can report the difference as damage
 	// rather than printing the prefix of a live credential (§11.1).
-	composed := composeRequest(req, bodyText)
-	placed := locate(composed, used)
+	//
+	// It is also what makes a failed run readable: this value exists from
+	// here to every return below, so no exit path can be missing it.
+	sent := c.mark(composeRequest(req, bodyText), used)
+
 	cl, err := c.instanceFor(ctx, k)
 	if err != nil {
-		return Response{}, err
+		// Nothing instanceFor can fail at has put a byte on a wire: the
+		// route table refusing the id, the pool refusing a lease, the jar
+		// refusing to exist. The phase is the ROUTE's whatever the error
+		// says underneath — except a cancellation, which is a stop
+		// wherever it lands.
+		phase := PhaseConnection
+		if errors.Is(err, context.Canceled) {
+			phase = PhaseStopped
+		}
+		return settled(sent, tr, 0, phase, err), nil
 	}
 
 	// The custom header names ride the context so the credential rule can
 	// drop exactly those names on an origin change, and the tracer rides it
 	// so the route can report the phases httptrace cannot see.
-	tr := &tracer{}
 	ctx = httppolicy.WithCustomHeaderNames(req.Context(), custom)
 	ctx = context.WithValue(ctx, traceKey{}, tr)
 	req = req.WithContext(httptrace.WithClientTrace(ctx, tr.hooks()))
@@ -148,14 +278,19 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 	start := time.Now()
 	resp, err := cl.Do(req)
 	if err != nil {
-		return Response{}, sendError(req.Method, req.URL, err)
+		return settled(sent, tr, time.Since(start),
+			phaseOf(err, tr, PhaseExchange), sendError(req.Method, req.URL, err)), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := captureBody(resp.Body, c.limit)
 	if err != nil {
-		return Response{}, fmt.Errorf("%s: reading the response body of %s %s: %w",
-			component, req.Method, redact(req.URL), err)
+		// The connection was open and the read broke on it, so the fallback
+		// is the exchange — but a cancellation here is still a stop, and
+		// phaseOf is the one place that decides which.
+		return settled(sent, tr, time.Since(start), phaseOf(err, tr, PhaseExchange),
+			fmt.Errorf("%s: reading the response body of %s %s: %w",
+				component, req.Method, redact(req.URL), err)), nil
 	}
 	total := time.Since(start)
 
@@ -167,23 +302,183 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 		Lossy:     body.Lossy,
 		Truncated: body.Truncated,
 		Size:      body.Size,
-		Timings:   tr.timings(total),
 	}
+	certs := tr.certificates()
 	if resp.TLS != nil {
 		out.TLSVersion = tls.VersionName(resp.TLS.Version)
 		out.TLSCipherSuite = tls.CipherSuiteName(resp.TLS.CipherSuite)
-		out.Certificates = describeChain(resp.TLS.PeerCertificates)
+		certs = describeChain(resp.TLS.PeerCertificates)
 	}
-	out.RemoteAddr = tr.remote()
-	out.Raw = Exchange{
-		Request: MarkRequest(c.bound(composed), placed),
-		// The response is searched on exactly the text that crosses, so
-		// there is nothing on this side for a bound to damage — which is
-		// the asymmetry §11.3 names: a placement exists independently of
-		// the text, a match does not.
-		Response: SearchResponse(c.bound(composeResponse(out)), used),
+	// The response is searched on exactly the text that crosses, so there
+	// is nothing on this side for a bound to damage — which is the
+	// asymmetry §11.3 names: a placement exists independently of the text,
+	// a match does not.
+	out.Raw = SearchResponse(c.bound(composeResponse(out)), used)
+
+	return Exchange{
+		Outcome:      Answered,
+		Request:      sent,
+		RemoteAddr:   tr.remote(),
+		Timings:      tr.timings(total),
+		Certificates: certs,
+		Response:     &out,
+	}, nil
+}
+
+// Unsent is an exchange that never reached this package at all: the caller
+// refused to hand it over, and the refusal is still a RUN.
+//
+// It exists because the caller owns two refusals this package cannot make.
+// A variable with no value is one (design §6.5, apicoll.UnresolvedError) and
+// an auth variable that is not bound is the other, and both are decided
+// before a request can be built — but both are things that happened to
+// somebody who pressed Send, so both belong on a row beside every other
+// thing they have sent rather than in an error string. The caller has the
+// reason; this package has the one renderer of a request's text and the one
+// constructor of an exchange, and putting them together anywhere else would
+// be a second answer to "what was sent" (§11.2).
+//
+// NO PLACEMENTS, deliberately. An exchange that never went out substituted
+// nothing, so there is no credential in the text to elide: the file itself
+// can never hold one (§8), and any value that WOULD have been placed is
+// exactly the value the caller could not resolve.
+func Unsent(r apicoll.Request, phase Phase, reason error) Exchange {
+	return settled(MarkRequest(boundTo(ceiling, composeUnsent(r)), nil), &tracer{}, 0, phase, reason)
+}
+
+// mark composes one side and elides what was placed in it, bounded by this
+// client's ceiling. One helper because both the sent and the unsent path
+// need exactly this, and two copies would drift on the bound.
+func (c *Client) mark(text string, used []NamedSecret) Raw {
+	bounded := c.bound(text)
+	return MarkRequest(bounded, locate(text, used))
+}
+
+// composeUnsent renders a request THE FILE'S WAY, for a run that never got
+// as far as an http.Request.
+//
+// Two differences from composeRequest, and both are the honest ones. There
+// is no Host line, because the address never parsed and inventing a host
+// would be describing a request that could not exist. And the headers are in
+// the user's own order rather than sorted, because there is no http.Header
+// map to have lost it — this is the request as written, not as net/http
+// would have canonicalised it on the way out.
+func composeUnsent(r apicoll.Request) string {
+	method := r.Method
+	if method == "" {
+		method = http.MethodGet
 	}
-	return out, nil
+	var b strings.Builder
+	b.WriteString(method)
+	b.WriteByte(' ')
+	b.WriteString(strings.TrimSpace(r.URL))
+	b.WriteString(" HTTP/1.1\n")
+	for _, h := range r.Headers {
+		// A disabled row is a row the user keeps and does not send, so it is
+		// not part of what would have gone out.
+		if !h.Enabled || h.Name == "" {
+			continue
+		}
+		b.WriteString(h.Name)
+		b.WriteString(": ")
+		b.WriteString(h.Value)
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	switch r.Body.Kind {
+	case apicoll.BodyRaw, apicoll.BodyJSON, apicoll.BodyForm:
+		b.WriteString(r.Body.Text)
+	case apicoll.BodyFile:
+		// The bytes were never read — that is the caller's to do (ErrFileBody)
+		// — so the run says which file it would have sent rather than
+		// pretending to show it.
+		b.WriteString("file body: ")
+		b.WriteString(r.Body.FileRef)
+	}
+	return b.String()
+}
+
+// settled builds the exchange for an attempt that did not answer. It is the
+// ONE constructor of a non-answered Exchange, so the invariants the schema
+// states — a request block whatever the outcome, a never-nil certificate
+// list, a failure exactly when there is no response — hold by construction
+// rather than by five call sites remembering them.
+func settled(sent Raw, tr *tracer, total time.Duration, phase Phase, err error) Exchange {
+	out := Exchange{
+		Outcome:      Failed,
+		Request:      sent,
+		RemoteAddr:   tr.remote(),
+		Timings:      tr.timings(total),
+		Certificates: tr.certificates(),
+		Failure:      &Failure{Phase: phase, Reason: err.Error()},
+	}
+	if phase == PhaseStopped {
+		out.Outcome = Stopped
+	}
+	return out
+}
+
+// phaseOf says WHERE an attempt stopped, from the error together with what
+// the tracer saw — a remote address means the dial landed, a TLS time means
+// the handshake started, and the route reports its own resolve and dial
+// because httptrace cannot see either through a connection.
+//
+// The order is the whole of it, and each step is ahead of the next for a
+// reason:
+//
+//   - a cancellation is a STOP wherever it lands, so it is asked first and
+//     nothing below can relabel a person's own Stop as a failure;
+//   - the ROUTE's own refusals come next, including its dial bound: a person
+//     whose bastion is the problem is not helped by being told "timeout";
+//   - a resolve failure outranks a timeout, because a DNS lookup that timed
+//     out is still a name that did not resolve;
+//   - a handshake that started and produced no first byte is a TLS failure
+//     even when the error underneath is an ordinary network one.
+//
+// fallback is the phase for an error nothing here recognises, and it is the
+// caller's because it depends on where the call was: past the dial, an
+// unrecognised failure is the exchange's.
+func phaseOf(err error, tr *tracer, fallback Phase) Phase {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return PhaseStopped
+	case errors.Is(err, ErrNoConnection), errors.Is(err, ErrNoSSHLease),
+		errors.Is(err, ErrSSHDialTimeout), errors.Is(err, ErrNameResolvedRemotely):
+		return PhaseConnection
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) || tr.resolveFailed() {
+		return PhaseResolve
+	}
+	if isTLSFailure(err) || (tr.tlsStarted() && !tr.answered()) {
+		return PhaseTLS
+	}
+	var ne net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) ||
+		(errors.As(err, &ne) && ne.Timeout()) {
+		return PhaseTimeout
+	}
+	if tr.dialFailed() || tr.remote() == "" {
+		return PhaseDial
+	}
+	return fallback
+}
+
+// isTLSFailure reports whether the handshake itself is what went wrong. The
+// types rather than the message: a certificate failure spelt differently by
+// a future Go release would silently become an "exchange" failure if this
+// matched on words.
+func isTLSFailure(err error) bool {
+	var (
+		verify   *tls.CertificateVerificationError
+		alert    tls.AlertError
+		record   tls.RecordHeaderError
+		unknown  x509.UnknownAuthorityError
+		hostname x509.HostnameError
+		invalid  x509.CertificateInvalidError
+	)
+	return errors.As(err, &verify) || errors.As(err, &alert) || errors.As(err, &record) ||
+		errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid)
 }
 
 // bound is the ceiling applied to what this package puts on the control
@@ -194,8 +489,11 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 // A cut can land inside a rune, so the result is made valid UTF-8 again:
 // invalid bytes in a JSON string are not a diagnostic, they are a payload
 // the renderer cannot decode at all.
-func (c *Client) bound(s string) string {
-	limit := c.limit
+func (c *Client) bound(s string) string { return boundTo(c.limit, s) }
+
+// boundTo is the rule itself, without a client — Unsent has no instance and
+// must not invent a second ceiling.
+func boundTo(limit int64, s string) string {
 	if limit <= 0 || limit > ceiling {
 		limit = ceiling
 	}
@@ -440,6 +738,19 @@ type tracer struct {
 	tlsStart   time.Time
 	firstStart time.Time
 	remoteAddr string
+	// resolveErr and dialErr are WHICH STEP THE ROUTE REPORTED A FAILURE
+	// AT, and they exist because the error alone cannot say. The policy
+	// resolves http:// names itself and dials an address literal, so a
+	// resolve failure there is not a *net.DNSError by the time it reaches
+	// the caller; and a route that dials on the far side is not net.Dialer
+	// at all. The wrapper that already times both steps is the one place
+	// that knows, so it records it (phaseOf reads it).
+	resolveErr bool
+	dialErr    bool
+	// certs is the chain the server presented, captured from the handshake
+	// rather than only from a completed response — so a run that got past
+	// TLS and broke afterwards still says which certificate it trusted.
+	certs []*x509.Certificate
 }
 
 // traceFrom returns the tracer on ctx, or a throwaway one when there is
@@ -462,6 +773,65 @@ func (t *tracer) setConnect(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.connect = d
+}
+
+// setRemote records the address the dial landed on. It is written by both
+// the dial wrapper and httptrace's GotConn — the same value from two
+// vantage points, and the earlier one is what a failed handshake has.
+func (t *tracer) setRemote(addr string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.remoteAddr = addr
+}
+
+func (t *tracer) failedResolve() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.resolveErr = true
+}
+
+func (t *tracer) failedDial() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.dialErr = true
+}
+
+func (t *tracer) resolveFailed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.resolveErr
+}
+
+func (t *tracer) dialFailed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dialErr
+}
+
+// tlsStarted reports whether a handshake began — the second half of "a TLS
+// time means the handshake started".
+func (t *tracer) tlsStarted() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.tlsStart.IsZero()
+}
+
+// answered reports whether a first response byte ever arrived. A failure
+// after that point is the exchange's rather than the handshake's, however
+// the handshake is timed.
+func (t *tracer) answered() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.ttfb > 0
+}
+
+// certificates describes the chain the handshake saw. Never nil: a plain
+// http exchange presents none and that is [].
+func (t *tracer) certificates() []Certificate {
+	t.mu.Lock()
+	chain := t.certs
+	t.mu.Unlock()
+	return describeChain(chain)
 }
 
 func (t *tracer) hooks() *httptrace.ClientTrace {
@@ -491,11 +861,20 @@ func (t *tracer) hooks() *httptrace.ClientTrace {
 			defer t.mu.Unlock()
 			t.tlsStart = time.Now()
 		},
-		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
+		// The state is EMPTY when the handshake failed — net/http passes a
+		// zero ConnectionState with the error — so this captures the chain
+		// for a run that got past TLS and broke afterwards, and never for
+		// one that was refused at it. contracts/api.request.send says the
+		// same thing to the renderer rather than leaving it to be
+		// discovered from an empty list.
+		TLSHandshakeDone: func(state tls.ConnectionState, _ error) {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 			if !t.tlsStart.IsZero() {
 				t.tlsTime = time.Since(t.tlsStart)
+			}
+			if len(state.PeerCertificates) > 0 {
+				t.certs = state.PeerCertificates
 			}
 		},
 		GotConn: func(info httptrace.GotConnInfo) {

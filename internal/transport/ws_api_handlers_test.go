@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,18 +36,59 @@ type recordingSender struct {
 	mu   sync.Mutex
 	keys []apisend.Key
 	reqs []apicoll.Request
-	err  error
+	// err is what the sender REFUSES with — the calling-contract violation
+	// that is still an error (apisend.Send). failure is the other half: an
+	// attempt that did not answer, which is an exchange and not an error.
+	err     error
+	failure *apisend.Failure
+	// block holds the exchange open until it is closed or the context is
+	// cancelled, so a test can act on a send that is genuinely in flight.
+	block chan struct{}
 }
 
-func (s *recordingSender) Send(_ context.Context, r apicoll.Request, k apisend.Key, _ ...apisend.NamedSecret) (apisend.Response, error) {
+func (s *recordingSender) Send(ctx context.Context, r apicoll.Request, k apisend.Key, _ ...apisend.NamedSecret) (apisend.Exchange, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.keys = append(s.keys, k)
 	s.reqs = append(s.reqs, r)
-	if s.err != nil {
-		return apisend.Response{}, s.err
+	block, failure, err := s.block, s.failure, s.err
+	s.mu.Unlock()
+	if err != nil {
+		return apisend.Exchange{}, err
 	}
-	return apisend.Response{Status: 204, Headers: []apicoll.Header{}}, nil
+	// block lets a test hold an exchange open while it does something else
+	// to the same socket — pressing Stop, most of the time. It waits on the
+	// CONTEXT as well, so a cancelled send returns without the test having
+	// to release it, which is what makes the cancel path observable.
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return apisend.Exchange{
+				Outcome:      apisend.Stopped,
+				Request:      apisend.Raw{Text: "GET /stopped HTTP/1.1\n\n", Spans: []apisend.Span{}},
+				Certificates: []apisend.Certificate{},
+				Failure:      &apisend.Failure{Phase: apisend.PhaseStopped, Reason: ctx.Err().Error()},
+			}, nil
+		}
+	}
+	if failure != nil {
+		return apisend.Exchange{
+			Outcome:      apisend.Failed,
+			Request:      apisend.Raw{Text: "GET /failed HTTP/1.1\n\n", Spans: []apisend.Span{}},
+			Certificates: []apisend.Certificate{},
+			Failure:      failure,
+		}, nil
+	}
+	return apisend.Exchange{
+		Outcome:      apisend.Answered,
+		Request:      apisend.Raw{Text: "GET / HTTP/1.1\n\n", Spans: []apisend.Span{}},
+		Certificates: []apisend.Certificate{},
+		Response: &apisend.Response{
+			Status:  204,
+			Headers: []apicoll.Header{},
+			Raw:     apisend.Raw{Spans: []apisend.Span{}},
+		},
+	}, nil
 }
 
 func (s *recordingSender) last(t *testing.T) (apisend.Key, apicoll.Request) {
@@ -68,6 +110,15 @@ func (s *recordingSender) count() int {
 // newAPIWSServerWithSender builds a server whose sender is the caller's.
 func newAPIWSServerWithSender(t *testing.T, sender apisend.Sender) *websocket.Conn {
 	t.Helper()
+	_, conn := newAPIServerAndConn(t, sender)
+	return conn
+}
+
+// newAPIServerAndConn is the same thing plus the SERVER, which a test needs
+// when it has to open a second socket of it — a token is a name one window
+// chose, so "two windows" is only expressible with two connections.
+func newAPIServerAndConn(t *testing.T, sender apisend.Sender) (*WSServer, *websocket.Conn) {
+	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	ws := NewWSServer(logger, newRegWithStub(logger),
 		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender))
@@ -76,7 +127,7 @@ func newAPIWSServerWithSender(t *testing.T, sender apisend.Sender) *websocket.Co
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
-	return connectWS(t, ws)
+	return ws, connectWS(t, ws)
 }
 
 // apiEnvironmentFolder writes a collection whose request is written in
@@ -102,6 +153,17 @@ func apiEnvironmentFolder(t *testing.T) string {
 	write("environments/prod.json",
 		`{"name":"prod","values":{"baseUrl":"https://api.internal"},"route":{"kind":"connection","profileId":"ssh:bastion:1"}}`)
 	write("environments/nobase.json", `{"name":"nobase","values":{},"route":{"kind":"direct"}}`)
+	// One request per FIELD a variable can be used in (§6.5's four places,
+	// of which auth is resolved a step later by apisend.Apply). A
+	// substitution that works in three out of four is the shape that ships,
+	// so the refusal has to be asked of each of them separately.
+	write("in-header.json", `{"id":"r2","name":"in-header","method":"GET","url":"http://127.0.0.1:1/x",`+
+		`"headers":[{"name":"X-Tenant","value":"{{tenant}}","enabled":true}],`+
+		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("in-body.json", `{"id":"r3","name":"in-body","method":"POST","url":"http://127.0.0.1:1/x",`+
+		`"body":{"kind":"raw","text":"{\"who\":\"{{tenant}}\"}"},"auth":{"kind":"none"}}`)
+	write("in-auth.json", `{"id":"r4","name":"in-auth","method":"GET","url":"http://127.0.0.1:1/x",`+
+		`"body":{"kind":"none"},"auth":{"kind":"bearer","var":"tenant"}}`)
 	return root
 }
 
@@ -117,7 +179,7 @@ func TestAPIRequestSend_TheEnvironmentsRouteAndAddressReachTheSender(t *testing.
 
 	// prod: through the bastion, at the internal address.
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/prod.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/prod.json", "token": "t-prod"}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send under prod: %+v", resp.Error)
 	}
@@ -138,7 +200,7 @@ func TestAPIRequestSend_TheEnvironmentsRouteAndAddressReachTheSender(t *testing.
 
 	// dev: out of this machine, at the local address. Same request file.
 	resp = vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/dev.json"}, 3)
+		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/dev.json", "token": "t-dev"}, 3)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send under dev: %+v", resp.Error)
 	}
@@ -169,6 +231,7 @@ func TestAPIRequestSend_TheResultNamesTheEnvironmentThatAnswered(t *testing.T) {
 
 	environmentOf := func(t *testing.T, params map[string]any, id int) string {
 		t.Helper()
+		params["token"] = fmt.Sprintf("t-%d", id)
 		resp := vaultCall(t, conn, "api.request.send", params, id)
 		if resp.Error != nil {
 			t.Fatalf("api.request.send: %+v", resp.Error)
@@ -212,7 +275,7 @@ func TestAPIRequestSend_WithNoEnvironmentIsStillTheDirectRoute(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "ping.json"}, 2)
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-ping"}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
@@ -225,25 +288,140 @@ func TestAPIRequestSend_WithNoEnvironmentIsStillTheDirectRoute(t *testing.T) {
 	}
 }
 
-// An unresolved variable BLOCKS the send and names itself. The assertion
-// that matters is the second one: the sender was never asked, so there is no
-// request going out with empty braces or an empty string in it.
-func TestAPIRequestSend_AnUnresolvedVariableBlocksTheSendAndNamesItself(t *testing.T) {
+// AN UNRESOLVED VARIABLE IS A RUN, at the `compose` phase, in every field
+// one can be used in (nocx-pgp9c.6).
+//
+// It answers with the UNRESOLVED reason — which names the variable and the
+// field it was used in — and never with a complaint about a URL. That was
+// the defect: `{{baseUrl}}/zen` reached the sender as text and came back as
+// `apisend: "{{baseUrl}}/zen" is not an absolute URL`, a sentence about a
+// URL nobody typed, naming neither the variable nor the environment. It also
+// only happened at all when an environment was named — with none, the
+// substitution was skipped entirely, which is the case a person starting
+// from the Playground actually meets.
+//
+// The second assertion is the one that carries the weight and is unchanged
+// by the new shape: the sender is never asked, so nothing goes out with
+// empty braces or an empty string in it.
+func TestAPIRequestSend_AnUnresolvedVariableIsARunNamingTheVariableAndItsField(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		relPath string
+		env     string
+		// field is the words apicoll uses for WHERE the reference was, and
+		// asserting it is what stops this passing on a build that reports
+		// only the first place it looked.
+		field string
+		want  string
+	}{
+		{"in the URL, with an environment that has no value for it", "users.json", "environments/nobase.json", "the URL", "baseUrl"},
+		{"in the URL, with NO environment at all", "users.json", "", "the URL", "baseUrl"},
+		{"in a header value", "in-header.json", "", `header "X-Tenant" value`, "tenant"},
+		{"in the body", "in-body.json", "", "the body", "tenant"},
+		// Auth is resolved a step later, by apisend.Apply, and lands on the
+		// same phase through the other branch of handleSend — which is the
+		// point of asking it here beside the other three.
+		{"in the auth", "in-auth.json", "", "", "tenant"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sender := &recordingSender{}
+			conn := newAPIWSServerWithSender(t, sender)
+			root := apiEnvironmentFolder(t)
+			handle := openAPICollection(t, conn, root, 1)
+
+			params := map[string]any{"handle": handle, "relPath": c.relPath, "token": "t-1"}
+			if c.env != "" {
+				params["envRelPath"] = c.env
+			}
+			resp := vaultCall(t, conn, "api.request.send", params, 2)
+			if resp.Error != nil {
+				t.Fatalf("the send answered an error rather than a run: %+v", resp.Error)
+			}
+			var got apiSendResponse
+			if err := json.Unmarshal(resp.Result, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Outcome != "failed" {
+				t.Fatalf("outcome = %q, want failed", got.Outcome)
+			}
+			if got.Failure == nil || got.Failure.Phase != "compose" {
+				t.Fatalf("failure = %+v, want phase compose", got.Failure)
+			}
+			if !strings.Contains(got.Failure.Reason, c.want) {
+				t.Errorf("reason = %q, want it to name %q", got.Failure.Reason, c.want)
+			}
+			if c.field != "" && !strings.Contains(got.Failure.Reason, c.field) {
+				t.Errorf("reason = %q, want it to say the reference was in %q", got.Failure.Reason, c.field)
+			}
+			// NEVER the URL complaint, which is the sentence this replaces.
+			if strings.Contains(got.Failure.Reason, "not an absolute URL") {
+				t.Errorf("reason = %q — that is the sender complaining about text nobody typed", got.Failure.Reason)
+			}
+			// The run shows what was asked for. In the three TEXT fields the
+			// reference is still in it — that is the thing the person has to
+			// go and bind — and in the auth it is not, deliberately: an auth
+			// variable is a NAME in the auth block rather than text
+			// containing a reference, and the header it would have become is
+			// apisend.Apply's mapping to make. Rendering it here would be a
+			// second owner of "which header does bearer auth produce", so
+			// the run shows the request line and the reason names the
+			// variable.
+			if c.field != "" && !strings.Contains(got.Request.Text, "{{") {
+				t.Errorf("the run does not show the unresolved reference:\n%s", got.Request.Text)
+			}
+			if !strings.Contains(got.Request.Text, "HTTP/1.1") {
+				t.Errorf("the run does not show the request line:\n%s", got.Request.Text)
+			}
+			if got.Response != nil {
+				t.Error("a request that never went out carries a response")
+			}
+			if n := sender.count(); n != 0 {
+				t.Errorf("the sender was asked to send %d times, want 0 — a request went out unresolved", n)
+			}
+		})
+	}
+}
+
+// And the pair, without which the five above would pass on a build that
+// refused every send: an environment that ANSWERS the name still sends, with
+// the value substituted in.
+func TestAPIRequestSend_AnEnvironmentThatAnswersTheNameStillSends(t *testing.T) {
 	sender := &recordingSender{}
 	conn := newAPIWSServerWithSender(t, sender)
 	root := apiEnvironmentFolder(t)
 	handle := openAPICollection(t, conn, root, 1)
 
+	resp := vaultCall(t, conn, "api.request.send", map[string]any{
+		"handle": handle, "relPath": "users.json",
+		"envRelPath": "environments/dev.json", "token": "t-1",
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.request.send: %+v", resp.Error)
+	}
+	_, req := sender.last(t)
+	if req.URL != "http://localhost:3000/users" {
+		t.Errorf("URL = %q, want the substituted address", req.URL)
+	}
+}
+
+// A request with NO references goes out unchanged when nothing is named —
+// the other half of "no environment is a lookup that answers nothing".
+// Without this, the change that made the no-environment case substitute
+// could have made every unnamed send fail and still passed the tests above.
+func TestAPIRequestSend_WithNoEnvironmentAndNoVariablesSendsAsWritten(t *testing.T) {
+	sender := &recordingSender{}
+	conn := newAPIWSServerWithSender(t, sender)
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
 	resp := vaultCall(t, conn, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": "environments/nobase.json"}, 2)
-	if resp.Error == nil {
-		t.Fatal("api.request.send succeeded with an unresolved variable")
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-1"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
-	if !strings.Contains(resp.Error.Message, "baseUrl") {
-		t.Errorf("message = %q, want it to name the variable that has no value", resp.Error.Message)
-	}
-	if got := sender.count(); got != 0 {
-		t.Errorf("the sender was asked to send %d times, want 0 — a request went out unresolved", got)
+	_, req := sender.last(t)
+	if req.URL != "https://example.test/ping" {
+		t.Errorf("URL = %q, want the file's own", req.URL)
 	}
 }
 
@@ -264,7 +442,7 @@ func TestAPIRequestSend_RefusesAnEnvironmentPathTheCollectionDoesNotOwn(t *testi
 		t.Run(name, func(t *testing.T) {
 			id++
 			resp := vaultCall(t, conn, "api.request.send",
-				map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": rel}, id)
+				map[string]any{"handle": handle, "relPath": "users.json", "envRelPath": rel, "token": fmt.Sprintf("t-%d", id)}, id)
 			if resp.Error == nil {
 				t.Fatalf("api.request.send accepted envRelPath %q", rel)
 			}

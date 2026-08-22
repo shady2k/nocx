@@ -214,19 +214,15 @@ func TestJar_ASecureCookieIsNotSentOverPlainHTTP(t *testing.T) {
 	if _, err := c.Send(context.Background(), apicollGet(httpsURL+"/login"), k); err != nil {
 		t.Fatalf("login over https: %v", err)
 	}
-	got, err := c.Send(context.Background(), apicollGet(httpsURL+"/me"), k)
-	if err != nil {
-		t.Fatalf("me over https: %v", err)
-	}
+	ex, err := c.Send(context.Background(), apicollGet(httpsURL+"/me"), k)
+	got := answered(t, ex, err)
 	if got.Text != "session=s3cure" {
 		t.Fatalf("the https follow-up carried %q, want the Secure cookie — the jar stored nothing", got.Text)
 	}
 
 	// Same jar, same host, plain http.
-	got, err = c.Send(context.Background(), apicollGet(httpURL+"/me"), k)
-	if err != nil {
-		t.Fatalf("me over http: %v", err)
-	}
+	ex, err = c.Send(context.Background(), apicollGet(httpURL+"/me"), k)
+	got = answered(t, ex, err)
 	if got.Text != "" {
 		t.Fatalf("the plain-http request carried %q — a Secure cookie may not leave the channel it was issued for", got.Text)
 	}

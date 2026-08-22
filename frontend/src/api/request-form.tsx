@@ -106,9 +106,15 @@ export interface RequestLineProps {
   dirty: boolean
   /** Whether a send is possible at all: there is a file behind this request. */
   sendable: boolean
+  /** A run of THIS request is in flight. The one button becomes Stop while
+   *  it is — one control for one exchange, because a second button that
+   *  appeared beside Send would be a control that exists for two seconds and
+   *  moves everything next to it when it does. */
   sending: boolean
   onEdit: (next: ApiRequest) => void
   onSend: () => void
+  /** Stop the run that is in flight. Reached only while `sending`. */
+  onStop: () => void
   /**
    * Ask for a curl command line to convert into this form.
    *
@@ -179,6 +185,7 @@ export function RequestLine(props: RequestLineProps) {
   }
 
   const sendTitle = (): string => {
+    if (props.sending) return 'Stops the run that is in flight'
     if (!props.sendable) return 'Choose a request from a collection first'
     return props.dirty ? 'Saves this request, then sends it' : 'Send this request'
   }
@@ -225,14 +232,20 @@ export function RequestLine(props: RequestLineProps) {
           </IconButton>
         </div>
       </Show>
+      {/* SEND BECOMES STOP, and it stays ENABLED while it does. A disabled
+          button was the only signal a request was in flight, which is
+          exactly backwards: the moment there is something happening is the
+          moment a person most needs a control, and what they want from it is
+          to end it. `danger` because stopping is the destructive half of the
+          pair — it discards an exchange that was under way. */}
       <div class="api-request__send">
         <Button
-          variant="primary"
-          disabled={!props.sendable || props.sending}
+          variant={props.sending ? 'danger' : 'primary'}
+          disabled={!props.sending && !props.sendable}
           title={sendTitle()}
-          onClick={() => props.onSend()}
+          onClick={() => (props.sending ? props.onStop() : props.onSend())}
         >
-          Send
+          {props.sending ? 'Stop' : 'Send'}
         </Button>
       </div>
     </div>

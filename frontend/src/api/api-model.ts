@@ -61,7 +61,7 @@ import type {
   Response as SendResponse,
   Header as SendHeader,
   Timings as SendTimings,
-  Exchange,
+  Failure as SendFailure,
   Raw,
 } from '../generated/api.request.send'
 
@@ -103,18 +103,28 @@ export type ApiSentRoute = ApiRequestSendResult['route']
 export type ApiCertificate = SendCertificate
 
 /**
- * Both sides of one exchange, already segmented (design §11).
+ * ONE SIDE of an exchange, already segmented (design §11).
  *
- * Two fields rather than one because they are two MECHANISMS with two
- * different guarantees (§11.3): the request side verifies placements the
- * sender itself made, which is cheap because we know where we put them; the
- * response side runs a bounded known-plaintext search, because a placement in
- * the request says nothing about whether a server echoed those bytes back or
- * where. They render alike and are not the same fact.
+ * There is no pair type any more, and the reason is what this whole change
+ * is about: the two sides are two MECHANISMS with two different guarantees
+ * (§11.3), and they now arrive at two different levels because they are
+ * known at two different times. The request side is composed before the
+ * dial, so it is on the exchange and a run that never got an answer still
+ * has it; the response side exists only when something answered, so it is on
+ * the response. A pair type would have had to sit at one of those levels and
+ * would have taken the request text away from exactly the runs that need it.
  */
-export type ApiExchange = Exchange
+export type ApiRaw = Raw
+/** Why an exchange ended without an answer: WHERE it stopped, from a closed
+ *  set the renderer words itself, and the backend's own reason. */
+export type ApiFailure = SendFailure
+/** WHERE an exchange stopped — the closed vocabulary, named so a surface can
+ *  exhaust it rather than matching on prose. */
+export type ApiPhase = ApiFailure['phase']
+/** One exchange whole, as api.request.send answers it. */
+export type ApiSendResult = ApiRequestSendResult
+export type ApiTimings = SendTimings
 type ApiResponseHeader = SendHeader
-type ApiTimings = SendTimings
 
 /**
  * What an import did NOT carry over (design §10, §12.2).
@@ -363,11 +373,59 @@ export function certificateText(cert: ApiCertificate, index: number): string {
   return lines.join('\n')
 }
 
-export function connectionRawText(response: ApiResponse): string {
-  const t: ApiTimings = response.timings
-  const where = [response.remoteAddr, response.tlsVersion, response.tlsCipherSuite]
+/**
+ * Where it went and how long each phase took.
+ *
+ * It takes the ATTEMPT rather than the response, because that is where these
+ * facts now live: an exchange that failed at the handshake still reached a
+ * machine and still took time, and those are the two things a person asks
+ * about it first. The TLS fields are the response's, because a handshake
+ * that did not complete negotiated nothing — so they are optional here and
+ * simply absent on a run with no answer.
+ */
+export function connectionRawText(where: {
+  remoteAddr: string
+  timings: ApiTimings
+  tlsVersion?: string
+  tlsCipherSuite?: string
+}): string {
+  const t = where.timings
+  const head = [where.remoteAddr, where.tlsVersion ?? '', where.tlsCipherSuite ?? '']
     .filter((s) => s !== '')
     .join('  ')
   const phases = `dns ${t.dnsMs}ms · connect ${t.connectMs}ms · tls ${t.tlsMs}ms · ttfb ${t.ttfbMs}ms · total ${t.totalMs}ms`
-  return where === '' ? phases : `${where}\n${phases}`
+  return head === '' ? phases : `${head}\n${phases}`
+}
+
+/**
+ * WHAT THE PHASE MEANS, in the product's words rather than the wire's.
+ *
+ * The contract deliberately sends a closed vocabulary and not a sentence, so
+ * that this exists: one place that turns a position into something a person
+ * can act on. A run reading `dial` tells them nothing; "nothing accepted a
+ * connection" tells them the host is not listening, which is a different
+ * afternoon from "the name did not resolve".
+ *
+ * The switch is exhaustive over ApiPhase with no default, so a phase added
+ * to the schema stops the build here rather than rendering as a raw token.
+ */
+export function phaseSentence(phase: ApiPhase): string {
+  switch (phase) {
+    case 'compose':
+      return 'the request could not be built'
+    case 'resolve':
+      return 'the name did not resolve'
+    case 'dial':
+      return 'nothing accepted a connection'
+    case 'connection':
+      return 'the connection it routes through was not available'
+    case 'tls':
+      return 'the TLS handshake did not complete'
+    case 'exchange':
+      return 'the connection broke during the exchange'
+    case 'timeout':
+      return 'it ran out of time'
+    case 'stopped':
+      return 'you stopped it'
+  }
 }

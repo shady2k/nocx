@@ -26,6 +26,7 @@ import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
 import type { ApiRequestSendResult } from '../generated/api.request.send'
+import type { ApiRequestCancelResult } from '../generated/api.request.cancel'
 import type { ApiImportPostmanResult } from '../generated/api.import.postman'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
 import type { FilesOpenResult } from '../generated/files.open'
@@ -136,12 +137,38 @@ class ApiClient {
    *  this", and the two would agree until somebody renamed an environment
    *  without renaming its file. '' is no environment, which is the request
    *  as written on the direct route. */
-  sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult> {
+  sendRequest(
+    handle: string,
+    relPath: string,
+    envRelPath: string,
+    token: string,
+  ): Promise<ApiRequestSendResult> {
     return this.dispatcher.call<ApiRequestSendResult>('api.request.send', {
       handle,
       relPath,
       envRelPath,
+      token,
     })
+  }
+
+  /** Stop the exchange running under `token`.
+   *
+   *  THE TOKEN IS OURS, and that is the whole design of this pair. The
+   *  dispatcher mints a JSON-RPC id per call and consumes it when the result
+   *  arrives; it is never handed to the caller that asked, and opening it up
+   *  so one button could name a request would be a second addressing scheme
+   *  over the same thing. So the store mints a name, sends it, and stops it
+   *  by that name.
+   *
+   *  It answers EMPTY. The stopped exchange reports itself on the
+   *  `api.request.send` result of the very request that was stopped, which
+   *  comes back as `outcome: "stopped"` — two methods reporting one
+   *  exchange's end would be two accounts of it, and this surface would have
+   *  to decide which to believe. A token naming nothing that is running is
+   *  REFUSED rather than answered, because "there was nothing to stop" and
+   *  "it is stopped" are different facts. */
+  cancelRequest(token: string): Promise<ApiRequestCancelResult> {
+    return this.dispatcher.call<ApiRequestCancelResult>('api.request.cancel', { token })
   }
 
   /** Convert a Postman v2.1 export into a collection folder at `dest`, and
@@ -160,21 +187,39 @@ class ApiClient {
 }
 
 /**
- * The native directory picker, as this surface consumes it: the chosen
- * ABSOLUTE path, or an empty one when the person changed their mind.
+ * What a native picker answers: the chosen ABSOLUTE path, or an empty one
+ * when the person changed their mind.
  *
- * Structural rather than the generated `dialog.openDirectory` type, and
- * deliberately so — `key-material-input.tsx` states the same shape for
- * `dialog.openFile` for the same reason. A component prop is not a wire
- * declaration: the client that OWNS the call (`dialog-client.ts`) is typed
- * from the contract, and this is the one field of its result that the
- * workbench uses. Nothing here decodes a payload.
+ * Structural rather than the generated `dialog.*` types, and deliberately
+ * so — `key-material-input.tsx` states the same shape for `dialog.openFile`
+ * for the same reason. A component prop is not a wire declaration: the
+ * client that OWNS the call (`dialog-client.ts`) is typed from the contract,
+ * and this is the one field of its result that the workbench uses. Nothing
+ * here decodes a payload.
+ */
+type ChosenPath = { path: string }
+
+/**
+ * The native directory picker, as this surface consumes it.
  *
  * A function rather than the client itself, because the surface may hold it
  * detached; `secrets.tsx` and `connections.tsx` bind `openFileDialog` the
  * same way.
  */
-export type DirectoryPicker = () => Promise<{ path: string }>
+export type DirectoryPicker = () => Promise<ChosenPath>
+
+/**
+ * The native FILE picker, for the one thing this surface reads rather than
+ * writes: a Postman export.
+ *
+ * Its own type beside DirectoryPicker although the shapes are identical,
+ * because they are two capabilities and either can be absent on its own —
+ * two `dialog.*` methods, each of which answers -32601 independently. A
+ * single picker type would make "this build can choose a folder" and "this
+ * build can choose a file" one fact, and the surface would then draw a
+ * control for whichever it had not got.
+ */
+export type FilePicker = () => Promise<ChosenPath>
 
 /**
  * Bind the directory picker off the dialog client, when the build has one.
@@ -195,6 +240,23 @@ export function directoryPicker(client: object): DirectoryPicker | undefined {
   if (!('openDirectoryDialog' in client)) return undefined
   const carrier = client as { openDirectoryDialog: DirectoryPicker }
   return () => carrier.openDirectoryDialog()
+}
+
+/**
+ * Bind the FILE picker off the dialog client, the same way and for the same
+ * reasons as the directory one above.
+ *
+ * `dialog.openFile` has been a declared method with a contract since before
+ * this surface existed — Connections and Secrets choose a private key with
+ * it — and the workbench was simply never wired with it. That is why the
+ * import ask's destination had a picker and its export did not: one
+ * capability was handed in and the other was not, so a person naming a
+ * Postman export opened a terminal, found the file and pasted its path.
+ */
+export function filePicker(client: object): FilePicker | undefined {
+  if (!('openFileDialog' in client)) return undefined
+  const carrier = client as { openFileDialog: FilePicker }
+  return () => carrier.openFileDialog()
 }
 
 /**
@@ -255,7 +317,14 @@ export interface ApiWorkbenchServices {
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
   deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult>
-  sendRequest(handle: string, relPath: string, envRelPath: string): Promise<ApiRequestSendResult>
+  sendRequest(
+    handle: string,
+    relPath: string,
+    envRelPath: string,
+    token: string,
+  ): Promise<ApiRequestSendResult>
+  /** Stop the exchange running under a token this surface minted. */
+  cancelRequest(token: string): Promise<ApiRequestCancelResult>
   importPostman(path: string, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
@@ -285,6 +354,15 @@ export interface ApiWorkbenchServices {
    * ship.
    */
   openDirectory?: DirectoryPicker
+  /**
+   * The native file picker, when the backend offers one — and ABSENT, not a
+   * function that rejects, when it does not. Optionality is the capability,
+   * exactly as it is for `openDirectory`: the ask draws a Browse control on
+   * the export field only where there is a picker to reach, so the
+   * `make dev-web` harness shows a typeable field rather than a button that
+   * fails when pressed.
+   */
+  openFile?: FilePicker
   /**
    * How the workbench notices a collection folder changed — and ABSENT when
    * this build cannot watch, for the same reason `openDirectory` is.
@@ -319,10 +397,12 @@ export function createApiWorkbenchServices(
   picker?: DirectoryPicker,
   watchCollections?: CollectionWatchPort,
   listConnections?: () => Promise<readonly ApiConnection[]>,
+  files?: FilePicker,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
     ...(picker ? { openDirectory: picker } : {}),
+    ...(files ? { openFile: files } : {}),
     ...(watchCollections ? { watchCollections } : {}),
     ...(listConnections ? { listConnections } : {}),
     listCollections: () => client.listCollections(),
@@ -335,7 +415,9 @@ export function createApiWorkbenchServices(
     deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),
-    sendRequest: (handle, relPath, envRelPath) => client.sendRequest(handle, relPath, envRelPath),
+    sendRequest: (handle, relPath, envRelPath, token) =>
+      client.sendRequest(handle, relPath, envRelPath, token),
+    cancelRequest: (token) => client.cancelRequest(token),
     importPostman: (path, dest) => client.importPostman(path, dest),
     importCurl: (line) => client.importCurl(line),
   }

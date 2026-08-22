@@ -159,11 +159,9 @@ func TestRoutes_TheDirectRouteSendsFromThisMachine(t *testing.T) {
 	srv := newCountingServer(t, "from this machine")
 
 	c := New(WithRoutes(NewRoutes(newFakeLeaser())))
-	got, err := c.Send(context.Background(),
+	ex, err := c.Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: ""})
-	if err != nil {
-		t.Fatalf("Send on the direct route: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "from this machine" {
 		t.Errorf("Text = %q, want the response from the local server", got.Text)
 	}
@@ -178,11 +176,9 @@ func TestRoutes_AConnectionRouteSendsThroughTheLease(t *testing.T) {
 		t.Fatalf("RouteIDFor: %v", err)
 	}
 	c := New(WithRoutes(NewRoutes(leaser)))
-	got, err := c.Send(context.Background(),
+	ex, err := c.Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: id})
-	if err != nil {
-		t.Fatalf("Send through the connection route: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "through the bastion" {
 		t.Errorf("Text = %q, want the response from the far side", got.Text)
 	}
@@ -206,16 +202,17 @@ func TestRoutes_AProfileWithNoLeaseFailsTheSendRatherThanDiallingLocally(t *test
 
 	id, _ := RouteIDFor(apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "ssh:p1:1"})
 	c := New(WithRoutes(NewRoutes(leaser)))
-	_, err := c.Send(context.Background(),
+	ex, err := c.Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: id})
-	if err == nil {
-		t.Fatal("Send succeeded with no lease on the connection; a production request went out around its bastion")
+	// A RUN, at phase `connection`. The refusal is the same refusal; what
+	// changed is that a person now has it on a row beside the request they
+	// sent, rather than as a sentence with no request attached to it.
+	fail := failedAt(t, ex, err, PhaseConnection)
+	if !strings.Contains(fail.Reason, ErrNoConnection.Error()) {
+		t.Errorf("reason = %q, want ErrNoConnection named in it — the surface needs a name to offer the right remedy", fail.Reason)
 	}
-	if !errors.Is(err, ErrNoConnection) {
-		t.Errorf("err = %v, want ErrNoConnection — the surface needs a name to offer the right remedy", err)
-	}
-	if !strings.Contains(err.Error(), "ssh:p1:1") {
-		t.Errorf("err = %v, want it to name the connection that could not be leased", err)
+	if !strings.Contains(fail.Reason, "ssh:p1:1") {
+		t.Errorf("reason = %q, want it to name the connection that could not be leased", fail.Reason)
 	}
 	if got := srv.hits.Load(); got != 0 {
 		t.Fatalf("the local server saw %d requests, want 0 — the refusal fell back to the local dialer", got)
@@ -227,10 +224,9 @@ func TestRoutes_AnUnknownRouteIDIsRefusedRatherThanDialledLocally(t *testing.T) 
 	srv := newCountingServer(t, "should never be reached")
 
 	c := New(WithRoutes(NewRoutes(newFakeLeaser())))
-	if _, err := c.Send(context.Background(),
-		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: "socks:whatever"}); err == nil {
-		t.Fatal("Send succeeded on an unknown route id")
-	}
+	ex, err := c.Send(context.Background(),
+		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: "socks:whatever"})
+	failedAt(t, ex, err, PhaseConnection)
 	if got := srv.hits.Load(); got != 0 {
 		t.Fatalf("the local server saw %d requests, want 0", got)
 	}
@@ -243,9 +239,10 @@ func TestRoutes_WithNoLeaserAConnectionRouteRefusesAndDirectStillWorks(t *testin
 	c := New(WithRoutes(NewRoutes(nil)))
 
 	id, _ := RouteIDFor(apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "ssh:p1:1"})
-	if _, err := c.Send(context.Background(),
-		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: id}); !errors.Is(err, ErrNoConnection) {
-		t.Errorf("err = %v, want ErrNoConnection", err)
+	refused, err := c.Send(context.Background(),
+		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: id})
+	if fail := failedAt(t, refused, err, PhaseConnection); !strings.Contains(fail.Reason, ErrNoConnection.Error()) {
+		t.Errorf("reason = %q, want ErrNoConnection", fail.Reason)
 	}
 	if got := srv.hits.Load(); got != 0 {
 		t.Fatalf("the local server saw %d requests, want 0", got)
@@ -392,10 +389,13 @@ func TestRoutes_HTTPToANameThroughAConnectionIsRefusedRatherThanGuessed(t *testi
 	id, _ := RouteIDFor(apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "ssh:p1:1"})
 
 	c := New(WithRoutes(NewRoutes(leaser)))
-	_, err := c.Send(context.Background(),
+	ex, err := c.Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: "http://api.internal/health"}, Key{RouteID: id})
-	if !errors.Is(err, ErrNameResolvedRemotely) {
-		t.Fatalf("err = %v, want ErrNameResolvedRemotely", err)
+	// Phase `connection` and not `resolve`: nothing on this side tried to
+	// resolve anything. The route is what cannot answer the question, and
+	// the remedy — an address, or https — is about the route.
+	if fail := failedAt(t, ex, err, PhaseConnection); !strings.Contains(fail.Reason, ErrNameResolvedRemotely.Error()) {
+		t.Fatalf("reason = %q, want ErrNameResolvedRemotely", fail.Reason)
 	}
 	if leaser.pool.connectionCount() != 0 {
 		t.Error("a connection was opened for a request that could never be checked")
@@ -413,11 +413,9 @@ func TestRoutes_HTTPToAnAddressThroughAConnectionIsSentAndChecked(t *testing.T) 
 	// httptest listens on 127.0.0.1, so its URL is an address literal and
 	// the address rule permits http:// to it.
 	c := New(WithRoutes(NewRoutes(leaser)))
-	got, err := c.Send(context.Background(),
+	ex, err := c.Send(context.Background(),
 		apicoll.Request{Method: http.MethodGet, URL: srv.URL}, Key{RouteID: id})
-	if err != nil {
-		t.Fatalf("Send to an address literal through a connection: %v", err)
-	}
+	got := answered(t, ex, err)
 	if got.Text != "checked and sent" {
 		t.Errorf("Text = %q, want the far side's answer", got.Text)
 	}

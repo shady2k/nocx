@@ -34,7 +34,7 @@ import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { apiSidebarAction, registerApiSurface } from './api'
-import { createApiWorkbenchServices, directoryPicker } from './api/api-client'
+import { createApiWorkbenchServices, directoryPicker, filePicker } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
@@ -546,6 +546,11 @@ async function main() {
         profileClient
           .listProfiles()
           .then((profiles) => profiles.map((p) => ({ id: p.id, name: p.name }))),
+      // And the FILE picker, off the same dialog client, for the one path
+      // this surface reads rather than writes: a Postman export. It is
+      // bound separately from the directory one because they are two
+      // capabilities that can be absent independently (api-client.ts).
+      filePicker(dialogClient),
     ),
   )
 

@@ -82,14 +82,14 @@ type Raw struct {
 	Spans []Span `json:"spans"`
 }
 
-// Exchange is both sides. They are two fields rather than one because they
-// are two mechanisms with two different guarantees (§11.3), and a caller
-// that could not tell them apart would read the response's coverage as the
-// request's.
-type Exchange struct {
-	Request  Raw
-	Response Raw
-}
+// The two sides are NOT a pair type. They are two mechanisms with two
+// different guarantees (§11.3), and they now live at two different levels
+// for a reason that is the same fact stated once more: the request side is
+// composed before the dial and belongs to the ATTEMPT, so it is on Exchange
+// and a run that never got an answer still has it; the response side exists
+// only when something answered, so it is on Response. A struct holding both
+// would have had to sit somewhere, and wherever it sat it would have taken
+// the request text away from the runs that most need it.
 
 // Placement is what the sender knows BECAUSE IT DID THE SUBSTITUTING: the
 // offsets in the text it composed where a named secret's value was written.

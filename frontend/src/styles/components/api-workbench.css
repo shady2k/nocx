@@ -377,11 +377,26 @@
   flex-wrap: wrap;
 }
 
+/* A run that has not answered yet: what is happening, and for how long. It
+   sits where the tab row will be once the exchange settles, so the row does
+   not jump when it does. */
+.api-run__state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 /* Status, time and size as one group at the end of the tab row. */
 .api-run__stats {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.api-run__state .api-run__elapsed {
   font-size: var(--font-size-sm);
   color: var(--color-text-muted);
   white-space: nowrap;

@@ -89,7 +89,7 @@ dev-web:
 	./scripts/dev-web.sh
 
 lint:
-	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 format:
 	$(GOFUMPT) -l -w .
@@ -426,7 +426,7 @@ lint-ci:
 	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
-	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 test-ci:
 	@echo "=== go test -race ==="

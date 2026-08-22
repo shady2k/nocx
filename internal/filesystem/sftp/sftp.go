@@ -204,7 +204,7 @@ func New(conn fsConn, opts ...Option) *Provider {
 // It is never nil, so a binding that carries one can always be written to.
 // The sink is built per call rather than cached because it holds no state of
 // its own: it is the lease plus a chunk size, and the lease is the field.
-func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(p.conn) }
+func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(p.conn, transfer.DefaultChunk) }
 
 // Source returns the read-stream half of this provider's lease — the
 // optional filesystem.Downloader seam. It is Sink's mirror in construction
@@ -216,7 +216,7 @@ func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(p.conn) }
 // buffered, text-decoded answer to "show me this file". A download is
 // unbounded and never decoded, and one method cannot be both without one of
 // the two answers being wrong (filesystem.Downloader says which).
-func (p *Provider) Source() transfer.Source { return transfer.NewSource(p.conn) }
+func (p *Provider) Source() transfer.Source { return transfer.NewSource(p.conn, transfer.DefaultChunk) }
 
 // Root computes the navigation root (spec D2) from the provider, never from a
 // shell: the server canonicalises "." — the SFTP session's starting

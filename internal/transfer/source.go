@@ -173,9 +173,11 @@ type source struct {
 	chunk int
 }
 
-// NewSource returns a Source reading through fs.
-func NewSource(remote RemoteReadFS, opts ...Option) Source {
-	return &source{fs: remote, chunk: newConfig(opts).chunk}
+// NewSource returns a Source reading through fs, moving chunk bytes per lane
+// call. Pass DefaultChunk unless you have a reason not to; see NewSink for
+// why the bound is a parameter rather than an option.
+func NewSource(remote RemoteReadFS, chunk int) Source {
+	return &source{fs: remote, chunk: chunkOr(chunk)}
 }
 
 // Open pins and measures. See Source.Open.

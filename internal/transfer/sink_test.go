@@ -15,7 +15,7 @@ import (
 
 func TestPut_WritesThroughTempAndPromotes(t *testing.T) {
 	fs := newFakeFS()
-	s := transfer.NewSink(fs)
+	s := transfer.NewSink(fs, transfer.DefaultChunk)
 	out, err := s.Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 5, OnExists: transfer.Overwrite},
 		strings.NewReader("hello"), func(int64) {})
@@ -44,7 +44,7 @@ func TestPut_OverwriteReplacesTheExistingContent(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -69,7 +69,7 @@ func TestPut_FallbackOnAServerWithoutPosixRename_WritesTheFileAndLeavesNoBackup(
 	fs.noPosixRename = true
 	fs.put("/home/u/a.txt", "old")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -94,7 +94,7 @@ func TestPut_FallbackWithNothingAtTheDestination_WritesTheFile(t *testing.T) {
 	fs := newFakeFS()
 	fs.noPosixRename = true
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -111,7 +111,7 @@ func TestPut_FallbackWithNothingAtTheDestination_WritesTheFile(t *testing.T) {
 func TestPut_ZeroByteFileIsWritten(t *testing.T) {
 	fs := newFakeFS()
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "empty", Size: 0, OnExists: transfer.Overwrite},
 		strings.NewReader(""), func(int64) {})
 	if err != nil {
@@ -133,7 +133,7 @@ func TestPut_CreateRefused_LeavesTheDestinationUntouched(t *testing.T) {
 	refusal := errors.New("permission denied")
 	fs.createErr = refusal
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if !errors.Is(err, refusal) {
@@ -154,7 +154,7 @@ func TestPut_WriteFailsMidStream_RemovesTheTempAndLeavesTheDestination(t *testin
 	fs.put("/home/u/a.txt", "old")
 	fs.failWriteAfter(4, errors.New("disk full"))
 
-	out, err := transfer.NewSink(fs, transfer.WithChunkSize(4)).Put(context.Background(),
+	out, err := transfer.NewSink(fs, 4).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 12, OnExists: transfer.Overwrite},
 		strings.NewReader("0123456789ab"), func(int64) {})
 	if err == nil {
@@ -181,7 +181,7 @@ func TestPut_WriteFailsAndRemoveAlsoFails_StrandsTheTemp(t *testing.T) {
 	fs.failWriteAfter(0, errors.New("disk full"))
 	fs.removeErr = errors.New("permission denied")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -223,7 +223,7 @@ func TestPut_CloseFailsAfterAllBytes_IsAFailureAndTheTempIsStranded(t *testing.T
 	fs.put("/home/u/a.txt", "old")
 	fs.closeErr = errors.New("quota exceeded on flush")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -257,7 +257,7 @@ func TestPut_CloseFailsAndTheReservationCannotBeRemoved_StrandsBothAndSaysWhy(t 
 	fs.failCloseAt(2, errors.New("quota exceeded on flush")) // 1 is the reservation
 	fs.removeErr = errors.New("permission denied")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -290,7 +290,7 @@ func TestPut_ConnectionLostMidStream_StrandsTheTemp(t *testing.T) {
 		}
 	}
 
-	out, err := transfer.NewSink(fs, transfer.WithChunkSize(4)).Put(context.Background(),
+	out, err := transfer.NewSink(fs, 4).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 12, OnExists: transfer.Overwrite},
 		strings.NewReader("0123456789ab"), func(int64) {})
 	if !errors.Is(err, errDisconnected) {
@@ -312,7 +312,7 @@ func TestPut_SourceReadFails_LeavesTheDestinationUntouched(t *testing.T) {
 	fs.put("/home/u/a.txt", "old")
 	boom := errors.New("source vanished")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 12, OnExists: transfer.Overwrite},
 		&failingReader{err: boom}, func(int64) {})
 	if !errors.Is(err, boom) {
@@ -330,7 +330,7 @@ func TestPut_SourceEndsShort_FailsAndLeavesTheDestinationUntouched(t *testing.T)
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 10, OnExists: transfer.Overwrite},
 		strings.NewReader("only4"), func(int64) {})
 	var mismatch *transfer.SizeMismatchError
@@ -355,7 +355,7 @@ func TestPut_SourceDeliversMoreThanDeclared_FailsWithoutWritingTheExcess(t *test
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
 
-	out, err := transfer.NewSink(fs, transfer.WithChunkSize(4)).Put(context.Background(),
+	out, err := transfer.NewSink(fs, 4).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 4, OnExists: transfer.Overwrite},
 		strings.NewReader("0123456789ab"), func(int64) {})
 	var mismatch *transfer.SizeMismatchError
@@ -389,7 +389,7 @@ func TestPromote_PosixRenameFailsForAnotherReason_RemovesTheTempAndReports(t *te
 	fs.put("/home/u/a.txt", "old")
 	fs.failRenameAt(1)
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -411,7 +411,7 @@ func TestPromote_BackupRenameFails_LeavesTheOldContentInPlace(t *testing.T) {
 	fs.put("/home/u/a.txt", "old")
 	fs.failRenameAt(1)
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -436,7 +436,7 @@ func TestPromote_BackupRenameFailsAndTheTempCannotBeRemoved_StrandsIt(t *testing
 	fs.failRenameAt(1)
 	fs.removeErr = errors.New("permission denied")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -460,7 +460,7 @@ func TestPromote_FallbackKeepsTheOldContentUnderBak(t *testing.T) {
 	fs.put("/home/u/a.txt", "old")
 	fs.failRenameAt(2) // dest→bak succeeds; temp→dest fails
 
-	s := transfer.NewSink(fs)
+	s := transfer.NewSink(fs, transfer.DefaultChunk)
 	out, err := s.Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
@@ -508,7 +508,7 @@ func TestPromote_ConnectionLostInsideTheFallbackWindow_StrandsBothPaths(t *testi
 		}
 	}
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if !lostInsideTheWindow {
@@ -538,7 +538,7 @@ func TestPromote_BackupRemoveFails_IsASuccessThatStillNamesTheBackup(t *testing.
 	fs.put("/home/u/a.txt", "old")
 	fs.removeErr = errors.New("permission denied")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -571,7 +571,7 @@ func TestPut_CancelledByThePerson_LeavesTheDestinationUntouched(t *testing.T) {
 		}
 	}
 
-	out, err := transfer.NewSink(fs, transfer.WithChunkSize(4)).Put(ctx,
+	out, err := transfer.NewSink(fs, 4).Put(ctx,
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 12, OnExists: transfer.Overwrite},
 		strings.NewReader("0123456789ab"), func(int64) {})
 	if !errors.Is(err, context.Canceled) {
@@ -603,7 +603,7 @@ func TestPromote_CancelInsideTheTwoRenameWindow_IsRefusedAndThePromoteCompletes(
 		}
 	}
 
-	out, err := transfer.NewSink(fs).Put(ctx,
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(ctx,
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if !cancelledInsideTheWindow {
@@ -632,7 +632,7 @@ func TestPut_KeepBoth_ResolvesTheFinalNameBeforeTheTransfer(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -659,7 +659,7 @@ func TestPut_KeepBothLosesTheExclRace_TakesTheNextSuffix(t *testing.T) {
 	fs.put("/home/u/a.txt", "old")
 	fs.put("/home/u/a (1).txt", "someone else's")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -684,7 +684,7 @@ func TestPut_KeepBothExhaustsItsAttempts_FailsWithATypedError(t *testing.T) {
 	}
 	before := len(fs.paths())
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	var exhausted *transfer.NameExhaustedError
@@ -715,7 +715,7 @@ func TestPut_KeepBothReservationIsRemovedWhenTheTransferFails(t *testing.T) {
 	fs.put("/home/u/a.txt", "old")
 	fs.failWriteAfter(0, errors.New("disk full"))
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -739,7 +739,7 @@ func TestPut_KeepBothReservationCloseFails_StrandsTheReservedName(t *testing.T) 
 	fs.closeErr = errors.New("lease gone")
 	fs.removeErr = errors.New("lease gone")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -756,7 +756,7 @@ func TestPut_Skip_TouchesNothing(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Skip},
 		strings.NewReader("new"), func(int64) {})
 	if err != nil {
@@ -777,7 +777,7 @@ func TestPut_RefusesANameThatIsNotOnePathComponent(t *testing.T) {
 	for _, name := range []string{"", ".", "..", "a/b", `a\b`, "/abs"} {
 		t.Run(name, func(t *testing.T) {
 			fs := newFakeFS()
-			_, err := transfer.NewSink(fs).Put(context.Background(),
+			_, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 				transfer.Upload{DestDir: "/home/u", Name: name, Size: 3, OnExists: transfer.Overwrite},
 				strings.NewReader("new"), func(int64) {})
 			if !errors.Is(err, transfer.ErrInvalidUpload) {
@@ -792,7 +792,7 @@ func TestPut_RefusesANameThatIsNotOnePathComponent(t *testing.T) {
 
 func TestPut_RefusesAnUnansweredCollisionDecision(t *testing.T) {
 	fs := newFakeFS()
-	_, err := transfer.NewSink(fs).Put(context.Background(),
+	_, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3},
 		strings.NewReader("new"), func(int64) {})
 	if !errors.Is(err, transfer.ErrInvalidUpload) {
@@ -805,7 +805,7 @@ func TestPut_RefusesAnUnansweredCollisionDecision(t *testing.T) {
 
 func TestPut_RefusesAnEmptyDestinationDirectory(t *testing.T) {
 	fs := newFakeFS()
-	_, err := transfer.NewSink(fs).Put(context.Background(),
+	_, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), func(int64) {})
 	if !errors.Is(err, transfer.ErrInvalidUpload) {
@@ -823,7 +823,7 @@ func TestPut_WritesOneBoundedChunkPerCallAndReportsTheRunningTotal(t *testing.T)
 	fs := newFakeFS()
 	var seen []int64
 
-	out, err := transfer.NewSink(fs, transfer.WithChunkSize(4)).Put(context.Background(),
+	out, err := transfer.NewSink(fs, 4).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 10, OnExists: transfer.Overwrite},
 		strings.NewReader("0123456789"),
 		func(total int64) { seen = append(seen, total) })
@@ -849,7 +849,7 @@ func TestPut_WritesOneBoundedChunkPerCallAndReportsTheRunningTotal(t *testing.T)
 // that have nobody to tell.
 func TestPut_NilProgressCallbackIsAccepted(t *testing.T) {
 	fs := newFakeFS()
-	if _, err := transfer.NewSink(fs).Put(context.Background(),
+	if _, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 		strings.NewReader("new"), nil); err != nil {
 		t.Fatal(err)
@@ -870,7 +870,7 @@ func TestPut_KeepBothReservationIsRemovedWhenThePromoteFails(t *testing.T) {
 	fs.put("/home/u/a.txt", "old")
 	fs.failRenameAt(1) // the promote itself fails
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -895,7 +895,7 @@ func TestPut_KeepBothReservationStrandedWhenThePromoteAndTheRemoveBothFail(t *te
 	fs.failRenameAt(1)
 	fs.removeErr = errors.New("permission denied")
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	if err == nil {
@@ -921,7 +921,7 @@ func TestPut_KeepBothCreateRefusedWithPermission_StopsAtOnceAndReportsTheRefusal
 	fs.put("/home/u/a.txt", "old")
 	fs.createErr = fmt.Errorf("sftp: open %s: %w", "/home/u/a (1).txt", iofs.ErrPermission)
 
-	out, err := transfer.NewSink(fs).Put(context.Background(),
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	var exhausted *transfer.NameExhaustedError
@@ -948,7 +948,7 @@ func TestPut_KeepBothCreateRefusedBecauseTheDirectoryIsGone_StopsAtOnce(t *testi
 	fs := newFakeFS()
 	fs.createErr = notFound("open", "/home/u/a (1).txt")
 
-	_, err := transfer.NewSink(fs).Put(context.Background(),
+	_, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	var exhausted *transfer.NameExhaustedError
@@ -970,7 +970,7 @@ func TestPut_KeepBothCreateRefusedByADeadLease_StopsAtOnce(t *testing.T) {
 	fs := newFakeFS()
 	fs.createErr = fmt.Errorf("sftp: %w", iofs.ErrClosed)
 
-	_, err := transfer.NewSink(fs).Put(context.Background(),
+	_, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.KeepBoth},
 		strings.NewReader("new"), func(int64) {})
 	var exhausted *transfer.NameExhaustedError
@@ -1010,7 +1010,7 @@ func TestPut_ReaderErrsOnCancellation_UnwindsAndCleansUp(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		out, err := transfer.NewSink(fs).Put(ctx,
+		out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(ctx,
 			transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
 			r, func(int64) {})
 		done <- result{out, err}

@@ -45,7 +45,9 @@ import (
 // one implementation for both providers AND for both directions, so a
 // download off a local tab and a download off a remote one differ in the
 // adapter underneath and in nothing a person can observe.
-func (p *Provider) Source() transfer.Source { return transfer.NewSource(osReadFS{}) }
+func (p *Provider) Source() transfer.Source {
+	return transfer.NewSource(osReadFS{}, transfer.DefaultChunk)
+}
 
 // osReadFS presents this machine's filesystem as the read surface
 // internal/transfer declares. It is the local counterpart of the

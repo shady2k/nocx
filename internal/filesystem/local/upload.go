@@ -59,7 +59,7 @@ const newFileMode = 0o666
 // implementation for both providers. A second sink here would be two
 // owners of one behaviour (AGENTS.md), and the two would agree until the
 // day they did not.
-func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(osFS{}) }
+func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(osFS{}, transfer.DefaultChunk) }
 
 // osFS presents this machine's filesystem as the write surface
 // internal/transfer declares. It is the local counterpart of the

@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	// defaultChunk is 256 KiB, matching tabby's read buffer and comfortably
+	// DefaultChunk is 256 KiB, matching tabby's read buffer and comfortably
 	// inside the lease's 30 s lane timeout on any link that is alive at
 	// all. Each chunk is ONE lane call (D2), so a long upload is many short
 	// calls rather than one call that outlives the watchdog.
-	defaultChunk = 256 << 10
+	DefaultChunk = 256 << 10
 
 	tempSuffix = ".nocx-upload-"
 	bakSuffix  = ".nocx-bak-"
@@ -31,39 +31,30 @@ type sink struct {
 	chunk int
 }
 
-// config is what an Option configures. It is shared by both directions
-// because the one knob either of them has is the chunk bound, and a chunk
-// is the same idea going each way: the most bytes one call may carry, which
-// is what keeps a single call inside the lease's lane timeout (D2). Two
-// Option types would be two names for one number.
-type config struct {
-	chunk int
-}
-
-// Option configures a Sink or a Source.
-type Option func(*config)
-
-// WithChunkSize sets the bytes moved per lane call. Values below one are
-// ignored; the default is 256 KiB.
-func WithChunkSize(n int) Option {
-	return func(c *config) {
-		if n > 0 {
-			c.chunk = n
-		}
+// chunkOr is the one place a chunk bound is validated, shared by both
+// directions because a chunk is the same idea going each way: the most bytes
+// one call may carry, which is what keeps a single call inside the lease's
+// lane timeout (D2). Values below one fall back rather than failing — a
+// caller that computes a bound has no useful answer to give a constructor.
+func chunkOr(n int) int {
+	if n > 0 {
+		return n
 	}
+	return DefaultChunk
 }
 
-func newConfig(opts []Option) config {
-	c := config{chunk: defaultChunk}
-	for _, o := range opts {
-		o(&c)
-	}
-	return c
-}
-
-// NewSink returns a Sink writing through fs.
-func NewSink(remote RemoteFS, opts ...Option) Sink {
-	return &sink{fs: remote, chunk: newConfig(opts).chunk}
+// NewSink returns a Sink writing through fs, moving chunk bytes per lane
+// call. Pass DefaultChunk unless you have a reason not to.
+//
+// A PARAMETER, NOT AN OPTION. This was `opts ...Option` over a one-field
+// config, and the single option that config ever had — WithChunkSize — had
+// no caller outside a test: an options framework built for a test seam, and
+// four production call sites that all passed nothing. deadcode reported it
+// the first time CI ran the ratchet on this branch, and it was right
+// (nocx-9le.5.25). Naming the bound costs each caller one word and leaves
+// nothing in the package that production does not reach.
+func NewSink(remote RemoteFS, chunk int) Sink {
+	return &sink{fs: remote, chunk: chunkOr(chunk)}
 }
 
 // Put writes r into u.DestDir under a temp name and promotes it.

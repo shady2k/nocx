@@ -634,27 +634,6 @@ func (u *transferRegistry) ticketTTL() time.Duration {
 	return defaultUploadTicketTTL
 }
 
-// WithTransferStallTimeout bounds how long ONE read of an upload body — or
-// ONE write of a download's response — may go
-// without progress. It is a stall rule and never a rule about the
-// transfer's total duration (D2): a 2 GB upload over a slow link is a
-// working upload, and only a body that has stopped is a broken one.
-func WithTransferStallTimeout(d time.Duration) WSServerOption {
-	return func(s *WSServer) { s.transfers.stall = d }
-}
-
-// WithTransferTicketTTL bounds how long an unclaimed ticket lives, in
-// either direction. Zero
-// is legitimate and means "expire as soon as the mint-side timer can run" —
-// the tests use it to reach the expiry path through the SAME code
-// production takes, rather than by sleeping.
-func WithTransferTicketTTL(d time.Duration) WSServerOption {
-	return func(s *WSServer) {
-		s.transfers.ttl = d
-		s.transfers.ttlSet = true
-	}
-}
-
 // sweepLocked drops transfers that finished long enough ago to be beyond
 // any caller's interest, and then the tickets that named them.
 //

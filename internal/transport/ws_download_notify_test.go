@@ -43,7 +43,7 @@ func newPausingSource() *pausingSource {
 }
 
 func (s *pausingSource) Open(path string) (*transfer.Download, error) {
-	return transfer.NewSource(pinnedFS{body: strings.Repeat("z", 4096)}).Open(path)
+	return transfer.NewSource(pinnedFS{body: strings.Repeat("z", 4096)}, transfer.DefaultChunk).Open(path)
 }
 
 func (s *pausingSource) Get(_ context.Context, d *transfer.Download, w io.Writer, progress func(int64)) (int64, error) {
@@ -63,7 +63,7 @@ type failingSource struct {
 }
 
 func (f *failingSource) Open(path string) (*transfer.Download, error) {
-	return transfer.NewSource(pinnedFS{body: strings.Repeat("q", 4096)}).Open(path)
+	return transfer.NewSource(pinnedFS{body: strings.Repeat("q", 4096)}, transfer.DefaultChunk).Open(path)
 }
 
 func (f *failingSource) Get(_ context.Context, _ *transfer.Download, _ io.Writer, progress func(int64)) (int64, error) {

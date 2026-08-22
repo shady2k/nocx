@@ -33,9 +33,9 @@ import (
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
-func openFor(t *testing.T, f *fakeReadFS, p string, opts ...transfer.Option) *transfer.Download {
+func openFor(t *testing.T, f *fakeReadFS, p string, chunk int) *transfer.Download {
 	t.Helper()
-	d, err := transfer.NewSource(f, opts...).Open(p)
+	d, err := transfer.NewSource(f, chunk).Open(p)
 	if err != nil {
 		t.Fatalf("Open(%s): %v", p, err)
 	}
@@ -54,14 +54,14 @@ func TestSourceGet_DeliversAnOrdinaryFile(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/report.bin"] = body
 
-	d := openFor(t, f, "/srv/report.bin", transfer.WithChunkSize(1024))
+	d := openFor(t, f, "/srv/report.bin", 1024)
 	if d.Name != "report.bin" || d.Size != int64(len(body)) {
 		t.Fatalf("Open = %+v; want name report.bin and size %d", d, len(body))
 	}
 
 	var w countingWriter
 	var lastProgress int64
-	sent, err := transfer.NewSource(f, transfer.WithChunkSize(1024)).
+	sent, err := transfer.NewSource(f, 1024).
 		Get(context.Background(), d, &w, func(total int64) { lastProgress = total })
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -82,10 +82,10 @@ func TestSourceGet_DeliversAnOrdinaryFile(t *testing.T) {
 func TestSourceGet_AnEmptyFileIsAFile(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/empty"] = ""
-	d := openFor(t, f, "/srv/empty")
+	d := openFor(t, f, "/srv/empty", transfer.DefaultChunk)
 
 	var w countingWriter
-	sent, err := transfer.NewSource(f).Get(context.Background(), d, &w, nil)
+	sent, err := transfer.NewSource(f, transfer.DefaultChunk).Get(context.Background(), d, &w, nil)
 	if err != nil || sent != 0 || len(w.got) != 0 {
 		t.Fatalf("Get on an empty file = (%d, %v), client got %d bytes; want (0, nil, 0)", sent, err, len(w.got))
 	}
@@ -97,10 +97,10 @@ func TestSourceGet_AnEmptyFileIsAFile(t *testing.T) {
 func TestSourceGet_ReadsInBoundedChunks(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/big"] = strings.Repeat("x", 5000)
-	d := openFor(t, f, "/srv/big", transfer.WithChunkSize(512))
+	d := openFor(t, f, "/srv/big", 512)
 
 	var w countingWriter
-	if _, err := transfer.NewSource(f, transfer.WithChunkSize(512)).
+	if _, err := transfer.NewSource(f, 512).
 		Get(context.Background(), d, &w, nil); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSourceOpen_RefusesBeforeAnyByteMoves(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newFakeReadFS()
 			tc.setup(f)
-			d, err := transfer.NewSource(f).Open("/srv/nope")
+			d, err := transfer.NewSource(f, transfer.DefaultChunk).Open("/srv/nope")
 			if err == nil {
 				_ = d.Close()
 				t.Fatal("Open succeeded; want a refusal")
@@ -157,7 +157,7 @@ func TestSourceOpen_RefusesANegativeSizeAndClosesTheHandle(t *testing.T) {
 	f.files["/srv/odd"] = "abc"
 	f.declaredSize = sizePtr(-1)
 
-	if _, err := transfer.NewSource(f).Open("/srv/odd"); !errors.Is(err, transfer.ErrInvalidDownload) {
+	if _, err := transfer.NewSource(f, transfer.DefaultChunk).Open("/srv/odd"); !errors.Is(err, transfer.ErrInvalidDownload) {
 		t.Fatalf("Open error = %v; want ErrInvalidDownload", err)
 	}
 	if f.closes != 1 {
@@ -174,10 +174,10 @@ func TestSourceGet_ReadFailsMidStream(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = strings.Repeat("y", 4096)
 	f.readErr, f.failReadAfterN = errReadFailed, 1024
-	d := openFor(t, f, "/srv/f", transfer.WithChunkSize(256))
+	d := openFor(t, f, "/srv/f", 256)
 
 	var w countingWriter
-	sent, err := transfer.NewSource(f, transfer.WithChunkSize(256)).
+	sent, err := transfer.NewSource(f, 256).
 		Get(context.Background(), d, &w, nil)
 	if !errors.Is(err, errReadFailed) {
 		t.Fatalf("Get error = %v; want the read's own reason", err)
@@ -195,10 +195,10 @@ func TestSourceGet_TheFileShrankAfterTheOpen(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = "only eight"
 	f.declaredSize = sizePtr(4096)
-	d := openFor(t, f, "/srv/f")
+	d := openFor(t, f, "/srv/f", transfer.DefaultChunk)
 
 	var w countingWriter
-	sent, err := transfer.NewSource(f).Get(context.Background(), d, &w, nil)
+	sent, err := transfer.NewSource(f, transfer.DefaultChunk).Get(context.Background(), d, &w, nil)
 	var mismatch *transfer.SizeMismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("Get error = %v; want a SizeMismatchError", err)
@@ -219,10 +219,10 @@ func TestSourceGet_TheFileGrewAfterTheOpen(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = strings.Repeat("z", 4096)
 	f.declaredSize = sizePtr(1000)
-	d := openFor(t, f, "/srv/f", transfer.WithChunkSize(256))
+	d := openFor(t, f, "/srv/f", 256)
 
 	var w countingWriter
-	_, err := transfer.NewSource(f, transfer.WithChunkSize(256)).
+	_, err := transfer.NewSource(f, 256).
 		Get(context.Background(), d, &w, nil)
 	var mismatch *transfer.SizeMismatchError
 	if !errors.As(err, &mismatch) || !mismatch.AtLeast {
@@ -240,10 +240,10 @@ func TestSourceGet_TheFileGrewAfterTheOpen(t *testing.T) {
 func TestSourceGet_TheClientWentAway(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = strings.Repeat("q", 4096)
-	d := openFor(t, f, "/srv/f", transfer.WithChunkSize(256))
+	d := openFor(t, f, "/srv/f", 256)
 
 	w := &countingWriter{failAfter: 512}
-	sent, err := transfer.NewSource(f, transfer.WithChunkSize(256)).
+	sent, err := transfer.NewSource(f, 256).
 		Get(context.Background(), d, w, nil)
 	if !errors.Is(err, errClientGone) {
 		t.Fatalf("Get error = %v; want the writer's own reason", err)
@@ -258,7 +258,7 @@ func TestSourceGet_TheClientWentAway(t *testing.T) {
 func TestSourceGet_CancelledByThePerson(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = strings.Repeat("c", 8192)
-	d := openFor(t, f, "/srv/f", transfer.WithChunkSize(256))
+	d := openFor(t, f, "/srv/f", 256)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	f.onRead = func(total int) {
@@ -267,7 +267,7 @@ func TestSourceGet_CancelledByThePerson(t *testing.T) {
 		}
 	}
 	var w countingWriter
-	sent, err := transfer.NewSource(f, transfer.WithChunkSize(256)).Get(ctx, d, &w, nil)
+	sent, err := transfer.NewSource(f, 256).Get(ctx, d, &w, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Get error = %v; want context.Canceled", err)
 	}
@@ -284,12 +284,12 @@ func TestSourceGet_CancelledByThePerson(t *testing.T) {
 func TestSourceGet_CancelledBeforeTheFirstChunkSendsNothing(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = strings.Repeat("c", 8192)
-	d := openFor(t, f, "/srv/f")
+	d := openFor(t, f, "/srv/f", transfer.DefaultChunk)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var w countingWriter
-	sent, err := transfer.NewSource(f).Get(ctx, d, &w, nil)
+	sent, err := transfer.NewSource(f, transfer.DefaultChunk).Get(ctx, d, &w, nil)
 	if !errors.Is(err, context.Canceled) || sent != 0 || len(w.got) != 0 {
 		t.Fatalf("Get = (%d, %v) with %d bytes at the client; want (0, context.Canceled, 0)", sent, err, len(w.got))
 	}
@@ -304,12 +304,12 @@ func TestSourceGet_CancelledBeforeTheFirstChunkSendsNothing(t *testing.T) {
 func TestSourceGet_DoesNotCloseTheHandle(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = "abc"
-	d, err := transfer.NewSource(f).Open("/srv/f")
+	d, err := transfer.NewSource(f, transfer.DefaultChunk).Open("/srv/f")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	var w countingWriter
-	if _, err := transfer.NewSource(f).Get(context.Background(), d, &w, nil); err != nil {
+	if _, err := transfer.NewSource(f, transfer.DefaultChunk).Get(context.Background(), d, &w, nil); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if f.closes != 0 {
@@ -333,17 +333,17 @@ func TestSourceGet_DoesNotCloseTheHandle(t *testing.T) {
 func TestSourceGet_RefusesADownloadWithNoOpenHandle(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = "abc"
-	d, err := transfer.NewSource(f).Open("/srv/f")
+	d, err := transfer.NewSource(f, transfer.DefaultChunk).Open("/srv/f")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	_ = d.Close()
 
 	var w countingWriter
-	if _, err := transfer.NewSource(f).Get(context.Background(), d, &w, nil); !errors.Is(err, transfer.ErrInvalidDownload) {
+	if _, err := transfer.NewSource(f, transfer.DefaultChunk).Get(context.Background(), d, &w, nil); !errors.Is(err, transfer.ErrInvalidDownload) {
 		t.Fatalf("Get on a closed Download = %v; want ErrInvalidDownload", err)
 	}
-	if _, err := transfer.NewSource(f).Get(context.Background(), nil, &w, nil); !errors.Is(err, transfer.ErrInvalidDownload) {
+	if _, err := transfer.NewSource(f, transfer.DefaultChunk).Get(context.Background(), nil, &w, nil); !errors.Is(err, transfer.ErrInvalidDownload) {
 		t.Fatalf("Get(nil) = %v; want ErrInvalidDownload", err)
 	}
 }
@@ -355,18 +355,18 @@ func TestSourceGet_NamesWhichEndFailed(t *testing.T) {
 	f := newFakeReadFS()
 	f.files["/srv/f"] = strings.Repeat("w", 2048)
 	f.readErr, f.failReadAfterN = errReadFailed, 256
-	d := openFor(t, f, "/srv/f", transfer.WithChunkSize(128))
+	d := openFor(t, f, "/srv/f", 128)
 	var w countingWriter
-	_, err := transfer.NewSource(f, transfer.WithChunkSize(128)).Get(context.Background(), d, &w, nil)
+	_, err := transfer.NewSource(f, 128).Get(context.Background(), d, &w, nil)
 	if err == nil || !strings.Contains(err.Error(), "read remote") {
 		t.Fatalf("a failed remote read reported %v; want it to name the remote end", err)
 	}
 
 	g := newFakeReadFS()
 	g.files["/srv/f"] = strings.Repeat("w", 2048)
-	d2 := openFor(t, g, "/srv/f", transfer.WithChunkSize(128))
+	d2 := openFor(t, g, "/srv/f", 128)
 	w2 := &countingWriter{failAfter: 128}
-	_, err = transfer.NewSource(g, transfer.WithChunkSize(128)).Get(context.Background(), d2, w2, nil)
+	_, err = transfer.NewSource(g, 128).Get(context.Background(), d2, w2, nil)
 	if err == nil || !strings.Contains(err.Error(), "send") {
 		t.Fatalf("a failed client write reported %v; want it to name the sending end", err)
 	}
@@ -381,10 +381,10 @@ func TestSourceGet_PreservesTheBytesExactly(t *testing.T) {
 	}
 	f := newFakeReadFS()
 	f.files["/srv/bin"] = string(body)
-	d := openFor(t, f, "/srv/bin", transfer.WithChunkSize(97))
+	d := openFor(t, f, "/srv/bin", 97)
 
 	var w countingWriter
-	if _, err := transfer.NewSource(f, transfer.WithChunkSize(97)).
+	if _, err := transfer.NewSource(f, 97).
 		Get(context.Background(), d, &w, nil); err != nil {
 		t.Fatalf("Get: %v", err)
 	}

@@ -83,7 +83,7 @@ func uploadableFactory(sess session.Session, rootPath string) (filesystem.Provid
 		Provider: p,
 		// A small chunk so an ordinary test file crosses the copy loop
 		// several times, which is where cancellation is observed.
-		sink: transfer.NewSink(osRemoteFS{}, transfer.WithChunkSize(1024)),
+		sink: transfer.NewSink(osRemoteFS{}, 1024),
 	}, nil
 }
 

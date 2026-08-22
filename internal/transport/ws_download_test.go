@@ -49,7 +49,7 @@ func writeOnlyFactory(sess session.Session, rootPath string) (filesystem.Provide
 	if err != nil {
 		return nil, err
 	}
-	return &writeOnlyProvider{Provider: p, sink: transfer.NewSink(osRemoteFS{})}, nil
+	return &writeOnlyProvider{Provider: p, sink: transfer.NewSink(osRemoteFS{}, transfer.DefaultChunk)}, nil
 }
 
 // readableProvider carries a Source the test chose, so a test can decide
@@ -522,7 +522,7 @@ type unresponsiveSource struct {
 }
 
 func (s *unresponsiveSource) Open(path string) (*transfer.Download, error) {
-	return transfer.NewSource(pinnedFS{body: "held"}).Open(path)
+	return transfer.NewSource(pinnedFS{body: "held"}, transfer.DefaultChunk).Open(path)
 }
 
 func (s *unresponsiveSource) Get(context.Context, *transfer.Download, io.Writer, func(int64)) (int64, error) {

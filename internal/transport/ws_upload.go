@@ -168,9 +168,11 @@ type filesUploadParams struct {
 	// SourceTicket names a file on the BACKEND's disk that a human already
 	// chose, in the native picker or by dropping it on the window. It is
 	// minted backend-side and opaque: the renderer can echo one but cannot
-	// author one, which is the difference between it and a path. Nothing
-	// mints one yet (that is Task 8), so a request carrying one is refused
-	// rather than silently treated as a stream upload.
+	// author one, which is the difference between it and a path. A request
+	// carrying one is a PATH upload and sends no body; one without is a
+	// stream upload and gets a url (§5.3). An id nothing minted is refused
+	// rather than silently treated as a stream upload, which would change
+	// what the caller asked for.
 	SourceTicket string `json:"sourceTicket,omitempty"`
 	// OnExists is the person's collision decision, absent until they have
 	// been asked.
@@ -1356,6 +1358,25 @@ func (h uploadHandlers) handleUpload(ctx context.Context, state *connState, req 
 			// resolve here and no name this handler could resolve it from.
 			// Ownership passes with the claim: from this line the reader
 			// has exactly one owner and every path below closes it.
+			//
+			// R1's other half, and the one binding authorisation cannot
+			// answer. Acquire has already proved this connection owns the
+			// DESTINATION; a ticket minted by a window drop additionally
+			// names the tab the file was dropped ON, and pairing it with a
+			// binding on any other tab is the wrong pairing R1 says must
+			// not be expressible. A picker ticket names no tab and is bound
+			// by whichever one redeems it (SourceTicketStore.Mint says why).
+			//
+			// The ticket is spent either way: the gesture it named has been
+			// answered, wrongly, and nothing may retry it.
+			if src.Session != "" && src.Session != sid {
+				_ = src.File.Close()
+				_ = h.r.TryError(req.ID, RPCError{
+					Code:    -32602,
+					Message: "Invalid params: this file was dropped on another tab",
+				})
+				return nil
+			}
 			source = &src
 			sourceReader = src.File
 		}

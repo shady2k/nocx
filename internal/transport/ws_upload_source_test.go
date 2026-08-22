@@ -13,6 +13,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // ── the source-ticket store ────────────────────────────────────────────────
@@ -202,9 +208,21 @@ func TestSourceTicketStore_MintErrorsNameNoPath(t *testing.T) {
 
 // ── the window drop ────────────────────────────────────────────────────────
 
+// recordingEmitter is the transport the drop reaches: it answers what kind
+// of tab the drop landed on and records what was sent to it. Remote by
+// default, because that is the tab an upload is even possible on.
 type recordingEmitter struct {
+	kind     session.Kind
+	unknown  bool // the session is not open at all
 	sessions []string
 	picks    [][]SourcePick
+}
+
+func (r *recordingEmitter) TabKind(string) (session.Kind, bool) {
+	if r.unknown {
+		return 0, false
+	}
+	return r.kind, true
 }
 
 func (r *recordingEmitter) EmitFilesDropped(sessionID string, picks []SourcePick) error {
@@ -212,6 +230,8 @@ func (r *recordingEmitter) EmitFilesDropped(sessionID string, picks []SourcePick
 	r.picks = append(r.picks, picks)
 	return nil
 }
+
+func remoteEmitter() *recordingEmitter { return &recordingEmitter{kind: session.KindRemote} }
 
 const dropSessionID = "0123456789abcdef0123456789abcdef"
 
@@ -230,7 +250,7 @@ func TestFilesDropped_MintsPerFileAndNamesNoDestination(t *testing.T) {
 		}
 		paths = append(paths, p)
 	}
-	em := &recordingEmitter{}
+	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 
 	if err := st.Dropped(paths, map[string]string{
@@ -287,7 +307,7 @@ func TestFilesDropped_MintsPerFileAndNamesNoDestination(t *testing.T) {
 // A drop target that names no session is refused whole: nothing is minted,
 // so a drop the renderer could not route never leaves a ticket behind.
 func TestFilesDropped_RefusesATargetThatNamesNoSession(t *testing.T) {
-	em := &recordingEmitter{}
+	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 	err := st.Dropped([]string{seedFile(t, "x.bin", 1)}, map[string]string{
 		"data-file-drop-target": "",
@@ -306,7 +326,7 @@ func TestFilesDropped_RefusesATargetThatNamesNoSession(t *testing.T) {
 // The attribute is renderer-authored DOM, so it is held to the shape a
 // server-minted session id has before it goes back out on the wire.
 func TestFilesDropped_RefusesASessionIDThatIsNotOne(t *testing.T) {
-	em := &recordingEmitter{}
+	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 	err := st.Dropped([]string{seedFile(t, "x.bin", 1)}, map[string]string{
 		"data-session-id": "../../etc/passwd",
@@ -331,7 +351,7 @@ func TestFilesDropped_SkipsWhatCannotBeMintedAndSaysSo(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	em := &recordingEmitter{}
+	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 	err := st.Dropped([]string{file, sub}, map[string]string{"data-session-id": dropSessionID})
 	if err == nil {
@@ -579,15 +599,15 @@ func TestDialogOpenFileForUpload_PickerFailureNamesNoPath(t *testing.T) {
 // real socket, carrying the session, the tickets, the names and the sizes —
 // and no destination, because the renderer resolves that itself.
 func TestFilesDropped_ReachesTheRendererOverTheSocket(t *testing.T) {
-	h := newInventoryHarness(t)
-	st := NewSourceTicketStore(h.ws)
+	e := newDropEnv(t)
 	path := seedFile(t, "dropped.bin", 5)
 
-	if err := st.Dropped([]string{path}, map[string]string{"data-session-id": dropSessionID}); err != nil {
+	if err := e.ws.UploadSources().Dropped([]string{path},
+		map[string]string{"data-session-id": e.sid}); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
 
-	params := readNotification(t, h.conn, "files.dropped", 5*time.Second)
+	params := readNotification(t, e.conn, "files.dropped", 5*time.Second)
 	var got struct {
 		SessionID string         `json:"sessionId"`
 		Sources   []SourcePick   `json:"sources"`
@@ -596,8 +616,8 @@ func TestFilesDropped_ReachesTheRendererOverTheSocket(t *testing.T) {
 	if err := json.Unmarshal(params, &got); err != nil {
 		t.Fatalf("unmarshal params: %v\nraw: %s", err, params)
 	}
-	if got.SessionID != dropSessionID {
-		t.Errorf("sessionId = %q, want %q", got.SessionID, dropSessionID)
+	if got.SessionID != e.sid {
+		t.Errorf("sessionId = %q, want %q", got.SessionID, e.sid)
 	}
 	if len(got.Sources) != 1 || got.Sources[0].Name != "dropped.bin" || got.Sources[0].Size != 5 {
 		t.Fatalf("sources = %+v, want one dropped.bin of 5 bytes", got.Sources)
@@ -618,27 +638,102 @@ func TestFilesDropped_ReachesTheRendererOverTheSocket(t *testing.T) {
 	}
 }
 
-// With no renderer attached there is nobody to hand a ticket to, and the
-// drop says so rather than leaving tickets in the store for nobody.
+// With no renderer attached to THAT TAB there is nobody to hand a ticket
+// to, and the drop says so rather than leaving tickets in the store for
+// nobody. The session is still open — it is the subscriber that went away,
+// which is the ordinary AD-9 state between a socket dropping and the next
+// one attaching.
 func TestFilesDropped_WithNoRendererMintsNothing(t *testing.T) {
-	h := newInventoryHarness(t)
-	if err := h.conn.Close(); err != nil {
+	e := newDropEnv(t)
+	if err := e.conn.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 	waitFor(t, "the connection to be forgotten", 5*time.Second, func() bool {
-		h.ws.connsMu.Lock()
-		defer h.ws.connsMu.Unlock()
-		return len(h.ws.conns) == 0
+		e.ws.connsMu.Lock()
+		defer e.ws.connsMu.Unlock()
+		return len(e.ws.conns) == 0
 	})
 
-	st := NewSourceTicketStore(h.ws)
-	err := st.Dropped([]string{seedFile(t, "nobody.bin", 1)}, map[string]string{"data-session-id": dropSessionID})
+	st := e.ws.UploadSources()
+	err := st.Dropped([]string{seedFile(t, "nobody.bin", 1)}, map[string]string{"data-session-id": e.sid})
 	if err == nil {
 		t.Fatalf("a drop with no renderer attached reported success")
 	}
 	if st.Len() != 0 {
 		t.Errorf("Len = %d, want 0 — undeliverable tickets must not accumulate", st.Len())
 	}
+}
+
+// ── a stand with a tab that can be dropped on ────────────────────────────
+
+// dropEnv is a server with a REMOTE session open over the wire, which is
+// the only kind of tab a drop mints for: a local tab does not copy (D9),
+// so it mints nothing and there would be no ticket to look at.
+//
+// The SSH factory and the resolver are stubs; nothing dials. What is real
+// is the path that matters here — the session is opened by the `open`
+// method, so it is in the registry with the kind the registry recorded and
+// this connection is its subscriber, which is what the notification is
+// addressed to.
+type dropEnv struct {
+	ws   *WSServer
+	conn *websocket.Conn
+	sid  string
+}
+
+func newDropEnv(t *testing.T) *dropEnv {
+	t.Helper()
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	ws := NewWSServer(logger, reg, WithProfileResolver(&fakeResolver{
+		resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+			return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+		},
+	}))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	return &dropEnv{ws: ws, conn: conn, sid: openRemoteSessionOnConn(t, ws, conn, 1)}
+}
+
+// openRemoteSessionOnConn opens a KindRemote session over a connection and
+// waits for the subscriber install, exactly as openSessionOnConn does for a
+// local one and for the same reason (see its comment).
+func openRemoteSessionOnConn(t *testing.T, ws *WSServer, conn *websocket.Conn, id int) string {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "profileId": "ssh:drop:1",
+	}, id)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("open ssh: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open ssh: %+v", envelope.Error)
+	}
+	var got struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("open ssh: decode: %v", err)
+	}
+	if got.SessionID == "" {
+		t.Fatal("open ssh returned an empty sessionId")
+	}
+	awaitSubscriber(t, ws, session.ID(got.SessionID))
+	return got.SessionID
 }
 
 // ── the ticket names bytes, not a name ────────────────────────────────────
@@ -771,6 +866,8 @@ type failingEmitter struct {
 	held []*os.File
 }
 
+func (f *failingEmitter) TabKind(string) (session.Kind, bool) { return session.KindRemote, true }
+
 func (f *failingEmitter) EmitFilesDropped(_ string, picks []SourcePick) error {
 	f.st.mu.Lock()
 	for _, p := range picks {
@@ -803,5 +900,129 @@ func TestFilesDropped_AnUndeliveredDropClosesItsHandles(t *testing.T) {
 		if err := f.Close(); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("an undelivered ticket's handle is still open (Close: %v)", err)
 		}
+	}
+}
+
+// ── the ticket is bound to the tab it was dropped on ──────────────────────
+
+// R1 says the wrong pairing is NOT EXPRESSIBLE. Dropped recorded only the
+// source file; the session id rode on the broadcast, not on the ticket, so
+// once redemption existed any recipient could pair any ticket with any
+// remote binding its connection owned, and a file dropped on tab A could be
+// sent to host B. Binding authorisation proves the caller owns B; it proves
+// nothing about where the file was dropped.
+func TestSourceTicketStore_ADroppedTicketCarriesItsTab(t *testing.T) {
+	em := remoteEmitter()
+	st := NewSourceTicketStore(em)
+	if err := st.Dropped([]string{seedFile(t, "bound.bin", 2)},
+		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	src, ok := st.Claim(em.picks[0][0].Ticket)
+	if !ok {
+		t.Fatal("the dropped ticket claimed nothing")
+	}
+	defer src.File.Close() //nolint:errcheck // the test owns it from here
+	if src.Session != session.ID(dropSessionID) {
+		t.Fatalf("the ticket names session %q, want %q — a ticket that names no tab can be paired with any tab", src.Session, dropSessionID)
+	}
+}
+
+// D9 on the native side. A local tab does not copy — every terminal inserts
+// the dropped name at the prompt instead — so there is nothing to upload
+// and no credential to mint. Today one was minted and then abandoned live
+// by the renderer, and a credential nobody redeems is still a credential
+// that exists.
+//
+// The renderer is still TOLD, because that is what makes the prompt insert
+// work in the Wails window, where the drop never becomes a DOM event: it
+// learns the names and the sizes and no ticket at all.
+func TestFilesDropped_ALocalTabMintsNoTicket(t *testing.T) {
+	em := &recordingEmitter{kind: session.KindLocal}
+	st := NewSourceTicketStore(em)
+	if err := st.Dropped([]string{seedFile(t, "typed.txt", 3)},
+		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	if st.Len() != 0 {
+		t.Fatalf("%d tickets minted for a local tab, want 0", st.Len())
+	}
+	if len(em.picks) != 1 || len(em.picks[0]) != 1 {
+		t.Fatalf("emitted %v, want the one dropped file", em.picks)
+	}
+	got := em.picks[0][0]
+	if got.Ticket != "" {
+		t.Errorf("a local tab's drop carries ticket %q, want none", got.Ticket)
+	}
+	if got.Name != "typed.txt" || got.Size != 3 {
+		t.Errorf("got %+v, want typed.txt of 3 bytes — the prompt insert needs the name", got)
+	}
+}
+
+// A drop target naming a session that is not open is refused whole. The
+// attribute is renderer-authored DOM: a well-shaped id for a tab that does
+// not exist must not mint a ticket bound to nothing.
+func TestFilesDropped_RefusesATabThatIsNotOpen(t *testing.T) {
+	em := &recordingEmitter{unknown: true}
+	st := NewSourceTicketStore(em)
+	err := st.Dropped([]string{seedFile(t, "ghost.bin", 1)},
+		map[string]string{"data-session-id": dropSessionID})
+	if err == nil {
+		t.Fatal("a drop on a session that is not open was accepted")
+	}
+	if st.Len() != 0 || len(em.picks) != 0 {
+		t.Errorf("minted %d tickets and emitted %d notifications for a tab that does not exist", st.Len(), len(em.picks))
+	}
+}
+
+// The notification is addressed to the tab it was dropped on, not
+// broadcast — the addressing files.changed already uses (ws_files.go).
+//
+// The assertion is an ORDER rather than an absence, because "conn B never
+// received it" can only be measured by waiting, and a test that waits for a
+// duration is broken on a fast machine too. Tab A is dropped on first: if
+// the notification were broadcast, the FIRST files.dropped conn B ever sees
+// would be A's. It sees B's, so it never saw A's.
+func TestFilesDropped_IsAddressedToTheTabItWasDroppedOn(t *testing.T) {
+	e := newDropEnv(t)
+	connB := connectWS(t, e.ws)
+	t.Cleanup(func() { _ = connB.Close() })
+	sidB := openRemoteSessionOnConn(t, e.ws, connB, 1)
+
+	st := e.ws.UploadSources()
+	if err := st.Dropped([]string{seedFile(t, "for-a.bin", 1)},
+		map[string]string{"data-session-id": e.sid}); err != nil {
+		t.Fatalf("Dropped on A: %v", err)
+	}
+	if err := st.Dropped([]string{seedFile(t, "for-b.bin", 2)},
+		map[string]string{"data-session-id": sidB}); err != nil {
+		t.Fatalf("Dropped on B: %v", err)
+	}
+
+	params := readNotification(t, connB, "files.dropped", 5*time.Second)
+	var got struct {
+		SessionID string       `json:"sessionId"`
+		Sources   []SourcePick `json:"sources"`
+	}
+	if err := json.Unmarshal(params, &got); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, params)
+	}
+	if got.SessionID != sidB {
+		t.Fatalf("the first drop tab B heard about was session %q; a drop is addressed to the tab it landed on, never broadcast", got.SessionID)
+	}
+	if len(got.Sources) != 1 || got.Sources[0].Name != "for-b.bin" {
+		t.Fatalf("tab B was told about %+v, want for-b.bin", got.Sources)
+	}
+	// And tab A did get its own, so the addressing delivers rather than
+	// merely withholding.
+	paramsA := readNotification(t, e.conn, "files.dropped", 5*time.Second)
+	var gotA struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(paramsA, &gotA); err != nil {
+		t.Fatalf("unmarshal A: %v", err)
+	}
+	if gotA.SessionID != e.sid {
+		t.Fatalf("tab A heard about session %q, want its own %q", gotA.SessionID, e.sid)
 	}
 }

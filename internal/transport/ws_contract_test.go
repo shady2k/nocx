@@ -700,16 +700,43 @@ func TestFilesDropped_DTOConformsToContract(t *testing.T) {
 // drop calls, so this is the whole native path minus the OS.
 func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.dropped.schema.json")
-	h := newInventoryHarness(t)
-	st := NewSourceTicketStore(h.ws)
-	if err := st.Dropped(
+	e := newDropEnv(t)
+	if err := e.ws.UploadSources().Dropped(
 		[]string{seedFile(t, "dropped-over-the-wire.bin", 3)},
-		map[string]string{"data-session-id": "0123456789abcdef0123456789abcdef"},
+		map[string]string{"data-session-id": e.sid},
 	); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
-	params := readNotification(t, h.conn, "files.dropped", 5*time.Second)
+	params := readNotification(t, e.conn, "files.dropped", 5*time.Second)
 	validateJSON(t, schema, params, "files.dropped notification")
+}
+
+// And the same notification for the tab that mints nothing: a drop on a
+// LOCAL tab still tells the renderer what was dropped, so the prompt insert
+// works in the Wails window, and carries no ticket because nothing may be
+// uploaded onto the machine the file is already on (D9). The empty ticket
+// is part of the contract rather than an accident of it.
+func TestFilesDropped_ALocalTabsNotificationConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.dropped.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1) // the `open` method opens a LOCAL session
+	if err := e.ws.UploadSources().Dropped(
+		[]string{seedFile(t, "local-drop.bin", 3)},
+		map[string]string{"data-session-id": sid},
+	); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	params := readNotification(t, e.conn, "files.dropped", 5*time.Second)
+	validateJSON(t, schema, params, "files.dropped notification (local tab)")
+	var got struct {
+		Sources []SourcePick `json:"sources"`
+	}
+	if err := json.Unmarshal(params, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Sources) != 1 || got.Sources[0].Ticket != "" {
+		t.Fatalf("sources = %+v, want one entry with no ticket", got.Sources)
+	}
 }
 
 // ── shell.openUrl (brief, nocx-hc0m) ────────────────────────────────────

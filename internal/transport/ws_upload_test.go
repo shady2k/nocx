@@ -931,3 +931,119 @@ func TestFilesUpload_ASourceTicketIsRedeemedExactlyOnce(t *testing.T) {
 		t.Fatalf("a second redemption must be refused with -32602, got %+v", env)
 	}
 }
+
+// ── R1 on the source side: a ticket is redeemed by the tab it names ──────
+
+// TestFilesUpload_RefusesATicketDroppedOnAnotherTab is R1 read as a
+// property of the addressing rather than as renderer discipline.
+//
+// Binding authorisation proves the caller owns the DESTINATION. It proves
+// nothing about where the file was dropped — so a ticket that named no tab
+// could be paired with any remote binding the connection owned, and a file
+// dropped on tab A could be sent to host B by a renderer that simply
+// quoted the other bindingId. Both bindings below are legitimately this
+// connection's; the pairing is what is refused.
+func TestFilesUpload_RefusesATicketDroppedOnAnotherTab(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sidA := e.openSession(t, 1)
+	sidB := e.openSession(t, 2)
+	dirB := t.TempDir()
+	bidB := e.openBinding(t, sidB, dirB, 3)
+
+	src := filepath.Join(t.TempDir(), "for-a.txt")
+	if err := os.WriteFile(src, []byte("meant for tab A"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Minted the way a window drop mints: bound to the tab it landed on.
+	pick, err := e.ws.UploadSources().mint(src, session.ID(sidA))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	p := uploadParams(bidB, dirB, "for-a.txt", pick.Size)
+	p["sourceTicket"] = pick.Ticket
+	env := callUpload(t, e.conn, p, 4)
+	if env.Error == nil {
+		t.Fatal("a ticket dropped on tab A was redeemed against tab B's binding")
+	}
+	if env.Error.Code != -32602 {
+		t.Fatalf("code = %d, want -32602", env.Error.Code)
+	}
+	if _, statErr := os.Stat(filepath.Join(dirB, "for-a.txt")); statErr == nil {
+		t.Fatal("the refused pairing still put a file on tab B's machine")
+	}
+	// The ticket is spent either way: it named a gesture, and the gesture
+	// has now been answered wrongly once. Nothing may retry it.
+	if n := e.ws.UploadSources().Len(); n != 0 {
+		t.Errorf("%d tickets survive a refused pairing, want 0", n)
+	}
+}
+
+// The paired success, without which the refusal above is satisfied by a
+// handler that refuses everything: the same ticket, redeemed against the
+// tab it was dropped on, moves the bytes.
+func TestFilesUpload_ATicketIsRedeemedByTheTabItWasDroppedOn(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	want := []byte("dropped on this very tab")
+	src := filepath.Join(t.TempDir(), "here.txt")
+	if err := os.WriteFile(src, want, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pick, err := e.ws.UploadSources().mint(src, session.ID(sid))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	p := uploadParams(bid, dir, "here.txt", pick.Size)
+	p["sourceTicket"] = pick.Ticket
+	got := callUpload(t, e.conn, p, 3).mustResult(t)
+	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	landed, err := os.ReadFile(filepath.Join(dir, "here.txt")) //nolint:gosec // see above
+	if err != nil || !bytes.Equal(landed, want) {
+		t.Fatalf("destination = %q, %v; want the dropped bytes", landed, err)
+	}
+}
+
+// The picker's ticket names no tab, and that is a decision rather than an
+// omission (see SourceTicketStore.Mint): the picker gesture is "choose a
+// file", not "drop it there", so there is no tab it could name that the
+// renderer would not itself have authored. It is bound by the tab that
+// redeems it, once — which the one-shot claim already guarantees.
+func TestFilesUpload_APickerTicketIsBoundByTheTabThatRedeemsIt(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sidA := e.openSession(t, 1)
+	sidB := e.openSession(t, 2)
+	dirB := t.TempDir()
+	bidB := e.openBinding(t, sidB, dirB, 3)
+	_ = sidA
+
+	want := []byte("chosen in the picker")
+	src := filepath.Join(t.TempDir(), "picked.txt")
+	if err := os.WriteFile(src, want, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Mint, not mint(path, sid): this is the picker seam's call.
+	pick, err := e.ws.UploadSources().Mint(src)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	p := uploadParams(bidB, dirB, "picked.txt", pick.Size)
+	p["sourceTicket"] = pick.Ticket
+	got := callUpload(t, e.conn, p, 4).mustResult(t)
+	if state := awaitUploadState(t, e.ws, got.TransferID); state != uploadStateWritten {
+		t.Fatalf("state = %q, want %q", state, uploadStateWritten)
+	}
+	// #nosec G304 — under this test's own t.TempDir().
+	landed, err := os.ReadFile(filepath.Join(dirB, "picked.txt")) //nolint:gosec // see above
+	if err != nil || !bytes.Equal(landed, want) {
+		t.Fatalf("destination = %q, %v", landed, err)
+	}
+}

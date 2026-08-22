@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/files.dropped.schema.json",
   "title": "FilesDropped",
-  "description": "The files.dropped JSON-RPC notification: files were dropped onto the window, and the backend has minted a source ticket for each of them. Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape — which is exactly where an addressing defect would hide, and why it is declared here like a result. In the Wails window a drop delivers absolute paths to the Go side, not File objects; the renderer must never see those paths (design R2), so Go mints and sends tickets, names and sizes instead. Read what this notification does NOT carry as part of the contract: there is no bindingId, no destDir and no path, because the native side resolves NO destination. The renderer takes these tickets and calls files.upload with its own bindingId, like any other caller, so the drop gesture joins the same authorised route rather than becoming a second addressing scheme that skips the connection's session set. The sessionId is a routing hint — which tab the drop landed on — and authorises nothing on its own.",
+  "description": "The files.dropped JSON-RPC notification: files were dropped onto the window, and the backend has minted a source ticket for each of them that can be uploaded. Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape — which is exactly where an addressing defect would hide, and why it is declared here like a result. In the Wails window a drop delivers absolute paths to the Go side, not File objects; the renderer must never see those paths (design R2), so Go mints and sends tickets, names and sizes instead. It is addressed to the renderer attached to the session it names, resolved at emit time, the way files.changed is — never broadcast: a ticket is a bearer credential, and handing every attached client the credentials for a drop it was not the target of gives away more than any later refusal can take back. Read what this notification does NOT carry as part of the contract: there is no bindingId, no destDir and no path, because the native side resolves NO destination. The renderer takes these tickets and calls files.upload with its own bindingId, like any other caller, so the drop gesture joins the same authorised route rather than becoming a second addressing scheme that skips the connection's session set.",
   "type": "object",
   "additionalProperties": false,
   "required": ["sessionId", "sources"],
   "properties": {
     "sessionId": {
-      "description": "The session the drop target belonged to, read from the drop element's data-session-id attribute and held to the shape a server-minted session id has (32 lowercase hex characters) before it goes back out on the wire. It tells the renderer which tab was dropped on; what actually authorises the write is the binding the renderer names in files.upload, re-checked against the requesting connection.",
+      "description": "The session the drop target belonged to, read from the drop element's data-session-id attribute, held to the shape a server-minted session id has (32 lowercase hex characters) and then to the harder question the shape cannot ask: that it names a session this backend actually has open. It tells the renderer which tab was dropped on. What authorises the write is still the binding the renderer names in files.upload, re-checked against the requesting connection; what the ticket adds is that the write goes to THIS tab and not to some other tab the same connection happens to own.",
       "type": "string",
       "pattern": "^[0-9a-f]{32}$"
     },
@@ -21,9 +21,9 @@
         "required": ["sourceTicket", "name", "size"],
         "properties": {
           "sourceTicket": {
-            "description": "The one-shot source ticket for this file, 32 lowercase hex characters from crypto/rand. Unlike dialog.openFileForUpload's, it is never empty — a drop that minted nothing is not sent. Same bearer-credential rules: never logged, never in an error string, claimed exactly once.",
+            "description": "The one-shot source ticket for this file, 32 lowercase hex characters from crypto/rand — or EMPTY, which is not an omission but the answer for a drop on a local tab. A local tab does not copy (design D9): the terminal inserts the dropped name at the prompt, because copying a file onto the machine it is already on is not a thing anybody asked for. So nothing is minted for it, and the notification is still sent because in the Wails window the drop never becomes a DOM event the renderer could read the name from. A credential nobody redeems is still a credential that exists, which is why the empty string is here rather than a ticket the renderer would abandon. When it is present it is bound to the session above and files.upload refuses to pair it with a binding on any other tab. Same bearer-credential rules: never logged, never in an error string, claimed exactly once.",
             "type": "string",
-            "pattern": "^[0-9a-f]{32}$"
+            "pattern": "^([0-9a-f]{32})?$"
           },
           "name": {
             "description": "The dropped file's BASE name, for display and for the default destination name. Never a path: the directory it came from stays in the backend's address space.",

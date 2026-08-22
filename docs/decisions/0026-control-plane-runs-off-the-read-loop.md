@@ -121,27 +121,38 @@ nothing wrong. Invisible on a fast host, where the response beat the next reques
 and reproducible under load. The waiting gate exists to bridge exactly that
 response/release tail window; only exhausting a bound is a refusal.
 
+The same window later reappeared on the **native picker**, which had been left in
+the instant-refusal class because "a second picker must never stack over the first"
+reads like an overload bound. It is not one: a picker is a serialisation point, and
+one at a time is a queue of length two. Held instantly-refusing, it refused its own
+tail — `dialog.openFile` sorts immediately before `dialog.openFileForUpload`, so a
+sweep that calls every method in order was told "Control plane busy" and the picker
+never opened (`nocx-9le.8.2`). The gate is now a waiting gate acquired inside the
+task, exactly like a domain gate; refusal is what a picker a human left open still
+produces, once the wait bound runs out.
+
 ### 5. The bounds
 
 All numbers are named at the composition root or its defaults — the same way the D14
 bounds are named there, so a reviewer looks in one place
 (`internal/app/app.go`, `internal/transport/ws.go`):
 
-| bound                             | value                                                                               | where                                     |
-| --------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------- |
-| per-connection outbound queue     | `outbound.DefaultQueueDepth` = 256 frames                                           | `internal/transport/outbound/outbound.go` |
-| reserved response queue           | `outbound.DefaultResponseQueueDepth` = 64 frames                                    | same                                      |
-| per-write deadline                | `outbound.DefaultWriteDeadline` = 10 s                                              | same                                      |
-| process-wide outbound             | `outboundBudgetBytes` = 32 MiB queued bytes                                         | `internal/transport/ws.go`                |
-| ordinary lane capacity            | `DefaultControlLaneCapacity` = 8 concurrent tasks                                   | `ws.go`, named at the composition root    |
-| conflict wait timeout             | `DefaultDomainConflictWaitTimeout` = 1 s per waiter                                 | `ws.go`, named at the composition root    |
-| conflict queue bound              | `DefaultDomainMaxQueue` = 8 registered waiters per gate; beyond, refusal is instant | `ws.go`                                   |
-| per-operation in-flight bound     | `DefaultDomainQueueDepth` = 8 tasks (waiting or running), refused at submit time    | `ws.go`                                   |
-| probe / dialog resource admission | capacity one, composed with the lane                                                | `ws.go` `buildControlPlane`               |
-| frame ceiling                     | `wsReadLimit` = 16 MiB (protocol-layer, close code 1009)                            | `ws.go`                                   |
-| envelope scan cap                 | `envelopeScanCap` = 4 KiB                                                           | `ws.go`                                   |
-| params budgets                    | `budgetTiny` 1 KiB / `budgetDefault` 64 KiB / `budgetDocument` 8 MiB                | `ws.go`                                   |
-| shutdown drain                    | `defaultControlDrainTimeout` = 5 s                                                  | `ws_control.go`                           |
+| bound                         | value                                                                               | where                                     |
+| ----------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------- |
+| per-connection outbound queue | `outbound.DefaultQueueDepth` = 256 frames                                           | `internal/transport/outbound/outbound.go` |
+| reserved response queue       | `outbound.DefaultResponseQueueDepth` = 64 frames                                    | same                                      |
+| per-write deadline            | `outbound.DefaultWriteDeadline` = 10 s                                              | same                                      |
+| process-wide outbound         | `outboundBudgetBytes` = 32 MiB queued bytes                                         | `internal/transport/ws.go`                |
+| ordinary lane capacity        | `DefaultControlLaneCapacity` = 8 concurrent tasks                                   | `ws.go`, named at the composition root    |
+| conflict wait timeout         | `DefaultDomainConflictWaitTimeout` = 1 s per waiter                                 | `ws.go`, named at the composition root    |
+| conflict queue bound          | `DefaultDomainMaxQueue` = 8 registered waiters per gate; beyond, refusal is instant | `ws.go`                                   |
+| per-operation in-flight bound | `DefaultDomainQueueDepth` = 8 tasks (waiting or running), refused at submit time    | `ws.go`                                   |
+| probe / agent-probe admission | capacity one, composed with the lane, acquired at submit (instant refusal)          | `ws.go` `buildControlPlane`               |
+| native picker (dialog) gate   | capacity one, WAITING, composed with the lane, acquired inside the task             | `ws.go` `buildControlPlane`               |
+| frame ceiling                 | `wsReadLimit` = 16 MiB (protocol-layer, close code 1009)                            | `ws.go`                                   |
+| envelope scan cap             | `envelopeScanCap` = 4 KiB                                                           | `ws.go`                                   |
+| params budgets                | `budgetTiny` 1 KiB / `budgetDefault` 64 KiB / `budgetDocument` 8 MiB                | `ws.go`                                   |
+| shutdown drain                | `defaultControlDrainTimeout` = 5 s                                                  | `ws_control.go`                           |
 
 ### 6. Saturation
 

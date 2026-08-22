@@ -436,6 +436,16 @@ func TestSourceTicket_CannotBeMintedFromTheWire(t *testing.T) {
 	if n := picker.store.Len(); n != 0 {
 		t.Fatalf("%d tickets exist after asking every one of %d methods for a path, want 0", n, len(names))
 	}
+	// And the SERVER's own mint is empty too. The picker's store is the one
+	// a legitimate mint lands in; s.sources is the one a wire-reachable mint
+	// would land in, because it is the store the upload flow claims from —
+	// so watching only the picker's store leaves the attack it is guarding
+	// against unobserved. Measured, not assumed: with a mint wired into the
+	// dispatcher for every frame naming `sourcePath`, this sweep stayed
+	// green until this assertion existed (nocx-9le.8.2).
+	if n := h.ws.UploadSources().Len(); n != 0 {
+		t.Fatalf("%d tickets exist in the SERVER's store after asking every one of %d methods for a path, want 0", n, len(names))
+	}
 
 	// Sweep two: every method again with no params at all — the shape that
 	// DOES reach the picker handler. Exactly one method opens the picker,
@@ -449,6 +459,9 @@ func TestSourceTicket_CannotBeMintedFromTheWire(t *testing.T) {
 	}
 	if n := picker.store.Len(); n != 1 {
 		t.Fatalf("%d tickets exist after sweeping %d methods twice, want 1 — the one the picker minted", n, len(names))
+	}
+	if n := h.ws.UploadSources().Len(); n != 0 {
+		t.Fatalf("%d tickets exist in the SERVER's store after sweeping %d methods twice, want 0", n, len(names))
 	}
 	// And the one ticket that does exist names the PICKER's file, not the
 	// path the first sweep asked every method for.

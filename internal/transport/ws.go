@@ -306,11 +306,17 @@ type WSServer struct {
 	// returns, cancelled or not — that is what releases the admission slot
 	// for the next connection.
 	probeSub control.Submission
-	// dialogSub admits and runs dialog.openFile off the read loop. Capacity
-	// one composed with the lane: while a dialog is open the native
-	// capability is busy, and a second dialog.openFile from any connection
-	// is refused rather than stacking a second picker over the first.
+	// dialogSub runs the dialog methods off the read loop under a bounded
+	// queue. It does NOT carry the native-picker capability: that is
+	// dialogAdmit, acquired on the task goroutine.
 	dialogSub control.Submission
+	// dialogAdmit is the native picker itself — a capacity-one WAITING gate
+	// composed with the lane, acquired inside the task (dialogHandlers), not
+	// at submit time. It is a serialisation point, not an execution bound:
+	// one picker at a time, and a request that arrives while the capability
+	// is held waits for it. Only exhausting a bound refuses, which is what
+	// still stops a second picker stacking over one a human left open.
+	dialogAdmit control.Admission
 	// inflight tracks admitted off-loop tasks so Stop cancels them and
 	// waits, bounded, for them to drain (see Stop's documented maximum).
 	inflight inflight
@@ -1012,18 +1018,36 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 func (s *WSServer) buildControlPlane() {
 	lane := control.NewSemaphore("control", s.laneCapacity)
 	s.lane = control.NewBoundedSubmission(lane)
-	// Probe, agent probe and dialog keep their own capacity-one resource
-	// admissions composed with the lane (canonical order: resource before
-	// execution permit): a second probe or dialog is refused even while the
-	// lane has free permits, and every task still occupies one lane permit.
+	// Probe and agent probe keep their own capacity-one resource admissions
+	// composed with the lane (canonical order: resource before execution
+	// permit): a second probe is refused even while the lane has free
+	// permits, and every task still occupies one lane permit.
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
 	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("agent-probe", 1), lane))}
 	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("agent-ask", askStreamCapacity), lane))}
-	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
-		control.NewSemaphore("dialog", 1), lane))}
+	// The native picker is the one of these that is NOT an execution bound.
+	// A probe competes for a scarce worker; a picker is a serialisation
+	// point — one at a time, and the second may proceed once the first
+	// closes. Held in the instant-refusal class it refused its own tail: a
+	// handler enqueues its response inside the task and the permit is
+	// returned only after the task goroutine returns, so a sequential
+	// client's very next dialog request landed in that window and was told
+	// "Control plane busy" for doing nothing wrong. That is precisely the
+	// window ADR-0026 item 4 says the waiting gate exists to bridge, and it
+	// is what made the R2 sweep report the picker opening zero times:
+	// dialog.openFile sorts immediately before dialog.openFileForUpload.
+	//
+	// So the capability moves to the waiting class and, because a waiting
+	// admission may never be wired into a Submission (ADR-0026 item 3 of
+	// Enforcement — a compile error, not a convention), it is acquired on
+	// the task goroutine by the handler. The submission that remains is a
+	// bounded queue, exactly as a domain operation's is.
+	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("dialog")}
+	s.dialogAdmit = control.NewComposite(
+		control.NewWaitingSemaphore("dialog", 1, s.domainMaxQueue, s.domainWaitTimeout), lane)
 	// Domain-gated methods do not register on the lane submission: their
 	// operation acquires the conflict gates (waiting, bounded) and THEN the
 	// lane inside Run, on the task goroutine, so waiting conflict work never

@@ -851,6 +851,10 @@ type apiSendResponse struct {
 	Failure *apiSendFailureWire `json:"failure"`
 	// RemoteAddr is what answered the dial, "" when nothing did.
 	RemoteAddr string `json:"remoteAddr"`
+	// DNSAddresses is what the resolver answered for the host, in its own
+	// order. Never null — the schema says [] for "no lookup" and for "the
+	// lookup failed" alike.
+	DNSAddresses []string `json:"dnsAddresses"`
 	// Timings are the phases as far as the attempt got; one never reached
 	// is 0.
 	Timings apiTimingsWire `json:"timings"`
@@ -1196,11 +1200,23 @@ func wireParams(ps []apicoll.Param) []apiParamWire {
 // send result is built, so the contract's invariants — a request block
 // whatever the outcome, a never-null certificate list, `response` and
 // `failure` mutually exclusive — hold here or nowhere.
+// neverNull is the wire's rule for a list, applied where a Go nil would
+// otherwise marshal as `null`: the schema says [] for an empty answer, and a
+// renderer that has to check for null is a renderer that will forget once.
+// The same defect shipped before in vault.status's `providers`.
+func neverNull(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
 func wireExchange(ex apisend.Exchange, environment string, route apicoll.Route) apiSendResponse {
 	out := apiSendResponse{
 		Outcome:      string(ex.Outcome),
 		Request:      wireRaw(ex.Request),
 		RemoteAddr:   ex.RemoteAddr,
+		DNSAddresses: neverNull(ex.DNSAddresses),
 		Timings:      wireTimings(ex.Timings),
 		Certificates: wireCertificates(ex.Certificates),
 		Environment:  environment,

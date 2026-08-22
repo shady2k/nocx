@@ -131,6 +131,20 @@ type Exchange struct {
 	// Timings are the phases AS FAR AS THE ATTEMPT GOT — one never reached
 	// is 0, which is the honest answer rather than an absence.
 	Timings Timings
+	// DNSAddresses is what the resolver ANSWERED for the host, in the order
+	// it answered, and empty when there was no lookup to make (an address
+	// literal, a route that resolves on the far side) or when the lookup
+	// failed. Never nil.
+	//
+	// It is here because "which address did this actually go to" and "what
+	// does this name resolve to" are two different questions and RemoteAddr
+	// only answers the first: a name with four A records tells you that the
+	// one that answered was one of four, and a name that resolves to a
+	// stale address tells you why a request went somewhere nobody expected.
+	// The resolver's answer is a fact about the attempt, so it rides the
+	// attempt rather than being looked up again by whoever reads the run —
+	// a second lookup a second later can legitimately differ.
+	DNSAddresses []string
 	// Certificates is the chain the server presented, leaf first. Never nil.
 	// EMPTY for a failure at PhaseTLS, and that is a real limit: net/http
 	// hands the trace an empty connection state when the handshake fails,
@@ -319,6 +333,7 @@ func (c *Client) Send(ctx context.Context, r apicoll.Request, k Key, used ...Nam
 		Outcome:      Answered,
 		Request:      sent,
 		RemoteAddr:   tr.remote(),
+		DNSAddresses: tr.resolved(),
 		Timings:      tr.timings(total),
 		Certificates: certs,
 		Response:     &out,
@@ -408,6 +423,7 @@ func settled(sent Raw, tr *tracer, total time.Duration, phase Phase, err error) 
 		Outcome:      Failed,
 		Request:      sent,
 		RemoteAddr:   tr.remote(),
+		DNSAddresses: tr.resolved(),
 		Timings:      tr.timings(total),
 		Certificates: tr.certificates(),
 		Failure:      &Failure{Phase: phase, Reason: err.Error()},
@@ -730,6 +746,7 @@ type traceKey struct{}
 // run on the transport's goroutines, so every field is behind the mutex.
 type tracer struct {
 	mu         sync.Mutex
+	dnsAddrs   []string
 	dns        time.Duration
 	connect    time.Duration
 	tlsTime    time.Duration
@@ -849,11 +866,18 @@ func (t *tracer) hooks() *httptrace.ClientTrace {
 			defer t.mu.Unlock()
 			t.dnsStart = time.Now()
 		},
-		DNSDone: func(httptrace.DNSDoneInfo) {
+		DNSDone: func(info httptrace.DNSDoneInfo) {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 			if !t.dnsStart.IsZero() {
 				t.dns = time.Since(t.dnsStart)
+			}
+			// The answer, in the resolver's own order — that order is what
+			// the dialler tries first, so re-sorting it here would describe
+			// a lookup nobody made. A failed lookup carries Err and no
+			// addresses, and then there is nothing to record.
+			for _, a := range info.Addrs {
+				t.dnsAddrs = append(t.dnsAddrs, a.String())
 			}
 		},
 		TLSHandshakeStart: func() {
@@ -902,6 +926,17 @@ func (t *tracer) remote() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.remoteAddr
+}
+
+// resolved is the resolver's answer, copied out under the lock. Never nil:
+// the wire declares an empty list rather than a null, and a caller that has
+// to check for one is a caller that will forget.
+func (t *tracer) resolved() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, len(t.dnsAddrs))
+	copy(out, t.dnsAddrs)
+	return out
 }
 
 // Certificate is one certificate from the chain a server presented, in the

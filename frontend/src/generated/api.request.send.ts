@@ -45,6 +45,10 @@ export interface ApiRequestSendResult {
    * The address that actually answered the dial, and "" when nothing did. It is on the EXCHANGE rather than on the response because it is a fact about the attempt: a run that failed at `tls` still reached a machine, and which machine it reached is the first thing anybody asks. Its presence is also what distinguishes a dial that never landed from a connection that broke later, which is how the phase is classified.
    */
   remoteAddr: string
+  /**
+   * What the resolver ANSWERED for the host, in the order it answered — the order the dialler tries, so re-sorting it would describe a lookup nobody made. Never null: no lookup to make (an address literal, or a route that resolves on the far side) and a lookup that FAILED are both []. It is beside remoteAddr rather than folded into it because the two answer different questions: remoteAddr is which address answered, and this is what the name stands for — a name with four A records says the one that answered was one of four, and a name that resolves to a stale address says why a request went somewhere nobody expected. Recorded from the attempt rather than looked up again by whoever reads the run: a second lookup a second later can legitimately differ.
+   */
+  dnsAddresses: string[]
   timings: Timings
   /**
    * The chain the SERVER PRESENTED, leaf first, described by the side that saw the bytes. Never null: a plain http exchange presents none and that is []. It is EMPTY for a failure at phase `tls`, and that is a real limit rather than an oversight — net/http hands the trace an empty connection state when the handshake fails, and recovering the chain from a rejected handshake would mean turning verification off and re-implementing it here, which is the second X.509 implementation apisend.Certificate exists to refuse.

@@ -185,6 +185,10 @@ export function sendFixture(
     environment,
     route,
     remoteAddr: '10.0.3.17:443',
+    // A real answer rather than []: a renderer that drops the field cannot
+    // then pass by rendering nothing, which is the whole reason the fixtures
+    // carry values instead of zero shapes.
+    dnsAddresses: ['10.0.3.17', '10.0.3.18'],
     timings: { dnsMs: 4, connectMs: 21, tlsMs: 38, ttfbMs: 118, totalMs: 184 },
     certificates: [],
   }
@@ -210,6 +214,10 @@ export function failedSendFixture(
     environment: '',
     route: { kind: 'direct', profileId: '', insecureTls: false },
     remoteAddr: '',
+    // Empty, and deliberately so: this fixture's failure is a dial that
+    // never landed, and a lookup that answered nothing is the ordinary
+    // shape of one.
+    dnsAddresses: [],
     timings: { dnsMs: 3, connectMs: 0, tlsMs: 0, ttfbMs: 0, totalMs: 3 },
     certificates: [],
     ...over,

@@ -589,3 +589,86 @@
   color: var(--color-warning);
   font-size: var(--font-size-sm);
 }
+
+/* ── The exchange, drawn to scale ─────────────────────────────────────────
+   Five phases of one run as one bar (api/timing-bar.tsx says why it is here
+   and not in the kit). Colours are tokens, and each phase gets a DIFFERENT
+   token rather than five mixes of one: a reader who cannot separate two
+   hues still has a legend under the bar naming every span it draws, and the
+   swatch beside each name is the same paint as the span. */
+.api-timing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.api-timing__bar {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--color-surface-raised);
+}
+
+.api-timing__span {
+  height: 100%;
+  min-width: 2px;
+  /* The share is the only thing the component says about a span; the
+     property's fallback is what a span looks like before one is set. */
+  width: var(--api-timing-share, 0%);
+}
+
+.api-timing__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  align-items: center;
+}
+
+.api-timing__key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The total is a fact about the whole bar, not a span on it, so it carries no
+   swatch and sits after the phases it sums. */
+.api-timing__key[data-total='true'] {
+  margin-left: auto;
+}
+
+.api-timing__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.api-timing__span[data-phase='resolve'],
+.api-timing__swatch[data-phase='resolve'] {
+  background: var(--color-accent-secondary);
+}
+
+.api-timing__span[data-phase='connect'],
+.api-timing__swatch[data-phase='connect'] {
+  background: var(--color-accent);
+}
+
+.api-timing__span[data-phase='tls'],
+.api-timing__swatch[data-phase='tls'] {
+  background: var(--color-success);
+}
+
+/* Waiting is the far side thinking, and it is the span that is usually the
+   longest and the one worth noticing — the warning tone is the loudest thing
+   on the bar for that reason, not because waiting is wrong. */
+.api-timing__span[data-phase='waiting'],
+.api-timing__swatch[data-phase='waiting'] {
+  background: var(--color-warning);
+}
+
+.api-timing__span[data-phase='download'],
+.api-timing__swatch[data-phase='download'] {
+  background: var(--color-text-dim);
+}

@@ -16,7 +16,14 @@ package apisend
 //     rather than in one test, so every failure test in this package proves
 //     it in passing.
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/shady2k/nocx/internal/apicoll"
+)
 
 // answered asserts the exchange came back and returns the response.
 func answered(t *testing.T, ex Exchange, err error) Response {
@@ -91,4 +98,33 @@ func failedAt(t *testing.T, ex Exchange, err error, want Phase) Failure {
 		t.Error("Request.Spans is nil; a side with nothing to mark is []")
 	}
 	return f
+}
+
+// The resolver's answer rides the attempt. It is a separate fact from the
+// address that answered: a name with several records says the one that
+// answered was one of several, and a name that resolves to something stale
+// says why a request went somewhere nobody expected.
+func TestExchange_CarriesWhatTheResolverAnswered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New()
+	ex, err := c.Send(context.Background(), apicoll.Request{Method: "GET", URL: srv.URL}, Key{})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if ex.Outcome != Answered {
+		t.Fatalf("outcome = %q", ex.Outcome)
+	}
+	// httptest serves on 127.0.0.1 as an address literal, so there is no
+	// lookup to make and the answer is EMPTY — never nil, because the wire
+	// declares a list and a nil marshals as null.
+	if ex.DNSAddresses == nil {
+		t.Fatal("DNSAddresses is nil; the wire declares a list and [] is the empty answer")
+	}
+	if len(ex.DNSAddresses) != 0 {
+		t.Fatalf("DNSAddresses = %v, want empty for an address literal", ex.DNSAddresses)
+	}
 }

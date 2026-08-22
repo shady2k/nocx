@@ -385,16 +385,21 @@ export function certificateText(cert: ApiCertificate, index: number): string {
  */
 export function connectionRawText(where: {
   remoteAddr: string
-  timings: ApiTimings
+  dnsAddresses: readonly string[]
   tlsVersion?: string
   tlsCipherSuite?: string
 }): string {
-  const t = where.timings
   const head = [where.remoteAddr, where.tlsVersion ?? '', where.tlsCipherSuite ?? '']
     .filter((s) => s !== '')
     .join('  ')
-  const phases = `dns ${t.dnsMs}ms · connect ${t.connectMs}ms · tls ${t.tlsMs}ms · ttfb ${t.ttfbMs}ms · total ${t.totalMs}ms`
-  return head === '' ? phases : `${head}\n${phases}`
+  // The resolver's answer on its own line, and only when there was one. It is
+  // BELOW the address that answered because that is the order the two facts
+  // arrive in and the order a person reads them: this name stands for these
+  // addresses, and this is the one that took the call. A single address that
+  // equals remoteAddr's host is still worth printing — "it resolved, and to
+  // exactly one thing" is an answer, and its absence is a different one.
+  const resolved = where.dnsAddresses.length > 0 ? `resolved  ${where.dnsAddresses.join(', ')}` : ''
+  return [head, resolved].filter((line) => line !== '').join('\n')
 }
 
 /**

@@ -13,6 +13,7 @@
     "environment",
     "route",
     "remoteAddr",
+    "dnsAddresses",
     "timings",
     "certificates"
   ],
@@ -73,6 +74,11 @@
     "remoteAddr": {
       "description": "The address that actually answered the dial, and \"\" when nothing did. It is on the EXCHANGE rather than on the response because it is a fact about the attempt: a run that failed at `tls` still reached a machine, and which machine it reached is the first thing anybody asks. Its presence is also what distinguishes a dial that never landed from a connection that broke later, which is how the phase is classified.",
       "type": "string"
+    },
+    "dnsAddresses": {
+      "description": "What the resolver ANSWERED for the host, in the order it answered — the order the dialler tries, so re-sorting it would describe a lookup nobody made. Never null: no lookup to make (an address literal, or a route that resolves on the far side) and a lookup that FAILED are both []. It is beside remoteAddr rather than folded into it because the two answer different questions: remoteAddr is which address answered, and this is what the name stands for — a name with four A records says the one that answered was one of four, and a name that resolves to a stale address says why a request went somewhere nobody expected. Recorded from the attempt rather than looked up again by whoever reads the run: a second lookup a second later can legitimately differ.",
+      "type": "array",
+      "items": { "type": "string" }
     },
     "timings": {
       "description": "The phases of the attempt, AS FAR AS IT GOT — a phase never reached is 0, which is the honest answer rather than an absence. On the exchange for the same reason remoteAddr is: a failed run took time too, and how long it spent before it gave up is the difference between a refusal and a hang.",

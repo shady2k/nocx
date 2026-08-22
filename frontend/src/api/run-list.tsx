@@ -30,8 +30,10 @@ import { StatusDot } from '../ui/status-dot'
 import { createSecretChip, createSecretChipDamaged } from '../ui/secret-chip'
 import { ResponseBody } from './response-body'
 import type { ApiRun, ApiRunView } from './api-store'
+import { TimingBar } from './timing-bar'
 import {
   type ApiCertificate,
+  type ApiTimings,
   type ApiRaw,
   type ApiRawSegment,
   bodySummary,
@@ -135,10 +137,11 @@ function Run(props: {
             response={res?.raw ?? null}
             connection={connectionRawText({
               remoteAddr: run().remoteAddr,
-              timings: run().timings ?? EMPTY_TIMINGS,
+              dnsAddresses: run().dnsAddresses,
               tlsVersion: res?.tlsVersion,
               tlsCipherSuite: res?.tlsCipherSuite,
             })}
+            timings={run().timings ?? EMPTY_TIMINGS}
             certificates={run().certificates}
           />
         ),
@@ -339,6 +342,9 @@ function RawExchange(props: {
    *  (api-model.ts). */
   response: ApiRaw | null
   connection: string
+  /** How the elapsed time was spent — drawn, because five numbers in a row
+   *  make the reader do the subtraction that answers "where did it go". */
+  timings: ApiTimings
   certificates: readonly ApiCertificate[]
 }) {
   return (
@@ -348,7 +354,10 @@ function RawExchange(props: {
         <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg)}</For>
       </CodeBlock>
       <Caption>── connection ──</Caption>
-      <CodeBlock ariaLabel="Connection">{props.connection}</CodeBlock>
+      <Show when={props.connection !== ''}>
+        <CodeBlock ariaLabel="Connection">{props.connection}</CodeBlock>
+      </Show>
+      <TimingBar timings={props.timings} />
       {/* WHAT WAS ON THE OTHER END. Present for any TLS exchange, not only
           the unverified ones — but it is the unverified ones it exists for:
           with the check off, "which certificate did I just trust" is the

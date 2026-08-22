@@ -159,6 +159,9 @@ export interface ApiRun {
   readonly request: ApiRaw | null
   /** What answered the dial, '' when nothing did or nothing has yet. */
   readonly remoteAddr: string
+  /** What the resolver answered for the host, in its own order. Empty when
+   *  there was no lookup to make, when it failed, and while pending. */
+  readonly dnsAddresses: readonly string[]
   /** The phases as far as the attempt got, or null while pending. */
   readonly timings: ApiTimings | null
   /** The chain the server presented. Never null once the run has settled. */
@@ -1001,6 +1004,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         route: { kind: 'direct', profileId: '', insecureTls: false },
         request: null,
         remoteAddr: '',
+        dnsAddresses: [],
         timings: null,
         certificates: [],
         response: null,
@@ -1060,6 +1064,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     route: result.route,
     request: result.request,
     remoteAddr: result.remoteAddr,
+    dnsAddresses: result.dnsAddresses,
     timings: result.timings,
     certificates: result.certificates,
     response: result.response,

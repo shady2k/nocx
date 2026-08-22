@@ -899,3 +899,34 @@ describe('the filter slot', () => {
     expect(panel.querySelector('.ui-sidebar-view__actions')).toBeNull()
   })
 })
+
+describe('sidebar view-zone actions', () => {
+  it('renders an action beside the Files view, not in the Files panel header', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      [TWO_VIEWS[0]],
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          id: 'sandbox-shield',
+          title: 'Sandbox',
+          icon: TestIcon,
+          onActivate: () => {},
+        },
+      ],
+    )
+
+    const topButtons = [...bar.querySelectorAll<HTMLElement>('.activity-bar-top button')]
+    expect(
+      topButtons.map((button) => button.getAttribute('data-view') ?? button.dataset.action),
+    ).toEqual(['alpha', 'sandbox-shield'])
+    expect(panel.querySelector('[data-testid="sandbox-shield"]')).toBeNull()
+  })
+})

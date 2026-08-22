@@ -324,7 +324,12 @@ select:focus-visible {
      spent 13% of it on air before a surface added its own — the Git panel's
      rows were losing the file name to it. The header and the body move
      together, because the invariant below is that they match. */
-  padding: 12px var(--space-2);
+  /* Asymmetric on purpose: the room ABOVE separates the panel's name from
+     the tab strip, the room BELOW only pushed the content away from the
+     title it belongs to. 12px each side put 24px between the heading and the
+     first row once a surface added its own group spacing, which read as a
+     gap rather than as a join (owner, 2026-08-22). */
+  padding: 12px var(--space-2) var(--space-1);
   font-weight: 600;
   /* BODY SIZE, and it is shared by every panel — Files, Git, Ports,
      Operations — so they stay one family. It was --font-size-sm, which left

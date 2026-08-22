@@ -48,3 +48,11 @@
   font-variant-numeric: tabular-nums;
   color: var(--color-text-muted);
 }
+
+/* AND THE FIRST GROUP ADDS NOTHING. The margin above a heading separates it
+   from the group before it; the first one has no group before it, only the
+   panel's own header, which already carries that room. Both together read as
+   a hole rather than a join (owner, 2026-08-22). */
+.ops-group__heading:first-child {
+  margin-top: 0;
+}

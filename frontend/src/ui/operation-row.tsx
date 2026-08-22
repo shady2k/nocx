@@ -42,7 +42,7 @@ import { Badge, type BadgeTone } from './badge'
 import { Button } from './button'
 import { CollectionRow } from './collection-view'
 import { formatProgress } from './format-bytes'
-import { ArrowUpIcon } from './icons'
+import { ArrowDownIcon, ArrowUpIcon } from './icons'
 import { ProgressBar } from './progress-bar'
 import {
   isTerminalPhase,
@@ -53,15 +53,18 @@ import {
 
 /** The kind's decorative glyph, decided here and never supplied by a
  *  surface — the same rule TreeRow follows for its type glyphs. Download
- *  joins as one more entry. */
+ *  joined as one more entry (nocx-9le.8.3), which is the whole of what this
+ *  component had to learn about a second direction. */
 const KIND_ICON: Record<OperationKind, Component> = {
   upload: ArrowUpIcon,
+  download: ArrowDownIcon,
 }
 
 /** How a finished operation reads. See the module doc for why `cancelled`
  *  and `skipped` are neutral rather than danger. */
 const PHASE_TONE: Record<TerminalOperationPhase, BadgeTone> = {
   written: 'success',
+  sent: 'success',
   skipped: 'neutral',
   cancelled: 'neutral',
   failed: 'danger',
@@ -70,9 +73,13 @@ const PHASE_TONE: Record<TerminalOperationPhase, BadgeTone> = {
 /** What a finished operation is called. `written` reads "Done" rather than
  *  "Uploaded" because one row serves every kind: the glyph and the title
  *  already say what was done, and a per-kind success word would be a second
- *  table indexed by two things for one cell. */
+ *  table indexed by two things for one cell. `sent` is the download's word
+ *  for the same success and reads the same "Done" — which is exactly why
+ *  the wire's two spellings could be carried in without a mapping layer:
+ *  they differ on the wire and they do not differ to a person. */
 const PHASE_LABEL: Record<TerminalOperationPhase, string> = {
   written: 'Done',
+  sent: 'Done',
   skipped: 'Skipped',
   cancelled: 'Cancelled',
   failed: 'Failed',

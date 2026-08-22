@@ -26,7 +26,7 @@ import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
-import { ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
+import { ArrowDownIcon, ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -37,6 +37,8 @@ import {
   type FilesNode,
   type FilesTreeStore,
 } from './files-store'
+import { downloadReachesTheBytes } from './download-eligibility'
+import type { DownloadSurface } from './download-surface'
 import { uploadMovesTheFile } from './upload-eligibility'
 import { pickUploadSources } from './upload-picker'
 import type { UploadDestination, UploadSource } from './upload-flow'
@@ -140,8 +142,13 @@ interface FilesPanelProps {
    *  to differ, and they would differ first over which services the picker
    *  asks, which is the half a test substitutes. */
   pickSources: () => Promise<UploadSource[]>
+  /** The app's single download surface, or null where none was injected —
+   *  the panel then offers no Download action, rather than offering one
+   *  that reaches nothing. */
+  download: DownloadSurface | null
   /** "Are we inside the Wails webview" — half of the upload rule
-   *  (upload-eligibility.ts), handed down rather than asked here so the
+   *  (upload-eligibility.ts) and half of the download one
+   *  (download-eligibility.ts), handed down rather than asked here so the
    *  panel's two menus and a test see the same answer. */
   native: () => boolean
 }
@@ -289,10 +296,34 @@ function FilesPanel(props: FilesPanelProps) {
     await u.flow.send({ bindingId: b.bindingId, destDir: node.path }, sources)
   }
 
+  /**
+   * Download the file the menu was opened on (nocx-9le.8.3).
+   *
+   * THE RENDERER NAMES NO DESTINATION. It says which file, and the browser
+   * saves it wherever that person's browser saves files, under the name the
+   * backend put on Content-Disposition. There is no path for the panel to
+   * choose and it must not invent one; the desktop build's native save
+   * dialog is a backend method (nocx-9le.8.4) and will arrive as another
+   * implementation of the saver, not as a path threaded through here.
+   *
+   * It appears in the operations list because the flow records it in the
+   * download store, which the activity bar reads as a source — the same row
+   * an upload draws, with the same progress and the same cancel. There is
+   * no second list and no second row: that is the thing the operations
+   * surface exists to prevent.
+   */
+  const downloadFile = async (node: FilesNode): Promise<void> => {
+    const d = props.download
+    const b = props.store.binding()
+    if (d === null || b === null) return
+    await d.flow.fetch({ bindingId: b.bindingId, path: node.path })
+  }
+
   /** The menu's items for the row it is open on. The two copy entries are
    *  always there — they are two different answers, and both were asked
    *  for. Upload joins only on a REMOTE origin and only on a folder; Show in
-   *  Finder joins only on a LOCAL one.
+   *  Finder joins only on a LOCAL one; Download joins wherever the bytes are
+   *  out of reach, and only on a file.
    *
    *  EVERY ROW CARRIES ITS MARK, from the kit's set and nowhere else
    *  (nocx-inbw1). The column is reserved whether or not one is passed, so
@@ -358,6 +389,35 @@ function FilesPanel(props: FilesPanelProps) {
         // glyph, whichever surface raises it.
         icon: ArrowUpIcon,
         onSelect: () => void uploadInto(m.node),
+      })
+    }
+    // Download joins where the person cannot reach the bytes any other way,
+    // expressed as ABSENCE — the same mechanism the two items around it use,
+    // and for the same reason: on the one combination where the file is
+    // already on the disk the window is running from, `Show in Finder` is
+    // the action for it and it is in this menu on exactly that combination.
+    //
+    // The rule is `downloadReachesTheBytes`'s and not this file's. It is a
+    // different question from the upload rule with the same answer today,
+    // and the two are separate predicates deliberately — see
+    // download-eligibility.ts for the case that would split them.
+    //
+    // Only on a FILE: a directory download is a second thing (an archive, a
+    // recursive walk, a question about symlinks) that nobody has specified,
+    // and `openable` is already the panel's owner of "is this row a file
+    // whose bytes can be got at" — the same predicate the click uses to
+    // decide whether the row opens.
+    if (
+      props.download !== null &&
+      o !== null &&
+      downloadReachesTheBytes({ native: props.native(), kind: o.kind }) &&
+      openable(m.node)
+    ) {
+      items.push({
+        id: 'download',
+        label: 'Download',
+        icon: ArrowDownIcon,
+        onSelect: () => void downloadFile(m.node),
       })
     }
     if (o !== null && o.kind === 'local') {
@@ -584,10 +644,17 @@ export interface FilesViewDeps {
    *  a test cannot perform, and a gesture whose middle step cannot be
    *  driven is a gesture no test can watch a user complete. */
   pickSources?: () => Promise<UploadSource[]>
+  /** The app's single download surface (download-surface.ts). Optional so
+   *  the panel still runs standalone in a test; main.tsx owns the real one.
+   *  Absent means the Download item is not offered — the same rule the
+   *  upload surface follows, because an item that reaches nothing is worse
+   *  than no item. */
+  download?: DownloadSurface
   /** "Are we inside the Wails webview" — half of the upload rule
-   *  (upload-eligibility.ts). Defaults to the one owner of that question;
-   *  a parameter because a test cannot be in two environments at once and
-   *  the rule has four combinations that all have to be watched. */
+   *  (upload-eligibility.ts) and half of the download one. Defaults to the
+   *  one owner of that question; a parameter because a test cannot be in
+   *  two environments at once and each rule has four combinations that all
+   *  have to be watched. */
   native?: () => boolean
 }
 
@@ -599,6 +666,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
   const upload = deps.upload ?? null
+  const download = deps.download ?? null
   const native = deps.native ?? hasWailsWebview
   /** Who asks the person for files. The default is the real picker; a
    *  test substitutes its own, because raising a picker is the one step a
@@ -777,6 +845,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         clipboard={clipboard}
         activeOrigin={props.activeOrigin}
         upload={upload}
+        download={download}
         pickSources={pick}
         native={native}
       />

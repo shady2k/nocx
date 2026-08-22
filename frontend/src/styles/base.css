@@ -370,9 +370,22 @@ select:focus-visible {
 }
 
 /* The title never gives up room to an action — losing the panel's name is a
-   worse trade than truncating what sits beside it. */
+   worse trade than truncating what sits beside it.
+
+   AND IT CARRIES NO DEFAULTS OF ITS OWN. This rule set only `flex`, so the
+   h2 kept the user agent's `font-size: 1.5em` and `margin: 0.83em 0`: the
+   header asked for 14px and rendered 21px, with about 35px of heading margin
+   inside a box whose own padding had just been trimmed to nothing. The header
+   measured 72px tall and the gap the owner kept pointing at was never the
+   padding at all (owner, 2026-08-22). `.ui-section h2` has always reset both;
+   this one had been missed. `inherit` rather than a token, because the header
+   above already declares the size and two declarations would drift. */
 .ui-sidebar-view__header > h2 {
   flex: 0 0 auto;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.2;
 }
 
 .ui-sidebar-view__filter {

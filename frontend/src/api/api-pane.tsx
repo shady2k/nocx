@@ -56,7 +56,7 @@ import { CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
 import { RequestEditor, RequestLine } from './request-form'
 import { RunList } from './run-list'
-import type { ApiStore } from './api-store'
+import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker } from './api-client'
 import type { ApiRoute } from './api-model'
 
@@ -506,49 +506,82 @@ export function ApiPane(props: ApiPaneProps) {
   /** Open the surface, on whatever is currently being sent under — the
    *  environment somebody came here about is nearly always that one. */
   /**
-   * What the active environment says about a name.
+   * What answers a name, as the address field needs it.
    *
-   * `unknown` is not a hedge: the store answers null until an environment has
-   * actually been read, and painting every reference as unanswered in that
-   * window is how a person learns to ignore the colour.
+   * `unknown` is not a hedge: until an environment has been read there is no
+   * answer to give for a name this request does not answer itself, and
+   * painting it as unanswered in that window is how a person learns to
+   * ignore the colour.
    */
   const variableState = (name: string): 'bound' | 'secret' | 'unbound' | 'unknown' => {
-    const known = store.knownVariables()
-    if (known === null) return 'unknown'
-    if (!known.has(name)) return 'unbound'
-    return store.isSecretVariable(name) ? 'secret' : 'bound'
+    const answer: VariableAnswer = store.variableAnswer(name)
+    switch (answer.scope) {
+      case 'request':
+      case 'environment':
+        return 'bound'
+      case 'secret':
+        return 'secret'
+      case 'none':
+        return 'unbound'
+      case 'unknown':
+        return 'unknown'
+    }
   }
 
   /** What the panel says about the variable that was clicked — one line,
-   *  and never a secret's value: the renderer does not have it (ADR-0021)
-   *  and the sentence says where it lives instead. */
+   *  naming WHICH SCOPE answered, and never a secret's value: the renderer
+   *  does not have it (ADR-0021) and says where it lives instead. */
   const variableHeader = (name: string): string => {
-    const state = variableState(name)
-    if (state === 'unknown') return `{{${name}}} — no environment has been read yet`
-    if (state === 'unbound') {
-      const env = store.activeEnvironment()
-      return env === ''
-        ? `{{${name}}} — no environment is chosen, so nothing answers it`
-        : `{{${name}}} — ${environmentName(env)} does not answer it`
+    const answer = store.variableAnswer(name)
+    const env = store.activeEnvironment()
+    switch (answer.scope) {
+      case 'request':
+        // Which scope answered is the half a person cannot see anywhere
+        // else: the same name can be answered twice, and which one wins
+        // decides what goes out.
+        return `{{${name}}} = ${answer.value ?? ''} — this request's own`
+      case 'environment':
+        return `{{${name}}} = ${answer.value ?? ''} — from ${environmentName(env)}`
+      case 'secret':
+        return `{{${name}}} = a secret, from the vault`
+      case 'unknown':
+        return `{{${name}}} — no environment has been read yet`
+      case 'none':
+        return env === ''
+          ? `{{${name}}} — nothing answers it: not this request, and no environment is chosen`
+          : `{{${name}}} — nothing answers it: neither this request nor ${environmentName(env)}`
     }
-    const value = store.variableValue(name)
-    return value === null ? `{{${name}}} = a secret, from the vault` : `{{${name}}} = ${value}`
   }
 
   /**
    * What the person can DO about the variable they clicked.
    *
-   * One row, and which row depends on the answer they already have in the
-   * header: a name nothing answers offers to define it, and a name that IS
-   * answered offers the place it is answered — the same door, walked in
-   * from the two directions a person arrives from.
+   * BOTH DOORS whenever nothing answers, because the choice is the point: a
+   * value belonging to this one request — an id, a page — goes here, and one
+   * every request under this environment shares goes there. A single "add"
+   * would make that choice for them, and the wrong scope is exactly what
+   * makes two requests fight over one name.
    */
   const variableMenuItems = () => {
     const name = varMenu()?.name ?? ''
     if (name === '') return []
-    const state = variableState(name)
+    const answer = store.variableAnswer(name)
     const env = store.activeEnvironment()
-    if (state === 'bound') {
+    const defineHere = {
+      id: 'api-variable-define-request',
+      label: `Add ${name} to this request`,
+      icon: PlusIcon,
+      onSelect: () => defineOnRequest(name),
+    }
+    const defineThere = {
+      id: 'api-variable-define',
+      label:
+        env === '' ? `Add ${name} to a new environment` : `Add ${name} to ${environmentName(env)}`,
+      icon: PlusIcon,
+      onSelect: () => defineVariable(name),
+    }
+    if (answer.scope === 'request') return [defineThere]
+    if (answer.scope === 'environment' || answer.scope === 'secret') {
       return [
         {
           id: 'api-variable-open-env',
@@ -559,19 +592,25 @@ export function ApiPane(props: ApiPaneProps) {
             openEnvironments()
           },
         },
+        defineHere,
       ]
     }
-    return [
-      {
-        id: 'api-variable-define',
-        label:
-          env === ''
-            ? `Add ${name} to a new environment`
-            : `Add ${name} to ${environmentName(env)}`,
-        icon: PlusIcon,
-        onSelect: () => defineVariable(name),
-      },
-    ]
+    return [defineHere, defineThere]
+  }
+
+  /** Put the name in THIS REQUEST's variables — the scope that answers before
+   *  the environment does. Into the DRAFT, which is what a person edits and
+   *  what Save writes; a row that went anywhere else would be a value the
+   *  form does not know it has. */
+  const defineOnRequest = (name: string): void => {
+    setVarMenu(null)
+    const current = store.draft()
+    if (current === null) return
+    if (current.variables.some((v) => v.name === name)) return
+    store.editDraft({
+      ...current,
+      variables: [...current.variables, { name, value: '', enabled: true }],
+    })
   }
 
   /** The environment's own NAME, by the path the picker chose it under. */

@@ -1830,6 +1830,37 @@ describe('a variable in the address says whether anything answers it', () => {
     expect(variableMenu()?.textContent).toContain('https://api.example.test')
   })
 
+  it("a request's own variable answers before the environment, and the panel says so", async () => {
+    // The inheritance is the point: the same name is answered twice, and
+    // which one wins decides what goes out.
+    const { bar } = await mountApp(
+      withEnvironment({ baseUrl: 'https://from-the-environment.test' }),
+    )
+    await openRequest(bar)
+    await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('reference'))
+
+    // Add it at REQUEST scope through the panel's own door.
+    fireEvent.click(marks()[0])
+    await vi.waitFor(() => expect(variableMenu()).toBeTruthy())
+    const here = [...(variableMenu()?.querySelectorAll('button') ?? [])].find((b) =>
+      (b.textContent ?? '').includes('to this request'),
+    )
+    expect(here, "the panel offers the request's own scope").toBeTruthy()
+    fireEvent.click(here as HTMLButtonElement)
+
+    // It is in the request's variables, and the panel now names that scope
+    // rather than the environment's value.
+    await vi.waitFor(() => {
+      const values = [...workbench().querySelectorAll<HTMLInputElement>('input')].map(
+        (i) => i.value,
+      )
+      expect(values).toContain('baseUrl')
+    })
+    fireEvent.click(marks()[0])
+    await vi.waitFor(() => expect(variableMenu()?.textContent).toContain("this request's own"))
+    expect(variableMenu()?.textContent).not.toContain('from-the-environment')
+  })
+
   it("a secret reference wears the vault's colour and never a value", async () => {
     // The panel does not hold a secret's value and must not learn to want
     // one: what it can say is that the name stands for something the vault
@@ -1869,12 +1900,15 @@ describe('a variable in the address says whether anything answers it', () => {
 
     fireEvent.click(marks()[0])
     await vi.waitFor(() => expect(variableMenu()).toBeTruthy())
-    expect(variableMenu()?.textContent).toContain('does not answer it')
+    // The header names BOTH scopes it looked in — which is what tells a
+    // person the request could answer this itself.
+    expect(variableMenu()?.textContent).toContain('nothing answers it')
+    expect(variableMenu()?.textContent).toContain('this request')
 
-    // And the one action takes them where it is fixed, with a row for that
-    // very name already in the editor.
+    // Two doors, and the environment one lands the row in the environment
+    // editor. (The request-scope door is asserted in its own test below.)
     const define = [...(variableMenu()?.querySelectorAll('button') ?? [])].find((b) =>
-      (b.textContent ?? '').includes('baseUrl'),
+      (b.textContent ?? '').includes('Add baseUrl to dev'),
     )
     expect(define, 'the menu offers to define the variable').toBeTruthy()
     fireEvent.click(define as HTMLButtonElement)

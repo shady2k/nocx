@@ -424,6 +424,71 @@ export function RequestEditor(props: RequestEditorProps) {
                 ),
               },
               {
+                id: 'variables',
+                label: counted('Variables', req().variables),
+                content: () => (
+                  <EditableRowList
+                    variant="table"
+                    ariaLabel="Request variables"
+                    columns={[
+                      { label: 'Send', labelHidden: true },
+                      { label: 'Name' },
+                      { label: 'Value' },
+                    ]}
+                    rows={req().variables}
+                    addLabel="Add variable"
+                    // The empty state says what the tab is FOR, because a
+                    // person arriving here has usually just been sent by the
+                    // panel behind a `{{name}}` they clicked: this is the
+                    // scope that beats the environment, and that sentence is
+                    // the whole reason to type a row here rather than there.
+                    emptyLabel="No variables of this request's own. One here answers before the environment does."
+                    removeLabel={(i) => `Remove variable ${i + 1}`}
+                    renderRow={(row, i) => (
+                      <>
+                        <td>
+                          <Checkbox
+                            ariaLabel={`Use variable ${i + 1}`}
+                            checked={row().enabled}
+                            onChange={(v) =>
+                              patch({ variables: patchRow(req().variables, i, { enabled: v }) })
+                            }
+                          />
+                        </td>
+                        <td>
+                          <TextField
+                            id={`api-variable-name-${i}`}
+                            ariaLabel={`Variable ${i + 1} name`}
+                            value={row().name}
+                            onInput={(v) =>
+                              patch({ variables: patchRow(req().variables, i, { name: v }) })
+                            }
+                          />
+                        </td>
+                        <td>
+                          <TextField
+                            id={`api-variable-value-${i}`}
+                            ariaLabel={`Variable ${i + 1} value`}
+                            value={row().value}
+                            onInput={(v) =>
+                              patch({ variables: patchRow(req().variables, i, { value: v }) })
+                            }
+                          />
+                        </td>
+                      </>
+                    )}
+                    onRemove={(i) =>
+                      patch({ variables: req().variables.filter((_, j) => j !== i) })
+                    }
+                    onAdd={() =>
+                      patch({
+                        variables: [...req().variables, { name: '', value: '', enabled: true }],
+                      })
+                    }
+                  />
+                ),
+              },
+              {
                 id: 'body',
                 label: bodyLabel(req()),
                 // THREE SIBLING SHOWS, NOT A SHOW WITH A FALLBACK. A JSX

@@ -194,6 +194,20 @@ interface ApiSelection {
  *  values, and the NAMES of the ones whose value lives in the vault. It is
  *  the environment document's own two fields — nothing derived, so nothing
  *  to fall out of step. */
+/**
+ * Who answers a variable, and with what.
+ *
+ * `value` is null for every scope that has no value to give a renderer:
+ * `secret` never does (it is the vault's, ADR-0021), `none` has none, and
+ * `unknown` has not been read. A scope that carries a value carries it as a
+ * string, never as "the value or ''": an empty BOUND value is a value, and
+ * the whole of §6.5 rests on that distinction.
+ */
+export interface VariableAnswer {
+  readonly scope: 'request' | 'environment' | 'secret' | 'none' | 'unknown'
+  readonly value: string | null
+}
+
 interface EnvironmentKnowledge {
   readonly values: Readonly<Record<string, string>>
   readonly secretVars: readonly string[]
@@ -262,21 +276,13 @@ export interface ApiStore {
    * way. Marking every reference as unanswered while a listing is in flight
    * is how a person learns to ignore the colour.
    */
-  knownVariables(): ReadonlySet<string> | null
-
-  /** Whether the active environment declares this name secret. The address
-   *  field paints such a reference differently: what it stands for is not
-   *  readable here and is not meant to be. */
-  isSecretVariable(name: string): boolean
+  /** Who answers a name and with what, in the backend's own order: this
+   *  request, then the environment, then the vault for a secret one. */
+  variableAnswer(name: string): VariableAnswer
 
   /** Give a secret variable its value — the one call that carries a
    *  credential. Answers whether it landed; the value is never kept. */
   bindSecret(variable: string, value: string): Promise<boolean>
-
-  /** What a PLAIN variable answers in the active environment — null for a
-   *  secret one (its value is the vault's and never the renderer's), for a
-   *  name nothing answers, and for an environment nobody has read yet. */
-  variableValue(name: string): string | null
 
   /** The backend's reported refresh mode for the collection watch set, or
    *  null until the first `files.watch` answers — and for a build that
@@ -698,29 +704,35 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     null,
   )
 
-  /** The names it answers. Derived rather than stored beside the values: one
-   *  fact, one owner, and a set that could disagree with the map it came
-   *  from is the shape this codebase keeps finding. */
-  const knownVariables = (): ReadonlySet<string> | null => {
-    const known = environmentKnowledge()
-    if (known === null) return null
-    return new Set([...Object.keys(known.values), ...known.secretVars])
-  }
+  /**
+   * WHO ANSWERS A NAME, and with what — the one accessor for it.
+   *
+   * The order is the backend's own (apicoll.Chain, built by Snapshot): the
+   * REQUEST's own variables first, then the environment's, then the vault
+   * for a name the environment declares secret. Stating it in one function
+   * is what keeps this side agreeing with the side that actually
+   * substitutes — three accessors, each deriving part of the answer, is how
+   * a panel comes to say `bound` about a name the sender then refuses.
+   *
+   * `unknown` is not a hedge and not the same as `unbound`: until an
+   * environment has been read, a name the REQUEST does not answer has no
+   * answer here, and painting it as unanswered would cry wolf for as long
+   * as a listing is in flight.
+   */
+  const variableAnswer = (name: string): VariableAnswer => {
+    // The DRAFT, not the file: a person who has just typed a row expects the
+    // address above it to stop complaining, and the draft is what a send
+    // would write and then use.
+    const own = untrack(draft)?.variables.find((v) => v.enabled && v.name === name)
+    if (own !== undefined) return { scope: 'request', value: own.value }
 
-  /** Whether the active environment declares this name SECRET — its value
-   *  lives in the vault and the renderer will never hold it. False for a
-   *  plain one, for an unbound one, and while nothing has been read. */
-  const isSecretVariable = (name: string): boolean =>
-    environmentKnowledge()?.secretVars.includes(name) ?? false
-
-  /** What a PLAIN variable answers, and null for one that is secret, one
-   *  nothing answers, and one nobody has read yet. Never a secret's value:
-   *  the renderer does not have it and must not learn to want it
-   *  (ADR-0021). */
-  const variableValue = (name: string): string | null => {
     const known = environmentKnowledge()
-    if (known === null) return null
-    return Object.prototype.hasOwnProperty.call(known.values, name) ? known.values[name] : null
+    if (known === null) return { scope: 'unknown', value: null }
+    if (known.secretVars.includes(name)) return { scope: 'secret', value: null }
+    if (Object.prototype.hasOwnProperty.call(known.values, name)) {
+      return { scope: 'environment', value: known.values[name] }
+    }
+    return { scope: 'none', value: null }
   }
 
   /**
@@ -1349,9 +1361,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     watchMode,
     watchDegradedReason,
     watchFailed,
-    knownVariables,
-    variableValue,
-    isSecretVariable,
+    variableAnswer,
     bindSecret,
     startWatching,
     dispose,

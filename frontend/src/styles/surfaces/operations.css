@@ -17,11 +17,16 @@
 /* The list scrolls itself rather than growing the panel: the panel's own
    height is what bounds it, and a list that scrolled the page would take the
    scroll from whatever is underneath. */
+/* NO SCROLLER HERE. There is one scroll owner in a panel and it is
+   .ui-sidebar-view__body (nocx-708q.3): a list that scrolls inside the
+   scrolling body gives a person two scrollbars for one list and a wheel that
+   stops at the wrong boundary. Worse here than elsewhere, because there are
+   TWO of these lists — running and finished — so the panel would have had
+   three scrollers. */
 .ops-list {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
 }
 
 /* THE HEADING SAYS THE STATE, so the rows do not have to. Every finished row
@@ -33,7 +38,10 @@
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  margin: var(--space-3) var(--space-4) var(--space-1);
+  /* Vertical only. 16px of horizontal inset on top of the body's own put the
+     headings 24px in while their rows sat at 8px — one panel disagreeing with
+     itself, never mind with the other three (nocx-708q.3). */
+  margin: var(--space-3) 0 var(--space-1);
   font-size: var(--font-size-2xs);
   font-weight: 600;
   letter-spacing: 0.06em;

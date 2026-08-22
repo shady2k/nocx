@@ -203,11 +203,15 @@ describe("the sidebar body is a panel's one scroll owner", () => {
 
   /** The exceptions that are on record rather than quietly excluded.
    *
-   *  `ops-list` is the operations panel's, one per group. It belongs to
-   *  another worker's branch, so it is named here — the next person reads it
-   *  as an outstanding item rather than as a rule that never covered it
-   *  (nocx-708q.3 report). */
-  const KNOWN_EXCEPTIONS = ['ops-list']
+   *  EMPTY, and that is the state to keep it in. It held `ops-list` for one
+   *  merge — the operations panel's two lists each declared their own
+   *  scroller, and they were in another worker's branch when this test was
+   *  written, so they were NAMED rather than silently excluded. They were
+   *  removed as soon as that branch landed, because an exception that
+   *  outlives its reason stops being a record and becomes a hole. Anything
+   *  added here carries the line that says why, and the line says when it
+   *  goes. */
+  const KNOWN_EXCEPTIONS: string[] = []
 
   it('leaves the scrolling to the shell, bar the exceptions on record', () => {
     // The shell really is the scroller — otherwise this rule would be

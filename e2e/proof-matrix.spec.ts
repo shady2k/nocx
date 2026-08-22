@@ -99,7 +99,14 @@ test.describe('1. Focus matrix', () => {
   test.describe('TextField', () => {
     test('shows focus ring on keyboard focus, not on pointer activation', async ({ page }) => {
       await openSettings(page)
-      const searchField = page.locator('.ui-search-field input[type="search"]').first()
+      // NAMED, not `.first()` over a global class. This was
+      // `.ui-search-field input[type="search"]` first-of-page, which was
+      // Settings' own field until the sidebar's panels grew filters of their
+      // own — after which the first one on the page is the Files panel's
+      // "Filter files by name", which is not what opening Settings focuses
+      // (nocx-708q.6). A positional locator over a kit class names whatever
+      // the page happens to render first; the accessible name is the field.
+      const searchField = page.getByRole('searchbox', { name: 'Search settings' })
       // Search field is auto-focused when settings opens
       await expect(searchField).toBeFocused()
       const kbdShadow = await searchField.evaluate((el) => getComputedStyle(el).boxShadow)

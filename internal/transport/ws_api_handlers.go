@@ -366,6 +366,47 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		_ = h.r.TryError(req.ID, RPCError{Code: apiSendErrorCode(err), Message: err.Error()})
 		return
 	}
+	// A SEALED VAULT IS NOT AN EXCHANGE.
+	//
+	// An environment that routes through a connection needs that connection's
+	// credential, and the credential is in the vault. Sealed, the lease
+	// cannot be taken — so nothing is dialled, nothing leaves this machine,
+	// and what stopped the attempt is a precondition the person can fix
+	// rather than anything that happened to a request. The epic's own line
+	// already names that case: what stays a JSON-RPC error is what is not an
+	// exchange.
+	//
+	// Answered as one, the seam that already exists runs end to end: the
+	// normalizer passes the canonical shape through, the renderer's
+	// dispatcher raises ONE unlock dialog and re-sends this request verbatim
+	// when the vault answers (vault_sealed.go). The person meets the prompt
+	// they would have met from a terminal tab and never learns there is a
+	// Vault page. Before this they got a dead row saying "vault is sealed" —
+	// a sentence describing a door, with nothing to press.
+	//
+	// THREE CONDITIONS, and the middle one is what keeps this a precondition
+	// rather than a blanket rule:
+	//
+	//   - the attempt did not answer;
+	//   - it stopped at PhaseConnection, which is the route being unusable —
+	//     the lease is taken there and nowhere else, so a vault that sealed
+	//     MID-EXCHANGE lands at a later phase and stays a run, as it must:
+	//     that request did go out;
+	//   - and its error chain reaches the vault's own sentinel.
+	if ex.Failure != nil && ex.Failure.Phase == apisend.PhaseConnection {
+		if sealed, ok := sealedVaultFailure(ex.Failure.Err); ok {
+			// The token is dropped HERE rather than only by the deferred
+			// drop below, because the renderer re-sends the request VERBATIM
+			// — the same token — as soon as the vault answers. The defer
+			// runs after this response is enqueued, so releasing the name
+			// first is what makes the replay's registration certain rather
+			// than merely likely. Dropping twice is a delete of a key that
+			// is already gone.
+			h.cancels.drop(h.conn, p.Token)
+			_ = h.r.TryError(req.ID, sealed)
+			return
+		}
+	}
 	_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(ex, inputs.Environment, inputs.Route)))
 }
 

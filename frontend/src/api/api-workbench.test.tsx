@@ -656,6 +656,42 @@ describe('a request goes out from the workbench', () => {
     expect(card.textContent).not.toContain('did not go out')
   })
 
+  it('cancelling the unlock leaves the run refused and says why (nocx-pgp9c.7)', async () => {
+    // A send through a connection whose credential the vault holds now comes
+    // back as the canonical SEALED ERROR rather than as a dead run, so the
+    // dispatcher raises one unlock dialog and keeps this promise pending
+    // (frontend/src/dispatcher.ts). Cancelling that dialog rejects it with
+    // VaultOperationCancelledError — the class vault.tsx exports for exactly
+    // this — and what must not happen then is a row that sits pending for
+    // ever, or vanishes, or claims an exchange nobody made.
+    //
+    // THIS COVERS THE STORE'S HALF. The dialog, the coalescing and the
+    // rejection are the vault seam's, tested where they live; what is
+    // asserted here is that a person who says "not now" is left with a row
+    // that says so.
+    class VaultOperationCancelledError extends Error {
+      constructor() {
+        super('Vault operation cancelled')
+        this.name = 'VaultOperationCancelledError'
+      }
+    }
+    const { bar } = await mountApp({
+      sendRequest: vi.fn().mockRejectedValue(new VaultOperationCancelledError()),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+
+    const card = runCards()[0]
+    expect(card.dataset.outcome).toBe('refused')
+    expect(card.textContent).toContain('Vault operation cancelled')
+    // Not pending — a row still spinning after the person declined is the
+    // silent nothing this criterion exists against.
+    expect(card.dataset.outcome).not.toBe('pending')
+    // And the line offers a send again, so "not now" is not "not ever".
+    expect(buttonNames()).toContain('Send')
+  })
+
   it('an ask the backend REFUSED says so, and claims no attempt', async () => {
     const { bar } = await mountApp({
       sendRequest: vi.fn().mockRejectedValue(new Error('unknown collection handle')),

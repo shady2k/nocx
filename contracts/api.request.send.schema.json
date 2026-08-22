@@ -78,7 +78,9 @@
     "dnsAddresses": {
       "description": "What the resolver ANSWERED for the host, in the order it answered — the order the dialler tries, so re-sorting it would describe a lookup nobody made. Never null: no lookup to make (an address literal, or a route that resolves on the far side) and a lookup that FAILED are both []. It is beside remoteAddr rather than folded into it because the two answer different questions: remoteAddr is which address answered, and this is what the name stands for — a name with four A records says the one that answered was one of four, and a name that resolves to a stale address says why a request went somewhere nobody expected. Recorded from the attempt rather than looked up again by whoever reads the run: a second lookup a second later can legitimately differ.",
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "timings": {
       "description": "The phases of the attempt, AS FAR AS IT GOT — a phase never reached is 0, which is the honest answer rather than an absence. On the exchange for the same reason remoteAddr is: a failed run took time too, and how long it spent before it gave up is the difference between a refusal and a hang.",
@@ -106,7 +108,8 @@
         "size",
         "tlsVersion",
         "raw",
-        "tlsCipherSuite"
+        "tlsCipherSuite",
+        "trust"
       ],
       "properties": {
         "status": {
@@ -147,6 +150,26 @@
         },
         "tlsCipherSuite": {
           "description": "The negotiated cipher suite's name, and \"\" when the exchange was not over TLS.",
+          "type": "string"
+        },
+        "trust": {
+          "description": "WHAT VERIFICATION SAYS about the chain this exchange accepted — never the environment's SETTING, which is what `route.insecureTls` is and what this replaces on the run.\n\nThe badge a surface draws from it used to come from that setting, so it appeared on every run under an environment with verification off — including a public host with an ordinary chain, in the same colour and words a self-signed development host would get. A warning that is on most of the time is a warning nobody reads, and the one run where it matters looks exactly like the twenty where it did not.\n\nWhat it means now is WE ACCEPTED SOMETHING THAT WOULD OTHERWISE HAVE BEEN REFUSED, which is knowable: the handshake completed, the chain is in hand, and the backend asks crypto/x509's own verifier — the presented intermediates, the host name, this build's roots — whether it verifies. It USES the verifier and does not become a second one; the renderer still parses no X.509 and reads a state and a sentence.\n\nIt is HERE, beside tlsVersion and tlsCipherSuite, because like both of those it is a fact of a handshake that COMPLETED and exists exactly when they do. One level up it would be the only TLS fact to survive a run whose exchange broke after its handshake, with no version beside it to attach to.",
+          "$ref": "#/$defs/trust"
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reason"],
+      "properties": {
+        "state": {
+          "description": "Four answers, because there are four different things to say. `none` there is nothing to say — no TLS, or a handshake that never completed. `verified` the handshake verified the chain before it would speak at all: the ordinary case, and nothing to report. `unchecked-trusted` verification was OFF and the chain verifies anyway — worth a quiet line beside the TLS version and never a warning, because nothing was accepted that would not have been accepted regardless. `unchecked-untrusted` verification was OFF and the chain does NOT verify: this is the one a warning is for, and `reason` says which.",
+          "type": "string",
+          "enum": ["none", "verified", "unchecked-trusted", "unchecked-untrusted"]
+        },
+        "reason": {
+          "description": "Why the chain would have been refused, in the verifier's own words — \"certificate signed by unknown authority\", \"certificate has expired or is not yet valid\", \"certificate is valid for a, not b\". Empty in every other state. Passed through rather than reworded: the verifier's sentence IS the sentence a person wants, and a second vocabulary would be one more thing to keep in step with the standard library.",
           "type": "string"
         }
       }

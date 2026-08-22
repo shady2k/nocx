@@ -14,8 +14,8 @@
 // walk sliced by UTF-16 code units, every span after the first non-ASCII
 // character would land in the wrong place.
 import { describe, expect, it } from 'vitest'
-import { rawSegments } from './api-model'
-import type { Raw } from '../generated/api.request.send'
+import { acceptedUntrusted, connectionRawText, rawSegments, untrustedSentence } from './api-model'
+import type { Raw, Trust } from '../generated/api.request.send'
 
 /** What the walk reads as, end to end — the check that nothing was dropped.
  *  A secret run contributes its NAME, which is all a segment carries: there is
@@ -135,5 +135,93 @@ describe('rawSegments — the walk is total', () => {
       spans: [{ from: 0, to: 99, kind: 'text', name: '', damage: '' }],
     }
     expect(reading(raw)).toBe('ab')
+  })
+})
+
+// ── What the run says about the chain it accepted (nocx-6hg2w.19) ──────────
+//
+// Four states, and only ONE of them is a warning. The badge used to be drawn
+// from the environment's setting, which is true of every run under that
+// environment — so it sat on a public host with an ordinary chain in the
+// same words a self-signed development host would get. These are the three
+// that must NOT produce one, and the one that must.
+
+const CONNECTION = { remoteAddr: '10.0.3.17:443', dnsAddresses: [] as readonly string[] }
+
+describe('acceptedUntrusted — the one state a warning is for', () => {
+  const cases: Array<[Trust['state'], boolean]> = [
+    ['none', false],
+    ['verified', false],
+    ['unchecked-trusted', false],
+    ['unchecked-untrusted', true],
+  ]
+  for (const [state, want] of cases) {
+    it(`${state} ${want ? 'warns' : 'does not warn'}`, () => {
+      expect(acceptedUntrusted({ state, reason: '' })).toBe(want)
+    })
+  }
+
+  it('a run with no response at all warns about nothing', () => {
+    // A failed handshake carries no response, so there is no verdict — and
+    // "no verdict" must read as "nothing to warn about" rather than throw.
+    expect(acceptedUntrusted(undefined)).toBe(false)
+  })
+})
+
+describe('untrustedSentence — what the badge says', () => {
+  it("names the verifier's reason, without the package that spoke", () => {
+    expect(
+      untrustedSentence({
+        state: 'unchecked-untrusted',
+        reason: 'x509: certificate signed by unknown authority',
+      }),
+    ).toBe('unverified TLS — certificate signed by unknown authority')
+  })
+
+  it('says the bare thing when the backend gave no reason', () => {
+    // Never an empty badge and never a dangling dash: a warning that says
+    // nothing is the warning this change replaced.
+    expect(untrustedSentence({ state: 'unchecked-untrusted', reason: '' })).toBe('unverified TLS')
+  })
+})
+
+describe('connectionRawText — the quiet case is a fact, not a warning', () => {
+  it('says verification was off when the chain would have passed anyway', () => {
+    const text = connectionRawText({
+      ...CONNECTION,
+      tlsVersion: 'TLS 1.3',
+      trust: { state: 'unchecked-trusted', reason: '' },
+    })
+    expect(text).toContain('TLS 1.3')
+    expect(text).toContain('not checked')
+    // …and it is stated as a fact rather than as an alarm: the words a
+    // warning would use are absent.
+    expect(text).not.toContain('unverified TLS')
+  })
+
+  it('says nothing extra for a chain that was verified', () => {
+    const text = connectionRawText({
+      ...CONNECTION,
+      tlsVersion: 'TLS 1.3',
+      trust: { state: 'verified', reason: '' },
+    })
+    expect(text).not.toContain('not checked')
+  })
+
+  it('says nothing extra for the state a badge already carries', () => {
+    // The untrusted case is the badge's, and printing it twice would be two
+    // owners of one sentence.
+    const text = connectionRawText({
+      ...CONNECTION,
+      tlsVersion: 'TLS 1.3',
+      trust: { state: 'unchecked-untrusted', reason: 'x509: certificate has expired' },
+    })
+    expect(text).not.toContain('not checked')
+    expect(text).not.toContain('expired')
+  })
+
+  it('says nothing extra where there was no chain', () => {
+    const text = connectionRawText({ ...CONNECTION, trust: { state: 'none', reason: '' } })
+    expect(text).not.toContain('not checked')
   })
 })

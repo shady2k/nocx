@@ -941,10 +941,24 @@ type apiSendResponseWire struct {
 	TLSVersion string `json:"tlsVersion"`
 	// TLSCipherSuite is the negotiated suite, "" off TLS.
 	TLSCipherSuite string `json:"tlsCipherSuite"`
+	// Trust is what VERIFICATION says about the chain that was accepted —
+	// never the environment's setting, which is what apiRouteWire's
+	// InsecureTLS is. Beside the version and the suite because it is the
+	// same kind of fact: a completed handshake's.
+	Trust apiTrustWire `json:"trust"`
 	// Raw is the RESPONSE SIDE of the segmented text. The request side is
 	// on the exchange, because the sender has it before it dials
 	// (apisend/spans.go).
 	Raw apiRawWire `json:"raw"`
+}
+
+// apiTrustWire is the verifier's answer, as a closed state plus its own
+// sentence. A state rather than a boolean: "verification was off" and
+// "something untrusted was accepted" are different facts, and a surface
+// given one flag drew the warning for both.
+type apiTrustWire struct {
+	State  string `json:"state"`
+	Reason string `json:"reason"`
 }
 
 // apiSendFailureWire is how an attempt ended when it did not answer: WHERE
@@ -1286,6 +1300,7 @@ func wireSendResponse(r apisend.Response) *apiSendResponseWire {
 		Size:           r.Size,
 		TLSVersion:     r.TLSVersion,
 		TLSCipherSuite: r.TLSCipherSuite,
+		Trust:          apiTrustWire{State: string(r.Trust.State), Reason: r.Trust.Reason},
 		Raw:            wireRaw(r.Raw),
 	}
 }

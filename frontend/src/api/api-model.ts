@@ -61,6 +61,7 @@ import type {
   Response as SendResponse,
   Header as SendHeader,
   Timings as SendTimings,
+  Trust as SendTrust,
   Failure as SendFailure,
   Raw,
 } from '../generated/api.request.send'
@@ -101,6 +102,18 @@ export type ApiSentRoute = ApiRequestSendResult['route']
 /** One certificate of the chain a server presented, already described by the
  *  backend: the renderer reads strings and parses no X.509. */
 export type ApiCertificate = SendCertificate
+
+/**
+ * WHAT VERIFICATION SAID about the chain a run accepted — the backend's
+ * answer, never the environment's setting.
+ *
+ * The difference is the whole of nocx-6hg2w.19: `route.insecureTls` is true
+ * of every run under an environment with the switch on, so a badge drawn
+ * from it fired on a public host with an ordinary chain in the same words
+ * and colour a self-signed development host would get. A warning that is on
+ * most of the time is a warning nobody reads.
+ */
+export type ApiTrust = SendTrust
 
 /**
  * ONE SIDE of an exchange, already segmented (design §11).
@@ -388,6 +401,7 @@ export function connectionRawText(where: {
   dnsAddresses: readonly string[]
   tlsVersion?: string
   tlsCipherSuite?: string
+  trust?: ApiTrust
 }): string {
   const head = [where.remoteAddr, where.tlsVersion ?? '', where.tlsCipherSuite ?? '']
     .filter((s) => s !== '')
@@ -399,7 +413,47 @@ export function connectionRawText(where: {
   // equals remoteAddr's host is still worth printing — "it resolved, and to
   // exactly one thing" is an answer, and its absence is a different one.
   const resolved = where.dnsAddresses.length > 0 ? `resolved  ${where.dnsAddresses.join(', ')}` : ''
-  return [head, resolved].filter((line) => line !== '').join('\n')
+  // VERIFICATION OFF OVER A CHAIN THAT WOULD HAVE PASSED belongs here and
+  // not in a badge: the setting is on, and nothing was accepted that would
+  // not have been accepted anyway. It is a FACT about this connection,
+  // printed beside the version and the suite that describe the same
+  // handshake — a warning for it would be the noise this whole change
+  // removes, and saying nothing at all would hide a switch somebody left on.
+  const verification =
+    where.trust?.state === 'unchecked-trusted'
+      ? 'verified  no — the certificate was not checked, but it would have passed'
+      : ''
+  return [head, resolved, verification].filter((line) => line !== '').join('\n')
+}
+
+/**
+ * WHETHER A RUN ACCEPTED SOMETHING IT WOULD OTHERWISE HAVE REFUSED.
+ *
+ * The one state a warning is for. The other three are not warnings and must
+ * not be drawn as one: `verified` is the ordinary case, `none` had no chain
+ * to judge, and `unchecked-trusted` is the quiet line in the connection
+ * block above.
+ *
+ * A function rather than a comparison at the call site because it is the
+ * predicate the badge exists for, and naming it is what stops the next
+ * surface reaching for `route.insecureTls` again.
+ */
+export function acceptedUntrusted(trust: ApiTrust | undefined): boolean {
+  return trust?.state === 'unchecked-untrusted'
+}
+
+/**
+ * The badge's words: what was accepted, and why it would have been refused.
+ *
+ * The verifier's own sentence is passed through — it is already the sentence
+ * a person wants, and a second vocabulary here would be one more thing to
+ * keep in step with crypto/x509. Only the library's `x509: ` prefix comes
+ * off: it names the package that spoke, which is not a fact about this
+ * connection.
+ */
+export function untrustedSentence(trust: ApiTrust): string {
+  const reason = trust.reason.replace(/^x509:\s*/, '').trim()
+  return reason === '' ? 'unverified TLS' : `unverified TLS — ${reason}`
 }
 
 /**

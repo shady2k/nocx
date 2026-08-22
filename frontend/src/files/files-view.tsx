@@ -20,6 +20,7 @@ import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
+import { hasWailsWebview } from '../wails-runtime'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
@@ -36,6 +37,7 @@ import {
   type FilesNode,
   type FilesTreeStore,
 } from './files-store'
+import { uploadMovesTheFile } from './upload-eligibility'
 import { formatProgress } from './upload-format'
 import { pickUploadSources } from './upload-picker'
 import type { UploadDestination, UploadSource } from './upload-flow'
@@ -160,6 +162,10 @@ interface FilesPanelProps {
    *  to differ, and they would differ first over which services the picker
    *  asks, which is the half a test substitutes. */
   pickSources: () => Promise<UploadSource[]>
+  /** "Are we inside the Wails webview" — half of the upload rule
+   *  (upload-eligibility.ts), handed down rather than asked here so the
+   *  panel's two menus and a test see the same answer. */
+  native: () => boolean
 }
 
 function FilesPanel(props: FilesPanelProps) {
@@ -337,12 +343,18 @@ function FilesPanel(props: FilesPanelProps) {
       },
     ]
     const o = props.store.origin()
-    // Upload joins only on a REMOTE origin (R1), expressed as ABSENCE — the
-    // same mechanism "Show in Finder" uses below in the opposite direction,
-    // and for the same reason: a local binding has no uploader at all, so
-    // the capability does not apply to that machine and a greyed-out row
-    // would be a promise the product cannot keep. It also joins only on a
-    // folder, because a file is not a place to put a file.
+    // Upload joins where an upload would actually MOVE the file, expressed
+    // as ABSENCE — the same mechanism "Show in Finder" uses below in the
+    // opposite direction, and for the same reason: where the capability does
+    // not apply to that machine, a greyed-out row would be a promise the
+    // product cannot keep. It also joins only on a folder, because a file is
+    // not a place to put a file.
+    //
+    // The rule is D9's and it is `uploadMovesTheFile`'s, not this file's
+    // (nocx-9le.5.24). It used to read `o.kind === 'ssh'` here, which is a
+    // second answer to the question the drop handler already answers — and
+    // the two disagreed about a browser on a local tab, where the drop
+    // uploads and this menu said there was no uploader.
     //
     // This is NOT the drop-on-a-folder-row that design §4 refuses. That
     // refused a GESTURE — a third target rule for a drag, where the folder
@@ -358,7 +370,7 @@ function FilesPanel(props: FilesPanelProps) {
     if (
       props.upload !== null &&
       o !== null &&
-      o.kind === 'ssh' &&
+      uploadMovesTheFile({ native: props.native(), kind: o.kind }) &&
       isExpandable(m.node.kind, m.node.linkKind, m.node.cyclic)
     ) {
       items.push({
@@ -651,6 +663,11 @@ export interface FilesViewDeps {
    *  a test cannot perform, and a gesture whose middle step cannot be
    *  driven is a gesture no test can watch a user complete. */
   pickSources?: () => Promise<UploadSource[]>
+  /** "Are we inside the Wails webview" — half of the upload rule
+   *  (upload-eligibility.ts). Defaults to the one owner of that question;
+   *  a parameter because a test cannot be in two environments at once and
+   *  the rule has four combinations that all have to be watched. */
+  native?: () => boolean
 }
 
 /** Build the Files view descriptor. The store is created once, per
@@ -661,6 +678,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
   const upload = deps.upload ?? null
+  const native = deps.native ?? hasWailsWebview
   /** Who asks the person for files. The default is the real picker; a
    *  test substitutes its own, because raising a picker is the one step a
    *  test cannot perform. */
@@ -714,17 +732,21 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
    * over-full and how it overflows belongs to nocx-a8cz. A seventh button
    * in a header that cannot hold six is the thing that bead exists to stop.
    *
-   * The item is absent on a LOCAL tab. That is not a greyed-out row: a
-   * local binding has no uploader at all (R1), so the capability does not
-   * apply to that machine, and absence is what says so — the same rule
-   * "Show in Finder" follows in the opposite direction.
+   * The item is absent where an upload would move nothing — inside the
+   * Wails window on a local tab, and only there (upload-eligibility.ts).
+   * That is not a greyed-out row: the capability does not apply to that
+   * machine, and absence is what says so — the same rule "Show in Finder"
+   * follows in the opposite direction. The predicate is shared with the row
+   * menu and with the terminal drop, so all three give one answer about one
+   * tab (nocx-9le.5.24).
    */
   const FilesHeaderActions: Component = () => {
     const [overflowAt, setOverflowAt] = createSignal<{ x: number; y: number } | null>(null)
 
     const overflowItems = (): ContextMenuItem[] => {
       const items: ContextMenuItem[] = []
-      if (upload !== null && store.origin()?.kind === 'ssh') {
+      const o = store.origin()
+      if (upload !== null && o !== null && uploadMovesTheFile({ native: native(), kind: o.kind })) {
         items.push({
           id: 'upload',
           label: 'Upload File…',
@@ -835,6 +857,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         activeOrigin={props.activeOrigin}
         upload={upload}
         pickSources={pick}
+        native={native}
       />
     ),
     order: FILES_VIEW_ORDER,

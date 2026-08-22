@@ -41,6 +41,10 @@
 // path. It looks like it worked, and then the command runs against whatever
 // `report.pdf` resolves to in the shell's cwd, or against no file at all.
 //
+// WHICH HALF APPLIES IS NOT DECIDED HERE. It is `uploadMovesTheFile` in
+// upload-eligibility.ts, because the Files panel's menus ask the same
+// question and the two used to answer it differently (nocx-9le.5.24).
+//
 // ## What is deliberately NOT here
 //
 // **Dropping onto an individual folder row.** Out, in `§4` and in `§5.5`:
@@ -61,6 +65,7 @@
 
 import { hasWailsWebview } from '../wails-runtime'
 import type { UploadServices } from './upload-client'
+import { uploadMovesTheFile } from './upload-eligibility'
 import type { UploadFlow, UploadReport, UploadSource } from './upload-flow'
 
 /** What the tab is, at the moment of the drop. A subset of ActiveOrigin —
@@ -151,17 +156,19 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
       )
       return
     }
-    if (o.kind === 'local') {
-      // D9's insert half, and the ONE condition that selects it: every
-      // dropped file arrived with a path. NO upload method is called here,
-      // and that is the point.
+    if (!uploadMovesTheFile({ native: native(), kind: o.kind })) {
+      // D9's insert half. WHICH half applies is not this module's to
+      // decide — upload-eligibility.ts owns that rule, and the Files
+      // panel's menus ask it too, so the drop and the menu cannot give
+      // different answers about the same tab (nocx-9le.5.24).
       //
-      // The test is on the sources rather than on the tab's kind because a
-      // path is what the branch needs. A `File` names itself and never says
-      // where it is, so the browser half falls through to the upload below
-      // — which is the same call a remote drop makes, into a directory on
-      // the backend's own machine, which is the machine this tab's shell is
-      // on (R1).
+      // What stays here is the guard the branch itself needs: every
+      // dropped file must actually have arrived with a path. A source
+      // that has none falls through to the refusal below rather than
+      // being inserted as a bare base name, which looks like it worked
+      // and then runs the command against whatever `report.pdf` resolves
+      // to in the shell's cwd. NO upload method is called on this path,
+      // and that is the point.
       const paths = sources.map((s) => s.localPath).filter((p) => p !== undefined)
       if (paths.length === sources.length) {
         insert(paths.map(shellQuote).join(' '))

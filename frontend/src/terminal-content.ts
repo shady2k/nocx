@@ -13,6 +13,7 @@ import {
 } from './lifecycle/state'
 import { LifecycleProjections } from './lifecycle/projections'
 import { CommandEditor } from './editor'
+import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
 import { CompletionController } from './suggest/controller'
@@ -731,6 +732,10 @@ export class TerminalContent extends BasePaneContent {
       cwdVerified: this._cwdVerified,
       cwdFollow: true,
       host: this._host || null,
+      // NAMED, never bare: this is the string a person is shown when the
+      // tab is not in front of them (the operations list), and it says
+      // "This machine" for a local session rather than nothing at all.
+      machine: machineName(this._user, this._host),
     }
   }
 
@@ -981,10 +986,15 @@ export class TerminalContent extends BasePaneContent {
    *  bare host when no user is known, and '' for a local shell. Extracted
    *  from `locationLine` rather than copied into `liveWork`: which machine we
    *  are on has one derivation, and a second one would agree everywhere
-   *  anyone looked and disagree in the nested case both of these exist for. */
+   *  anyone looked and disagree in the nested case both of these exist for.
+   *
+   *  The derivation itself now lives in `machine-name.ts`, because a second
+   *  surface needed the same answer: the operations list names a machine per
+   *  row and cannot ask a tab for it. This is still the only caller that
+   *  wants the EMPTY answer — `locationLine` falls back to the directory,
+   *  which "This machine" would displace. */
   private hostLabel(): string {
-    if (!this._host) return ''
-    return this._user ? `${this._user}@${this._host}` : this._host
+    return remoteMachineName(this._user, this._host)
   }
 
   /** Copy the environment projection's current view into the fields every
@@ -3668,6 +3678,9 @@ export class TerminalContent extends BasePaneContent {
           kind: o.kind,
           cwd: o.cwd,
           cwdVerified: o.cwdVerified,
+          // Which machine the file lands on, recorded when the transfer
+          // starts because the operations list has no tab to ask later.
+          machine: o.machine ?? '',
         }
       },
       services: surface.services,

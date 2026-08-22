@@ -128,7 +128,8 @@ describe('OperationRow owns the outcome vocabulary', () => {
       const badge = container.querySelector('.ui-badge')
       expect(badge?.textContent).toBe(c.label)
       expect(badge?.getAttribute('data-tone')).toBe(c.tone)
-      // Finished: no bar, no numbers, nothing still moving.
+      // Finished: no bar and no rate — nothing is still moving. What it
+      // DOES carry is the finished summary, which is a different sentence.
       expect(container.querySelector('[role="progressbar"]')).toBeNull()
     })
   }
@@ -188,6 +189,123 @@ describe('OperationRow — what shares a line with what', () => {
   it('draws no destination line at all when there is none', () => {
     // An adopted transfer knows its name and not where it went.
     const { container } = render(() => <OperationRow {...RUNNING} destination="" />)
+    expect(container.querySelector('.ui-operation-row__destination')).toBeNull()
+  })
+})
+
+// ── What a finished row is worth reading (nocx-hbdw4.4) ─────────────────
+//
+// It read `appicon.png · Done · /home/dev`: a file name, a word and a path.
+// No size, no when, no how long — somebody coming back to the list learnt
+// nothing from it (owner, 2026-08-22).
+describe('OperationRow once the work is over', () => {
+  const ENDED = 1_700_000_000_000
+  const FINISHED = {
+    ...RUNNING,
+    phase: 'written' as OperationPhase,
+    done: 4_000_000,
+    total: 4_000_000,
+    speedBytesPerSecond: null,
+    startedAt: ENDED - 14_000,
+    endedAt: ENDED,
+    now: ENDED + 5 * 60_000,
+  }
+
+  it('says how big it was, when it landed and how long it took', () => {
+    const { container } = render(() => <OperationRow {...FINISHED} />)
+    expect(container.querySelector('.ui-operation-row__summary')?.textContent).toBe(
+      '4.0 MB · 5 min ago · took 14 s',
+    )
+  })
+
+  it('puts the exact moment on hover, because the label ages and the clock does not', () => {
+    const { container } = render(() => <OperationRow {...FINISHED} />)
+    expect(container.querySelector('.ui-operation-row__summary')?.getAttribute('title')).toBe(
+      new Date(ENDED).toLocaleString(),
+    )
+  })
+
+  it('carries the summary on every outcome, not only on success', () => {
+    // "It failed after 14 s having moved 4 MB" is the same three facts, and
+    // the one a person is most likely to be asking about.
+    const { container } = render(() => (
+      <OperationRow {...FINISHED} phase="failed" error="permission denied" />
+    ))
+    expect(container.querySelector('.ui-operation-row__detail')?.textContent).toBe(
+      'permission denied',
+    )
+    expect(container.querySelector('.ui-operation-row__summary')?.textContent).toContain(
+      'took 14 s',
+    )
+  })
+
+  it('draws no summary line at all for a row that knows none of it', () => {
+    // An adopted transfer — the row lived in a page that was reloaded — has
+    // no size, no start and no end of its own. An empty line would be a
+    // claim; nothing is the truth.
+    const { container } = render(() => (
+      <OperationRow
+        {...FINISHED}
+        total={null}
+        startedAt={null}
+        endedAt={null}
+        done={null}
+        destination=""
+        machine=""
+      />
+    ))
+    expect(container.querySelector('.ui-operation-row__summary')).toBeNull()
+  })
+
+  it('follows the clock it is given, so a relative label can age', () => {
+    const [now, setNow] = createSignal(ENDED)
+    const { container } = render(() => <OperationRow {...FINISHED} now={now()} />)
+    expect(container.querySelector('.ui-operation-row__summary')?.textContent).toContain('just now')
+    setNow(ENDED + 10 * 60_000)
+    expect(container.querySelector('.ui-operation-row__summary')?.textContent).toContain(
+      '10 min ago',
+    )
+  })
+})
+
+// ── Which machine (amendment to nocx-hbdw4.4) ───────────────────────────
+//
+// The operations list is global: one list for every tab. A row saying
+// `/var/www` is unambiguous with one connection open and meaningless with
+// three.
+describe('OperationRow says which machine', () => {
+  it('reads the machine and the path as one fact, on one line', () => {
+    const { container } = render(() => (
+      <OperationRow {...RUNNING} machine="deploy@srv-01" destination="/var/www" />
+    ))
+    const where = container.querySelector<HTMLElement>('.ui-operation-row__destination')
+    expect(where?.textContent).toBe('deploy@srv-01 · /var/www')
+    // And the whole of it on hover, because what is on screen is an
+    // ellipsis of it.
+    expect(where?.getAttribute('title')).toBe('deploy@srv-01 · /var/www')
+  })
+
+  it('never lets the machine share the name’s line', () => {
+    // The name is what the row exists to say, and the line it has is its
+    // own — the machine joins the path below, not the title above.
+    const { container } = render(() => (
+      <OperationRow {...RUNNING} machine="deploy@srv-01" destination="/var/www" />
+    ))
+    const line = container.querySelector('.ui-operation-row__line')
+    expect(line?.textContent).toBe('notes.txt')
+  })
+
+  it('says the machine even where there is no path to say it beside', () => {
+    const { container } = render(() => (
+      <OperationRow {...RUNNING} machine="This machine" destination="" />
+    ))
+    expect(container.querySelector('.ui-operation-row__destination')?.textContent).toBe(
+      'This machine',
+    )
+  })
+
+  it('draws nothing where it knows neither', () => {
+    const { container } = render(() => <OperationRow {...RUNNING} machine="" destination="" />)
     expect(container.querySelector('.ui-operation-row__destination')).toBeNull()
   })
 })

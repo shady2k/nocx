@@ -14,6 +14,7 @@ const REMOTE: DropOrigin = {
   kind: 'ssh',
   cwd: '/home/deploy',
   cwdVerified: true,
+  machine: 'deploy@srv-01',
 }
 
 const LOCAL: DropOrigin = {
@@ -21,6 +22,7 @@ const LOCAL: DropOrigin = {
   kind: 'local',
   cwd: '/Users/me',
   cwdVerified: true,
+  machine: 'This machine',
 }
 
 /** A DataTransfer jsdom does not have: the two things a handler reads. */

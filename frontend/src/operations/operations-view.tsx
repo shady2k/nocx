@@ -37,12 +37,13 @@
 // restarts is a separate conversation the notification design defers on
 // purpose.
 
-import { For, Show } from 'solid-js'
+import { For, Show, createSignal, onCleanup } from 'solid-js'
 import type { SidebarViewDescriptor, SidebarViewStatus } from '../sidebar'
 import { EmptyState } from '../ui/empty-state'
 import { ArrowDownUpIcon } from '../ui/icons'
 import { OperationRow } from '../ui/operation-row'
 import type { OperationsModel } from './operations'
+import { createThrottledOperations, type RenderThrottleDeps } from './render-throttle'
 
 /** The view's registry id, and the sidebar's persisted `activeViewId` for it. */
 export const OPERATIONS_VIEW_ID = 'operations'
@@ -56,7 +57,35 @@ const OPERATIONS_VIEW_ORDER = 2
  *  string, because they are one thing to a reader. */
 const TITLE = 'Operations'
 
-export function createOperationsView(model: OperationsModel): SidebarViewDescriptor {
+/**
+ * How often "2 min ago" is recomputed.
+ *
+ * A relative label ages whether or not any data moves, and when nothing is
+ * running nothing else repaints — so without this the last finished row
+ * would read "just now" for the rest of the session, which is the soft
+ * degrade AGENTS.md forbids wearing a friendly word. Thirty seconds is half
+ * the smallest step the label can take (`just now` → `1 min ago`), so the
+ * worst staleness a reader can see is under one unit.
+ *
+ * It is NOT the render throttle and must not be merged with it: that one
+ * holds updates back when data moves too fast, this one produces updates
+ * when no data moves at all. Same mechanism, opposite jobs.
+ */
+const RELATIVE_TIME_TICK_MS = 30_000
+
+/** The clocks and the interval, injected so a test can move them by hand.
+ *  A test that waited a real quarter-second to watch a throttle would be a
+ *  test that depends on timing — broken on a fast machine too. */
+export interface OperationsViewDeps extends RenderThrottleDeps {
+  /** The clock the relative "when" is read against; defaults to the wall
+   *  clock. Shared with the throttle's `now` when both are given. */
+  tickMs?: number
+}
+
+export function createOperationsView(
+  model: OperationsModel,
+  deps: OperationsViewDeps = {},
+): SidebarViewDescriptor {
   return {
     id: OPERATIONS_VIEW_ID,
     title: TITLE,
@@ -68,14 +97,30 @@ export function createOperationsView(model: OperationsModel): SidebarViewDescrip
       const p = model.progress()
       return { count: model.activeCount(), progress: p === null ? null : p.fraction }
     },
-    view: () => <OperationsPanel model={model} />,
+    // Called rather than mounted as JSX, and that is deliberate: `deps` is
+    // configuration read once (two clocks and an interval), not reactive
+    // state, and passing it as a prop would make every read of it a
+    // reactive read outside a tracked scope — which the linter is right
+    // about and which would be a lie about what the value does.
+    view: () => OperationsPanel(model, deps),
   }
 }
 
-function OperationsPanel(props: { model: OperationsModel }) {
-  /** The list, read once per render pass and named, so the two reads below
-   *  (is it empty, and what is in it) cannot see two different lists. */
-  const operations = () => props.model.operations()
+function OperationsPanel(model: OperationsModel, deps: OperationsViewDeps) {
+  /** The list AS DRAWN, a few times a second rather than on every frame the
+   *  data moves — see render-throttle.ts for the two problems that needed
+   *  and for why a phase change bypasses it. Still read once per pass and
+   *  named, so the two reads below (is it empty, and what is in it) cannot
+   *  see two different lists. */
+  const operations = createThrottledOperations(() => model.operations(), deps)
+
+  /** The clock the finished rows' "when" is read against. The panel owns it
+   *  because the panel is what has to repaint when it moves, and one clock
+   *  serves every row — a timer per row would be N timers for one tick. */
+  const clock = deps.now ?? ((): number => Date.now())
+  const [now, setNow] = createSignal(clock())
+  const tick = setInterval(() => setNow(clock()), deps.tickMs ?? RELATIVE_TIME_TICK_MS)
+  onCleanup(() => clearInterval(tick))
 
   return (
     <div class="ops-panel" data-testid="operations-panel">
@@ -118,11 +163,15 @@ function OperationsPanel(props: { model: OperationsModel }) {
                     kind={op().kind}
                     title={op().title}
                     destination={op().destination}
+                    machine={op().machine}
                     phase={op().phase}
                     done={op().done}
                     total={op().total}
                     speedBytesPerSecond={op().speedBytesPerSecond}
                     error={op().error}
+                    startedAt={op().startedAt}
+                    endedAt={op().endedAt}
+                    now={now()}
                     // Whether there is a cancel at all is the operation's own
                     // judgement, carried on the item. This surface never
                     // switches on kind or phase to work it out.

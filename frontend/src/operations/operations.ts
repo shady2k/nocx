@@ -42,15 +42,28 @@ export interface Operation {
    *  from a retained outcome after a reload knows its name and not its
    *  destination, and says so by carrying nothing rather than a guess. */
   destination: string
+  /** WHICH MACHINE `destination` is on, as a person names it
+   *  (machine-name.ts). Empty only where it is genuinely unknown.
+   *
+   *  It is on the ITEM and not derived by the surface, and that is the
+   *  whole point: this list is GLOBAL — one list for every tab — so by the
+   *  time a row is drawn there is no tab to ask. A source records it when
+   *  the operation STARTS, which is the only moment anybody knows. */
+  machine: string
   phase: OperationPhase
   /** Bytes confirmed so far, or null while nothing has been OBSERVED. Not
    *  zero: zero is a measurement and this is its absence. */
   done: number | null
-  /** The declared size. Zero is legitimate — an empty file is a file. */
-  total: number
+  /** The declared size. Zero is legitimate — an empty file is a file — and
+   *  null is the absence of a declaration, which is what an operation
+   *  adopted from a retained outcome has. */
+  total: number | null
   speedBytesPerSecond: number | null
   /** Why it says what it says; null when there is nothing to say. */
   error: string | null
+  /** When it started, on its source's clock; null where the source never
+   *  saw it start. The opening end of the duration a finished row reports. */
+  startedAt: number | null
   /** When it reached a terminal phase, on its source's clock; null while
    *  it is live. The finished half of the list is ordered by it. */
   endedAt: number | null
@@ -125,7 +138,11 @@ export function createOperationsModel(sources: readonly OperationSource[]): Oper
     let total = 0
     for (const o of running) {
       done += o.done ?? 0
-      total += o.total
+      // A live operation with no declared size contributes nothing to the
+      // denominator rather than poisoning the aggregate: the fraction is
+      // clamped below, so the worst case is a bar that reads full early,
+      // never a NaN that reads as no bar at all.
+      total += o.total ?? 0
     }
     if (total <= 0) return { fraction: 0 }
     return { fraction: Math.min(1, done / total) }

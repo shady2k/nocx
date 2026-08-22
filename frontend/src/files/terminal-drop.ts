@@ -76,6 +76,12 @@ export interface DropOrigin {
   kind: 'local' | 'ssh'
   cwd: string | null
   cwdVerified: boolean
+  /** WHICH MACHINE this tab is on, as a person names it — `ActiveOrigin.machine`,
+   *  which is the string the tab strip's own second line shows. Carried
+   *  because the operations list is GLOBAL: by the time the row is drawn
+   *  there is no tab to ask, so the answer travels with the transfer from
+   *  the moment it starts. */
+  machine: string
 }
 
 /** One dropped file as this module sees it, before the drop's meaning is
@@ -203,7 +209,7 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
       report('The files of this machine could not be reached, so nothing was uploaded.', 'danger')
       return
     }
-    await flow.send({ bindingId, destDir: o.cwd }, sources)
+    await flow.send({ bindingId, destDir: o.cwd, machine: o.machine }, sources)
   }
 
   const onDragOver = (e: DragEvent): void => {

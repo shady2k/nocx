@@ -107,3 +107,18 @@
      does, which is what keeps the wrap from moving the file name. */
   overflow-wrap: anywhere;
 }
+
+/* What a FINISHED row says about itself: size, when it ended, how long it
+   took. Same weight and colour as the progress detail it replaces, because
+   it is the same kind of statement on the other side of the split — the row
+   explaining itself under its own name. It never wraps: the three parts are
+   short and fixed, and a wrap here would move the destination line under
+   them for a fraction of a second every time the relative label ages. */
+.ui-operation-row__summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+}

@@ -26,7 +26,7 @@ import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
-import { ArrowUpIcon, CloseIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
+import { ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -38,11 +38,9 @@ import {
   type FilesTreeStore,
 } from './files-store'
 import { uploadMovesTheFile } from './upload-eligibility'
-import { formatProgress } from './upload-format'
 import { pickUploadSources } from './upload-picker'
 import type { UploadDestination, UploadSource } from './upload-flow'
 import type { UploadSurface } from './upload-surface'
-import { isTerminalPhase, type TerminalPhase, type UploadTransfer } from './upload-store'
 
 // ── The opener seam ────────────────────────────────────────────────────────
 
@@ -111,26 +109,6 @@ const MoreIcon: Component = () => (
     <circle cx="19" cy="12" r="1" />
   </svg>
 )
-
-// ── Transfers ─────────────────────────────────────────────────────────────
-
-/** How a finished transfer reads. `cancelled` and `skipped` are NOT
- *  failures — a cancelled transfer's underlying error is a context
- *  cancellation, and a skipped one is the person's own decision — so
- *  neither is danger. */
-const PHASE_TONE: Record<TerminalPhase, 'success' | 'neutral' | 'danger'> = {
-  written: 'success',
-  skipped: 'neutral',
-  cancelled: 'neutral',
-  failed: 'danger',
-}
-
-const PHASE_LABEL: Record<TerminalPhase, string> = {
-  written: 'Uploaded',
-  skipped: 'Skipped',
-  cancelled: 'Cancelled',
-  failed: 'Failed',
-}
 
 // ── Panel ─────────────────────────────────────────────────────────────────
 
@@ -516,78 +494,21 @@ function FilesPanel(props: FilesPanelProps) {
   // central state, and something has to be able to say WHICH machine and
   // directory this tree is: a check that waits on "a row appeared" cannot
   // tell a correct tree from a wrong machine's.
-  /** One transfer's row. A transfer that has not ended says how far and how
-   *  fast and offers the cancel; a finished one says how it ended and
-   *  offers to be forgotten. The progress line renders the SIZE alone
-   *  until a sample has arrived — a transfer that produced none is not at
-   *  zero, it is unobserved.
-   *
-   *  `unsettled` sits on the live side of that split and not the finished
-   *  side, which is the whole of what the state is for: the renderer lost
-   *  sight of the transfer, the backend may still be writing it, and
-   *  files.uploadCancel still reaches it — so the cancel stays and the
-   *  badge says we are waiting rather than that it failed. The reason we
-   *  are waiting is the badge's hover detail; the person was already told
-   *  it as a toast at the moment it happened. */
-  const renderTransfer = (t: UploadTransfer) => (
-    <div
-      class="files-upload-row"
-      data-testid="files-upload-row"
-      data-transfer-id={t.transferId}
-      data-phase={t.phase}
-    >
-      <span class="files-upload-name">{t.finalName !== '' ? t.finalName : t.name}</span>
-      <Show
-        when={!isTerminalPhase(t.phase)}
-        fallback={
-          <>
-            <Badge tone={PHASE_TONE[t.phase as TerminalPhase]}>
-              {PHASE_LABEL[t.phase as TerminalPhase]}
-            </Badge>
-            <Show when={t.error !== null}>
-              <span class="files-upload-detail">{t.error}</span>
-            </Show>
-            <IconButton
-              size="sm"
-              ariaLabel={`Dismiss ${t.name}`}
-              data-testid="files-upload-dismiss"
-              onClick={() => props.upload?.store.dismiss(t.transferId)}
-            >
-              <CloseIcon />
-            </IconButton>
-          </>
-        }
-      >
-        <Show when={t.phase === 'unsettled'}>
-          <Badge tone="warning" title={t.error ?? undefined} data-testid="files-upload-unsettled">
-            Waiting for the server
-          </Badge>
-        </Show>
-        <span class="files-upload-detail" data-testid="files-upload-progress">
-          {formatProgress(t)}
-        </span>
-        <Button
-          size="sm"
-          data-testid="files-upload-cancel"
-          onClick={() => props.upload?.store.cancel(t.transferId)}
-        >
-          Cancel
-        </Button>
-      </Show>
-    </div>
-  )
-
+  // THE TRANSFERS ARE NOT DRAWN HERE ANY MORE (nocx-hbdw4). They were, above
+  // the tree, and the panel was the only place a running transfer could be
+  // seen: switching sidebar view or collapsing the panel made a 2 GB upload
+  // invisible and uncancellable while it went on running on its own SSH
+  // lease. The list belongs to the activity bar's operations indicator,
+  // which is on screen whatever the panel is doing.
+  //
+  // The panel keeps NO contextual copy, and that is a decision rather than
+  // an omission. A copy would have to answer "which transfers belong to
+  // this panel", which is a second rule about where an operation appears —
+  // and the store deliberately has no bindingId to answer it with. It would
+  // also bring back exactly what the owner asked to be rid of: a finished
+  // transfer sitting above the tree until somebody dismissed it.
   return (
     <div class="files-panel" data-testid="files-panel" data-root={props.store.root()?.path}>
-      {/* The transfers this renderer knows about, above the tree and
-          outside the phase switch: a transfer outlives a re-scope, and an
-          upload that vanished because the panel changed tab would be an
-          upload nobody could account for. */}
-      <Show when={(props.upload?.store.transfers().length ?? 0) > 0}>
-        <div class="files-uploads" data-testid="files-uploads">
-          <For each={props.upload?.store.transfers() ?? []}>{(t) => renderTransfer(t)}</For>
-        </div>
-      </Show>
       <Show when={props.store.phase() === 'no-origin'}>
         <EmptyState
           icon={<FilesIcon />}

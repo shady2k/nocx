@@ -1,0 +1,91 @@
+/* OperationRow — one line of background work (nocx-hbdw4), composed on the
+   kit CollectionRow. This file owns only what the row adds: the kind glyph,
+   the title-and-destination line, and the progress detail. Everything about
+   the row itself — density, selection, focus — is CollectionRow's, and the
+   Badge, the Button and the ProgressBar inside it are the kit's own and are
+   not repainted here. */
+
+/* The parts' own box. It sits INSIDE `.ui-collection-row__info`, never
+   around CollectionRow — outside, it would orphan role="listitem" from its
+   role="list" — and it declares the flex context the parts need, because
+   the info slot is a plain block and must stay one (see
+   file-status-row.css for what depends on that). */
+.ui-operation-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: var(--font-size-sm);
+}
+
+/* AND THE SLOT SIZES THE GLYPH, because the glyph has no size of its own:
+   the kit's icons are inline `<svg viewBox>` with no width or height, which
+   WebKit resolves to zero and Chromium resolves against the slot. A slot
+   that does not say how big its svg is renders an empty column in the
+   packaged app and a correct one in the dev stand (nocx-8830c). */
+.ui-operation-row__kind-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  /* A hair below the first text line, so the glyph reads as a mark on the
+     row rather than as the start of a second column. */
+  margin-top: 2px;
+  color: var(--color-text-dim);
+}
+
+.ui-operation-row__kind-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* The name over the numbers: two lines in a rail's width, because a
+   progress line and a file name side by side leave neither enough room. */
+.ui-operation-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ui-operation-row__line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* The title keeps the room and gives it up last: which file this is is what
+   the row exists to say, so it ellipsises rather than wrapping and the
+   destination beside it is what yields first. */
+.ui-operation-row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-operation-row__destination {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-dim);
+}
+
+/* The numbers, and the failure reason in the same place — both are the row
+   explaining itself under its own name. */
+.ui-operation-row__detail {
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  /* A failure reason is a sentence and may wrap; the line above never
+     does, which is what keeps the wrap from moving the file name. */
+  overflow-wrap: anywhere;
+}

@@ -1106,7 +1106,14 @@ describe('uploading from the panel', () => {
     })
   })
 
-  it('shows the transfer it started, and what it knows about it', async () => {
+  it('draws no transfer rows at all — the operations indicator owns that list', async () => {
+    // The deliberate absence, and an untested absence is not one. The panel
+    // used to be the ONLY place a running transfer could be seen, which is
+    // the defect nocx-hbdw4 exists to fix: switch sidebar view or collapse
+    // the panel and a 2 GB upload was invisible and uncancellable. A
+    // contextual copy here would also have to answer "which transfers
+    // belong to this panel", and the store has no bindingId to answer it
+    // with.
     const app = await mountOnRemote({
       pickSources: () =>
         Promise.resolve([{ name: 'big.iso', size: 400, blob: new Blob([new Uint8Array(400)]) }]),
@@ -1115,81 +1122,12 @@ describe('uploading from the panel', () => {
     app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
     menuItem('Upload File').click()
 
-    const row = () => app.panel.querySelector('[data-testid="files-upload-row"]')
-    await vi.waitFor(() => expect(row()).not.toBeNull())
-    expect(row()?.getAttribute('data-phase')).toBe('running')
-    // No sample has arrived, so the line says the size and NOT "0 B of
-    // 400 B", which would claim the transfer had stalled at zero.
-    expect(app.panel.querySelector('[data-testid="files-upload-progress"]')?.textContent).toBe(
-      '400 B',
-    )
-
-    app.services.emitDone({
-      transferId: 't1',
-      outcome: 'written',
-      finalName: 'big.iso',
-      stranded: [],
-    })
-    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
-    expect(row()?.textContent).toContain('Uploaded')
-
-    // And the person can put it away.
-    app.panel.querySelector<HTMLElement>('[data-testid="files-upload-dismiss"]')!.click()
-    await vi.waitFor(() => expect(row()).toBeNull())
-  })
-
-  it('cancels a running transfer through the wire, not by deciding locally', async () => {
-    const app = await mountOnRemote({
-      pickSources: () =>
-        Promise.resolve([{ name: 'a.txt', size: 1, sourceTicket: 'c'.repeat(32) }]),
-    })
-    app.services.nextResult = [{ transferId: 't1' }]
-    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
-    menuItem('Upload File').click()
-    await vi.waitFor(() =>
-      expect(app.panel.querySelector('[data-testid="files-upload-cancel"]')).not.toBeNull(),
-    )
-
-    app.panel.querySelector<HTMLElement>('[data-testid="files-upload-cancel"]')!.click()
-    expect(app.services.cancels).toEqual(['t1'])
-    // Still running: the cancel races the transfer's own completion, and
-    // uploadDone is what says which won.
-    expect(
-      app.panel.querySelector('[data-testid="files-upload-row"]')?.getAttribute('data-phase'),
-    ).toBe('running')
-  })
-
-  it('does not call a 409 a failure — the row says it is waiting and still offers the cancel', async () => {
-    // The transfer is ALIVE: another claimant's body is running for this
-    // ticket. A row that said "Failed" would announce it dead and take
-    // away the only control that can still stop it.
-    const app = await mountOnRemote({
-      pickSources: () =>
-        Promise.resolve([{ name: 'big.iso', size: 400, blob: new Blob([new Uint8Array(400)]) }]),
-    })
-    app.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
-    app.services.nextSendBody = [{ ok: false, kind: 'status', status: 409 }]
-    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
-    menuItem('Upload File').click()
-
-    const row = () => app.panel.querySelector('[data-testid="files-upload-row"]')
-    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('unsettled'))
-    expect(row()?.textContent).toContain('Waiting for the server')
-    expect(row()?.textContent).not.toContain('Failed')
-
-    const cancel = () => app.panel.querySelector<HTMLElement>('[data-testid="files-upload-cancel"]')
-    expect(cancel()).not.toBeNull()
-    cancel()!.click()
-    expect(app.services.cancels).toEqual(['t1'])
-
-    app.services.emitDone({
-      transferId: 't1',
-      outcome: 'written',
-      finalName: 'big.iso',
-      stranded: [],
-    })
-    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
-    expect(row()?.textContent).toContain('Uploaded')
+    // The transfer really started — the panel's action still reaches the
+    // flow — and the panel still draws nothing about it.
+    await vi.waitFor(() => expect(app.services.uploads).toHaveLength(1))
+    expect(app.store.transfers()).toHaveLength(1)
+    expect(app.panel.querySelector('.ui-operation-row')).toBeNull()
+    expect(app.panel.textContent).not.toContain('big.iso')
   })
 })
 

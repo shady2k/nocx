@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatProgress, formatSpeed } from './upload-format'
+import { formatBytes, formatProgress, formatSpeed } from './format-bytes'
 
 describe('byte counts as a person reads them', () => {
   it('is exact below a kilobyte', () => {
@@ -32,20 +32,20 @@ describe('the rate', () => {
 
 describe('the progress line', () => {
   it('says the size alone while nothing has been observed', () => {
-    expect(formatProgress({ bytes: null, size: 400_000_000, speedBytesPerSecond: null })).toBe(
+    expect(formatProgress({ done: null, total: 400_000_000, speedBytesPerSecond: null })).toBe(
       '400.0 MB',
     )
   })
 
   it('says what has arrived out of what, once something has', () => {
-    expect(formatProgress({ bytes: 1_000_000, size: 4_000_000, speedBytesPerSecond: null })).toBe(
+    expect(formatProgress({ done: 1_000_000, total: 4_000_000, speedBytesPerSecond: null })).toBe(
       '1.0 MB of 4.0 MB',
     )
   })
 
   it('adds the rate when there is one', () => {
     expect(
-      formatProgress({ bytes: 1_000_000, size: 4_000_000, speedBytesPerSecond: 500_000 }),
+      formatProgress({ done: 1_000_000, total: 4_000_000, speedBytesPerSecond: 500_000 }),
     ).toBe('1.0 MB of 4.0 MB · 500.0 kB/s')
   })
 })

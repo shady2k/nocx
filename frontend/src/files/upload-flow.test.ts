@@ -3,7 +3,8 @@
 import { describe, expect, it } from 'vitest'
 import type { SendBodyOutcome } from './upload-client'
 import { createUploadFlow, type UploadSource } from './upload-flow'
-import { createUploadStore, isTerminalPhase, type TransferPhase } from './upload-store'
+import { createUploadStore } from './upload-store'
+import { isTerminalPhase, type OperationPhase } from '../ui/operation'
 import { fakeClock, fakeUploadServices } from './upload-fixtures'
 import type { CollisionRequest, CollisionResult } from '../ui/collision-dialog'
 import type { ToastLevel } from '../ui/toast'
@@ -271,7 +272,7 @@ describe('what the renderer does not know, it does not claim', () => {
     // Flattening everything into `unsettled` trades one lie for another. A
     // body the renderer refused to send is over: no bytes left this
     // machine and none are going to.
-    const cases: Array<{ what: string; outcome: SendBodyOutcome; phase: TransferPhase }> = [
+    const cases: Array<{ what: string; outcome: SendBodyOutcome; phase: OperationPhase }> = [
       {
         what: 'the file changed size before a byte was sent',
         outcome: { ok: false, kind: 'size', declared: 4, actual: 5 },

@@ -11,12 +11,12 @@
 // would show it uploading forever.
 import { describe, expect, it } from 'vitest'
 import {
+  FINISHED_TRANSFERS_RETAINED,
   createUploadStore,
-  isTerminalPhase,
-  type TransferPhase,
   type UploadStore,
   type UploadTransfer,
 } from './upload-store'
+import { isTerminalPhase, type OperationPhase } from '../ui/operation'
 import type { UploadServices } from './upload-client'
 import { fakeClock, fakeUploadServices } from './upload-fixtures'
 
@@ -115,6 +115,7 @@ describe('the row a result seeds', () => {
       bytes: null,
       speedBytesPerSecond: null,
       phase: 'running',
+      endedAt: null,
       finalName: '',
       error: null,
       stranded: [],
@@ -133,7 +134,7 @@ describe('the row a result seeds', () => {
       const store = createUploadStore({ services, now: fakeClock().now })
       seeded(store)
       services.emitDone({ transferId: 't1', outcome, finalName: '', stranded: [] })
-      const phase: TransferPhase | undefined = store.transfer('t1')?.phase
+      const phase: OperationPhase | undefined = store.transfer('t1')?.phase
       expect(phase).toBe(outcome)
       // The two non-terminal values, named: a row the wire has settled is
       // neither still moving nor still unknown.
@@ -350,13 +351,105 @@ describe('the store as a surface', () => {
     expect(store.transfers().map((t) => t.transferId)).toEqual(['a', 'b'])
   })
 
-  it('dismisses a row the person is done reading', () => {
+  it('stamps a finished transfer with when it ended, and leaves a live one unstamped', () => {
+    // `endedAt` is what orders the finished half of the operations list and
+    // decides which one falls off the end. It cannot be read off the array,
+    // which is in START order: a transfer that started first does not
+    // finish first, and the pair below is exactly that case.
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    store.begin({ transferId: 'a', name: 'a.txt', destDir: '/d', size: 1 })
+    store.begin({ transferId: 'b', name: 'b.txt', destDir: '/d', size: 2 })
+
+    clock.advance(50)
+    services.emitDone({ transferId: 'b', outcome: 'written', finalName: 'b.txt', stranded: [] })
+    expect(store.transfer('a')?.endedAt).toBeNull()
+    const bEnded = store.transfer('b')?.endedAt
+    expect(bEnded).toBe(1_050)
+
+    clock.advance(50)
+    services.emitDone({ transferId: 'a', outcome: 'written', finalName: 'a.txt', stranded: [] })
+    expect(store.transfer('a')?.endedAt).toBe(1_100)
+    // A second terminal frame for the same transfer does not rewrite when
+    // it ended — the retention order would move under the reader.
+    clock.advance(50)
+    services.emitDone({ transferId: 'b', outcome: 'written', finalName: 'b.txt', stranded: [] })
+    expect(store.transfer('b')?.endedAt).toBe(bEnded)
+  })
+
+  it('stamps a locally-failed transfer too, so it is retained like any other outcome', () => {
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    seeded(store)
+    clock.advance(7)
+    store.failLocally('t1', 'the file could not be read')
+    expect(store.transfer('t1')?.endedAt).toBe(1_007)
+  })
+
+  it('leaves an unsettled transfer unstamped — it has not ended', () => {
+    // `unsettled` is the renderer not knowing, not the transfer being over.
+    // A stamp here would put it in the finished half of the list and expose
+    // it to eviction while files.uploadCancel still reaches it.
     const services = fakeUploadServices()
     const store = createUploadStore({ services, now: fakeClock().now })
     seeded(store)
-    services.emitDone({ transferId: 't1', outcome: 'written', finalName: 'big.iso', stranded: [] })
-    store.dismiss('t1')
-    expect(store.transfers()).toEqual([])
+    store.unsettle('t1', 'the connection dropped')
+    expect(store.transfer('t1')?.endedAt).toBeNull()
+  })
+
+  it('remembers a bounded number of FINISHED transfers, dropping the oldest by when it ended', () => {
+    // A finished transfer does not vanish and does not accumulate. It used
+    // to do the second: a row stayed until somebody clicked its ×, which
+    // is a chore the product invented for itself.
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    const total = FINISHED_TRANSFERS_RETAINED + 3
+    for (let i = 0; i < total; i++) {
+      store.begin({ transferId: `t${i}`, name: `f${i}`, destDir: '/d', size: 1 })
+    }
+    // Finished in REVERSE start order, so "oldest" cannot be read off the
+    // array — only `endedAt` answers it.
+    for (let i = total - 1; i >= 0; i--) {
+      clock.advance(1)
+      services.emitDone({
+        transferId: `t${i}`,
+        outcome: 'written',
+        finalName: `f${i}`,
+        stranded: [],
+      })
+    }
+    const ids = store.transfers().map((t) => t.transferId)
+    expect(ids).toHaveLength(FINISHED_TRANSFERS_RETAINED)
+    // t2, t1, t0 ended last, so they survive; the highest-numbered ones
+    // ended first and are the ones dropped.
+    expect(ids).toContain('t0')
+    expect(ids).toContain('t2')
+    expect(ids).not.toContain(`t${total - 1}`)
+  })
+
+  it('never evicts a transfer that is still live, however many have finished', () => {
+    // The bound is about how long an OUTCOME is worth reading. A running
+    // transfer has no outcome yet, and dropping it would take away the only
+    // control that can stop it.
+    const clock = fakeClock()
+    const services = fakeUploadServices()
+    const store = createUploadStore({ services, now: clock.now })
+    store.begin({ transferId: 'live', name: 'big.iso', destDir: '/d', size: 400 })
+    for (let i = 0; i < FINISHED_TRANSFERS_RETAINED + 5; i++) {
+      store.begin({ transferId: `t${i}`, name: `f${i}`, destDir: '/d', size: 1 })
+      clock.advance(1)
+      services.emitDone({
+        transferId: `t${i}`,
+        outcome: 'written',
+        finalName: `f${i}`,
+        stranded: [],
+      })
+    }
+    expect(store.transfer('live')?.phase).toBe('running')
+    expect(store.transfers()).toHaveLength(FINISHED_TRANSFERS_RETAINED + 1)
   })
 
   it('unsubscribes from the wire when it is disposed', () => {

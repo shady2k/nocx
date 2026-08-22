@@ -1,8 +1,9 @@
 // The flow both gestures run through: one file at a time, one question at
 // most, and the source routed rather than reimplemented.
 import { describe, expect, it } from 'vitest'
+import type { SendBodyOutcome } from './upload-client'
 import { createUploadFlow, type UploadSource } from './upload-flow'
-import { createUploadStore } from './upload-store'
+import { createUploadStore, isTerminalPhase, type TransferPhase } from './upload-store'
 import { fakeClock, fakeUploadServices } from './upload-fixtures'
 import type { CollisionRequest, CollisionResult } from '../ui/collision-dialog'
 import type { ToastLevel } from '../ui/toast'
@@ -177,13 +178,13 @@ describe('what the person is told when it does not work', () => {
     expect(gone.said.said[0]).toContain('already ended')
   })
 
-  it('records the body failure on the transfer as well as saying it', async () => {
+  it('records a terminal body failure on the transfer as well as saying it', async () => {
     const h = harness()
     h.services.nextResult = [waiting('t1')]
-    h.services.nextSendBody = [{ ok: false, kind: 'network', message: 'connection reset' }]
+    h.services.nextSendBody = [{ ok: false, kind: 'size', declared: 4, actual: 5 }]
     await h.flow.send(DEST, [streamSource('a.txt')])
     expect(h.store.transfer('t1')?.phase).toBe('failed')
-    expect(h.store.transfer('t1')?.error).toContain('connection reset')
+    expect(h.store.transfer('t1')?.error).toContain('changed size')
   })
 
   it('stops the batch when the destination refuses, rather than saying it once per file', async () => {
@@ -203,5 +204,116 @@ describe('what the person is told when it does not work', () => {
     const h = harness()
     h.services.nextResult = []
     await expect(h.flow.send(DEST, [streamSource('a.txt')])).resolves.toBeUndefined()
+  })
+})
+
+describe('what the renderer does not know, it does not claim', () => {
+  // files.uploadDone is the only thing that settles a transfer, and it is
+  // RETAINED per session and flushed on reattach precisely so a dropped
+  // connection cannot lose a terminal outcome. Two body results leave the
+  // renderer without an answer, and inventing `failed` for them does not
+  // merely pre-empt that mechanism — it overrides the one thing built to
+  // answer this exact question.
+
+  it('leaves a 409 unsettled: another claimant is sending it and the transfer is alive', async () => {
+    const h = harness()
+    h.services.nextResult = [waiting('t1')]
+    h.services.nextSendBody = [{ ok: false, kind: 'status', status: 409 }]
+    await h.flow.send(DEST, [streamSource('a.txt')])
+
+    const t = h.store.transfer('t1')
+    expect(t?.phase).toBe('unsettled')
+    expect(isTerminalPhase(t!.phase)).toBe(false)
+    // Cancelling still means something: the body running on the backend is
+    // another request's, and files.uploadCancel reaches the transfer.
+    h.store.cancel('t1')
+    expect(h.services.cancels).toEqual(['t1'])
+
+    h.services.emitDone({
+      transferId: 't1',
+      outcome: 'written',
+      finalName: 'a.txt',
+      stranded: [],
+    })
+    expect(h.store.transfer('t1')?.phase).toBe('written')
+    expect(h.store.transfer('t1')?.error).toBeNull()
+  })
+
+  it('leaves a dropped connection unsettled, and settles it in EITHER direction', async () => {
+    // Both outcomes, because the whole point is that the renderer did not
+    // know which one it was going to be. A test that only asserted the
+    // happy one would pass for a store that guessed.
+    for (const outcome of ['written', 'failed'] as const) {
+      const h = harness()
+      h.services.nextResult = [waiting('t1')]
+      h.services.nextSendBody = [{ ok: false, kind: 'network', message: 'connection reset' }]
+      await h.flow.send(DEST, [streamSource('a.txt')])
+
+      const t = h.store.transfer('t1')
+      expect(t?.phase).toBe('unsettled')
+      expect(isTerminalPhase(t!.phase)).toBe(false)
+      expect(t?.error).toContain('connection reset')
+
+      h.services.emitDone({
+        transferId: 't1',
+        outcome,
+        finalName: outcome === 'written' ? 'a.txt' : '',
+        ...(outcome === 'failed' ? { error: 'no space left on device' } : {}),
+        stranded: [],
+      })
+      const settled = h.store.transfer('t1')
+      expect(settled?.phase).toBe(outcome)
+      expect(settled?.error).toBe(outcome === 'failed' ? 'no space left on device' : null)
+    }
+  })
+
+  it('keeps a genuinely local failure terminal, and unsettles only the two that are unknown', async () => {
+    // Flattening everything into `unsettled` trades one lie for another. A
+    // body the renderer refused to send is over: no bytes left this
+    // machine and none are going to.
+    const cases: Array<{ what: string; outcome: SendBodyOutcome; phase: TransferPhase }> = [
+      {
+        what: 'the file changed size before a byte was sent',
+        outcome: { ok: false, kind: 'size', declared: 4, actual: 5 },
+        phase: 'failed',
+      },
+      {
+        what: 'the ticket names nothing at all',
+        outcome: { ok: false, kind: 'status', status: 410 },
+        phase: 'failed',
+      },
+      {
+        what: 'the server read the body and refused it',
+        outcome: { ok: false, kind: 'status', status: 500 },
+        phase: 'failed',
+      },
+      {
+        what: 'another claimant holds the ticket',
+        outcome: { ok: false, kind: 'status', status: 409 },
+        phase: 'unsettled',
+      },
+      {
+        what: 'the request never got an answer',
+        outcome: { ok: false, kind: 'network', message: 'connection reset' },
+        phase: 'unsettled',
+      },
+    ]
+    for (const c of cases) {
+      const h = harness()
+      h.services.nextResult = [waiting('t1')]
+      h.services.nextSendBody = [c.outcome]
+      await h.flow.send(DEST, [streamSource('a.txt')])
+      expect(`${c.what}: ${h.store.transfer('t1')?.phase}`).toBe(`${c.what}: ${c.phase}`)
+    }
+  })
+
+  it('tells the person an unsettled transfer is unsettled, not that it failed', async () => {
+    const h = harness()
+    h.services.nextResult = [waiting('t1')]
+    h.services.nextSendBody = [{ ok: false, kind: 'status', status: 409 }]
+    await h.flow.send(DEST, [streamSource('a.txt')])
+    expect(h.said.said[0]).toContain('already claimed')
+    expect(h.said.said[0]).toContain('waiting for the server')
+    expect(h.said.said[0].toLowerCase()).not.toContain('failed')
   })
 })

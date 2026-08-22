@@ -31,6 +31,14 @@
 //    that was reloaded — and the correct handling is to say the upload
 //    finished, not to discard the frame.
 //
+// Rule 1 is why there are two non-terminal phases and not one. When the
+// renderer's own half of a transfer ends without an answer — a `409`, a
+// dropped connection — it has learnt something and it has NOT learnt the
+// outcome. `unsettled` is that state written down. Collapsing it into
+// `failed` would make the renderer the second author of a terminal
+// account, over the top of the one notification that is retained across a
+// reconnect for exactly this reason.
+//
 // ## Speed is derived here
 //
 // The wire carries `bytes` and `total`; bytes-per-second is this store's
@@ -44,11 +52,34 @@ import type { FilesUploadDone } from '../generated/files.uploadDone'
 import type { FilesUploadProgress } from '../generated/files.uploadProgress'
 import type { UploadServices } from './upload-client'
 
-/** Where a transfer is. `running` is the only non-terminal value, and the
- *  four terminal ones are the wire's own outcome vocabulary — told to a
- *  person in four different ways, so they are four values and not a
- *  boolean plus an error string. */
-export type TransferPhase = 'running' | 'written' | 'skipped' | 'cancelled' | 'failed'
+/**
+ * Where a transfer is. The four terminal values are the wire's own outcome
+ * vocabulary — told to a person in four different ways, so they are four
+ * values and not a boolean plus an error string — and TWO values are not
+ * terminal.
+ *
+ * `unsettled` is the renderer saying it does not know. Its own half of the
+ * transfer is over and the answer never came back: a `409` means another
+ * claimant's body is running for this ticket and the transfer is very much
+ * alive, and a dropped connection means the backend may be writing the
+ * file successfully right now. Only files.uploadDone settles a transfer,
+ * and it is retained per session and flushed on reattach precisely so a
+ * dropped connection cannot lose a terminal outcome — so a renderer that
+ * minted `failed` here would not merely be early, it would be overriding
+ * the one mechanism built to answer this exact question.
+ */
+export type TransferPhase = 'running' | 'unsettled' | 'written' | 'skipped' | 'cancelled' | 'failed'
+
+/** The values that mean the transfer is over. Exported because a surface
+ *  that labels an outcome needs the closed set of outcomes, and a second
+ *  spelling of it in a view is how a new phase renders as nothing. */
+export type TerminalPhase = Exclude<TransferPhase, 'running' | 'unsettled'>
+
+/** Whether anything more can happen to this transfer. The one owner of the
+ *  question: `running` and `unsettled` both still have an outcome coming. */
+export function isTerminalPhase(phase: TransferPhase): phase is TerminalPhase {
+  return phase !== 'running' && phase !== 'unsettled'
+}
 
 export interface UploadTransfer {
   /** The backend's opaque id — the address of every later frame. */
@@ -68,9 +99,11 @@ export interface UploadTransfer {
   phase: TransferPhase
   /** The name actually written; empty for every outcome but `written`. */
   finalName: string
-  /** Why it failed. Null on every other outcome — a cancelled transfer's
-   *  underlying error is a context cancellation, which is not a fault and
-   *  must never be shown to a person as one. */
+  /** Why the row says what it says: the wire's reason on `failed`, and
+   *  what the renderer's own half hit on `unsettled` — which is a reason
+   *  for not knowing and not a fault. Null on every other phase; a
+   *  cancelled transfer's underlying error is a context cancellation,
+   *  which must never be shown to a person as a failure. */
   error: string | null
   /** Paths the transfer created or moved and could not clean up. Always an
    *  array; orthogonal to the outcome. */
@@ -89,12 +122,22 @@ export interface UploadStore {
    *  is what says a transfer exists. */
   begin(t: { transferId: string; name: string; destDir: string; size: number }): void
   /**
-   * Record a failure only the renderer can know about: the POST that
-   * carries the bytes never landed. It is NOT the terminal account — a
-   * `409` means somebody else claimed the ticket and the transfer is very
-   * much alive — so `files.uploadDone` overrules whatever this wrote.
+   * Record a failure only the renderer can know about, and that is the
+   * whole story: no bytes left this machine and none are going to — the
+   * file could not be read, or the sink refused the body outright. It is
+   * still not the terminal ACCOUNT: `files.uploadDone` overrules whatever
+   * this wrote, because the backend may have its own view of a transfer it
+   * created.
    */
   failLocally(transferId: string, error: string): void
+  /**
+   * Record that the renderer's half is over and THE OUTCOME IS UNKNOWN —
+   * the body was claimed by another request, or the connection dropped
+   * mid-send. Not a failure and not an ending: the transfer may be running
+   * on the backend this moment, `files.uploadCancel` still reaches it, and
+   * `files.uploadDone` is what will say how it went.
+   */
+  unsettle(transferId: string, reason: string): void
   /** Ask the backend to cancel. Deliberately changes NO phase: the person's
    *  cancel races the transfer's own completion every time, and what
    *  actually happened arrives as `uploadDone` with outcome `cancelled`
@@ -124,10 +167,6 @@ export interface UploadStoreDeps {
  * to move from and is taken whole.
  */
 const SPEED_SMOOTHING = 0.4
-
-function isTerminal(phase: TransferPhase): boolean {
-  return phase !== 'running'
-}
 
 export function createUploadStore(deps: UploadStoreDeps): UploadStore {
   const { services } = deps
@@ -193,7 +232,7 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     const current = currentOf(p.transferId)
     // Rule 2: no row means nothing to draw; a finished row is not reopened
     // by a frame that was in flight when it ended.
-    if (current === undefined || isTerminal(current.phase)) return
+    if (current === undefined || isTerminalPhase(current.phase)) return
     const at = now()
     const last = samples.get(p.transferId)
     let speed = current.speedBytesPerSecond
@@ -257,7 +296,20 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
 
   function failLocally(transferId: string, error: string): void {
     patch(transferId, (t) =>
-      isTerminal(t.phase) ? t : { ...t, phase: 'failed', error, speedBytesPerSecond: null },
+      isTerminalPhase(t.phase) ? t : { ...t, phase: 'failed', error, speedBytesPerSecond: null },
+    )
+  }
+
+  function unsettle(transferId: string, reason: string): void {
+    // The rate stops rather than freezing at its last value: it is
+    // arithmetic over samples, and the renderer has stopped taking them.
+    // The byte count is left alone — for a `409` the other claimant's
+    // progress frames are real and keep arriving, and applyProgress goes
+    // on applying them without ever deciding the phase.
+    patch(transferId, (t) =>
+      isTerminalPhase(t.phase)
+        ? t
+        : { ...t, phase: 'unsettled', error: reason, speedBytesPerSecond: null },
     )
   }
 
@@ -284,5 +336,5 @@ export function createUploadStore(deps: UploadStoreDeps): UploadStore {
     setTransfers([])
   }
 
-  return { transfers, transfer: find, begin, failLocally, cancel, dismiss, dispose }
+  return { transfers, transfer: find, begin, failLocally, unsettle, cancel, dismiss, dispose }
 }

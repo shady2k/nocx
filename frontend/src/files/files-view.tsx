@@ -40,7 +40,7 @@ import { formatProgress } from './upload-format'
 import { pickUploadSources } from './upload-picker'
 import type { UploadDestination, UploadSource } from './upload-flow'
 import type { UploadSurface } from './upload-surface'
-import type { TransferPhase, UploadTransfer } from './upload-store'
+import { isTerminalPhase, type TerminalPhase, type UploadTransfer } from './upload-store'
 
 // ── The opener seam ────────────────────────────────────────────────────────
 
@@ -116,14 +116,14 @@ const MoreIcon: Component = () => (
  *  failures — a cancelled transfer's underlying error is a context
  *  cancellation, and a skipped one is the person's own decision — so
  *  neither is danger. */
-const PHASE_TONE: Record<Exclude<TransferPhase, 'running'>, 'success' | 'neutral' | 'danger'> = {
+const PHASE_TONE: Record<TerminalPhase, 'success' | 'neutral' | 'danger'> = {
   written: 'success',
   skipped: 'neutral',
   cancelled: 'neutral',
   failed: 'danger',
 }
 
-const PHASE_LABEL: Record<Exclude<TransferPhase, 'running'>, string> = {
+const PHASE_LABEL: Record<TerminalPhase, string> = {
   written: 'Uploaded',
   skipped: 'Skipped',
   cancelled: 'Cancelled',
@@ -428,10 +428,19 @@ function FilesPanel(props: FilesPanelProps) {
   // central state, and something has to be able to say WHICH machine and
   // directory this tree is: a check that waits on "a row appeared" cannot
   // tell a correct tree from a wrong machine's.
-  /** One transfer's row. Running says how far and how fast and offers the
-   *  cancel; finished says how it ended and offers to be forgotten. The
-   *  progress line renders the SIZE alone until a sample has arrived — a
-   *  transfer that produced none is not at zero, it is unobserved. */
+  /** One transfer's row. A transfer that has not ended says how far and how
+   *  fast and offers the cancel; a finished one says how it ended and
+   *  offers to be forgotten. The progress line renders the SIZE alone
+   *  until a sample has arrived — a transfer that produced none is not at
+   *  zero, it is unobserved.
+   *
+   *  `unsettled` sits on the live side of that split and not the finished
+   *  side, which is the whole of what the state is for: the renderer lost
+   *  sight of the transfer, the backend may still be writing it, and
+   *  files.uploadCancel still reaches it — so the cancel stays and the
+   *  badge says we are waiting rather than that it failed. The reason we
+   *  are waiting is the badge's hover detail; the person was already told
+   *  it as a toast at the moment it happened. */
   const renderTransfer = (t: UploadTransfer) => (
     <div
       class="files-upload-row"
@@ -441,11 +450,11 @@ function FilesPanel(props: FilesPanelProps) {
     >
       <span class="files-upload-name">{t.finalName !== '' ? t.finalName : t.name}</span>
       <Show
-        when={t.phase === 'running'}
+        when={!isTerminalPhase(t.phase)}
         fallback={
           <>
-            <Badge tone={PHASE_TONE[t.phase as Exclude<TransferPhase, 'running'>]}>
-              {PHASE_LABEL[t.phase as Exclude<TransferPhase, 'running'>]}
+            <Badge tone={PHASE_TONE[t.phase as TerminalPhase]}>
+              {PHASE_LABEL[t.phase as TerminalPhase]}
             </Badge>
             <Show when={t.error !== null}>
               <span class="files-upload-detail">{t.error}</span>
@@ -461,6 +470,11 @@ function FilesPanel(props: FilesPanelProps) {
           </>
         }
       >
+        <Show when={t.phase === 'unsettled'}>
+          <Badge tone="warning" title={t.error ?? undefined} data-testid="files-upload-unsettled">
+            Waiting for the server
+          </Badge>
+        </Show>
         <span class="files-upload-detail" data-testid="files-upload-progress">
           {formatProgress(t)}
         </span>

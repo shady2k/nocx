@@ -1084,4 +1084,37 @@ describe('uploading from the panel', () => {
       app.panel.querySelector('[data-testid="files-upload-row"]')?.getAttribute('data-phase'),
     ).toBe('running')
   })
+
+  it('does not call a 409 a failure — the row says it is waiting and still offers the cancel', async () => {
+    // The transfer is ALIVE: another claimant's body is running for this
+    // ticket. A row that said "Failed" would announce it dead and take
+    // away the only control that can still stop it.
+    const app = await mountOnRemote({
+      pickSources: () =>
+        Promise.resolve([{ name: 'big.iso', size: 400, blob: new Blob([new Uint8Array(400)]) }]),
+    })
+    app.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
+    app.services.nextSendBody = [{ ok: false, kind: 'status', status: 409 }]
+    app.panel.querySelector<HTMLElement>('[data-testid="files-overflow"]')!.click()
+    menuItem('Upload File').click()
+
+    const row = () => app.panel.querySelector('[data-testid="files-upload-row"]')
+    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('unsettled'))
+    expect(row()?.textContent).toContain('Waiting for the server')
+    expect(row()?.textContent).not.toContain('Failed')
+
+    const cancel = () => app.panel.querySelector<HTMLElement>('[data-testid="files-upload-cancel"]')
+    expect(cancel()).not.toBeNull()
+    cancel()!.click()
+    expect(app.services.cancels).toEqual(['t1'])
+
+    app.services.emitDone({
+      transferId: 't1',
+      outcome: 'written',
+      finalName: 'big.iso',
+      stranded: [],
+    })
+    await vi.waitFor(() => expect(row()?.getAttribute('data-phase')).toBe('written'))
+    expect(row()?.textContent).toContain('Uploaded')
+  })
 })

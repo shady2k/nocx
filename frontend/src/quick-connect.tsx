@@ -63,7 +63,6 @@ import {
 import { render } from 'solid-js/web'
 import { parseQuickConnect, type ProfileClient } from './profiles'
 import type { Pane } from './panes'
-import type { SandboxStatus } from './generated/sandbox.status'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
 import { VAULT_OFFER_SETUP, VAULT_OFFER_UNSEAL, addSecretLabel } from './ui/secret-picker'
@@ -234,13 +233,9 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
     private drillCommand?: DrillCommand,
-    private sandbox?: {
-      state: () => Promise<{ enabled: boolean; status: SandboxStatus | null }>
-      open: () => void
-    },
   ) {}
 
-  async getItems(): Promise<QuickConnectItem[]> {
+  getItems(): QuickConnectItem[] {
     const items: QuickConnectItem[] = [
       {
         id: '__local__',
@@ -269,27 +264,6 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     if (this.drillCommand) {
       items.push(drillItem(this.drillCommand))
     }
-    if (!this.sandbox) return items
-    let state: { enabled: boolean; status: SandboxStatus | null }
-    try {
-      state = await this.sandbox.state()
-    } catch {
-      return items
-    }
-    if (!state.enabled) return items
-    const backend = state.status?.backend ?? 'unknown'
-    const reason = state.status?.reason ?? ''
-    const unavailable = !state.status?.available
-    items.push({
-      id: '__sandboxed_local__',
-      kind: 'command',
-      label: 'Sandboxed shell…',
-      detail: unavailable
-        ? `Sandbox unavailable (${reason})`
-        : `Open a filesystem-isolated local shell (${backend})`,
-      disabled: unavailable,
-      run: () => this.sandbox?.open(),
-    })
     return items
   }
 }

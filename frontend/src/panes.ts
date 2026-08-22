@@ -960,11 +960,7 @@ export class PaneManager {
    * never appears (nocx-rtg0.29). Returning the id alone is what made that
    * race impossible to close at the call site.
    */
-  private mintPane(
-    kind: 'local' | 'ssh',
-    endpoint: string | null,
-    ephemeral = false,
-  ): PaneIdentity {
+  private mintPane(kind: 'local' | 'ssh', endpoint: string | null): PaneIdentity {
     // No store is a DEGRADE, not a refusal: the id is minted and simply
     // names no row, which `registered: false` states rather than leaving the
     // caller to infer it from a promise that never settles.
@@ -974,10 +970,7 @@ export class PaneManager {
     // would either vanish on arrival or drag the window away from where the
     // person was working. The default is where it goes when that is where
     // they are.
-    const opened = this.layout.openTab(
-      { kind, endpoint, cwd: '', ephemeral },
-      this.currentWorkspaceId(),
-    )
+    const opened = this.layout.openTab({ kind, endpoint, cwd: '' }, this.currentWorkspaceId())
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the
@@ -1009,7 +1002,10 @@ export class PaneManager {
     return this.buildLocalPane(this.mintPane('local', null))
   }
 
-  newSandboxedPane(workspace: string, launch: SandboxLaunch): Pane {
+  newSandboxedPane(
+    workspace: string,
+    launch: SandboxLaunch,
+  ): { pane: Pane; created: Promise<boolean> } {
     const request: SandboxRequest = {
       workspace,
       settingsRevision: launch.settingsRevision,
@@ -1018,7 +1014,11 @@ export class PaneManager {
       addReadOnly: [...launch.addReadOnly],
       removeReadOnly: [...launch.removeReadOnly],
     }
-    return this.buildLocalPane(this.mintPane('local', null, true), true, request)
+    const identity = this.mintPane('local', null)
+    return {
+      pane: this.buildLocalPane(identity, true, request),
+      created: identity.registered,
+    }
   }
 
   /** The chrome and content of a LOCAL terminal pane with a given identity —
@@ -1525,6 +1525,32 @@ export class PaneManager {
     return pane ? this.layout.tabOf(pane.wireId) : undefined
   }
 
+  /** Renderer pane by its in-memory identity. */
+  paneOf(paneId: number): Pane | undefined {
+    return this.panes.find((pane) => pane.id === paneId)
+  }
+
+  /** The durable tab row behind one renderer pane. */
+  tabOf(paneId: number) {
+    return this.tabFor(paneId)
+  }
+
+  /** Put a newly created tab in the replaced tab's durable strip position. */
+  replaceTabPosition(oldPaneId: number, newPaneId: number): void {
+    const oldTab = this.tabFor(oldPaneId)
+    const newTab = this.tabFor(newPaneId)
+    if (!oldTab || !newTab || oldTab.workspaceId !== newTab.workspaceId) return
+    const order = stripOrder(
+      this.layout.tabs().filter((tab) => tab.workspaceId === oldTab.workspaceId),
+    ).map((tab) => tab.id)
+    const oldIndex = order.indexOf(oldTab.id)
+    const newIndex = order.indexOf(newTab.id)
+    if (oldIndex === -1 || newIndex === -1) return
+    order.splice(newIndex, 1)
+    order[newIndex < oldIndex ? oldIndex - 1 : oldIndex] = newTab.id
+    void this.layout.reorder(oldTab.workspaceId, order)
+  }
+
   /**
    * Run one layout call and report a refusal.
    *
@@ -1683,7 +1709,6 @@ export class PaneManager {
       kind: 'local',
       endpoint: null,
       cwd: '',
-      ephemeral: false,
     })
     // The window follows the workspace it just made, before the answer: the
     // chrome goes up in the same turn the person pressed the key, and a
@@ -2145,10 +2170,9 @@ export class PaneManager {
    * old session died with the backend, and what this opens is another one.
    */
   private adopt(row: PaneRow): void {
-    if (row.ephemeral) {
+    if (row.sandboxGranted) {
       // Backend startup normally closes this row before layout.read. Refuse
-      // independently: adopting it as local would reopen a sandboxed pane
-      // without its policy.
+      // independently: adopting it as local would silently re-issue authority.
       return
     }
     if (row.kind === 'ssh') {

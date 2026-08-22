@@ -302,20 +302,18 @@ func TestClearWindowClosesEveryLeftoverAndKeepsWhatComesAfter(t *testing.T) {
 	}
 }
 
-// An ephemeral pane is recorded so its blocks and workspace provenance have a
-// durable anchor while it is alive, but it is not part of the next window.
-// The startup sweep closes only that pane: ordinary local/SSH panes remain
-// restorable, and closing never deletes the row that the ledger references.
-func TestCloseEphemeralPanesLeavesOnlyRestorablePanesInTheWindow(t *testing.T) {
+// A granted pane is recorded so its blocks and workspace provenance have a
+// durable anchor while it is alive, but its authority cannot be silently
+// re-issued in the next backend incarnation.
+func TestCloseSandboxPanesLeavesOnlyRestorablePanesInTheWindow(t *testing.T) {
 	ctx := context.Background()
 	db, led, path := newLedgerAt(t)
 	layout := db.Layout()
 
-	ephemeral := aPane("pane-sandbox", "tab-sandbox", "/workspace")
-	ephemeral.Ephemeral = true
 	if _, err := layout.CreateWorkspace(ctx,
 		content.Workspace{ID: "ws-sandbox", Name: "sandbox"},
-		aTab("tab-sandbox", "ws-sandbox"), ephemeral); err != nil {
+		aTab("tab-sandbox", "ws-sandbox"),
+		aPane("pane-sandbox", "tab-sandbox", "/workspace")); err != nil {
 		t.Fatalf("CreateWorkspace sandbox: %v", err)
 	}
 	if _, err := layout.CreateWorkspace(ctx,
@@ -324,22 +322,27 @@ func TestCloseEphemeralPanesLeavesOnlyRestorablePanesInTheWindow(t *testing.T) {
 		aPane("pane-ordinary", "tab-ordinary", "/repo")); err != nil {
 		t.Fatalf("CreateWorkspace ordinary: %v", err)
 	}
-
-	isEphemeral, queryErr := layout.IsPaneEphemeral(ctx, "pane-sandbox")
-	if queryErr != nil || !isEphemeral {
-		t.Fatalf("IsPaneEphemeral(sandbox) = %v, %v; want true, nil", isEphemeral, queryErr)
+	if err := layout.InsertSandboxGrant(ctx, content.SandboxGrant{
+		PaneID: "pane-sandbox", Version: 1, IssuedAt: 42,
+		Workspace: "/workspace", Payload: `{"writableRoots":["/workspace"]}`,
+	}); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
 	}
-	isEphemeral, queryErr = layout.IsPaneEphemeral(ctx, "pane-ordinary")
-	if queryErr != nil || isEphemeral {
-		t.Fatalf("IsPaneEphemeral(ordinary) = %v, %v; want false, nil", isEphemeral, queryErr)
+	granted, queryErr := layout.SandboxGrantExists(ctx, "pane-sandbox")
+	if queryErr != nil || !granted {
+		t.Fatalf("SandboxGrantExists(sandbox) = %v, %v; want true, nil", granted, queryErr)
+	}
+	granted, queryErr = layout.SandboxGrantExists(ctx, "pane-ordinary")
+	if queryErr != nil || granted {
+		t.Fatalf("SandboxGrantExists(ordinary) = %v, %v; want false, nil", granted, queryErr)
 	}
 
 	envReady(t, led, "local")
 	const block = "00000000-0000-7000-8000-0000000c4001"
 	aBlockIn(t, led, block, "pane-sandbox")
 
-	if closeErr := layout.CloseEphemeralPanes(ctx); closeErr != nil {
-		t.Fatalf("CloseEphemeralPanes: %v", closeErr)
+	if closeErr := layout.CloseSandboxPanes(ctx); closeErr != nil {
+		t.Fatalf("CloseSandboxPanes: %v", closeErr)
 	}
 	snap, snapshotErr := layout.Snapshot(ctx)
 	if snapshotErr != nil {
@@ -348,8 +351,8 @@ func TestCloseEphemeralPanesLeavesOnlyRestorablePanesInTheWindow(t *testing.T) {
 	if len(snap.Panes) != 1 || snap.Panes[0].ID != "pane-ordinary" {
 		t.Fatalf("window panes = %+v, want pane-ordinary alone", snap.Panes)
 	}
-	if _, closedErr := layout.IsPaneEphemeral(ctx, "pane-sandbox"); !errors.Is(closedErr, content.ErrNoSuchPane) {
-		t.Fatalf("IsPaneEphemeral(closed sandbox) error = %v, want ErrNoSuchPane", closedErr)
+	if _, closedErr := layout.SandboxGrantExists(ctx, "pane-sandbox"); !errors.Is(closedErr, content.ErrNoSuchPane) {
+		t.Fatalf("SandboxGrantExists(closed sandbox) error = %v, want ErrNoSuchPane", closedErr)
 	}
 	if page := entriesForPane(t, led, "pane-sandbox"); len(page.Entries) != 1 {
 		t.Fatalf("sandbox blocks after sweep = %+v, want the anchored entry", page.Entries)

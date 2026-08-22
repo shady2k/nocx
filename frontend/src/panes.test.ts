@@ -2229,7 +2229,7 @@ describe('sandbox marker ownership', () => {
 })
 
 describe('newSandboxedPane', () => {
-  it('persists non-restorable identity, copies launch deltas, and marks the pane once', async () => {
+  it('copies launch deltas and exposes durable creation readiness', async () => {
     const openSandboxedSession = vi.fn(() =>
       Promise.resolve(
         makeSession({
@@ -2244,7 +2244,7 @@ describe('newSandboxedPane', () => {
       ),
     )
     const client = makeClient({ openSandboxedSession })
-    const { manager, backend } = await mountPaneManager(client)
+    const { manager } = await mountPaneManager(client)
     const launch = {
       settingsRevision: 1,
       addWritable: ['/a'],
@@ -2253,7 +2253,7 @@ describe('newSandboxedPane', () => {
       removeReadOnly: ['/r2'],
     }
 
-    const pane = manager.newSandboxedPane('/w', launch)
+    const made = manager.newSandboxedPane('/w', launch)
     launch.addWritable.push('/mutated')
     launch.removeWritable.pop()
     launch.addReadOnly.push('/mutated-ro')
@@ -2271,12 +2271,10 @@ describe('newSandboxedPane', () => {
         addReadOnly: ['/r1'],
         removeReadOnly: ['/r2'],
       },
-      { paneId: pane.wireId },
+      { paneId: made.pane.wireId },
     )
-    expect(backend.rows().panes.find((row) => row.id === pane.wireId)?.ephemeral).toBe(true)
-    await vi.waitFor(() => expect(pane.sandboxed).toBe(true))
-    pane.setSandboxed()
-    expect(pane.sandboxed).toBe(true)
-    expect(pane.descriptor.restoreDescriptor).toBeNull()
+    await expect(made.created).resolves.toBe(true)
+    await vi.waitFor(() => expect(made.pane.sandboxed).toBe(true))
+    expect(made.pane.descriptor.restoreDescriptor).toBeNull()
   })
 })

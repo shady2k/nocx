@@ -1,12 +1,10 @@
 /**
- * sandbox-open — the Quick Connect "Sandboxed shell…" flow (ADR-0040).
+ * sandbox-open — the sidebar shield's sandbox conversion flow (ADR-0043).
  *
- * Extracted from the composition root so the one flow that turns a picker and
- * a permission dialog into a new tab is testable without booting `main()`. The
- * backend is the sole policy author: this reads one fresh settings snapshot,
- * shows the permission dialog seeded from both persisted baselines, and
- * forwards only the canonical workspace plus the confirmed class-scoped deltas
- * — never a baseline or an effective policy root.
+ * Extracted from the composition root so the flow that turns a verified cwd
+ * and permission dialog into a replacement tab is testable without booting
+ * `main()`. The backend is the sole policy author: this reads one fresh
+ * settings snapshot and forwards only confirmed class-scoped deltas.
  */
 import type { SandboxLaunch } from './ipc'
 import type {
@@ -39,7 +37,10 @@ export const SANDBOX_READ_ONLY_PATHS_KEY = 'sandbox.allowedReadOnlyPaths'
  * Run the sandboxed-shell open flow. Any picker or dialog cancellation
  * creates no tab; a thrown failure is reported through `reportError`.
  */
-export async function openSandboxedShell(deps: SandboxOpenFlowDeps): Promise<void> {
+export async function openSandboxedShell(
+  deps: SandboxOpenFlowDeps,
+  options?: { workspace?: string },
+): Promise<void> {
   try {
     const snap = await deps.getSnapshot()
     const rawWritable = snap.values[SANDBOX_WRITABLE_PATHS_KEY]
@@ -51,18 +52,18 @@ export async function openSandboxedShell(deps: SandboxOpenFlowDeps): Promise<voi
       ? rawReadOnly.filter((x): x is string => typeof x === 'string')
       : []
 
-    const workspace = await deps.openDirectory()
-    if (!workspace.path) return
+    const workspace = options?.workspace ?? (await deps.openDirectory()).path
+    if (!workspace) return
 
     const result = await deps.showPermissions({
-      workspace: workspace.path,
+      workspace,
       baselineWritable,
       baselineReadOnly,
       openDirectory: () => deps.openDirectory(),
     })
     if (!result) return
 
-    deps.newSandboxedTab(workspace.path, {
+    deps.newSandboxedTab(workspace, {
       settingsRevision: snap.revision,
       addWritable: result.addWritable,
       removeWritable: result.removeWritable,

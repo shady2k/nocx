@@ -182,6 +182,12 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		if perr != nil {
 			return nil, perr
 		}
+		if cfg.SandboxPrepared != nil {
+			if err := cfg.SandboxPrepared(pc); err != nil {
+				pc.Close()
+				return nil, sandbox.NewSetupErrorf("record sandbox grant: %v", err)
+			}
+		}
 		cmd = pc.Cmd
 		prepared = pc
 	}

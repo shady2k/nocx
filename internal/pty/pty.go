@@ -51,6 +51,9 @@ type Config struct {
 	// established. Ordinary sessions leave it nil and never touch the
 	// sandbox path.
 	Sandbox *sandbox.Request
+	// SandboxPrepared runs after policy realization and before process start.
+	// It is used to durably record the grant that caused enforcement.
+	SandboxPrepared func(*sandbox.PreparedCommand) error
 	// sandboxService is injected by the composition root via
 	// WithSandboxService; it is never part of the wire contract.
 	sandboxService sandbox.Service

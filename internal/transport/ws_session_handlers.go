@@ -16,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
@@ -115,14 +117,13 @@ type openHandlers struct {
 	log      log.Logger
 }
 
-// paneWorkspaces answers "which workspace is this pane in" — the one
-// derivation §4.5 leaves in the backend, satisfied by
-// content.LayoutRepository. Declared here as the narrow seam this handler
-// needs rather than taken as the whole repository: an open may resolve a
-// workspace and may not write a layout row.
+// paneWorkspaces is the narrow layout seam needed by open: resolve pane
+// provenance, reject duplicate sandbox authority, and durably record the
+// realized grant before native enforcement starts.
 type paneWorkspaces interface {
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
-	IsPaneEphemeral(ctx context.Context, paneID string) (bool, error)
+	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)
+	InsertSandboxGrant(ctx context.Context, grant content.SandboxGrant) error
 }
 
 // workspaceForOpen derives the workspace this session's ack will carry.
@@ -377,14 +378,20 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		}
 		if params.PaneID == "" || h.panes == nil {
 			_ = r.TryError(req.ID, RPCError{
-				Code: -32602, Message: "Invalid params: sandbox requires an ephemeral pane",
+				Code: -32602, Message: "Invalid params: sandbox requires an open pane",
 			})
 			return
 		}
-		ephemeral, ephemeralErr := h.panes.IsPaneEphemeral(ctx, params.PaneID)
-		if ephemeralErr != nil || !ephemeral {
+		granted, grantErr := h.panes.SandboxGrantExists(ctx, params.PaneID)
+		if grantErr != nil {
 			_ = r.TryError(req.ID, RPCError{
-				Code: -32602, Message: "Invalid params: sandbox requires an ephemeral pane",
+				Code: -32602, Message: "Invalid params: sandbox requires an open pane",
+			})
+			return
+		}
+		if granted {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32602, Message: "Invalid params: sandbox pane already granted",
 			})
 			return
 		}
@@ -427,6 +434,23 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	if sandboxReq != nil {
 		cfg.Cwd = sandboxReq.Workspace
 		cfg.Sandbox = sandboxReq
+		cfg.SandboxPrepared = func(prepared *sandbox.PreparedCommand) error {
+			info := sandbox.SessionInfo{
+				Backend:         prepared.Backend,
+				Workspace:       prepared.Policy.Workspace,
+				WritableRoots:   append([]string(nil), prepared.Policy.WritableRoots...),
+				ReadOnlyRoots:   append([]string(nil), prepared.Policy.ReadOnlyRoots...),
+				HomeProjections: append([]sandbox.HomeProjection(nil), prepared.Policy.HomeProjections...),
+			}
+			payload, marshalErr := json.Marshal(info)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			return h.panes.InsertSandboxGrant(ctx, content.SandboxGrant{
+				PaneID: params.PaneID, Version: 1, IssuedAt: time.Now().Unix(),
+				Workspace: sandboxReq.Workspace, Payload: string(payload),
+			})
+		}
 	}
 	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
 	// claim; the registry is the single owner of whether it may be recorded,

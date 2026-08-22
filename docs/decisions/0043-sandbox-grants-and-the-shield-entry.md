@@ -1,0 +1,31 @@
+# ADR-0043: Sandbox grants and the sidebar shield entry
+
+- Status: Accepted
+- Date: 2026-08-22
+
+## Context
+
+PR #91 represented non-restorability as `panes.ephemeral`. That field names a consequence, not the authority that caused it, and spends schema version 12 on a boolean that cannot answer which policy was granted. ADR-0020 already treats authority as an immutable grant. Agent-run `authority_grants` are execution-subject grants and remain unchanged.
+
+The same draft exposed sandbox launch in Quick Connect and the tab-strip More menu. Conversion instead needs the active local terminal's verified cwd and must preserve the source tab until the replacement is known to exist.
+
+## Decision
+
+Add `sandbox_grants` as a parallel table whose subject is one durable pane. A grant contains version, backend issue time, canonical workspace, and the realized policy metadata serialized in `payload`. One pane has at most one grant. The grant is inserted after policy realization and before the native helper starts; insertion failure aborts launch with `setup-failed`. A running grant is immutable.
+
+Non-restorability is derived. At backend startup, every open pane named by `sandbox_grants` is closed before the first `layout.read`; the renderer also refuses to adopt any granted row. Authority therefore ends with the backend incarnation and cannot be silently re-issued. `layout.read` annotates open panes with `sandboxGranted`; `panes` stores no sandbox flag.
+
+Schema version remains 12. The previous v12 shape existed only on this unmerged branch, and the documented discard mechanism already rebuilds files whose version differs. Creating v13 would preserve no released data.
+
+The only launch entry is the shield in the active sidebar-panel header. It is hidden while `sandbox.enabled` is false. It is disabled when the backend is unavailable, the active surface is not a local terminal, or OSC 7 has not verified a cwd. Quick Connect, the tab-strip More menu, `+`, and Cmd/Ctrl+T contain no sandbox action.
+
+Conversion creates a new sandbox pane using the source cwd, waits for its durable create acknowledgement, moves the new tab to the source tab's strip position, and then closes the source. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
+
+Generalizing `authority_grants` to multiple subject kinds is deferred. Reopening a grant or changing a running pane's grant is also deferred; both require explicit user consent and a restart design.
+
+## Consequences
+
+- The persisted model records cause and realized authority rather than a restore hint.
+- A crash after grant insertion but before enforcement leaves a pane that the next startup closes; it never restores unsandboxed.
+- The shield depends on live settings, backend status, active-surface identity, and verified cwd.
+- Conversion temporarily has both source and replacement tabs; source removal occurs only after replacement readiness.

@@ -83,9 +83,8 @@ func (f *sandboxPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, 
 }
 
 // newSandboxHarness wires a WSServer with a scripted sandbox service, a real
-// settings registry, and an OPEN ephemeral pane. A sandbox request is only
-// valid for that pane: this fixture exercises the same fail-closed layout gate
-// the renderer must pass.
+// settings registry, and an open pane without a grant. A successful sandbox
+// request records the grant before the helper starts.
 func newSandboxHarness(t *testing.T, svc *sandboxTestService, loggers ...log.Logger) (*WSServer, *settings.Registry) {
 	t.Helper()
 	logger := log.Logger(log.NewSlogAdapter(nil))
@@ -97,7 +96,7 @@ func newSandboxHarness(t *testing.T, svc *sandboxTestService, loggers ...log.Log
 	db := newLayoutStore(t)
 	pane := content.Pane{
 		ID: paneID1, TabID: tabID1, Cwd: "", Kind: content.PaneLocal,
-		SizeShare: 1, Ephemeral: true,
+		SizeShare: 1,
 	}
 	if _, err := db.Layout().CreateWorkspace(context.Background(),
 		content.Workspace{ID: wsID1, Name: "sandbox"},
@@ -269,7 +268,7 @@ func TestOpen_SandboxFlagOff(t *testing.T) {
 	}
 }
 
-func TestOpen_SandboxRequiresAnOpenEphemeralPane(t *testing.T) {
+func TestOpen_SandboxRequiresAnOpenPaneWithoutAGrant(t *testing.T) {
 	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
 	ws, reg := newSandboxHarness(t, svc)
 	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
@@ -285,18 +284,23 @@ func TestOpen_SandboxRequiresAnOpenEphemeralPane(t *testing.T) {
 	}
 
 	if _, err := ws.contentDB.Layout().CreatePane(t.Context(), content.Pane{
-		ID: paneID2, TabID: tabID1, Cwd: "/ordinary", Kind: content.PaneLocal,
-		SizeShare: 1, Ephemeral: false,
+		ID: paneID2, TabID: tabID1, Cwd: "/granted", Kind: content.PaneLocal,
+		SizeShare: 1,
 	}); err != nil {
-		t.Fatalf("CreatePane ordinary: %v", err)
+		t.Fatalf("CreatePane granted: %v", err)
 	}
-	ordinary := sandboxOpenParams(t.TempDir(), snapshotRevision(t, reg))
-	ordinary["paneId"] = paneID2
-	if code, _ := openError(t, jsonrpcCall(t, conn, "open", ordinary)); code != -32602 {
-		t.Fatalf("sandbox open on ordinary pane code = %d, want -32602", code)
+	if err := ws.contentDB.Layout().InsertSandboxGrant(t.Context(), content.SandboxGrant{
+		PaneID: paneID2, Version: 1, IssuedAt: 1, Workspace: "/granted", Payload: `{}`,
+	}); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
+	}
+	granted := sandboxOpenParams(t.TempDir(), snapshotRevision(t, reg))
+	granted["paneId"] = paneID2
+	if code, _ := openError(t, jsonrpcCall(t, conn, "open", granted)); code != -32602 {
+		t.Fatalf("sandbox open on granted pane code = %d, want -32602", code)
 	}
 	if got := svc.prepareCount(); got != 0 {
-		t.Fatalf("sandbox Prepare calls = %d, want 0 before ephemeral gate", got)
+		t.Fatalf("sandbox Prepare calls = %d, want 0 before grant gate", got)
 	}
 	if got := len(ws.registry.List()); got != 0 {
 		t.Fatalf("registered sessions = %d, want none", got)

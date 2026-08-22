@@ -57,6 +57,9 @@ import {
   type SettingsSnapshot,
 } from './settings-domain'
 import { BackupRestoreSection } from './backup-restore-section'
+import { AboutSection } from './about-section'
+import type { AboutClient } from './about-client'
+import type { ClipboardAccess } from './clipboard'
 import { VaultSection } from './vault'
 import { log } from './log'
 import {
@@ -90,6 +93,11 @@ import {
  *  at all, and inventing one so that one section can carry one notice would
  *  make every future section-level fact a schema change. */
 const HISTORY_SECTION = 'History'
+
+const unavailableClipboard: ClipboardAccess = {
+  readText: () => Promise.reject(new Error('no clipboard in this window')),
+  writeText: () => Promise.reject(new Error('no clipboard in this window')),
+}
 
 export type SettingsPage =
   | { kind: 'generated'; id: string; title: string; groupId?: string }
@@ -180,6 +188,8 @@ export interface SettingsComponentProps {
    *  section then makes no claim either way. */
   historyStatus?: HistoryStatusStore
   sandboxAccessClient?: SandboxAccessClient
+  aboutClient?: AboutClient
+  clipboard?: ClipboardAccess
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -531,6 +541,23 @@ export function SettingsComponent(props: SettingsComponentProps) {
       scrollMode: 'page',
       renderContent: () => <SandboxAccessSettings client={props.sandboxAccessClient} />,
     }
+    const aboutPage: SettingsPage = {
+      kind: 'component',
+      id: 'about',
+      title: 'About',
+      groupId: 'application',
+      scrollMode: 'page',
+      renderContent: () => (
+        <AboutSection
+          load={() =>
+            props.aboutClient
+              ? props.aboutClient.load()
+              : Promise.reject(new Error('the build description is not available in this window'))
+          }
+          clipboard={props.clipboard ?? unavailableClipboard}
+        />
+      ),
+    }
     return [
       connectionPage,
       ...generated,
@@ -539,6 +566,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      aboutPage,
       sandboxAccessPage,
     ]
   })

@@ -316,13 +316,23 @@ func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string,
 	return "", ErrNotImplemented
 }
 
-func (s *layoutStub) IsPaneEphemeral(_ context.Context, paneID string) (bool, error) {
-	s.log.Info("content stub: LayoutRepository.IsPaneEphemeral", "pane", paneID)
+func (s *layoutStub) InsertSandboxGrant(_ context.Context, grant SandboxGrant) error {
+	s.log.Info("content stub: LayoutRepository.InsertSandboxGrant", "pane", grant.PaneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) SandboxGrantExists(_ context.Context, paneID string) (bool, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantExists", "pane", paneID)
 	return false, ErrNotImplemented
 }
 
-func (s *layoutStub) CloseEphemeralPanes(_ context.Context) error {
-	s.log.Info("content stub: LayoutRepository.CloseEphemeralPanes")
+func (s *layoutStub) SandboxGrantedPaneIDs(_ context.Context) (map[string]struct{}, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantedPaneIDs")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) CloseSandboxPanes(_ context.Context) error {
+	s.log.Info("content stub: LayoutRepository.CloseSandboxPanes")
 	return ErrNotImplemented
 }
 

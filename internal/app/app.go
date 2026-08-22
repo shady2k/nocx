@@ -197,13 +197,13 @@ func policyFromSettings(reg *settings.Registry) *content.Policy {
 	return p
 }
 
-// closeEphemeralPanesOnStartup enforces the one non-restorable pane class
-// before any layout read can reach the renderer. A failure is visible but
-// does not prevent startup; PaneManager independently refuses to adopt an
-// ephemeral row as an ordinary local shell.
-func closeEphemeralPanesOnStartup(ctx context.Context, db content.ContentDB, logger *slog.Logger) {
-	if err := db.Layout().CloseEphemeralPanes(ctx); err != nil {
-		logger.Warn("ephemeral panes could not be closed before restore", "error", err)
+// closeSandboxPanesOnStartup enforces the non-restorable sandbox-grant
+// boundary before any layout read can reach the renderer. A failure is visible
+// but does not prevent startup; PaneManager independently refuses to adopt a
+// granted row as an ordinary local shell.
+func closeSandboxPanesOnStartup(ctx context.Context, db content.ContentDB, logger *slog.Logger) {
+	if err := db.Layout().CloseSandboxPanes(ctx); err != nil {
+		logger.Warn("sandbox panes could not be closed before restore", "error", err)
 	}
 }
 
@@ -782,7 +782,7 @@ func New(opts ...Option) (*App, error) {
 		// inferred, and this is the line a retry (or nocx-rtg0.10's queue
 		// draining) closes its episode on.
 		historyStatus.Clear()
-		closeEphemeralPanesOnStartup(ctx, db, slogger)
+		closeSandboxPanesOnStartup(ctx, db, slogger)
 		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
 	}
 

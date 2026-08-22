@@ -82,7 +82,7 @@ func firstTab(id string) map[string]any {
 
 func firstPane(id, cwd string) map[string]any {
 	return map[string]any{
-		"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1, "ephemeral": false,
+		"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1,
 	}
 }
 
@@ -524,7 +524,7 @@ func TestLayoutRefusesRowsThatDoNotExist(t *testing.T) {
 		"recolour a tab that is not there":     {"tabs.recolour", map[string]any{"id": tabID2, "colour": "#fff"}},
 		"pin a tab that is not there":          {"tabs.pin", map[string]any{"id": tabID2, "pinned": true}},
 		"tab in a workspace that is not there": {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row", "firstPane": firstPane(paneID2, "/var")}},
-		"pane in a tab that is not there":      {"panes.create", map[string]any{"id": paneID2, "tabId": tabID2, "cwd": "/", "kind": "local", "sizeShare": 1, "ephemeral": false}},
+		"pane in a tab that is not there":      {"panes.create", map[string]any{"id": paneID2, "tabId": tabID2, "cwd": "/", "kind": "local", "sizeShare": 1}},
 		"create with no first tab":             {"workspaces.create", map[string]any{"id": wsID2, "name": "x", "position": 0, "firstPane": firstPane(paneID2, "/var")}},
 		"create with no first pane":            {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID1, "position": 0, "layout": "row"}},
 		"move a pane that is not there":        {"panes.move", map[string]any{"id": paneID2, "tabId": tabID1}},
@@ -639,41 +639,5 @@ func TestNotificationsAreStillAddressedBySessionID(t *testing.T) {
 		if _, has := params[forbidden]; has {
 			t.Fatalf("the exit notification carries %q — every backend→renderer address is a sessionId (§4.4)", forbidden)
 		}
-	}
-}
-
-func TestLayoutEphemeralPaneFactIsRequiredStoredAndLocalOnly(t *testing.T) {
-	ws, db := newLayoutWSServer(t)
-	conn := connectWS(t, ws)
-	mustLayoutCall(t, conn, "workspaces.create", map[string]any{
-		"id": wsID1, "name": "sandbox", "position": 0,
-		"firstTab": firstTab(tabID1),
-		"firstPane": map[string]any{
-			"id": paneID1, "cwd": "/workspace", "kind": "local",
-			"sizeShare": 1, "ephemeral": true,
-		},
-	}, 200)
-	got, err := db.Layout().IsPaneEphemeral(context.Background(), paneID1)
-	if err != nil || !got {
-		t.Fatalf("stored ephemeral = %v, %v; want true, nil", got, err)
-	}
-
-	_, rpcErr := layoutCall(t, conn, "panes.create", map[string]any{
-		"id": paneID4, "tabId": tabID1, "cwd": "/srv", "kind": "ssh",
-		"endpoint": "deploy@srv-01:22", "sizeShare": 1, "ephemeral": true,
-	}, 201)
-	if rpcErr == nil || rpcErr.Code != -32602 {
-		t.Fatalf("ephemeral ssh error = %+v, want -32602", rpcErr)
-	}
-
-	_, rpcErr = layoutCall(t, conn, "workspaces.create", map[string]any{
-		"id": wsID2, "name": "missing flag", "position": 1,
-		"firstTab": firstTab(tabID2),
-		"firstPane": map[string]any{
-			"id": paneID2, "cwd": "/repo", "kind": "local", "sizeShare": 1,
-		},
-	}, 202)
-	if rpcErr == nil || rpcErr.Code != -32602 {
-		t.Fatalf("missing ephemeral error = %+v, want -32602", rpcErr)
 	}
 }

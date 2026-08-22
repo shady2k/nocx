@@ -30,9 +30,9 @@ func (p *clearWindowProbe) Layout() content.LayoutRepository { return p.layout }
 
 type clearWindowLayout struct {
 	content.LayoutRepository
-	calls          int
-	ephemeralCalls int
-	err            error
+	calls        int
+	sandboxCalls int
+	err          error
 }
 
 func (l *clearWindowLayout) ClearWindow(context.Context) error {
@@ -40,8 +40,8 @@ func (l *clearWindowLayout) ClearWindow(context.Context) error {
 	return l.err
 }
 
-func (l *clearWindowLayout) CloseEphemeralPanes(context.Context) error {
-	l.ephemeralCalls++
+func (l *clearWindowLayout) CloseSandboxPanes(context.Context) error {
+	l.sandboxCalls++
 	return l.err
 }
 
@@ -112,17 +112,17 @@ func TestCleanStartSurvivesAStoreThatRefusesTheSweep(t *testing.T) {
 	}
 }
 
-func TestStartupAlwaysSweepsEphemeralPanesAndSurvivesRefusal(t *testing.T) {
+func TestStartupAlwaysSweepsSandboxPanesAndSurvivesRefusal(t *testing.T) {
 	probe := newClearWindowProbe(content.ErrNotImplemented)
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	closeEphemeralPanesOnStartup(context.Background(), probe, logger)
+	closeSandboxPanesOnStartup(context.Background(), probe, logger)
 
-	if probe.layout.ephemeralCalls != 1 {
-		t.Fatalf("CloseEphemeralPanes calls = %d, want 1", probe.layout.ephemeralCalls)
+	if probe.layout.sandboxCalls != 1 {
+		t.Fatalf("CloseSandboxPanes calls = %d, want 1", probe.layout.sandboxCalls)
 	}
-	if !strings.Contains(logged.String(), "ephemeral") {
-		t.Fatalf("log after a refused ephemeral sweep = %q, want the failure named", logged.String())
+	if !strings.Contains(logged.String(), "sandbox") {
+		t.Fatalf("log after a refused sandbox sweep = %q, want the failure named", logged.String())
 	}
 }

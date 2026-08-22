@@ -19,6 +19,8 @@ import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
 import type { SandboxAccessClient } from './sandbox-access-settings'
+import type { AboutClient } from './about-client'
+import type { ClipboardAccess } from './clipboard'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -49,6 +51,8 @@ export class SettingsContent extends SolidPaneContent {
      *  store never opened. */
     private readonly historyStatus?: HistoryStatusStore,
     private readonly sandboxAccessClient?: SandboxAccessClient,
+    private readonly aboutClient?: AboutClient,
+    private readonly clipboard?: ClipboardAccess,
   ) {
     super()
   }
@@ -66,6 +70,8 @@ export class SettingsContent extends SolidPaneContent {
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           historyStatus: this.historyStatus,
+          aboutClient: this.aboutClient,
+          clipboard: this.clipboard,
           sandboxAccessClient: this.sandboxAccessClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {

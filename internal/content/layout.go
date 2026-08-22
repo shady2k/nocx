@@ -203,10 +203,16 @@ type Pane struct {
 	// SizeShare is this pane's share of its tab's extent. Size is a property
 	// of the MEMBER, direction a property of the set (§5).
 	SizeShare float64
-	// Ephemeral marks a pane the layout records but must never restore. A
-	// sandboxed shell is still a local pane; this independent property says
-	// whether a later process may recreate it.
-	Ephemeral bool
+}
+
+// SandboxGrant records the immutable filesystem authority minted for one pane.
+// A pane may receive at most one grant during its lifetime.
+type SandboxGrant struct {
+	PaneID    string
+	Version   int64
+	IssuedAt  int64
+	Workspace string
+	Payload   string
 }
 
 // Replacement is the identity of the tab that appears when the last tab in
@@ -449,9 +455,14 @@ type LayoutRepository interface {
 	// owner of "which workspace is this in" and it cannot go out of step with
 	// a pane that was dragged elsewhere.
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
-	// IsPaneEphemeral reports whether an OPEN pane is explicitly
-	// non-restorable. A closed or unknown pane is ErrNoSuchPane.
-	IsPaneEphemeral(ctx context.Context, paneID string) (bool, error)
+	// InsertSandboxGrant records the immutable authority minted for an open
+	// pane. The pane's UNIQUE grant makes a second sandbox launch fail closed.
+	InsertSandboxGrant(ctx context.Context, grant SandboxGrant) error
+	// SandboxGrantExists reports whether an open pane already carries a grant.
+	// A closed or unknown pane is ErrNoSuchPane.
+	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)
+	// SandboxGrantedPaneIDs returns the open panes carrying a grant.
+	SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error)
 	// Panes returns one tab's panes in id order. A pane has no stored
 	// position: §5 gives the member a SHARE and the set a direction, and
 	// nothing else. Ordering within a tab becomes a user-visible operation
@@ -469,11 +480,11 @@ type LayoutRepository interface {
 	// it — which this did until nocx-l21ib.4 — made an ordinary Cmd-W a
 	// permanent loss of that pane's history.
 	DeletePane(ctx context.Context, id string, next Replacement) error
-	// CloseEphemeralPanes marks every OPEN ephemeral pane closed in one
-	// transaction and unwinds empty tabs/workspaces without deleting pane
-	// rows. It is the startup boundary that prevents a sandboxed pane from
-	// returning as an ordinary local shell.
-	CloseEphemeralPanes(ctx context.Context) error
+	// CloseSandboxPanes marks every OPEN pane carrying a sandbox grant closed
+	// in one transaction and unwinds empty tabs/workspaces without deleting
+	// pane rows. It is the startup boundary that prevents sandbox authority
+	// from being silently re-issued after a backend restart.
+	CloseSandboxPanes(ctx context.Context) error
 	// ClearWindow marks EVERY open tab and pane closed, in one transaction,
 	// and deletes the workspaces left holding no open tab. It is the clean
 	// start (settings: restore.onStartup off) and nothing else calls it: what

@@ -41,8 +41,6 @@ export interface NewPane {
    *  is opened — the cwd arrives from the session a round trip later, and
    *  there is no method that revises it until restore (nocx-l21ib) needs one. */
   cwd: string
-  /** True only for a pane that must never be restored. */
-  ephemeral: boolean
 }
 
 /**
@@ -396,6 +394,5 @@ function paneFacts(id: string, pane: NewPane): PaneFacts {
     // One pane fills its tab. A share below 1 arrives with the split
     // (nocx-8m2x6), which is where the second member comes from.
     sizeShare: 1,
-    ephemeral: pane.ephemeral,
   }
 }

@@ -36,7 +36,7 @@ function pane(id: string, tabId: string, over: Partial<Pane> = {}): Pane {
     kind: 'local',
     endpoint: null,
     sizeShare: 1,
-    ephemeral: false,
+    sandboxGranted: false,
     ...over,
   }
 }
@@ -239,7 +239,7 @@ describe('LayoutStore', () => {
     const store = new LayoutStore(client)
     await store.load()
 
-    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false })
+    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
     await opened.created
 
     expect(isUuidv7(opened.tabId)).toBe(true)
@@ -254,7 +254,6 @@ describe('LayoutStore', () => {
         kind: 'local',
         endpoint: null,
         sizeShare: 1,
-        ephemeral: false,
       },
     })
     expect(store.tabs().map((t) => t.id)).toEqual([opened.tabId])
@@ -270,9 +269,8 @@ describe('LayoutStore', () => {
     const store = new LayoutStore(client)
     await store.load()
 
-    await store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false }, 'ws-1')
-      .created
-    await store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false }).created
+    await store.openTab({ kind: 'local', endpoint: null, cwd: '' }, 'ws-1').created
+    await store.openTab({ kind: 'local', endpoint: null, cwd: '' }).created
 
     const creates = client.calls.filter(([m]) => m === 'tabs.create').map(([, p]) => p)
     expect(creates[0]).toMatchObject({ workspaceId: 'ws-1' })
@@ -281,9 +279,9 @@ describe('LayoutStore', () => {
 
   it('refuses to open a tab before it has been told where tabs go', () => {
     const store = new LayoutStore(fakeClient())
-    expect(() =>
-      store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false }),
-    ).toThrow(/before the first read/)
+    expect(() => store.openTab({ kind: 'local', endpoint: null, cwd: '' })).toThrow(
+      /before the first read/,
+    )
   })
 
   it('carries an ssh pane to the wire with its endpoint, and a local one without', async () => {
@@ -291,10 +289,8 @@ describe('LayoutStore', () => {
     const store = new LayoutStore(client)
     await store.load()
 
-    await store.openTab({ kind: 'ssh', endpoint: 'deploy@srv-01:22', cwd: '', ephemeral: false })
-      .created
-    await store.openTab({ kind: 'local', endpoint: 'deploy@srv-01:22', cwd: '', ephemeral: false })
-      .created
+    await store.openTab({ kind: 'ssh', endpoint: 'deploy@srv-01:22', cwd: '' }).created
+    await store.openTab({ kind: 'local', endpoint: 'deploy@srv-01:22', cwd: '' }).created
 
     const creates = client.calls.filter(([m]) => m === 'tabs.create').map(([, p]) => p) as Array<{
       firstPane: PaneFacts
@@ -313,7 +309,7 @@ describe('LayoutStore', () => {
     })
     const store = new LayoutStore(client)
     await store.load()
-    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false })
+    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
     await opened.created
 
     await store.recolour(opened.tabId, '#ff8800')
@@ -324,9 +320,9 @@ describe('LayoutStore', () => {
     const client = fakeClient()
     const store = new LayoutStore(client)
     await store.load()
-    const a = store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false })
+    const a = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
     await a.created
-    const b = store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false })
+    const b = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
     await b.created
     expect(store.tabs().map((t) => t.id)).toEqual([a.tabId, b.tabId])
 
@@ -398,7 +394,6 @@ describe('LayoutStore', () => {
       kind: 'local',
       endpoint: null,
       cwd: '',
-      ephemeral: false,
     })
     await made.created
 
@@ -410,7 +405,7 @@ describe('LayoutStore', () => {
       id: made.workspaceId,
       name: 'refactor-auth',
       firstTab: { id: made.tabId },
-      firstPane: { id: made.paneId, kind: 'local', endpoint: null, sizeShare: 1, ephemeral: false },
+      firstPane: { id: made.paneId, kind: 'local', endpoint: null, sizeShare: 1 },
     })
     expect(store.workspaces().map((w) => w.id)).toContain(made.workspaceId)
     expect(store.tab(made.tabId)?.workspaceId).toBe(made.workspaceId)
@@ -429,7 +424,6 @@ describe('LayoutStore', () => {
       kind: 'local',
       endpoint: null,
       cwd: '',
-      ephemeral: false,
     })
 
     await expect(made.created).rejects.toThrow('name is required')
@@ -519,7 +513,7 @@ describe('LayoutStore', () => {
 
     await store.load()
     expect(changes).toHaveBeenCalledTimes(1)
-    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '', ephemeral: false })
+    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
     await opened.created
     expect(changes).toHaveBeenCalledTimes(2)
     await store.pin(opened.tabId, true)

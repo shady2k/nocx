@@ -396,7 +396,7 @@ const schemaVersion = 12
 var rebuildDropOrder = []string{
 	"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
-	"panes", "tabs",
+	"sandbox_grants", "panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
 	"retention_watermark",
 	// RETIRED, AND STILL LISTED ON PURPOSE (nocx-rtg0.19). command_history
@@ -674,7 +674,6 @@ CREATE TABLE IF NOT EXISTS panes (
   endpoint   TEXT,                         -- canonical user@host:port; NULL local
   size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0),
   closed_at  INTEGER,                      -- NULL: in the window
-  ephemeral INTEGER NOT NULL DEFAULT 0 CHECK (ephemeral IN (0,1)),
   digest     TEXT NOT NULL DEFAULT ''      -- the create key's content binding
 ) STRICT;
 
@@ -795,6 +794,15 @@ CREATE TABLE IF NOT EXISTS authority_grants (
   expires_at   INTEGER NOT NULL,           -- expiring: a grant is not a toggle
   policy       TEXT NOT NULL CHECK (policy IN ('ask-every-time','ask-on-mutate','autonomous')),
   payload      TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS sandbox_grants (
+  id         INTEGER PRIMARY KEY,
+  pane_id    TEXT NOT NULL UNIQUE REFERENCES panes(id),
+  version    INTEGER NOT NULL,
+  issued_at  INTEGER NOT NULL,           -- backend wall clock
+  workspace  TEXT NOT NULL,
+  payload    TEXT NOT NULL DEFAULT '{}'  -- realized policy roots (JSON)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS grant_scopes (

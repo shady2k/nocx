@@ -19,7 +19,7 @@
     "pane": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "tabId", "cwd", "kind", "endpoint", "sizeShare", "ephemeral"],
+      "required": ["id", "tabId", "cwd", "kind", "endpoint", "sizeShare", "sandboxGranted"],
       "properties": {
         "id": {
           "description": "The pane's id, and the DURABLE IDENTITY of this whole chain (§5): it outlives its shell, its tab and the application, and its blocks are found by it after a restart. Client-minted UUIDv7 and therefore UNTRUSTED INPUT (design .internal/specs/2026-08-16-tabs-panes-and-blocks-design.md §7): the shape is validated and never believed, an insert on an id that already means something else FAILS rather than overwriting, and knowing an id confers NO RIGHT to use it — a UUIDv7 embeds a timestamp and is guessable by construction, so nothing anywhere may treat possession of one as evidence.",
@@ -49,8 +49,8 @@
           "type": "number",
           "exclusiveMinimum": 0
         },
-        "ephemeral": {
-          "description": "Whether this pane is explicitly non-restorable. True only for a sandboxed local shell: the backend startup sweep closes it and the renderer refuses to adopt it, so it can never return as an ordinary unsandboxed local pane. Always present; this is independent of kind because its pipe is still local.",
+        "sandboxGranted": {
+          "description": "Whether this open pane carries an immutable sandbox grant. The grant is the cause of native enforcement and of the startup sweep that makes the pane non-restorable.",
           "type": "boolean"
         }
       }

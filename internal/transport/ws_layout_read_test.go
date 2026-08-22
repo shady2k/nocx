@@ -205,7 +205,7 @@ func TestLayoutCreateAcceptsAPaneWithNoCwdYet(t *testing.T) {
 
 	mustLayoutCall(t, conn, "tabs.create", map[string]any{
 		"id": tabID1, "workspaceId": def, "position": 0, "layout": "row",
-		"firstPane": map[string]any{"id": paneID1, "cwd": "", "kind": "local", "sizeShare": 1, "ephemeral": false},
+		"firstPane": map[string]any{"id": paneID1, "cwd": "", "kind": "local", "sizeShare": 1},
 	}, 2)
 
 	got := readLayout(t, conn, 3)
@@ -224,7 +224,7 @@ func TestPanesCloseRemovesOnePaneAndLeavesItsTab(t *testing.T) {
 	seedWire(t, conn)
 	mustLayoutCall(t, conn, "panes.create", map[string]any{
 		"id": paneID2, "tabId": tabID1, "cwd": "/srv", "kind": "local",
-		"sizeShare": 0.5, "ephemeral": false,
+		"sizeShare": 0.5,
 	}, 2)
 
 	var closed struct {

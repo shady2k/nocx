@@ -16,7 +16,7 @@ import (
 func TestSystemReadOnlyRoots_IncludesThePackageStoreWhenItExists(t *testing.T) {
 	base := t.TempDir()
 	store := filepath.Join(base, "store")
-	if err := os.MkdirAll(store, 0o755); err != nil {
+	if err := os.MkdirAll(store, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	absent := filepath.Join(base, "not-a-store")
@@ -43,7 +43,7 @@ func TestSystemReadOnlyRoots_IncludesThePackageStoreWhenItExists(t *testing.T) {
 func TestWritableRootIsProtected_CoversThePackageStore(t *testing.T) {
 	base := t.TempDir()
 	store := filepath.Join(base, "store")
-	if err := os.MkdirAll(store, 0o755); err != nil {
+	if err := os.MkdirAll(store, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	restore := linuxPackageStoreRoots

@@ -605,7 +605,7 @@ export function makeLayoutBackend(): LayoutClientLike & {
     kind: 'local',
     endpoint: null,
     sizeShare: 1,
-    ephemeral: false,
+    sandboxGranted: false,
     ...over,
   })
   const patch = (id: string, over: Partial<LayoutTab>): LayoutTab => {
@@ -652,7 +652,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
         cwd: ws.firstPane.cwd,
         kind: ws.firstPane.kind,
         endpoint: ws.firstPane.endpoint,
-        ephemeral: ws.firstPane.ephemeral,
       })
       made = [...made, workspace]
       tabs = [...tabs, tab]
@@ -728,7 +727,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
         cwd: t.firstPane.cwd,
         kind: t.firstPane.kind,
         endpoint: t.firstPane.endpoint,
-        ephemeral: t.firstPane.ephemeral,
       })
       tabs = [...tabs, tab]
       panes = [...panes, first]
@@ -740,7 +738,6 @@ export function makeLayoutBackend(): LayoutClientLike & {
         cwd: p.cwd,
         kind: p.kind,
         endpoint: p.endpoint,
-        ephemeral: p.ephemeral,
       })
       panes = [...panes, row]
       return Promise.resolve({ pane: row, replayed: false })

@@ -12,11 +12,13 @@ import { log } from './log'
 import { installBrowserTransport } from './wails-runtime'
 import { WSClient, type SandboxStatus } from './ipc'
 import { openSandboxedShell } from './sandbox-open'
+import { shieldState } from './sandbox-shield'
 import { showSandboxPermissions } from './sandbox-permissions-dialog'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
 import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
+import { AboutClient } from './about-client'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
@@ -37,7 +39,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon, ShieldIcon, TextQuoteIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -139,6 +141,7 @@ async function main() {
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
   const dispatcher = new Dispatcher()
+  const aboutClient = new AboutClient(dispatcher)
   const client = new WSClient(dispatcher)
   // Connection notice — the transport's condition, stated where a person is
   // already looking (the tab bar). A dropped connection is a persistent
@@ -262,7 +265,24 @@ async function main() {
   applyOutputWrap(OUTPUT_WRAP_DEFAULT)
 
   let placement: unknown = 'horizontal'
-  let sandboxEnabled = false
+  const [sandboxEnabledLive, setSandboxEnabledLive] = createSignal(false)
+  const [sandboxStatusAvailable, setSandboxStatusAvailable] = createSignal<boolean | null>(null)
+  const refreshSandboxAvailability = async (enabled: boolean): Promise<void> => {
+    if (!enabled) {
+      setSandboxStatusAvailable(null)
+      return
+    }
+    const sandboxClient = client
+    if (!sandboxClient) {
+      setSandboxStatusAvailable(null)
+      return
+    }
+    try {
+      setSandboxStatusAvailable((await sandboxClient.sandboxStatus())?.available ?? null)
+    } catch {
+      setSandboxStatusAvailable(null)
+    }
+  }
   // The sidebar's remembered state, from the UI-state document rather than
   // the settings snapshot below — a drag is not a decision (ADR-0033). A
   // failure falls back to the declared defaults, which is also what the CSS
@@ -273,7 +293,9 @@ async function main() {
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
-    sandboxEnabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    setSandboxEnabledLive(enabled)
+    void refreshSandboxAvailability(enabled)
     // Reconcile the Go theme setting against the bootstrap cache. Go is
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
     // frame, but the persisted Go value wins on snapshot arrival.
@@ -294,7 +316,6 @@ async function main() {
     // Backend may not be ready yet — safe fallback.
   }
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
-  let currentStrip = tabStrip
 
   // The layout chain, which the backend owns and the renderer renders
   // (nocx-isoph.4). Constructed here, beside every other wire client, and
@@ -363,6 +384,8 @@ async function main() {
         snippetsStore,
         historyStatusStore,
         client,
+        aboutClient,
+        clipboard,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -418,6 +441,7 @@ async function main() {
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
   }
+  let convertActiveTabToSandboxed: () => Promise<void> = async () => {}
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
   // binding lifecycle: a binding is live from the files.open that created
@@ -650,16 +674,16 @@ async function main() {
       try {
         const snap = await profileClient.getSnapshot()
         observer.setRevision(snap.revision)
-        sandboxEnabled = snap.values[SANDBOX_ENABLED_KEY] === true
+        const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+        setSandboxEnabledLive(enabled)
+        void refreshSandboxAvailability(enabled)
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
         if (next !== placement) {
           placement = next
           const newStrip = next === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
           wireQuickConnect(newStrip)
-          currentStrip = newStrip
           tm.replaceStrip(newStrip)
         }
-        currentStrip.setSandboxEnabled(sandboxEnabled)
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
         // The wrap default is live: flipping it repaints every block nobody
@@ -794,6 +818,30 @@ async function main() {
     () => activeOrigin(),
     sidebarWidthCtrl,
     () => activeSurfaceType() === SURFACE_SETTINGS,
+    () => {
+      const state = shieldState({
+        enabled: sandboxEnabledLive(),
+        statusAvailable: sandboxStatusAvailable(),
+        origin: activeOrigin(),
+      })
+      if (state.kind === 'hidden') return <></>
+      const title =
+        state.kind === 'ready'
+          ? `Convert this tab to a sandboxed shell (${state.workspace})`
+          : state.reason
+      return (
+        <IconButton
+          data-testid="sandbox-shield"
+          size="sm"
+          ariaLabel="Convert active tab to a sandboxed shell"
+          title={title}
+          disabled={state.kind !== 'ready'}
+          onClick={() => void convertActiveTabToSandboxed()}
+        >
+          <ShieldIcon />
+        </IconButton>
+      )
+    },
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
@@ -949,7 +997,13 @@ async function main() {
     showToast({ level: 'danger', message: `Could not open a sandboxed shell: ${message}` })
   }
 
-  const openSandboxedPane = async (): Promise<void> => {
+  convertActiveTabToSandboxed = async (): Promise<void> => {
+    const ready = shieldState({
+      enabled: sandboxEnabledLive(),
+      statusAvailable: sandboxStatusAvailable(),
+      origin: activeOrigin(),
+    })
+    if (ready.kind !== 'ready') return
     let state: { enabled: boolean; status: SandboxStatus | null }
     try {
       state = await getSandboxState()
@@ -964,13 +1018,26 @@ async function main() {
       )
       return
     }
-    await openSandboxedShell({
-      getSnapshot: () => profileClient.getSnapshot(),
-      openDirectory: () => dialogClient.openDirectoryDialog(),
-      showPermissions: showSandboxPermissions,
-      newSandboxedTab: (workspace, launch) => tm.newSandboxedPane(workspace, launch),
-      reportError: reportSandboxOpenError,
-    })
+    const source = tm.activeOrigin()
+    const oldPane = source ? tm.paneOf(source.paneId) : undefined
+    if (!source || !oldPane || !tm.tabOf(source.paneId)) return
+    await openSandboxedShell(
+      {
+        getSnapshot: () => profileClient.getSnapshot(),
+        openDirectory: () => dialogClient.openDirectoryDialog(),
+        showPermissions: showSandboxPermissions,
+        newSandboxedTab: (_workspace, launch) => {
+          const made = tm.newSandboxedPane(ready.workspace, launch)
+          void made.created.then((created) => {
+            if (!created) return
+            tm.replaceTabPosition(oldPane.id, made.pane.id)
+            void tm.closePane(oldPane)
+          })
+        },
+        reportError: reportSandboxOpenError,
+      },
+      { workspace: ready.workspace },
+    )
   }
 
   const qcProviders: QuickConnectProvider[] = [
@@ -978,10 +1045,6 @@ async function main() {
       () => tm.newPane(),
       () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
-      {
-        state: getSandboxState,
-        open: () => void openSandboxedPane(),
-      },
     ),
     sshProvider,
     // Snippets: one kind set of its own (the 'snippets' variant), so its
@@ -1084,8 +1147,6 @@ async function main() {
   tm.onSnippetAccepted = (id) => fireSnippetById(id)
 
   function wireQuickConnect(strip: typeof tabStrip) {
-    strip.setSandboxEnabled(sandboxEnabled)
-    strip.onNewSandboxedTab = () => void openSandboxedPane()
     strip.onQuickConnect = () => qc.show()
     strip.onInsertSecret = () => qc.showSecrets()
     // The snippets action (design §10.3): the library without knowing the

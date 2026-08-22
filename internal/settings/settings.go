@@ -855,41 +855,41 @@ func init() {
 	RegisterSectionGroup("Test", "developer")
 }
 
-// SandboxEnabled gates the opt-in "Sandboxed shell…" action (ADR-0036 §3.1, ADR-0040).
-// It is a capability/visibility gate, not "sandbox every tab": it only
-// exposes an opt-in action for NEW local tabs, never changes a running tab,
-// and the backend rejects a sandbox request while the flag is off.
+// SandboxEnabled gates the sidebar shield action (ADR-0043).
+// It is a capability/visibility gate, not "sandbox every tab": it exposes
+// conversion of an eligible active local tab, and the backend rejects a
+// sandbox request while the flag is off.
 var SandboxEnabled = MustRegisterBool(BoolSpec{
 	Key:         "sandbox.enabled",
 	Section:     "Experimental",
 	Label:       "Filesystem sandbox",
-	Description: "Expose an opt-in action that opens new local tabs inside a filesystem-isolated sandbox (experimental). Existing tabs are never affected, and the flag alone never sandboxes anything.",
+	Description: "Expose the sidebar shield action that converts the active local tab into a filesystem-isolated sandbox (experimental). The action requires a verified current folder; the flag alone never sandboxes anything.",
 	DataClass:   PublicConfig,
 	Default:     false,
 })
 
 // SandboxAllowedWritablePaths is the persisted global baseline of additional
-// directories made read-write in every new sandboxed tab (ADR-0037 §3.1,
-// ADR-0039 §3.1). The workspace is always writable; changes affect new tabs
-// only.
+// directories made read-write in each future sandbox conversion (ADR-0037
+// §3.1, ADR-0039 §3.1). The workspace is always writable; changes affect
+// future conversions only.
 var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedWritablePaths",
 	Section:     "Experimental",
 	Label:       "Sandbox read & write folders",
-	Description: "Additional folders available read/write in every new sandboxed tab. A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and receive exactly this read/write authority. The workspace is always read/write; changes affect new tabs only.",
+	Description: "Additional folders available read/write in each future sandbox conversion. A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and receive exactly this read/write authority. The workspace is always read/write; changes affect future conversions only.",
 	DataClass:   PrivateMetadata,
 })
 
 // SandboxAllowedReadOnlyPaths is the persisted global baseline of additional
-// directories made read-only in every new sandboxed tab (ADR-0039 §3.1):
-// their contents may be read and traversed, never created, removed, renamed,
-// or modified. The workspace is always read/write; changes affect new tabs
-// only.
+// directories made read-only in each future sandbox conversion (ADR-0039
+// §3.1): their contents may be read and traversed, never created, removed,
+// renamed, or modified. The workspace is always read/write; changes affect
+// future conversions only.
 var SandboxAllowedReadOnlyPaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedReadOnlyPaths",
 	Section:     "Experimental",
 	Label:       "Sandbox read-only folders",
-	Description: "Additional folders available read-only in every new sandboxed tab (their contents may be read, never created, removed, renamed, or modified). A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and remain read-only. The workspace is always read/write; changes affect new tabs only.",
+	Description: "Additional folders available read-only in each future sandbox conversion (their contents may be read, never created, removed, renamed, or modified). A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and remain read-only. The workspace is always read/write; changes affect future conversions only.",
 	DataClass:   PrivateMetadata,
 })
 

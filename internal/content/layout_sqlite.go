@@ -126,7 +126,7 @@ func tabFields(t Tab) []any {
 }
 
 func paneFields(p Pane) []any {
-	return []any{p.ID, p.TabID, p.Cwd, string(p.Kind), p.Ephemeral, p.Endpoint, p.SizeShare}
+	return []any{p.ID, p.TabID, p.Cwd, string(p.Kind), p.Endpoint, p.SizeShare}
 }
 
 func workspaceDigest(ws Workspace, firstTab Tab, firstPane Pane) string {
@@ -472,15 +472,16 @@ func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID strin
 	return err
 }
 
-// CloseEphemeralPanes is the startup sweep for panes that may not be
-// restored. It marks rows rather than deleting them so ledger entries keep
-// their durable pane anchor, then unwinds any tab/workspace left empty.
-func (s *sqliteContent) CloseEphemeralPanes(ctx context.Context) error {
+// CloseSandboxPanes is the startup sweep for panes whose authority may not be
+// silently re-issued. It marks rows rather than deleting them so ledger entries
+// keep their durable pane anchor, then unwinds any tab/workspace left empty.
+func (s *sqliteContent) CloseSandboxPanes(ctx context.Context) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
 			rows, err := tx.QueryContext(ctx,
 				`SELECT id, tab_id FROM panes
-				  WHERE ephemeral = 1 AND closed_at IS NULL`)
+				  WHERE closed_at IS NULL
+				    AND id IN (SELECT pane_id FROM sandbox_grants)`)
 			if err != nil {
 				return err
 			}
@@ -506,7 +507,7 @@ func (s *sqliteContent) CloseEphemeralPanes(ctx context.Context) error {
 			for _, paneID := range paneIDs {
 				if _, err := tx.ExecContext(ctx,
 					`UPDATE panes SET closed_at = ?
-					  WHERE id = ? AND ephemeral = 1 AND closed_at IS NULL`,
+					  WHERE id = ? AND closed_at IS NULL`,
 					at, paneID); err != nil {
 					return err
 				}
@@ -847,10 +848,9 @@ func (s *sqliteContent) CreatePane(ctx context.Context, pane Pane) (Created[Pane
 
 func insertPane(ctx context.Context, db execer, pane Pane, digest string) error {
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO panes (id, tab_id, cwd, kind, endpoint, size_share, ephemeral, digest)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pane.ID, pane.TabID, pane.Cwd, string(pane.Kind), pane.Endpoint, pane.SizeShare,
-		boolToInt(pane.Ephemeral), digest)
+		`INSERT INTO panes (id, tab_id, cwd, kind, endpoint, size_share, digest)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		pane.ID, pane.TabID, pane.Cwd, string(pane.Kind), pane.Endpoint, pane.SizeShare, digest)
 	return err
 }
 
@@ -859,7 +859,7 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 		return nil, ErrClosed
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tab_id, cwd, kind, endpoint, size_share, ephemeral
+		`SELECT id, tab_id, cwd, kind, endpoint, size_share
 		   FROM panes WHERE tab_id = ? AND closed_at IS NULL ORDER BY id`, tabID)
 	if err != nil {
 		return nil, err
@@ -868,17 +868,15 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 	out := []Pane{}
 	for rows.Next() {
 		var (
-			p         Pane
-			kind      string
-			endpoint  sql.NullString
-			ephemeral int
+			p        Pane
+			kind     string
+			endpoint sql.NullString
 		)
-		if err := rows.Scan(&p.ID, &p.TabID, &p.Cwd, &kind, &endpoint, &p.SizeShare, &ephemeral); err != nil {
+		if err := rows.Scan(&p.ID, &p.TabID, &p.Cwd, &kind, &endpoint, &p.SizeShare); err != nil {
 			return nil, err
 		}
 		p.Kind = PaneKind(kind)
 		p.Endpoint = nullableString(endpoint)
-		p.Ephemeral = ephemeral != 0
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -1249,19 +1247,71 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 	return workspaceID, err
 }
 
-func (s *sqliteContent) IsPaneEphemeral(ctx context.Context, paneID string) (bool, error) {
+func (s *sqliteContent) InsertSandboxGrant(ctx context.Context, grant SandboxGrant) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
+		 SELECT ?, ?, ?, ?, ? FROM panes WHERE id = ? AND closed_at IS NULL`,
+		grant.PaneID, grant.Version, grant.IssuedAt, grant.Workspace, grant.Payload, grant.PaneID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
+	}
+	return nil
+}
+
+func (s *sqliteContent) SandboxGrantExists(ctx context.Context, paneID string) (bool, error) {
 	if s.closed.Load() {
 		return false, ErrClosed
 	}
-	var ephemeral int
+	var granted int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT ephemeral FROM panes WHERE id = ? AND closed_at IS NULL`,
-		paneID,
-	).Scan(&ephemeral)
-	if errors.Is(err, sql.ErrNoRows) {
+		`SELECT EXISTS(
+		   SELECT 1 FROM panes p LEFT JOIN sandbox_grants g ON g.pane_id = p.id
+		    WHERE p.id = ? AND p.closed_at IS NULL AND g.pane_id IS NOT NULL
+		 )`, paneID).Scan(&granted)
+	if err != nil {
+		return false, err
+	}
+	var open int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM panes WHERE id = ? AND closed_at IS NULL)`, paneID).Scan(&open); err != nil {
+		return false, err
+	}
+	if open == 0 {
 		return false, fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
 	}
-	return ephemeral != 0, err
+	return granted != 0, nil
+}
+
+func (s *sqliteContent) SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT g.pane_id FROM sandbox_grants g JOIN panes p ON p.id = g.pane_id
+		  WHERE p.closed_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var paneID string
+		if err := rows.Scan(&paneID); err != nil {
+			return nil, err
+		}
+		out[paneID] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // ── row readers ──────────────────────────────────────────────────────────
@@ -1355,14 +1405,13 @@ type paneRow struct {
 
 func paneByID(ctx context.Context, q rowQuerier, id string) (paneRow, error) {
 	var (
-		row       paneRow
-		kind      string
-		endpoint  sql.NullString
-		ephemeral int
+		row      paneRow
+		kind     string
+		endpoint sql.NullString
 	)
 	err := q.QueryRowContext(ctx,
-		`SELECT id, tab_id, cwd, kind, endpoint, size_share, ephemeral, digest FROM panes WHERE id = ?`, id,
-	).Scan(&row.ID, &row.TabID, &row.Cwd, &kind, &endpoint, &row.SizeShare, &ephemeral, &row.digest)
+		`SELECT id, tab_id, cwd, kind, endpoint, size_share, digest FROM panes WHERE id = ?`, id,
+	).Scan(&row.ID, &row.TabID, &row.Cwd, &kind, &endpoint, &row.SizeShare, &row.digest)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return paneRow{}, fmt.Errorf("%w: %s", ErrNoSuchPane, id)
@@ -1371,7 +1420,6 @@ func paneByID(ctx context.Context, q rowQuerier, id string) (paneRow, error) {
 	}
 	row.Kind = PaneKind(kind)
 	row.Endpoint = nullableString(endpoint)
-	row.Ephemeral = ephemeral != 0
 	return row, nil
 }
 

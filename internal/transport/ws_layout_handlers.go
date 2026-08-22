@@ -99,13 +99,13 @@ type tabWire struct {
 }
 
 type paneWire struct {
-	ID        string  `json:"id"`
-	TabID     string  `json:"tabId"`
-	Cwd       string  `json:"cwd"`
-	Kind      string  `json:"kind"`
-	Endpoint  *string `json:"endpoint"`
-	SizeShare float64 `json:"sizeShare"`
-	Ephemeral bool    `json:"ephemeral"`
+	ID             string  `json:"id"`
+	TabID          string  `json:"tabId"`
+	Cwd            string  `json:"cwd"`
+	Kind           string  `json:"kind"`
+	Endpoint       *string `json:"endpoint"`
+	SizeShare      float64 `json:"sizeShare"`
+	SandboxGranted bool    `json:"sandboxGranted"`
 }
 
 func wireWorkspace(ws content.Workspace) workspaceWire {
@@ -123,7 +123,7 @@ func wireTab(t content.Tab) tabWire {
 func wirePane(p content.Pane) paneWire {
 	return paneWire{
 		ID: p.ID, TabID: p.TabID, Cwd: p.Cwd, Kind: string(p.Kind),
-		Endpoint: p.Endpoint, SizeShare: p.SizeShare, Ephemeral: p.Ephemeral,
+		Endpoint: p.Endpoint, SizeShare: p.SizeShare,
 	}
 }
 
@@ -146,10 +146,12 @@ func wireTabs(all []content.Tab) []tabWire {
 	return out
 }
 
-func wirePanes(all []content.Pane) []paneWire {
+func wirePanes(all []content.Pane, granted map[string]struct{}) []paneWire {
 	out := make([]paneWire, 0, len(all))
 	for _, p := range all {
-		out = append(out, wirePane(p))
+		w := wirePane(p)
+		_, w.SandboxGranted = granted[p.ID]
+		out = append(out, w)
 	}
 	return out
 }
@@ -260,7 +262,6 @@ type firstPaneParams struct {
 	Kind      string  `json:"kind"`
 	Endpoint  *string `json:"endpoint"`
 	SizeShare float64 `json:"sizeShare"`
-	Ephemeral *bool   `json:"ephemeral"`
 }
 
 func (p firstTabParams) tab(workspaceID string, parentID *string) content.Tab {
@@ -274,7 +275,7 @@ func (p firstTabParams) tab(workspaceID string, parentID *string) content.Tab {
 func (p firstPaneParams) pane(tabID string) content.Pane {
 	return content.Pane{
 		ID: p.ID, TabID: tabID, Cwd: p.Cwd, Kind: content.PaneKind(p.Kind),
-		Endpoint: p.Endpoint, SizeShare: p.SizeShare, Ephemeral: p.Ephemeral != nil && *p.Ephemeral,
+		Endpoint: p.Endpoint, SizeShare: p.SizeShare,
 	}
 }
 
@@ -359,7 +360,6 @@ type paneCreateParams struct {
 	Kind      string  `json:"kind"`
 	Endpoint  *string `json:"endpoint"`
 	SizeShare float64 `json:"sizeShare"`
-	Ephemeral *bool   `json:"ephemeral"`
 }
 
 type paneMoveParams struct {
@@ -547,10 +547,7 @@ func validateFirstPane(p firstPaneParams) string {
 	if msg := layoutID("firstPane.id", p.ID); msg != "" {
 		return msg
 	}
-	if p.Ephemeral == nil {
-		return "firstPane.ephemeral is required"
-	}
-	return validatePaneFacts("firstPane", p.Cwd, p.Kind, p.Endpoint, p.SizeShare, *p.Ephemeral)
+	return validatePaneFacts("firstPane", p.Cwd, p.Kind, p.Endpoint, p.SizeShare)
 }
 
 func validateWorkspaceRenameRaw(raw json.RawMessage) string {
@@ -698,16 +695,13 @@ func validatePaneCreateRaw(raw json.RawMessage) string {
 	if msg := layoutID("tabId", p.TabID); msg != "" {
 		return msg
 	}
-	if p.Ephemeral == nil {
-		return "ephemeral is required"
-	}
-	return validatePaneFacts("", p.Cwd, p.Kind, p.Endpoint, p.SizeShare, *p.Ephemeral)
+	return validatePaneFacts("", p.Cwd, p.Kind, p.Endpoint, p.SizeShare)
 }
 
 // validatePaneFacts is the pane's own shape, wherever a pane arrives: on its
 // own through panes.create, or as the first member of a container. One
 // implementation, because two would agree until the day they did not.
-func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare float64, ephemeral bool) string {
+func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare float64) string {
 	if prefix != "" {
 		prefix += "."
 	}
@@ -723,9 +717,6 @@ func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare flo
 	}
 	if msg := nullableBounded(prefix+"endpoint", endpoint, maxLayoutEndpointRunes); msg != "" {
 		return msg
-	}
-	if ephemeral && content.PaneKind(kind) != content.PaneLocal {
-		return prefix + "ephemeral is only admitted on kind = local"
 	}
 	switch content.PaneKind(kind) {
 	case content.PaneLocal:
@@ -803,12 +794,16 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		switch req.Method {
 		case "layout.read":
 			snap, err := svc.Snapshot(ctx)
+			granted := map[string]struct{}{}
+			if err == nil {
+				granted, err = svc.SandboxGrantedPaneIDs(ctx)
+			}
 			h.answer(req, err, func() any {
 				return layoutReadResponse{
 					DefaultWorkspaceID: snap.DefaultWorkspaceID,
 					Workspaces:         wireWorkspaces(snap.Workspaces),
 					Tabs:               wireTabs(snap.Tabs),
-					Panes:              wirePanes(snap.Panes),
+					Panes:              wirePanes(snap.Panes, granted),
 				}
 			})
 		case "workspaces.create":
@@ -916,7 +911,6 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			made, err := svc.CreatePane(ctx, content.Pane{
 				ID: p.ID, TabID: p.TabID, Cwd: p.Cwd, Kind: content.PaneKind(p.Kind),
 				Endpoint: p.Endpoint, SizeShare: p.SizeShare,
-				Ephemeral: p.Ephemeral != nil && *p.Ephemeral,
 			})
 			h.answer(req, err, func() any {
 				return paneCreateResponse{Pane: wirePane(made.Object), Replayed: made.Replayed}

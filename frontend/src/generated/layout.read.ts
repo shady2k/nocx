@@ -112,7 +112,7 @@ export interface Pane {
    */
   sizeShare: number
   /**
-   * Whether this pane is explicitly non-restorable. True only for a sandboxed local shell: the backend startup sweep closes it and the renderer refuses to adopt it, so it can never return as an ordinary unsandboxed local pane. Always present; this is independent of kind because its pipe is still local.
+   * Whether this open pane carries an immutable sandbox grant. The grant is the cause of native enforcement and of the startup sweep that makes the pane non-restorable.
    */
-  ephemeral: boolean
+  sandboxGranted: boolean
 }

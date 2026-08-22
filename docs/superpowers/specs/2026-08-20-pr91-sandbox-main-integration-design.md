@@ -33,10 +33,14 @@
    for history; only the _open_ (in-window) pane is excluded at restart.
 5. **Sandbox launch affordance is a More-menu row, not a third strip glyph**
    (UX review §3.4, Option B). The PR's dedicated ShieldIcon button beside `+`
-   is NOT carried over. "New sandboxed tab" is a named row in main's existing
-   More menu (`tab-strip.tsx` `ContextMenu` items), gated by `sandbox.enabled`,
-   wired to `onNewSandboxedTab`. The Quick Connect action `__sandboxed_local__`
-   (`Sandboxed shell…`) is unchanged (A1).
+
+> **Superseded:** the More-menu and Quick Connect entry-point decisions in this
+> section are replaced by [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md).
+
+is NOT carried over. "New sandboxed tab" is a named row in main's existing
+More menu (`tab-strip.tsx` `ContextMenu` items), gated by `sandbox.enabled`,
+wired to `onNewSandboxedTab`. The Quick Connect action `__sandboxed_local__`
+(`Sandboxed shell…`) is unchanged (A1).
 
 ---
 
@@ -154,14 +158,20 @@ therefore `layout.read.ts`) regenerate with `ephemeral: boolean` on `Pane`.
 1. The sandbox action has two entry points, both funneling into the existing
    `openSandboxedShell` flow (`frontend/src/sandbox-open.ts`): one fresh
    settings snapshot → native directory picker (workspace) → permission dialog
-   (deltas) → `deps.newSandboxedTab(workspace, launch)`.
-   - Quick Connect action `Sandboxed shell…` (`id: "__sandboxed_local__"`),
-     unchanged (A1).
-   - A named **"New sandboxed tab"** row in main's More menu (`tab-strip.tsx`
-     `ContextMenu` items), gated by `sandbox.enabled`, wired to
-     `onNewSandboxedTab` (UX review §3.4, Option B). The PR's dedicated
-     ShieldIcon strip button is NOT carried over — main's strip stays at two
-     glyphs (`+`, `More`).
+
+> **Superseded:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
+> consolidates sandbox launch into the active sidebar-panel shield.
+
+(deltas) → `deps.newSandboxedTab(workspace, launch)`.
+
+- Quick Connect action `Sandboxed shell…` (`id: "__sandboxed_local__"`),
+  unchanged (A1).
+- A named **"New sandboxed tab"** row in main's More menu (`tab-strip.tsx`
+  `ContextMenu` items), gated by `sandbox.enabled`, wired to
+  `onNewSandboxedTab` (UX review §3.4, Option B). The PR's dedicated
+  ShieldIcon strip button is NOT carried over — main's strip stays at two
+  glyphs (`+`, `More`).
+
 2. `newSandboxedTab` is **renamed and relocated** to
    `PaneManager.newSandboxedPane(workspace: string, launch: SandboxLaunch): Pane`
    (`frontend/src/panes.ts`). It is the only new public PaneManager method.

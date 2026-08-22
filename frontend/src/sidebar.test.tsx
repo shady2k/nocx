@@ -568,3 +568,33 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
     expect(panelTitle(panel)).toBe('Alpha')
   })
 })
+
+describe('sidebar panel actions', () => {
+  it('renders the shared action before the active view action', () => {
+    const { bar, panel } = mount()
+    const views: SidebarViewDescriptor[] = [
+      {
+        ...TWO_VIEWS[0],
+        actions: () => <button data-testid="view-action">View</button>,
+      },
+    ]
+    mountSidebar(
+      bar,
+      panel,
+      views,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => <button data-testid="panel-action">Panel</button>,
+    )
+
+    const actions = [...panel.querySelectorAll('.ui-sidebar-view__actions button')]
+    expect(actions.map((action) => action.getAttribute('data-testid'))).toEqual([
+      'panel-action',
+      'view-action',
+    ])
+  })
+})

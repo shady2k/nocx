@@ -46,7 +46,6 @@ export interface PaneFacts {
   kind: 'local' | 'ssh'
   endpoint: string | null
   sizeShare: number
-  ephemeral: boolean
 }
 
 /** A workspace and the tab and pane it is minted around. Creation is always

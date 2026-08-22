@@ -77,7 +77,6 @@ async function seededBackend({ decorate = true } = {}): Promise<
       kind: 'local',
       endpoint: null,
       sizeShare: 1,
-      ephemeral: false,
     },
   })
   await backend.createTab({
@@ -90,7 +89,6 @@ async function seededBackend({ decorate = true } = {}): Promise<
       kind: 'local',
       endpoint: null,
       sizeShare: 1,
-      ephemeral: false,
     },
   })
   if (decorate) {
@@ -693,7 +691,7 @@ async function backendWithAnSSHRow(
     id: `tab-${id}`,
     workspaceId: 'workspace:default',
     position: 0,
-    firstPane: { id, cwd: '/srv', kind: 'ssh', endpoint, sizeShare: 1, ephemeral: false },
+    firstPane: { id, cwd: '/srv', kind: 'ssh', endpoint, sizeShare: 1 },
   })
   return backend
 }
@@ -864,7 +862,6 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
         kind: 'ssh',
         endpoint: 'deploy@srv-02:22',
         sizeShare: 1,
-        ephemeral: false,
       },
     })
     const client = makeClient()

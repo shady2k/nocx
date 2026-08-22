@@ -75,6 +75,31 @@ const listOk = (
   ...over,
 })
 
+/** A listing served from a backing array the way a provider serves one: the
+ *  whole directory is enumerated, `Total` counts all of it, and the page is a
+ *  slice. The refresh tests need this rather than a fixed fixture — the defect
+ *  they cover is about WHICH slice the re-list asks for, so a mock that
+ *  ignores offset/limit cannot see it. */
+const pageOf = (
+  canonical: string,
+  path: string,
+  all: FilesListEntry[],
+  offset: number,
+  limit: number,
+): FilesListResult => {
+  const slice = all.slice(offset, offset + limit)
+  return {
+    state: 'ok',
+    path,
+    canonical,
+    entries: slice,
+    offset,
+    total: all.length,
+    hasMore: offset + slice.length < all.length,
+    rev: `r${all.length}`,
+  }
+}
+
 type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void }
 
 function deferred<T>(): Deferred<T> {
@@ -974,6 +999,149 @@ describe('files tree store', () => {
     // Expansion state survives the re-list (mergeChildren keeps identity).
     expect(docs.expanded).toBe(true)
     expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'old.md')).toBe(true)
+  })
+
+  // ── The §5.5 re-list window (nocx-o97xj) ───────────────────────────────
+
+  it('a file arriving in a fully displayed directory is rendered with no further user action (nocx-o97xj)', async () => {
+    // The promise D5 makes: the tree updates by itself. A re-list that asks
+    // for exactly the row count already on screen cannot see a newcomer that
+    // sorts past the last of them — the row lands in a page nobody asked for
+    // and the panel offers a "Show next 1" button instead of the file.
+    const docs = [entry({ name: 'old.md', path: '/docs/old.md' })]
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string, offset: number, limit: number) =>
+        Promise.resolve(
+          path === '/'
+            ? pageOf(
+                'C:/',
+                '/',
+                [entry({ name: 'docs', path: '/docs', kind: 'dir' })],
+                offset,
+                limit,
+              )
+            : pageOf('C:/docs', '/docs', docs, offset, limit),
+        ),
+      )
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    store.toggle(nodeRows(store, 'docs'))
+    await settle()
+    expect(store.rows().some((r) => r.kind === 'more')).toBe(false)
+
+    // Somebody else writes a file — an upload, a checkout, an agent, cron.
+    // It sorts AFTER every row on screen, which is the case the displayed
+    // count cannot reach.
+    docs.push(entry({ name: 'zz-new.md', path: '/docs/zz-new.md' }))
+    handler!({ bindingId: 'b1', path: '/docs', rev: 'r2' })
+    await settle()
+
+    const names = store
+      .rows()
+      .filter((r) => r.kind === 'entry')
+      .map((r) => (r.kind === 'entry' ? r.node.name : ''))
+    expect(names).toEqual(['docs', 'old.md', 'zz-new.md'])
+    // And no button is offered: the directory is fully displayed.
+    expect(store.rows().some((r) => r.kind === 'more')).toBe(false)
+  })
+
+  it('a directory somebody has paged into keeps its position across a change (nocx-o97xj)', async () => {
+    // The other half of the rule. A window the user chose by pressing
+    // "Show next" is theirs: a change must not shrink it back to one page,
+    // and must not silently page them further into a directory they did not
+    // ask to see more of. The unseen tail stays behind the button.
+    const big = Array.from({ length: 120 }, (_, i) =>
+      entry({
+        name: `f${String(i).padStart(3, '0')}`,
+        path: `/big/f${String(i).padStart(3, '0')}`,
+      }),
+    )
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string, offset: number, limit: number) =>
+        Promise.resolve(
+          path === '/'
+            ? pageOf('C:/', '/', [entry({ name: 'big', path: '/big', kind: 'dir' })], offset, limit)
+            : pageOf('C:/big', '/big', big, offset, limit),
+        ),
+      )
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const dir = nodeRows(store, 'big')
+    store.toggle(dir)
+    await settle()
+    store.showMore(dir)
+    await settle()
+    expect(dir.children).toHaveLength(2 * FILES_PAGE_SIZE)
+
+    handler!({ bindingId: 'b1', path: '/big', rev: 'r-changed' })
+    await settle()
+
+    // Same window: the 100 rows the user paged to are still on screen, the
+    // hundredth included, and the button still owns the remaining 20.
+    expect(dir.children).toHaveLength(2 * FILES_PAGE_SIZE)
+    expect(dir.children[2 * FILES_PAGE_SIZE - 1]?.name).toBe('f099')
+    expect(dir.hasMore).toBe(true)
+    expect(dir.total - dir.children.length).toBe(20)
+    // The re-list asked for exactly what was displayed — a paged directory
+    // is not re-enumerated more widely than the user asked for.
+    const bigLists = list.mock.calls.filter(([, p]) => p === '/big')
+    expect(bigLists[bigLists.length - 1]?.slice(2)).toEqual([0, 2 * FILES_PAGE_SIZE])
+  })
+
+  it('a capped directory is still not re-listed when it changes (nocx-o97xj)', async () => {
+    // D14: a tooLarge directory renders a state row and is deliberately not
+    // polled. Widening the refresh window must not turn it back into an
+    // enumeration the backend already refused.
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string, offset: number, limit: number) =>
+        path === '/'
+          ? Promise.resolve(
+              pageOf(
+                'C:/',
+                '/',
+                [entry({ name: 'huge', path: '/huge', kind: 'dir' })],
+                offset,
+                limit,
+              ),
+            )
+          : Promise.resolve({
+              state: 'tooLarge',
+              limit: 5000,
+              observedCount: 5001,
+            } as FilesListResult),
+      )
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    store.toggle(nodeRows(store, 'huge'))
+    await settle()
+    expect(nodeRows(store, 'huge').state).toBe('tooLarge')
+    expect(list.mock.calls.filter(([, p]) => p === '/huge')).toHaveLength(1)
+
+    handler!({ bindingId: 'b1', path: '/huge', rev: 'r-changed' })
+    await settle()
+
+    expect(list.mock.calls.filter(([, p]) => p === '/huge')).toHaveLength(1)
   })
 
   it('a files.changed whose rev matches the applied rev triggers no re-list', async () => {

@@ -3,6 +3,15 @@
 // stage/unstage, stage-all/unstage-all and the commit form. The store owns
 // every call; the panel renders state and routes user intent into it.
 //
+// THE BODY, and that is why nothing here mentions `SidebarView`. The frame —
+// header, header actions, pinned filter row, the one scrolling body — is the
+// kit's, and it is reached through the DESCRIPTOR in git-view.tsx, which the
+// shell renders inside `SidebarView` for every panel alike (sidebar.tsx
+// builds it once). A panel body that imported the frame would be the second
+// owner of a layout the shell already owns; what a body may say about the
+// frame is which of its children is the filter, and it says that in the
+// descriptor beside `actions`. Same for notes-panel.tsx (nocx-708q.3).
+//
 // The render rules that make it correct:
 //
 // 1. state() IS THE DISCRIMINATOR, SWITCHED ON FIRST — exactly one of the

@@ -9,13 +9,16 @@
  * list it loaded, because that would mean loading every note to look inside
  * it.
  *
- * WHAT THIS COMPONENT IS is the panel's BODY and nothing else. The search
- * field and the "+ New note" button used to be here, in a bordered strip at
- * the top of the scrolling body, and both went away with the list the
- * moment anybody scrolled it. They are the view descriptor's header action
- * and pinned filter slots now (notes-view.tsx), the way every other panel
- * says it; the state and the query arrive as accessors so the field, the
- * button and the rows read one signal (nocx-708q.3).
+ * WHAT THIS COMPONENT IS is the panel's BODY and nothing else — which is
+ * why nothing here mentions `SidebarView`. The frame is the kit's and is
+ * reached through the DESCRIPTOR in notes-view.tsx, which the shell renders
+ * inside `SidebarView` for every panel alike (sidebar.tsx builds it once).
+ * The search field and the "+ New note" button used to be here, in a
+ * bordered strip at the top of the scrolling body, and both went away with
+ * the list the moment anybody scrolled it. They are the descriptor's header
+ * action and pinned filter slots now, the way every other panel says it; the
+ * state and the query arrive as accessors so the field, the button and the
+ * rows read one signal (nocx-708q.3).
  */
 import { For, onMount, Show } from 'solid-js'
 import { Button } from '../ui/button'

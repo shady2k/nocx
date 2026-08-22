@@ -87,11 +87,24 @@
    is two short words and a path is not; `min-width: 0` is what lets the
    field actually shrink inside the flex row rather than forcing the toggle
    off the panel's edge. */
+/* The name filter (nocx-708q.2): the kit's SearchField, placed and never
+   repainted (ADR-0014). One control on one line, taking the panel's width.
+
+   There WAS a Names/Contents toggle beside it, from the file-manager design's
+   Orca reference. It went: content search is not built, so the toggle's other
+   half was permanently disabled, and a two-option control with one option is
+   not a control — it was a third of a ~250 px rail spent on nothing, and
+   side by side the two shrank into "Na me s" and a placeholder cut mid-word.
+   The owner had not asked for it either. If content search is ever built the
+   toggle returns with it, which is the only moment it means anything. */
 .files-filter {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-2) var(--space-4);
+  /* NO horizontal margin of its own. The panel body already insets its
+     content by --space-2, and 16px on top of that left the field 48px
+     narrower than the panel it sits in — which is what "why is the input not
+     full width" actually was (owner, 2026-08-22). Vertical only, so the
+     filter stands on the same line as everything below it. */
+  margin: var(--space-2) 0;
 }
 
 .files-filter > .ui-search-field {

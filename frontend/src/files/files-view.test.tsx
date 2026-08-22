@@ -1653,22 +1653,17 @@ describe('filtering the tree by name', () => {
     await vi.waitFor(() => expect(shown(panel)).toHaveLength(3))
   })
 
-  it('the Names/Contents toggle offers Contents disabled AND says why', async () => {
-    // A disabled control that does not say why is a dead control, and it
-    // teaches people the panel is broken. The design allows Contents to
-    // ship unbuilt; it does not allow it to ship mute.
-    const { panel } = await mountWithTree()
-    const segments = [
-      ...panel.querySelectorAll<HTMLButtonElement>(
-        '[data-testid="files-filter"] .ui-segmented-control__option',
-      ),
-    ]
-    expect(segments.map((s) => s.textContent)).toEqual(['Names', 'Contents'])
-    const [names, contents] = segments
-    expect(names.disabled).toBe(false)
-    expect(names.getAttribute('aria-checked')).toBe('true')
-    expect(contents.disabled).toBe(true)
-    expect(contents.title).toContain('not built yet')
+  it('offers no search-scope toggle, because there is only one scope', async () => {
+    // There WAS a Names/Contents toggle here, from the file-manager design's
+    // Orca reference. Content search is not built, so its other half was
+    // permanently disabled — and a two-option control with one option is not
+    // a control. In a ~250 px rail it also took a third of the row and broke
+    // the layout, and the owner had not asked for it. If content search is
+    // ever built the toggle returns with it; until then its absence is the
+    // honest state and this test is what keeps it from drifting back.
+    const app = await mountWithTree()
+    expect(app.panel.querySelector('.ui-segmented-control')).toBeNull()
+    expect(app.panel.querySelector('.ui-search-field')).not.toBeNull()
   })
 
   it('the filter survives the panel being swapped out and back', async () => {

@@ -28,7 +28,6 @@ import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
 import { ArrowDownIcon, ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
 import { SearchField } from '../ui/search-field'
-import { SegmentedControl } from '../ui/segmented-control'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -662,33 +661,6 @@ function FilesPanel(props: FilesPanelProps) {
                 props.store.setFilter('')
               }
             }}
-          />
-          {/* Names is the only mode that exists, and Contents is drawn
-              DISABLED rather than left out. The design put both in scope, so
-              hiding the half that is not built would present the built half
-              as the whole intention — and offering it live would be a
-              control that does nothing. A disabled control has to say why it
-              is disabled or it teaches people the panel is broken, so the
-              title is not decoration here: it is what makes the segment
-              honest instead of dead.
-
-              The value is the literal 'names' and the handler is empty
-              because there is nothing a person can change it to: the only
-              other segment refuses the click. A mode signal would be state
-              that cannot move. */}
-          <SegmentedControl
-            ariaLabel="What the filter searches"
-            value="names"
-            onChange={() => {}}
-            options={[
-              { value: 'names', label: 'Names' },
-              {
-                value: 'contents',
-                label: 'Contents',
-                disabled: true,
-                title: 'Searching file contents is not built yet — this filter matches names only.',
-              },
-            ]}
           />
         </div>
         {/* A filter that matches nothing is a STATE, never a blank tree —

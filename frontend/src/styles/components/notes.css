@@ -4,24 +4,31 @@
 
 /* ── The panel ─────────────────────────────────────────────────────────── */
 
+/* Placement only, and almost nothing left of it: the panel's frame is the
+   kit's SidebarView, which owns the header, the pinned filter row, the one
+   scrolling body and the horizontal inset all three share.
+
+   `.notes-panel__search` used to be here — a bordered strip holding the
+   search field and a full-width "+ New note", inset by --space-2 ON TOP of
+   the body's own, at the top of the SCROLLING body. So the two controls
+   scrolled away with the list they act on, and every note title started one
+   step right of the panel's own title. The field is the shell's pinned row
+   now and the button is the header action, which is where Files, Git and
+   Ports have always kept theirs (nocx-708q.3). */
 .notes-panel {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
   min-height: 0;
 }
 
-.notes-panel__search {
+/* No `overflow-y` here, and that is the point rather than an omission: the
+   sidebar body is the ONE scroll owner of a panel, the way PageScroller is
+   the one scroll owner of a page (§6.2). A second declared scroller inside
+   it is a boundary nobody asked for — inert while nothing bounds its height,
+   and a list that traps the wheel the day something does. */
+.notes-panel__list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--color-divider);
-}
-
-.notes-panel__list {
-  overflow-y: auto;
-  flex: 1 1 auto;
   min-height: 0;
 }
 

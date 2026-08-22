@@ -36,7 +36,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -93,7 +93,7 @@ import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
 import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
 import { NotesClient } from './notes/notes-client'
 import { NotesStore } from './notes/notes-store'
-import { NotesPanel } from './notes/notes-panel'
+import { createNotesView } from './notes/notes-view'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
 import { createOverviewController } from './overview/overview-controller'
@@ -769,22 +769,17 @@ async function main() {
   // point of the feature (design §6.3).
   const notesStore = new NotesStore(new NotesClient(dispatcher))
   registerNotesSurface(tm, notesStore)
-  const NOTES_VIEW: SidebarViewDescriptor = {
-    id: 'notes',
-    title: 'Notes',
-    icon: TextQuoteIcon,
-    view: (props) => (
-      <NotesPanel
-        store={notesStore}
-        visible={props.visible()}
-        onOpen={(id) => openNote(id, '')}
-        onCreate={() => void createAndOpenNote()}
-      />
-    ),
-    order: 1,
-  }
+  // The descriptor is `createNotesView`, beside the Files, Git and
+  // Operations ones, rather than a literal here (nocx-708q.3): the header
+  // action, the pinned filter and the body all read one store, and a
+  // descriptor that lives with its panel is a descriptor a test can mount.
+  const notesView = createNotesView({
+    store: notesStore,
+    onOpen: (id) => openNote(id, ''),
+    onCreate: () => void createAndOpenNote(),
+  })
 
-  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW, operationsView].sort(
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, notesView, operationsView].sort(
     (a, b) => a.order - b.order,
   )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {

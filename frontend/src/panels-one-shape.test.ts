@@ -168,3 +168,51 @@ describe('no panel adds horizontal inset on top of the shell body', () => {
     })
   }
 })
+
+describe("the sidebar body is a panel's one scroll owner", () => {
+  // The Page family has had this rule since §6.2 — "only PageScroller and
+  // PageRail may scroll, no third scroll container" — and the sidebar has
+  // exactly the same shape one size down: `.ui-sidebar-view__body` is the
+  // scroller, the header and the filter row are pinned outside it. Nothing
+  // said so, so panels declared their own: the notes list carried
+  // `overflow-y: auto` inside the body's own, which is inert while nothing
+  // bounds its height and becomes a list that traps the wheel the day
+  // something does.
+  //
+  // Asserted over the shipped rules rather than a rendered box for the
+  // reason at the top of this file: jsdom computes no layout, so a nested
+  // scroller is invisible to a render test and plain to read here.
+
+  /** The class prefixes a sidebar PANEL's own elements carry. The notes TAB
+   *  (`note-tab*`) and the terminal panes are not panels and keep their own
+   *  scrollers; naming the prefixes is what keeps this rule about the thing
+   *  it is about. */
+  const PANEL_PREFIXES = ['git-', 'ports-', 'notes-panel', 'ops-', 'files-']
+
+  /** Every scroller the panel elements declare, by bare class — a compound
+   *  or descendant selector is a rule about something inside a panel, not
+   *  about the panel's own frame. */
+  const declared: string[] = []
+  for (const rule of RULES) {
+    if (!/(?:^|;)\s*overflow(?:-y)?\s*:\s*(?:auto|scroll)/.test(rule.body)) continue
+    for (const sel of rule.selectors) {
+      const m = /^\.([\w-]+)$/.exec(sel)
+      if (m && PANEL_PREFIXES.some((p) => m[1].startsWith(p))) declared.push(m[1])
+    }
+  }
+
+  /** The exceptions that are on record rather than quietly excluded.
+   *
+   *  `ops-list` is the operations panel's, one per group. It belongs to
+   *  another worker's branch, so it is named here — the next person reads it
+   *  as an outstanding item rather than as a rule that never covered it
+   *  (nocx-708q.3 report). */
+  const KNOWN_EXCEPTIONS = ['ops-list']
+
+  it('leaves the scrolling to the shell, bar the exceptions on record', () => {
+    // The shell really is the scroller — otherwise this rule would be
+    // satisfied by nothing scrolling at all.
+    expect(shipped('ui-sidebar-view__body', 'overflow-y')).toBe('auto')
+    expect(declared.filter((c) => !KNOWN_EXCEPTIONS.includes(c))).toEqual([])
+  })
+})

@@ -122,6 +122,11 @@ type pmURL struct {
 	Path     json.RawMessage `json:"path"`
 	Port     pmString        `json:"port"`
 	Query    []pmQuery       `json:"query"`
+	// Postman's PATH variables: `/users/:id` with the value for `id` kept
+	// beside the address. Read only so the import can SAY it is dropping
+	// them — see readURL. The field was absent before, which made the loss
+	// silent, and the ask promises the opposite in as many words.
+	Variable []pmVariable `json:"variable"`
 }
 
 type pmQuery struct {
@@ -599,6 +604,7 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 		base = assembleURL(u)
 	}
 	base, decoded := splitQuery(base)
+	c.notePathVariables(base, u.Variable, item)
 	if len(u.Query) == 0 {
 		return base, decoded
 	}
@@ -611,6 +617,57 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 		out = append(out, apicoll.Param{Name: name, Value: q.Value.String(), Enabled: !q.Disabled})
 	}
 	return base, out
+}
+
+// notePathVariables says what a `/users/:id` address loses on the way in.
+//
+// Postman keeps a per-REQUEST value beside the address: the path carries
+// `:id` and `url.variable` carries `id = 54321`. This model has no
+// per-request variable — an environment answers `{{name}}` and its scope is
+// the collection — so the address arrives with `:id` still in it and the
+// value has nowhere to go. That is a real loss and it was a SILENT one: the
+// field was not even read, so nothing could report it, while the import ask
+// promises that "what the format cannot carry is named afterwards rather
+// than dropped".
+//
+// Both shapes are reported, because both lose something different. With
+// values, the values are what is gone. Without them — an export that
+// templated the path and never filled it in — what is gone is any way to
+// resolve `:id` at all, and a request that goes out with a literal colon
+// segment is a request to a URL nobody meant.
+func (c *pmConv) notePathVariables(base string, vars []pmVariable, item string) {
+	named := make([]string, 0, len(vars))
+	for _, v := range vars {
+		if name := strings.TrimSpace(v.Key.String()); name != "" {
+			named = append(named, name)
+		}
+	}
+	if len(named) > 0 {
+		c.itemise("path variables on "+item+" ("+strings.Join(named, ", ")+")",
+			"the model has no per-request variable, so the address keeps its `:name` segments and the values beside them were not carried")
+		return
+	}
+	if colonSegments(base) {
+		c.itemise("a templated path on "+item,
+			"the address contains a `:name` segment and the export carried no value for it; nothing resolves it here, and it goes out as written")
+	}
+}
+
+// colonSegments reports whether the path has a `:name` segment — Postman's
+// path-variable spelling. The scheme's own colon is not one: it is followed
+// by `//`, and a port is digits, so both are excluded by requiring a letter
+// or `_` immediately after a `/:`.
+func colonSegments(rawURL string) bool {
+	for i := 0; i+2 < len(rawURL); i++ {
+		if rawURL[i] != '/' || rawURL[i+1] != ':' {
+			continue
+		}
+		ch := rawURL[i+2]
+		if ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			return true
+		}
+	}
+	return false
 }
 
 // assembleURL rebuilds a URL from Postman's parts, for the exports that

@@ -651,3 +651,50 @@ func TestPostmanUnmarkedCredentialIsPromotedAndSaidOutLoud(t *testing.T) {
 		t.Fatalf("the credential is in the environment: %s", blob)
 	}
 }
+
+// A Postman path variable — `/users/:id` with its value beside the address —
+// has nowhere to go in this model, and the import must SAY so. It used to be
+// dropped in silence: `url.variable` was not even a field on the struct that
+// reads a URL, so no code path could report it, while the ask above the file
+// field promises that what the format cannot carry is named afterwards.
+func TestPostmanPathVariablesAreItemisedRatherThanDropped(t *testing.T) {
+	const doc = `{
+      "info": {"name": "PV", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "item": [
+        {"name": "One user", "request": {"method": "GET", "url": {
+           "raw": "https://example.test/users/:id",
+           "variable": [{"key": "id", "value": "54321"}]}}},
+        {"name": "Templated", "request": {"method": "GET", "url": {
+           "raw": "https://example.test/orders/:orderId/items"}}}
+      ]}`
+	coll, reqs, _, unsup := mustPostman(t, doc)
+
+	// The address arrives as written — nothing here rewrites a path.
+	req, _ := findRequest(t, coll, reqs, "One user")
+	if req.URL != "https://example.test/users/:id" {
+		t.Fatalf("url = %q", req.URL)
+	}
+
+	// With a value, the VALUE is what was lost, and the name says which.
+	if !anyUnsupportedContaining(unsup, "path variables") || !anyUnsupportedContaining(unsup, "id") {
+		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
+	}
+	// Without one, what is lost is any way to resolve the segment at all.
+	if !anyUnsupportedContaining(unsup, "templated path") {
+		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
+	}
+}
+
+// The scheme's own colon and a port are not path variables. Reporting them
+// would put a line on every ordinary import, which is how a list of real
+// losses stops being read.
+func TestPostmanOrdinaryURLIsNotReportedAsTemplated(t *testing.T) {
+	const doc = `{
+      "info": {"name": "PV", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "item": [{"name": "Plain", "request": {"method": "GET",
+        "url": {"raw": "https://example.test:8443/users/42"}}}]}`
+	_, _, _, unsup := mustPostman(t, doc)
+	if anyUnsupportedContaining(unsup, "templated path") || anyUnsupportedContaining(unsup, "path variables") {
+		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
+	}
+}

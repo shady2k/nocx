@@ -7,8 +7,8 @@ import (
 
 // DialogService opens native platform dialogs on behalf of the renderer. It
 // is a control-plane capability (AD-1): the renderer has no path to the Wails
-// runtime, so a native file picker is reached through this method over the
-// same WebSocket as everything else.
+// runtime, so a native picker is reached through this method over the same
+// WebSocket as everything else.
 //
 // The service is often absent. The dev-web harness has no Wails at all, and
 // that is the configuration the app is developed and tested in. Absence is
@@ -31,6 +31,9 @@ type DialogService interface {
 	// is returned as-is. The context may be cancelled on disconnect; see
 	// the cancellation contract above.
 	OpenFile(ctx context.Context) (string, error)
+	// OpenDirectory opens the platform folder picker and returns the chosen
+	// ABSOLUTE directory, or "" when the user cancelled (design spec §4.3).
+	OpenDirectory(ctx context.Context) (string, error)
 }
 
 // dialogServiceHolder is the transport's mutable dialog-service seam: the
@@ -101,6 +104,24 @@ func (h dialogHandlers) handleDialogOpenFile(ctx context.Context, req jsonrpcReq
 	path, err := ds.OpenFile(ctx)
 	if err != nil {
 		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "dialog.openFile: ", err))
+		return
+	}
+	resp := struct {
+		Path string `json:"path"`
+	}{Path: path}
+	_ = h.r.TryResult(req.ID, mustMarshal(resp))
+}
+
+func (h dialogHandlers) handleDialogOpenDirectory(ctx context.Context, req jsonrpcRequest) {
+	ds := h.dialog.get()
+	if ds == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "dialog not available"})
+		return
+	}
+
+	path, err := ds.OpenDirectory(ctx)
+	if err != nil {
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "dialog.openDirectory: ", err))
 		return
 	}
 	resp := struct {

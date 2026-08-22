@@ -4,15 +4,85 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
 
 func TestRealRegistry_ImplementsRegistry(t *testing.T) {
 	var _ Registry = New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
+}
+
+func TestRealSession_SandboxInfoReturnsDeepCopy(t *testing.T) {
+	s := &realSession{
+		sandboxInfo: &sandbox.SessionInfo{
+			Backend:         sandbox.BackendLandlock,
+			Workspace:       "/workspace",
+			WritableRoots:   []string{"/workspace"},
+			ReadOnlyRoots:   []string{"/usr"},
+			HomeProjections: []sandbox.HomeProjection{{HostPath: "/workspace", RelativePath: "workspace"}},
+		},
+	}
+
+	first := s.SandboxInfo()
+	first.WritableRoots[0] = "/mutated"
+	first.ReadOnlyRoots[0] = "/mutated-ro"
+	first.HomeProjections[0].RelativePath = "mutated"
+	second := s.SandboxInfo()
+	if got := second.WritableRoots[0]; got != "/workspace" {
+		t.Fatalf("second SandboxInfo root = %q, want immutable session metadata", got)
+	}
+	if got := second.ReadOnlyRoots[0]; got != "/usr" {
+		t.Fatalf("second SandboxInfo read-only root = %q, want immutable session metadata", got)
+	}
+	if got := second.HomeProjections[0].RelativePath; got != "workspace" {
+		t.Fatalf("second SandboxInfo projection = %q, want immutable session metadata", got)
+	}
+}
+
+type sandboxPTYStub struct {
+	*pty.Stub
+	info *sandbox.SessionInfo
+}
+
+func (s *sandboxPTYStub) SandboxInfo() *sandbox.SessionInfo {
+	return s.info.Clone()
+}
+
+func TestRealRegistry_SandboxCwdRemainsCanonicalUnderHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(home, "workspace")
+	logger := log.NewSlogAdapter(nil)
+	pt := &sandboxPTYStub{
+		Stub: pty.NewStub(logger),
+		info: &sandbox.SessionInfo{
+			Backend:         sandbox.BackendLandlock,
+			Workspace:       workspace,
+			WritableRoots:   []string{workspace},
+			HomeProjections: []sandbox.HomeProjection{},
+		},
+	}
+	reg := New(logger, &stubPTYFactory{stub: pt})
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:    KindLocal,
+		Cwd:     workspace,
+		Cols:    80,
+		Rows:    24,
+		Sandbox: &sandbox.Request{Workspace: workspace},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.Cwd(); got != workspace {
+		t.Fatalf("Cwd = %q, want canonical workspace %q", got, workspace)
+	}
 }
 
 func TestNewID_Is32HexChars(t *testing.T) {
@@ -179,6 +249,28 @@ func TestOpenCarriesSessionIDToPTYFactory(t *testing.T) {
 	}
 }
 
+func TestOpenBindsSandboxRequestToSessionIncarnation(t *testing.T) {
+	f := &capturePTYFactory{}
+	reg := New(log.NewSlogAdapter(nil), f)
+	request := &sandbox.Request{Workspace: t.TempDir()}
+
+	sess, err := reg.Open(t.Context(), Config{Kind: KindLocal, Cols: 80, Rows: 24, Sandbox: request})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+	identity := sess.Identity()
+	if f.last.Sandbox == request {
+		t.Fatal("session mutated and forwarded the caller's sandbox request")
+	}
+	if got := f.last.Sandbox.Identity; got.SessionID != string(sess.ID()) || got.InstanceID != string(identity.InstanceID) || got.Epoch != identity.Epoch {
+		t.Fatalf("sandbox identity = %#v, want session %q instance %q epoch %d", got, sess.ID(), identity.InstanceID, identity.Epoch)
+	}
+	if request.Identity != (sandbox.SessionIdentity{}) {
+		t.Fatalf("caller request was mutated: %#v", request.Identity)
+	}
+}
+
 func TestRealRegistry_DoneChannel(t *testing.T) {
 	reg := New(log.NewSlogAdapter(nil), &realPTYFactory{log: log.NewSlogAdapter(nil)})
 
@@ -308,7 +400,7 @@ func TestRealRegistry_WriteToClosedSession(t *testing.T) {
 	_, _ = sess.Write([]byte("echo test\n"))
 }
 
-type stubPTYFactory struct{ stub *pty.Stub }
+type stubPTYFactory struct{ stub pty.Pty }
 
 func (f *stubPTYFactory) NewPTY(_ context.Context, _ pty.Config) (pty.Pty, error) {
 	return f.stub, nil

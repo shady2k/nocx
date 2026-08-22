@@ -37,6 +37,7 @@ import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 import type { SessionLiveness } from '../generated/session.liveness'
 import type { Open } from '../generated/open'
+import type { SessionSandboxInfo } from '../ipc'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -273,6 +274,7 @@ export interface SessionFake {
    *  `childOf(parent)` builds the whole value from the parent's own fake, so
    *  no test spells the identity by hand. */
   parent: Open['parent']
+  sandbox?: SessionSandboxInfo
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -371,6 +373,7 @@ interface DispatcherFake {
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: ReturnType<typeof vi.fn>
+  openSandboxedSession: ReturnType<typeof vi.fn>
   openSSHSession: ReturnType<typeof vi.fn>
   openSSHSessionByHost: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -466,6 +469,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const client: ClientFake = {
     connect: vi.fn().mockResolvedValue(undefined),
     openSession: vi.fn(() => Promise.resolve(newSession())),
+    openSandboxedSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     close: vi.fn(),
@@ -601,6 +605,7 @@ export function makeLayoutBackend(): LayoutClientLike & {
     kind: 'local',
     endpoint: null,
     sizeShare: 1,
+    sandboxGranted: false,
     ...over,
   })
   const patch = (id: string, over: Partial<LayoutTab>): LayoutTab => {
@@ -729,7 +734,11 @@ export function makeLayoutBackend(): LayoutClientLike & {
     },
 
     createPane: (p) => {
-      const row = paneRow(p.id, p.tabId, { cwd: p.cwd, kind: p.kind, endpoint: p.endpoint })
+      const row = paneRow(p.id, p.tabId, {
+        cwd: p.cwd,
+        kind: p.kind,
+        endpoint: p.endpoint,
+      })
       panes = [...panes, row]
       return Promise.resolve({ pane: row, replayed: false })
     },

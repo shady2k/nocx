@@ -24,6 +24,7 @@ export interface SelectProps {
   placeholder?: string
   placeholderValue?: string
   disabled?: boolean
+  ariaLabel?: string
 }
 
 export function Select(props: SelectProps) {
@@ -51,6 +52,7 @@ export function Select(props: SelectProps) {
       class="ui-select"
       value={props.value}
       disabled={props.disabled === true}
+      aria-label={props.ariaLabel ?? undefined}
       onChange={onChange}
     >
       <Show when={props.placeholder !== undefined}>

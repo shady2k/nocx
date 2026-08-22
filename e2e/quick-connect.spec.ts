@@ -94,6 +94,27 @@ test.describe('quick-connect picker', () => {
     await expect(page.locator(QUICK_CONNECT_SEARCH)).not.toBeVisible()
   })
 
+  test('the physical palette chord is independent of the active keyboard layout', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+
+    await page.evaluate(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          code: 'KeyP',
+          key: '\u0417',
+          ctrlKey: true,
+          shiftKey: true,
+        }),
+      )
+    })
+
+    await expect(page.locator(QUICK_CONNECT_ITEM).first()).toContainText('Local shell')
+  })
+
   test('typing filters the palette to one command', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)

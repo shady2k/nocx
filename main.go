@@ -15,6 +15,7 @@ import (
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/version"
@@ -42,6 +43,15 @@ func main() {
 	// build metadata and exit, never opening a terminal.
 	if versionRequested() {
 		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
+		return
+	}
+
+	// Native sandbox helpers re-exec this binary. They must run before the
+	// backend, Wails services, or any window exists.
+	if sandbox.MaybeHelper() {
+		return
+	}
+	if sandbox.MaybeArtifactSmoke() {
 		return
 	}
 
@@ -493,6 +503,15 @@ func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
 		CanChooseFiles(true).
 		SetTitle("Choose a private key").
 		AddFilter("All files", "*").
+		PromptForSingleSelection()
+}
+
+func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
+	return d.app.Dialog.OpenFile().
+		CanChooseFiles(false).
+		CanChooseDirectories(true).
+		CanCreateDirectories(false).
+		SetTitle("Choose a sandbox workspace").
 		PromptForSingleSelection()
 }
 

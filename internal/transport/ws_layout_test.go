@@ -81,7 +81,9 @@ func firstTab(id string) map[string]any {
 }
 
 func firstPane(id, cwd string) map[string]any {
-	return map[string]any{"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1}
+	return map[string]any{
+		"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1,
+	}
 }
 
 // aReplacement is the identity of the tab that appears if a close empties the

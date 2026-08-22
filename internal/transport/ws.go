@@ -32,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -166,6 +167,15 @@ type WSServer struct {
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
+
+	// sandboxSvc is the per-pane filesystem sandbox backend (ADR-0036),
+	// answering sandbox.status and preparing sandboxed open requests. The
+	// transport never renders policy — it validates the request and maps the
+	// backend's typed errors to reserved codes.
+	sandboxSvc sandbox.Service
+	// sandboxAccess is the bounded, in-memory denied-access inbox. It owns
+	// event state and promotion; the transport only validates and serializes.
+	sandboxAccess *sandbox.AccessInbox
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
 	// When nil, the handler returns a JSON-RPC error. The resolver
@@ -764,6 +774,27 @@ func WithSettingsRegistry(r *settings.Registry) WSServerOption {
 // WithBackupService attaches the structured Backup & Restore service.
 func WithBackupService(svc *backup.Service) WSServerOption {
 	return func(s *WSServer) { s.backupService = svc }
+}
+
+// WithSandboxService attaches the filesystem sandbox backend, enabling
+// sandbox.status and sandboxed open requests. Without it, sandbox.status
+// reports -32601 and a sandboxed open fails closed as -32007 setup-failed
+// when the PTY factory cannot prepare native enforcement.
+func WithSandboxService(svc sandbox.Service) WSServerOption {
+	return func(s *WSServer) { s.sandboxSvc = svc }
+}
+
+// WithSandboxAccessInbox enables sandbox.access.* and broadcasts revision-only
+// invalidations. The callback is process-lifetime, like settings.changed.
+func WithSandboxAccessInbox(inbox *sandbox.AccessInbox) WSServerOption {
+	return func(s *WSServer) {
+		s.sandboxAccess = inbox
+		if inbox != nil {
+			inbox.Subscribe(func(revision uint64) {
+				s.broadcastSandboxAccessChanged(revision)
+			})
+		}
+	}
 }
 
 // WithBackupFileSaver injects the native save-file capability. Tests can
@@ -1465,16 +1496,19 @@ func isJSONObject(data []byte) bool {
 	return false
 }
 
-// openParams is the payload of the "open" RPC method.
-//
-// There is deliberately no `enhanced` field (nocx-tr2n): whether a session
-// tries to become integrated is the backend's decision, not the renderer's.
-// See handleOpen.
+// openParams is the strictly-decoded payload of the "open" RPC method
+// (decodeOpenParams). Unknown members — including the obsolete `enhanced`
+// renderer field — duplicate keys, wrong types, and trailing JSON are
+// rejected as invalid params, so a malformed frame can never silently
+// become an ordinary or SSH launch.
 type openParams struct {
 	Cols   uint16 `json:"cols"`
 	Rows   uint16 `json:"rows"`
 	XPixel uint16 `json:"xpixel"`
 	YPixel uint16 `json:"ypixel"`
+	// Cwd is an optional canonical local directory for an ordinary replacement
+	// shell. It is rejected on SSH and sandbox requests.
+	Cwd string `json:"cwd,omitempty"`
 
 	// SSH fields — when Kind="ssh", the session opens an SSH channel.
 	// ProfileID identifies the SSH profile to connect to; the backend
@@ -1489,6 +1523,11 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
+	// Sandbox is the strict opt-in filesystem sandbox request (ADR-0039 §5).
+	// A present, valid object opts in; omitted means ordinary local; null is
+	// rejected at decode. The renderer supplies workspace, settingsRevision
+	// and bounded class-scoped add/remove deltas — never policy roots.
+	Sandbox *openSandboxParams `json:"sandbox"`
 	// Shell pins the far shell the launcher must target (nocx-pu4.1): a
 	// user who knows their host runs zsh can say so, and where detection
 	// is wrong they have an override. Empty means detect — the launcher
@@ -1535,6 +1574,19 @@ type openParentParams struct {
 	SessionID    string `json:"sessionId"`
 	InstanceID   string `json:"instanceId"`
 	SessionEpoch uint64 `json:"sessionEpoch"`
+}
+
+// openSandboxParams is the strictly-decoded sandbox block of open
+// (ADR-0039 §5). workspace and settingsRevision are required; addWritable,
+// removeWritable, addReadOnly and removeReadOnly are optional bounded deltas.
+// Populated by decodeOpenSandbox, never by a permissive Unmarshal.
+type openSandboxParams struct {
+	Workspace        string
+	SettingsRevision int
+	AddWritable      []string
+	RemoveWritable   []string
+	AddReadOnly      []string
+	RemoveReadOnly   []string
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -2677,5 +2729,18 @@ func (s *WSServer) broadcastSettingsChanged(revision int, keys []string) {
 	}
 	for _, wc := range conns {
 		_ = wc.TryNotify("settings.changed", mustMarshal(params))
+	}
+}
+
+func (s *WSServer) broadcastSandboxAccessChanged(revision uint64) {
+	s.connsMu.Lock()
+	conns := make([]*wsConn, 0, len(s.conns))
+	for wc := range s.conns {
+		conns = append(conns, wc)
+	}
+	s.connsMu.Unlock()
+	params := mustMarshal(map[string]uint64{"revision": revision})
+	for _, wc := range conns {
+		_ = wc.TryNotify("sandbox.access.changed", params)
 	}
 }

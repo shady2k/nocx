@@ -432,14 +432,14 @@ export class ScrollbackController {
    * block that merely looks a little different is not an answer to "is this
    * shell still running".
    */
-  restorePast(blocks: HTMLElement[]): void {
+  restorePast(blocks: HTMLElement[], boundaryLabel = 'Previous session'): void {
     if (blocks.length === 0) return
     const anchor = this.scrollbackInner.firstChild
     for (const el of blocks) this.scrollbackInner.insertBefore(el, anchor)
     const boundary = document.createElement('div')
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.restoreBoundary = 'true'
-    boundary.textContent = 'Previous session'
+    boundary.textContent = boundaryLabel
     this.scrollbackInner.insertBefore(boundary, anchor)
     // AND LAND AT THE NEWEST BLOCK, which is where a terminal always puts
     // you. The insert goes ABOVE everything, so the scroller keeps the

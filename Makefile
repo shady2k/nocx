@@ -1,5 +1,7 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        sandbox-smoke-linux sandbox-smoke-linux-artifact \
+        sandbox-smoke-macos sandbox-smoke-macos-artifact \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -24,33 +26,6 @@ WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) 
 # requires a populated dist before the Go compiler runs.
 FRONTEND_BUILD := cd frontend && npm run build
 
-# BUILD METADATA, stamped at link time so the About page (nocx-8bbp) reads it
-# out of the binary rather than out of a constant somebody has to remember to
-# bump. The -X paths are documented in internal/version/version.go, which is the
-# source of truth for them; the release workflow builds the same three.
-#
-# VERSION IS NOT SET HERE, AND THAT IS THE POINT. `internal/version.Version`
-# defaults to "dev", and the updater treats that exact string as "this is a
-# development build, never check for updates". A local build that stamped a
-# version guessed from `git describe` would be a build that offers to replace
-# itself with a release. Commit and date are honest about any build, so they
-# are always stamped; pass VERSION explicitly to make a build that claims to be
-# a release:
-#
-#   make build-release VERSION=0.3.0
-#
-# `git describe` is not used even then. The release number is the tag the
-# workflow was triggered by, and deriving it locally would be a second answer to
-# a question the release pipeline already answers.
-VERSION ?=
-BUILD_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-VERSION_PKG := github.com/shady2k/nocx/internal/version
-LDFLAGS := -X $(VERSION_PKG).Commit=$(BUILD_COMMIT) -X $(VERSION_PKG).Date=$(BUILD_DATE)
-ifneq ($(VERSION),)
-LDFLAGS += -X $(VERSION_PKG).Version=$(VERSION)
-endif
-
 all: lint test build
 
 # A local build is a DEVELOPMENT build: it resolves the nocx-dev profile, so it
@@ -59,7 +34,7 @@ all: lint test build
 # artefact; CI does that from a tag.
 build:
 	$(FRONTEND_BUILD)
-	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -ldflags "$(LDFLAGS)" -o build/bin/nocx .
+	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -o build/bin/nocx .
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
@@ -67,7 +42,7 @@ build:
 # `production` is v3's tag for production build semantics (devtools off).
 build-release:
 	$(FRONTEND_BUILD)
-	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
+	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -o build/bin/nocx .
 
 # A local dev loop: build the embedded frontend and run the app with the dev
 # profile. `wails dev` used to provide a hot-reloading asset server; v3 has
@@ -108,6 +83,44 @@ test:
 # knows about. Run it when the ssh -G parsing or the resolver changes.
 conformance:
 	NOCX_TEST_SSH_G=1 $(GO) test -v -count=1 -run Conformance ./internal/ssh/...
+
+
+# Real Landlock enforcement smoke (ADR-0036 §8, ADR-0040). Proves the cage behaves, not
+# just that the source compiles. Requires a kernel with Landlock ABI >= 3 and
+# FAILS LOUDLY below it — it is a release gate, not an env-gated convenience.
+# The ABI probe is go-landlock's own cmd, resolved from the module cache.
+sandbox-smoke-linux:
+	@abi=$$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0); \
+	echo "=== Landlock enforcement smoke (detected ABI $$abi, floor 3) ==="; \
+	if [ "$$abi" -lt 3 ]; then echo "FAIL: Landlock ABI $$abi < 3 — enforcement smoke cannot run on this kernel"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestLandlockEnforcement|TestNewLocal_SandboxedEndToEnd' ./internal/sandbox/
+
+# The source-level smoke above can pass while the executable's early helper
+# dispatch is missing. This gate invokes the built nocx binary itself; on Linux
+# that binary then re-execs itself as the Landlock helper.
+sandbox-smoke-linux-artifact:
+	@echo "=== Landlock release-artifact smoke ==="
+	@if [ "$$(uname -s)" != "Linux" ]; then echo "FAIL: sandbox-smoke-linux-artifact requires Linux"; exit 1; fi
+	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name an executable nocx binary"; exit 1; fi
+	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
+
+# Real Seatbelt enforcement smoke (ADR-0036 §9.4, ADR-0040). Runs the shared probe
+# inside a real sandbox-exec cage on macOS. Absence is a failed release gate:
+# a successful release must prove enforcement rather than skip the check.
+sandbox-smoke-macos:
+	@echo "=== Seatbelt enforcement smoke (macOS) ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — enforcement smoke cannot run"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService|TestNewLocal_SandboxedEndToEnd' ./internal/sandbox/
+
+# Seatbelt is applied by the built nocx executable, not by the test process.
+# This catches packaging/startup drift before a release can claim macOS support.
+sandbox-smoke-macos-artifact:
+	@echo "=== Seatbelt release-artifact smoke ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos-artifact requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — artifact smoke cannot run"; exit 1; fi
+	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name the executable inside the packaged .app"; exit 1; fi
+	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
 
 clean:
 	$(GO) clean -cache
@@ -235,18 +248,11 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 # is a fixture dimension rather than a platform one: internal/vault/system is
 # the Secret Service binding and lives in the OS set, but portable packages
 # read through it too, so both variants run over the whole partition.
-# internal/app and internal/ssh/mux joined on 2026-08-21 (nocx-m8jwn.4), and
-# ci-os-split is what noticed rather than anybody remembering. The typed-`ssh`
-# wrapper gave each of them a `unix` / `!unix` pair — the multiplex socket's
-# SCM_RIGHTS descriptor passing, and the probes that decide a refusal class —
-# and a package with a platform split that stays in the portable set has its
-# `!unix` half compiled by nothing at all.
-OS_PKG_DIRS := cmd/e2e-sshd internal/app internal/contentkey \
-               internal/lifecyclechannel \
+OS_PKG_DIRS := cmd/e2e-sshd internal/contentkey internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
-               internal/pty internal/ssh/mux \
+               internal/pty internal/sandbox \
                internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+OS_PKG_RE := (cmd/e2e-sshd|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/sandbox|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
@@ -260,7 +266,15 @@ ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
 
-ci-linux:
+# The job gained a Landlock enforcement smoke, so the target does too — the
+# header of ci.yml says every job here has a local target of the same name that
+# IS the job, and a target that runs a subset is how a green local gate stops
+# meaning anything (nocx-70rqe). It runs OUTSIDE the container deliberately:
+# Landlock is a per-process LSM answered by the host kernel, so a container on a
+# Linux box reproduces it and a Docker Desktop VM on a Mac does not. Where it
+# cannot run it FAILS rather than skips, which is the true statement about that
+# environment — see sandbox-smoke-linux.
+ci-linux: sandbox-smoke-linux
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $(OS_PKGS)
 
@@ -334,8 +348,8 @@ ci-os-split:
 	if [ $$rc = 0 ]; then echo "ok"; fi; \
 	exit $$rc
 
-# ci-mac is the ONLY gate with no container, because macos-latest is the
-# target OS and Docker on a Mac runs Linux. It is therefore also the only one
+# ci-mac is the ONLY gate with no container, because macos-15 is the pinned
+# Seatbelt target and Docker on a Mac runs Linux. It is therefore also the only one
 # that runs against a real machine with a real login keychain, so it is NOT in
 # `make ci` — you run it by hand, when a Darwin-specific failure needs
 # reproducing.
@@ -404,6 +418,7 @@ ci-mac:
 	  GOMODCACHE="$$gomodcache" GOCACHE="$$gocache" \
 	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
 	         $(GO) test -race -count=1 $(OS_PKGS) && \
+	         $(MAKE) sandbox-smoke-macos && \
 	         echo "" && \
 	         echo "=== the shipped profile directory (-tags release) ===" && \
 	         $(GO) test -race -count=1 -tags release ./internal/storage/...'

@@ -11,6 +11,7 @@ const TOOLBAR = '[role="toolbar"]'
 const VIEW_BTN = 'button[data-view]'
 const ACTION_BTN = 'button[data-action]'
 const VIEWS_GROUP = '[role="group"][aria-label="Views"]'
+const TAB_ACTIONS_GROUP = '[role="group"][aria-label="Active tab actions"]'
 const ACTIONS_GROUP = '[role="group"][aria-label="Actions"]'
 
 // These three tests used to assert the REGISTRY — "exactly one action, zero
@@ -21,26 +22,32 @@ const ACTIONS_GROUP = '[role="group"][aria-label="Actions"]'
 // sidebar actually owes a user, each of which survives the next view being
 // registered.
 
-test('the activity bar renders as a toolbar with views and actions groups', async ({ page }) => {
+test('the activity bar separates view navigation, active-tab actions, and global actions', async ({
+  page,
+}) => {
   await page.goto('/')
 
   // The activity bar toolbar exists
   await expect(page.locator(TOOLBAR)).toBeAttached()
 
-  // Both zone groups exist (even if empty)
+  // All three semantic groups exist.
   await expect(page.locator(VIEWS_GROUP)).toBeAttached()
+  await expect(page.locator(TAB_ACTIONS_GROUP)).toBeAttached()
   await expect(page.locator(ACTIONS_GROUP)).toBeAttached()
 
-  // The zones are what identifies a button, not where it happens to sit: a
-  // view button carries data-view and lives in Views, an action carries
-  // data-action and lives in Actions. Asserted as a partition so a button that
-  // grows both attributes, or lands in the wrong group, is caught.
   const viewsInViewGroup = page.locator(`${VIEWS_GROUP} button`)
   await expect(viewsInViewGroup).toHaveCount(await page.locator(VIEW_BTN).count())
-  const actionsInActionGroup = page.locator(`${ACTIONS_GROUP} button`)
-  await expect(actionsInActionGroup).toHaveCount(await page.locator(ACTION_BTN).count())
 
-  // The Settings gear is a permanent fixture of the actions zone.
+  const tabActions = page.locator(`${TAB_ACTIONS_GROUP} button[data-action]`)
+  const globalActions = page.locator(`${ACTIONS_GROUP} button[data-action]`)
+  await expect(tabActions).toHaveCount(1)
+  await expect(globalActions).toHaveCount(1)
+  expect((await tabActions.count()) + (await globalActions.count())).toBe(
+    await page.locator(ACTION_BTN).count(),
+  )
+  await expect(
+    page.locator(`${TAB_ACTIONS_GROUP} button[data-testid="sandbox-shield"]`),
+  ).toHaveCount(1)
   await expect(page.locator(`${ACTIONS_GROUP} button[data-action="settings"]`)).toBeAttached()
 })
 

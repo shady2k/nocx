@@ -568,3 +568,38 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
     expect(panelTitle(panel)).toBe('Alpha')
   })
 })
+
+describe('sidebar view-zone actions', () => {
+  it('renders an action beside the Files view, not in the Files panel header', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      [TWO_VIEWS[0]],
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          id: 'sandbox-shield',
+          title: 'Sandbox',
+          icon: TestIcon,
+          onActivate: () => {},
+          selected: () => true,
+        },
+      ],
+    )
+
+    const topButtons = [...bar.querySelectorAll<HTMLElement>('.activity-bar-top button')]
+    expect(
+      topButtons.map((button) => button.getAttribute('data-view') ?? button.dataset.action),
+    ).toEqual(['alpha', 'sandbox-shield'])
+    const shield = topButtons[1]
+    expect(shield.getAttribute('aria-selected')).toBe('true')
+    expect(shield.dataset.railIndicator).toBe('true')
+    expect(panel.querySelector('[data-testid="sandbox-shield"]')).toBeNull()
+  })
+})

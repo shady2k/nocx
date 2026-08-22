@@ -472,6 +472,61 @@ func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID strin
 	return err
 }
 
+// CloseSandboxPanes is the startup sweep for panes whose authority may not be
+// silently re-issued. It marks rows rather than deleting them so ledger entries
+// keep their durable pane anchor, then unwinds any tab/workspace left empty.
+func (s *sqliteContent) CloseSandboxPanes(ctx context.Context) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			rows, err := tx.QueryContext(ctx,
+				`SELECT id, tab_id FROM panes
+				  WHERE closed_at IS NULL
+				    AND id IN (SELECT pane_id FROM sandbox_grants)`)
+			if err != nil {
+				return err
+			}
+			var paneIDs, tabIDs []string
+			for rows.Next() {
+				var paneID, tabID string
+				if err := rows.Scan(&paneID, &tabID); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				paneIDs = append(paneIDs, paneID)
+				tabIDs = append(tabIDs, tabID)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+
+			at := closedNow()
+			for _, paneID := range paneIDs {
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE panes SET closed_at = ?
+					  WHERE id = ? AND closed_at IS NULL`,
+					at, paneID); err != nil {
+					return err
+				}
+			}
+			seenTabs := make(map[string]struct{}, len(tabIDs))
+			for _, tabID := range tabIDs {
+				if _, seen := seenTabs[tabID]; seen {
+					continue
+				}
+				seenTabs[tabID] = struct{}{}
+				if err := dissolveTabIfEmpty(ctx, tx, tabID); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
+
 // ClearWindow is the CLEAN START (restore.onStartup off): everything the last
 // session left the window holding leaves it, in ONE transaction, and nothing
 // is deleted but the workspaces that are then holding no open tab.
@@ -1190,6 +1245,73 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 		return "", fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
 	}
 	return workspaceID, err
+}
+
+func (s *sqliteContent) InsertSandboxGrant(ctx context.Context, grant SandboxGrant) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
+		 SELECT ?, ?, ?, ?, ? FROM panes WHERE id = ? AND closed_at IS NULL`,
+		grant.PaneID, grant.Version, grant.IssuedAt, grant.Workspace, grant.Payload, grant.PaneID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
+	}
+	return nil
+}
+
+func (s *sqliteContent) SandboxGrantExists(ctx context.Context, paneID string) (bool, error) {
+	if s.closed.Load() {
+		return false, ErrClosed
+	}
+	var granted int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(
+		   SELECT 1 FROM panes p LEFT JOIN sandbox_grants g ON g.pane_id = p.id
+		    WHERE p.id = ? AND p.closed_at IS NULL AND g.pane_id IS NOT NULL
+		 )`, paneID).Scan(&granted)
+	if err != nil {
+		return false, err
+	}
+	var open int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM panes WHERE id = ? AND closed_at IS NULL)`, paneID).Scan(&open); err != nil {
+		return false, err
+	}
+	if open == 0 {
+		return false, fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
+	}
+	return granted != 0, nil
+}
+
+func (s *sqliteContent) SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT g.pane_id FROM sandbox_grants g JOIN panes p ON p.id = g.pane_id
+		  WHERE p.closed_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var paneID string
+		if err := rows.Scan(&paneID); err != nil {
+			return nil, err
+		}
+		out[paneID] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // ── row readers ──────────────────────────────────────────────────────────

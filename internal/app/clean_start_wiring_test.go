@@ -30,12 +30,18 @@ func (p *clearWindowProbe) Layout() content.LayoutRepository { return p.layout }
 
 type clearWindowLayout struct {
 	content.LayoutRepository
-	calls int
-	err   error
+	calls        int
+	sandboxCalls int
+	err          error
 }
 
 func (l *clearWindowLayout) ClearWindow(context.Context) error {
 	l.calls++
+	return l.err
+}
+
+func (l *clearWindowLayout) CloseSandboxPanes(context.Context) error {
+	l.sandboxCalls++
 	return l.err
 }
 
@@ -103,5 +109,20 @@ func TestCleanStartSurvivesAStoreThatRefusesTheSweep(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "clean start") {
 		t.Fatalf("log after a refused sweep = %q, want the failure named", logged.String())
+	}
+}
+
+func TestStartupAlwaysSweepsSandboxPanesAndSurvivesRefusal(t *testing.T) {
+	probe := newClearWindowProbe(content.ErrNotImplemented)
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	closeSandboxPanesOnStartup(context.Background(), probe, logger)
+
+	if probe.layout.sandboxCalls != 1 {
+		t.Fatalf("CloseSandboxPanes calls = %d, want 1", probe.layout.sandboxCalls)
+	}
+	if !strings.Contains(logged.String(), "sandbox") {
+		t.Fatalf("log after a refused sandbox sweep = %q, want the failure named", logged.String())
 	}
 }

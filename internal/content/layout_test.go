@@ -334,6 +334,10 @@ func TestWorkspaceAndPaneStoreExactlyTheirFields(t *testing.T) {
 		[]string{"id", "tab_id", "cwd", "kind", "endpoint", "size_share", "closed_at", "digest"}; !equalStrings(got, want) {
 		t.Fatalf("panes columns = %v, want exactly %v", got, want)
 	}
+	if got, want := columnsOf(t, path, "sandbox_grants"),
+		[]string{"id", "pane_id", "version", "issued_at", "workspace", "payload"}; !equalStrings(got, want) {
+		t.Fatalf("sandbox_grants columns = %v, want exactly %v", got, want)
+	}
 }
 
 // Panes do not nest (§5), and the schema makes a pane whose parent is a pane

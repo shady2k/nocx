@@ -10,13 +10,16 @@ import { Show, createSignal } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { installBrowserTransport } from './wails-runtime'
-import { WSClient } from './ipc'
+import { WSClient, type SandboxStatus } from './ipc'
+import { openSandboxedShell } from './sandbox-open'
+import { shieldState } from './sandbox-shield'
+import { showSandboxPermissions } from './sandbox-permissions-dialog'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
 import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
-import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { AboutClient } from './about-client'
+import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
@@ -36,7 +39,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon, ShieldIcon, TextQuoteIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -138,9 +141,6 @@ async function main() {
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
   const dispatcher = new Dispatcher()
-  // What build this is, for the About page (nocx-8bbp). Constructed here with
-  // every other client: the page is registered unconditionally, so the client
-  // has to exist for it to have anything to read.
   const aboutClient = new AboutClient(dispatcher)
   const client = new WSClient(dispatcher)
   // Connection notice — the transport's condition, stated where a person is
@@ -258,12 +258,31 @@ async function main() {
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
+  const SANDBOX_ENABLED_KEY = 'sandbox.enabled'
 
   // The declared default, painted BEFORE the snapshot arrives: the first
   // frame must not show the opposite of what the backend is about to say.
   applyOutputWrap(OUTPUT_WRAP_DEFAULT)
 
   let placement: unknown = 'horizontal'
+  const [sandboxEnabledLive, setSandboxEnabledLive] = createSignal(false)
+  const [sandboxStatusAvailable, setSandboxStatusAvailable] = createSignal<boolean | null>(null)
+  const refreshSandboxAvailability = async (enabled: boolean): Promise<void> => {
+    if (!enabled) {
+      setSandboxStatusAvailable(null)
+      return
+    }
+    const sandboxClient = client
+    if (!sandboxClient) {
+      setSandboxStatusAvailable(null)
+      return
+    }
+    try {
+      setSandboxStatusAvailable((await sandboxClient.sandboxStatus())?.available ?? null)
+    } catch {
+      setSandboxStatusAvailable(null)
+    }
+  }
   // The sidebar's remembered state, from the UI-state document rather than
   // the settings snapshot below — a drag is not a decision (ADR-0033). A
   // failure falls back to the declared defaults, which is also what the CSS
@@ -274,6 +293,9 @@ async function main() {
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    setSandboxEnabledLive(enabled)
+    void refreshSandboxAvailability(enabled)
     // Reconcile the Go theme setting against the bootstrap cache. Go is
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
     // frame, but the persisted Go value wins on snapshot arrival.
@@ -361,6 +383,7 @@ async function main() {
         agentClient,
         snippetsStore,
         historyStatusStore,
+        client,
         aboutClient,
         clipboard,
       )
@@ -409,6 +432,7 @@ async function main() {
   // PaneManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
+  const [activeSandboxed, setActiveSandboxed] = createSignal(tm.activePaneSandboxed())
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
@@ -417,7 +441,16 @@ async function main() {
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    setActiveSandboxed(tm.activePaneSandboxed())
   }
+  let convertActiveTabToSandboxed: () => Promise<void> = async () => {}
+  const currentShieldState = () =>
+    shieldState({
+      enabled: sandboxEnabledLive(),
+      statusAvailable: sandboxStatusAvailable(),
+      origin: activeOrigin(),
+      sandboxed: activeSandboxed(),
+    })
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
   // binding lifecycle: a binding is live from the files.open that created
@@ -650,6 +683,9 @@ async function main() {
       try {
         const snap = await profileClient.getSnapshot()
         observer.setRevision(snap.revision)
+        const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+        setSandboxEnabledLive(enabled)
+        void refreshSandboxAvailability(enabled)
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
         if (next !== placement) {
           placement = next
@@ -791,6 +827,26 @@ async function main() {
     () => activeOrigin(),
     sidebarWidthCtrl,
     () => activeSurfaceType() === SURFACE_SETTINGS,
+    [
+      {
+        id: 'sandbox-shield',
+        title: () => {
+          const state = currentShieldState()
+          return state.kind === 'ready'
+            ? state.action === 'remove'
+              ? `Remove sandbox from this tab (${state.workspace})`
+              : `Convert this tab to a sandboxed shell (${state.workspace})`
+            : state.kind === 'disabled'
+              ? state.reason
+              : 'Convert active tab to a sandboxed shell'
+        },
+        icon: ShieldIcon,
+        selected: () => activeSandboxed(),
+        hidden: () => currentShieldState().kind === 'hidden',
+        disabled: () => currentShieldState().kind !== 'ready',
+        onActivate: () => void convertActiveTabToSandboxed(),
+      },
+    ],
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
@@ -924,6 +980,91 @@ async function main() {
       const localPort = Number(portChoice.item.label.replace(/^:/, '')) || 0
       void openForward(server.item.id, destination, localPort)
     },
+  }
+
+  const getSandboxState = async (): Promise<{
+    enabled: boolean
+    status: SandboxStatus | null
+  }> => {
+    const snap = await profileClient.getSnapshot()
+    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    let status: SandboxStatus | null = null
+    if (enabled) {
+      try {
+        status = await client.sandboxStatus()
+      } catch {
+        status = null
+      }
+    }
+    return { enabled, status }
+  }
+  const reportSandboxOpenError = (message: string): void => {
+    showToast({ level: 'danger', message: `Could not open a sandboxed shell: ${message}` })
+  }
+
+  convertActiveTabToSandboxed = async (): Promise<void> => {
+    const ready = currentShieldState()
+    if (ready.kind !== 'ready') return
+    const source = tm.activeOrigin()
+    const oldPane = source ? tm.paneOf(source.paneId) : undefined
+    if (!source || !oldPane || !tm.tabOf(source.paneId)) return
+    if (ready.action === 'remove') {
+      const transcript = tm.captureConversionTranscript(oldPane.id)
+      const made = tm.newLocalPaneAt(ready.workspace)
+      if (
+        (await made.created) &&
+        (await tm.installConversionTranscript(
+          made.pane.id,
+          transcript,
+          'Sandbox removed — new shell',
+        ))
+      ) {
+        tm.replaceTabPosition(oldPane.id, made.pane.id)
+        void tm.closePane(oldPane)
+      }
+      return
+    }
+
+    let state: { enabled: boolean; status: SandboxStatus | null }
+    try {
+      state = await getSandboxState()
+    } catch (err) {
+      reportSandboxOpenError(err instanceof Error ? err.message : 'sandbox status unavailable')
+      return
+    }
+    if (!state.enabled) return
+    if (!state.status?.available) {
+      reportSandboxOpenError(
+        `Sandbox unavailable (${state.status?.reason || 'status-unavailable'})`,
+      )
+      return
+    }
+    await openSandboxedShell(
+      {
+        getSnapshot: () => profileClient.getSnapshot(),
+        openDirectory: () => dialogClient.openDirectoryDialog(),
+        showPermissions: showSandboxPermissions,
+        newSandboxedTab: (_workspace, launch) => {
+          const transcript = tm.captureConversionTranscript(oldPane.id)
+          const made = tm.newSandboxedPane(ready.workspace, launch)
+          void (async () => {
+            if (
+              (await made.created) &&
+              (await tm.installConversionTranscript(
+                made.pane.id,
+                transcript,
+                'Sandbox enabled — new shell',
+              ))
+            ) {
+              tm.replaceTabPosition(oldPane.id, made.pane.id)
+              void tm.closePane(oldPane)
+            }
+          })()
+        },
+        reportError: reportSandboxOpenError,
+      },
+      { workspace: ready.workspace },
+    )
   }
 
   const qcProviders: QuickConnectProvider[] = [
@@ -1070,7 +1211,7 @@ async function main() {
   // with PaneManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
   // CodeMirror (which does not register this binding in its keymap).
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyP') {
       e.preventDefault()
       qc.showPalette()
     }

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -337,6 +338,85 @@ func TestSettingsSet_UnknownKey(t *testing.T) {
 	}
 	if env.Error.Code != -32602 {
 		t.Errorf("expected code -32602 (Invalid params), got %d", env.Error.Code)
+	}
+}
+
+func TestSettingsSet_PathsArray(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	dir := t.TempDir()
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	resp := jsonrpcCall(t, conn, "settings.set", map[string]any{
+		"key":   "sandbox.allowedWritablePaths",
+		"value": []string{dir},
+	})
+	var env struct {
+		Result struct {
+			OK bool `json:"ok"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("unexpected error: code=%d msg=%s", env.Error.Code, env.Error.Message)
+	}
+	if !env.Result.OK {
+		t.Fatal("expected ok: true")
+	}
+
+	snapResp := jsonrpcCall(t, conn, "settings.getSnapshot", map[string]any{})
+	var snap struct {
+		Result struct {
+			Values map[string]any `json:"values"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(snapResp, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if snap.Error != nil {
+		t.Fatalf("snapshot error: code=%d msg=%s", snap.Error.Code, snap.Error.Message)
+	}
+	v, ok := snap.Result.Values["sandbox.allowedWritablePaths"]
+	if !ok {
+		t.Fatal("sandbox.allowedWritablePaths missing from snapshot")
+	}
+	paths, ok := v.([]any)
+	if !ok || len(paths) != 1 || paths[0] != canonical {
+		t.Errorf("snapshot paths = %v (%T), want [%s]", v, v, canonical)
+	}
+}
+
+func TestSettingsSet_PathsArrayValidationError(t *testing.T) {
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "settings.set", map[string]any{
+		"key":   "sandbox.allowedWritablePaths",
+		"value": []string{filepath.Join(t.TempDir(), "does-not-exist")},
+	})
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil {
+		t.Fatal("expected JSON-RPC error for a non-existent directory")
+	}
+	if env.Error.Code != -32602 {
+		t.Errorf("expected code -32602, got %d", env.Error.Code)
 	}
 }
 

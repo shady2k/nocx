@@ -7,10 +7,12 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
 
 type LocalPty struct {
@@ -20,7 +22,6 @@ type LocalPty struct {
 	mu     sync.Mutex
 	done   chan struct{}
 	closed bool
-
 	// waitErr is what cmd.Wait returned when the shell process ended, and
 	// waitSet whether it has been captured. Written by the watcher goroutine
 	// BEFORE close(done), so a reader that has observed <-done sees the
@@ -30,7 +31,15 @@ type LocalPty struct {
 	// status — from a teardown that never let the process report one.
 	waitErr error
 	waitSet bool
+
+	// prepared is set only for sandboxed sessions: it owns the enforced
+	// process, the readiness handshake, and the runtime-tree cleanup.
+	prepared *sandbox.PreparedCommand
 }
+
+// sandboxReadyTimeout bounds the post-start enforcement handshake (design
+// spec §8.3): a helper that never reports readiness fails closed.
+const sandboxReadyTimeout = 30 * time.Second
 
 // localeVars are checked in POSIX precedence order; any one of them present
 // means the environment already states a locale.
@@ -152,6 +161,37 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	cmd.Env = env
 	cmd.ExtraFiles = cfg.ExtraFiles
 
+	// A sandbox request prepares the ordinary command through the injected
+	// Service: the command is wrapped (helper re-exec / sandbox-exec), the
+	// runtime tree is created, and enforcement must be confirmed before this
+	// session may exist (design spec §7.3). Fail-closed: any preparation or
+	// readiness error closes the PTY, tears down the helper and runtime tree,
+	// and returns the typed error — no session is registered.
+	var prepared *sandbox.PreparedCommand
+	if cfg.Sandbox != nil {
+		if cfg.sandboxService == nil {
+			return nil, sandbox.NewSetupErrorf("sandbox request without a sandbox service")
+		}
+		pc, perr := cfg.sandboxService.Prepare(context.Background(), *cfg.Sandbox, sandbox.CommandSpec{
+			Path:       cmd.Path,
+			Args:       append([]string(nil), cmd.Args[1:]...),
+			Dir:        cmd.Dir,
+			Env:        env,
+			ExtraFiles: append([]*os.File(nil), cmd.ExtraFiles...),
+		})
+		if perr != nil {
+			return nil, perr
+		}
+		if cfg.SandboxPrepared != nil {
+			if err := cfg.SandboxPrepared(pc); err != nil {
+				pc.Close()
+				return nil, sandbox.NewSetupErrorf("record sandbox grant: %v", err)
+			}
+		}
+		cmd = pc.Cmd
+		prepared = pc
+	}
+
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: cfg.Cols,
 		Rows: cfg.Rows,
@@ -159,16 +199,35 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		Y:    cfg.YPixel,
 	})
 	if err != nil {
+		if prepared != nil {
+			prepared.Close()
+			return nil, sandbox.NewSetupErrorf("start sandboxed command: %v", err)
+		}
 		return nil, err
 	}
 
-	lp := &LocalPty{
-		log:  logger,
-		cmd:  cmd,
-		file: f,
-		done: make(chan struct{}),
+	if prepared != nil {
+		readyCtx, cancel := context.WithTimeout(context.Background(), sandboxReadyTimeout)
+		readyErr := prepared.WaitReady(readyCtx)
+		cancel()
+		if readyErr != nil {
+			_ = f.Close()
+			prepared.Close()
+			return nil, readyErr
+		}
 	}
 
+	lp := &LocalPty{
+		log:      logger,
+		cmd:      cmd,
+		file:     f,
+		done:     make(chan struct{}),
+		prepared: prepared,
+	}
+
+	// Exactly one waiter owns the process. Sandboxed sessions wait for the
+	// child to exit before PreparedCommand.Close releases its runtime tree;
+	// Close itself remains the kill-and-cleanup path for startup failures.
 	go func() {
 		waitErr := cmd.Wait()
 		// Record BEFORE close(done): the transport's exit monitor wakes on
@@ -179,6 +238,9 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		lp.waitErr = waitErr
 		lp.waitSet = true
 		lp.mu.Unlock()
+		if prepared != nil {
+			prepared.Close()
+		}
 		close(lp.done)
 	}()
 
@@ -196,6 +258,14 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 // starts bash with an rcfile whatever $SHELL says, and saying otherwise
 // would send the user to fix a file the session never read.
 func (lp *LocalPty) Shell() string {
+	// A sandboxed session's cmd.Path is the enforcement wrapper — the Linux
+	// helper re-exec or sandbox-exec — and naming that would answer a
+	// different question from the one every caller is asking. The policy
+	// records the shell the wrapper goes on to exec, and that is the launched
+	// process the sentence above is about.
+	if lp.prepared != nil && lp.prepared.Policy != nil && lp.prepared.Policy.Shell != "" {
+		return lp.prepared.Policy.Shell
+	}
 	return lp.cmd.Path
 }
 
@@ -213,6 +283,21 @@ func (lp *LocalPty) Pid() int {
 		return 0
 	}
 	return lp.cmd.Process.Pid
+}
+
+// SandboxInfo returns the immutable sandbox metadata for a sandboxed
+// session, or nil for an ordinary one. It implements pty.SandboxInfoProvider.
+func (lp *LocalPty) SandboxInfo() *sandbox.SessionInfo {
+	if lp.prepared == nil || lp.prepared.Policy == nil {
+		return nil
+	}
+	return &sandbox.SessionInfo{
+		Backend:         lp.prepared.Backend,
+		Workspace:       lp.prepared.Policy.Workspace,
+		WritableRoots:   append([]string(nil), lp.prepared.Policy.WritableRoots...),
+		ReadOnlyRoots:   append([]string(nil), lp.prepared.Policy.ReadOnlyRoots...),
+		HomeProjections: append([]sandbox.HomeProjection{}, lp.prepared.Policy.HomeProjections...),
+	}
 }
 
 func (lp *LocalPty) Read(p []byte) (int, error) {

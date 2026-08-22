@@ -87,6 +87,7 @@
 @import './styles/surfaces/files.css';
 @import './styles/surfaces/vault.css';
 @import './styles/surfaces/git.css';
+@import './styles/surfaces/sandbox-permissions.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
 

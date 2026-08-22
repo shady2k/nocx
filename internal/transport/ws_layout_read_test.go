@@ -223,7 +223,8 @@ func TestPanesCloseRemovesOnePaneAndLeavesItsTab(t *testing.T) {
 	conn := connectWS(t, ws)
 	seedWire(t, conn)
 	mustLayoutCall(t, conn, "panes.create", map[string]any{
-		"id": paneID2, "tabId": tabID1, "cwd": "/srv", "kind": "local", "sizeShare": 0.5,
+		"id": paneID2, "tabId": tabID1, "cwd": "/srv", "kind": "local",
+		"sizeShare": 0.5,
 	}, 2)
 
 	var closed struct {

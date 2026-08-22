@@ -50,14 +50,24 @@
           "type": "string"
         },
         "control": {
-          "enum": ["toggle", "text", "number", "select", "secret"]
+          "enum": ["toggle", "text", "number", "select", "secret", "paths"]
         },
         "dataClass": {
           "enum": ["publicConfig", "privateMetadata", "privateContent", "secretAuthenticator"]
         },
         "default": {
-          "description": "The declared default. Absent for secret-class settings and for zero-value defaults (the Go wire omits them via omitempty).",
-          "type": ["boolean", "string", "number", "null"]
+          "description": "The declared default. Path-list settings use an array of strings; scalar settings use their scalar value. Absent for secret-class settings and for zero-value scalar defaults (the Go wire omits them via omitempty).",
+          "oneOf": [
+            {
+              "type": ["boolean", "string", "number", "null"]
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         },
         "options": {
           "description": "The select control's choices; present only for control: select.",

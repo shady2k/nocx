@@ -6,12 +6,21 @@ import (
 	"os"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
 
 type Pty interface {
 	io.ReadWriteCloser
 	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
 	Done() <-chan struct{}
+}
+
+// SandboxInfoProvider is implemented by local PTYs that were prepared as
+// sandboxed sessions. The session layer reads the immutable metadata from it
+// so the open result can carry {backend, workspace, writableRoots,
+// readOnlyRoots} (design spec §8). Ordinary PTYs do not implement it.
+type SandboxInfoProvider interface {
+	SandboxInfo() *sandbox.SessionInfo
 }
 
 type Config struct {
@@ -37,6 +46,17 @@ type Config struct {
 	// exec.Cmd.ExtraFiles. The lifecycle channel descriptor is the first
 	// one, so it is fd 3 in the shell.
 	ExtraFiles []*os.File
+	// Sandbox is the wire opt-in: when non-nil, the shell is prepared by the
+	// injected sandbox.Service and fails closed if enforcement cannot be
+	// established. Ordinary sessions leave it nil and never touch the
+	// sandbox path.
+	Sandbox *sandbox.Request
+	// SandboxPrepared runs after policy realization and before process start.
+	// It is used to durably record the grant that caused enforcement.
+	SandboxPrepared func(*sandbox.PreparedCommand) error
+	// sandboxService is injected by the composition root via
+	// WithSandboxService; it is never part of the wire contract.
+	sandboxService sandbox.Service
 }
 
 // Option configures a Config before PTY creation.
@@ -55,6 +75,15 @@ func WithExtraEnv(env []string) Option {
 func WithExtraFiles(files ...*os.File) Option {
 	return func(cfg *Config) {
 		cfg.ExtraFiles = append(cfg.ExtraFiles, files...)
+	}
+}
+
+// WithSandboxService injects the sandbox backend. It is applied by the
+// composition-root PTY factory (internal/app/app.go) — the sandbox package
+// is never a global — and is required exactly when Config.Sandbox is set.
+func WithSandboxService(svc sandbox.Service) Option {
+	return func(cfg *Config) {
+		cfg.sandboxService = svc
 	}
 }
 

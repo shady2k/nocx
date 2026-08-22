@@ -330,6 +330,7 @@ async function mountSettings(
   const host: PaneHost = {
     contentSettled: () => {},
     setTitle: vi.fn(),
+    updateTooltip: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
   }

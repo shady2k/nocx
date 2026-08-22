@@ -1523,6 +1523,18 @@ func (h settingsHandlers) handleSet(ss capability.SettingsService, req jsonrpcRe
 			return
 		}
 		setErr = ss.SetSelect(sk, str)
+	case settings.ControlPaths:
+		var paths []string
+		if err := json.Unmarshal(p.Value, &paths); err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected array of strings"})
+			return
+		}
+		pk, ok := desc.(*settings.PathList)
+		if !ok {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as paths but is not a PathList key"})
+			return
+		}
+		setErr = ss.SetPaths(pk, paths)
 	}
 
 	if setErr != nil {

@@ -150,6 +150,7 @@ function mockReady(
 function mockPaneHost(): PaneHost {
   return {
     setTitle: vi.fn(),
+    updateTooltip: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
     contentSettled: vi.fn(),
@@ -310,6 +311,7 @@ describe('SettingsContent', () => {
       'Snippets',
       'About',
       'AI',
+      'Sandbox access',
     ])
 
     // Connections is top level: a direct child of the top list, not a group.
@@ -319,6 +321,8 @@ describe('SettingsContent', () => {
     // And no page appears twice.
     const ids = items.map((l) => l.getAttribute('data-item'))
     expect(new Set(ids).size).toBe(ids.length)
+    const sandboxAccess = nav.querySelector('[data-item="sandbox-access"]')!
+    expect(sandboxAccess.closest('[data-group="developer"]')).not.toBeNull()
   })
 
   it('section nav shows per-section modified counts', async () => {

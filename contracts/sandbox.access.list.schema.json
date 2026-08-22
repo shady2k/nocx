@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.list.schema.json",
+  "title": "SandboxAccessList",
+  "description": "Bounded in-memory denied-access inbox. Paths and process names are PrivateMetadata and are never persisted by this surface.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events", "revision", "lost"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "revision": { "type": "integer", "minimum": 0 },
+    "lost": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sessionId",
+        "instanceId",
+        "sessionEpoch",
+        "path",
+        "directory",
+        "canGrant",
+        "access",
+        "source",
+        "firstSeen",
+        "lastSeen",
+        "count",
+        "state"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "sessionId": { "type": "string" },
+        "instanceId": { "type": "string" },
+        "sessionEpoch": { "type": "integer", "minimum": 1 },
+        "shell": { "type": "string" },
+        "executable": { "type": "string" },
+        "path": { "type": "string" },
+        "directory": { "type": "string" },
+        "canGrant": { "type": "boolean" },
+        "grantReason": { "type": "string" },
+        "access": { "type": "string", "enum": ["readOnly", "readWrite"] },
+        "operation": { "type": "string" },
+        "source": {
+          "type": "string",
+          "enum": ["linux-seccomp-user-notify", "darwin-seatbelt-log"]
+        },
+        "firstSeen": { "type": "string", "format": "date-time" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "count": { "type": "integer", "minimum": 1 },
+        "state": { "type": "string", "enum": ["pending", "dismissed", "granted", "expired"] },
+        "decision": { "type": "string", "enum": ["dismiss", "globalReadOnly", "globalReadWrite"] },
+        "settingsRevision": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

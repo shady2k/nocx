@@ -110,6 +110,7 @@ export interface QuickConnectItem {
   /** When present, activating this command drills into its steps inside the
    *  same surface instead of running (nocx-4t37). */
   readonly drill?: DrillCommand
+  readonly disabled?: boolean
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -861,18 +862,16 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   function activate(index: number) {
-    // Whatever this is — a row, a drill step, a walk-back — the person has
-    // moved past the refusal that was on screen.
-    props.onNoticeDone?.()
     if (drill()) {
       const choice = drillFiltered()[index]
       if (!choice) return
+      props.onNoticeDone?.()
       chooseStep(choice)
       return
     }
-    const list = filteredItems()
-    const item = list[index]
-    if (!item) return
+    const item = filteredItems()[index]
+    if (!item || item.disabled) return
+    props.onNoticeDone?.()
     if (item.drill) {
       // A command that needs a target drills in — no second dialog, no
       // dead end (nocx-4t37).
@@ -1015,9 +1014,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     classList={{
                       'quick-connect__item--selected': selectedIndex() === index(),
                       'quick-connect__item--system': item.system === true,
+                      'quick-connect__item--disabled': item.disabled === true,
                     }}
                     role="option"
                     aria-selected={selectedIndex() === index()}
+                    aria-disabled={item.disabled === true}
                     // The row is not a focus target: the field is. Without
                     // this the mouse silently moves the caret out of the
                     // one place this surface takes input, and the next

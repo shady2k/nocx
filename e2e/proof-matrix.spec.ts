@@ -504,7 +504,7 @@ test.describe('4. Scroll ownership — measured', () => {
     // Scroll the last setting row into view using the scroll container. The
     // scroller arrives WITH Interface — Settings opens on Connections, which
     // is contained and has none — so it is waited for, never assumed.
-    const lastRow = page.locator('.ui-settings-row').last()
+    const lastRow = page.locator('#st-section-Interface .ui-settings-row').last()
     const scroller = page.locator('.ui-page__scroll')
     await expect(scroller).toBeVisible({ timeout: 5_000 })
     await page.evaluate(() => {
@@ -902,7 +902,7 @@ test.describe('6. Page duties', () => {
       // `.ui-page__scroll` at all; the element below belongs to Interface and
       // exists only once that page is the open one. Without this the evaluate
       // found null, scrolled nothing, and the boundingBox below timed out.
-      const lastRow = page.locator('.ui-settings-row').last()
+      const lastRow = page.locator('#st-section-Interface .ui-settings-row').last()
       const scroller = page.locator('.ui-page__scroll')
       await expect(scroller).toBeVisible({ timeout: 5_000 })
       await page.evaluate(() => {

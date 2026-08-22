@@ -1,7 +1,7 @@
 import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
 import { TAB_DRAG_TYPE } from './layout/strip-drag'
-import { PinIcon } from './ui/icons'
+import { PinIcon, ShieldIcon } from './ui/icons'
 import type { AgentStatus } from './agent-status'
 
 /**
@@ -68,6 +68,8 @@ export interface TabProps {
    *  cannot say what it is about is a mark people learn to ignore. Falls
    *  back to the generic wording when nothing more specific is known. */
   warningLabel?: string
+  /** Native sandbox readiness was confirmed for this pane. */
+  sandboxed?: boolean
   /** The tab's colour, as the backend stores it (nocx-isoph.4): one of the
    *  closed set in layout/workspace-colours.ts, or undefined for an undecorated
    *  tab, which is the normal state. It renders as a swatch on the row and
@@ -152,6 +154,7 @@ export function Tab(props: TabProps) {
       data-colour={props.colour || undefined}
       data-group-colour={props.groupColour || undefined}
       data-pinned={props.pinned === true ? 'true' : undefined}
+      data-sandboxed={props.sandboxed === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       data-depth={(props.depth ?? 0) > 0 ? String(props.depth) : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
@@ -241,6 +244,15 @@ export function Tab(props: TabProps) {
             is not showing — and pushed the two visible lines below the row's
             centre. Wrapping the pair keeps the column at exactly two children. */}
         <span class="nocx-tab-line">
+          <Show when={props.sandboxed === true}>
+            <span
+              class="nocx-tab-sandboxed-marker"
+              aria-label="Sandboxed"
+              title="Filesystem-isolated"
+            >
+              <ShieldIcon />
+            </span>
+          </Show>
           <span class="nocx-tab-status" />
           {/* Why this tab is at the head of the strip. Without the mark the
               pinning is invisible until the strip is long enough for the

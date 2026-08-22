@@ -1,0 +1,825 @@
+package transport
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/storage"
+)
+
+// sandboxTestService is a deterministic, recording sandbox.Service for the
+// wire contract tests: the status and Prepare outcome are scripted, and every
+// Prepare call records the Request it received so tests can assert globals and
+// deltas reach the backend.
+type sandboxTestService struct {
+	status  sandbox.Status
+	prepErr error
+	policy  *sandbox.Policy
+
+	mu       sync.Mutex
+	prepared int
+	lastReq  sandbox.Request
+}
+
+func (s *sandboxTestService) Status(context.Context) sandbox.Status { return s.status }
+func (s *sandboxTestService) NewRuntimeRoot() (string, error) {
+	return sandbox.NewRuntimeRoot(os.TempDir())
+}
+
+func (s *sandboxTestService) Prepare(_ context.Context, req sandbox.Request, _ sandbox.CommandSpec) (*sandbox.PreparedCommand, error) {
+	s.mu.Lock()
+	s.prepared++
+	s.lastReq = req
+	s.mu.Unlock()
+	if !s.status.Available {
+		return nil, &sandbox.StatusError{Status: s.status}
+	}
+	if s.prepErr != nil {
+		return nil, s.prepErr
+	}
+	// A real, short-lived payload: the PTY opens, the process exits.
+	cmd := exec.Command("/usr/bin/true") //nolint:gosec // fixed test payload
+	return &sandbox.PreparedCommand{Cmd: cmd, Backend: s.status.Backend, Policy: s.policy}, nil
+}
+
+func (s *sandboxTestService) prepareCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prepared
+}
+
+func (s *sandboxTestService) request() sandbox.Request {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastReq
+}
+
+// sandboxPTYFactory routes the sandbox request into the real NewLocal so the
+// open path is the production one (minus kernel enforcement, which the stub
+// service supplies).
+type sandboxPTYFactory struct {
+	svc sandbox.Service
+}
+
+func (f *sandboxPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	return pty.NewLocal(log.NewSlogAdapter(nil), cfg, pty.WithSandboxService(f.svc))
+}
+
+// newSandboxHarness wires a WSServer with a scripted sandbox service, a real
+// settings registry, and an open pane without a grant. A successful sandbox
+// request records the grant before the helper starts.
+func newSandboxHarness(t *testing.T, svc *sandboxTestService, loggers ...log.Logger) (*WSServer, *settings.Registry) {
+	t.Helper()
+	logger := log.Logger(log.NewSlogAdapter(nil))
+	if len(loggers) > 0 {
+		logger = loggers[0]
+	}
+	dir := t.TempDir()
+	reg := settings.New(storage.NewDocumentStore(dir), newTestStore())
+	db := newLayoutStore(t)
+	pane := content.Pane{
+		ID: paneID1, TabID: tabID1, Cwd: "", Kind: content.PaneLocal,
+		SizeShare: 1,
+	}
+	if _, err := db.Layout().CreateWorkspace(context.Background(),
+		content.Workspace{ID: wsID1, Name: "sandbox"},
+		content.Tab{ID: tabID1, WorkspaceID: wsID1, Layout: content.LayoutRow},
+		pane); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	sess := session.New(logger, &sandboxPTYFactory{svc: svc})
+	ws := NewWSServer(logger, sess,
+		WithSettingsRegistry(reg),
+		WithSandboxService(svc),
+		WithContentDB(db))
+	ctx := t.Context()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return ws, reg
+}
+
+// snapshotRevision reads the registry's current revision so a test can send a
+// matching settingsRevision without hardcoding a count of mutations.
+func snapshotRevision(t *testing.T, reg *settings.Registry) int {
+	t.Helper()
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot: %v", err)
+	}
+	return snap.Revision
+}
+
+// sandboxOpenParams builds a valid local open with a sandbox block. The
+// obsolete `enhanced` member is deliberately absent: strict decoding rejects
+// it.
+func sandboxOpenParams(workspace string, revision int) map[string]any {
+	return map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"paneId": paneID1,
+		"sandbox": map[string]any{
+			"workspace":        workspace,
+			"settingsRevision": revision,
+		},
+	}
+}
+
+// manyStrings returns n distinct non-empty strings.
+func manyStrings(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "p" + strconv.Itoa(i)
+	}
+	return out
+}
+
+// jsonrpcCallRaw sends an "open" frame whose params are a raw JSON string, so
+// tests can express shapes a Go map cannot (duplicate members, trailing JSON).
+func jsonrpcCallRaw(t *testing.T, conn *websocket.Conn, method, params string) json.RawMessage {
+	t.Helper()
+	req := []byte(`{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":` + params + `}`)
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_, resp, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		var check struct {
+			ID *json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(resp, &check)
+		if check.ID == nil {
+			continue
+		}
+		return resp
+	}
+}
+
+func openError(t *testing.T, resp json.RawMessage) (code int, reason string) {
+	t.Helper()
+	var env struct {
+		Error *struct {
+			Code int `json:"code"`
+			Data *struct {
+				Reason string `json:"reason"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal response: %v (raw %s)", err, resp)
+	}
+	if env.Error == nil {
+		t.Fatalf("expected error, got %s", resp)
+	}
+	reason = ""
+	if env.Error.Data != nil {
+		reason = env.Error.Data.Reason
+	}
+	return env.Error.Code, reason
+}
+
+func TestSandboxStatus_ReportsBackend(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock, ABI: 9}}
+	ws, _ := newSandboxHarness(t, svc)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "sandbox.status", map[string]any{})
+	var result struct {
+		Result struct {
+			Available bool            `json:"available"`
+			Backend   string          `json:"backend"`
+			ABI       int             `json:"abi"`
+			Intent    json.RawMessage `json:"intent"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, resp)
+	}
+	if result.Error != nil {
+		t.Fatalf("sandbox.status error: %+v", result.Error)
+	}
+	if !result.Result.Available || result.Result.Backend != sandbox.BackendLandlock || result.Result.ABI != 9 {
+		t.Errorf("sandbox.status = %+v, want available landlock ABI 9", result.Result)
+	}
+	if result.Result.Intent != nil {
+		t.Errorf("sandbox.status unexpectedly carries a launch intent: %s", result.Result.Intent)
+	}
+}
+
+func TestSandboxStatus_UnavailableWithoutService(t *testing.T) {
+	reg := settings.New(storage.NewDocumentStore(t.TempDir()), newTestStore())
+	sess := session.New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
+	ws := NewWSServer(log.NewSlogAdapter(nil), sess, WithSettingsRegistry(reg))
+	ctx := t.Context()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "sandbox.status", map[string]any{})
+	var env struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32601 {
+		t.Fatalf("expected -32601, got %s", resp)
+	}
+}
+
+func TestOpen_SandboxFlagOff(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, _ := newSandboxHarness(t, svc) // flag defaults to false
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(t.TempDir(), 0))
+	code, reason := openError(t, resp)
+	if code != -32005 || reason != "feature-disabled" {
+		t.Errorf("code=%d reason=%q, want -32005 feature-disabled", code, reason)
+	}
+}
+
+func TestOpen_SandboxRequiresAnOpenPaneWithoutAGrant(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	missing := sandboxOpenParams(t.TempDir(), snapshotRevision(t, reg))
+	delete(missing, "paneId")
+	if code, _ := openError(t, jsonrpcCall(t, conn, "open", missing)); code != -32602 {
+		t.Fatalf("sandbox open without paneId code = %d, want -32602", code)
+	}
+
+	if _, err := ws.contentDB.Layout().CreatePane(t.Context(), content.Pane{
+		ID: paneID2, TabID: tabID1, Cwd: "/granted", Kind: content.PaneLocal,
+		SizeShare: 1,
+	}); err != nil {
+		t.Fatalf("CreatePane granted: %v", err)
+	}
+	if err := ws.contentDB.Layout().InsertSandboxGrant(t.Context(), content.SandboxGrant{
+		PaneID: paneID2, Version: 1, IssuedAt: 1, Workspace: "/granted", Payload: `{}`,
+	}); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
+	}
+	granted := sandboxOpenParams(t.TempDir(), snapshotRevision(t, reg))
+	granted["paneId"] = paneID2
+	if code, _ := openError(t, jsonrpcCall(t, conn, "open", granted)); code != -32602 {
+		t.Fatalf("sandbox open on granted pane code = %d, want -32602", code)
+	}
+	if got := svc.prepareCount(); got != 0 {
+		t.Fatalf("sandbox Prepare calls = %d, want 0 before grant gate", got)
+	}
+	if got := len(ws.registry.List()); got != 0 {
+		t.Fatalf("registered sessions = %d, want none", got)
+	}
+}
+
+func TestOpen_SandboxSSHRejected(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	params := sandboxOpenParams(t.TempDir(), snapshotRevision(t, reg))
+	params["kind"] = "ssh"
+	params["host"] = "example.com"
+	resp := jsonrpcCall(t, conn, "open", params)
+	code, _ := openError(t, resp)
+	if code != -32602 {
+		t.Errorf("code=%d, want -32602", code)
+	}
+}
+
+func TestOpen_SandboxInvalidWorkspace(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	rev := snapshotRevision(t, reg)
+
+	for _, bad := range []string{"relative/path", filepath.Join(t.TempDir(), "missing")} {
+		resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(bad, rev))
+		if code, _ := openError(t, resp); code != -32602 {
+			t.Errorf("workspace %q: code=%d, want -32602", bad, code)
+		}
+		if strings.Contains(string(resp), bad) {
+			t.Errorf("workspace path leaked in wire error: %s", resp)
+		}
+	}
+}
+
+func TestOpen_SandboxHappyPath(t *testing.T) {
+	base := t.TempDir()
+	ws := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(ws, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	canon, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	svc := &sandboxTestService{
+		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock, ABI: 9},
+		policy: &sandbox.Policy{
+			Workspace:       canon,
+			WritableRoots:   []string{canon, filepath.Join(base, "rt", "home"), filepath.Join(base, "rt", "tmp")},
+			ReadOnlyRoots:   []string{filepath.Join(base, "usr"), filepath.Join(base, "rt", "ro")},
+			HomeProjections: []sandbox.HomeProjection{{HostPath: canon, RelativePath: "workspace"}},
+		},
+	}
+	wsrv, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, wsrv)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(ws, snapshotRevision(t, reg)))
+	var result struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+			Cwd       string `json:"cwd"`
+			Sandbox   *struct {
+				Backend         string                   `json:"backend"`
+				Workspace       string                   `json:"workspace"`
+				WritableRoots   []string                 `json:"writableRoots"`
+				ReadOnlyRoots   []string                 `json:"readOnlyRoots"`
+				HomeProjections []sandbox.HomeProjection `json:"homeProjections"`
+			} `json:"sandbox"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, resp)
+	}
+	if result.Error != nil {
+		t.Fatalf("open error: %+v", result.Error)
+	}
+	if result.Result.SessionID == "" {
+		t.Fatal("no sessionId in open result")
+	}
+	if result.Result.Sandbox == nil {
+		t.Fatal("open result missing sandbox metadata")
+	}
+	if result.Result.Sandbox.Backend != sandbox.BackendLandlock || result.Result.Sandbox.Workspace != canon {
+		t.Errorf("sandbox = %+v, want backend landlock workspace %q", result.Result.Sandbox, canon)
+	}
+	if len(result.Result.Sandbox.WritableRoots) != 3 {
+		t.Errorf("writableRoots = %v, want 3 roots", result.Result.Sandbox.WritableRoots)
+	}
+	if len(result.Result.Sandbox.ReadOnlyRoots) != 2 {
+		t.Errorf("readOnlyRoots = %v, want 2 roots", result.Result.Sandbox.ReadOnlyRoots)
+	}
+	if len(result.Result.Sandbox.HomeProjections) != 1 || result.Result.Sandbox.HomeProjections[0].HostPath != canon {
+		t.Errorf("homeProjections = %v, want canonical workspace projection", result.Result.Sandbox.HomeProjections)
+	}
+	// The canonical workspace drives session CWD (ADR-0037 item 9): the same
+	// value reaches session.Config.Cwd and comes back as the open result's
+	// cwd, matching the policy's workspace — never the raw input.
+	if result.Result.Cwd != canon {
+		t.Errorf("cwd = %q, want canonical workspace %q", result.Result.Cwd, canon)
+	}
+}
+
+func TestOpen_OrdinaryResultHasNoSandbox(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0})
+	var env struct {
+		Result map[string]any   `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("open error: %+v", env.Error)
+	}
+	if _, ok := env.Result["sandbox"]; ok {
+		t.Errorf("ordinary open result must omit sandbox: %v", env.Result)
+	}
+}
+
+func TestOpen_SandboxSetupFailure(t *testing.T) {
+	ws := t.TempDir()
+	privatePath := filepath.Join(ws, "private-workspace")
+	svc := &sandboxTestService{
+		status:  sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
+		prepErr: sandbox.NewSetupErrorf("helper rejected %s", privatePath),
+	}
+	var logs syncBuffer
+	logger := log.NewSlogAdapter(slog.New(slog.NewJSONHandler(&logs, nil)))
+	wsrv, reg := newSandboxHarness(t, svc, logger)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, wsrv)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(ws, snapshotRevision(t, reg)))
+	code, reason := openError(t, resp)
+	if code != -32007 || reason != "setup-failed" {
+		t.Errorf("code=%d reason=%q, want -32007 setup-failed", code, reason)
+	}
+	if strings.Contains(string(resp), privatePath) {
+		t.Errorf("private path leaked in wire response: %s", resp)
+	}
+	logged := logs.String()
+	if strings.Contains(logged, privatePath) {
+		t.Errorf("private path leaked in backend log: %s", logged)
+	}
+	if !strings.Contains(logged, "sandbox setup failed") {
+		t.Errorf("sanitized setup diagnostic missing from backend log: %s", logged)
+	}
+}
+
+func TestOpen_SandboxBackendUnavailable(t *testing.T) {
+	ws := t.TempDir()
+	svc := &sandboxTestService{
+		status: sandbox.Status{Available: false, Backend: sandbox.BackendLandlock, Reason: sandbox.ReasonLandlockABITooOld, ABI: 2},
+	}
+	wsrv, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, wsrv)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(ws, snapshotRevision(t, reg)))
+	code, reason := openError(t, resp)
+	if code != -32006 || reason != sandbox.ReasonLandlockABITooOld {
+		t.Errorf("code=%d reason=%q, want -32006 %q", code, reason, sandbox.ReasonLandlockABITooOld)
+	}
+}
+
+// TestOpen_SandboxStrictShapes drives the real socket with every malformed
+// sandbox shape a map can express. Every case must fail with -32602 before
+// any PTY is prepared, so a malformed opt-in can never become an ordinary
+// launch.
+func TestOpen_SandboxStrictShapes(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	wsPath := t.TempDir()
+	rev := snapshotRevision(t, reg)
+
+	base := func(sandbox any) map[string]any {
+		return map[string]any{"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "sandbox": sandbox}
+	}
+	valid := func() map[string]any {
+		return map[string]any{"workspace": wsPath, "settingsRevision": rev}
+	}
+
+	cases := []struct {
+		name   string
+		params any
+	}{
+		{"sandbox null", base(nil)},
+		{"sandbox not object", base("x")},
+		{"sandbox unknown member", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "bogus": 1})},
+		{"sandbox missing workspace", base(map[string]any{"settingsRevision": rev})},
+		{"sandbox missing revision", base(map[string]any{"workspace": wsPath})},
+		{"sandbox workspace wrong type", base(map[string]any{"workspace": 123, "settingsRevision": rev})},
+		{"sandbox workspace null", base(map[string]any{"workspace": nil, "settingsRevision": rev})},
+		{"sandbox revision null", base(map[string]any{"workspace": wsPath, "settingsRevision": nil})},
+		{"sandbox revision negative", base(map[string]any{"workspace": wsPath, "settingsRevision": -1})},
+		{"sandbox revision wrong type", base(map[string]any{"workspace": wsPath, "settingsRevision": "1"})},
+		{"sandbox obsolete add member", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "add": []string{"a"}})},
+		{"sandbox obsolete remove member", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "remove": []string{"a"}})},
+		{"sandbox addWritable null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": nil})},
+		{"sandbox addWritable not array", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": "x"})},
+		{"sandbox addWritable non-string element", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": []any{1}})},
+		{"sandbox addWritable null element", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": []any{nil}})},
+		{"sandbox addWritable duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": []string{"a", "a"}})},
+		{"sandbox addWritable oversized", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addWritable": manyStrings(33)})},
+		{"sandbox removeWritable null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeWritable": nil})},
+		{"sandbox removeWritable duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeWritable": []string{"a", "a"}})},
+		{"sandbox addReadOnly null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addReadOnly": nil})},
+		{"sandbox addReadOnly duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addReadOnly": []string{"a", "a"}})},
+		{"sandbox addReadOnly oversized", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "addReadOnly": manyStrings(33)})},
+		{"sandbox removeReadOnly null", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeReadOnly": nil})},
+		{"sandbox removeReadOnly duplicate", base(map[string]any{"workspace": wsPath, "settingsRevision": rev, "removeReadOnly": []string{"a", "a"}})},
+		{"outer unknown member enhanced", map[string]any{"cols": 80, "rows": 24, "enhanced": true, "sandbox": valid()}},
+		{"ssh with sandbox", map[string]any{"cols": 80, "rows": 24, "kind": "ssh", "host": "example.com", "sandbox": valid()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := jsonrpcCall(t, conn, "open", tc.params)
+			if code, _ := openError(t, resp); code != -32602 {
+				t.Errorf("code=%d, want -32602 (resp %s)", code, resp)
+			}
+		})
+	}
+	if svc.prepareCount() != 0 {
+		t.Errorf("Prepare called %d times, want 0 (no PTY on malformed sandbox)", svc.prepareCount())
+	}
+}
+
+// TestOpen_SandboxDuplicateMembers drives shapes a Go map cannot: duplicate
+// object keys at the outer and nested level, which must be refused as invalid
+// params.
+func TestOpen_SandboxDuplicateMembers(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	wsPath := t.TempDir()
+	rev := strconv.Itoa(snapshotRevision(t, reg))
+
+	cases := []struct {
+		name   string
+		params string
+	}{
+		{"outer duplicate member", `{"cols":80,"cols":80,"rows":24,"sandbox":{"workspace":"` + wsPath + `","settingsRevision":` + rev + `}}`},
+		{"sandbox duplicate member", `{"cols":80,"rows":24,"sandbox":{"workspace":"` + wsPath + `","workspace":"` + wsPath + `","settingsRevision":` + rev + `}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := jsonrpcCallRaw(t, conn, "open", tc.params)
+			if code, _ := openError(t, resp); code != -32602 {
+				t.Errorf("code=%d, want -32602 (resp %s)", code, resp)
+			}
+		})
+	}
+}
+
+// TestDecodeOpenParams_TrailingData covers the trailing-JSON rejection that
+// cannot be expressed through the wire (the envelope's full decode extracts a
+// single params value): the strict decoder itself refuses any bytes after the
+// open object.
+func TestDecodeOpenParams_TrailingData(t *testing.T) {
+	for _, raw := range []string{
+		`{"cols":80,"rows":24} {}`,
+		`{"cols":80,"rows":24} 42`,
+	} {
+		if _, err := decodeOpenParams([]byte(raw)); err == nil {
+			t.Errorf("decodeOpenParams(%q) = nil error, want trailing-data rejection", raw)
+		}
+	}
+}
+
+// TestSandboxBaselines_RejectsBadSnapshot pins the persisted-baseline failure
+// class for both path-list keys: a missing key, a wrong snapshot type, or an
+// over-count list on either the writable or read-only side is backend state
+// (mapped to -32007 setup-failed), never silently an empty list.
+func TestSandboxBaselines_RejectsBadSnapshot(t *testing.T) {
+	writableKey := settings.SandboxAllowedWritablePaths.Key()
+	readOnlyKey := settings.SandboxAllowedReadOnlyPaths.Key()
+	valid := map[string]any{
+		writableKey: []string{"/w"},
+		readOnlyKey: []string{"/r"},
+	}
+
+	cases := []struct {
+		name   string
+		values map[string]any
+	}{
+		{"writable missing", map[string]any{readOnlyKey: []string{"/r"}}},
+		{"writable wrong type", map[string]any{writableKey: 42, readOnlyKey: []string{"/r"}}},
+		{"writable over count", map[string]any{writableKey: manyStrings(33), readOnlyKey: []string{"/r"}}},
+		{"read-only missing", map[string]any{writableKey: []string{"/w"}}},
+		{"read-only wrong type", map[string]any{writableKey: []string{"/w"}, readOnlyKey: 42}},
+		{"read-only over count", map[string]any{writableKey: []string{"/w"}, readOnlyKey: manyStrings(33)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := settings.SettingsSnapshot{Values: tc.values}
+			if _, _, err := sandboxBaselines(snap); err == nil {
+				t.Fatalf("sandboxBaselines(%v) = nil error, want error", tc.values)
+			}
+		})
+	}
+
+	writable, readOnly, err := sandboxBaselines(settings.SettingsSnapshot{Values: valid})
+	if err != nil {
+		t.Fatalf("sandboxBaselines(valid) = %v", err)
+	}
+	if !reflect.DeepEqual(writable, []string{"/w"}) {
+		t.Errorf("writable = %v, want deep copy of [/w]", writable)
+	}
+	if !reflect.DeepEqual(readOnly, []string{"/r"}) {
+		t.Errorf("readOnly = %v, want deep copy of [/r]", readOnly)
+	}
+}
+
+// TestOpen_SandboxStaleRevision: a settingsRevision that does not match the
+// snapshot revision is refused with -32602 (no data.reason) before any PTY.
+func TestOpen_SandboxStaleRevision(t *testing.T) {
+	svc := &sandboxTestService{status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}}
+	ws, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	rev := snapshotRevision(t, reg)
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(t.TempDir(), rev+1))
+	code, reason := openError(t, resp)
+	if code != -32602 {
+		t.Errorf("code=%d, want -32602", code)
+	}
+	if reason != "" {
+		t.Errorf("stale revision must omit data.reason, got %q", reason)
+	}
+	if svc.prepareCount() != 0 {
+		t.Errorf("Prepare called %d times, want 0 (no PTY on stale revision)", svc.prepareCount())
+	}
+}
+
+// TestOpen_SandboxGlobalsAndDeltas: both snapshot baselines and the per-tab
+// class-scoped deltas reach the backend as one Request (workspace canonical,
+// globals deep-copied from the snapshot, deltas verbatim).
+func TestOpen_SandboxGlobalsAndDeltas(t *testing.T) {
+	base := t.TempDir()
+	canon := func(p string) string {
+		t.Helper()
+		c, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatalf("EvalSymlinks %s: %v", p, err)
+		}
+		return c
+	}
+	ws := filepath.Join(base, "workspace")
+	g1 := filepath.Join(base, "global1")
+	g2 := filepath.Join(base, "global2")
+	r1 := filepath.Join(base, "ro-global1")
+	r2 := filepath.Join(base, "ro-global2")
+	aw := filepath.Join(base, "add-writable")
+	rw := g2
+	ar := filepath.Join(base, "add-readonly")
+	rr := r2
+	for _, d := range []string{ws, g1, g2, r1, r2, aw, ar} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	svc := &sandboxTestService{
+		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
+		policy: &sandbox.Policy{Workspace: ws, WritableRoots: []string{ws}, HomeProjections: []sandbox.HomeProjection{}},
+	}
+	wsrv, reg := newSandboxHarness(t, svc)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	if err := reg.SetPaths(settings.SandboxAllowedWritablePaths, []string{g1, g2}); err != nil {
+		t.Fatalf("SetPaths writable: %v", err)
+	}
+	if err := reg.SetPaths(settings.SandboxAllowedReadOnlyPaths, []string{r1, r2}); err != nil {
+		t.Fatalf("SetPaths read-only: %v", err)
+	}
+	conn := connectWS(t, wsrv)
+	defer func() { _ = conn.Close() }()
+
+	params := sandboxOpenParams(ws, snapshotRevision(t, reg))
+	sandbox, ok := params["sandbox"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandbox params is %T, want map[string]any", params["sandbox"])
+	}
+	sandbox["addWritable"] = []string{aw}
+	sandbox["removeWritable"] = []string{rw}
+	sandbox["addReadOnly"] = []string{ar}
+	sandbox["removeReadOnly"] = []string{rr}
+	resp := jsonrpcCall(t, conn, "open", params)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, resp)
+	}
+	if env.Error != nil {
+		t.Fatalf("open error: %+v", env.Error)
+	}
+
+	got := svc.request()
+	if got.Workspace != canon(ws) {
+		t.Errorf("Workspace = %q, want canonical %q", got.Workspace, canon(ws))
+	}
+	if !reflect.DeepEqual(got.GlobalWritable, []string{canon(g1), canon(g2)}) {
+		t.Errorf("GlobalWritable = %v, want [%s %s]", got.GlobalWritable, canon(g1), canon(g2))
+	}
+	if !reflect.DeepEqual(got.GlobalReadOnly, []string{canon(r1), canon(r2)}) {
+		t.Errorf("GlobalReadOnly = %v, want [%s %s]", got.GlobalReadOnly, canon(r1), canon(r2))
+	}
+	if !reflect.DeepEqual(got.AddWritable, []string{aw}) {
+		t.Errorf("AddWritable = %v, want [%s]", got.AddWritable, aw)
+	}
+	if !reflect.DeepEqual(got.RemoveWritable, []string{rw}) {
+		t.Errorf("RemoveWritable = %v, want [%s]", got.RemoveWritable, rw)
+	}
+	if !reflect.DeepEqual(got.AddReadOnly, []string{ar}) {
+		t.Errorf("AddReadOnly = %v, want [%s]", got.AddReadOnly, ar)
+	}
+	if !reflect.DeepEqual(got.RemoveReadOnly, []string{rr}) {
+		t.Errorf("RemoveReadOnly = %v, want [%s]", got.RemoveReadOnly, rr)
+	}
+}
+
+// A setup failure the user can act on has to reach them as itself. The
+// generic "setup-failed" is what a machine whose derived policy does not fit
+// the bounds reported before nocx-263da, and the renderer can only show the
+// reason it is given.
+func TestOpen_SandboxPolicyTooLargeKeepsItsReason(t *testing.T) {
+	ws := t.TempDir()
+	privatePath := filepath.Join(ws, "private-workspace")
+	svc := &sandboxTestService{
+		status: sandbox.Status{Available: true, Backend: sandbox.BackendLandlock},
+		prepErr: sandbox.NewSetupErrorReasonf(sandbox.ReasonPolicyTooLarge,
+			"policy: too many roots under %s", privatePath),
+	}
+	var logs syncBuffer
+	logger := log.NewSlogAdapter(slog.New(slog.NewJSONHandler(&logs, nil)))
+	wsrv, reg := newSandboxHarness(t, svc, logger)
+	if err := reg.SetBool(settings.SandboxEnabled, true); err != nil {
+		t.Fatalf("SetBool: %v", err)
+	}
+	conn := connectWS(t, wsrv)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", sandboxOpenParams(ws, snapshotRevision(t, reg)))
+	code, reason := openError(t, resp)
+	if code != -32007 || reason != sandbox.ReasonPolicyTooLarge {
+		t.Errorf("code=%d reason=%q, want -32007 %s", code, reason, sandbox.ReasonPolicyTooLarge)
+	}
+	// A typed reason is not a licence to leak the detail it was built from.
+	if strings.Contains(string(resp), privatePath) {
+		t.Errorf("private path leaked in wire response: %s", resp)
+	}
+	if strings.Contains(logs.String(), privatePath) {
+		t.Errorf("private path leaked in backend log: %s", logs.String())
+	}
+}
+
+func TestCanonicalizeOpenCwdAcceptsOnlyExistingAbsoluteDirectories(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := canonicalizeOpenCwd(link)
+	if err != nil || got != dir {
+		t.Fatalf("canonicalizeOpenCwd(link) = %q, %v; want %q, nil", got, err, dir)
+	}
+	if _, err := canonicalizeOpenCwd("relative"); err == nil {
+		t.Fatal("canonicalizeOpenCwd(relative) succeeded")
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := canonicalizeOpenCwd(file); err == nil {
+		t.Fatal("canonicalizeOpenCwd(file) succeeded")
+	}
+}

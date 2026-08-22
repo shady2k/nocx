@@ -726,6 +726,7 @@ type SettingsService interface {
 	SetString(s *settings.String, v string) error
 	SetNumber(n *settings.Number, v float64) error
 	SetSelect(s *settings.Select, v string) error
+	SetPaths(p *settings.PathList, v []string) error
 	SecretSet(s *settings.Secret, v string) error
 	SecretDelete(s *settings.Secret) error
 	SecretExists(s *settings.Secret) (bool, error)
@@ -804,6 +805,13 @@ func (s *settingsService) SetSelect(sel *settings.Select, v string) error {
 		return err
 	}
 	return s.reg.SetSelect(sel, v)
+}
+
+func (s *settingsService) SetPaths(p *settings.PathList, v []string) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.reg.SetPaths(p, v)
 }
 
 func (s *settingsService) SecretSet(sec *settings.Secret, v string) error {

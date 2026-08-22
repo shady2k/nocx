@@ -35,6 +35,7 @@ function harness(over: Partial<NotesClientLike> = {}) {
   const host: PaneHost = {
     contentSettled: () => {},
     setTitle: (t) => titles.push(t),
+    updateTooltip: () => {},
     requestAttention: () => {},
     requestClose: () => {},
   }

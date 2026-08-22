@@ -291,7 +291,37 @@
 .ui-settings-modified-dot[data-modified='true'] {
   background: var(--color-warning);
 }
+/* ── Paths control (sandbox read-only and read & write folders) ────────────
+   Placement only: the list fills the control column (which otherwise flushes
+   one-line controls right), and its reset affordance sits beside it in the
+   same gutter every other row reserves. The row content is the kit's — a
+   path is text, and long ones wrap rather than overflow the column. */
+.ui-settings-paths {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.ui-settings-paths .ui-row-list {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ui-settings-paths-row {
+  word-break: break-all;
+}
 
 .st-vis-hidden {
   display: none;
+}
+
+/* ── Sandbox denied-access inbox — placement only ──────────────────────
+   The inbox is a CollectionView of RecordRows and its state lines are
+   StatusCards, so appearance lives in the kit. What is left here is one
+   thing the surface owns: a denied path is long and arbitrary, so the row's
+   title and detail lines wrap instead of stretching the column. */
+.sandbox-access-settings .ui-record-row__title,
+.sandbox-access-settings .ui-record-row__detail {
+  overflow-wrap: anywhere;
 }

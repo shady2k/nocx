@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -22,6 +23,14 @@ type DocumentStore interface {
 	// interrupted part-way through.
 	Delete(name string) error
 }
+
+// maxDocumentBytes is the shared control-plane document ceiling (8 MiB),
+// matching backup.MaxDocumentBytes. Read and Write both refuse to cross it.
+const maxDocumentBytes = 8 << 20
+
+// ErrDocumentTooLarge is returned by Read and Write when a document would
+// exceed maxDocumentBytes.
+var ErrDocumentTooLarge = errors.New("document exceeds size limit")
 
 // ---------------------------------------------------------------------------
 // Schema version protocol
@@ -117,20 +126,47 @@ func (s *documentStore) pathFor(name string) string {
 }
 
 // Read loads the named document and unmarshals it into into. Returns
-// (false, nil) when the document does not exist.
-func (s *documentStore) Read(name string, into any) (bool, error) {
-	raw, err := os.ReadFile(s.pathFor(name))
+// (false, nil) when the document does not exist or is empty. A document
+// larger than maxDocumentBytes is rejected before JSON decode.
+func (s *documentStore) Read(name string, into any) (found bool, err error) {
+	path := s.pathFor(name)
+	f, err := os.Open(path) // #nosec G304 -- the path is rooted in the injected app-data directory
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("read document %s: %w", name, err)
 	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close document %s: %w", name, cerr)
+		}
+	}()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat document %s: %w", name, err)
+	}
+	if fi.Size() > maxDocumentBytes {
+		return false, fmt.Errorf("%w: document %s is %d bytes (limit %d)", ErrDocumentTooLarge, name, fi.Size(), maxDocumentBytes)
+	}
+
+	// The open descriptor and a hard reader ceiling make the bound true even
+	// when another same-user process grows or replaces the pathname between
+	// Stat and Read. Reading max+1 lets us distinguish an exact-limit document
+	// from an oversized one without allocating in proportion to attacker input.
+	raw, err := io.ReadAll(io.LimitReader(f, maxDocumentBytes+1))
+	if err != nil {
+		return false, fmt.Errorf("read document %s: %w", name, err)
+	}
 	if len(raw) == 0 {
 		return false, nil
 	}
+	if len(raw) > maxDocumentBytes {
+		return false, fmt.Errorf("%w: document %s exceeds %d bytes", ErrDocumentTooLarge, name, maxDocumentBytes)
+	}
 
-	if err := json.Unmarshal(raw, into); err != nil {
+	if err = json.Unmarshal(raw, into); err != nil {
 		return false, fmt.Errorf("parse document %s: %w", name, err)
 	}
 	return true, nil
@@ -165,6 +201,9 @@ func (s *documentStore) Write(name string, doc any) error {
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal document %s: %w", name, err)
+	}
+	if len(raw) > maxDocumentBytes {
+		return fmt.Errorf("%w: document %s marshals to %d bytes (limit %d)", ErrDocumentTooLarge, name, len(raw), maxDocumentBytes)
 	}
 
 	dir := filepath.Dir(s.pathFor(name))

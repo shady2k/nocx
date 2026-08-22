@@ -29,7 +29,16 @@ function tab(id: string, over: Partial<Tab> = {}): Tab {
 }
 
 function pane(id: string, tabId: string, over: Partial<Pane> = {}): Pane {
-  return { id, tabId, cwd: '', kind: 'local', endpoint: null, sizeShare: 1, ...over }
+  return {
+    id,
+    tabId,
+    cwd: '',
+    kind: 'local',
+    endpoint: null,
+    sizeShare: 1,
+    sandboxGranted: false,
+    ...over,
+  }
 }
 
 function snapshot(over: Partial<LayoutReadResult> = {}): LayoutReadResult {
@@ -240,7 +249,12 @@ describe('LayoutStore', () => {
       id: opened.tabId,
       workspaceId: DEFAULT_WS,
       position: 0,
-      firstPane: { id: opened.paneId, kind: 'local', endpoint: null, sizeShare: 1 },
+      firstPane: {
+        id: opened.paneId,
+        kind: 'local',
+        endpoint: null,
+        sizeShare: 1,
+      },
     })
     expect(store.tabs().map((t) => t.id)).toEqual([opened.tabId])
     expect(store.tabOf(opened.paneId)?.id).toBe(opened.tabId)
@@ -406,7 +420,11 @@ describe('LayoutStore', () => {
     const changes = vi.fn()
     store.onChange(changes)
 
-    const made = store.createWorkspace('', 'blue', { kind: 'local', endpoint: null, cwd: '' })
+    const made = store.createWorkspace('', 'blue', {
+      kind: 'local',
+      endpoint: null,
+      cwd: '',
+    })
 
     await expect(made.created).rejects.toThrow('name is required')
     expect(store.workspaces().map((w) => w.id)).toEqual([DEFAULT_WS])

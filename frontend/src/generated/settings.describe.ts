@@ -39,12 +39,12 @@ export interface Declaration {
   section: string
   label: string
   description: string
-  control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
+  control: 'toggle' | 'text' | 'number' | 'select' | 'secret' | 'paths'
   dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
   /**
-   * The declared default. Absent for secret-class settings and for zero-value defaults (the Go wire omits them via omitempty).
+   * The declared default. Path-list settings use an array of strings; scalar settings use their scalar value. Absent for secret-class settings and for zero-value scalar defaults (the Go wire omits them via omitempty).
    */
-  default?: boolean | string | number | null
+  default?: (boolean | string | number | null) | string[]
   /**
    * The select control's choices; present only for control: select.
    */

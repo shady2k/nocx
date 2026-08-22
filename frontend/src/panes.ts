@@ -21,7 +21,7 @@
 // position, pinned, layout, workspace_id, seen-mark, and no "active".
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { WSClient } from './ipc'
+import type { WSClient, SandboxLaunch, SandboxRequest } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
@@ -62,7 +62,12 @@ import type {
 } from './pane-content'
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
-import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import {
+  TerminalContent,
+  type ConversionTranscript,
+  type HostKeyErrorEvidence,
+  type PaneIdentity,
+} from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -103,6 +108,7 @@ export class Pane implements PaneHost {
    *  contentSettled). Output before that is the pane starting up, not
    *  something the user missed. */
   private _settled = false
+  private _sandboxed = false
   /** The tab's stored decoration, as the backend last answered. Never
    *  decided here — see setTabDecoration. */
   private _tabName: string | null = null
@@ -227,6 +233,16 @@ export class Pane implements PaneHost {
 
   get agentStatus(): AgentStatus | null {
     return this._agentStatus
+  }
+
+  get sandboxed(): boolean {
+    return this._sandboxed
+  }
+
+  setSandboxed(): void {
+    if (this._disposed || this._sandboxed) return
+    this._sandboxed = true
+    this.onDisplayChange?.()
   }
 
   get tooltip(): string {
@@ -949,7 +965,7 @@ export class PaneManager {
    * never appears (nocx-rtg0.29). Returning the id alone is what made that
    * race impossible to close at the call site.
    */
-  private mintPane(kind: 'local' | 'ssh', endpoint: string | null): PaneIdentity {
+  private mintPane(kind: 'local' | 'ssh', endpoint: string | null, cwd = ''): PaneIdentity {
     // No store is a DEGRADE, not a refusal: the id is minted and simply
     // names no row, which `registered: false` states rather than leaving the
     // caller to infer it from a promise that never settles.
@@ -959,7 +975,7 @@ export class PaneManager {
     // would either vanish on arrival or drag the window away from where the
     // person was working. The default is where it goes when that is where
     // they are.
-    const opened = this.layout.openTab({ kind, endpoint, cwd: '' }, this.currentWorkspaceId())
+    const opened = this.layout.openTab({ kind, endpoint, cwd }, this.currentWorkspaceId())
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the
@@ -991,10 +1007,43 @@ export class PaneManager {
     return this.buildLocalPane(this.mintPane('local', null))
   }
 
+  /** Create an ordinary local replacement in a verified current directory. */
+  newLocalPaneAt(cwd: string): { pane: Pane; created: Promise<boolean> } {
+    const identity = this.mintPane('local', null, cwd)
+    return {
+      pane: this.buildLocalPane(identity, true, undefined, cwd),
+      created: identity.registered,
+    }
+  }
+
+  newSandboxedPane(
+    workspace: string,
+    launch: SandboxLaunch,
+  ): { pane: Pane; created: Promise<boolean> } {
+    const request: SandboxRequest = {
+      workspace,
+      settingsRevision: launch.settingsRevision,
+      addWritable: [...launch.addWritable],
+      removeWritable: [...launch.removeWritable],
+      addReadOnly: [...launch.addReadOnly],
+      removeReadOnly: [...launch.removeReadOnly],
+    }
+    const identity = this.mintPane('local', null)
+    return {
+      pane: this.buildLocalPane(identity, true, request),
+      created: identity.registered,
+    }
+  }
+
   /** The chrome and content of a LOCAL terminal pane with a given identity —
    *  one implementation for a pane the user just asked for and a pane the
    *  chain already holds, because "a local pane" must not mean two things. */
-  private buildLocalPane(identity: PaneIdentity, activateNow = true): Pane {
+  private buildLocalPane(
+    identity: PaneIdentity,
+    activateNow = true,
+    sandbox?: SandboxRequest,
+    initialCwd = '',
+  ): Pane {
     const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
       this.client,
@@ -1021,6 +1070,8 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        sandbox,
+        initialCwd,
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
         // chain did not take costs the NEXT restore its cwd — it falls back
@@ -1039,7 +1090,7 @@ export class PaneManager {
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
       singletonKey: null,
-      restoreDescriptor: { type: 'local' },
+      restoreDescriptor: sandbox ? null : { type: 'local' },
       supportsAttention: true,
       // No placeholder. A terminal pane is named after where it is, and that
       // arrives one WebSocket round-trip after the pane appears; printing
@@ -1051,6 +1102,13 @@ export class PaneManager {
     }
     const pane = this.addPane(content, descriptor, identity.paneId, activateNow)
     paneRef.current = pane
+    if (sandbox) {
+      void content.ready.then((started) => {
+        if (!started || !this.panes.includes(pane)) return
+        pane.setSandboxed()
+        if (pane === this.activePane) this.onActivePaneChange?.()
+      })
+    }
     return pane
   }
 
@@ -1485,6 +1543,51 @@ export class PaneManager {
   private tabFor(paneId: number) {
     const pane = this.panes.find((p) => p.id === paneId)
     return pane ? this.layout.tabOf(pane.wireId) : undefined
+  }
+
+  /** Renderer pane by its in-memory identity. */
+  paneOf(paneId: number): Pane | undefined {
+    return this.panes.find((pane) => pane.id === paneId)
+  }
+
+  /** The durable tab row behind one renderer pane. */
+  tabOf(paneId: number) {
+    return this.tabFor(paneId)
+  }
+
+  captureConversionTranscript(paneId: number): ConversionTranscript | null {
+    const pane = this.paneOf(paneId)
+    return pane?.content instanceof TerminalContent
+      ? pane.content.captureConversionTranscript()
+      : null
+  }
+
+  async installConversionTranscript(
+    paneId: number,
+    transcript: ConversionTranscript | null,
+    boundaryLabel: string,
+  ): Promise<boolean> {
+    const pane = this.paneOf(paneId)
+    if (!(pane?.content instanceof TerminalContent)) return false
+    if (!(await pane.content.ready)) return false
+    if (transcript) pane.content.installConversionTranscript(transcript, boundaryLabel)
+    return true
+  }
+
+  /** Put a newly created tab in the replaced tab's durable strip position. */
+  replaceTabPosition(oldPaneId: number, newPaneId: number): void {
+    const oldTab = this.tabFor(oldPaneId)
+    const newTab = this.tabFor(newPaneId)
+    if (!oldTab || !newTab || oldTab.workspaceId !== newTab.workspaceId) return
+    const order = stripOrder(
+      this.layout.tabs().filter((tab) => tab.workspaceId === oldTab.workspaceId),
+    ).map((tab) => tab.id)
+    const oldIndex = order.indexOf(oldTab.id)
+    const newIndex = order.indexOf(newTab.id)
+    if (oldIndex === -1 || newIndex === -1) return
+    order.splice(newIndex, 1)
+    order[newIndex < oldIndex ? oldIndex - 1 : oldIndex] = newTab.id
+    void this.layout.reorder(oldTab.workspaceId, order)
   }
 
   /**
@@ -1981,6 +2084,11 @@ export class PaneManager {
     return pane && origin ? { paneId: pane.id, ...origin } : null
   }
 
+  /** Whether the active renderer pane is confirmed filesystem-sandboxed. */
+  activePaneSandboxed(): boolean {
+    return this.activePane?.sandboxed === true
+  }
+
   /** The ACTIVE pane's surface type (B.8) — the seam chrome reads to answer
    *  "what kind of pane is in front" without instanceof tests. The sidebar's
    *  Settings collapse (nocx-3e3b) reads this through the composition root:
@@ -2106,6 +2214,11 @@ export class PaneManager {
    * old session died with the backend, and what this opens is another one.
    */
   private adopt(row: PaneRow): void {
+    if (row.sandboxGranted) {
+      // Backend startup normally closes this row before layout.read. Refuse
+      // independently: adopting it as local would silently re-issue authority.
+      return
+    }
     if (row.kind === 'ssh') {
       this.reopenSSH(row)
       return

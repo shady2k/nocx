@@ -54,4 +54,22 @@ export interface Open {
      */
     sessionEpoch: number
   } | null
+  /**
+   * Immutable realized sandbox metadata for a sandboxed local session. Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.
+   */
+  sandbox?: {
+    backend: 'landlock' | 'seatbelt'
+    workspace: string
+    writableRoots: string[]
+    readOnlyRoots: string[]
+    /**
+     * Disposable discoverability aliases from the isolated runtime HOME to exact canonical host roots. These objects carry no access class; writableRoots and readOnlyRoots remain authoritative.
+     *
+     * @maxItems 129
+     */
+    homeProjections: {
+      hostPath: string
+      relativePath: string
+    }[]
+  }
 }

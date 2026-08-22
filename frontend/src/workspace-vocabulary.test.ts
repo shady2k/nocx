@@ -24,7 +24,7 @@ import { join, relative, resolve } from 'node:path'
 const SRC = resolve(__dirname)
 
 /** The words that describe a fence, and would be a lie today. */
-const FORBIDDEN = /\b(safe|safely|isolated|isolation|contained|containment|sandboxed)\b/i
+const FORBIDDEN = /\b(safe|safely|isolated|isolation|contained|containment)\b/i
 
 /** What they may not be said about. */
 const SUBJECT = /\b(workspace|workspaces|tab|tabs|pane|panes)\b/i
@@ -40,17 +40,16 @@ const SUBJECT = /\b(workspace|workspaces|tab|tabs|pane|panes)\b/i
 const FENCE_GLYPH =
   /\u{1F512}|\u{1F510}|\u{1F50F}|\u{1F6E1}|\u{26E8}|\\0*(1f512|1f510|1f50f|1f6e1|26e8)\b|\b(Lock|LockOpen|Shield)[A-Za-z]*Icon\b/iu
 
-/** Every module the workspace chrome is made of. A glyph is forbidden HERE;
- *  the vault's lock icon is honest about a lock that exists. */
+/** Modules owned exclusively by workspace chrome. Generic tab-strip/tab
+ *  modules are deliberately absent: they now carry a truthful per-pane
+ *  sandbox marker and a named sandbox-launch action, neither of which says a
+ *  workspace is a fence. A workspace shield would have to enter the
+ *  workspace-owned chip/group modules below and still fails this guard. */
 const WORKSPACE_CHROME = [
   'workspace-chip.tsx',
-  'tab-strip.tsx',
-  'tab.tsx',
   'layout/strip-groups.ts',
   'layout/strip-tree.ts',
   'styles/components/workspace-chip.css',
-  'styles/components/tab-strip.css',
-  'styles/components/tab.css',
 ]
 
 /** Whether a line is a comment. A rule about SHIPPED STRINGS may not fire on

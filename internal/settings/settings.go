@@ -25,10 +25,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
@@ -56,6 +60,7 @@ const (
 	ControlNumber ControlKind = "number"
 	ControlSelect ControlKind = "select"
 	ControlSecret ControlKind = "secret"
+	ControlPaths  ControlKind = "paths"
 )
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -263,6 +268,17 @@ type SecretSpec struct {
 	DataClass   DataClass
 }
 
+// PathListSpec is the declaration site for a path-list setting. The value is
+// always a canonical list of existing directories; there is no Default field
+// because the default is always the empty list.
+type PathListSpec struct {
+	Key         string
+	Section     string
+	Label       string
+	Description string
+	DataClass   DataClass
+}
+
 // ── Typed setting keys (unexported fields, exported via Descriptor) ─────
 
 // Bool is a typed key for a boolean toggle setting.
@@ -439,6 +455,39 @@ func (s *Secret) toDeclaration() Declaration {
 	}
 }
 
+// PathList is a typed key for a path-list setting. The stored and wire value
+// is a canonical []string of existing directories.
+type PathList struct {
+	key         string
+	section     string
+	label       string
+	description string
+	dataClass   DataClass
+}
+
+func (p *PathList) Key() string             { return p.key }
+func (p *PathList) Section() string         { return p.section }
+func (p *PathList) Label() string           { return p.label }
+func (p *PathList) Description() string     { return p.description }
+func (p *PathList) Control() ControlKind    { return ControlPaths }
+func (p *PathList) DataClass() DataClass    { return p.dataClass }
+func (p *PathList) Default() any            { return []string{} }
+func (p *PathList) Options() []SelectOption { return nil }
+func (p *PathList) Min() *float64           { return nil }
+func (p *PathList) Max() *float64           { return nil }
+
+func (p *PathList) toDeclaration() Declaration {
+	return Declaration{
+		Key:         p.key,
+		Section:     p.section,
+		Label:       p.label,
+		Description: p.description,
+		Control:     ControlPaths,
+		DataClass:   p.dataClass,
+		Default:     p.Default(),
+	}
+}
+
 // ── Declaration auto-registration ──────────────────────────────────────
 
 // allDecls holds every declared setting, populated at package init time
@@ -533,6 +582,20 @@ func MustRegisterSecret(spec SecretSpec) *Secret {
 	assertValidKey(s.key)
 	allDecls = append(allDecls, s)
 	return s
+}
+
+// MustRegisterPathList declares a path-list setting and registers it.
+func MustRegisterPathList(spec PathListSpec) *PathList {
+	p := &PathList{
+		key:         spec.Key,
+		section:     spec.Section,
+		label:       spec.Label,
+		description: spec.Description,
+		dataClass:   spec.DataClass,
+	}
+	assertValidKey(p.key)
+	allDecls = append(allDecls, p)
+	return p
 }
 
 func assertValidKey(key string) {
@@ -785,11 +848,50 @@ func init() {
 	RegisterSectionGroup("Interface", "application")
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")
+	RegisterSectionGroup("Experimental", "developer")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).
 	RegisterSectionGroup("Test", "developer")
 }
+
+// SandboxEnabled gates the sidebar shield action (ADR-0043).
+// It is a capability/visibility gate, not "sandbox every tab": it exposes
+// conversion of an eligible active local tab, and the backend rejects a
+// sandbox request while the flag is off.
+var SandboxEnabled = MustRegisterBool(BoolSpec{
+	Key:         "sandbox.enabled",
+	Section:     "Experimental",
+	Label:       "Filesystem sandbox",
+	Description: "Expose the activity-bar shield beside Files that converts the active local tab into a filesystem-isolated sandbox (experimental). The action requires a verified current folder; the flag alone never sandboxes anything.",
+	DataClass:   PublicConfig,
+	Default:     false,
+})
+
+// SandboxAllowedWritablePaths is the persisted global baseline of additional
+// directories made read-write in each future sandbox conversion (ADR-0037
+// §3.1, ADR-0039 §3.1). The workspace is always writable; changes affect
+// future conversions only.
+var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
+	Key:         "sandbox.allowedWritablePaths",
+	Section:     "Experimental",
+	Label:       "Sandbox read & write folders",
+	Description: "Additional folders available read/write in each future sandbox conversion. A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and receive exactly this read/write authority. The workspace is always read/write; changes affect future conversions only.",
+	DataClass:   PrivateMetadata,
+})
+
+// SandboxAllowedReadOnlyPaths is the persisted global baseline of additional
+// directories made read-only in each future sandbox conversion (ADR-0039
+// §3.1): their contents may be read and traversed, never created, removed,
+// renamed, or modified. The workspace is always read/write; changes affect
+// future conversions only.
+var SandboxAllowedReadOnlyPaths = MustRegisterPathList(PathListSpec{
+	Key:         "sandbox.allowedReadOnlyPaths",
+	Section:     "Experimental",
+	Label:       "Sandbox read-only folders",
+	Description: "Additional folders available read-only in each future sandbox conversion (their contents may be read, never created, removed, renamed, or modified). A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and remain read-only. The workspace is always read/write; changes affect future conversions only.",
+	DataClass:   PrivateMetadata,
+})
 
 // ── Document shape ─────────────────────────────────────────────────────
 
@@ -874,9 +976,20 @@ func New(doc storage.DocumentStore, secrets credential.SecretStore) *Registry {
 	}
 
 	for k, v := range stored.Values {
-		if descriptorByKey(k) != nil {
-			r.values[k] = v
+		d := descriptorByKey(k)
+		if d == nil {
+			continue
 		}
+		if d.Control() == ControlPaths {
+			// A recognized path list is preserved raw (no re-stat: a
+			// directory that disappeared after a valid save stays visible and
+			// makes a sandbox launch fail closed). A type-corrupted value is
+			// preserved unchanged so it stays observable as an invalid
+			// snapshot, never silently coerced to the default (ADR-0037 §3.2).
+			r.values[k] = normalizeLoadedPathList(v)
+			continue
+		}
+		r.values[k] = v
 	}
 	for k, id := range stored.SecretRefs {
 		if descriptorByKey(k) != nil {
@@ -956,6 +1069,8 @@ func descriptorToDeclaration(d Descriptor) Declaration {
 	case *Select:
 		return t.toDeclaration()
 	case *Secret:
+		return t.toDeclaration()
+	case *PathList:
 		return t.toDeclaration()
 	default:
 		return Declaration{
@@ -1107,6 +1222,101 @@ func (r *Registry) SetSelect(s *Select, value string) error {
 	}
 }
 
+// GetPaths returns the current value of a path-list setting, or its default.
+// The returned slice is a fresh copy — mutating it never mutates registry
+// state. A stored value that is not a recognized string list is reported as a
+// corruption error, never silently coerced to the default (ADR-0037 §3.2).
+func (r *Registry) GetPaths(p *PathList) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v, ok := r.values[p.key]
+	if !ok {
+		return []string{}, nil
+	}
+	paths, ok := v.([]string)
+	if !ok {
+		return nil, &ValidationError{SettingKey: p.key, Message: "stored path list is corrupted"}
+	}
+	return copyStrings(paths), nil
+}
+
+// SetPaths validates, canonicalizes, and persists a path-list setting. The
+// entire candidate is validated before one commit: non-empty absolute paths
+// with no control runes that resolve to existing directories, at most
+// pathListMaxEntries entries, canonical duplicates collapsing first-wins.
+func (r *Registry) SetPaths(p *PathList, value []string) error {
+	r.mu.Lock()
+	canonical, err := canonicalPaths(p.key, value)
+	if err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	newValues := copyValues(r.values)
+	newValues[p.key] = canonical
+	if sandboxPathKeys[p.key] {
+		if err := checkSandboxPathConflict(p.key, newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	ch, commitErr := r.commitLocked(newValues, r.refs, []string{p.key})
+	r.mu.Unlock()
+	if commitErr == nil {
+		r.finishCommit(ch)
+	}
+	return commitErr
+}
+
+// AppendSandboxPath canonicalizes one directory and appends it to a sandbox
+// baseline in the same locked persistence transaction that observes the
+// current list. Concurrent Settings edits therefore cannot be lost. Existing
+// canonical entries are idempotent and do not advance the revision.
+func (r *Registry) AppendSandboxPath(p *PathList, path string) (int, error) {
+	if p != SandboxAllowedWritablePaths && p != SandboxAllowedReadOnlyPaths {
+		return 0, &ValidationError{SettingKey: p.key, Message: "not a sandbox path baseline"}
+	}
+	r.mu.Lock()
+	canonical, err := canonicalPaths(p.key, []string{path})
+	if err != nil {
+		r.mu.Unlock()
+		return 0, err
+	}
+	if len(canonical) != 1 {
+		r.mu.Unlock()
+		return 0, &ValidationError{SettingKey: p.key, Message: "path did not resolve to one directory"}
+	}
+	existing, ok := r.values[p.key].([]string)
+	if !ok && r.values[p.key] != nil {
+		r.mu.Unlock()
+		return 0, &ValidationError{SettingKey: p.key, Message: "stored path list is corrupted"}
+	}
+	for _, current := range existing {
+		if current == canonical[0] {
+			revision := r.revision
+			r.mu.Unlock()
+			return revision, nil
+		}
+	}
+	if len(existing) >= pathListMaxEntries {
+		r.mu.Unlock()
+		return 0, &ValidationError{SettingKey: p.key, Message: fmt.Sprintf("at most %d paths are allowed", pathListMaxEntries)}
+	}
+	newValues := copyValues(r.values)
+	newValues[p.key] = append(copyStrings(existing), canonical[0])
+	if err := checkSandboxPathConflict(p.key, newValues); err != nil {
+		r.mu.Unlock()
+		return 0, err
+	}
+	ch, commitErr := r.commitLocked(newValues, r.refs, []string{p.key})
+	revision := r.revision
+	r.mu.Unlock()
+	if commitErr != nil {
+		return 0, commitErr
+	}
+	r.finishCommit(ch)
+	return revision, nil
+}
+
 // ── getSnapshot ─────────────────────────────────────────────────────────
 
 // GetSnapshot returns the current snapshot of all non-secret settings:
@@ -1122,7 +1332,11 @@ func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
 			continue
 		}
 		if v, ok := r.values[d.Key()]; ok {
-			values[d.Key()] = v
+			if d.Control() == ControlPaths {
+				values[d.Key()] = copyPathsValue(v)
+			} else {
+				values[d.Key()] = v
+			}
 			overridden = append(overridden, d.Key())
 		} else {
 			values[d.Key()] = d.Default()
@@ -1154,6 +1368,10 @@ func (r *Registry) NonSecretOverrides() map[string]any {
 		if d == nil || d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
 			continue
 		}
+		if d.Control() == ControlPaths {
+			out[key] = copyPathsValue(value)
+			continue
+		}
 		out[key] = value
 	}
 	return out
@@ -1166,7 +1384,7 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 	defer r.mu.Unlock()
 
 	newValues := copyValues(r.values)
-	var changedKeys []string
+	typed := make(map[string]any, len(values))
 	for key, value := range values {
 		d := descriptorByKey(key)
 		if d == nil {
@@ -1175,13 +1393,23 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 		if d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
 			return PendingNotification{}, &ValidationError{SettingKey: key, Message: "secret-class settings cannot be bulk-replaced"}
 		}
+		if d.Control() == ControlPaths {
+			canonical, err := canonicalPaths(key, value)
+			if err != nil {
+				return PendingNotification{}, err
+			}
+			typed[key] = canonical
+			continue
+		}
 		if err := validateValue(d, value); err != nil {
 			return PendingNotification{}, err
 		}
+		typed[key] = value
 	}
-	for key, value := range values {
+	var changedKeys []string
+	for key, value := range typed {
 		existing, had := newValues[key]
-		if !had || existing != value {
+		if !had || !reflect.DeepEqual(existing, value) {
 			changedKeys = append(changedKeys, key)
 		}
 		newValues[key] = value
@@ -1191,12 +1419,25 @@ func (r *Registry) ReplaceNonSecretOverrides(values map[string]any) (PendingNoti
 		if d == nil || d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
 			continue
 		}
-		if _, kept := values[key]; !kept {
+		if _, kept := typed[key]; !kept {
 			changedKeys = append(changedKeys, key)
 			delete(newValues, key)
 		}
 	}
 	sort.Strings(changedKeys)
+	// Check sandbox cross-class conflicts on the final combined state.
+	// The error is keyed to the read-only setting — the one whose value is
+	// constrained by the writable setting.
+	if _, roChanged := typed[SandboxAllowedReadOnlyPaths.Key()]; roChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedReadOnlyPaths.Key(), newValues); err != nil {
+			return PendingNotification{}, err
+		}
+	}
+	if _, rwChanged := typed[SandboxAllowedWritablePaths.Key()]; rwChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedWritablePaths.Key(), newValues); err != nil {
+			return PendingNotification{}, err
+		}
+	}
 	ch, err := r.commitLocked(newValues, r.refs, changedKeys)
 	if err != nil {
 		return PendingNotification{}, err
@@ -1260,6 +1501,10 @@ func validateValue(d Descriptor, value any) error {
 			}
 		}
 		return &ValidationError{SettingKey: d.Key(), Message: fmt.Sprintf("invalid option %q", s)}
+	case ControlPaths:
+		if _, err := canonicalPaths(d.Key(), value); err != nil {
+			return err
+		}
 	default:
 		return &ValidationError{SettingKey: d.Key(), Message: "unsupported control kind"}
 	}
@@ -1278,6 +1523,12 @@ func (r *Registry) Reset(d Descriptor) error {
 	}
 	newValues := copyValues(r.values)
 	delete(newValues, d.Key())
+	if sandboxPathKeys[d.Key()] {
+		if err := checkSandboxPathConflict(d.Key(), newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
 	ch, err := r.commitLocked(newValues, r.refs, []string{d.Key()})
 	r.mu.Unlock()
 	if err == nil {
@@ -1332,6 +1583,20 @@ func (r *Registry) ApplyValues(values map[string]any) error {
 	if len(changed) == 0 {
 		r.mu.Unlock()
 		return nil
+	}
+
+	// Check sandbox cross-class conflicts on the final combined state.
+	if _, roChanged := values[SandboxAllowedReadOnlyPaths.Key()]; roChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedReadOnlyPaths.Key(), newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	if _, rwChanged := values[SandboxAllowedWritablePaths.Key()]; rwChanged {
+		if err := checkSandboxPathConflict(SandboxAllowedWritablePaths.Key(), newValues); err != nil {
+			r.mu.Unlock()
+			return err
+		}
 	}
 
 	ch, err := r.commitLocked(newValues, r.refs, changed)
@@ -1406,6 +1671,12 @@ func coerceValue(d Descriptor, value any) (any, error) {
 			}
 		}
 		return f, nil
+	case ControlPaths:
+		paths, err := canonicalPaths(d.Key(), value)
+		if err != nil {
+			return nil, err
+		}
+		return paths, nil
 	}
 	return nil, &ValidationError{SettingKey: d.Key(), Value: value, Message: "unsupported control kind"}
 }
@@ -1557,6 +1828,243 @@ func copyRefs(src map[string]credential.SecretID) map[string]credential.SecretID
 		dst[k] = v
 	}
 	return dst
+}
+
+// ── Path-list validation ───────────────────────────────────────────────
+
+// pathListMaxEntries bounds a path-list setting (design spec §3.1).
+const pathListMaxEntries = 32
+
+// canonicalPaths validates a path-list candidate and returns the canonical,
+// deduplicated slice. It accepts []string (the typed setter / in-memory
+// snapshot) and []any (JSON-decoded values). Every entry must be a non-empty
+// absolute path with no control runes that resolves (Abs → EvalSymlinks →
+// Stat) to an existing directory. Canonical duplicates collapse first-wins.
+// The returned slice is freshly allocated and never aliases the input.
+// Error messages deliberately name no path (AD-11: user paths never enter
+// wire errors or logs).
+func canonicalPaths(key string, value any) ([]string, error) {
+	strs, err := pathStrings(value)
+	if err != nil {
+		return nil, &ValidationError{SettingKey: key, Value: value, Message: err.Error()}
+	}
+	if len(strs) > pathListMaxEntries {
+		return nil, &ValidationError{SettingKey: key, Value: value, Message: fmt.Sprintf("at most %d paths allowed", pathListMaxEntries)}
+	}
+	out := make([]string, 0, len(strs))
+	for _, p := range strs {
+		if p == "" {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must be non-empty"}
+		}
+		if !filepath.IsAbs(p) {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must be absolute"}
+		}
+		if hasControlRune(p) {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "paths must not contain control characters"}
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "invalid path"}
+		}
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "path does not resolve"}
+		}
+		fi, err := os.Stat(resolved)
+		if err != nil || !fi.IsDir() {
+			return nil, &ValidationError{SettingKey: key, Value: value, Message: "path is not an existing directory"}
+		}
+		dup := false
+		for _, seen := range out {
+			if sameDir(resolved, seen) {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue // canonical first-wins
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
+// pathStrings converts a path-list candidate to []string. It accepts []string
+// (the typed setter) and []any (a JSON-decoded array of strings); anything
+// else is rejected as "expected an array of strings".
+func pathStrings(value any) ([]string, error) {
+	switch v := value.(type) {
+	case []string:
+		return v, nil
+	case []any:
+		out := make([]string, len(v))
+		for i, e := range v {
+			s, ok := e.(string)
+			if !ok {
+				return nil, errors.New("expected an array of strings")
+			}
+			out[i] = s
+		}
+		return out, nil
+	default:
+		return nil, errors.New("expected an array of strings")
+	}
+}
+
+// hasControlRune reports whether p contains a Unicode control rune (which
+// includes NUL). Such bytes cannot appear in a path handed to a native
+// backend.
+func hasControlRune(p string) bool {
+	for _, r := range p {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyStrings returns a fresh copy of src; the result never aliases the input.
+func copyStrings(src []string) []string {
+	if src == nil {
+		return []string{}
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
+// copyPathsValue returns the snapshot/override representation of a stored
+// path-list value: a deep-copied []string for a recognized list, or the raw
+// stored value (deep-copied when it is a slice) so startup type corruption
+// stays observable for fail-closed handling instead of being coerced to [].
+func copyPathsValue(v any) any {
+	switch t := v.(type) {
+	case []string:
+		return copyStrings(t)
+	case []any:
+		out := make([]any, len(t))
+		copy(out, t)
+		return out
+	default:
+		return v
+	}
+}
+
+// normalizeLoadedPathList converts a persisted path-list value into registry
+// state. A recognized value — an array of strings with at most
+// pathListMaxEntries entries — becomes []string, preserved raw (no re-stat).
+// Any other value is type corruption and is returned unchanged so it remains
+// observable as an invalid snapshot.
+func normalizeLoadedPathList(v any) any {
+	switch t := v.(type) {
+	case []string:
+		if len(t) > pathListMaxEntries {
+			return v
+		}
+		return copyStrings(t)
+	case []any:
+		if len(t) > pathListMaxEntries {
+			return v
+		}
+		out := make([]string, len(t))
+		for i, e := range t {
+			s, ok := e.(string)
+			if !ok {
+				return v
+			}
+			out[i] = s
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// ── Sandbox path-class conflict detection ────────────────────────────────
+
+// sameDir reports whether two canonical paths refer to the same directory,
+// falling back to os.SameFile for case-insensitive/case-normalizing
+// filesystems where lexical comparison is not identity. Fails closed: a stat
+// failure that would let the caller widen permissions returns false, so the
+// caller conservatively treats the paths as distinct.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fiA, errA := os.Stat(a)
+	fiB, errB := os.Stat(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return os.SameFile(fiA, fiB)
+}
+
+// pathWithinOrEqual reports whether path equals root or is a descendant of
+// root. The cheap lexical fast path (filepath.Rel) is followed by os.SameFile
+// while walking parents, so case/normalization aliases of the same directory
+// are recognised on case-insensitive filesystems. Fails closed: a stat
+// failure that would make a path appear "within" returns false.
+func pathWithinOrEqual(root, path string) bool {
+	if sameDir(root, path) {
+		return true
+	}
+	// Cheap lexical fast path.
+	rel, err := filepath.Rel(root, path)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return true
+	}
+	// Walk up from path, checking each ancestor with os.SameFile.
+	for p := path; p != "/" && p != "."; {
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+		if sameDir(parent, root) {
+			return true
+		}
+		p = parent
+	}
+	return false
+}
+
+// checkSandboxPathConflict returns a ValidationError if any read-only path
+// equals or is a descendant of any writable path — a configuration that
+// would make the read-only classification meaningless because a writable
+// ancestor overrides it. RW child under RO parent is allowed: the child is
+// specifically writable inside a broader read-only tree.
+// The error is keyed to the setting being changed and carries no path.
+func checkSandboxPathConflict(key string, values map[string]any) error {
+	roAny, roOK := values[SandboxAllowedReadOnlyPaths.Key()]
+	rwAny, rwOK := values[SandboxAllowedWritablePaths.Key()]
+	if !roOK || !rwOK {
+		return nil
+	}
+	ro, ok := roAny.([]string)
+	if !ok || len(ro) == 0 {
+		return nil
+	}
+	rw, ok := rwAny.([]string)
+	if !ok || len(rw) == 0 {
+		return nil
+	}
+	for _, r := range ro {
+		for _, w := range rw {
+			if pathWithinOrEqual(w, r) {
+				return &ValidationError{
+					SettingKey: key,
+					Message:    "a read-only path cannot be equal to or below a writable path",
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// sandboxPathKeys is the set of keys whose values participate in the
+// cross-class conflict check — the two sandbox path-list settings.
+var sandboxPathKeys = map[string]bool{
+	"sandbox.allowedWritablePaths": true,
+	"sandbox.allowedReadOnlyPaths": true,
 }
 
 func toFloat64(v any) (float64, bool) {

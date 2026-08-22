@@ -316,6 +316,26 @@ func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string,
 	return "", ErrNotImplemented
 }
 
+func (s *layoutStub) InsertSandboxGrant(_ context.Context, grant SandboxGrant) error {
+	s.log.Info("content stub: LayoutRepository.InsertSandboxGrant", "pane", grant.PaneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) SandboxGrantExists(_ context.Context, paneID string) (bool, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantExists", "pane", paneID)
+	return false, ErrNotImplemented
+}
+
+func (s *layoutStub) SandboxGrantedPaneIDs(_ context.Context) (map[string]struct{}, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantedPaneIDs")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) CloseSandboxPanes(_ context.Context) error {
+	s.log.Info("content stub: LayoutRepository.CloseSandboxPanes")
+	return ErrNotImplemented
+}
+
 func (s *layoutStub) ClearWindow(_ context.Context) error {
 	s.log.Info("content stub: LayoutRepository.ClearWindow")
 	return ErrNotImplemented

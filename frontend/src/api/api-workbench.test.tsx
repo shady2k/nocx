@@ -3567,7 +3567,7 @@ describe('a request names itself from what you typed', () => {
   }
 
   /** Make one through the header's door and wait for it to be in the form. */
-  async function newRequest(bar: HTMLElement): Promise<void> {
+  async function newRequest(): Promise<void> {
     fireEvent.click(button('New request'))
     await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
   }
@@ -3576,7 +3576,7 @@ describe('a request names itself from what you typed', () => {
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openRequest(bar)
-    await newRequest(bar)
+    await newRequest()
 
     fireEvent.input(field('api-url'), {
       target: { value: 'http://127.0.0.1:8080/v1/broker-access' },
@@ -3593,7 +3593,7 @@ describe('a request names itself from what you typed', () => {
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openRequest(bar)
-    await newRequest(bar)
+    await newRequest()
 
     fireEvent.input(field('api-url'), { target: { value: 'https://h/v1/broker-access' } })
     await vi.waitFor(() => expect(crumbName()).toBe('GET broker-access'))
@@ -3612,7 +3612,7 @@ describe('a request names itself from what you typed', () => {
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openRequest(bar)
-    await newRequest(bar)
+    await newRequest()
 
     // A host is not a path segment: the offer is absent rather than wrong.
     fireEvent.input(field('api-url'), { target: { value: 'http://127.0.0.1:8080' } })
@@ -3631,5 +3631,94 @@ describe('a request names itself from what you typed', () => {
     fireEvent.input(field('api-url'), { target: { value: 'https://h/v1/broker-access' } })
     await vi.waitFor(() => expect(field('api-url').value).toBe('https://h/v1/broker-access'))
     expect(crumbName()).toBe('create')
+  })
+})
+
+describe('a request can be duplicated', () => {
+  it('the copy is beside the original, named apart from it, and in the form', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+
+    // BESIDE THE ORIGINAL: the same folder inside the collection, under a
+    // path the allocator chose — a copy of `users/create.json` at the
+    // collection's root is not beside anything.
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'users/create-copy.json',
+        expect.objectContaining({ name: 'create copy', id: 'users/create-copy' }),
+      ),
+    )
+    // It is a FILE like any other: the row is there because the collection
+    // listing has it, which is the route a colleague's git pull takes.
+    await vi.waitFor(() => row('users/create-copy.json'))
+    // And it is the request in the form, so the change they came to make is
+    // the next thing they do.
+    await vi.waitFor(() => expect(crumbName()).toBe('create copy'))
+  })
+
+  it('the copy carries everything, including the auth VARIABLE and no value', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+    await vi.waitFor(() => expect(disk.files.has('users/create-copy.json')).toBe(true))
+
+    const copy = disk.files.get('users/create-copy.json') as ApiRequest
+    expect(copy.method).toBe(REQUEST.method)
+    expect(copy.url).toBe(REQUEST.url)
+    expect(copy.headers).toEqual(REQUEST.headers)
+    expect(copy.query).toEqual(REQUEST.query)
+    expect(copy.variables).toEqual(REQUEST.variables)
+    expect(copy.body).toEqual(REQUEST.body)
+    // The auth VARIABLE NAME travels; there is nowhere in the file a value
+    // could be spelled, and the copy must not become the place (design §8).
+    expect(copy.auth).toEqual(REQUEST.auth)
+    expect(JSON.stringify(copy)).not.toContain(SECRET_VALUE)
+    // Two things do not travel, and both are the file's own identity: the
+    // path it lives at and the id minted from it.
+    expect(copy.id).not.toBe(REQUEST.id)
+  })
+
+  it('duplicating twice gives two copies — not a collision and not an overwrite', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+    await vi.waitFor(() => row('users/create-copy.json'))
+    fireEvent.click(button('Duplicate create'))
+    await vi.waitFor(() => row('users/create-copy-2.json'))
+
+    // Three requests where there was one, and the first copy still holds
+    // what was written into it.
+    expect([...disk.files.keys()]).toEqual([
+      CREATE_REL_PATH,
+      'users/create-copy.json',
+      'users/create-copy-2.json',
+    ])
+    // Told apart in the tree, which is the whole point of copying one.
+    expect(crumbName()).toBe('create copy 2')
+  })
+
+  it('a copy that could not be written says so and puts no row in the tree', async () => {
+    const disk = folderOnDisk({
+      writeRequest: vi.fn().mockRejectedValue(new Error('read-only file system')),
+    })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+
+    await vi.waitFor(() => expect(workbench().textContent).toContain('read-only file system'))
+    expect(workbench().querySelector('[data-rel-path="users/create-copy.json"]')).toBeNull()
   })
 })

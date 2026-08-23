@@ -31,6 +31,7 @@ import { IconButton } from '../ui/icon-button'
 import {
   ArrowDownIcon,
   CloseIcon,
+  CopyIcon,
   FolderOpenIcon,
   MoreIcon,
   PencilIcon,
@@ -1588,6 +1589,30 @@ export function ApiPane(props: ApiPaneProps) {
                             nothing between the pointer and the act. Closing
                             is a menu item now, where a destructive thing has
                             to be chosen rather than brushed past. */}
+                          {/* A REQUEST ROW'S OWN ACTION: copy this one.
+                            It is on the row and not in the header beside
+                            Save, and the two lines' division is why —
+                            the header is about the one request a person has
+                            open, and this acts on the row it is on, which is
+                            very often not that one. Delete stays where it
+                            was for the same reason it went there: it takes
+                            something away, so it has to be read and chosen
+                            rather than brushed past. */}
+                          <Show when={row.kind === 'request'}>
+                            <span class="api-tree__row-actions">
+                              <IconButton
+                                size="sm"
+                                title="Duplicate"
+                                ariaLabel={`Duplicate ${row.name}`}
+                                onClick={(e: MouseEvent) => {
+                                  e.stopPropagation()
+                                  void store.duplicateRequest(row.handle, row.relPath)
+                                }}
+                              >
+                                <CopyIcon />
+                              </IconButton>
+                            </span>
+                          </Show>
                           <Show when={row.kind === 'collection'}>
                             <span class="api-tree__row-actions">
                               <IconButton

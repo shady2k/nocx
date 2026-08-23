@@ -351,6 +351,23 @@ export interface ApiStore {
    */
   deleteRequest(handle: string, relPath: string): Promise<void>
   /**
+   * Copy one request file, beside itself, and open the copy.
+   *
+   * Somebody wanting the same call with one header changed had two ways to
+   * get it: retype the request, or edit the original and lose it. The parts
+   * were both here — an allocator that names a file nothing occupies, and a
+   * write — with no door onto them.
+   *
+   * THE SOURCE IS THE FILE, read under its own path rather than taken from
+   * the form: the request being copied is very often not the one open, and
+   * the file is the truth in any case (§6.4). What travels is everything the
+   * file holds — method, URL, headers, query, variables, body and the auth
+   * VARIABLE NAME — and what does not is the file's own identity, the path
+   * and the id minted from it. A credential cannot travel because there is
+   * nowhere in the contract it could be spelled (design §8).
+   */
+  duplicateRequest(handle: string, relPath: string): Promise<void>
+  /**
    * Make a request that does not exist yet, in the collection the workbench
    * is pointed at, and open it.
    *
@@ -434,16 +451,61 @@ function newToken(): string {
  *  decision before the thing they came to do. */
 const UNTITLED = 'Untitled request'
 
-function freePath(open: readonly ApiOpenCollection[], handle: string, name: string): string {
+function freePath(
+  open: readonly ApiOpenCollection[],
+  handle: string,
+  name: string,
+  /** The directory INSIDE the collection the file goes in — '' for the
+   *  collection's own root, which is where a request made from nothing goes.
+   *  A copy goes beside its original instead, and a copy of
+   *  `users/create.json` at the root is not beside anything. */
+  dir = '',
+): string {
   const taken = new Set(
     open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.relPath) ?? [],
   )
   const stem = slugify(name) || 'untitled'
-  if (!taken.has(`${stem}.json`)) return `${stem}.json`
-  for (let n = 2; ; n++) {
-    const candidate = `${stem}-${n}.json`
+  const at = dir === '' ? stem : `${dir}/${stem}`
+  return firstFree(taken, (n) => (n === 1 ? `${at}.json` : `${at}-${n}.json`))
+}
+
+/**
+ * The first candidate `form` produces that `taken` does not already hold,
+ * counting from one — the rule behind `create-user.json`, `create-user-2.json`
+ * and behind `create copy`, `create copy 2`.
+ *
+ * ONE COUNTING RULE, two currencies. A file and a name are uniquified against
+ * different sets and spell their suffix differently, and that is all that
+ * differs; a second loop would be the same rule written twice, agreeing until
+ * the day one of them learnt something the other did not.
+ */
+function firstFree(taken: ReadonlySet<string>, form: (n: number) => string): string {
+  for (let n = 1; ; n++) {
+    const candidate = form(n)
     if (!taken.has(candidate)) return candidate
   }
+}
+
+/**
+ * What a copy of `name` is CALLED, given what the collection already shows.
+ *
+ * A name a person can tell apart is the point of the whole act: a second row
+ * called exactly what the first one is called is the tree this door exists to
+ * stop growing. The file could not collide either way — the allocator sees to
+ * that — but two identical rows over two different files is worse than a
+ * collision, because nothing on screen says which is which.
+ */
+function freeCopyName(open: readonly ApiOpenCollection[], handle: string, name: string): string {
+  const taken = new Set(
+    open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.name) ?? [],
+  )
+  return firstFree(taken, (n) => (n === 1 ? `${name} copy` : `${name} copy ${n}`))
+}
+
+/** The directory a path inside a collection lives in — '' at the root. */
+function directoryOf(relPath: string): string {
+  const cut = relPath.lastIndexOf('/')
+  return cut === -1 ? '' : relPath.slice(0, cut)
 }
 
 function message(err: unknown): string {
@@ -1096,6 +1158,36 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
   }
 
+  const duplicateRequest = async (handle: string, relPath: string): Promise<void> => {
+    try {
+      // Read first, and let a source that will not read stop the whole act:
+      // a copy written from a request nobody could read would be a file
+      // whose contents nothing accounts for.
+      const source = (await services.readRequest(handle, relPath)).request
+      const name = freeCopyName(untrack(collections), handle, source.name)
+      // BESIDE THE ORIGINAL — the same directory inside the collection, so
+      // the copy of `users/create.json` lands under `users/` where a person
+      // is already looking.
+      const target = freePath(untrack(collections), handle, name, directoryOf(relPath))
+      await services.writeRequest(handle, target, {
+        ...source,
+        // The id is the file's stem, the rule `newRequest` follows: two
+        // machines copying the same request produce the same file, and the
+        // copy does not arrive carrying the original's identity.
+        id: target.replace(/\.json$/, ''),
+        name,
+      })
+      setError('')
+      // The tree learns about the copy the way it learns about a colleague's
+      // — from the folder, re-read — and the form opens it through the
+      // ordinary path, so what lands there is what the FILE says.
+      await refresh()
+      await openRequest(handle, target)
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
   const saveDraft = async (): Promise<void> => {
     const target = untrack(selected)
     const request = untrack(draft)
@@ -1440,6 +1532,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     saveDraft,
     deleteRequest,
     newRequest,
+    duplicateRequest,
     editDraft,
     setEnvironment,
     send,

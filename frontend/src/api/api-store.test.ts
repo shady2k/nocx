@@ -800,3 +800,74 @@ describe('ApiStore — a request names itself while nobody else has', () => {
     expect(disk.files.get('untitled-request.json')?.url).toBe('https://h/v1/broker-access')
   })
 })
+
+// ── A request can be duplicated (nocx-bp44a) ──────────────────────────────
+//
+// The parts existed — `freePath` names a file nothing occupies and
+// `writeRequest` writes one — and there was no way to reach them: somebody
+// wanting the same call with one header changed retyped it, or edited the
+// original and lost it.
+
+describe('ApiStore — duplicating a request', () => {
+  it('copies the FILE, beside the original, under a name the allocator freed', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    // The source is READ rather than taken from the form: the file is the
+    // truth, and the request being copied is very often not the one open.
+    expect(disk.readRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH)
+    const copy = disk.files.get('users/create-copy.json')
+    expect(copy?.name).toBe('create copy')
+    expect(copy?.auth).toEqual(REQUEST.auth)
+    // Selected, so the change the person came to make is the next thing.
+    expect(store.selected()).toEqual({ handle: HANDLE, relPath: 'users/create-copy.json' })
+    expect(store.draft()?.name).toBe('create copy')
+  })
+
+  it('twice gives two copies, told apart in the tree', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    expect([...disk.files.keys()]).toEqual([
+      CREATE_REL_PATH,
+      'users/create-copy.json',
+      'users/create-copy-2.json',
+    ])
+    // Two rows a person can tell apart, which is why they made the copy.
+    expect(disk.files.get('users/create-copy-2.json')?.name).toBe('create copy 2')
+  })
+
+  it('a source that will not read writes nothing and says why', async () => {
+    const disk = folderOnDisk({
+      readRequest: vi.fn().mockRejectedValue(new Error('bad JSON')),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    expect(disk.writeRequest).not.toHaveBeenCalled()
+    expect(store.error()).toBe('bad JSON')
+  })
+
+  it('a copy the disk refuses leaves the folder as it was and says why', async () => {
+    const disk = folderOnDisk({
+      writeRequest: vi.fn().mockRejectedValue(new Error('read-only file system')),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    expect([...disk.files.keys()]).toEqual([CREATE_REL_PATH])
+    expect(store.error()).toBe('read-only file system')
+    expect(store.selected()).toBeNull()
+  })
+})

@@ -61,6 +61,30 @@ describe('ApiClient — one method per contract', () => {
     expect(call).toHaveBeenCalledWith('api.collections.create', { name: 'orders-api' })
   })
 
+  it('makes ONE folder inside a collection — a name, and the folder to put it in', async () => {
+    const { dispatcher, call } = fakeDispatcher({ relPath: 'reports', collection: {} })
+    await createApiWorkbenchServices(dispatcher).createFolder('h1', '', 'reports')
+    expect(call).toHaveBeenCalledWith('api.collections.createFolder', {
+      handle: 'h1',
+      parentRelPath: '',
+      name: 'reports',
+    })
+  })
+
+  it('nests by naming the parent it already has, never by a path with separators in it', async () => {
+    // §13.1's grammar one level down: the caller names a COMPONENT and the
+    // backend derives the location. A client that spelled `users/admin` as
+    // the name would be asking the backend to sanitise a path, which is the
+    // thing that grammar exists to make impossible.
+    const { dispatcher, call } = fakeDispatcher({ relPath: 'users/admin', collection: {} })
+    await createApiWorkbenchServices(dispatcher).createFolder('h1', 'users', 'admin')
+    expect(call).toHaveBeenCalledWith('api.collections.createFolder', {
+      handle: 'h1',
+      parentRelPath: 'users',
+      name: 'admin',
+    })
+  })
+
   it('closes a folder by handle, never by path', async () => {
     const { dispatcher, call } = fakeDispatcher({})
     await createApiWorkbenchServices(dispatcher).closeCollection('h1')
@@ -225,6 +249,7 @@ describe('ApiClient — one method per contract', () => {
     const s = createApiWorkbenchServices(dispatcher)
     await s.listCollections()
     await s.createCollection('orders-api')
+    await s.createFolder('h1', 'users', 'admin')
     await s.closeCollection('h1')
     await s.readRequest('h1', 'a.json')
     await s.writeRequest('h1', 'a.json', REQUEST)
@@ -245,6 +270,7 @@ describe('ApiClient — every call has a test where it fails', () => {
     ['listCollections', (s) => s.listCollections()],
     ['openCollection', (s) => s.openCollection('/w/x')],
     ['createCollection', (s) => s.createCollection('orders-api')],
+    ['createFolder', (s) => s.createFolder('h1', 'users', 'admin')],
     ['closeCollection', (s) => s.closeCollection('h1')],
     ['readRequest', (s) => s.readRequest('h1', 'a.json')],
     ['writeRequest', (s) => s.writeRequest('h1', 'a.json', REQUEST)],

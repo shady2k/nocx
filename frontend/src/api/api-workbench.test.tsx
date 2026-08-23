@@ -44,6 +44,7 @@ import {
   nativeDropFixture,
   type NativeDropFixture,
   createdFixture,
+  folderCreatedFixture,
   folderOnDisk,
   failedSendFixture,
   requestRawFixture,
@@ -3568,11 +3569,11 @@ describe('a new request has a door that does not move', () => {
     // And the row's menu still offers it.
     fireEvent.click(button('More actions for acme-api'))
     await vi.waitFor(() =>
-      expect(document.querySelector('[data-testid="api-collection-row-menu"]')).toBeTruthy(),
+      expect(document.querySelector('[data-testid="api-folder-row-menu"]')).toBeTruthy(),
     )
     const item = [
       ...(document
-        .querySelector('[data-testid="api-collection-row-menu"]')
+        .querySelector('[data-testid="api-folder-row-menu"]')
         ?.querySelectorAll('button') ?? []),
     ].find((b) => (b.textContent ?? '').trim() === 'New request')
     expect(item, 'the row menu still offers New request').toBeTruthy()
@@ -3944,5 +3945,220 @@ describe('the tree says which request is open', () => {
 
     await vi.waitFor(() => expect(crumbName()).toBe('ping'))
     expect(marked()).toEqual([])
+  })
+})
+
+// ── A collection can be given a folder from the tree (nocx-8v1fu) ─────────
+//
+// The half of design §6.2 the product could not reach. A collection is a
+// folder and it may contain folders; the Postman importer writes them, so an
+// imported collection arrived with structure and one built inside nocx could
+// never have any — there was no folder-creation door anywhere on the surface.
+//
+// Every check below drives the seam a person reaches: the control is found by
+// its words, activated from the state a person starts in, and what appears
+// afterwards is the assertion. Nothing calls the store.
+
+describe('a collection can be given a folder', () => {
+  /** A folder or collection row, by the path within the collection — '' is
+   *  the collection's own row. Requests are addressed by `data-rel-path`;
+   *  every row carries `data-row-key`, which is the handle and the path. */
+  function treeRow(relPath: string, handle: string = HANDLE): HTMLElement {
+    const el = workbench().querySelector<HTMLElement>(`[data-row-key="${handle}:${relPath}"]`)
+    if (!el) throw new Error(`no tree row for ${relPath || '(the collection)'}`)
+    return el
+  }
+
+  /** Right-click a folder row and pick one of its acts. */
+  async function pickOnFolder(relPath: string, label: string): Promise<void> {
+    rightClick(treeRow(relPath))
+    await vi.waitFor(() => menuItem(label))
+    fireEvent.click(menuItem(label))
+  }
+
+  /** Answer the folder ask the way a person does. */
+  function answerWith(name: string): void {
+    const field = document.querySelector<HTMLInputElement>('#api-new-folder-name')
+    if (!field) throw new Error('the folder ask is not on screen')
+    fireEvent.input(field, { target: { value: name } })
+    fireEvent.click(button('Create folder'))
+  }
+
+  /** The reason under the folder ask's field, or '' when it is clean. */
+  function folderRefusal(): string {
+    return (
+      document.querySelector<HTMLElement>('#api-new-folder-name')?.closest('.ui-field')
+        ?.textContent ?? ''
+    )
+  }
+
+  /** A backend whose listing carries the folders it is given. */
+  function withFolders(folders: string[], over: Partial<ApiWorkbenchServices> = {}) {
+    return {
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({ collection: collectionFixture({ requests: [], folders }) }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+      ...over,
+    }
+  }
+
+  it('a folder with nothing in it is a row — the state a folder spends its first minutes in', async () => {
+    const { bar } = await mountApp(withFolders(['reports']))
+    await openWorkbench(bar)
+    await vi.waitFor(() => treeRow('reports'))
+  })
+
+  it('makes one inside the open collection, and it is in the tree afterwards', async () => {
+    const createFolder = vi.fn().mockResolvedValue(folderCreatedFixture('reports'))
+    const { bar } = await mountApp({ createFolder })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // The door a person starts at: the collection's own row, whose menu is
+    // reachable by the button beside it as well as by the right button.
+    fireEvent.click(button('More actions for acme-api'))
+    await vi.waitFor(() => menuItem('New folder…'))
+    fireEvent.click(menuItem('New folder…'))
+
+    await vi.waitFor(() => expect(document.querySelector('#api-new-folder-name')).toBeTruthy())
+    answerWith('reports')
+
+    // A NAME and the collection's ROOT — never a path, and never a root on
+    // the wire (§13.1).
+    await vi.waitFor(() => expect(createFolder).toHaveBeenCalledWith(HANDLE, '', 'reports'))
+    // And the row is there, drawn from the collection the call answered.
+    await vi.waitFor(() => treeRow('reports'))
+    expect(toasts().map((t) => t.message)).toContain('Created reports')
+  })
+
+  it('makes one INSIDE a folder, naming the parent it already has', async () => {
+    const createFolder = vi.fn().mockResolvedValue(folderCreatedFixture('users/admin'))
+    const { bar } = await mountApp({ createFolder })
+    await openWorkbench(bar)
+    await vi.waitFor(() => treeRow('users'))
+
+    await pickOnFolder('users', 'New folder…')
+    await vi.waitFor(() => expect(document.querySelector('#api-new-folder-name')).toBeTruthy())
+    answerWith('admin')
+
+    // NESTING IS REPEATED CALLS: the parent is the folder that is already
+    // there, and the name is one component. A surface that sent
+    // `users/admin` as the name would be asking the backend to sanitise a
+    // path, which §13.1 exists to make impossible.
+    await vi.waitFor(() => expect(createFolder).toHaveBeenCalledWith(HANDLE, 'users', 'admin'))
+    await vi.waitFor(() => treeRow('users/admin'))
+  })
+
+  it('the name the backend refuses is refused IN THE ASK, holding what was typed', async () => {
+    // §13.1's grammar: a folder name is one path component. The renderer does
+    // not know that rule and must not learn it — a surface that sanitised
+    // `a/b` into `a-b` would make a folder nobody asked for and report
+    // success. The backend's own sentence goes under the field.
+    const createFolder = vi
+      .fn()
+      .mockRejectedValue(new Error('invalid folder name: a folder name is one path component'))
+    const { bar } = await mountApp({ createFolder })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    await pickOnFolder('', 'New folder…')
+    await vi.waitFor(() => expect(document.querySelector('#api-new-folder-name')).toBeTruthy())
+    answerWith('a/b')
+
+    await vi.waitFor(() => expect(folderRefusal()).toContain('one path component'))
+    // The ask is still open and still holds the answer, so the correction is
+    // one keystroke rather than a retype.
+    expect(dialogFor('api-new-folder-name').open).toBe(true)
+    expect(
+      document.querySelector<HTMLInputElement>('#api-new-folder-name')?.value,
+    ).toBe('a/b')
+  })
+
+  it('a folder that is already there is refused rather than merged into', async () => {
+    // Mkdir's own EEXIST. The import refuses an existing destination the same
+    // way, and for the same reason: adopting a folder somebody else made puts
+    // two owners on one directory.
+    const createFolder = vi.fn().mockRejectedValue(new Error('folder already exists: "users"'))
+    const { bar } = await mountApp({ createFolder })
+    await openWorkbench(bar)
+    await vi.waitFor(() => treeRow('users'))
+
+    await pickOnFolder('', 'New folder…')
+    await vi.waitFor(() => expect(document.querySelector('#api-new-folder-name')).toBeTruthy())
+    answerWith('users')
+
+    await vi.waitFor(() => expect(folderRefusal()).toContain('already exists'))
+    // One row, not two, and nothing was said to have worked.
+    expect(workbench().querySelectorAll(`[data-row-key="${HANDLE}:users"]`)).toHaveLength(1)
+    expect(toasts()).toHaveLength(0)
+  })
+
+  it('a new request can be saved into the folder', async () => {
+    // The criterion that makes a folder a place rather than a row: a request
+    // goes IN it, under a path the allocator freed inside it.
+    const disk = folderOnDisk(withFolders(['reports']))
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => treeRow('reports'))
+
+    await pickOnFolder('reports', 'New request')
+
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'reports/untitled-request.json',
+        expect.objectContaining({ name: 'Untitled request' }),
+      ),
+    )
+    // And it is the request in the form, so the address is the next thing
+    // typed rather than a file that has to be found again.
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+  })
+
+  it('a file that will not read is left with the platform menu — an empty one of ours is worse', async () => {
+    // ABSENCE IS THE CAPABILITY. A malformed row's whole answer is the reason
+    // printed under it; there is nothing to put in a menu, so the right
+    // button is not taken over and the event is not cancelled.
+    const { bar } = await mountApp({
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({
+            collection: collectionFixture({
+              requests: [],
+              folders: [],
+              malformed: [{ relPath: 'users/oops.json', reason: 'unexpected end of JSON input' }],
+            }),
+          }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+    })
+    await openWorkbench(bar)
+    await vi.waitFor(() => treeRow('!users/oops.json'))
+
+    rightClick(treeRow('!users/oops.json'))
+    // Nothing of ours opens. The assertion is what a person SEES rather than
+    // `defaultPrevented`: this pane's element is reused by the terminal
+    // content in these tests, and that surface cancels contextmenu for its
+    // own paste — so the flag answers about a neighbour and the menu answers
+    // about this row.
+    expect(document.querySelector('.ui-context-menu__item')).toBeNull()
+  })
+
+  it('with no collection open there is no folder door at all', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(workbench().textContent).toContain('No collections open'))
+
+    // Absence is the capability: a folder needs a collection to go in, and
+    // there is none. There is no row to aim at, so no door — rather than a
+    // door that is drawn and refuses. The ask itself is mounted for the life
+    // of the surface (a closed `<dialog>` keeps its children), so what is
+    // asserted is REACHABILITY, which is what a person has.
+    expect(dialogFor('api-new-folder-name').open).toBe(false)
+    expect(buttonNames().filter((n) => n.startsWith('More actions for'))).toEqual([])
   })
 })

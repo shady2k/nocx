@@ -32,6 +32,7 @@ import {
   ArrowDownIcon,
   CloseIcon,
   CopyIcon,
+  FolderIcon,
   FolderOpenIcon,
   MoreIcon,
   PencilIcon,
@@ -270,12 +271,27 @@ export function ApiPane(props: ApiPaneProps) {
   // menu per row: only one can be open, and a menu per row would be as many
   // popovers as the tree has entries.
   const [rowMenu, setRowMenu] = createSignal<{ x: number; y: number } | null>(null)
-  // WHICH ROW the menu is about, in a plain variable and not a signal. The
-  // kit's ContextMenu closes BEFORE it calls the item's onSelect — the action
-  // is what the person is waiting for, so the popover goes first — and
-  // `onClose` is what clears the open state. Reading the row out of a signal
-  // that close had just cleared meant every item acted on nothing.
-  let rowMenuHandle = ''
+  /**
+   * WHICH FOLDER the menu is about — the collection's handle, the path within
+   * it and the name to say it by. `relPath` is '' for the collection's own
+   * row, which is the same '' the wire calls the collection root (§13.1).
+   *
+   * ONE MENU FOR BOTH KINDS OF FOLDER, because a collection IS a folder
+   * (design §6.1) and the acts are the same acts: put a request in it, put a
+   * folder in it. A second list for the folder rows would be two owners of
+   * one menu, agreeing for as long as anybody looked and diverging the day an
+   * act was added to one — this repo's most recurrent defect, with the row
+   * menu as the thing the two owners disagreed about. What differs is
+   * `Close collection`, and it is ABSENT on a folder row rather than present
+   * and refusing: there is no such act on a folder.
+   *
+   * A plain variable, not a signal, for the reason `requestMenuTarget` below
+   * is one: the kit closes the menu BEFORE it calls the item's `onSelect`, so
+   * anything read out of a signal at that moment is read after `onClose`
+   * cleared it, and every item would act on nothing.
+   */
+  let rowMenuTarget: { handle: string; relPath: string; name: string; collection: boolean } | null =
+    null
   /** Where a REQUEST's menu hangs, or null when it is closed. */
   const [requestMenu, setRequestMenu] = createSignal<{ x: number; y: number } | null>(null)
   /**
@@ -419,6 +435,30 @@ export function ApiPane(props: ApiPaneProps) {
   const [openingFolder, setOpeningFolder] = createSignal(false)
   const [pathRefused, setPathRefused] = createSignal('')
 
+  // ── The third ask: a FOLDER inside a collection (nocx-8v1fu) ───────────
+  //
+  // The same four pieces the two above have — what is typed, why the last
+  // attempt was refused, whether a call is in flight — and one more, because
+  // this ask is about a place: WHICH folder the new one goes in.
+  //
+  // The parent is captured when the ask OPENS rather than read when it
+  // submits. The menu that opened it has already closed by then, and the row
+  // it hung off may have moved under a listing that arrived in between; a
+  // folder made in whatever the panel happened to be pointed at is the same
+  // defect the request menu's target fixed one row over.
+  const [foldering, setFoldering] = createSignal(false)
+  const [folderName, setFolderName] = createSignal('')
+  const [folderCreating, setFolderCreating] = createSignal(false)
+  const [folderRefused, setFolderRefused] = createSignal('')
+  const [folderIn, setFolderIn] = createSignal<{
+    handle: string
+    /** The EXISTING folder it goes in, '' being the collection's own root —
+     *  the value that rides on the wire as `parentRelPath`. */
+    parentRelPath: string
+    /** What to call that place in the ask, so the question names where. */
+    label: string
+  } | null>(null)
+
   /**
    * Whether the folder ask still offers Browse.
    *
@@ -450,7 +490,8 @@ export function ApiPane(props: ApiPaneProps) {
    */
   /** Whether an ask is on screen that owns whatever the last call refused.
    *  Each of these renders the reason under its own field. */
-  const anyAskOpen = (): boolean => naming() || opening() || importing() || curling() || envOpen()
+  const anyAskOpen = (): boolean =>
+    naming() || opening() || foldering() || importing() || curling() || envOpen()
 
   const rows = (): ApiTreeRow[] =>
     flattenCollections(
@@ -513,6 +554,87 @@ export function ApiPane(props: ApiPaneProps) {
     setFolderPath('')
     setPathRefused('')
     setOpening(true)
+  }
+
+  /**
+   * Ask for a folder's NAME, for a place chosen before the ask opened.
+   *
+   * A fresh ask starts empty, exactly as the two above do: the dialog is
+   * mounted for the life of the surface, so without this the field still
+   * holds the last answer — an offer nobody wrote, and one Enter would submit
+   * straight back to a backend that has just refused it as already there.
+   */
+  const askForNewFolder = (handle: string, parentRelPath: string, label: string): void => {
+    setFolderName('')
+    setFolderRefused('')
+    setFolderIn({ handle, parentRelPath, label })
+    setFoldering(true)
+  }
+
+  /**
+   * Make it, and answer why it did not get made.
+   *
+   * The refusal STAYS IN THE ASK, holding what was typed — the rule
+   * collection-dialog.tsx states for itself and the reason it exists. A folder
+   * name is one path component (§13.1) and a folder that is already there is
+   * refused rather than merged; both are sentences about what is in this
+   * field, and this surface neither composes them nor sanitises the name to
+   * avoid them. It reads `store.error()` the moment the call settles, for the
+   * reason `nameRefused` gives: that signal is the last failure of ANY call,
+   * so it is a sentence about this one only at this instant.
+   *
+   * On success everything above the new row is unfolded, so the answer to
+   * "where did it go" is on screen rather than inside a folder the person had
+   * folded away earlier.
+   */
+  /**
+   * What the ask is titled: the place the folder is going, said the way that
+   * place is addressed.
+   *
+   * At the collection's root that is the COLLECTION'S NAME, because a person
+   * knows the folder they opened by its name and `''` is nothing to show
+   * them. Inside a folder it is the PATH within the collection rather than
+   * the row's leaf name: two folders called `users` in one collection are
+   * ordinary, and a title naming only the leaf would be the same sentence for
+   * both.
+   */
+  const folderAskTitle = (): string => {
+    const place = folderIn()
+    if (place === null) return 'New folder'
+    return `New folder in ${place.parentRelPath === '' ? place.label : place.parentRelPath}`
+  }
+
+  const createFolder = (typed: string): void => {
+    const place = folderIn()
+    if (place === null) return
+    setFolderCreating(true)
+    void store.createFolder(place.handle, place.parentRelPath, typed).then(() => {
+      setFolderCreating(false)
+      setFolderRefused(store.error())
+      if (store.error() !== '') return
+      setFoldering(false)
+      revealFolder(place.handle, place.parentRelPath)
+      showToast({ level: 'success', message: `Created ${typed}` })
+    })
+  }
+
+  /** Unfold everything between the collection's row and the folder that was
+   *  just made. A new row inside a folded parent is a row nobody can see, and
+   *  the collapsed set is this surface's own — the store cannot reach it. */
+  const revealFolder = (handle: string, parentRelPath: string): void => {
+    const keys = [`${handle}:`]
+    let prefix = ''
+    if (parentRelPath !== '') {
+      for (const segment of parentRelPath.split('/')) {
+        prefix = prefix === '' ? segment : `${prefix}/${segment}`
+        keys.push(`${handle}:${prefix}`)
+      }
+    }
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      for (const key of keys) next.delete(key)
+      return next
+    })
   }
 
   const createCollection = (typed: string): void => {
@@ -1228,11 +1350,23 @@ export function ApiPane(props: ApiPaneProps) {
    */
   /** Open a row's menu under the control that asked for it — the button's
    *  box, not the pointer, for the reason openMenu below gives. */
-  const openRowMenu = (e: MouseEvent, handle: string): void => {
+  const openRowMenu = (e: MouseEvent, row: ApiTreeRow): void => {
     e.stopPropagation()
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    rowMenuHandle = handle
+    aimRowMenu(row)
     setRowMenu({ x: box.left, y: box.bottom })
+  }
+
+  /** Point the folder menu at one folder. Both doors go through here — the
+   *  ⋮ on a collection row and the right button on any folder row — so there
+   *  is one place that can leave the target unset. */
+  const aimRowMenu = (row: ApiTreeRow): void => {
+    rowMenuTarget = {
+      handle: row.handle,
+      relPath: row.relPath,
+      name: row.name,
+      collection: row.kind === 'collection',
+    }
   }
 
   /** Point the request menu at one request. Both doors go through here, so
@@ -1299,6 +1433,66 @@ export function ApiPane(props: ApiPaneProps) {
       },
     },
   ]
+
+  /**
+   * WHAT A FOLDER CAN BE — one list, built once, reached by two doors: the ⋮
+   * beside a collection's row and the right button on any folder row,
+   * collections included.
+   *
+   * Every item reads `rowMenuTarget` when it FIRES rather than when it is
+   * built, for the reason the request menu's items do: the kit closes the
+   * menu before it calls `onSelect`, so anything read from a signal at build
+   * time is read from a signal that close has already cleared.
+   */
+  const rowMenuItems = (): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [
+      {
+        id: 'api-row-new-request',
+        label: 'New request',
+        icon: PlusIcon,
+        onSelect: () => {
+          const target = rowMenuTarget
+          if (target === null) return
+          // POINTED AT FIRST, because the row a person aimed at is very often
+          // not the collection the panel was working in — and then the folder
+          // within it, which is '' on a collection's own row and is exactly
+          // what the allocator wants for "the collection's root".
+          store.pointAt(target.handle)
+          void store.newRequest(target.relPath)
+        },
+      },
+      {
+        id: 'api-row-new-folder',
+        label: 'New folder…',
+        // The kit has a folder glyph and no folder-plus one; the `+` is on
+        // the sibling item, and what distinguishes these two is the word.
+        icon: FolderIcon,
+        onSelect: () => {
+          const target = rowMenuTarget
+          if (target === null) return
+          askForNewFolder(target.handle, target.relPath, target.name)
+        },
+      },
+    ]
+    // ABSENT rather than present and refusing, which is this surface's rule
+    // for every door: there is no act called "close" on a folder inside a
+    // collection — the collection is what the app has open (design §6.1).
+    if (rowMenuTarget?.collection === true) {
+      items.push({
+        id: 'api-row-close',
+        // "Close collection", not the path. The row this menu hangs off
+        // already says WHICH collection, and a path elided in the middle
+        // answers neither question — it is not readable and it is not needed.
+        label: 'Close collection',
+        icon: CloseIcon,
+        onSelect: () => {
+          const target = rowMenuTarget
+          if (target !== null) void store.closeFolder(target.handle)
+        },
+      })
+    }
+    return items
+  }
 
   const openMenu = (e: MouseEvent): void => {
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -1396,39 +1590,20 @@ export function ApiPane(props: ApiPaneProps) {
           items={requestMenuItems()}
         />
 
-        {/* What a collection row can do. Closing is here rather than on the
-            row itself because it is the one act that takes something away,
-            and here it has to be read and chosen. */}
+        {/* What a FOLDER row can do — a collection's own row included, because
+            a collection is a folder (§6.1). One menu, mounted once, opened by
+            either door, for the reason the request menu is one: two would be
+            two surfaces owning one popover, and the second to open would
+            close the first from under the pointer. Closing is a menu item
+            rather than a control on the row because it is the one act that
+            takes something away, and here it has to be read and chosen. */}
         <ContextMenu
           open={rowMenu() !== null}
           x={rowMenu()?.x ?? 0}
           y={rowMenu()?.y ?? 0}
-          data-testid="api-collection-row-menu"
+          data-testid="api-folder-row-menu"
           onClose={() => setRowMenu(null)}
-          items={[
-            {
-              id: 'api-row-new-request',
-              label: 'New request',
-              icon: PlusIcon,
-              onSelect: () => {
-                if (rowMenuHandle === '') return
-                store.pointAt(rowMenuHandle)
-                void store.newRequest()
-              },
-            },
-            {
-              id: 'api-row-close',
-              // "Close collection", not the path. The row this menu hangs
-              // off already says WHICH collection, and a path elided in the
-              // middle answers neither question — it is not readable and it
-              // is not needed.
-              label: 'Close collection',
-              icon: CloseIcon,
-              onSelect: () => {
-                if (rowMenuHandle !== '') void store.closeFolder(rowMenuHandle)
-              },
-            },
-          ]}
+          items={rowMenuItems()}
         />
         {/* WHAT THIS VARIABLE IS, where it was clicked. A menu rather than a
             panel of its own: the kit already owns "a small thing anchored at
@@ -1476,6 +1651,28 @@ export function ApiPane(props: ApiPaneProps) {
           onBrowse={pickerLive() ? browseForFolder : undefined}
           onCancel={() => setOpening(false)}
           onSubmit={openFolder}
+        />
+        {/* THE THIRD ASK, and the same component as the other two on purpose:
+            "ask for one string about a new thing" is one question, and a
+            second component for it would be the two-owners defect in
+            miniature (collection-dialog.tsx says so at length). It stays open
+            when the backend refuses and renders the reason under the field,
+            which is the whole of the criterion about a name being refused on
+            the backend's terms rather than sanitised away here. */}
+        <CollectionDialog
+          open={foldering()}
+          title={folderAskTitle()}
+          submitLabel="Create folder"
+          fieldId="api-new-folder-name"
+          fieldLabel="Name"
+          fieldDescription="One folder, one name — not a path. A folder inside this one is made by asking again from its own row."
+          placeholder="reports"
+          value={folderName()}
+          onInput={setFolderName}
+          error={folderRefused()}
+          busy={folderCreating()}
+          onCancel={() => setFoldering(false)}
+          onSubmit={createFolder}
         />
         <PostmanImportDialog
           open={importing()}
@@ -1639,17 +1836,19 @@ export function ApiPane(props: ApiPaneProps) {
                         setRequestMenu({ x: e.clientX, y: e.clientY })
                         return
                       }
-                      if (row.kind === 'collection') {
+                      if (row.kind === 'collection' || row.kind === 'dir') {
                         e.preventDefault()
-                        rowMenuHandle = row.handle
+                        aimRowMenu(row)
                         setRowMenu({ x: e.clientX, y: e.clientY })
                       }
-                      /* A directory and an unreadable file are left with the
-                         platform's menu, because there is nothing yet to put
-                         in one of ours: a folder's acts arrive with the tree
-                         that can make one (nocx-8v1fu), and a malformed row's
-                         whole answer is the reason printed under it. An empty
-                         menu is worse than no menu. */
+                      /* An unreadable file is left with the platform's menu,
+                         because there is nothing to put in one of ours: a
+                         malformed row's whole answer is the reason printed
+                         under it, and an empty menu is worse than no menu. A
+                         DIRECTORY used to be in that sentence and is not any
+                         more — it has acts now (nocx-8v1fu), and they are the
+                         collection row's own, because a collection is a
+                         folder. */
                     }}
                   >
                     <TreeRow
@@ -1708,7 +1907,10 @@ export function ApiPane(props: ApiPaneProps) {
                                 onClick={(e: MouseEvent) => {
                                   e.stopPropagation()
                                   store.pointAt(row.handle)
-                                  void store.newRequest()
+                                  // The collection's own root: this control
+                                  // is only ever on a collection row, whose
+                                  // relPath is ''.
+                                  void store.newRequest(row.relPath)
                                 }}
                               >
                                 <PlusIcon />
@@ -1717,7 +1919,7 @@ export function ApiPane(props: ApiPaneProps) {
                                 size="sm"
                                 title="More"
                                 ariaLabel={`More actions for ${row.name}`}
-                                onClick={(e: MouseEvent) => openRowMenu(e, row.handle)}
+                                onClick={(e: MouseEvent) => openRowMenu(e, row)}
                               >
                                 <MoreIcon />
                               </IconButton>

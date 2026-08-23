@@ -20,6 +20,7 @@ import type { Dispatcher } from '../dispatcher'
 import type { ApiCollectionsListResult } from '../generated/api.collections.list'
 import type { ApiCollectionsOpenResult } from '../generated/api.collections.open'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
+import type { ApiCollectionsCreateFolderResult } from '../generated/api.collections.createFolder'
 import type { ApiCollectionsCloseResult } from '../generated/api.collections.close'
 import type { ApiEnvironmentReadResult } from '../generated/api.environment.read'
 import type { ApiEnvironmentWriteResult } from '../generated/api.environment.write'
@@ -62,6 +63,33 @@ class ApiClient {
    *  renderer one thing to do afterwards rather than two. */
   createCollection(name: string): Promise<ApiCollectionsCreateResult> {
     return this.dispatcher.call<ApiCollectionsCreateResult>('api.collections.create', { name })
+  }
+
+  /**
+   * Make ONE folder inside a collection the user has open.
+   *
+   * The grammar is `createCollection`'s one level down: a NAME that is a
+   * single component, and the EXISTING folder to put it in, addressed by the
+   * handle plus a path relative to it (§13.1). `''` is the collection root.
+   *
+   * NESTING IS REPEATED CALLS, and the name is never a path. A single
+   * relative path with the intermediate folders made along the way succeeds
+   * for a request nobody made — a misspelled month would silently mint the
+   * misspelling — so the caller names one folder at a time and is told when
+   * the parent is not there. The renderer's half of that is here: it passes
+   * back the `relPath` the last call ANSWERED as the next call's parent,
+   * rather than joining a parent and a name itself.
+   */
+  createFolder(
+    handle: string,
+    parentRelPath: string,
+    name: string,
+  ): Promise<ApiCollectionsCreateFolderResult> {
+    return this.dispatcher.call<ApiCollectionsCreateFolderResult>('api.collections.createFolder', {
+      handle,
+      parentRelPath,
+      name,
+    })
   }
 
   /** Drop the folder from the opened list and stop resolving its handle. An
@@ -416,6 +444,11 @@ export interface ApiWorkbenchServices {
   listCollections(): Promise<ApiCollectionsListResult>
   openCollection(path: string): Promise<ApiCollectionsOpenResult>
   createCollection(name: string): Promise<ApiCollectionsCreateResult>
+  createFolder(
+    handle: string,
+    parentRelPath: string,
+    name: string,
+  ): Promise<ApiCollectionsCreateFolderResult>
   closeCollection(handle: string): Promise<ApiCollectionsCloseResult>
   readEnvironment(handle: string, relPath: string): Promise<ApiEnvironmentReadResult>
   writeEnvironment(
@@ -540,6 +573,8 @@ export function createApiWorkbenchServices(
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),
+    createFolder: (handle, parentRelPath, name) =>
+      client.createFolder(handle, parentRelPath, name),
     closeCollection: (handle) => client.closeCollection(handle),
     readEnvironment: (handle, relPath) => client.readEnvironment(handle, relPath),
     writeEnvironment: (handle, relPath, environment) =>

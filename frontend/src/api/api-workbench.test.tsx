@@ -53,6 +53,7 @@ import {
   watchFixture,
 } from './api-test-fixtures'
 import { createSecretChip } from '../ui/secret-chip'
+import { clearToasts, toasts } from '../ui/toast'
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -65,6 +66,10 @@ afterEach(() => {
   liveHandles.length = 0
   cleanup()
   document.body.replaceChildren()
+  // The toast queue is module state shared by every test in this file, and
+  // the import path below reads it as its account of what the person was
+  // told. A queue left standing would let one test read the last one's toast.
+  clearToasts()
 })
 
 // ── The app, as far as this surface needs one ─────────────────────────────
@@ -1788,6 +1793,116 @@ describe('the import ask accepts a drop', () => {
     await openAskWithDrop(nativeDropFixture(null))
 
     expect(importAskBody().querySelector('[data-file-drop-target]')).toBeNull()
+  })
+})
+
+// ── An import opens what it wrote ─────────────────────────────────────────
+//
+// nocx-vkp9d. `api.collections.list` answers the OPEN folders and
+// `api.import.postman` registers nothing, so a successful import left the
+// collection on disk and absent from the tree: the person went to "Open a
+// collection folder…" and named the path that had been in the field beside
+// them a second earlier. That is the second step the whole import rework
+// (nocx-is3qh) exists to remove, arriving through the back door.
+//
+// These drive the ASK, not the store — the defect was never in
+// `store.openFolder`, which has always worked; it was that nothing called it.
+
+/** The import ask, opened on a stand with nothing in the tree, with the two
+ *  fields filled and Import pressed. `openCollection` is the call the OPEN
+ *  goes through, so a test that is about the open overrides it. */
+async function importInto(
+  dest: string,
+  over: Partial<ApiWorkbenchServices> = {},
+): Promise<void> {
+  const { bar } = await mountApp({ ...noCollections(), ...over })
+  await openImportAsk(bar)
+  fireEvent.input(field('api-import-postman-file'), { target: { value: '/downloads/acme.json' } })
+  fireEvent.input(field('api-import-postman-dest'), { target: { value: dest } })
+  fireEvent.click(button('Import'))
+}
+
+/** Every message the person has been shown, newest last. */
+function toastMessages(): string[] {
+  return toasts().map((t) => t.message)
+}
+
+describe('an import opens its destination', () => {
+  it('puts the imported collection in the tree with nothing else pressed', async () => {
+    // The imported collection is named apart from anything the listing
+    // carries, so "it is in the tree" cannot be satisfied by a row that was
+    // already there.
+    const openCollection = vi
+      .fn()
+      .mockResolvedValue({ handle: 'h-imported', collection: collectionFixture({ name: 'Acme' }) })
+    await importInto('/data/collections/acme', { openCollection })
+
+    // The open goes to the destination the import just wrote — not to
+    // anything the person has to name a second time.
+    await vi.waitFor(() => expect(openCollection).toHaveBeenCalledWith('/data/collections/acme'))
+    await vi.waitFor(() => expect(workbench().textContent).toContain('Acme'))
+    // And the ask has gone: nothing else is waiting to be pressed.
+    await vi.waitFor(() => expect(dialogFor('api-import-postman-file').open).toBe(false))
+  })
+
+  it('the success toast says what happened and no more', async () => {
+    const openCollection = vi
+      .fn()
+      .mockResolvedValue({ handle: 'h-imported', collection: collectionFixture({ name: 'Acme' }) })
+    await importInto('/data/collections/acme', { openCollection })
+
+    await vi.waitFor(() => expect(toastMessages()).toContain('Imported into /data/collections/acme'))
+    expect(toasts().every((t) => t.level === 'success')).toBe(true)
+    // The folder ask's own toast belongs to the folder ask. One act, one
+    // sentence — a person who pressed Import once is not told twice.
+    expect(toastMessages()).toHaveLength(1)
+  })
+
+  it('a REFUSED import opens nothing and keeps the ask, with the reason under the field', async () => {
+    const openCollection = vi.fn()
+    await importInto('/data/collections/acme', {
+      importPostman: vi.fn().mockRejectedValue(new Error('a folder is already there')),
+      openCollection,
+    })
+
+    await vi.waitFor(() => expect(destError()).toContain('a folder is already there'))
+    expect(dialogFor('api-import-postman-file').open).toBe(true)
+    expect(openCollection).not.toHaveBeenCalled()
+    expect(toastMessages()).toHaveLength(0)
+    // What was typed survives — the destination is what has to change.
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
+  })
+
+  it('an import whose OPEN fails reports THAT, not a success the tree contradicts', async () => {
+    await importInto('/data/collections/acme', {
+      openCollection: vi.fn().mockRejectedValue(new Error('permission denied')),
+    })
+
+    await vi.waitFor(() => expect(toasts()).toHaveLength(1))
+    const told = toasts()[0]
+    // The ask has closed — the import DID happen — so the validation slot is
+    // gone and the toast is the only surface left. It must carry the second
+    // failure's own words.
+    expect(told.level).toBe('danger')
+    expect(told.message).toContain('permission denied')
+    // And it must not stand as a plain "Imported into X" while X is not on
+    // screen: the sentence has to say the collection is not in the tree.
+    expect(told.message).not.toBe('Imported into /data/collections/acme')
+    expect(workbench().textContent).not.toContain('Acme')
+  })
+
+  it('a failed OPEN leaves the folder ask untouched — it owns none of this', async () => {
+    // openFolder() next door owns `opening`, `openingFolder` and
+    // `pathRefused`. The import borrows the store call and none of that
+    // state, so a refusal here may not put a reason inside a dialog the
+    // person never opened.
+    await importInto('/data/collections/acme', {
+      openCollection: vi.fn().mockRejectedValue(new Error('permission denied')),
+    })
+
+    await vi.waitFor(() => expect(toasts()).toHaveLength(1))
+    expect(openFolderDialog().open).toBe(false)
+    expect(openFolderDialog().textContent).not.toContain('permission denied')
   })
 })
 

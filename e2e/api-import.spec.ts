@@ -207,21 +207,16 @@ test.describe('the import ask on a stand with no Wails', () => {
     // folder that arrived is the surface disagreeing with the disk.
     await expect(ask).toBeHidden()
 
-    // ── …and the collection can be worked with ────────────────────────────
+    // ── …and the collection is in the tree, with nothing else pressed ─────
     //
-    // An import does not OPEN the folder it wrote — api.collections.list
-    // answers the open folders, and the import registers nothing — so a
-    // person opens it, which is the panel's other ask and the same folder
-    // path the ask just proposed. This is what puts the requests in the tree,
-    // and it is the difference between a directory on disk and a collection
+    // The import OPENS what it wrote (nocx-vkp9d). It used not to —
+    // `api.collections.list` answers the open folders and the import
+    // registers nothing — so this spec went to "Open a collection folder…"
+    // afterwards and typed the path that had been in the field beside it a
+    // moment earlier. That second step was the defect, not the procedure, so
+    // nothing is pressed between the Import above and the rows below: what
+    // arrives is the difference between a directory on disk and a collection
     // somebody can use.
-    await workbench.locator('#api-collections-menu').click()
-    await page.getByRole('menuitem', { name: 'Open folder…' }).click()
-    const folderAsk = page.getByRole('dialog').filter({ hasText: 'Open a collection folder' })
-    await expect(folderAsk).toBeVisible()
-    await page.locator('#api-collection-path').fill(collectionRoot)
-    await folderAsk.getByRole('button', { name: 'Open', exact: true }).click()
-
     await expect(
       workbench.locator('.api-tree__row').filter({ hasText: POSTMAN_COLLECTION_NAME }),
     ).toBeVisible({ timeout: 10_000 })

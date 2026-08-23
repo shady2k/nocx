@@ -395,12 +395,32 @@ export function ApiPane(props: ApiPaneProps) {
     })
   }
 
+  /**
+   * Put a folder in the tree, and answer why it did not go in.
+   *
+   * The one derivation of "open a collection folder", because there are two
+   * callers and only ever one answer: the folder ask below, and the import,
+   * which has just written a folder and must show it (nocx-vkp9d). It owns
+   * NONE of the ask's state — not `opening`, not `openingFolder`, not
+   * `pathRefused` — so an import that fails to open puts no reason inside a
+   * dialog the person never opened.
+   *
+   * It answers '' when the folder is in the tree and the backend's sentence
+   * otherwise, read off the store the moment the call settles for the reason
+   * `nameRefused` gives above: `store.error()` is the last failure of ANY
+   * call, so it is a sentence about this one only at this instant.
+   */
+  const putInTree = async (path: string): Promise<string> => {
+    await store.openFolder(path)
+    return store.error()
+  }
+
   const openFolder = (path: string): void => {
     setOpeningFolder(true)
-    void store.openFolder(path).then(() => {
+    void putInTree(path).then((refused) => {
       setOpeningFolder(false)
-      setPathRefused(store.error())
-      if (store.error() !== '') return
+      setPathRefused(refused)
+      if (refused !== '') return
       setOpening(false)
       showToast({ level: 'success', message: `Opened ${path}` })
     })
@@ -812,18 +832,50 @@ export function ApiPane(props: ApiPaneProps) {
     })
   }
 
+  /**
+   * Import an export, and OPEN what it wrote.
+   *
+   * The open is half of the act, not a courtesy after it:
+   * `api.collections.list` answers the folders that are open and the import
+   * registers nothing, so an import that stopped at the disk left the person
+   * naming — in the panel's other ask — the path that had been in the field
+   * in front of them a second earlier (nocx-vkp9d).
+   *
+   * WHERE EACH FAILURE IS SAID, and why the two are said in different
+   * places. A refused IMPORT keeps the ask, because the destination is what
+   * has to change and the field holding it is still on screen with its own
+   * validation slot under it. A refused OPEN cannot use that slot: the
+   * import succeeded, so the ask has closed — leaving it up would invite a
+   * second import into a folder that now exists — and a toast is the only
+   * surface still there. It is a `danger` one carrying the open's own
+   * sentence, because the person must never read "Imported into X" while X
+   * is not in the tree.
+   */
   const importPostman = (): void => {
     const file = postmanFile().trim()
     const dest = postmanDest().trim()
     if (file === '' || dest === '') return
     setImportingBusy(true)
-    void store.importPostman(file, dest).then(() => {
-      setImportingBusy(false)
-      setImportRefused(store.error())
-      if (store.error() !== '') return
-      setImporting(false)
-      showToast({ level: 'success', message: `Imported into ${dest}` })
-    })
+    void store
+      .importPostman(file, dest)
+      .then(async (): Promise<void> => {
+        const refused = store.error()
+        setImportRefused(refused)
+        if (refused !== '') return
+        const notOpened = await putInTree(dest)
+        setImporting(false)
+        if (notOpened !== '') {
+          showToast({
+            level: 'danger',
+            message: `Imported into ${dest}, but it is not in the tree: ${notOpened}`,
+          })
+          return
+        }
+        showToast({ level: 'success', message: `Imported into ${dest}` })
+      })
+      .finally(() => {
+        setImportingBusy(false)
+      })
   }
 
   /**

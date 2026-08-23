@@ -10,6 +10,7 @@ import type { ApiWorkbenchServices } from './api-client'
 import type { ApiEnvironmentRef, ApiRequest } from './api-model'
 import {
   COLLECTION_PATH,
+  CREATE_REL_PATH,
   CREATED_HANDLE,
   CREATED_NAME,
   DEV_ENV,
@@ -22,6 +23,7 @@ import {
   collectionsFixture,
   DEFAULT_ROOT,
   createdFixture,
+  folderOnDisk,
   sendFixture,
   failedSendFixture,
   stoppedSendFixture,
@@ -718,3 +720,154 @@ describe('ApiStore — the environment', () => {
 function emptyCollection() {
   return { name: 'gone', requests: [], malformed: [], environments: [] }
 }
+
+// ── A request names itself, and the files stay apart (nocx-lpo2m) ─────────
+//
+// The offer is the store's because the DRAFT is: it is the one place that
+// knows what the name was a moment ago and who changed it, which is the
+// whole of "an offer, not a derivation" — the moment a person names the
+// request themselves the offer stops for good.
+
+describe('ApiStore — a request names itself while nobody else has', () => {
+  it('takes the name from the method and the address, as the URL is edited', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.newRequest()
+
+    const made = store.draft()
+    expect(made?.name).toBe('Untitled request')
+    store.editDraft({ ...(made as ApiRequest), url: 'http://127.0.0.1:8080/v1/broker-access' })
+    expect(store.draft()?.name).toBe('GET broker-access')
+
+    store.editDraft({ ...(store.draft() as ApiRequest), method: 'POST' })
+    expect(store.draft()?.name).toBe('POST broker-access')
+  })
+
+  it('stops for good the moment a person names it — not when the URL changes, not ever', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.newRequest()
+
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v1/broker-access' })
+    expect(store.draft()?.name).toBe('GET broker-access')
+
+    store.editDraft({ ...(store.draft() as ApiRequest), name: 'Broker access, live' })
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v2/tenants' })
+    expect(store.draft()?.name).toBe('Broker access, live')
+
+    // Not even after the file has been written and read back: the name in
+    // it is a name somebody gave, and reopening a request must not put the
+    // offer back on.
+    await store.saveDraft()
+    await store.openRequest(HANDLE, 'untitled-request.json')
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v3/anything' })
+    expect(store.draft()?.name).toBe('Broker access, live')
+  })
+
+  it('an address with nothing to take a name from leaves the name alone', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.newRequest()
+
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'http://127.0.0.1:8080' })
+    expect(store.draft()?.name).toBe('Untitled request')
+    // And the offer is still live: it was absent, not spent.
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'http://127.0.0.1:8080/v1/orders' })
+    expect(store.draft()?.name).toBe('GET orders')
+  })
+
+  it('two requests offered ONE name are two files — the allocator is what keeps them apart', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.newRequest()
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v1/broker-access' })
+    await store.saveDraft()
+    await store.newRequest()
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v1/broker-access' })
+    await store.saveDraft()
+
+    // Same name, two files, and the first still holds what was written into
+    // it — a second request that overwrote the first would be the same
+    // number of rows and one lost request.
+    expect(store.draft()?.name).toBe('GET broker-access')
+    const written = [...disk.files.keys()].filter((p) => p !== CREATE_REL_PATH)
+    expect(written).toEqual(['untitled-request.json', 'untitled-request-2.json'])
+    expect(disk.files.get('untitled-request.json')?.url).toBe('https://h/v1/broker-access')
+  })
+})
+
+// ── A request can be duplicated (nocx-bp44a) ──────────────────────────────
+//
+// The parts existed — `freePath` names a file nothing occupies and
+// `writeRequest` writes one — and there was no way to reach them: somebody
+// wanting the same call with one header changed retyped it, or edited the
+// original and lost it.
+
+describe('ApiStore — duplicating a request', () => {
+  it('copies the FILE, beside the original, under a name the allocator freed', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    // The source is READ rather than taken from the form: the file is the
+    // truth, and the request being copied is very often not the one open.
+    expect(disk.readRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH)
+    const copy = disk.files.get('users/create-copy.json')
+    expect(copy?.name).toBe('create copy')
+    expect(copy?.auth).toEqual(REQUEST.auth)
+    // Selected, so the change the person came to make is the next thing.
+    expect(store.selected()).toEqual({ handle: HANDLE, relPath: 'users/create-copy.json' })
+    expect(store.draft()?.name).toBe('create copy')
+  })
+
+  it('twice gives two copies, told apart in the tree', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    expect([...disk.files.keys()]).toEqual([
+      CREATE_REL_PATH,
+      'users/create-copy.json',
+      'users/create-copy-2.json',
+    ])
+    // Two rows a person can tell apart, which is why they made the copy.
+    expect(disk.files.get('users/create-copy-2.json')?.name).toBe('create copy 2')
+  })
+
+  it('a source that will not read writes nothing and says why', async () => {
+    const disk = folderOnDisk({
+      readRequest: vi.fn().mockRejectedValue(new Error('bad JSON')),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    expect(disk.writeRequest).not.toHaveBeenCalled()
+    expect(store.error()).toBe('bad JSON')
+  })
+
+  it('a copy the disk refuses leaves the folder as it was and says why', async () => {
+    const disk = folderOnDisk({
+      writeRequest: vi.fn().mockRejectedValue(new Error('read-only file system')),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.duplicateRequest(HANDLE, CREATE_REL_PATH)
+
+    expect([...disk.files.keys()]).toEqual([CREATE_REL_PATH])
+    expect(store.error()).toBe('read-only file system')
+    expect(store.selected()).toBeNull()
+  })
+})

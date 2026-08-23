@@ -44,6 +44,7 @@ import {
   nativeDropFixture,
   type NativeDropFixture,
   createdFixture,
+  folderOnDisk,
   failedSendFixture,
   requestRawFixture,
   responseRawFixture,
@@ -3448,5 +3449,276 @@ describe('a variable in the address says whether anything answers it', () => {
       )
       expect(values).toContain('baseUrl')
     })
+  })
+})
+
+// ── The doors a request was missing (nocx-c8ozb, nocx-lpo2m, nocx-bp44a) ──
+//
+// Making a request meant aiming at a collection row and hitting a plus that
+// is only there while the pointer is over it; naming one meant renaming
+// `Untitled request` by hand, so a tree filled with rows nobody could tell
+// apart; and copying one meant retyping it. These three describe the doors,
+// and each drives the seam a person reaches — the control, from the state
+// they start in, and what is on screen afterwards.
+
+/** The name the header's crumb trail is showing, or '' when it shows none. */
+function crumbName(): string {
+  const el = workbench().querySelector<HTMLElement>('.api-crumbs__name')
+  return (el?.textContent ?? '').trim()
+}
+
+/** Every dialog that is OPEN — the assertion behind "with no dialog". */
+function openDialogs(): HTMLDialogElement[] {
+  return [...workbench().querySelectorAll('dialog')].filter((d) => d.open)
+}
+
+describe('a new request has a door that does not move', () => {
+  it('the control in the header makes one in the active collection and puts it in the form', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    fireEvent.click(button('New request'))
+
+    // The file is written into the collection the workbench is pointed at,
+    // under a path the allocator chose — nothing was asked.
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'untitled-request.json',
+        expect.objectContaining({ name: 'Untitled request', method: 'GET', url: '' }),
+      ),
+    )
+    // And it is what the form is showing, read back off the file.
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+    // The URL field follows too. The pane leaves the caret in it
+    // (api-content.ts) and on macOS a button click does not take it away, so
+    // this is the state a person is actually in when they press the control.
+    await vi.waitFor(() => expect(field('api-url').value).toBe(''))
+    expect(openDialogs()).toEqual([])
+  })
+
+  it("and a person's own typing is still theirs — the caret keeps the field", async () => {
+    // The other end of the interval the door moved. The field owns its text
+    // while it has the caret AND is showing the same request: type the `?`
+    // of a query by hand and the model cannot represent it yet, so a form
+    // that pushed the derived address back would erase the character as it
+    // was typed.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    field('api-url').focus()
+    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/users?' } })
+
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users?'))
+  })
+
+  it('it is there before any request is open — an empty collection is where it is needed', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // Nothing is in the form yet, and the door is still there.
+    expect(crumbName()).toBe('')
+    fireEvent.click(button('New request'))
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+  })
+
+  it('with no collection open the control is ABSENT, not present and refusing', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(workbench().textContent).toContain('No collections open'))
+
+    expect(buttonNames()).not.toContain('New request')
+  })
+
+  it('the existing doors stay — the row is how a person makes one somewhere else', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // The row's own plus, which names the collection it acts on.
+    expect(buttonNames()).toContain('New request in acme-api')
+    // And the row's menu still offers it.
+    fireEvent.click(button('More actions for acme-api'))
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="api-collection-row-menu"]')).toBeTruthy(),
+    )
+    const item = [
+      ...(document
+        .querySelector('[data-testid="api-collection-row-menu"]')
+        ?.querySelectorAll('button') ?? []),
+    ].find((b) => (b.textContent ?? '').trim() === 'New request')
+    expect(item, 'the row menu still offers New request').toBeTruthy()
+  })
+})
+
+describe('a request names itself from what you typed', () => {
+  /** Rename the open request the way a person does: the name in the crumb
+   *  trail is a control, and pressing it puts a field in its place. */
+  function rename(to: string): void {
+    fireEvent.click(button(crumbName()))
+    const nameField = field('api-request-name')
+    fireEvent.input(nameField, { target: { value: to } })
+    fireEvent.blur(nameField)
+  }
+
+  /** Make one through the header's door and wait for it to be in the form. */
+  async function newRequest(): Promise<void> {
+    fireEvent.click(button('New request'))
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+  }
+
+  it('a request nobody has named takes its name as the URL is typed', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    await newRequest()
+
+    fireEvent.input(field('api-url'), {
+      target: { value: 'http://127.0.0.1:8080/v1/broker-access' },
+    })
+
+    await vi.waitFor(() => expect(crumbName()).toBe('GET broker-access'))
+    // The verb is half the name, so changing it changes the name too —
+    // while nobody has taken it over.
+    fireEvent.change(control('method'), { target: { value: 'POST' } })
+    await vi.waitFor(() => expect(crumbName()).toBe('POST broker-access'))
+  })
+
+  it('a request the person HAS named is never renamed by this, whatever the URL does', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    await newRequest()
+
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/v1/broker-access' } })
+    await vi.waitFor(() => expect(crumbName()).toBe('GET broker-access'))
+
+    rename('Broker access, live')
+    await vi.waitFor(() => expect(crumbName()).toBe('Broker access, live'))
+
+    // Not when the URL changes, and not ever.
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/v2/tenants' } })
+    fireEvent.change(control('method'), { target: { value: 'DELETE' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('https://h/v2/tenants'))
+    expect(crumbName()).toBe('Broker access, live')
+  })
+
+  it('an address with nothing to take a name from leaves the request named as it is', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    await newRequest()
+
+    // A host is not a path segment: the offer is absent rather than wrong.
+    fireEvent.input(field('api-url'), { target: { value: 'http://127.0.0.1:8080' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('http://127.0.0.1:8080'))
+    expect(crumbName()).toBe('Untitled request')
+  })
+
+  it('a request that came off disk under its own name keeps it', async () => {
+    // The offer is for a request nobody has named. `create` is a name
+    // somebody gave — the file carries it — so typing an address must not
+    // take it away, and reopening the request must not start the offer over.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/v1/broker-access' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('https://h/v1/broker-access'))
+    expect(crumbName()).toBe('create')
+  })
+})
+
+describe('a request can be duplicated', () => {
+  it('the copy is beside the original, named apart from it, and in the form', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+
+    // BESIDE THE ORIGINAL: the same folder inside the collection, under a
+    // path the allocator chose — a copy of `users/create.json` at the
+    // collection's root is not beside anything.
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'users/create-copy.json',
+        expect.objectContaining({ name: 'create copy', id: 'users/create-copy' }),
+      ),
+    )
+    // It is a FILE like any other: the row is there because the collection
+    // listing has it, which is the route a colleague's git pull takes.
+    await vi.waitFor(() => row('users/create-copy.json'))
+    // And it is the request in the form, so the change they came to make is
+    // the next thing they do.
+    await vi.waitFor(() => expect(crumbName()).toBe('create copy'))
+  })
+
+  it('the copy carries everything, including the auth VARIABLE and no value', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+    await vi.waitFor(() => expect(disk.files.has('users/create-copy.json')).toBe(true))
+
+    const copy = disk.files.get('users/create-copy.json') as ApiRequest
+    expect(copy.method).toBe(REQUEST.method)
+    expect(copy.url).toBe(REQUEST.url)
+    expect(copy.headers).toEqual(REQUEST.headers)
+    expect(copy.query).toEqual(REQUEST.query)
+    expect(copy.variables).toEqual(REQUEST.variables)
+    expect(copy.body).toEqual(REQUEST.body)
+    // The auth VARIABLE NAME travels; there is nowhere in the file a value
+    // could be spelled, and the copy must not become the place (design §8).
+    expect(copy.auth).toEqual(REQUEST.auth)
+    expect(JSON.stringify(copy)).not.toContain(SECRET_VALUE)
+    // Two things do not travel, and both are the file's own identity: the
+    // path it lives at and the id minted from it.
+    expect(copy.id).not.toBe(REQUEST.id)
+  })
+
+  it('duplicating twice gives two copies — not a collision and not an overwrite', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+    await vi.waitFor(() => row('users/create-copy.json'))
+    fireEvent.click(button('Duplicate create'))
+    await vi.waitFor(() => row('users/create-copy-2.json'))
+
+    // Three requests where there was one, and the first copy still holds
+    // what was written into it.
+    expect([...disk.files.keys()]).toEqual([
+      CREATE_REL_PATH,
+      'users/create-copy.json',
+      'users/create-copy-2.json',
+    ])
+    // Told apart in the tree, which is the whole point of copying one.
+    expect(crumbName()).toBe('create copy 2')
+  })
+
+  it('a copy that could not be written says so and puts no row in the tree', async () => {
+    const disk = folderOnDisk({
+      writeRequest: vi.fn().mockRejectedValue(new Error('read-only file system')),
+    })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(button('Duplicate create'))
+
+    await vi.waitFor(() => expect(workbench().textContent).toContain('read-only file system'))
+    expect(workbench().querySelector('[data-rel-path="users/create-copy.json"]')).toBeNull()
   })
 })

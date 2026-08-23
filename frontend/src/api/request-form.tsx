@@ -220,15 +220,34 @@ export function RequestLine(props: RequestLineProps) {
   // as it was typed, and a query could never be entered by hand at all.
   //
   // The rule, both ends named: from the moment the field takes the caret
-  // until it loses it, the field's text is the truth and the model follows
-  // every keystroke; at every other moment the model is the truth and the
-  // text follows it. One caret means the two can never both be the owner.
+  // until it loses it, the field's text is the truth FOR THE REQUEST IT IS
+  // SHOWING and the model follows every keystroke; at every other moment the
+  // model is the truth and the text follows it. One caret means the two can
+  // never both be the owner.
+  //
+  // THE REQUEST CHANGING ENDS THAT INTERVAL, caret or no caret, and the
+  // clause is not a detail: the pane focuses this field when the surface
+  // activates (api-content.ts), and on macOS clicking a button does not take
+  // focus away from it. So pressing New request in the header left the
+  // caret here, the guard held, and the field went on showing the PREVIOUS
+  // request's address over a form holding an empty one — with the next
+  // keystroke about to write that stale address into the new request. A
+  // person's typing is theirs; the address of a request they are no longer
+  // looking at is not.
   const [typedUrl, setTypedUrl] = createSignal('')
+
+  // WHICH request's text the field is holding. The file's own id, because
+  // that is what changes when the form is pointed at another request and
+  // what stays put while one is edited.
+  let showing = ''
 
   createEffect(() => {
     const req = request()
     const derived = req === null ? '' : urlWithParams(req.url, req.query)
-    if (document.activeElement?.id === 'api-url') return
+    const id = req?.id ?? ''
+    const switched = id !== showing
+    showing = id
+    if (!switched && document.activeElement?.id === 'api-url') return
     setTypedUrl(derived)
   })
 

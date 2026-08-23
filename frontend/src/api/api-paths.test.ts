@@ -12,6 +12,7 @@ import {
   proposedDestination,
   proposedDestinationFromDocument,
   proposedDestinationFromURL,
+  proposedRequestName,
   slugify,
 } from './api-paths'
 
@@ -129,5 +130,45 @@ describe('proposedDestinationFromURL — what a pasted link proposes', () => {
   it('offers nothing when there is no last segment to take', () => {
     expect(proposedDestinationFromURL('/root', 'https://h/')).toBe('')
     expect(proposedDestinationFromURL('/root', 'not a url')).toBe('')
+  })
+})
+
+describe('proposedRequestName — what a request calls itself while nobody has', () => {
+  it('is the method and the last path segment, which is what the crumbs read', () => {
+    expect(proposedRequestName('POST', 'http://127.0.0.1:8080/v1/broker-access')).toBe(
+      'POST broker-access',
+    )
+    expect(proposedRequestName('GET', 'https://api.example.test/users')).toBe('GET users')
+  })
+
+  it('reads an address written against an environment, which is most of them', () => {
+    // `{{baseUrl}}/users` is not a URL any parser accepts and it is what a
+    // Postman export holds, so the segments are taken syntactically.
+    expect(proposedRequestName('GET', '{{baseUrl}}/users')).toBe('GET users')
+    expect(proposedRequestName('DELETE', '{{baseUrl}}/users/{{id}}')).toBe('DELETE users')
+  })
+
+  it('ignores the query and the fragment — they are not what a request is called', () => {
+    expect(proposedRequestName('GET', 'https://h/orders?page=2')).toBe('GET orders')
+    expect(proposedRequestName('GET', 'https://h/orders#top')).toBe('GET orders')
+    expect(proposedRequestName('GET', 'https://h/orders/?page=2')).toBe('GET orders')
+  })
+
+  it('offers NOTHING rather than something wrong', () => {
+    // A host is not a path segment: `POST 127.0.0.1:8080` names the machine
+    // and not the call.
+    expect(proposedRequestName('POST', 'http://127.0.0.1:8080')).toBe('')
+    expect(proposedRequestName('GET', 'https://api.example.test/')).toBe('')
+    // Nothing typed yet, which is every request the moment it is made.
+    expect(proposedRequestName('GET', '')).toBe('')
+    expect(proposedRequestName('GET', '   ')).toBe('')
+    // Every segment is a reference: there is no word in it that a person
+    // would recognise as the name of this call.
+    expect(proposedRequestName('GET', '{{baseUrl}}')).toBe('')
+    expect(proposedRequestName('GET', '{{baseUrl}}/{{id}}')).toBe('')
+  })
+
+  it('a method nobody named leaves the segment standing alone', () => {
+    expect(proposedRequestName('', 'https://h/orders')).toBe('orders')
   })
 })

@@ -62,7 +62,7 @@ import {
   type ApiSentRoute,
   type ApiTimings,
 } from './api-model'
-import { slugify } from './api-paths'
+import { proposedRequestName, slugify } from './api-paths'
 import { foldQueryIntoParams } from './api-url'
 import type { Unsupported as PostmanNote } from '../generated/api.import.postman'
 
@@ -351,6 +351,23 @@ export interface ApiStore {
    */
   deleteRequest(handle: string, relPath: string): Promise<void>
   /**
+   * Copy one request file, beside itself, and open the copy.
+   *
+   * Somebody wanting the same call with one header changed had two ways to
+   * get it: retype the request, or edit the original and lose it. The parts
+   * were both here — an allocator that names a file nothing occupies, and a
+   * write — with no door onto them.
+   *
+   * THE SOURCE IS THE FILE, read under its own path rather than taken from
+   * the form: the request being copied is very often not the one open, and
+   * the file is the truth in any case (§6.4). What travels is everything the
+   * file holds — method, URL, headers, query, variables, body and the auth
+   * VARIABLE NAME — and what does not is the file's own identity, the path
+   * and the id minted from it. A credential cannot travel because there is
+   * nowhere in the contract it could be spelled (design §8).
+   */
+  duplicateRequest(handle: string, relPath: string): Promise<void>
+  /**
    * Make a request that does not exist yet, in the collection the workbench
    * is pointed at, and open it.
    *
@@ -428,16 +445,67 @@ function newToken(): string {
  * (punctuation, another script) falls back to `untitled`, which is a file
  * name rather than a judgement about the name.
  */
-function freePath(open: readonly ApiOpenCollection[], handle: string, name: string): string {
+/** What a request is called before anybody — a person or the offer below —
+ *  has said. It is a file name's worth of nothing on purpose: the request a
+ *  person is about to type has no name yet, and asking for one puts a
+ *  decision before the thing they came to do. */
+const UNTITLED = 'Untitled request'
+
+function freePath(
+  open: readonly ApiOpenCollection[],
+  handle: string,
+  name: string,
+  /** The directory INSIDE the collection the file goes in — '' for the
+   *  collection's own root, which is where a request made from nothing goes.
+   *  A copy goes beside its original instead, and a copy of
+   *  `users/create.json` at the root is not beside anything. */
+  dir = '',
+): string {
   const taken = new Set(
     open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.relPath) ?? [],
   )
   const stem = slugify(name) || 'untitled'
-  if (!taken.has(`${stem}.json`)) return `${stem}.json`
-  for (let n = 2; ; n++) {
-    const candidate = `${stem}-${n}.json`
+  const at = dir === '' ? stem : `${dir}/${stem}`
+  return firstFree(taken, (n) => (n === 1 ? `${at}.json` : `${at}-${n}.json`))
+}
+
+/**
+ * The first candidate `form` produces that `taken` does not already hold,
+ * counting from one — the rule behind `create-user.json`, `create-user-2.json`
+ * and behind `create copy`, `create copy 2`.
+ *
+ * ONE COUNTING RULE, two currencies. A file and a name are uniquified against
+ * different sets and spell their suffix differently, and that is all that
+ * differs; a second loop would be the same rule written twice, agreeing until
+ * the day one of them learnt something the other did not.
+ */
+function firstFree(taken: ReadonlySet<string>, form: (n: number) => string): string {
+  for (let n = 1; ; n++) {
+    const candidate = form(n)
     if (!taken.has(candidate)) return candidate
   }
+}
+
+/**
+ * What a copy of `name` is CALLED, given what the collection already shows.
+ *
+ * A name a person can tell apart is the point of the whole act: a second row
+ * called exactly what the first one is called is the tree this door exists to
+ * stop growing. The file could not collide either way — the allocator sees to
+ * that — but two identical rows over two different files is worse than a
+ * collision, because nothing on screen says which is which.
+ */
+function freeCopyName(open: readonly ApiOpenCollection[], handle: string, name: string): string {
+  const taken = new Set(
+    open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.name) ?? [],
+  )
+  return firstFree(taken, (n) => (n === 1 ? `${name} copy` : `${name} copy ${n}`))
+}
+
+/** The directory a path inside a collection lives in — '' at the root. */
+function directoryOf(relPath: string): string {
+  const cut = relPath.lastIndexOf('/')
+  return cut === -1 ? '' : relPath.slice(0, cut)
 }
 
 function message(err: unknown): string {
@@ -947,6 +1015,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // snapshot as well is what keeps `dirty` false, so opening a request
       // does not report itself as edited.
       const adopted = foldQueryIntoParams(result.request)
+      // WHOSE NAME IS IN THE FORM NOW. A file still called `Untitled
+      // request` has been named by nobody, so the offer is live on it — that
+      // is the request `newRequest` has just written and reopened. Every
+      // other name on disk is one somebody gave, including one this offer
+      // gave earlier, and it is never taken away again.
+      offered = adopted.name === UNTITLED ? UNTITLED : ''
       setDraft(adopted)
       setSaved(adopted)
       setError('')
@@ -957,8 +1031,47 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
   }
 
+  // ── A request names itself, until somebody names it (nocx-lpo2m) ──────
+  //
+  // WHAT THE STORE IS STILL FREE TO REPLACE: the name it last put in the
+  // form, and '' once a person has taken the name over. That one string is
+  // the whole interval, and both its ends are named — it opens when a
+  // request arrives unnamed and it closes, for good, the moment `editDraft`
+  // is handed a different name than the one in the draft. Only the header's
+  // rename field can do that: everything else edits the address, the rows or
+  // the body, and hands the name straight back.
+  //
+  // It is here rather than in the form because the DRAFT is here. A surface
+  // deriving the name from the URL it is rendering would have to remember
+  // what the name was a moment ago and who changed it, which is exactly what
+  // this variable is, in a component that is rebuilt whenever the pane is.
+  let offered = ''
+
   const editDraft = (next: ApiRequest): void => {
-    setDraft(next)
+    const current = untrack(draft)
+    if (current === null || next.name !== current.name) {
+      // A PERSON NAMED IT. Not when the URL changes, not ever: the offer is
+      // spent, and it stays spent across a save and a reopen, because what
+      // the file then holds is a name somebody gave.
+      offered = ''
+      setDraft(next)
+      return
+    }
+    if (offered === '' || next.name !== offered) {
+      setDraft(next)
+      return
+    }
+    // AN OFFER, NOT A DERIVATION (api-paths.ts). '' is "there is nothing in
+    // this address to take a name from" — a bare host, an address that is
+    // all references — and then the request keeps the name it has and the
+    // offer stays live, because absent is not spent.
+    const name = proposedRequestName(next.method, next.url)
+    if (name === '') {
+      setDraft(next)
+      return
+    }
+    offered = name
+    setDraft({ ...next, name })
   }
 
   const saveDraftAs = async (): Promise<void> => {
@@ -1015,9 +1128,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // NO ASK. A person pressing "new request" has already said what they
     // want, and answering with a dialog puts a naming decision before the
     // thing they came to do — which is type a URL. The request arrives
-    // named "Untitled request" and is renamed in the header, in place,
-    // whenever they know what it is (api-pane.tsx).
-    const name = 'Untitled request'
+    // named "Untitled request", NAMES ITSELF from the address as that is
+    // typed (editDraft), and is renamed in the header, in place, the moment
+    // the person knows better (api-pane.tsx).
+    const name = UNTITLED
     const relPath = freePath(untrack(collections), handle, name)
     try {
       // A GET at no address, which is the request a person is about to type
@@ -1039,6 +1153,36 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // Opened through the ordinary path, so what lands in the form is what
       // the FILE says — never the object we just sent.
       await openRequest(handle, relPath)
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
+  const duplicateRequest = async (handle: string, relPath: string): Promise<void> => {
+    try {
+      // Read first, and let a source that will not read stop the whole act:
+      // a copy written from a request nobody could read would be a file
+      // whose contents nothing accounts for.
+      const source = (await services.readRequest(handle, relPath)).request
+      const name = freeCopyName(untrack(collections), handle, source.name)
+      // BESIDE THE ORIGINAL — the same directory inside the collection, so
+      // the copy of `users/create.json` lands under `users/` where a person
+      // is already looking.
+      const target = freePath(untrack(collections), handle, name, directoryOf(relPath))
+      await services.writeRequest(handle, target, {
+        ...source,
+        // The id is the file's stem, the rule `newRequest` follows: two
+        // machines copying the same request produce the same file, and the
+        // copy does not arrive carrying the original's identity.
+        id: target.replace(/\.json$/, ''),
+        name,
+      })
+      setError('')
+      // The tree learns about the copy the way it learns about a colleague's
+      // — from the folder, re-read — and the form opens it through the
+      // ordinary path, so what lands there is what the FILE says.
+      await refresh()
+      await openRequest(handle, target)
     } catch (err) {
       setError(message(err))
     }
@@ -1286,6 +1430,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // is nothing on disk for api.request.send to send.
       setSelected(null)
       setSaved(null)
+      // THE IMPORTER NAMED IT, off the line the person pasted, so there is
+      // no offer to make: a curl line converted into the form arrives called
+      // something, and rewriting that from the address would be this store
+      // arguing with the importer about one request's name.
+      offered = ''
       setDraft(foldQueryIntoParams(adoptImportedRequest(result.request)))
       setNotes(result.unsupported)
       setError('')
@@ -1383,6 +1532,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     saveDraft,
     deleteRequest,
     newRequest,
+    duplicateRequest,
     editDraft,
     setEnvironment,
     send,

@@ -1259,6 +1259,15 @@ end-to-end check, and it is the half that broke twice."
 
 - With no Wails runtime the ask draws NO drop target, and typing the export's
   path plus pressing Import puts the collection in the tree.
+  **This criterion was FALSE when it was written and is true only because of
+  nocx-vkp9d.** `api.collections.list` answers OPEN folders and
+  `api.import.postman` registered nothing, so the import stopped at the disk and
+  the person had to name the destination again in the panel's other ask. The
+  worker writing this spec asserted disk arrival instead and said so rather than
+  weakening the assertion quietly; the owner then decided the import should open
+  what it wrote. Left written down because the plan asserting a behaviour the
+  product did not have is exactly the shape rule 1 warns about — a criterion read
+  off intent rather than off the code.
 - The ask opens with `<defaultRoot>/` in the destination and Import disabled until
   it grows a last segment.
 - A bead exists for the uncovered native gesture.

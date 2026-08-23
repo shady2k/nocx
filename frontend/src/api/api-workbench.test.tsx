@@ -1811,10 +1811,7 @@ describe('the import ask accepts a drop', () => {
 /** The import ask, opened on a stand with nothing in the tree, with the two
  *  fields filled and Import pressed. `openCollection` is the call the OPEN
  *  goes through, so a test that is about the open overrides it. */
-async function importInto(
-  dest: string,
-  over: Partial<ApiWorkbenchServices> = {},
-): Promise<void> {
+async function importInto(dest: string, over: Partial<ApiWorkbenchServices> = {}): Promise<void> {
   const { bar } = await mountApp({ ...noCollections(), ...over })
   await openImportAsk(bar)
   fireEvent.input(field('api-import-postman-file'), { target: { value: '/downloads/acme.json' } })
@@ -1851,7 +1848,9 @@ describe('an import opens its destination', () => {
       .mockResolvedValue({ handle: 'h-imported', collection: collectionFixture({ name: 'Acme' }) })
     await importInto('/data/collections/acme', { openCollection })
 
-    await vi.waitFor(() => expect(toastMessages()).toContain('Imported into /data/collections/acme'))
+    await vi.waitFor(() =>
+      expect(toastMessages()).toContain('Imported into /data/collections/acme'),
+    )
     expect(toasts().every((t) => t.level === 'success')).toBe(true)
     // The folder ask's own toast belongs to the folder ask. One act, one
     // sentence — a person who pressed Import once is not told twice.

@@ -30,13 +30,10 @@ func TestPosixLauncher_EmitsMarkersFromPS1(t *testing.T) {
 		t.Fatalf("write fixture .profile: %v", err)
 	}
 
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{})
-	if !ok {
-		t.Fatalf("ShellUnknown launcher refused: reason=%q", reason)
-	}
+	cmd, tierEnv := tierCommand(t, ShellUnknown, home, LaunchOptions{})
 
 	out := runLauncherOnPTY(t, dashPath, cmd,
-		[]string{"HOME=" + home, "SHELL=" + dashPath, "HOSTNAME=testhost"},
+		append([]string{"HOME=" + home, "SHELL=" + dashPath, "HOSTNAME=testhost"}, tierEnv...),
 		"true", "false", "exit")
 
 	if !strings.Contains(out, "USER_RC_RAN") {
@@ -78,18 +75,8 @@ func TestPosixLauncher_EmitsMarkersFromPS1(t *testing.T) {
 	}
 }
 
-// TestPosixLauncher_MarkerOnlyKeepsSameStream: the minimal tier has no
-// ownership protocol and no C marker, so Enhanced changes nothing about the
-// emitted stream — but the pinned precondition "SessionID is never empty
-// when Enhanced" still applies (it is the caller's contract, enforced
-// uniformly across tiers). This is the enforcement half; the acceptance half
-// is the pty test above with an empty LaunchOptions.
-func TestPosixLauncher_EnhancedRequiresSessionID(t *testing.T) {
-	cmd, reason, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{Enhanced: true})
-	if ok {
-		t.Fatalf("ShellUnknown enhanced with empty SessionID accepted; got %q", cmd)
-	}
-	if reason != ReasonUnsupportedShell {
-		t.Errorf("reason = %q, want %q", reason, ReasonUnsupportedShell)
-	}
-}
+// The "Enhanced requires SessionID" precondition used to be asserted here, on
+// the per-tier command. It moved with the command: the bounded carrier is the
+// only thing that builds a remote start now, it enforces the same
+// precondition, and carrier_test.go asserts it there
+// (TestCarrier_EnhancedRequiresSessionID).

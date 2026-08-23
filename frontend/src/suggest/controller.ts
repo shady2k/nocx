@@ -47,6 +47,7 @@ import { mergeCandidates, preserveSelection } from './merge'
 import { rankCandidates } from './rank'
 import { tokenAt, positionOf } from './token'
 import type { SuggestionProvider, SuggestContext, SuggestBatch, EmptyReason } from './providers'
+import type { CommandNamesState } from '../command-snapshot'
 import type { CompletionDropdown } from '../ui/completion-dropdown'
 import { logDecision, isDecisionTracing } from '../log'
 
@@ -270,6 +271,57 @@ function ghostDecorations(view: EditorView, box: GhostBox, queryDoc: string): De
   )
   if (tail === null) return Decoration.none
   return Decoration.set([Decoration.widget({ widget: new GhostWidget(tail), side: 1 }).range(head)])
+}
+
+/**
+ * The five discovery states, and the five different things a person needs to
+ * be told (carrier design §8, assertion 36).
+ *
+ * There used to be one sentence for all of them — "Command names are still
+ * loading — they arrive after your next command" — and it was true for
+ * exactly one. A scan that timed out is not going to arrive after the next
+ * command; a scan that failed is not going to arrive at all; a stale cache
+ * has already arrived and is simply old. Telling a user to wait for any of
+ * those is telling them to do the one thing that cannot help, which is the
+ * shape of the defect the row had before.
+ *
+ * `running` keeps the original sentence, shortened: it is the only state in
+ * which waiting is the right advice, and the shell's own tables really do
+ * arrive at the next prompt.
+ *
+ * Distinct STRINGS, not distinct enum values. A state machine whose members
+ * render identically has not told anybody anything.
+ */
+function commandNamesMessage(reason: {
+  state: CommandNamesState
+  ageMs: number
+  reason: string
+}): string {
+  switch (reason.state) {
+    case 'ready':
+      return 'No command names match'
+    case 'stale':
+      return `Command names may be out of date — last scanned ${formatAge(reason.ageMs)} ago`
+    case 'timed-out':
+      return 'Command names timed out — the scan on this host did not finish in time'
+    case 'failed':
+      return reason.reason === ''
+        ? 'Command names could not be listed on this host'
+        : `Command names could not be listed — ${reason.reason}`
+    case 'running':
+    default:
+      return 'Command names are still loading'
+  }
+}
+
+/** Whole units, because a stale age is read, not measured. */
+function formatAge(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} min`
+  const hours = Math.round(minutes / 60)
+  return `${hours} h`
 }
 
 export class CompletionController {
@@ -774,12 +826,12 @@ export class CompletionController {
       return
     }
     // Prefer the most specific reason: a directory that has no
-    // subdirectories of the kind the command takes beats "snapshot pending"
+    // subdirectories of the kind the command takes beats a discovery state,
     // and a degraded ssh config resolver beat the generic "no matches".
     const priority: Record<EmptyReason['kind'], number> = {
       'dirs-only-empty': 0,
       'empty-dir': 0,
-      'snapshot-pending': 1,
+      'command-names': 1,
       'hosts-unavailable': 1,
       'no-match': 2,
     }
@@ -796,17 +848,8 @@ export class CompletionController {
         return this.bestReason.dir === ''
           ? 'This folder is empty'
           : `${this.bestReason.dir} is empty`
-      case 'snapshot-pending':
-        // Not "press Tab again in a moment", which is what this said and could
-        // not deliver. The snapshot is written by the shell and only from a
-        // prompt; a shell idle in readline runs nothing on its own (measured
-        // on bash 5.2 and 5.3 — a raised signal's trap waits for the next
-        // submitted command). So on the rare occasion the source-time job
-        // misses the first prompt's grace, pressing Tab cannot advance it and
-        // the row was telling the user to do the one thing that does not work.
-        // Running anything produces the next prompt, which carries it
-        // (nocx-z9s9.16).
-        return 'Command names are still loading — they arrive after your next command'
+      case 'command-names':
+        return commandNamesMessage(this.bestReason)
       case 'hosts-unavailable':
         // The quick-connect vocabulary for the degraded `ssh -G` resolver —
         // the condition, never silence. The detail names the failure the

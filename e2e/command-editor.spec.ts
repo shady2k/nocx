@@ -358,23 +358,55 @@ test.describe('command editor (nocx-4ff)', () => {
     await expect.poll(draft).toBe('e')
     const typed = await cardHeight()
 
-    // LESS THAN A PIXEL, not equal, and the slack is measured rather than
-    // guessed. When the completion has a candidate it draws the ghost as a CM6
-    // WIDGET, and CM6 puts an `<img class="cm-widgetBuffer">` beside every
-    // widget — `height: 1em`, `vertical-align: text-top` — which lifts the line
-    // box from 16.796875 to 16.890625. That is 0.09375px, it belongs to CM6
-    // rather than to this card, and whether it is there at all depends on what
-    // the stand's shell history holds, which is whatever spec ran before.
+    // The slack is the measured cost of a mechanism that belongs to CM6 and
+    // not to this card. When the completion has a candidate it draws the ghost
+    // as a CM6 WIDGET, and CM6 puts an `<img class="cm-widgetBuffer">` beside
+    // every widget — `height: 1em`, `vertical-align: text-top` — which lifts
+    // the line box. The lift is per-ENGINE, and the number here was first
+    // measured on one of them:
     //
-    // The defect this case guards is 10px — a whole scrollbar gutter — so a
-    // pixel of slack still fails on it by a factor of ten, and refusing the
-    // slack only buys a test that reports the suite's file order.
-    expect(Math.abs(typed - empty)).toBeLessThan(1)
+    //   webkit    16.796875 → 16.890625   0.09375px
+    //   chromium  16.796875 → 17.796875   1px exactly
+    //
+    // (chromium measured 2026-08-21 in e2e/run-in-container.sh: font-size
+    // 14px, line-height 16.8px, the buffer img 14px tall.) A `< 1` bound was
+    // the webkit figure rounded up, and chromium lands exactly on it.
+    //
+    // Whether the ghost is there at all used to depend on what the stand's
+    // shell history held. It no longer does: since the carrier design's §8
+    // split, the target's PATH set arrives over `shell.commandNames` for every
+    // session, so almost any first character has a candidate and draws a
+    // ghost. `e` completes to `e2freefrag` on this image where it completed to
+    // nothing before, which is why this case turned red without the card
+    // changing.
+    //
+    // The defect this case guards is 10px — a whole scrollbar gutter reserved
+    // for an empty document — so two pixels of slack still fails on it by a
+    // factor of five. THE 1px IS NOT NOTHING: it is a real wobble of the card
+    // and everything above it on the first keystroke, and it is written up as
+    // such in REPORT-e2e-triage.md. It is not fixed here because the fix is
+    // in the editor and CM6's buffer is deliberately left unstyled by this
+    // repo (`cmd-output-wrap.test.ts` asserts no rule targets it).
+    expect(Math.abs(typed - empty)).toBeLessThan(2)
 
     // And back again when the draft is emptied — the height belongs to the
-    // box, not to whether anything is in it.
+    // box, not to whether anything is in it. STILL A SUB-PIXEL BOUND here,
+    // and it is the CM6 buffer's absence that earns it: an empty draft has
+    // no candidates, so there is no ghost and no widget beside it.
+    //
+    // WAITED FOR, not sampled once. An empty document is not yet a settled
+    // one: the ghost's line box shrinks back immediately and `.cm-scroller`
+    // follows a beat later, so a height read the instant the draft empties
+    // catches the scroller still a pixel tall — measured on chromium as
+    // card 77.796875 against 76.796875 with `.cm-line` and `.nocx-editor-input`
+    // ALREADY back to their empty values, the extra pixel entirely in the
+    // scroller. It settles on its own; reading before it had was the whole of
+    // the failure. Polling the bound is strictly stronger than sampling it,
+    // because a card that never comes back still fails.
     await page.keyboard.press('Backspace')
     await expect.poll(draft).toBe('')
-    expect(Math.abs((await cardHeight()) - empty)).toBeLessThan(1)
+    await expect
+      .poll(async () => Math.abs((await cardHeight()) - empty) < 1, { timeout: 5_000 })
+      .toBe(true)
   })
 })

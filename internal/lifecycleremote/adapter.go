@@ -132,12 +132,83 @@ type Config struct {
 	Recovery   string // 64 lowercase hex chars; the one-shot recovery fence
 }
 
+// LossCause names which of the adapter's loss paths fired, and it is the
+// carrier design's §6.2 vocabulary rather than a list of this file's `return`
+// statements.
+//
+// §6.2 insists the events are DETECTED SEPARATELY, and the reason is that they
+// mean different things to a user: a listener that went away is nocx's own
+// channel disappearing, a transport that died is the SSH connection dying and
+// takes the session with it, and a speaker that stopped speaking is the shell.
+// Collapsing them produces one sentence — "not integrated, cannot say why" —
+// for three situations with three different answers.
+//
+// Two of §6.2's rows are NOT produced here and are named anyway, because the
+// vocabulary is the design's and not this package's: the multiplex master's
+// socket file going and the master process dying belong to the typed-`ssh`
+// wrapper, which owns the master. They are declared so that side reports into
+// one table rather than inventing a second (AD-8).
+//
+// The FIRST cause wins, which is the one that actually ended the channel: lose
+// is idempotent and is reached from several paths at once when a connection
+// dies, and the later ones are consequences.
+type LossCause string
+
+const (
+	// LossHelloTimeout is the handshake bound expiring (protocol §5): the
+	// transport was established and no acceptable hello arrived inside the
+	// window. §6.2's second row — after the channel exists, before
+	// integration is live.
+	LossHelloTimeout LossCause = "hello-timeout"
+	// LossEndOfStream is the speaker closing its end.
+	LossEndOfStream LossCause = "end-of-stream"
+	// LossReadError is the candidate's stream breaking under the pump.
+	LossReadError LossCause = "read-error"
+	// LossListenerGone is the remote listener going away while the adapter
+	// still wanted it: nocx's own channel to the shell is gone, and nothing
+	// on the far host can reach it any more.
+	LossListenerGone LossCause = "listener-gone"
+	// LossTransportGone is the underlying SSH transport dying. §6.2 is
+	// explicit about what follows and it is not a degrade to conventional:
+	// LOSING THE UNDERLYING TRANSPORT ENDS THE SESSION. There is no prompt
+	// to keep, and claiming otherwise would be an outcome we cannot deliver.
+	LossTransportGone LossCause = "transport-gone"
+	// LossMasterSocketGone is §6.2's first distinct event — the multiplex
+	// socket file going. Produced by the owner of the master, never here.
+	LossMasterSocketGone LossCause = "master-socket-gone"
+	// LossMasterExited is §6.2's second — the master process dying.
+	// Produced by the owner of the master, never here.
+	LossMasterExited LossCause = "master-exited"
+	// LossClosed is the session's own disposal path. Not a failure: the
+	// session is going away and the product has nothing to say about it.
+	LossClosed LossCause = "closed"
+)
+
+// LossReporter is told which path ended one adapter's transport, keyed by the
+// adapter's own lane.
+//
+// It exists because the kernel cannot answer this, and on the REMOTE path the
+// consequence was worse than on the local one: a remote session whose shell
+// never spoke established no domain, so the lane's projection never moved, so
+// the publisher announced nothing — and with no reporter here either, the
+// session's integration axis stayed at `starting` for the life of the tab.
+// §7 forbids exactly that ("`starting` can never be permanent"), and nothing
+// enforced it on this path until the reporter existed.
+type LossReporter func(lane lifecycle.LaneID, cause LossCause)
+
 // Option configures an Adapter.
 type Option func(*options)
 
 type options struct {
 	helloTimeout  time.Duration
 	maxCandidates int
+	lossReporter  LossReporter
+}
+
+// WithLossReporter registers the sink for this adapter's loss cause. Nil (the
+// default) reports nowhere and the loss is still logged.
+func WithLossReporter(r LossReporter) Option {
+	return func(o *options) { o.lossReporter = r }
 }
 
 // WithHelloTimeout bounds the handshake: unless an authenticated hello is
@@ -178,6 +249,7 @@ type Adapter struct {
 
 	helloTimeout  time.Duration
 	maxCandidates int
+	report        LossReporter
 
 	// slots bounds concurrent candidate connections (the accept loop parks
 	// one token per served connection).
@@ -232,16 +304,27 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 	}
 	port := portOf(ln.Addr())
 
+	tptHex, err := randHex(8)
+	if err != nil {
+		_ = ln.Close()
+		return nil, Config{}, err
+	}
+	laneHex, err := randHex(8)
+	if err != nil {
+		_ = ln.Close()
+		return nil, Config{}, err
+	}
 	a := &Adapter{
 		log:           log,
 		kernel:        k,
-		id:            lifecycle.TransportID("tpt-" + randHex(8)),
-		lane:          lifecycle.LaneID("lane-" + randHex(8)),
+		id:            lifecycle.TransportID("tpt-" + tptHex),
+		lane:          lifecycle.LaneID("lane-" + laneHex),
 		tc:            tc,
 		ln:            ln,
 		port:          port,
 		helloTimeout:  o.helloTimeout,
 		maxCandidates: o.maxCandidates,
+		report:        o.lossReporter,
 		slots:         make(chan struct{}, o.maxCandidates),
 		claim:         map[lifecycle.DomainID]net.Conn{},
 		speakers:      map[lifecycle.DomainID]net.Conn{},
@@ -271,7 +354,7 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 	// The timer may fire before New returns (a short hello timeout), so the
 	// field is stored under the same mutex stopHelloTimer reads: the
 	// callback's read is then ordered against this write and never races.
-	t := time.AfterFunc(a.helloTimeout, a.lose)
+	t := time.AfterFunc(a.helloTimeout, func() { a.lose(LossHelloTimeout) })
 	a.mu.Lock()
 	a.timer = t
 	a.mu.Unlock()
@@ -369,19 +452,40 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 
 // Close tears the transport down: the domain ends (TransportLost), the hello
 // timer stops, the listener and every candidate connection close, and the
-// tunnel lease is released. It is the session-end disposal path.
+// tunnel lease is released. It is the session-end disposal path, and it is also
+// the HARD INVALIDATION of design §5.3's validity interval — a bootstrap
+// refusal or timeout closes the handle, the domain ends, and a frame of that
+// epoch is rejected from then on.
+//
+// Teardown leaves nothing running, and every step of it is bounded: the accept
+// loop ends when the listener closes, each candidate goroutine ends when its
+// connection closes, the hello timer is stopped rather than left to fire into
+// a dead adapter, and the lease is released. It is idempotent under concurrent
+// callers, which it has to be — the refusal path, the session's own disposal
+// and the connection dying all reach it, sometimes at once.
 func (a *Adapter) Close() error {
-	a.lose()
+	a.lose(LossClosed)
 	return nil
 }
+
+// LoseForTest drives one loss path from a test, so §6.2's rows are asserted
+// against the adapter's own vocabulary rather than against a copy of it.
+func (a *Adapter) LoseForTest(cause LossCause) { a.lose(cause) }
 
 // lose is the single loss path, executed once: notify the kernel, mark the
 // adapter closed, stop accepting, close every live connection and release
 // the tunnel lease. Idempotent under concurrent callers (pump EOF, hello
 // timeout, Done watcher, explicit Close).
-func (a *Adapter) lose() {
+func (a *Adapter) lose(cause LossCause) {
 	a.loss.Do(func() {
 		a.stopHelloTimer()
+		// Reported BEFORE the kernel's TransportLost, so a consumer that
+		// also watches published facts has the cause in hand by the time
+		// one arrives.
+		if a.report != nil {
+			a.report(a.lane, cause)
+		}
+		a.log.Info("lifecycle remote transport lost", "transport", a.id, "lane", a.lane, "cause", cause)
 		if err := a.kernel.TransportLost(a.id); err != nil {
 			a.log.Warn("lifecycle transport lost notification failed", "error", err)
 		}
@@ -417,8 +521,8 @@ func (a *Adapter) stopHelloTimer() {
 // on loss; lose()'s tc.Close is a no-op after it.
 func (a *Adapter) watchLoss() {
 	<-a.tc.Done()
-	a.log.Info("lifecycle remote transport lost", "transport", a.id, "error", a.tc.LostErr())
-	a.lose()
+	a.log.Info("lifecycle remote underlying transport gone", "transport", a.id, "error", a.tc.LostErr())
+	a.lose(LossTransportGone)
 }
 
 // acceptLoop serves candidate connections from the remote listener until the
@@ -430,8 +534,13 @@ func (a *Adapter) acceptLoop() {
 	for {
 		c, err := a.ln.Accept()
 		if err != nil {
-			// Listener closed (lose) or the transport broke. The loss path
-			// owns the kernel notification; this loop just ends.
+			// Two different events reach here and §6.2 requires them
+			// apart: the listener closing because WE closed it (lose has
+			// already run and owns the cause), and the listener going away
+			// while the adapter still wanted it — nocx's own channel to
+			// the shell disappearing. lose is idempotent and first-cause-
+			// wins, so reporting here cannot overwrite a real cause.
+			a.lose(LossListenerGone)
 			return
 		}
 		select {
@@ -620,11 +729,22 @@ func (a *Adapter) endOfStream(c net.Conn) {
 		}
 	}
 	a.log.Info("lifecycle transport ended with a live domain; marking lost", "domain", d)
-	a.lose()
+	a.lose(LossEndOfStream)
 }
 
-func randHex(n int) string {
+// randHex mints this adapter's transport and lane IDENTIFIERS. Neither is an
+// authenticator, and a zero value lets nobody in — but every adapter would
+// then carry the SAME transport id and the SAME lane id, and the kernel tells
+// one transport's domains from another's by exactly that value
+// (ErrWrongTransport is an equality on it). Two remote sessions would share a
+// lane. So a failed read is an error here too, refused at construction where
+// the caller already has an error to return (nocx-s16k8).
+var randReader io.Reader = rand.Reader
+
+func randHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = io.ReadFull(rand.Reader, b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(randReader, b); err != nil {
+		return "", fmt.Errorf("lifecycleremote: the randomness source failed; no identifier was minted: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

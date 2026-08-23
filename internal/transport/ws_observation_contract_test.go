@@ -116,12 +116,13 @@ func TestSessionIntegrationChanged_ObservedProcessOverTheWireConformsToContract(
 	}
 	_ = in.Close()
 
-	raw = readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+	// By the property that makes it the outcome, never by position: this env
+	// enters the axis after `open` has returned, which races the open
+	// handler's own emit, and the frame that lands where the outcome was
+	// expected is then a second `starting` (readIntegrationWhere says why).
+	raw, got := readIntegrationWhere(t, e.conn, sid,
+		"the fact that concludes the axis", integrationConcluded)
 	validateJSON(t, schema, raw, "session.integrationChanged params (real socket, observed process)")
-	var got integrationChangedParams
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
 	if got.Status != IntegrationConventional {
 		t.Errorf("status = %q, want conventional", got.Status)
 	}

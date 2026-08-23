@@ -26,6 +26,8 @@ package app
 // neither touching the developer's home.
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -45,7 +47,9 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/ssh"
 	gosshagent "golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -56,14 +60,153 @@ import (
 const assemblySID = "aabbccddeeff00112233445566778899"
 
 var (
-	// childCapRe finds the per-epoch capability as the composed line
-	// streams it: `printf '%s\n' '<64 hex>'` (ShellQuote never alters hex).
-	childCapRe = regexp.MustCompile(`[0-9a-f]{64}`)
-	// childForwardRe pulls the -R ports out of the composed line:
-	// -R 127.0.0.1:CPORT:127.0.0.1:LPORT — CPORT is the remote bind, LPORT
-	// the listener transport's local port the forward terminates at.
-	childForwardRe = regexp.MustCompile(`-R 127\.0\.0\.1:(\d+):127\.0\.0\.1:(\d+)`)
+	// childCapRe finds a per-epoch capability. It is no longer looked for in
+	// the composed LINE — ADR-0035 took both bearers out of the command, and
+	// requestChild now asserts their absence — but in FRAME 2, which the
+	// delivery writes onto the parent's terminal after ownership of the
+	// multiplex socket has been proven. That is where the harness learns the
+	// child's capability, by watching exactly what the product delivers.
+	childCapRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})$`)
+	// childForwardRe pulls the -R ports out of the composed line. The words
+	// are shell-quoted one token at a time, so the port triple is its own
+	// quoted argument.
+	childForwardRe = regexp.MustCompile(`'127\.0\.0\.1:(\d+):127\.0\.0\.1:(\d+)'`)
 )
+
+// ---------------------------------------------------------------------------
+// The parent's terminal, as the typed delivery sees it.
+//
+// In the product the frames travel on the pty of the session whose shell
+// typed the `ssh`, and internal/session opens the window on it. This harness
+// IS that shell — it runs the composed line under a pty of its own — so it
+// provides the same window over that pty.
+//
+// The ordering is the interesting part, and it is the production ordering:
+// the window is opened while the grant is being built, BEFORE the parent has
+// the line, because once the parent has it `ssh` can start at once and a
+// window opened afterwards could miss the loader's readiness token. The pty
+// does not exist yet at that point, so the window waits for it.
+
+type harnessWindow struct {
+	mu       sync.Mutex
+	buf      []byte
+	sig      chan struct{}
+	ptmx     *os.File
+	attached chan struct{}
+	written  []byte
+	closed   bool
+}
+
+func newHarnessWindow() *harnessWindow {
+	return &harnessWindow{sig: make(chan struct{}, 1), attached: make(chan struct{})}
+}
+
+// attach hands the window the terminal, once the composed line is running.
+func (w *harnessWindow) attach(ptmx *os.File) {
+	w.mu.Lock()
+	w.ptmx = ptmx
+	w.mu.Unlock()
+	close(w.attached)
+}
+
+// feed is the tap: a COPY of the terminal's output, taking nothing from the
+// reader that renders it.
+func (w *harnessWindow) feed(p []byte) {
+	w.mu.Lock()
+	w.buf = append(w.buf, p...)
+	w.mu.Unlock()
+	select {
+	case w.sig <- struct{}{}:
+	default:
+	}
+}
+
+func (w *harnessWindow) ReadLine(ctx context.Context, timeout time.Duration) (string, error) {
+	deadline := time.After(timeout)
+	for {
+		w.mu.Lock()
+		if i := bytes.IndexByte(w.buf, '\n'); i >= 0 {
+			line := string(bytes.TrimRight(w.buf[:i], "\r"))
+			w.buf = w.buf[i+1:]
+			w.mu.Unlock()
+			return line, nil
+		}
+		closed := w.closed
+		w.mu.Unlock()
+		if closed {
+			return "", io.EOF
+		}
+		select {
+		case <-w.sig:
+		case <-deadline:
+			return "", errors.New("harness window: deadline")
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+
+func (w *harnessWindow) Write(p []byte) (int, error) {
+	<-w.attached
+	w.mu.Lock()
+	w.written = append(w.written, p...)
+	ptmx := w.ptmx
+	w.mu.Unlock()
+	if ptmx == nil {
+		return 0, errors.New("harness window: no terminal")
+	}
+	return ptmx.Write(p)
+}
+
+// QuarantineInput is a no-op here: this harness has no user typing into the
+// terminal until it types itself, and it types only after the bootstrap has
+// named its outcome.
+func (w *harnessWindow) QuarantineInput() {}
+
+func (w *harnessWindow) Close() error {
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
+	select {
+	case w.sig <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// capability returns the per-epoch capability out of the secret frame the
+// delivery wrote, waiting for it to be written.
+func (w *harnessWindow) capability(t *testing.T) (lifecycle.Capability, bool) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		m := childCapRe.FindStringSubmatch(string(w.written))
+		w.mu.Unlock()
+		if m != nil {
+			raw, err := hex.DecodeString(m[1])
+			if err != nil {
+				t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
+			}
+			var cap lifecycle.Capability
+			if len(raw) != len(cap) {
+				t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
+			}
+			copy(cap[:], raw)
+			return cap, true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return lifecycle.Capability{}, false
+}
+
+// harnessTerminals is the typedSessions seam: one window, for the one session
+// this harness has.
+type harnessTerminals struct{ win *harnessWindow }
+
+func (h harnessTerminals) OpenBootstrapWindow(session.ID) (session.BootstrapWindow, error) {
+	return h.win, nil
+}
 
 // fixturePort extracts the sshd port from the fixture address.
 func (fx *liveSshd) fixturePort() int {
@@ -206,6 +349,10 @@ type sshChildHarness struct {
 	childEpoch uint64
 	bootstrap  string
 	childCap   lifecycle.Capability
+	// win is the parent's terminal as the typed delivery sees it: the
+	// window the frames travel on, and where the harness learns the child's
+	// capability from (ADR-0035 took it out of the composed line).
+	win        *harnessWindow
 	childLPort int // the listener transport's local port (the -R target)
 	childRPort int // the remote bind the sshd opens (CPORT)
 	// Every fact the publisher emitted, in order — the renderer's whole
@@ -278,8 +425,11 @@ func (l *factLog) commands(domain lifecycle.DomainID) []string {
 
 func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	t.Helper()
-	logger := log.NewSlogAdapter(nil)
-	k := lifecycle.New(lifecycle.Options{})
+	logger := fx.log()
+	// The kernel's randomness comes from the fixture, so a test that needs a
+	// TAINTED capability and fence (the epic's canary) mints them through the
+	// production RequestDomain rather than reaching past it.
+	k := lifecycle.New(lifecycle.Options{Rand: fx.rand})
 	sessions := newSessionRegistry()
 	transports := newTransportRegistry()
 	lane := lifecycle.LaneID("lane-ssh-child-assembly")
@@ -288,17 +438,47 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	// The production grant wiring (app.go): the grant builder is the single
 	// owner of "how do we reach a host"; the closure resolves the publisher
 	// lazily, the way the composition root does.
+	// The typed-ssh delivery, wired as the composition root wires it. The
+	// control root is a short disposable directory: an over-long
+	// ControlPath does not degrade to no-multiplexing, it kills the
+	// connection, so the product refuses to build one and a test must not
+	// hand it one either.
+	//
+	// SHORT is asked of the product, not assumed of $TMPDIR. This minted
+	// the directory in os.TempDir(), which on macOS is a 48-character
+	// per-user confinement directory — the expansion landed 4 bytes past
+	// the bound, the wrapper refused with ReasonNoControlPath, and these
+	// tests read that refusal as a broken grant on the macOS runner while
+	// passing here. DefaultControlRoot now picks a base a socket fits in;
+	// its directory is that base, so the disposable root inherits the one
+	// answer instead of re-deriving it (and would inherit the next fix too).
+	sockRoot, err := os.MkdirTemp(filepath.Dir(ssh.DefaultControlRoot()), "nx")
+	if err != nil {
+		t.Fatalf("socket root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockRoot) })
+	win := newHarnessWindow()
+	typed := &typedRunner{
+		log: logger,
+		wrapper: ssh.NewTypedWrapper(logger,
+			ssh.NewSSHConfigResolver(logger, os.DevNull, ""), sockRoot),
+		dial:     DialTypedMux,
+		publish:  shellintegration.New(logger),
+		sessions: harnessTerminals{win: win},
+		probes:   defaultMasterProbes,
+	}
+
 	var pub *lifecyclepub.Publisher
 	pub = lifecyclepub.New(k,
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return pub }, transports, sessions)))
+			func() *lifecyclepub.Publisher { return pub }, transports, sessions, typed)))
 	facts := &factLog{pub: pub}
 	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}
 
-	parentLn, err := lifecyclechannel.NewListener(logger, pub)
-	if err != nil {
-		t.Fatalf("parent listener: %v", err)
+	parentLn, lnErr := lifecyclechannel.NewListener(logger, pub)
+	if lnErr != nil {
+		t.Fatalf("parent listener: %v", lnErr)
 	}
 	t.Cleanup(func() { _ = parentLn.Close() })
 	// The parent is a LOCAL adapter (the child's ssh runs on this machine),
@@ -325,6 +505,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 		parentEpoch: h.Epoch,
 		parentCap:   h.Capability,
 		facts:       facts,
+		win:         win,
 	}
 }
 
@@ -393,15 +574,14 @@ func (h *sshChildHarness) requestChild(host string, port int, user string) {
 	h.childEpoch = grant.Epoch
 	h.bootstrap = grant.Bootstrap
 
-	capHex := childCapRe.FindString(h.bootstrap)
-	if capHex == "" {
-		h.t.Fatalf("composed line carries no capability line (nocx-u7uh.29 defect): %s", h.bootstrap)
+	// ADR-0035's whole subject: neither bearer travels in the command, and
+	// neither does the bundle. The line's only 64-hex value is the stage-1
+	// DIGEST, which names public bytes; a capability there would reach the
+	// far host's process arguments and every recorder of the exec request,
+	// and a bundle there is the 92,204-byte command this epic removed.
+	if len(h.bootstrap) > shellintegration.MaxCarrierLen+4096 {
+		h.t.Fatalf("composed line is %d bytes: the bundle is back in the command", len(h.bootstrap))
 	}
-	raw, err := hex.DecodeString(capHex)
-	if err != nil || len(raw) != len(h.childCap) {
-		h.t.Fatalf("composed line capability %q does not decode to a capability", capHex)
-	}
-	copy(h.childCap[:], raw)
 
 	ports := childForwardRe.FindStringSubmatch(h.bootstrap)
 	if ports == nil {
@@ -515,7 +695,23 @@ func (h *sshChildHarness) runComposedLine(agentSock, sshWrapperDir string) *comp
 		h.t.Fatalf("start composed line on a pty: %v", err)
 	}
 	out := &outputBuffer{}
-	go func() { _, _ = io.Copy(out, ptmx) }()
+	// One reader, two consumers: the window gets a COPY and takes nothing.
+	// Every byte still reaches the buffer a failing test prints.
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := ptmx.Read(buf)
+			if n > 0 {
+				_, _ = out.Write(buf[:n])
+				h.win.feed(buf[:n])
+			}
+			if rerr != nil {
+				_ = h.win.Close()
+				return
+			}
+		}
+	}()
+	h.win.attach(ptmx)
 	return &composedLineProc{t: h.t, cmd: cmd, ptmx: ptmx, out: out}
 }
 
@@ -852,6 +1048,11 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 // their states.
 func (h *sshChildHarness) assertLateChildHelloRejected() {
 	h.t.Helper()
+	cap, ok := h.win.capability(h.t)
+	if !ok {
+		h.t.Fatal("no capability was ever delivered to the far side; the late-hello proof needs one")
+	}
+	h.childCap = cap
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", h.childLPort))
 	if err != nil {
 		h.t.Fatalf("dial child listener: %v", err)

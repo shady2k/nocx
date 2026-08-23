@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -617,6 +618,159 @@ func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("dialog.openFile: %+v", envelope.Error)
 	}
 	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
+}
+
+// ── dialog.openFileForUpload ────────────────────────────────────────────
+
+// The DTO's own conformance. Both branches: a picked file, and a cancelled
+// picker — where the ticket is the empty string and the pattern has to
+// accept it, because cancel is "no change" and not an error.
+func TestDialogOpenFileForUpload_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFileForUpload.schema.json")
+	raw, err := json.Marshal(SourcePick{
+		Ticket: "0123456789abcdef0123456789abcdef",
+		Name:   "report.pdf",
+		Size:   4096,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "dialog.openFileForUpload DTO")
+
+	rawCancel, err := json.Marshal(SourcePick{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawCancel, "dialog.openFileForUpload cancelled DTO")
+}
+
+// The ticket's PATTERN is load-bearing, not decoration: an unconstrained
+// string lets a regression emit a malformed or truncated ticket and still
+// pass conformance. This is the assertion that the schema would reject one.
+func TestDialogOpenFileForUpload_ContractRefusesAMalformedTicket(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFileForUpload.schema.json")
+	for _, bad := range []string{"not-a-ticket", "ABCDEF0123456789ABCDEF0123456789", "0123456789abcdef"} {
+		raw, err := json.Marshal(SourcePick{Ticket: bad, Name: "x", Size: 1})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := validateJSONErr(schema, raw); err == nil {
+			t.Errorf("the contract accepted %q as a source ticket", bad)
+		}
+	}
+}
+
+// The real method through the real socket, with a picker standing in for
+// the Wails runtime and a real file standing in for the human's choice.
+func TestDialogOpenFileForUpload_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "dialog.openFileForUpload.schema.json")
+	h := newInventoryHarness(t)
+	picker := &fakeUploadPicker{path: seedFile(t, "over-the-wire.bin", 9), store: NewSourceTicketStore(nil)}
+	h.ws.SetDialogService(picker)
+
+	resp := jsonrpcCall(t, h.conn, "dialog.openFileForUpload", map[string]any{})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("dialog.openFileForUpload: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "dialog.openFileForUpload result")
+}
+
+// ── files.dropped ───────────────────────────────────────────────────────
+
+// The DTO's own conformance: the notification params as the emitter builds
+// them, key set exact.
+func TestFilesDropped_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.dropped.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"sessionId": "0123456789abcdef0123456789abcdef",
+		"sources": []SourcePick{
+			{Ticket: "abcdef0123456789abcdef0123456789", Name: "a.txt", Size: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.dropped DTO")
+
+	// And the local tab's shape, which is the other one this struct has: no
+	// ticket, and the absolute path the prompt insert needs (D9).
+	rawLocal, err := json.Marshal(map[string]any{
+		"sessionId": "0123456789abcdef0123456789abcdef",
+		"sources": []SourcePick{
+			{Name: "a.txt", Size: 2, LocalPath: "/home/dev/Downloads/a.txt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, rawLocal, "files.dropped DTO (local tab)")
+}
+
+// The real notification off the real socket — the row that matters, because
+// a payload the test itself built proves the struct is well-formed and not
+// that the server sends it. The drop is driven through the store the window
+// drop calls, so this is the whole native path minus the OS.
+func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.dropped.schema.json")
+	e := newDropEnv(t)
+	if err := e.ws.UploadSources().Dropped(
+		[]string{seedFile(t, "dropped-over-the-wire.bin", 3)},
+		map[string]string{"data-session-id": e.sid},
+	); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	params := readNotification(t, e.conn, "files.dropped", 5*time.Second)
+	validateJSON(t, schema, params, "files.dropped notification")
+	// The regression that would matter, asserted on the bytes rather than on
+	// a decoded struct: a REMOTE tab is where a credential exists and bytes
+	// will move, and it learns a name and a size and nothing else about the
+	// backend's filesystem. The KEY is what is checked, so an empty path
+	// cannot pass for an absent one.
+	if bytes.Contains(params, []byte("localPath")) {
+		t.Fatalf("a remote tab's files.dropped carries a path: %s", params)
+	}
+}
+
+// And the same notification for the tab that mints nothing: a drop on a
+// LOCAL tab still tells the renderer what was dropped, so the prompt insert
+// works in the Wails window, and carries no ticket because nothing may be
+// uploaded onto the machine the file is already on (D9). The empty ticket
+// is part of the contract rather than an accident of it.
+func TestFilesDropped_ALocalTabsNotificationConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.dropped.schema.json")
+	e := newFilesTestEnv(t)
+	sid := e.openSession(t, 1) // the `open` method opens a LOCAL session
+	path := seedFile(t, "local-drop.bin", 3)
+	if err := e.ws.UploadSources().Dropped(
+		[]string{path},
+		map[string]string{"data-session-id": sid},
+	); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	params := readNotification(t, e.conn, "files.dropped", 5*time.Second)
+	validateJSON(t, schema, params, "files.dropped notification (local tab)")
+	var got struct {
+		Sources []SourcePick `json:"sources"`
+	}
+	if err := json.Unmarshal(params, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Sources) != 1 || got.Sources[0].Ticket != "" {
+		t.Fatalf("sources = %+v, want one entry with no ticket", got.Sources)
+	}
+	// The half D9 promised and the wire did not keep until now: the prompt
+	// insert needs the PATH, and a base name that looks like one resolves
+	// against whatever the shell's cwd happens to be.
+	if got.Sources[0].LocalPath != path {
+		t.Fatalf("localPath = %q off the socket, want %q", got.Sources[0].LocalPath, path)
+	}
 }
 
 // ── shell.openUrl (brief, nocx-hc0m) ────────────────────────────────────
@@ -1788,6 +1942,11 @@ func (fakeRemoteLauncher) StartCommand(ssh.ShellKind, ssh.LaunchOptions) (string
 	return "", ssh.ReasonNone, false
 }
 
+// A launcher that declines has no bootstrap to prepare either.
+func (fakeRemoteLauncher) Prepare(ssh.ShellKind, ssh.LaunchOptions) (string, ssh.BootstrapRun, ssh.BootstrapGate, bool) {
+	return "", nil, nil, false
+}
+
 // ── tunnel.open / tunnel.stop ──────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, pointer-as-null for stopReason and
@@ -2763,6 +2922,323 @@ func TestFilesReveal_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestFilesUpload_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.upload.schema.json")
+
+	// One case per branch of the union. They are separate Go types rather
+	// than one struct with everything optional, so "exactly one branch
+	// matches" is a property of the code and not only of the schema.
+	cases := map[string]any{
+		"collision": filesUploadCollision{Collision: "exists"},
+		"started (no body needed)": filesUploadStarted{
+			TransferID: "0123456789abcdef0123456789abcdef",
+		},
+		"stream (the sink is waiting for a body)": filesUploadStream{
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     strings.Repeat("ab", uploadTicketHexLen/2),
+			URL:        "/upload/" + strings.Repeat("ab", uploadTicketHexLen/2),
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.upload DTO")
+		})
+	}
+}
+
+// TestFilesUpload_ContractRefusesValuesItOnlyUsedToDescribe. The schema
+// described transferId as 32 lowercase hex, ticket as 64 and url as
+// /upload/{ticket}, and typed all three as unrestricted strings — so a
+// regression emitting an empty id, an uppercase ticket or an unrelated URL
+// satisfied every conformance check in this file. additionalProperties:false
+// makes the SHAPE exact; these patterns are what make the security-relevant
+// VALUES exact, and a pattern with nothing asserting it refuses anything is
+// the same theatre as a schema without them.
+func TestFilesUpload_ContractRefusesValuesItOnlyUsedToDescribe(t *testing.T) {
+	schema := loadSchema(t, "files.upload.schema.json")
+	good := strings.Repeat("ab", uploadTicketHexLen/2)
+	cases := map[string]any{
+		"an empty transfer id": filesUploadStarted{TransferID: ""},
+		"a transfer id of the wrong width": filesUploadStarted{
+			TransferID: "0123456789abcdef",
+		},
+		"an uppercase ticket": filesUploadStream{
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     strings.ToUpper(good),
+			URL:        "/upload/" + strings.ToUpper(good),
+		},
+		"a url that is not this route": filesUploadStream{
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     good,
+			URL:        "https://elsewhere.example.com/collect",
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("the contract accepted %s:\n%s", name, raw)
+			}
+		})
+	}
+}
+
+// The one that matters: all three branches taken off the real socket, from
+// the real handler, against the real schema. A payload the test itself
+// built proves the struct is well-formed, not that the server sends it.
+func TestFilesUpload_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.upload.schema.json")
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "taken.txt"), []byte("original"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	bid := e.openBinding(t, sid, dir, 2)
+
+	// Branch 3: a free name — the sink is waiting for a body.
+	stream := callUpload(t, e.conn, uploadParams(bid, dir, "fresh.txt", 5), 3)
+	if stream.Error != nil {
+		t.Fatalf("files.upload (stream): %+v", stream.Error)
+	}
+	validateJSON(t, schema, stream.Result, "files.upload result, stream branch (real socket)")
+
+	// Branch 1: a taken name and no decision.
+	collision := callUpload(t, e.conn, uploadParams(bid, dir, "taken.txt", 5), 4)
+	if collision.Error != nil {
+		t.Fatalf("files.upload (collision): %+v", collision.Error)
+	}
+	validateJSON(t, schema, collision.Result, "files.upload result, collision branch (real socket)")
+
+	// Branch 2: skip — a transfer that needs no body.
+	skipParams := uploadParams(bid, dir, "taken.txt", 5)
+	skipParams["onExists"] = "skip"
+	skipped := callUpload(t, e.conn, skipParams, 5)
+	if skipped.Error != nil {
+		t.Fatalf("files.upload (skip): %+v", skipped.Error)
+	}
+	validateJSON(t, schema, skipped.Result, "files.upload result, started branch (real socket)")
+
+	// And the branches really are distinct on the wire, not one shape with
+	// fields that happened to be empty.
+	if got := stream.mustResult(t); got.Collision != "" || got.Ticket == "" {
+		t.Errorf("stream branch = %+v", got)
+	}
+	if got := collision.mustResult(t); got.Collision != "exists" || got.TransferID != "" {
+		t.Errorf("collision branch = %+v", got)
+	}
+	if got := skipped.mustResult(t); got.TransferID == "" || got.Ticket != "" {
+		t.Errorf("started branch = %+v", got)
+	}
+}
+
+func TestFilesUploadCancel_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadCancel.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.uploadCancel DTO")
+}
+
+func TestFilesUploadCancel_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadCancel.schema.json")
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callUpload(t, e.conn, uploadParams(bid, dir, "a.txt", 1<<20), 3).mustResult(t)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.uploadCancel", map[string]any{
+		"transferId": started.TransferID,
+	}, 4)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.uploadCancel: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.uploadCancel result (real socket)")
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != uploadStateCancelled {
+		t.Fatalf("state = %q, want %q", state, uploadStateCancelled)
+	}
+}
+
+func TestFilesUploadProgress_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadProgress.schema.json")
+	cases := map[string]filesTransferProgressParams{
+		// Mid-transfer: the ordinary frame.
+		"in flight": {TransferID: strings.Repeat("a1", 16), Bytes: 4096, Total: 1 << 20},
+		// Nothing confirmed yet — the first chunk has not landed.
+		"at zero": {TransferID: strings.Repeat("b2", 16), Bytes: 0, Total: 1 << 20},
+		// An empty file is a file: total 0 must not be an omitempty hole.
+		"an empty file": {TransferID: strings.Repeat("c3", 16), Bytes: 0, Total: 0},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.uploadProgress DTO")
+		})
+	}
+}
+
+// The real progress notification off the real socket. The sink holds inside
+// Put after reporting, so the frame is guaranteed rather than raced: the
+// emitter chooses between the progress mailbox and the transfer's done
+// channel, and a transfer that could settle first would legitimately emit
+// nothing.
+func TestFilesUploadProgress_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadProgress.schema.json")
+	sink := newPausingSink()
+	e := newUploadTestEnvWithSink(t, sink)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+
+	params := uploadParams(bid, dir, "watched.bin", 4096)
+	params["onExists"] = "skip" // the branch that needs no body
+	started := callUpload(t, e.conn, params, 3).mustResult(t)
+
+	<-sink.reported
+	raw := readNotification(t, e.conn, "files.uploadProgress", wantWithin)
+	validateJSON(t, schema, raw, "files.uploadProgress params (real socket)")
+
+	var got filesTransferProgressParams
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.TransferID != started.TransferID {
+		t.Errorf("transferId = %q, want %q", got.TransferID, started.TransferID)
+	}
+	if got.Total != 4096 {
+		t.Errorf("total = %d, want the declared size 4096", got.Total)
+	}
+	sink.release()
+	awaitTransferState(t, e.ws, started.TransferID)
+}
+
+func TestFilesUploadDone_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadDone.schema.json")
+	cases := map[string]filesUploadDoneParams{
+		"written": {
+			TransferID: strings.Repeat("a1", 16), Outcome: uploadStateWritten,
+			FinalName: "report.pdf", Stranded: []string{},
+		},
+		// keepBoth renamed it, and the backup unlink failed afterwards: a
+		// success that still stranded a path (§6).
+		"written and stranded": {
+			TransferID: strings.Repeat("b2", 16), Outcome: uploadStateWritten,
+			FinalName: "report (1).pdf", Stranded: []string{"/srv/.report.pdf.nocx-bak"},
+		},
+		"skipped": {
+			TransferID: strings.Repeat("c3", 16), Outcome: uploadStateSkipped, Stranded: []string{},
+		},
+		"cancelled carries no error": {
+			TransferID: strings.Repeat("d4", 16), Outcome: uploadStateCancelled, Stranded: []string{},
+		},
+		// The fallback lost its second rename: BOTH paths, which is why
+		// stranded is a list.
+		"failed": {
+			TransferID: strings.Repeat("e5", 16), Outcome: uploadStateFailed,
+			Error:    "transfer: promote /srv/report.pdf: connection lost",
+			Stranded: []string{"/srv/.report.pdf.nocx-tmp", "/srv/.report.pdf.nocx-bak"},
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.uploadDone DTO")
+			// stranded must be [] and never null: a nil slice marshals to
+			// null and the renderer's first .map would throw on it. The DTO
+			// cases above all pass a non-nil slice, so this is the check
+			// that the SERVER never builds one that does not.
+			if bytes.Contains(raw, []byte(`"stranded":null`)) {
+				t.Errorf("stranded marshalled as null: %s", raw)
+			}
+		})
+	}
+}
+
+// The real terminal notification off the real socket, in both of the ways
+// it can reach a person: delivered live, and RETAINED across a reconnect
+// and flushed on attach. The second is the one an addressing defect hides
+// in — an outcome addressed like progress would be emitted into nothing.
+func TestFilesUploadDone_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.uploadDone.schema.json")
+
+	t.Run("live, failed with stranded paths", func(t *testing.T) {
+		sink := &failingSink{
+			err:      errors.New("transfer: promote /srv/f: connection lost"),
+			stranded: []string{"/srv/.f.nocx-tmp", "/srv/.f.nocx-bak"},
+		}
+		e := newUploadTestEnvWithSink(t, sink)
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		bid := e.openBinding(t, sid, dir, 2)
+		body := []byte("bytes that never land")
+		started := callUpload(t, e.conn, uploadParams(bid, dir, "f", int64(len(body))), 3).mustResult(t)
+		go postUploadAsync(e.ws, started.Ticket, body)
+
+		raw := readNotification(t, e.conn, "files.uploadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.uploadDone params (real socket, live)")
+		var got filesUploadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Outcome != uploadStateFailed || got.Error == "" || len(got.Stranded) != 2 {
+			t.Fatalf("got %+v; want a failed outcome carrying its reason and both stranded paths", got)
+		}
+	})
+
+	t.Run("retained across a reconnect, written", func(t *testing.T) {
+		e := newUploadTestEnv(t)
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		bid := e.openBinding(t, sid, dir, 2)
+		body := []byte("finished while nobody was watching")
+		started := callUpload(t, e.conn, uploadParams(bid, dir, "late.txt", int64(len(body))), 3).mustResult(t)
+
+		dropSubscriber(t, e, sid)
+		if code, resp := postUpload(t, e.ws, started.Ticket, body); code != http.StatusOK {
+			t.Fatalf("POST /upload = %d %q, want 200", code, resp)
+		}
+		awaitTransferState(t, e.ws, started.TransferID)
+
+		connB := reattach(t, e, sid, 4)
+		raw := readNotification(t, connB, "files.uploadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.uploadDone params (real socket, flushed on attach)")
+		var got filesUploadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.TransferID != started.TransferID || got.Outcome != uploadStateWritten || got.FinalName != "late.txt" {
+			t.Fatalf("got %+v; want the written outcome of %s", got, started.TransferID)
+		}
+		// The empty case of the null check: a transfer that stranded
+		// nothing must still send [].
+		if got.Stranded == nil {
+			t.Error("stranded is null on the wire — the renderer's first .map would throw")
+		}
+	})
+}
+
 func TestFilesChanged_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.changed.schema.json")
 	cases := map[string]filesChangedParams{
@@ -3713,15 +4189,15 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
+	readLifecycleWhere(t, e.conn, "the hello's prompt_ready fact",
+		lifecycleIs(lifecyclepub.LifecyclePromptReady))
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
-	var lost lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &lost); err != nil {
-		t.Fatalf("decode lost: %v", err)
-	}
+	// The lost fact BY NAME, for the reason readLifecycleWhere gives: the
+	// open handler's replay can put a second prompt_ready exactly here.
+	_, lost := readLifecycleWhere(t, e.conn, "the lane's lost fact",
+		lifecycleIs(lifecyclepub.LifecycleLost))
 	if lost.Recovery == nil {
 		t.Fatal("a live session's lost fact must carry the recovery contract")
 	}
@@ -4124,12 +4600,16 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 
 	// The shell never speaks. The handshake bound expires, the adapter names
 	// the path that lost the channel, and the product finally hears about it.
-	raw = readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+	//
+	// Asked for BY THE PROPERTY that makes it the outcome, never by position.
+	// The axis legitimately re-sends `starting` — the open handler emits the
+	// status once after its ack, and registering the axis after `open` has
+	// returned races that emit — so "the next session.integrationChanged" is
+	// not the same question as "the one that says how it ended", and on the
+	// run where the handler loses the race the two have different answers.
+	raw, timedOut := readIntegrationWhere(t, e.conn, sid,
+		"the fact that concludes the axis", integrationConcluded)
 	validateJSON(t, schema, raw, "session.integrationChanged params (real socket, handshake timeout)")
-	var timedOut integrationChangedParams
-	if err := json.Unmarshal(raw, &timedOut); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
 	if timedOut.Status != IntegrationConventional {
 		t.Errorf("status = %q, want %q", timedOut.Status, IntegrationConventional)
 	}
@@ -5499,6 +5979,96 @@ func TestAPICollections_FailuresAreReportedNotPaperedOver(t *testing.T) {
 	}
 }
 
+// ── the bootstrap's outcome, off the real socket ──────────────────────────
+
+// Assertion 23, and the third of AGENTS.md rule 5's three checks, which is the
+// one that matters: THE REAL RESULT OFF THE REAL SOCKET. A payload the test
+// itself built would prove the struct is well-formed, not that the server
+// sends it.
+//
+// What is red without P5: every one of these reasons reached the product as
+// `unknown`. The bootstrap concluded before any domain existed, so no lifecycle
+// fact carried it and no transport-loss cause described it — the precise
+// outcome went to a log, and the session either sat in `starting` until some
+// other detector concluded it with a vaguer word, or (on the remote path,
+// which has no loss reporter at all) sat there for the life of the tab.
+//
+// The table is the §6.4 matrix plus the bootstrap's own set, one case each. It
+// asserts the value the RENDERER will key on, after the schema has accepted
+// the frame — a reason outside the closed enum fails validateJSON here rather
+// than arriving as a card with no words in it.
+func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason ssh.RefusalReason
+	}{
+		// §6.4, by real channel type.
+		{"the primary session refused", ssh.ReasonSessionUnavailable},
+		{"pty-req refused after the session", ssh.ReasonPTYUnavailable},
+		{"exec refused, the channel alive", ssh.ReasonExecRefused},
+		{"exec accepted and substituted", ssh.ReasonExecSubstituted},
+		{"the SFTP subsystem refused", ssh.ReasonPublishUnavailable},
+		{"the lifecycle channel refused", ssh.ReasonChannelUnavailable},
+		{"an open channel severed mid-frame", ssh.ReasonBootstrapInterrupted},
+		// The bootstrap's own closed set. The first is the one the brief
+		// names: the backend knew `generation-unavailable` and the product
+		// said "conventional, unknown".
+		{"no generation installed on the far host", ssh.ReasonGenerationUnavailable},
+		{"no hasher on the far host", ssh.ReasonStageDigestUnavailable},
+		{"the stage-1 digest did not match", ssh.ReasonStageDigestMismatch},
+		{"the far side never announced itself", ssh.ReasonReceiverUnready},
+		{"the far side went quiet after announcing", ssh.ReasonBootstrapTimeout},
+		{"a token arrived twice or out of order", ssh.ReasonBootstrapOutOfOrder},
+		{"the capability could not be stored privately", ssh.ReasonCapabilityWriteFailed},
+		{"the far side refused a key addressed elsewhere", ssh.ReasonSecretNotForThisSession},
+	}
+	schema := loadSchema(t, "session.integrationChanged.schema.json")
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newLifecycleTestEnv(t)
+			sid := e.openSession(t, 1)
+			lane := lifecycle.LaneID(fmt.Sprintf("lane-bootstrap-%d", i))
+			e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+			e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+			e.ws.emitIntegration(session.ID(sid))
+
+			// The honest interval first: nothing has failed yet, and a
+			// product that named an outcome here would be guessing.
+			raw := readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+			validateJSON(t, schema, raw, "session.integrationChanged params (real socket, starting)")
+			var starting integrationChangedParams
+			if err := json.Unmarshal(raw, &starting); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if starting.Status != IntegrationStarting || starting.Reason != "" {
+				t.Fatalf("first fact = %+v, want status=starting with no reason", starting)
+			}
+
+			// The bootstrap reaches its terminal outcome.
+			e.ws.NoteBootstrapOutcome(lane, tc.reason)
+
+			// Asked for BY THE PROPERTY that makes it the outcome. The
+			// first `session.integrationChanged` after this point is not
+			// reliably the terminal one: the open handler emits the status
+			// once after its ack, so a test that enters the axis afterwards
+			// races that emit and an extra `starting` can land exactly here.
+			raw, got := readIntegrationWhere(t, e.conn, sid,
+				"the fact that concludes the axis", integrationConcluded)
+			validateJSON(t, schema, raw, "session.integrationChanged params (real socket, "+tc.name+")")
+			if got.Status != IntegrationConventional {
+				t.Errorf("status = %q, want %q", got.Status, IntegrationConventional)
+			}
+			if got.Reason != string(tc.reason) {
+				t.Errorf("reason off the wire = %q, want %q — the backend knew which it was",
+					got.Reason, tc.reason)
+			}
+			if got.Reason == string(ssh.ReasonUnknown) {
+				t.Error("the product was told the backend cannot say why, and it can")
+			}
+		})
+	}
+}
+
 // A collection whose root is replaced under it. The handle is re-validated
 // per operation rather than trusted from open time (§13.1's fourth rule),
 // and the list REPORTS the failure on the entry rather than dropping the
@@ -5771,6 +6341,216 @@ func TestAPIRequestSend_DTOConformsToContract(t *testing.T) {
 			if ex.Failure == nil && string(probe.Failure) != "null" {
 				t.Errorf("failure = %s for an answered exchange, want null", probe.Failure)
 			}
+		})
+	}
+}
+
+// An accepted bootstrap says nothing at all on this axis, and must not: "a
+// domain is live" is the kernel's word, and an accepted bootstrap means the
+// shell is on its way to proving itself rather than that it has. Reporting
+// `integrated` here would be the transport re-deriving the kernel's
+// conclusion, which is the two-owners defect AD-8 names.
+func TestSessionIntegrationChanged_AnAcceptedBootstrapClaimsNothing(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	sid := e.openSession(t, 1)
+	lane := lifecycle.LaneID("lane-bootstrap-accepted")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.emitIntegration(session.ID(sid))
+	readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+
+	e.ws.NoteBootstrapOutcome(lane, ssh.ReasonNone)
+
+	e.ws.integrationMu.Lock()
+	st := *e.ws.integrations[session.ID(sid)]
+	e.ws.integrationMu.Unlock()
+	if st.status != IntegrationStarting || st.reason != ssh.ReasonNone {
+		t.Errorf("axis = %q/%q after an accepted bootstrap, want it untouched at %q",
+			st.status, st.reason, IntegrationStarting)
+	}
+}
+
+// The first answer wins, and this is the third detector to meet that rule.
+// A session already concluded — by the launch itself, by the process observer,
+// or by a transport loss — is not re-explained by a bootstrap report arriving
+// afterwards.
+func TestSessionIntegrationChanged_ABootstrapOutcomeNeverOverwritesAnAnswer(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	sid := e.openSession(t, 1)
+	lane := lifecycle.LaneID("lane-bootstrap-answered")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonRemoteCommand)
+
+	e.ws.NoteBootstrapOutcome(lane, ssh.ReasonGenerationUnavailable)
+
+	e.ws.integrationMu.Lock()
+	st := *e.ws.integrations[session.ID(sid)]
+	e.ws.integrationMu.Unlock()
+	if st.reason != ssh.ReasonRemoteCommand {
+		t.Errorf("reason = %q, want the first answer %q", st.reason, ssh.ReasonRemoteCommand)
+	}
+}
+
+// ── files.download* ──────────────────────────────────────────────────────
+
+func TestFilesDownload_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.download.schema.json")
+	good := strings.Repeat("ab", uploadTicketHexLen/2)
+	cases := map[string]filesDownloadResult{
+		"an ordinary file": {
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     good,
+			URL:        "/download/" + good,
+			Name:       "report.pdf",
+			Size:       1 << 20,
+		},
+		// An empty file is a file: size 0 must not be an omitempty hole.
+		"an empty file": {
+			TransferID: "0123456789abcdef0123456789abcdef",
+			Ticket:     good,
+			URL:        "/download/" + good,
+			Name:       "empty",
+			Size:       0,
+		},
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.download DTO")
+		})
+	}
+}
+
+// The patterns are what make the security-relevant VALUES exact. A schema
+// that described a 64-hex ticket and typed it as an unrestricted string
+// would accept an empty one, an uppercase one, or a URL pointing somewhere
+// else entirely — and a pattern with nothing asserting that it refuses
+// anything is the same theatre as a schema without one.
+func TestFilesDownload_ContractRefusesValuesItOnlyUsedToDescribe(t *testing.T) {
+	schema := loadSchema(t, "files.download.schema.json")
+	good := strings.Repeat("ab", uploadTicketHexLen/2)
+	base := filesDownloadResult{
+		TransferID: "0123456789abcdef0123456789abcdef",
+		Ticket:     good,
+		URL:        "/download/" + good,
+		Name:       "a.txt",
+		Size:       1,
+	}
+	empty := base
+	empty.TransferID = ""
+	upper := base
+	upper.Ticket = strings.ToUpper(good)
+	elsewhere := base
+	elsewhere.URL = "https://elsewhere.example.com/collect"
+	wrongRoute := base
+	wrongRoute.URL = "/upload/" + good
+	negative := base
+	negative.Size = -1
+
+	cases := map[string]filesDownloadResult{
+		"an empty transfer id":              empty,
+		"an uppercase ticket":               upper,
+		"a url that is not this backend":    elsewhere,
+		"a url naming the OTHER byte route": wrongRoute,
+		"a negative size":                   negative,
+	}
+	for name, res := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(res)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("the contract accepted %s:\n%s", name, raw)
+			}
+		})
+	}
+}
+
+// The one that matters: the real result off the real socket, from the real
+// handler, against the real schema. A payload the test itself built proves
+// the struct is well-formed, not that the server sends it.
+func TestFilesDownload_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.download.schema.json")
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	p := fixture(t, dir, "report.bin", strings.Repeat("x", 4096))
+	empty := fixture(t, dir, "empty", "")
+	bid := e.openBinding(t, sid, dir, 2)
+
+	resp := callDownload(t, e.conn, downloadParams(bid, p), 3)
+	if resp.Error != nil {
+		t.Fatalf("files.download: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "files.download result (real socket)")
+
+	// And the zero-size shape, which is where an omitempty defect would
+	// hide: a size that vanished from the payload fails `required`.
+	respEmpty := callDownload(t, e.conn, downloadParams(bid, empty), 4)
+	if respEmpty.Error != nil {
+		t.Fatalf("files.download of an empty file: %+v", respEmpty.Error)
+	}
+	validateJSON(t, schema, respEmpty.Result, "files.download result, empty file (real socket)")
+	if !bytes.Contains(respEmpty.Result, []byte(`"size":0`)) {
+		t.Fatalf("an empty file's size vanished from the payload: %s", respEmpty.Result)
+	}
+}
+
+func TestFilesDownloadCancel_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadCancel.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "files.downloadCancel DTO")
+}
+
+func TestFilesDownloadCancel_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadCancel.schema.json")
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	p := fixture(t, dir, "a.txt", strings.Repeat("x", 4096))
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.downloadCancel", map[string]any{
+		"transferId": started.TransferID,
+	}, 4)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.downloadCancel: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.downloadCancel result (real socket)")
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateCancelled {
+		t.Fatalf("state = %q, want %q", state, downloadStateCancelled)
+	}
+}
+
+func TestFilesDownloadProgress_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadProgress.schema.json")
+	cases := map[string]filesTransferProgressParams{
+		"in flight":     {TransferID: strings.Repeat("a1", 16), Bytes: 4096, Total: 1 << 20},
+		"at zero":       {TransferID: strings.Repeat("b2", 16), Bytes: 0, Total: 1 << 20},
+		"an empty file": {TransferID: strings.Repeat("c3", 16), Bytes: 0, Total: 0},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.downloadProgress DTO")
 		})
 	}
 }
@@ -6106,6 +6886,67 @@ func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
 	}
 }
 
+// The real progress notification off the real socket. The source holds
+// inside Get after reporting, so the frame is guaranteed rather than raced.
+func TestFilesDownloadProgress_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadProgress.schema.json")
+	src := newPausingSource()
+	e := newDownloadTestEnvWith(t, downloadFactoryWithSource(src))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	p := fixture(t, dir, "watched.bin", "x")
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+
+	go func() { _, _ = getDownloadRaw(e.ws, started.Ticket) }()
+	<-src.reported
+
+	raw := readNotification(t, e.conn, "files.downloadProgress", wantWithin)
+	validateJSON(t, schema, raw, "files.downloadProgress params (real socket)")
+	src.release()
+	awaitTransferState(t, e.ws, started.TransferID)
+}
+
+func TestFilesDownloadDone_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadDone.schema.json")
+	cases := map[string]filesDownloadDoneParams{
+		"sent": {
+			TransferID: strings.Repeat("a1", 16), Outcome: downloadStateSent,
+			Name: "report.pdf", Bytes: 1 << 20, Total: 1 << 20,
+		},
+		// A partial transfer that cannot be taken back: bytes is the whole
+		// of the account.
+		"failed part-way": {
+			TransferID: strings.Repeat("b2", 16), Outcome: downloadStateFailed,
+			Name: "report.pdf", Bytes: 4096, Total: 1 << 20,
+			Error: "transfer: read remote: connection lost",
+		},
+		"cancelled carries no error": {
+			TransferID: strings.Repeat("c3", 16), Outcome: downloadStateCancelled,
+			Name: "report.pdf", Bytes: 0, Total: 1 << 20,
+		},
+		"an empty file": {
+			TransferID: strings.Repeat("d4", 16), Outcome: downloadStateSent,
+			Name: "empty", Bytes: 0, Total: 0,
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "files.downloadDone DTO")
+			// bytes and total are required, so a zero that vanished behind
+			// an omitempty would fail the schema — asserted directly too,
+			// because that is the defect class this directory exists for.
+			if !bytes.Contains(raw, []byte(`"bytes":`)) || !bytes.Contains(raw, []byte(`"total":`)) {
+				t.Errorf("a count vanished from the payload: %s", raw)
+			}
+		})
+	}
+}
+
 // chosenCollections drops the BUILT-IN collection from a listing.
 //
 // api.collections.list opens the Playground once per process before it
@@ -6123,4 +6964,60 @@ func chosenCollections(in []apiOpenCollectionWire) []apiOpenCollectionWire {
 		out = append(out, c)
 	}
 	return out
+}
+
+// The real terminal notification off the real socket, in both of the ways
+// it can reach a person: delivered live, and RETAINED across a reconnect
+// and flushed on attach. The second is the one an addressing defect hides
+// in — an outcome addressed like progress would be emitted into nothing.
+func TestFilesDownloadDone_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.downloadDone.schema.json")
+
+	t.Run("live, failed part-way", func(t *testing.T) {
+		src := &failingSource{err: errors.New("transfer: read remote: connection lost"), sent: 1024}
+		e := newDownloadTestEnvWith(t, downloadFactoryWithSource(src))
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		p := fixture(t, dir, "f", "x")
+		bid := e.openBinding(t, sid, dir, 2)
+		started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+		go func() { _, _ = getDownloadRaw(e.ws, started.Ticket) }()
+
+		raw := readNotification(t, e.conn, "files.downloadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.downloadDone params (real socket, live)")
+		var got filesDownloadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Outcome != downloadStateFailed || got.Error == "" || got.Bytes != 1024 {
+			t.Fatalf("got %+v; want a failed outcome carrying its reason and how far it got", got)
+		}
+	})
+
+	t.Run("retained across a reconnect, sent", func(t *testing.T) {
+		e := newDownloadTestEnv(t)
+		sid := e.openSession(t, 1)
+		dir := t.TempDir()
+		body := "finished while nobody was watching"
+		p := fixture(t, dir, "late.txt", body)
+		bid := e.openBinding(t, sid, dir, 2)
+		started := callDownload(t, e.conn, downloadParams(bid, p), 3).mustResult(t)
+
+		dropSubscriber(t, e, sid)
+		if code, _, _, err := getDownloadFull(e.ws, started.Ticket, nil); err != nil || code != 200 {
+			t.Fatalf("GET = %d %v", code, err)
+		}
+		awaitTransferState(t, e.ws, started.TransferID)
+
+		connB := reattach(t, e, sid, 4)
+		raw := readNotification(t, connB, "files.downloadDone", wantWithin)
+		validateJSON(t, schema, raw, "files.downloadDone params (real socket, flushed on attach)")
+		var got filesDownloadDoneParams
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.TransferID != started.TransferID || got.Outcome != downloadStateSent || got.Name != "late.txt" {
+			t.Fatalf("got %+v; want the sent outcome of %s", got, started.TransferID)
+		}
+	})
 }

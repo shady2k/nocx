@@ -51,22 +51,22 @@
     {
       "kind": "exports",
       "file": "src/recall.ts",
-      "symbol": "MIN_USEFUL_ROWS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "SCOPE_LABELS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
       "symbol": "isRecallShortcut"
     },
     {
       "kind": "exports",
       "file": "src/recall.ts",
+      "symbol": "MIN_USEFUL_ROWS"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
       "symbol": "nextScope"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "SCOPE_LABELS"
     },
     {
       "kind": "exports",
@@ -76,12 +76,12 @@
     {
       "kind": "exports",
       "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "STORAGE_KEY"
+      "symbol": "cacheThemeId"
     },
     {
       "kind": "exports",
       "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "cacheThemeId"
+      "symbol": "STORAGE_KEY"
     },
     {
       "kind": "exports",
@@ -180,16 +180,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/ui/icons/PauseIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/PlayIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
       "file": "src/ui/icons/index.ts",
       "symbol": "PauseIcon"
     },
@@ -200,12 +190,37 @@
     },
     {
       "kind": "exports",
+      "file": "src/ui/icons/PauseIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PlayIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
       "file": "src/unresolved-redactions.ts",
       "symbol": "hasUnresolved"
     },
     {
       "kind": "files",
-      "file": "src/generated/ledger.artifact.ts",
+      "file": "src/generated/files.download.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.downloadCancel.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.downloadDone.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/files.downloadProgress.ts",
       "symbol": ""
     },
     {
@@ -220,17 +235,7 @@
     },
     {
       "kind": "files",
-      "file": "src/generated/ledger.get.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
       "file": "src/generated/ledger.open.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/ledger.query.ts",
       "symbol": ""
     },
     {
@@ -281,11 +286,6 @@
     {
       "kind": "files",
       "file": "src/ui/overlay/index.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/ui/overlay/portal.ts",
       "symbol": ""
     },
     {

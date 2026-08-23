@@ -27,7 +27,7 @@ type inventoryHarness struct {
 	conn *websocket.Conn
 }
 
-func newInventoryHarness(t *testing.T) *inventoryHarness {
+func newInventoryHarness(t *testing.T, extra ...WSServerOption) *inventoryHarness {
 	t.Helper()
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
@@ -45,10 +45,12 @@ func newInventoryHarness(t *testing.T) *inventoryHarness {
 
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+	opts := append([]WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v),
-		WithVaultLifecycle(v))
+		WithVaultLifecycle(v),
+	}, extra...)
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
 	ctx := t.Context()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

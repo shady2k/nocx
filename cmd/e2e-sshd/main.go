@@ -40,6 +40,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,6 +51,7 @@ import (
 	"sync"
 
 	"github.com/creack/pty"
+	"github.com/pkg/sftp"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -469,6 +471,22 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 				}
 				_ = req.Reply(true, nil)
 				startCommand(ch, st, e.Command)
+			case "subsystem":
+				// RFC 4254 Â§6.5: one string, the subsystem name. OpenSSH
+				// ships `internal-sftp` and is configured with it by default,
+				// so a far side that refuses this request is not a smaller
+				// sshd â it is a different one, and nocx publishes its
+				// integration bundle over SFTP and nothing else (ADR-0035).
+				// While this fell through to `default`, every connection to
+				// the fixture came up "Not integrated", which is the same
+				// class of dishonesty as the denied tcpip-forward above.
+				var sub struct{ Name string }
+				if gossh.Unmarshal(req.Payload, &sub) != nil || sub.Name != "sftp" {
+					_ = req.Reply(false, nil)
+					continue
+				}
+				_ = req.Reply(true, nil)
+				startSFTP(ch, st)
 			default:
 				_ = req.Reply(false, nil)
 			}
@@ -514,14 +532,65 @@ func sessionEnv(shell string) []string {
 	return append(env, "SHELL="+shell, "TERM=xterm-256color")
 }
 
-func startCommand(ch gossh.Channel, st *sessionState, command string) {
+// claim reports whether this channel is still free to start something. A
+// session channel runs exactly one thing â a shell, an exec or a subsystem
+// â and the second request to arrive is refused rather than raced.
+func (st *sessionState) claim() bool {
 	st.mu.Lock()
+	defer st.mu.Unlock()
 	if st.started {
-		st.mu.Unlock()
-		return
+		return false
 	}
 	st.started = true
-	st.mu.Unlock()
+	return true
+}
+
+// startSFTP serves the SFTP subsystem on the channel, which is what OpenSSH's
+// `internal-sftp` does and what the nocx publisher speaks to.
+//
+// pkg/sftp's server advertises posix-rename@openssh.com, and that matters
+// rather than being incidental: sftpFS.Rename refuses to replace an existing
+// destination on a server without it (there is deliberately no
+// remove-then-rename fallback), so a fixture lacking the extension would take
+// a first publish and refuse every manifest upgrade after it â a far side
+// that half-works is worse than one that refuses, because the spec above it
+// would prove the wrong thing.
+//
+// The bundle is written under the session's own $HOME, which the e2e home
+// boundary has already moved into the run's disposable directory: this serves
+// the real filesystem, exactly as a real sftp-server does, and the isolation
+// stays where it already is.
+func startSFTP(ch gossh.Channel, st *sessionState) {
+	if !st.claim() {
+		return
+	}
+	srv, err := sftp.NewServer(ch)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd: sftp server:", err)
+		_ = ch.Close()
+		return
+	}
+	go func() {
+		// Serve returns io.EOF when the client closes the session, which is
+		// the ordinary end of a publish and not a failure.
+		serveErr := srv.Serve()
+		_ = srv.Close()
+		status := uint32(0)
+		if serveErr != nil && !errors.Is(serveErr, io.EOF) {
+			fmt.Fprintln(os.Stderr, "e2e-sshd: sftp serve:", serveErr)
+			status = 1
+		}
+		// The same contract as startCommand: an explicit exit-status and then
+		// EOF, because a real ssh client waits for both.
+		_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{Status: status}))
+		_ = ch.Close()
+	}()
+}
+
+func startCommand(ch gossh.Channel, st *sessionState, command string) {
+	if !st.claim() {
+		return
+	}
 
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -587,6 +656,32 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	}()
 	go func() {
 		_, _ = io.Copy(master, ch)
-		_ = master.Close()
+		// THE CLIENT HALF-CLOSING ITS STDIN IS NOT THE END OF THE COMMAND,
+		// and closing the master here said it was.
+		//
+		// gossh sends channel EOF the moment a session with no Stdin starts,
+		// which is every `sess.Output(...)` — so `exec` ran, the master was
+		// closed under it, the child took SIGHUP from its own controlling
+		// terminal and every exec on this fixture answered "Process exited
+		// with status 255" with no output at all. Nothing noticed while the
+		// integration bundle travelled in the ssh command line: the one
+		// caller is GetRemoteHome, whose failure was fail-open and cost the
+		// old path nothing. ADR-0035 moved the bundle onto SFTP, which needs
+		// that home, so a fixture that cannot run `echo $HOME` now reports
+		// itself to the user as "nocx could not copy its shell integration to
+		// this host".
+		//
+		// So NOTHING HAPPENS HERE, which is also what a real sshd does: this
+		// session has a PTY, a PTY cannot be half-closed, and OpenSSH answers
+		// a client stdin EOF on a pty session by simply ceasing to write. The
+		// master belongs to the exit goroutine above, which closes it once
+		// the child is reaped.
+		//
+		// The cost is stated rather than hidden: a command that READS stdin
+		// would now wait for input that can never arrive. Every caller of
+		// exec here — GetRemoteHome's `echo $HOME`, the command-name probe
+		// and scan — reads none, and injecting an EOT to cover the case that
+		// does not exist is not faithfulness but invention: it also reaches
+		// the interactive shell on this fixture, where ^D means "exit".
 	}()
 }

@@ -68,6 +68,10 @@ func (s *StubConfigResolver) ResolveConfig(_ context.Context, host string) (*Hos
 			IdentityFile:  e.IdentityFile,
 			RemoteCommand: e.RemoteCommand,
 			RequestTTY:    e.RequestTTY,
+
+			ControlMaster:  e.ControlMaster,
+			ControlPath:    e.ControlPath,
+			ControlPersist: e.ControlPersist,
 		}, nil
 	}
 	return &HostConfig{HostName: host, User: currentUser(), Port: 22}, nil
@@ -679,4 +683,120 @@ port 22
 	for range b.N {
 		_, _ = parseSSHGOutput(output, strconv.Itoa(b.N))
 	}
+}
+
+// Two argvs naming ONE destination are two questions, and each gets its own
+// answer — before and after the other has been asked.
+//
+// The oracle cache was keyed by the resolved identity (user@host:port) with
+// the argv only an index into it, on the assumption that every argv for one
+// destination resolves the same. ADR-0035 made that false on purpose: the
+// typed wrapper asks about the user's own line, and then about the same line
+// plus our own ControlMaster/ControlPath/ControlPersist, and the second
+// question exists BECAUSE it answers differently — only ssh can expand the
+// %C in the socket path.
+//
+// Sharing one entry meant whichever question ran last owned the destination.
+// The FIRST typed ssh to a host worked, because neither argv was cached yet;
+// every one after it got the other question's answer, found no control path
+// for the wrapped line, and refused to interpose with `no-control-path`. The
+// user's second connection to the same host came up unintegrated
+// (e2e/nocxify-journey.spec.ts, 2026-08-21).
+func TestResolveArgv_TwoArgvsForOneDestinationKeepTheirOwnAnswers(t *testing.T) {
+	sshPath, configPath := fakeSSHClientWithControlPath(t)
+	resolver := NewSSHConfigResolver(log.NewSlogAdapter(nil), configPath, sshPath)
+
+	plain := []string{"ssh", "-G", "-p", "2222", "e2e@127.0.0.1"}
+	wrapped := []string{
+		"ssh", "-G",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=/tmp/nocx-mux-0/m-deadbeef",
+		"-o", "ControlPersist=no",
+		"-p", "2222", "e2e@127.0.0.1",
+	}
+
+	ask := func(what string, argv []string) *HostConfig {
+		t.Helper()
+		cfg, err := resolver.ResolveArgv(context.Background(), argv)
+		if err != nil {
+			t.Fatalf("ResolveArgv(%s): %v", what, err)
+		}
+		return cfg
+	}
+
+	// Both are asked once, in the order the typed wrapper asks them.
+	if cp := ask("plain, first", plain).ControlPath; cp != "" {
+		t.Fatalf("the user's own line reports ControlPath %q, want none", cp)
+	}
+	if cp := ask("wrapped, first", wrapped).ControlPath; cp == "" {
+		t.Fatal("the wrapped line reports no ControlPath; the fake oracle is not answering the question this test asks")
+	}
+
+	// And again — the second connection to the same host.
+	if cp := ask("plain, second", plain).ControlPath; cp != "" {
+		t.Errorf("the user's own line reports ControlPath %q on the second ask, want none — "+
+			"nocx would refuse the rewrite as the user's own multiplex policy", cp)
+	}
+	if cp := ask("wrapped, second", wrapped).ControlPath; cp == "" {
+		t.Error("the wrapped line reports no ControlPath on the second ask — " +
+			"nocx refuses to interpose with no-control-path and the session comes up unintegrated")
+	}
+
+	// The paired half: a REPEAT of one argv is still served from the cache,
+	// so the fix did not buy correctness with a subprocess per question.
+	before := sshInvocationCount(t, sshPath)
+	_ = ask("wrapped, third", wrapped)
+	if after := sshInvocationCount(t, sshPath); after != before {
+		t.Errorf("ssh invocations %d → %d for a repeated argv, want no new spawn", before, after)
+	}
+}
+
+// fakeSSHClientWithControlPath is an ssh -G stand-in that answers about the
+// OPTIONS as well as the host: it echoes `controlpath` when one was asked
+// for, which is exactly the difference the test above is about. The fake in
+// fakeSSHClient consumes a fixed `-F <config> -G <host>` and cannot.
+func fakeSSHClientWithControlPath(t *testing.T) (sshPath, configPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	configPath = filepath.Join(dir, "config")
+	if err := os.WriteFile(configPath, []byte(""), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	counterPath := filepath.Join(dir, "counter")
+	if err := os.WriteFile(counterPath, []byte("0"), 0o600); err != nil {
+		t.Fatalf("write counter: %v", err)
+	}
+	sshPath = filepath.Join(dir, "ssh")
+	script := fmt.Sprintf(`#!/bin/sh
+counter="%s"
+c=$(cat "$counter" 2>/dev/null || echo 0)
+echo $((c + 1)) > "$counter"
+
+cp=""
+host=""
+for a in "$@"; do
+    case "$a" in
+        ControlPath=*) cp="${a#ControlPath=}" ;;
+        -*) ;;
+        *) host="$a" ;;
+    esac
+done
+
+echo "user e2e"
+echo "hostname 127.0.0.1"
+echo "port 2222"
+echo "remotecommand none"
+echo "requesttty auto"
+[ -n "$cp" ] && echo "controlpath $cp"
+[ -n "$host" ] || exit 1
+exit 0
+`, counterPath)
+	if err := os.WriteFile(sshPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	// #nosec G302 — a stand-in ssh must be executable to be run.
+	if err := os.Chmod(sshPath, 0o700); err != nil {
+		t.Fatalf("chmod fake ssh: %v", err)
+	}
+	return sshPath, configPath
 }

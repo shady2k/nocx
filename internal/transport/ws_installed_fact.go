@@ -51,8 +51,10 @@ const installedFactProtocol = "1"
 //     document on every prompt.
 //
 // A failed write is logged and dropped: the store's own contract is that a
-// lost fact degrades to "not installed", which costs a bootstrap on the next
-// connection and never a claim that cannot be proven.
+// lost fact degrades to "not observed", which costs the footprint surface
+// one row and never a claim that cannot be proven. Nothing else reads the
+// fact — the remote command is unconditional (2026-08-20 carrier design
+// §4.1) — so a lost row changes no delivery decision.
 func (s *WSServer) recordInstalledFact(f lifecyclepub.Fact) {
 	if s.installedFacts == nil || s.sshConfigResolver == nil || s.lifecyclePub == nil {
 		return
@@ -139,7 +141,7 @@ func (s *WSServer) resolveAndRecordInstalledFact(host, user string, port int, ge
 		ObservedAt: time.Now().UTC(),
 	}
 	if err := s.installedFacts.Record(fact); err != nil {
-		s.log.Warn("installed fact: the observation could not be persisted, so the next connection will bootstrap",
+		s.log.Warn("installed fact: the observation could not be persisted, so the footprint surface will not list this destination",
 			"identity", fact.Identity, "error", err)
 		return
 	}

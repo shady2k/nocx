@@ -718,6 +718,21 @@ __nocx_nested_launch() {
     if ! __nocx_lc_read_grant "$__rid"; then
         return 1 # no grant: channel dead or refused without a reply
     fi
+    # A grant whose bootstrap is EMPTY is the protocol's refusal echo: the
+    # backend's grant builder declined this child and the publisher answered
+    # with the echo rather than with no reply at all (lifecyclepub's
+    # Publisher leaves Bootstrap zero when the builder returns an error).
+    # The documented contract for that echo is the honest fallback — run the
+    # user's line conventionally — and it is checked HERE, above the
+    # suspend, for two reasons. There is no child, so nothing may be
+    # suspended and no domain may be claimed. And `eval ""` succeeds: the
+    # ssh branch below would return 0 for a launch that never happened, and
+    # 0 is what tells the caller to skip the user's line (nocx-tyyo).
+    if [[ -z "$__nocx_grant_bootstrap" ]]; then
+        eval "$__line"
+        __nocx_nested_rc=$?
+        return 0
+    fi
     # The child's hello requires the parent Suspended (§9) — never exec the
     # child before this frame is written.
     __nocx_lc_send domain_suspended
@@ -727,7 +742,7 @@ __nocx_nested_launch() {
         # the -R reverse forward plus the in-band payload piped into ssh -t.
         eval "$__nocx_grant_bootstrap"
         __nocx_nested_rc=$?
-    elif [[ -n "$__nocx_grant_bootstrap" ]]; then
+    else
         # Same machine: stage the child's rcfile into a preserved descriptor
         # and launch. The child reads it via --rcfile /dev/fd/4 (ADR-0024's
         # preferred answer: the capability never enters a filesystem
@@ -839,10 +854,6 @@ __nocx_nested_launch() {
             eval "$__line"
             __nocx_nested_rc=$?
         fi
-    else
-        # The grant refused (empty bootstrap): run conventionally.
-        eval "$__line"
-        __nocx_nested_rc=$?
     fi
     return 0
 }
@@ -1239,9 +1250,29 @@ fi
 # run; the frontend accepts exactly one hello, so a forged re-hello cannot
 # re-anchor the nonce.
 #
-# compgen -c | sort -u measures ~37 ms on this machine and can take seconds
-# on NFS, so it must never sit in front of the prompt. The snapshot is
-# computed in a background job started at SOURCE time — the old reason for
+# WHAT IS IN THIS PAYLOAD, AND WHAT IS NOT (carrier design §8). It carries
+# the SESSION-LOCAL tables only: aliases, builtins, keywords and functions —
+# `compgen -abkA function`. It deliberately no longer carries the PATH
+# executables, which `compgen -c` used to merge in.
+#
+# The split is by whose truth it is. A function or an alias belongs to THIS
+# shell and to no other, so it must be answered by this shell and may never
+# be cached for another session — cache it and a tab claims a function
+# defined in a different tab. The PATH executables are the opposite: the same
+# set for every session to the same host, and expensive to enumerate
+# (`compgen -c | sort -u` measured ~37 ms here and takes seconds on NFS). So
+# they are computed once per host by the backend, shared across every tab,
+# and invalidated by the mtime of each PATH directory — where ten tabs in an
+# hour used to mean ten full scans of thousands of files.
+#
+# That is also what disarms the background job below. It used to run an
+# unbounded directory enumeration whose 250 ms budget stopped the WAIT and
+# not the WORK; what it runs now is a read of tables the shell already holds
+# in memory. The staging file, the atomic rename and the exit-time kill are
+# kept because the job is still a job, but there is no longer a thousands-of-
+# files pipeline behind them to be orphaned.
+#
+# The snapshot is computed in a background job started at SOURCE time — the old reason for
 # deferring it to the first prompt was "the environment is final only once
 # the rc has finished", weighed and rejected: the gate line is appended at
 # the END of ~/.bashrc, so in the common case sourcing already happens last
@@ -1465,9 +1496,13 @@ __nocx_encode_hex_into() {
 }
 
 # Fill __nocx_payload with the hex-escaped, `;`-joined names, capped at
-# 8192 names and 65536 encoded characters. Returns non-zero when the list is
+# 4096 names and 65536 encoded characters. Returns non-zero when the list is
 # empty — an empty snapshot must never reach the frontend: "every command is
 # unknown" is the same lie as "every command exists", pointing the other way.
+#
+# 4096, not 8192: this payload is now the SESSION-LOCAL half only (see the
+# enumeration below), and 4096 is the bound the carrier design puts on it.
+# The PATH half is bounded separately, at 8192, by the backend that owns it.
 __nocx_snapshot_build() {
     __nocx_payload=''
     local line n=0 before LC_ALL=C
@@ -1479,7 +1514,7 @@ __nocx_snapshot_build() {
             break
         fi
         n=$((n + 1))
-        if (( n >= 8192 )); then
+        if (( n >= 4096 )); then
             break
         fi
     done
@@ -1523,7 +1558,7 @@ __nocx_snapshot_emit() {
 # that has already been announced. See the latch's own comment for what the
 # second hello cost.
 if (( __nocx_snapshot_announce )); then
-    ( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
+    ( compgen -abkA function 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
         >| "$__nocx_snap_staging" 2>/dev/null \
         && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
     __nocx_snap_job=$!

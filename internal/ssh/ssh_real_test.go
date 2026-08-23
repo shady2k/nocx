@@ -52,6 +52,10 @@ type testSSHServer struct {
 	execCommands chan string
 	// shellRequests counts answered "shell" requests (session.Shell calls).
 	shellRequests int
+	// execRefusals and execSubstitutions count the two §6.4 rows this
+	// server can produce, so a test states a number rather than a mood.
+	execRefusals      int
+	execSubstitutions int
 	// execHandler, when set, answers every accepted exec request with its
 	// canned output, exit status and a channel close — the server side of a
 	// scripted remote probe (discovery tests). Nil keeps the default echo
@@ -61,6 +65,24 @@ type testSSHServer struct {
 	// opens are rejected with ResourceShortage (OpenSSH's MaxSessions).
 	// Read under s.mu; set via setMaxSessions.
 	maxSessions int
+	// sessionChannels counts session channels GRANTED across every
+	// connection this server has served. It is what makes "the user's
+	// session was claimed before nocx opened anything of its own" a state a
+	// test can read at the moment the auxiliary call is made, rather than an
+	// ordering it has to arrange. Read under s.mu; see sessionChannelCount.
+	sessionChannels int
+	// execRefusal selects §6.4's `exec` rows. A real OpenSSH server cannot
+	// be made to refuse an exec request at all — measured in
+	// internal/app/exec_refusal_probe_test.go, five ways of restricting an
+	// account and every one ACCEPTS and substitutes — so the two refusing
+	// rows exist only against a server that chooses to refuse, and this is
+	// that server. Read under s.mu; set via setExecRefusal.
+	execRefusal execRefusalMode
+	// execSubstitute, when set, is what the server runs INSTEAD of the
+	// command it was asked for: the request is accepted, this is written,
+	// an exit status is sent and the channel is closed. That is the sixth
+	// row, and the only one a stock server actually produces.
+	execSubstitute string
 	// liveConns tracks established server-side SSH connections so a test can
 	// kill them to simulate transport loss. Guarded by liveMu (serveConn
 	// registers from the accept loop while a test may kill concurrently).
@@ -107,6 +129,42 @@ func (s *testSSHServer) setExecHandler(h func(cmd string) (stdout, stderr string
 	s.mu.Lock()
 	s.execHandler = h
 	s.mu.Unlock()
+}
+
+// execRefusalMode selects which of §6.4's `exec` rows this server produces.
+type execRefusalMode int
+
+const (
+	// execAccepts is the default: the request is accepted and the command
+	// runs.
+	execAccepts execRefusalMode = iota
+	// execRefusedChannelSurvives answers (false, nil) and leaves the
+	// channel and its pty alone — a `shell` on the same channel still
+	// works.
+	execRefusedChannelSurvives
+	// execRefusedChannelClosed answers (false, …) and tears the channel
+	// down with it, so the client sees io.EOF on the next request.
+	execRefusedChannelClosed
+	// execAcceptedAndSubstituted accepts the request and runs something
+	// else, consuming the channel.
+	execAcceptedAndSubstituted
+)
+
+// setExecRefusal selects the §6.4 row. Call before the test's first
+// connection.
+func (s *testSSHServer) setExecRefusal(m execRefusalMode, substitute string) {
+	s.mu.Lock()
+	s.execRefusal = m
+	s.execSubstitute = substitute
+	s.mu.Unlock()
+}
+
+// sessionChannelCount is how many session channels this server has granted so
+// far — the server's own view, taken at whatever moment the caller asks.
+func (s *testSSHServer) sessionChannelCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionChannels
 }
 
 // setMaxSessions caps session channels per connection (OpenSSH's
@@ -301,6 +359,9 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 				continue
 			}
 			sessions++
+			s.mu.Lock()
+			s.sessionChannels++
+			s.mu.Unlock()
 			ch, reqs, err := newChan.Accept()
 			if err != nil {
 				s.logf("test server accept channel: %v", err)
@@ -366,6 +427,37 @@ func (s *testSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reque
 				if err := gossh.Unmarshal(req.Payload, &m); err != nil {
 					_ = req.Reply(false, nil)
 					continue
+				}
+				s.mu.Lock()
+				refusal := s.execRefusal
+				substitute := s.execSubstitute
+				s.mu.Unlock()
+				switch refusal {
+				case execAccepts:
+					// The ordinary arm: the request is accepted and the
+					// command runs, which is what falls through below.
+				case execRefusedChannelSurvives:
+					s.mu.Lock()
+					s.execRefusals++
+					s.mu.Unlock()
+					_ = req.Reply(false, nil)
+					continue
+				case execRefusedChannelClosed:
+					s.mu.Lock()
+					s.execRefusals++
+					s.mu.Unlock()
+					_ = req.Reply(false, nil)
+					_ = ch.Close()
+					return
+				case execAcceptedAndSubstituted:
+					s.mu.Lock()
+					s.execSubstitutions++
+					s.mu.Unlock()
+					_ = req.Reply(true, nil)
+					_, _ = ch.Write([]byte(substitute))
+					_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{0}))
+					_ = ch.Close()
+					return
 				}
 				_ = req.Reply(true, nil)
 				s.mu.Lock()

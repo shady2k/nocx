@@ -207,7 +207,26 @@ var (
 // original command conventionally instead of rejecting nocx's generated argv
 // and consuming the command. BASHOPTS is scrubbed at the privileged child
 // boundary so nocx's internal extdebug never makes the child attempt bashdb.
-const version = "39"
+// 40: the snapshot carries the SESSION-LOCAL tables only — aliases,
+// builtins, keywords and functions — and no longer the PATH executables
+// (nocx-m8jwn.6, carrier design §8). The split is by whose truth it is: a
+// function belongs to one shell and may never be cached for another, while
+// the PATH set is identical for every session to the same host and is
+// expensive to enumerate. That half is now computed once per host by
+// internal/commandnames, shared across every tab, and invalidated on the
+// mtime of each PATH directory — ten tabs in an hour used to mean ten full
+// scans of thousands of files, and the 250 ms budget in front of them
+// stopped the WAIT rather than the WORK. The name cap on this payload drops
+// from 8192 to 4096 with it: the session-local half has its own bound and
+// the shared half has another.
+const version = "41"
+
+// ScriptVersion is the integration script version other packages may read.
+// Command discovery puts it in its cache key (internal/commandnames): the
+// scripts decide what the session-local half enumerates, so a name set
+// computed under one version must never be served to a session running
+// another.
+func ScriptVersion() string { return version }
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

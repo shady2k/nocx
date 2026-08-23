@@ -2,6 +2,58 @@ package shellintegration
 
 import "strings"
 
+// zshCleanupTrap is the frozen removal of the transient directory, with the
+// path substituted at the moment the trap is set. It is set in the .zshenv
+// phase — before any user code at all — and re-armed in .zshrc, because a
+// user startup file may legitimately install an EXIT trap of its own and
+// replace ours. One constant, two set points: the alternative is two
+// spellings of one cleanup, which is how a leak survives a reading.
+const zshCleanupTrap = `trap "[[ \"$__nocx_bootstrap\" == */nocx-zsh.?????? ]] && rm -rf \"$__nocx_bootstrap\" 2>/dev/null" EXIT`
+
+// zshEnvTemplate and zshProfileTemplate are the transient ZDOTDIR's .zshenv
+// and .zprofile — the halves that close the login-shell gap (design §9).
+//
+// The gap existed because ZDOTDIR names a DIRECTORY: pointing it at ours to
+// deliver one file shadowed all four of the user's, and only ~/.zshrc was
+// ever replayed. So the user's ~/.zshenv and ~/.zprofile did not run at all,
+// in a shell whose whole point was to look like their login. (Their
+// ~/.zlogin did run, and had since the .zshrc phase began restoring
+// ZDOTDIR — zsh resolves $ZDOTDIR again for every phase — which is what the
+// tier's own comment got wrong for months and what a table with a test now
+// prevents.)
+//
+// Each file replays the user's file of the same phase, so the sequence is
+// exactly a native login's: /etc/zshenv, ~/.zshenv, /etc/zprofile,
+// ~/.zprofile, /etc/zshrc, ~/.zshrc, /etc/zlogin, ~/.zlogin.
+const zshEnvTemplate = `# nocx launcher zshenv — the .zshenv phase of the login zsh whose ZDOTDIR
+# points at the launcher's transient directory.
+__nocx_bootstrap="${ZDOTDIR}"
+@TRAP@
+__nocx_f="${NOCX_ZDOTDIR_ORIG:-$HOME}/.zshenv"
+if [[ -f "$__nocx_f" ]]; then
+    . "$__nocx_f"
+fi
+# ~/.zshenv is the ONE user file that may choose ZDOTDIR, and a native zsh
+# reads every later phase from wherever it pointed. Record the new choice as
+# the user's — so the phases below replay from there and .zshrc restores it —
+# and take the directory back, so our own chain still resolves.
+if [[ "${ZDOTDIR-}" != "$__nocx_bootstrap" ]]; then
+    NOCX_ZDOTDIR_WAS_SET="${${ZDOTDIR+1}:-0}"
+    NOCX_ZDOTDIR_ORIG="${ZDOTDIR-}"
+    export NOCX_ZDOTDIR_WAS_SET NOCX_ZDOTDIR_ORIG
+fi
+export ZDOTDIR="$__nocx_bootstrap"
+unset __nocx_f
+`
+
+const zshProfileTemplate = `# nocx launcher zprofile — the .zprofile phase, replaying the user's own.
+__nocx_f="${NOCX_ZDOTDIR_ORIG:-$HOME}/.zprofile"
+if [[ -f "$__nocx_f" ]]; then
+    . "$__nocx_f"
+fi
+unset __nocx_f
+`
+
 // zshRcfileTemplate is the generated .zshrc the zsh launcher writes into a
 // transient, mode-700 directory and points ZDOTDIR at. zsh has no --rcfile;
 // ZDOTDIR names a directory and cannot name a pipe, so the transient
@@ -12,17 +64,18 @@ import "strings"
 // and only then install nocx's hooks. @ENV@ is replaced by the session
 // environment block and @NOCX_ZSH@ by the embedded nocx.zsh.
 //
-// Declared equivalence set (what this .zshrc promises, nothing more):
+// What this tier does and does not reproduce is declared in ONE place —
+// fidelity.go's startupFidelity table — and not here. What belongs here is
+// only what is local to this file:
+//
 //   - exported variables, cwd, umask, shell options, functions and aliases,
 //     traps and history configuration are whatever the user's real startup
-//     file leaves them; nocx resets none of them;
+//     files leave them; nocx resets none of them;
 //   - $0 reports the invoked name ("zsh"); login status comes from the -l
-//     flag, so the login startup files are read; SHLVL is one higher than
-//     a native session (the outer /bin/sh is a shell);
-//   - the /etc/zshenv, /etc/zprofile, /etc/zshrc and /etc/zlogin phases run
-//     natively (absolute paths); the user's ~/.zshenv, ~/.zprofile and
-//     ~/.zlogin are shadowed by the transient ZDOTDIR and are not replayed
-//     — declared deviation, only ~/.zshrc is sourced;
+//     flag, so every system startup phase runs natively, and the transient
+//     ZDOTDIR replays the USER's file of each phase from their own location
+//     (zshEnvTemplate and zshProfileTemplate below) so the order a native
+//     `zsh -l` would run is the order that runs;
 //   - history: zsh reads the history file before startup files run, so the
 //     transient ZDOTDIR shadowed it; HISTFILE is defaulted to the native
 //     location and loaded with fc -R when nothing was read, so an
@@ -40,11 +93,11 @@ import "strings"
 const zshRcfileTemplate = `# nocx launcher zshrc — runs at the .zshrc phase of the login zsh whose
 # ZDOTDIR points at a transient directory created by the launcher.
 __nocx_bootstrap="${ZDOTDIR}"
-# Frozen trap (path substituted now): covers a partial startup that never
-# reaches the removal below — a parse error in this very file, an exit
-# during /etc/zshenv or zshenv, anything. The user's rc may replace the
-# EXIT trap later; the directory is already gone by then.
-trap "[[ \"$__nocx_bootstrap\" == */nocx-zsh.?????? ]] && rm -rf \"$__nocx_bootstrap\" 2>/dev/null" EXIT
+# The frozen trap again (zshCleanupTrap), re-armed: it was set in the
+# .zshenv phase, and the user's own .zshenv or .zprofile may have replaced
+# the EXIT trap since. The directory is removed a few lines below anyway;
+# this covers a startup that dies between here and there.
+@TRAP@
 
 # Restore the original ZDOTDIR state (set vs unset), then drop the carrier
 # variables before any user code runs.
@@ -124,17 +177,15 @@ fi
 # nocx installs last. Re-sourcing after an installer-era gate in the
 # user's file is idempotent (add-zsh-hook dedupes; state is unset first).
 unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session
-# The per-epoch capability, substituted into this .zshrc's TEXT by the
-# launcher (@CAP@) — never exported, never in the environment. The hook
-# drops any export attribute again at source time (a user rc under
-# 'set -a' would auto-export it); zsh has no 'export -n' — 'typeset +x'
-# removes the attribute, and 'typeset -n' is a nameref and must never be
-# used here. An empty value means no authenticated channel and a
-# conventional session.
-__nocx_cap='@CAP@'
-typeset +x __nocx_cap 2>/dev/null
-__nocx_lc_recovery='@RECOVERY@'
-typeset +x __nocx_lc_recovery 2>/dev/null
+# The per-epoch capability and the one-shot recovery fence — never exported,
+# never in the environment, never in a named file. The block below is one of
+# the two forms in capability_source.go: on the remote path the shell READS an
+# inherited, already-unlinked descriptor once and closes it; on the local
+# child path the values are in this file's own text, which is itself delivered
+# through a descriptor. zsh has no export -n — typeset +x removes the
+# attribute, and typeset -n is a nameref and must never be used here. An empty
+# capability means no authenticated channel and a conventional session.
+@CAPSRC@
 @NOCX_ZSH@
 `
 
@@ -155,7 +206,9 @@ typeset +x __nocx_lc_recovery 2>/dev/null
 const zshOuterScript = `old_umask=$(umask)
 umask 077
 d=$(mktemp -d "${TMPDIR:-/tmp}/nocx-zsh.XXXXXX") 2>/dev/null || { umask "$old_umask"; exec zsh -l; }
-printf %b "@ZSHCRC@" > "$d/.zshrc" 2>/dev/null || { umask "$old_umask"; exec zsh -l; }
+printf %b "@ZSHENV@" > "$d/.zshenv" 2>/dev/null || { umask "$old_umask"; rm -rf "$d"; exec zsh -l; }
+printf %b "@ZPROFILE@" > "$d/.zprofile" 2>/dev/null || { umask "$old_umask"; rm -rf "$d"; exec zsh -l; }
+printf %b "@ZSHCRC@" > "$d/.zshrc" 2>/dev/null || { umask "$old_umask"; rm -rf "$d"; exec zsh -l; }
 umask "$old_umask"
 if [ "${ZDOTDIR+x}" = x ]; then export NOCX_ZDOTDIR_WAS_SET=1; else export NOCX_ZDOTDIR_WAS_SET=0; fi
 export NOCX_ZDOTDIR_ORIG="${ZDOTDIR-}"
@@ -181,14 +234,15 @@ exec zsh -l
 // The umask is captured before the bootstrap and restored before every
 // exec: the session must inherit the user's umask, not the bootstrap's.
 // zshRcfile renders the generated .zshrc from its template: @ENV@ is the
-// session environment block, @CAP@ the per-epoch capability and @RECOVERY@
-// the one-shot recovery fence (both substituted into the script text, never
-// the environment) and @NOCX_ZSH@ the nocx.zsh body (embedded for the argv
-// launchers, a source of the installed generation file for the carrier).
-func zshRcfile(envBlock, scriptSource, capability, recovery string) string {
-	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", envBlock)
-	rc = strings.ReplaceAll(rc, "@CAP@", capability)
-	rc = strings.ReplaceAll(rc, "@RECOVERY@", recovery)
+// session environment block, @CAPSRC@ is where the capability and the fence
+// come from (capability_source.go — a descriptor read on the remote path, a
+// literal on the local child path) and @NOCX_ZSH@ the nocx.zsh body
+// (embedded for the argv launchers, a source of the installed generation
+// file for the carrier).
+func zshRcfile(envBlock, scriptSource, capSource string) string {
+	rc := strings.ReplaceAll(zshRcfileTemplate, "@TRAP@", zshCleanupTrap)
+	rc = strings.ReplaceAll(rc, "@ENV@", envBlock)
+	rc = strings.ReplaceAll(rc, "@CAPSRC@", capSource)
 	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
 	// Comment-stripped like the generation scripts: the generated .zshrc
 	// ships inside the bootstrap payload, and the far shell never reads
@@ -198,52 +252,27 @@ func zshRcfile(envBlock, scriptSource, capability, recovery string) string {
 }
 
 // zshArgFor wraps a rendered .zshrc in the zsh tier's pinned transport: the
-// POSIX outer script writes it into a transient ZDOTDIR and execs a login
-// zsh. The result is one physical line with no single quotes, so it can
+// POSIX outer script writes it, and the two login-phase files beside it,
+// into a transient ZDOTDIR and execs a login zsh. The three are written
+// before ZDOTDIR is exported, and a failed write of any of them removes the
+// directory and falls open to a plain login zsh — a transient ZDOTDIR
+// holding only some of the phases would shadow the user's other files with
+// nothing at all, which is the very gap these two files close. The result is one physical line with no single quotes, so it can
 // travel inside the launch carrier and the argv launchers' shellQuote.
 func zshArgFor(rc string) string {
-	outer := strings.ReplaceAll(zshOuterScript, "@ZSHCRC@", printfBEscape(rc))
+	outer := strings.ReplaceAll(zshOuterScript, "@ZSHENV@",
+		printfBEscape(stripShellComments(strings.ReplaceAll(zshEnvTemplate, "@TRAP@", zshCleanupTrap))))
+	outer = strings.ReplaceAll(outer, "@ZPROFILE@",
+		printfBEscape(stripShellComments(zshProfileTemplate)))
+	outer = strings.ReplaceAll(outer, "@ZSHCRC@", printfBEscape(rc))
 	// One physical line: a csh login shell splits multi-line quoted
 	// tokens, so the payload must survive that parse (see singleLine).
 	return singleLine(outer)
 }
 
-func (remoteLauncher) zshArg(opts LaunchOptions) (string, bool) {
-	if opts.Enhanced && opts.SessionID == "" {
-		// Pinned contract: SessionID is never empty when Enhanced. Fail
-		// closed — a marker-only session with no id cannot anchor the
-		// ownership protocol — rather than emit one that half-works.
-		return "", false
-	}
-	// The .zshrc SOURCES the installed generation file rather than
-	// embedding the script — same reasoning and same failure semantics as
-	// the bash tier (see launcher_bash.go bashArg): the publish prelude has
-	// already published the bundle, and a failed publish leaves a
-	// conventional terminal, never a partial integration.
-	return zshArgFor(zshRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.zsh"), opts.Capability, opts.Recovery)), true
-}
-
-// zshCommand builds the zsh remote command, sent when the far shell is
-// already known to be zsh. The outer form is
-// `/usr/bin/env -u BASH_ENV /bin/sh -c '<script>'`: -u BASH_ENV so a
-// bash-as-/bin/sh host (macOS) cannot execute BASH_ENV code in the outer
-// sh, the same spec §4.3 protection the bash launcher gets. `exec zsh -l`
-// rather than `exec -l zsh`: dash and busybox ash reject `exec -l` (they
-// treat -l as the command to exec), while `zsh -l` is portable and makes
-// zsh a login shell, reading the login startup files. The ShellAuto
-// dispatcher sends zshArg instead, wrapped by its own argv plumbing, so the
-// two paths share one payload.
-func (remoteLauncher) zshCommand(opts LaunchOptions) (string, RefusalReason, bool) {
-	arg, ok := remoteLauncher{}.zshArg(opts)
-	if !ok {
-		return "", ReasonUnsupportedShell, false
-	}
-	cmd, ok := fullBootstrapLauncher(shExecTail, arg)
-	if !ok {
-		// The publish prelude carries the bundle; a bundle that outgrows
-		// the cap must refuse rather than emit a command the far host
-		// cannot exec.
-		return "", ReasonUnsupportedShell, false
-	}
-	return cmd, ReasonNone, true
-}
+// The per-tier ARG method that used to sit here went with the command that
+// consumed it (ADR-0035). It substituted the two bearers into the rcfile TEXT
+// and that text travelled inside the remote COMMAND, so both reached the far
+// host's process arguments — the defect this epic exists to remove. What
+// survives is zshArgFor, which the installed launch carrier uses and which
+// carries no per-session value at all.

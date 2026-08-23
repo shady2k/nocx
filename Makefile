@@ -89,7 +89,7 @@ dev-web:
 	./scripts/dev-web.sh
 
 lint:
-	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 format:
 	$(GOFUMPT) -l -w .
@@ -235,11 +235,18 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 # is a fixture dimension rather than a platform one: internal/vault/system is
 # the Secret Service binding and lives in the OS set, but portable packages
 # read through it too, so both variants run over the whole partition.
-OS_PKG_DIRS := cmd/e2e-sshd internal/contentkey internal/lifecyclechannel \
+# internal/app and internal/ssh/mux joined on 2026-08-21 (nocx-m8jwn.4), and
+# ci-os-split is what noticed rather than anybody remembering. The typed-`ssh`
+# wrapper gave each of them a `unix` / `!unix` pair — the multiplex socket's
+# SCM_RIGHTS descriptor passing, and the probes that decide a refusal class —
+# and a package with a platform split that stays in the portable set has its
+# `!unix` half compiled by nothing at all.
+OS_PKG_DIRS := cmd/e2e-sshd internal/app internal/contentkey \
+               internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
-               internal/pty \
+               internal/pty internal/ssh/mux \
                internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/storage|internal/update|internal/vault/system)
+OS_PKG_RE := (cmd/e2e-sshd|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
@@ -419,7 +426,7 @@ lint-ci:
 	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
-	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 test-ci:
 	@echo "=== go test -race ==="

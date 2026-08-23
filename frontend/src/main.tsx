@@ -38,7 +38,7 @@ import { createApiWorkbenchServices, directoryPicker, filePicker } from './api/a
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -52,12 +52,24 @@ import {
   type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
-import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
+import {
+  PortsPanel,
+  createPortsFilter,
+  createPortsFilterControl,
+  createPortsPanelServices,
+  createPortsPauseControl,
+} from './ports'
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { uploadSurfaceFor } from './files/upload-surface'
+import { uploadOperations } from './files/upload-operations'
+import { downloadSurfaceFor } from './files/download-surface'
+import { downloadOperations } from './files/download-operations'
+import { createOperationsModel } from './operations/operations'
+import { createOperationsView } from './operations/operations-view'
 import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
@@ -83,7 +95,7 @@ import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
 import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
 import { NotesClient } from './notes/notes-client'
 import { NotesStore } from './notes/notes-store'
-import { NotesPanel } from './notes/notes-panel'
+import { createNotesView } from './notes/notes-view'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
 import { createOverviewController } from './overview/overview-controller'
@@ -490,12 +502,34 @@ async function main() {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
+  // The upload surface (design §5.5), resolved from the dispatcher — the
+  // SAME instance the terminal panes resolve, because a transfer has one
+  // state and two stores would each mint a row for every transfer the other
+  // started. Without this the panel's Upload action would be dead code.
+  const uploadSurface = uploadSurfaceFor(dispatcher)
+  // The download surface (nocx-9le.8.3), resolved the same way and for the
+  // same reason: one store per dispatcher, because a transfer has one state.
+  // Without this the panel's Download item would be dead code.
+  const downloadSurface = downloadSurfaceFor(dispatcher)
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
     clipboard,
     activeOrigin,
+    upload: uploadSurface,
+    download: downloadSurface,
   })
+
+  // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
+  // store is read as operations rather than being the list itself, which is
+  // what made download a one-line ADDITION here: it has no panel of its own,
+  // it joins as a second source, and nothing in the model, the indicator or
+  // the row changed to receive it.
+  const operations = createOperationsModel([
+    uploadOperations(uploadSurface.store),
+    downloadOperations(downloadSurface.store),
+  ])
+  const operationsView = createOperationsView(operations)
 
   // The API workbench (design §9.1): ONE pane, singleton-keyed, holding the
   // collection tree, the request form and the runs. Registered through its
@@ -768,10 +802,16 @@ async function main() {
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
   const portsPause = createPortsPauseControl()
+  // The filter is a HEADER-LEVEL slot too (nocx-708q.3), for the same
+  // reason Pause is: one control shared between the shell's pinned row and
+  // the panel, so the field and the rows read one signal. In the body it
+  // scrolled away with the list it narrows.
+  const portsFilter = createPortsFilterControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
     icon: PlugIcon,
+    filter: createPortsFilter(portsFilter),
     // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
     // nothing to protect a host from; what a user actually wants is to ask
     // again after starting something.
@@ -797,6 +837,7 @@ async function main() {
         services={portsServices}
         visible={props.visible}
         pause={portsPause}
+        filter={portsFilter}
       />
     ),
     order: 0,
@@ -807,22 +848,17 @@ async function main() {
   // point of the feature (design §6.3).
   const notesStore = new NotesStore(new NotesClient(dispatcher))
   registerNotesSurface(tm, notesStore)
-  const NOTES_VIEW: SidebarViewDescriptor = {
-    id: 'notes',
-    title: 'Notes',
-    icon: TextQuoteIcon,
-    view: (props) => (
-      <NotesPanel
-        store={notesStore}
-        visible={props.visible()}
-        onOpen={(id) => openNote(id, '')}
-        onCreate={() => void createAndOpenNote()}
-      />
-    ),
-    order: 1,
-  }
+  // The descriptor is `createNotesView`, beside the Files, Git and
+  // Operations ones, rather than a literal here (nocx-708q.3): the header
+  // action, the pinned filter and the body all read one store, and a
+  // descriptor that lives with its panel is a descriptor a test can mount.
+  const notesView = createNotesView({
+    store: notesStore,
+    onOpen: (id) => openNote(id, ''),
+    onCreate: () => void createAndOpenNote(),
+  })
 
-  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW].sort(
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, notesView, operationsView].sort(
     (a, b) => a.order - b.order,
   )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {

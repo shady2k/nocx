@@ -260,6 +260,16 @@ type Session interface {
 	Close() error
 	Done() <-chan struct{}
 	StartOutput(ctx context.Context, onOutput OutputHandler) error
+	// OpenBootstrapWindow opens the one interval in which the backend reads
+	// this session's output and writes to its input (design §5.5). It is
+	// how a typed `ssh` inside this session's shell reaches the far-side
+	// loader: the frames travel through this pty and the loader's tokens
+	// come back through it. The window takes no byte away from the
+	// renderer, and while it is open the user's own input is refused.
+	//
+	// One window at a time; a second open is an error rather than a second
+	// owner of one stream.
+	OpenBootstrapWindow() (BootstrapWindow, error)
 	// ShellIntegrationReason reports why shell integration did not happen
 	// for this session (nocx-r52q). Remote sessions surface the refusal
 	// reason decided when the shell started; local sessions always return
@@ -723,6 +733,16 @@ type realSession struct {
 	// signal instead; a send on an open channel is always safe.
 	writeCh   chan writeJob
 	writeDone chan struct{}
+
+	// window is the open bootstrap window's tap, or nil (design §5.5).
+	// inputQuarantined is the same interval seen from the input side: while
+	// it is true the USER's bytes are refused, never buffered. Both are
+	// guarded by windowMu, which is separate from handlerMu because the
+	// read pump takes it on every chunk and must never contend with a
+	// handler swap.
+	windowMu         sync.Mutex
+	window           *outputTap
+	inputQuarantined bool
 }
 
 // writeJob carries a payload and its result channel. The result is
@@ -782,6 +802,15 @@ func (s *realSession) EnqueueWrite(p []byte) bool {
 	case <-s.writeDone:
 		return false
 	default:
+	}
+	// The input quarantine (design §5.3). This is the USER's path — every
+	// keystroke, paste and synthetic input arrives here — so this is where
+	// the bootstrap window refuses them. REFUSED, not buffered: a buffered
+	// keystroke is a command the user did not knowingly run, executed later
+	// at a prompt they were not looking at. Resize and the other control
+	// events do not travel this way and keep working.
+	if s.inputRefused() {
+		return false
 	}
 	select {
 	case s.writeCh <- writeJob{p: p}:
@@ -924,6 +953,11 @@ func (s *realSession) readPump(ctx context.Context) {
 			}
 			return
 		}
+
+		// The bootstrap window's copy, taken BEFORE the renderer's and
+		// taking nothing from it (design §5.5): every byte still reaches
+		// the renderer, in order, unchanged.
+		s.tapOutput(buf[:n])
 
 		s.handlerMu.Lock()
 		h := s.handler

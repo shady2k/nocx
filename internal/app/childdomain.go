@@ -26,25 +26,30 @@ package app
 //     not: the child starts conventional, never establishes, and the parent
 //     stillborn-activates (§9) — asserted by the fd-closed su test. The
 //     full reasoning lives at the launcher site in nocx.bash/nocx.zsh.
-//   - ssh: the bootstrap is a rewritten command line the parent executes —
-//     ADR-0022, "the ssh command line is the carrier" — carrying the child's
-//     forwarded lifecycle port as a -R reverse forward on that same ssh
-//     connection plus the in-band install payload (wrapper, capability as
-//     the first streamed line, payload, terminator) piped into `ssh -t`.
+//   - ssh: the bootstrap is the user's OWN `ssh` invocation with two
+//     multiplex options added — ADR-0035, "the channel we own is the
+//     carrier" — carrying the child's forwarded lifecycle port as a -R
+//     reverse forward on that same connection and, as its remote command,
+//     the bounded loader. Nothing of variable size and no secret travels in
+//     the line: the bundle is published over an auxiliary channel of the
+//     master, and stage-1 and the secret travel as frames on the pty the
+//     parent shell is already using. typed_line.go is that delivery.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // transportKind describes how a lifecycle transport's domains reach the
@@ -116,7 +121,7 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // option), so a captured *Publisher value would be nil for the lifetime of
 // the closure — the first real domain_request would dereference nil
 // (nocx-u7uh.29). The accessor resolves the variable at grant time.
-func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry) lifecyclepub.GrantBuilder {
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, typed *typedRunner) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (boot lifecyclepub.GrantBootstrap, err error) {
 		// Every outcome is logged, refusals loudest. A refusal here is
 		// invisible by construction — the publisher answers it with an
@@ -158,7 +163,7 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
 			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind)
 		case lifecycle.EnvSSH:
-			return buildSSHChildBootstrap(lg, p, sessions, req, kind)
+			return buildSSHChildBootstrap(lg, p, sessions, req, kind, typed)
 		default:
 			return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: unsupported environment %q", req.Env)
 		}
@@ -213,27 +218,58 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: rc}, nil
 }
 
-// buildSSHChildBootstrap composes the ssh child: a loopback listener
-// transport (the local endpoint of the child's -R reverse forward), the
-// child minted on it, and the rewritten command line the parent executes —
-// the in-band install payload piped into `ssh -t` with the -R. The remote
-// port is pre-picked because the payload must name it before ssh runs; a
-// server that refuses the bind (PermitListen) fails the forward, the child
-// never establishes, and the session is the honest conventional fallback.
-func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentKind transportKind) (lifecyclepub.GrantBootstrap, error) {
+// buildSSHChildBootstrap composes the ssh child: the user's own `ssh`
+// invocation with our two multiplex options added, a loopback listener
+// transport (the local endpoint of the child's -R reverse forward), the child
+// minted on it, and the bounded loader as the remote command.
+//
+// It is the typed path's entry point, and the order in it is the order design
+// §4.4 and §6.1 fix. The WRAPPER DECIDES FIRST, before anything is minted or
+// opened: a configured RemoteCommand, a multiplex policy the user expressed,
+// a control socket path that cannot be built safely — each of those runs the
+// user's own line with no nocx effect at all, and the line returned IS their
+// line, because an empty bootstrap on this path is a command the parent shell
+// would eval to nothing.
+//
+// Everything after the decision is local: a listener, a mint, a stage-1 frame
+// and a command under 1 KiB. Nothing reaches the far host until the multiplex
+// handshake has proven ownership of that specific socket, which happens in
+// typed_line.go after the user has finished authenticating to their own
+// client.
+func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentKind transportKind, typed *typedRunner) (lifecyclepub.GrantBootstrap, error) {
 	if !parentKind.local {
 		// A remote parent runs ssh on the far host: the -R forward would
-		// terminate at that host, not at this backend's listener. The
-		// mechanism does not preclude it — the far host's own remote
-		// adapter listener is the natural endpoint — but it is not built
-		// in this bead. Refuse honestly: the parent runs its command
-		// conventionally.
+		// terminate at that host, not at this backend's listener, and the
+		// multiplex socket would be created on the far machine where this
+		// backend cannot reach it. The mechanism does not preclude it —
+		// the far host's own remote adapter listener is the natural
+		// endpoint — but it is not built in this bead. Refuse honestly:
+		// the parent runs its command conventionally.
 		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: ssh nested inside a remote parent is not implemented")
 	}
 	sid, ok := sessions.lookup(req.Lane)
 	if !ok {
 		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: no session registered for lane %s", req.Lane)
 	}
+	inv := ssh.TypedInvocation{Opts: req.Opts, Host: req.Host, User: req.User, Port: req.Port}
+
+	if typed == nil {
+		// Not wired. Say so loudly and hand back the user's own line: a
+		// missing composition is a bug in this file's caller, and the user
+		// still gets the ssh they asked for.
+		lg.Error("child domain: the typed-ssh delivery is not wired; the line runs as plain ssh",
+			"host", req.Host)
+		return lifecyclepub.GrantBootstrap{Bootstrap: composeSSHLine(ssh.TypedWrap{}, nil, inv, "")}, nil
+	}
+
+	// §4.4, decided before anything happens.
+	wrap, reason, accepted := typed.wrapper.Wrap(context.Background(), inv)
+	if !accepted {
+		lg.Info("child domain: nocx does not interpose on this line; it runs as plain ssh",
+			"host", req.Host, "user", req.User, "port", req.Port, "reason", string(reason))
+		return lifecyclepub.GrantBootstrap{Bootstrap: composeSSHLine(ssh.TypedWrap{}, nil, inv, "")}, nil
+	}
+
 	ln, err := lifecyclechannel.NewListener(lg, pub)
 	if err != nil {
 		return lifecyclepub.GrantBootstrap{}, err
@@ -248,101 +284,92 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
-	// The far shell is brought up by the SAME launcher the profile path
-	// uses (AD-8: one owner for "what command makes a remote shell
-	// integrated"), delivered as the command OpenSSH runs on the far side —
-	// which is what ADR-0022 decided the carrier is.
-	//
-	// It used to be delivered in-band instead, piped into the client's
-	// stdin ahead of the connection, and that is what nocx-beib was: the
-	// authentication phase belongs to the ssh client, and a client whose
-	// stdin is a pre-filled pipe cannot ask for a password, a passphrase, a
-	// host key or a second factor — it reads our wrapper as the answer. A
-	// key hides this completely, which is why every proof of this path
-	// (ssh_child_assembly_test.go, ADR-0025) authenticated with one.
-	cmd, reason, ok := shellintegration.NewRemoteLauncher().StartCommand(
-		shellintegration.ShellAuto,
-		shellintegration.LaunchOptions{
-			SessionID:     sid,
-			Enhanced:      true,
-			Lane:          string(req.Lane),
-			Domain:        string(h.Domain),
-			Epoch:         h.Epoch,
-			LifecyclePort: remotePort,
-			Capability:    hex.EncodeToString(h.Capability[:]),
-			Recovery:      hex.EncodeToString(h.Recovery[:]),
-		})
-	if !ok || cmd == "" {
-		_ = ln.Close()
-		if reason == shellintegration.ReasonNone {
-			reason = shellintegration.ReasonUnsupportedShell
-		}
-		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: launcher declined (%s)", reason)
-	}
-	line := composeSSHChildLine(cmd, remotePort, ln.Port(), req)
-	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
-}
 
-// composeSSHChildLine builds the rewritten command line the parent executes
-// (ADR-0022: the ssh command line is the carrier). The shape:
-//
-//	ssh -t -R 127.0.0.1:CPORT:127.0.0.1:LPORT [-p N] dst '<launcher command>'
-//
-// Nothing wraps the client. Its stdin is the parent's terminal, so the whole
-// authentication phase — password, passphrase, host-key confirmation, a
-// second factor — is between the user and OpenSSH exactly as in a plain
-// terminal, and the integration rides in the command sshd runs afterwards.
-//
-// This replaced an in-band delivery that piped the bootstrap into the
-// client's stdin before it had connected (nocx-beib). It worked with a key,
-// because the far side reaches a prompt immediately and consumes the staged
-// bytes; with an interactive prompt the client read our wrapper as the
-// user's password and the login could not succeed. The pipe was also why
-// `-tt` was needed — a client whose stdin is not a terminal refuses to
-// allocate one — so removing the pipe removes the reason for the second t
-// along with the termios save/restore that guarded the raw-mode window.
-//
-// The far shell is therefore started by sshd from this command rather than
-// as a bare login shell, which is the same shape the profile path already
-// uses. A destination configured with its own RemoteCommand is refused by
-// OpenSSH ("Cannot execute command-line and remote command") and falls back
-// conventionally, which is the honest degrade — the same one the profile
-// path names ReasonRemoteCommand.
-func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
-	var b strings.Builder
-	b.WriteString("ssh -t -R 127.0.0.1:")
-	b.WriteString(fmt.Sprintf("%d:127.0.0.1:%d", remotePort, localPort))
-	// The options the user typed, in their order, ahead of the destination
-	// where ssh expects them (nocx-c6z0).
+	// The far shell is brought up by the SAME launcher the profile path uses
+	// (AD-8: one owner for "what command makes a remote shell integrated"),
+	// and it is now the bounded carrier for both — the pre-carrier
+	// self-installing launcher, which carried the whole bundle and both
+	// secrets in its text, is gone from this path and from the repository
+	// with it.
 	//
-	// This line is rebuilt rather than edited, so anything not carried here
-	// is not merely reordered — it is gone. It used to carry host, user and
-	// port and nothing else, while the shell's detector deliberately ACCEPTS
-	// a line bearing -i, -o, -F, -J, -l, -e, -b and -m. So a user's
-	// `ssh -i ~/.ssh/prod -J bastion host` connected with the wrong key and
-	// no jump host at all, and the block went on showing the line they typed,
-	// so nothing anywhere said otherwise.
+	// The two halves are minted together or not at all: the command commits
+	// to the digest of the stage-1 frame, so a command whose digest names
+	// bytes nobody will send is a far side blocking on a frame that never
+	// arrives.
+	opts := shellintegration.LaunchOptions{
+		SessionID:     sid,
+		Enhanced:      true,
+		Lane:          string(req.Lane),
+		Domain:        string(h.Domain),
+		Epoch:         h.Epoch,
+		LifecyclePort: remotePort,
+		Capability:    hex.EncodeToString(h.Capability[:]),
+		Recovery:      hex.EncodeToString(h.Recovery[:]),
+	}
+	stage, err := shellintegration.Stage1Frame(shellintegration.ShellAuto, opts)
+	if err != nil {
+		_ = ln.Close()
+		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: stage-1 could not be rendered: %w", err)
+	}
+	opts.StageDigest = shellintegration.StageDigest(stage)
+	carrier, creason, cok := shellintegration.NewRemoteLauncher().StartCommand(shellintegration.ShellAuto, opts)
+	if !cok || carrier == "" {
+		_ = ln.Close()
+		if creason == shellintegration.ReasonNone {
+			creason = shellintegration.ReasonUnsupportedShell
+		}
+		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: launcher declined (%s)", creason)
+	}
+
+	// The delivery is armed BEFORE the grant is handed over: once the parent
+	// shell has the line it can start `ssh` at once, and a bootstrap window
+	// opened afterwards could miss the loader's readiness token and leave
+	// the far side blocked on a frame nobody would send.
+	plan := shellintegration.BootstrapPlan{Stage1: stage}
+	// The lane travels with the delivery because it is the addressing the
+	// session integration axis already uses to route this session's facts
+	// (RegisterLifecycleLane), so the bootstrap's terminal outcome needs no
+	// second registry to reach the product.
+	delivery, err := typed.arm(sid, string(req.Lane), wrap.ControlPath, plan)
+	if err != nil {
+		_ = ln.Close()
+		return lifecyclepub.GrantBootstrap{}, err
+	}
+	// Frame 2 is delivered only after the publish has reached a terminal
+	// outcome (design §6.1 step 5), and never before stage-1 has verified
+	// itself — DeliverBootstrap runs the barrier at exactly that point. The
+	// barrier is the plan's rather than the secret source's for the reason
+	// BootstrapPlan.Ordered gives: step 5 orders the DELIVERY, and step 8
+	// follows frame 2 whether it carried a bearer or a refusal.
 	//
-	// Quoted one token at a time, never joined and quoted once: each token is
-	// a separate argv entry on the user's side and must stay one here.
-	// -p and -t are absent by construction (the port is modelled above; a
-	// second -t is -tt, which is not what this composes).
-	for _, o := range req.Opts {
-		b.WriteString(" ")
-		b.WriteString(shellintegration.ShellQuote(o))
+	// The context is DeliverBootstrap's own, bounded by the bootstrap
+	// deadline, and the wait honours it: once the bootstrap has given up
+	// there is nothing left to hand a bearer to, and minting one anyway
+	// would put a live per-epoch secret into backend memory for a session
+	// that has already ended. It does not shorten the ordering — the
+	// publish still settles before anything is minted; it only stops the
+	// wait when the frame it would fill can no longer be written.
+	plan.Ordered = func(ctx context.Context) error {
+		select {
+		case <-delivery.publishSettled:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("child domain: the bootstrap ended before the publish settled: %w", ctx.Err())
+		case <-time.After(typedPublishDeadline):
+			return fmt.Errorf("child domain: the publish did not settle inside %s", typedPublishDeadline)
+		}
 	}
-	if req.Port != 0 {
-		b.WriteString(fmt.Sprintf(" -p %d", req.Port))
-	}
-	b.WriteString(" ")
-	dest := req.Host
-	if req.User != "" {
-		dest = req.User + "@" + dest
-	}
-	b.WriteString(shellintegration.ShellQuote(dest))
-	b.WriteString(" ")
-	b.WriteString(shellintegration.ShellQuote(startCmd))
-	return b.String()
+	plan.Secret = shellintegration.SecretFunc(func(context.Context) ([]byte, error) {
+		return shellintegration.SecretFrame(opts)
+	})
+	delivery.plan = plan
+
+	extra := []string{"-t", "-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", remotePort, ln.Port())}
+	line := composeSSHLine(wrap, extra, inv, carrier)
+
+	go delivery.run(context.Background())
+
+	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
 }
 
 // randomPort picks a high loopback port for the -R bind. A collision with

@@ -1,0 +1,41 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/files.upload.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Result of the files.upload JSON-RPC method — the call that puts a file from here onto the machine the active tab is on. Read the PARAMS of this method as part of the contract too, because what they omit is the rule: there is no sourcePath and no source discriminator, and the backend decodes them with unknown fields refused, so a renderer cannot name a file on the backend's disk. A destination is scoped by a binding the backend issued; a source path is scoped by nothing, and a renderer that could spell one could ask the backend to read ~/.ssh/id_ed25519 and send it to a host of the renderer's choosing. A source that does live on the backend's disk is named by an opaque sourceTicket minted backend-side at the moment a human chose the file, which the renderer can echo but never author. The result is a discriminated union of the three things that can happen, and exactly one branch matches: the destination name is taken and nobody has decided what to do about it; the transfer is running and needs no body; or the sink is waiting for the bytes on a one-shot POST.
+ */
+export type FilesUploadResult =
+  | {
+      /**
+       * The destination name is already taken and the call carried no onExists decision. NOTHING was created and no transfer exists: the renderer asks the person and calls again with onExists. The check is a stat and a stat is a moment, so it is advisory — the transfer's own create is the arbiter (O_EXCL) — but the person is asked on this answer, and an upload that silently replaced a file is the failure the question exists for.
+       */
+      collision: 'exists'
+    }
+  | {
+      /**
+       * The transfer's opaque id, 32 lowercase hex characters. This branch carries no ticket because the transfer needs no body from the renderer: either a sourceTicket named bytes that already live on the backend's disk, or the decision was skip and there are no bytes to move. Progress and the terminal outcome arrive as files.uploadProgress and files.uploadDone, addressed by this id; files.uploadCancel takes it too. It is not a credential — cancelling by it still re-checks that the caller owns the transfer's session.
+       */
+      transferId: string
+    }
+  | {
+      /**
+       * The transfer's opaque id, 32 lowercase hex characters — the same id files.uploadProgress, files.uploadDone and files.uploadCancel use.
+       */
+      transferId: string
+      /**
+       * The one-shot sink ticket authorising the POST that carries the bytes, 64 lowercase hex characters from crypto/rand. The width is a pattern here and not only a sentence, because the sentence cannot refuse anything. It is a BEARER credential and the design says so out loud: possession authorises both the destination and the content written to it. A stolen ticket cannot redirect a write, but it can win the one-shot race and put attacker-chosen bytes at that path, which is an integrity violation and not merely a denial of service. It therefore never appears in a log line or an error string, it travels in the request path only because the request never leaves loopback, and it is claimed exactly once: a second POST while the first is still running is refused, and one after the transfer has ended finds nothing.
+       */
+      ticket: string
+      /**
+       * Where to POST the bytes — the path on the backend's own HTTP surface, of the form /upload/{ticket}, constrained by a pattern so a result naming some other URL is refused rather than read past. The request must carry a Content-Length equal to the size declared at mint time; a mismatch is refused before the body is read. Bytes travel as a streamed POST rather than on the WebSocket because the data plane carries PTY I/O, and a multi-gigabyte upload multiplexed onto it would compete with terminal responsiveness and need a flow-control scheme invented for the purpose; an HTTP request is a separate connection whose backpressure is TCP's.
+       */
+      url: string
+    }

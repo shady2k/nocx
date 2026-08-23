@@ -82,6 +82,7 @@ type sessionShellHandlers struct {
 	local  completion.Completer // shell.complete for KindLocal sessions
 	remote RemoteCompleter      // shell.complete for KindRemote sessions
 	inBand InBandBootstrapper   // shell.integrate plan builder
+	names  CommandNamesResolver // shell.commandNames shared scan
 }
 
 // handleIntegrate serves the shell.integrate method.
@@ -151,6 +152,14 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		regResponder(shellSub, "shell.complete", params(validateShellCompleteRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleComplete(ctx, req) }
+		}),
+		// shell.commandNames rides the same staged session-target operation
+		// as shell.complete, for the same reason: the scan behind it may
+		// take its whole deadline, and the session gate must not be held
+		// across it.
+		regResponder(shellSub, "shell.commandNames", params(validateShellCommandNamesRaw), func(r Responder) handlerFunc {
+			h := sessionShellHandlers{ops: sessionOps, r: r, names: s.commandNames}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleCommandNames(ctx, req) }
 		}),
 		regResponder(shellSub, "shell.integrate", params(validateShellIntegrateRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, inBand: s.inBand}

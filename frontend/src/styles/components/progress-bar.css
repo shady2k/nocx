@@ -1,0 +1,50 @@
+/* ProgressBar — the kit's determinate progress bar (ui/README table). One
+   identity family: ui-progress-bar + __fill. The WIDTH of the fill is set
+   by the component (it is the value); everything the bar looks like is
+   here, and nothing else may paint it.
+
+   Thin and quiet by design. It reports a fraction beside something that is
+   already saying what it is — a file name in a row, an icon in the rail —
+   so it is a line and not a panel. */
+
+.ui-progress-bar {
+  /* The track takes the room its placement gives it and keeps its height:
+     a surface says how wide, never how tall — it says which SIZE, and the
+     two heights live here. */
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--control-radius-sm);
+  background: var(--color-surface-hover);
+}
+
+/* The quiet line, and the default: a fraction reported beside something
+   that is already saying what it is. */
+.ui-progress-bar[data-size='sm'] {
+  height: 3px;
+}
+
+/* Where the progress IS the point. A 3 px bar between a title and a line of
+   numbers reads as a rule separating them rather than as the row's main
+   fact, which is what the operations row shipped with and what the owner
+   read as "too small to take in" (nocx-hbdw4.5). Twice the height is enough
+   to become the thing the eye lands on first; more would make a panel of a
+   list of bars. */
+.ui-progress-bar[data-size='md'] {
+  height: 6px;
+}
+
+.ui-progress-bar__fill {
+  height: 100%;
+  background: var(--color-accent);
+  /* The fill moves rather than jumping between samples, which arrive
+     coalesced and can skip a long way. Motion here is bounded by the
+     transfer's own end, not a loop — see the module doc for why there is no
+     indeterminate mode at all. */
+  transition: width 120ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-progress-bar__fill {
+    transition: none;
+  }
+}

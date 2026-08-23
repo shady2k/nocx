@@ -137,9 +137,18 @@ export interface IntegrationMessage {
   readonly fix?: IntegrationFix
 }
 
-/** The one place a reason becomes English. Every string here was agreed with
- *  the owner rather than invented in review, which is what nocx-viil
- *  requires.
+/** The one place a reason becomes English.
+ *
+ *  The first seven strings were agreed with the owner rather than invented in
+ *  review, which is what nocx-viil requires. The rest arrived with the
+ *  integration-delivery-carrier design and have NOT been through that
+ *  agreement yet — they are here because the alternative is worse: every one
+ *  of those reasons reached the user as "cannot say why" while the backend
+ *  knew exactly which of thirty things had happened, and a soft degrade the UI
+ *  contradicts is how a feature that does not exist survives a release. Each
+ *  says what happened and the last step that did work, names no program and no
+ *  path, and claims nothing nocx did not observe. The wording is the
+ *  coordinator’s to review; the coverage is not optional.
  *
  *  `startup-did-not-return` and `handshake-timeout` are deliberately different
  *  sentences for two different amounts of knowledge, and the difference is the
@@ -193,48 +202,56 @@ function standAsideFix(shell: ShellFacts): IntegrationFix {
   }
 }
 
+/** What is true right now for every reason but `channel-lost`: the session is
+ *  a working terminal and the structure around it is off. One string rather
+ *  than thirty copies of it — the sentence is the same fact each time, and a
+ *  reason that needed a different one would be a reason whose session is in a
+ *  different state. */
+const PLAIN_TERMINAL =
+  'This tab is a plain terminal: command blocks and the command editor are off.'
+
+/** One "not integrated" template. The title is the same for every reason
+ *  because the headline answers "did this work", which has one answer; the
+ *  description and the last good step are what differ, and they are what the
+ *  user reads to know which of thirty things happened. */
+function notIntegrated(
+  description: string,
+  lastGoodStep: string,
+  fix?: (shell: ShellFacts) => IntegrationFix,
+): MessageTemplate {
+  return { title: 'Not integrated', description, happening: PLAIN_TERMINAL, lastGoodStep, fix }
+}
+
 const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
-  'handshake-timeout': {
-    title: 'Not integrated',
-    description: 'Your shell did not answer nocx in time, so this tab is a plain terminal.',
-    happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
-    lastGoodStep: 'nocx started the shell and opened its channel. The shell never answered on it.',
-    fix: standAsideFix,
-  },
+  'handshake-timeout': notIntegrated(
+    'Your shell did not answer nocx in time, so this tab is a plain terminal.',
+    'nocx started the shell and opened its channel. The shell never answered on it.',
+    standAsideFix,
+  ),
   // The stage, not the culprit. nocx knows its rcfile started and never got
   // control back; exec, exit, a hung attach and a crashed shell all produce
   // this identically, so the sentence names what did not happen and stops
   // there. It is the reason the owner's own wording was written for, and the
   // only one that can carry it honestly (nocx-yww2).
-  'startup-did-not-return': {
-    title: 'Not integrated',
-    description:
-      'Your shell startup files did not return control to nocx, so this tab is a plain terminal.',
-    happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
-    lastGoodStep:
-      'nocx started the shell and its startup files began. They never handed control back.',
-    fix: standAsideFix,
-  },
+  'startup-did-not-return': notIntegrated(
+    'Your shell startup files did not return control to nocx, so this tab is a plain terminal.',
+    'nocx started the shell and its startup files began. They never handed control back.',
+    standAsideFix,
+  ),
   'channel-lost': {
     title: 'Integration lost',
     description: 'nocx lost its channel to this shell, so this tab is now a plain terminal.',
     happening: 'This tab is a plain terminal. Commands still run; they are no longer recorded.',
     lastGoodStep: 'The shell was integrated and answering. Its channel then ended.',
   },
-  'unsupported-shell': {
-    title: 'Not integrated',
-    description: 'nocx has no integration for this shell, so this tab is a plain terminal.',
-    happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
-    lastGoodStep: 'The connection opened. Integration was declined before the shell started.',
-  },
-  'no-secure-temp': {
-    title: 'Not integrated',
-    description:
-      'nocx could not create a private temporary file for this session, so integration was not installed.',
-    happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
-    lastGoodStep:
-      'The connection opened. Installing the integration stopped before the shell started.',
-  },
+  'unsupported-shell': notIntegrated(
+    'nocx has no integration for this shell, so this tab is a plain terminal.',
+    'The connection opened. Integration was declined before the shell started.',
+  ),
+  'no-secure-temp': notIntegrated(
+    'nocx could not create a private temporary file for this session, so integration was not installed.',
+    'The connection opened. Installing the integration stopped before the shell started.',
+  ),
   'remote-command': {
     title: 'Not integrated',
     description:
@@ -242,13 +259,156 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
     happening: 'This tab runs the configured command. Command blocks do not apply to it.',
     lastGoodStep: 'The connection opened and ran what it was configured to run.',
   },
-  unknown: {
+
+  // nocx's OWN guard, and the only reason on this list the far side had no
+  // part in: the command nocx was about to run exceeded the bound it declares
+  // for a remote command, so it was refused before it was sent rather than
+  // truncated into something else (nocx-e4ir3). A user cannot cause this and
+  // cannot fix it, so there is no remedy offered — it is a defect in nocx,
+  // and the sentence says so rather than implying the host did something.
+  'command-too-long': {
     title: 'Not integrated',
-    description: 'nocx could not set up shell integration for this session, and cannot say why.',
-    happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
-    lastGoodStep: 'The session opened. Integration stopped somewhere nocx cannot name.',
+    description:
+      'nocx refused to send its own start-up command to this host because it was longer than nocx allows, so this tab is a plain terminal.',
+    happening: PLAIN_TERMINAL,
+    lastGoodStep: 'The connection opened and authenticated. nocx stopped before sending anything.',
   },
+
+  // ── the selective-refusal matrix, by real SSH channel type ─────────────
+  //
+  // A server or an intermediary may permit some channels and not others, and
+  // each row is a different thing the user's administrator can change. Before
+  // these, all five arrived as "cannot say why".
+  'session-unavailable': notIntegrated(
+    'This connection would not open a session of its own for nocx, so this tab is a plain terminal.',
+    'The connection opened and authenticated once. Opening another session on it was refused.',
+  ),
+  'pty-unavailable': notIntegrated(
+    'This connection will not give nocx a terminal, so there is no interactive shell here to integrate.',
+    'The connection opened and nocx asked for a terminal. The request was refused.',
+  ),
+  'exec-refused': notIntegrated(
+    'This connection would not run the line nocx starts a shell with, so it started your shell the plain way instead.',
+    'The connection opened and gave nocx a terminal. Running nocx’s own line on it was refused.',
+  ),
+  'exec-substituted': notIntegrated(
+    'This connection runs one fixed command whatever it is asked for, so there is no shell here to integrate.',
+    'The connection opened and ran what it is configured to run, in place of what nocx asked for.',
+  ),
+  'publish-unavailable': notIntegrated(
+    'nocx could not copy its shell integration to this host, so there was nothing on it to start.',
+    'The connection opened and authenticated. Copying the integration across was refused.',
+  ),
+
+  // ── the bootstrap, before the shell exists ─────────────────────────────
+  //
+  // These are the far host answering nocx’s own setup, or failing to. None
+  // of them is the user’s to change, which is why none carries a fix: an
+  // empty "How to fix" that says "try again" teaches the user that the button
+  // never helps.
+  'loader-termios-unavailable': notIntegrated(
+    'nocx could not put the terminal into the state its setup needs, so it gave the terminal back untouched.',
+    'The connection opened and nocx’s line started. Preparing the terminal stopped there.',
+  ),
+  'bootstrap-interrupted': notIntegrated(
+    'The connection ended while nocx was still setting this session up.',
+    'nocx’s line started on the far host. The channel ended before the setup finished.',
+  ),
+  'bootstrap-protocol': notIntegrated(
+    'What answered nocx during setup was not nocx’s own protocol, so nocx stopped rather than act on it.',
+    'nocx’s line started on the far host. What came back where nocx’s own frame belongs was something else.',
+  ),
+  'bootstrap-timeout': notIntegrated(
+    'The far host answered nocx once and then did not finish the setup in time.',
+    'nocx’s line started and announced itself. It never reached an outcome.',
+  ),
+  // The one reason on this list that is worth reading twice: the far side
+  // emits each of its steps exactly once, so a step answered out of turn was
+  // written by something that is not nocx’s own setup. The sentence says
+  // what happened and claims nothing about who did it.
+  'bootstrap-out-of-order': notIntegrated(
+    'An answer arrived out of turn during nocx’s setup, so nocx refused it and stopped.',
+    'nocx’s line started on the far host. A step was answered that was not the next one.',
+  ),
+  'receiver-unready': notIntegrated(
+    'Nothing on the far host answered nocx’s setup, so this tab is a plain terminal.',
+    'The connection opened and nocx’s line was sent. Nothing announced itself on it.',
+  ),
+  'stage-too-large': notIntegrated(
+    'nocx’s setup was larger than nocx allows itself to send, so none of it was sent.',
+    'The connection opened. nocx refused its own oversized setup before writing a byte of it.',
+  ),
+  'stage-digest-unavailable': notIntegrated(
+    'The far host has no way to check that nocx’s setup arrived intact, and nocx does not run setup it cannot verify.',
+    'The connection opened and nocx’s line started. Nothing on the host could compute a checksum.',
+  ),
+  'stage-digest-mismatch': notIntegrated(
+    'nocx’s setup did not arrive on the far host exactly as it was sent, so nocx did not run it.',
+    'The connection opened and nocx’s setup was sent. Checking it on the far host did not match.',
+  ),
+  'stage-fd-unavailable': notIntegrated(
+    'The far host could not hand nocx’s verified setup to the shell, so none of it was run.',
+    'The connection opened, and nocx’s setup arrived and verified. Passing it to the shell failed.',
+  ),
+  'stage-source-failed': notIntegrated(
+    'nocx’s setup ran on the far host and gave control back instead of starting your shell.',
+    'The connection opened, and nocx’s setup arrived, verified and ran. It did not take the session over.',
+  ),
+  'secret-too-large': notIntegrated(
+    'nocx’s key for this session was larger than nocx allows itself to send, so it was not sent.',
+    'The connection opened and nocx’s setup ran. nocx refused its own oversized frame.',
+  ),
+  'secret-malformed': notIntegrated(
+    'The far host did not recognise nocx’s key for this session, so the session has no channel of its own.',
+    'The connection opened and nocx’s setup ran and read the key. It was not the shape a key must be.',
+  ),
+  'secret-not-for-this-session': notIntegrated(
+    'The key that reached the far host was addressed to a different session, so the far host refused it.',
+    'The connection opened and nocx’s setup ran and read a key. It named another session.',
+  ),
+  'capability-fd-unavailable': notIntegrated(
+    'The far host could not open a private place to keep nocx’s key for this session, so nocx did not hand one over.',
+    'The connection opened and nocx’s setup ran. Opening private storage for the key failed.',
+  ),
+  'capability-unlink-failed': notIntegrated(
+    'The far host could not make nocx’s key nameless before writing it, so nocx wrote nothing at all.',
+    'The connection opened and nocx’s setup ran. Removing the name failed, so no key was written.',
+  ),
+  'capability-write-failed': notIntegrated(
+    'The far host could not store nocx’s key for this session, so the session has no channel of its own.',
+    'The connection opened and nocx’s setup ran. Writing the key failed.',
+  ),
+  'generation-unavailable': notIntegrated(
+    'This host has no copy of nocx’s shell integration to start. The next connection installs it and tries again.',
+    'The connection opened and nocx’s setup ran. It found nothing installed to hand the shell to.',
+  ),
+  'channel-unavailable': notIntegrated(
+    'This connection will not give nocx a channel of its own to the shell, so this tab is a plain terminal.',
+    'The connection opened and authenticated. Opening nocx’s own channel on it was refused.',
+  ),
+
+  unknown: notIntegrated(
+    'nocx could not set up shell integration for this session, and cannot say why.',
+    'The session opened. Integration stopped somewhere nocx cannot name.',
+  ),
 }
+
+/** Every reason the wire can carry, as a runtime list.
+ *
+ *  It is not a copy of the contract's enum, it IS the enum: `MESSAGES` above
+ *  is typed `Record<IntegrationReason, MessageTemplate>`, `IntegrationReason`
+ *  is read off the GENERATED renderer type, and `npm run contracts:check` —
+ *  a gate on every commit — is what proves that generated type still matches
+ *  `contracts/session.integrationChanged.schema.json`. So `tsc` refuses a
+ *  member with no message and refuses a message with no member, and the keys
+ *  below are exactly the vocabulary the server sends.
+ *
+ *  That chain is why this is exported rather than the test reading the schema
+ *  file: the containerized `vitest` assembles its workspace from `frontend/`
+ *  alone, so a path out to `contracts/` resolves to nothing there — and it
+ *  need not, because the schema has already been checked into this module's
+ *  own types by the time the test runs. */
+export const INTEGRATION_REASONS = Object.keys(MESSAGES) as IntegrationReason[]
 
 /** The message for a fact, or null when there is nothing to say — which is
  *  every non-degraded status. A reason the renderer does not recognise falls

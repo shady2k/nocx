@@ -35,10 +35,13 @@ import type { Page } from './harness'
 //      the remote context (the typed destination);
 //   3. after `exit`, local blocks again and the editor back;
 //   4. a SECOND connection over the same option-bearing line is integrated
-//      from its first prompt. Which DELIVERY FORM it picks is no longer
-//      asserted here (nocx-292k): the installed fact that selected the
-//      compact carrier has no production writer on this branch, so the
-//      assertion would have described a route nothing can take;
+//      from its first prompt. Which DELIVERY FORM it picks is not asserted
+//      here, and cannot be: the remote command is one unconditional bounded
+//      loader for every connection (2026-08-20 carrier design §4.1), so
+//      there is no second form to choose. The installed fact selects
+//      nothing — the per-identity lookup that once fed the choice is
+//      deleted (nocx-m8jwn.10) — it is only the inventory the footprint
+//      surface lists;
 //   5. authentication failure leaves an ordinary terminal: no passport, the
 //      block runs to the local D and shows the real exit status;
 //   6. the host's rc files are byte-identical after all of it (.bashrc,
@@ -335,7 +338,7 @@ const pane = (page: Page) => page.locator('.pane.active')
 
 // ── the journey ───────────────────────────────────────────────────────────
 
-test('a hand-typed ssh: frozen local block, remote blocks, compact second connection, auth failure, rc files intact, one generation', async ({
+test('a hand-typed ssh: frozen local block, remote blocks, integrated second connection, auth failure, rc files intact, one generation', async ({
   page,
 }) => {
   test.setTimeout(360_000)
@@ -504,7 +507,9 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await expect(local.locator('.cmd-header-cwd')).toHaveCount(1)
     await expect(local.locator('.cmd-header-location')).toHaveCount(0)
 
-    // The installed fact was recorded from the first run's accepted passport.
+    // The installed fact was recorded from the first run: the far shell
+    // named its generation on the authenticated channel and the backend
+    // persisted it (nocx-ak2d).
     const factDoc = installedFactDoc()
     expect(factDoc, 'installed-facts.json exists').not.toBeNull()
     const facts = Object.values(factDoc!.facts)
@@ -513,17 +518,20 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     expect(fact, `installed fact for ${primary.addr}`).toBeTruthy()
     expect(fact!.protocol).toBe('1')
 
-    // ── 4. second connection: the COMPACT ~/.nocx/launch line ──
+    // ── 4. second connection: integrated from its first prompt ──
     await submitInEditor(page, primaryLine)
     const secondRunning = pane(page).locator('.cmd-block.cmd-block-running', {
       hasText: 'ssh -i',
     })
     await expect(secondRunning).toBeVisible({ timeout: 30_000 })
     await expect(secondRunning).toContainText(`-p ${primary.addr.split(':')[1]}`)
-    // The compact-second-connection assertion is gone with its input: the
-    // installed fact that selected that path has no production writer on
-    // this branch (nocx-292k blocker A), so asserting it here would assert
-    // a route nothing can currently take.
+    // There is no compact-second-connection assertion because there is no
+    // compact second connection: every connection emits the same
+    // unconditional loader (carrier design §4.1), and the installed fact
+    // that once selected between forms no longer has a per-identity read at
+    // all (nocx-m8jwn.10). Do not restore this assertion on the strength of
+    // the fact having a writer again — the writer feeds the footprint
+    // inventory, not a delivery choice.
     await primary.waitConn(2, 30_000)
     await page.keyboard.type(primaryPassword)
     await page.keyboard.press('Enter')
@@ -597,7 +605,28 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     const root = path.join(remoteHome(), '.nocx')
     const manifest = verifyInstallation(root)
     const genDirs = readdirSync(path.join(root, 'integration')).filter((n) => n.startsWith('v'))
-    expect(genDirs).toEqual([manifest.generation])
+    // What this journey is checking is that a HAND-TYPED ssh published no
+    // generation of its own beside the managed one. It is not "the host holds
+    // exactly one directory": the publisher's documented policy is keep-two —
+    // the active generation and the newest other survive, so a shell still
+    // running from the previous version does not have its directory deleted
+    // out from under it (publisher.go, cleanupOrphans).
+    //
+    // Asserting exactly one passed only because CI checks out a fresh tree and
+    // .e2e/remote-home starts empty, so no version bump had ever been seen
+    // here. The first one — nocx-tyyo, 40 -> 41 — failed it on a local run
+    // while the product did precisely what it promises. The assertion is
+    // therefore the invariant the product actually holds, and it still fails
+    // if this run mints a second generation, which is the thing being tested.
+    expect(genDirs).toContain(manifest.generation)
+    expect(genDirs.length).toBeLessThanOrEqual(2)
+    for (const g of genDirs) {
+      if (g === manifest.generation) continue
+      expect(
+        Number(g.slice(1)),
+        `${g} is a leftover from an older version, not a second generation minted by this run`,
+      ).toBeLessThan(Number(manifest.generation.slice(1)))
+    }
     expect(statSync(path.join(root, 'launch')).mode & 0o777).toBe(0o700)
     expect(statSync(path.join(root, 'manifest.json')).mode & 0o777).toBe(0o600)
     expect(statSync(root).mode & 0o777).toBe(0o700)

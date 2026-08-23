@@ -21,6 +21,13 @@ type RealChannel struct {
 	// shellIntegrationReason is why shell integration did not happen,
 	// decided by openShell when the session started (nocx-r52q). ReasonNone
 	// means integration succeeded or was never attempted.
+	//
+	// It is guarded because one row of design §6.4 can only be named LATER:
+	// an exec request that was ACCEPTED and substituted is indistinguishable
+	// from an accepted one until the loader fails to announce itself, which
+	// is after the channel has been handed out. The reason is set once more
+	// at that point, and the transport reads it from another goroutine.
+	reasonMu               sync.Mutex
 	shellIntegrationReason RefusalReason
 
 	// waitMu guards waitErr/waitSet: the watcher records the outcome of
@@ -42,6 +49,16 @@ type RealChannel struct {
 	// transferred here on the shell-open path; every path that opens a
 	// plain shell closes it instead.
 	lifecycleClose func()
+	// inputGate is the bootstrap's input quarantine (design §5.3). Closed
+	// for the whole bootstrap interval and opened at its one terminal
+	// outcome; nil-safe, and open from the start for a session that runs no
+	// bootstrap at all.
+	inputGate *inputGate
+	// bootstrapDone is closed when the bootstrap has finished with the
+	// output stream. Read waits on it, which is what makes the handover
+	// from the bootstrap driver to the terminal a sequence rather than a
+	// race — and what publishes the driver's leftover bytes to it.
+	bootstrapDone chan struct{}
 	// releasePoolRef drops this channel's reference to the pooled ssh.Client.
 	// Set by RealClient.Connect; invoked once from Close (after closeOnce
 	// fires) so the connection closes when the last referencing tab closes,
@@ -70,7 +87,22 @@ func (h *lifecycleHandle) close() {
 	})
 }
 
+// Read hands the session's output to the terminal — after the bootstrap has
+// finished with it.
+//
+// The wait is not a delay imposed on the user: during the bootstrap the far
+// side emits nothing but protocol tokens, on a terminal it holds in raw mode
+// with echo off, and those tokens are precisely what must NOT reach a pane.
+// The first byte a user could want is the prompt, which comes after the
+// terminal outcome.
 func (c *RealChannel) Read(p []byte) (int, error) {
+	if c.bootstrapDone != nil {
+		select {
+		case <-c.bootstrapDone:
+		case <-c.done:
+			return 0, &ErrDisconnected{}
+		}
+	}
 	return c.stdout.Read(p)
 }
 
@@ -91,6 +123,17 @@ func (c *RealChannel) Write(p []byte) (int, error) {
 	case <-c.done:
 		return 0, &ErrDisconnected{}
 	default:
+	}
+	// The input quarantine (design §5.3). One write is one decision, taken
+	// under the gate's lock, so a keystroke arriving as the bootstrap ends
+	// is either refused or delivered exactly once — never both, never
+	// neither. Refused, never buffered: a buffered keystroke is a command
+	// the user did not knowingly run, executed later.
+	//
+	// Resize and the other PTY control requests are NOT user bytes and do
+	// not pass through here at all, which is why they keep working.
+	if !c.inputGate.admit() {
+		return 0, &ErrInputQuarantined{}
 	}
 	return c.stdin.Write(p)
 }
@@ -142,6 +185,8 @@ func (c *RealChannel) Done() <-chan struct{} {
 }
 
 func (c *RealChannel) ShellIntegrationReason() RefusalReason {
+	c.reasonMu.Lock()
+	defer c.reasonMu.Unlock()
 	return c.shellIntegrationReason
 }
 
@@ -231,4 +276,13 @@ func buildTerminalModes() string {
 	}
 	buf = append(buf, 0) // TTY_OP_END
 	return string(buf)
+}
+
+// setShellIntegrationReason records a refusal decided after the channel was
+// built. Only design §6.4's substituted-exec row reaches it: everything else
+// is known before the session is handed out.
+func (c *RealChannel) setShellIntegrationReason(r RefusalReason) {
+	c.reasonMu.Lock()
+	defer c.reasonMu.Unlock()
+	c.shellIntegrationReason = r
 }

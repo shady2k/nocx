@@ -6,6 +6,15 @@
   (the marker rule), [ADR-0006](0006-marker-only-prompt-mode.md) §4 (`A → B`
   ownership), and the lifecycle half of `AD-5`.
 - **Amends:** `AD-1` (what may cross the control plane), `AD-6` (who owns what).
+- **Amended:** 2026-08-20 by
+  [ADR-0035](0035-the-channel-we-own-is-the-carrier.md) and the
+  integration-delivery-carrier design (D8, §5.4) — one open question closes and
+  decision 10's threat model gains the actor it was always about. See
+  **Amendment (2026-08-20)** below; decision 2's sentence about substituting the
+  capability into the script text is retired there. Amended again the same day by
+  the same design (§5.5), together with `AD-6`: decision 1 gains a **second
+  carve-out** — the bootstrap window — and decision 4 gains the sentence that
+  keeps its first condition from contradicting it.
 - **Related:** `nocx-u7uh` (the epic that implements it), `nocx-mu8s` (the defect that
   found it), `AD-8`.
 
@@ -153,6 +162,69 @@ down because the alternative reading forbids the only clean solution to render
 ordering, and a future reviewer would be right to reject it under decision 1 as
 otherwise phrased.
 
+**A second carve-out, added 2026-08-20, and it is narrower than the first.** The
+sentence above should now be read as "the first of two". This one is bounded by an
+interval rather than by a grammar. Before an integrated remote session has a shell
+there is a window in which nocx's own bootstrap program — a loader we wrote, sent
+as the remote command, holding stdin and stdout on the PTY and nothing else — is
+the only thing on the far end of the stream. In that window, and in no other, the
+backend may read a closed set of fixed-prefix, length-framed tokens it defined
+itself: the loader has taken the terminal and may be written to, stage-1 is loaded
+and may be handed its frame, and exactly one terminal outcome. The window closes on
+that outcome, the reader is closed with it, and it never reads that session again.
+`AD-6` carries the same wording; the mechanism is the integration-delivery-carrier
+design §5.5.
+
+It is written down because the alternatives are closed rather than unattractive. A
+sub-1-KiB POSIX shell script has no channel but the terminal it was handed — the
+socket decision 4's diagnostic channel wants is one a portable shell cannot open,
+and requiring one would decide at first contact, before we know anything about the
+far side, that hosts without it get nothing. Decision 2's authenticated channel is
+established **after** the bootstrap this signal exists to sequence, so it cannot
+carry the signal that gates its own establishment. And there is nothing to infer
+without reading: only a duration to wait, which is the answer this repo does not
+accept.
+
+**What it may not do, which is the whole of its licence.** Nothing on this reader
+creates, authenticates, completes, revokes or assigns status to a lifecycle
+attempt, mints or validates a capability, or gives the editor the keyboard. Like
+the first carve-out it is a rendezvous; what it rendezvouses with is a program of
+ours rather than an already-authenticated event. Its one effect on input is to end
+the **quarantine** the bootstrap itself opened — and ending a quarantine is a
+**return** of the keyboard to the state a plain `ssh` would have left it in, not a
+grant. Inside the window there is no shell, no attempt and no domain; the lifecycle
+axis of decision 6 is `Native` throughout it and is still `Native` when it closes.
+If that ever stops holding — if anything a token reaches can leave that axis
+anywhere but `Native` — this carve-out is void, and the design that needed it is
+the thing that is wrong.
+
+**Why this is not the private OSC this ADR rejected above.** That rejection was of
+a **namespace offered as a boundary**: the bytes stay anonymous, so the token in
+them does all the security work and one captured frame replays forever. This
+carve-out claims no namespace and asks its prefix to do no security work at all.
+Its boundary is the interval. Inside the window there is no shell, no user program
+and no user keystroke, so any writer other than our loader is a process that can
+already write the session's terminal — and such a process can read the same bytes,
+so the tokens tell it nothing it could not have taken. Outside the window there is
+no reader, so a captured token replays into nothing. Take the interval away and
+this carve-out is the rejected idea again, which is why the interval, not the
+vocabulary, is what a reviewer should check.
+
+**The worst forgery, stated rather than buried.** A process that can write that PTY
+can forge these tokens. What it gains is an early release of the input quarantine,
+an early or a doomed delivery of stage-1 — public bytes with a public digest — or a
+bootstrap that fails into a conventional session. What it does not gain is a
+capability or a fence it could not already have taken, because the frame that
+carries them travels on the same terminal it is already reading. There is one
+strict gain and it is named rather than smoothed over: forging the readiness that
+says stage-1 verified its frame can make the backend mint and send in a session
+whose honest outcome was a refusal, producing a capability that would otherwise
+never have existed. The design's §6.1 carries the three rules that shrink that to a
+race — each token accepted once and only in order, no frame written after an
+observed outcome, and hard invalidation on refusal or timeout — and no framing
+closes the race itself, because winning it requires writing the session's terminal,
+which is the position decision 10 already declines to defend against.
+
 This is the whole decision. Everything below is how it is made true.
 
 ### 2. The lifecycle rides an authenticated channel that is not the tty
@@ -238,6 +310,14 @@ substitutes `@SID@` — never passed as an environment variable. Verified: a chi
 cannot read a non-exported shell variable, and a value that was never in the
 environment is absent from `/proc/<pid>/environ`, which survives `unset`.
 
+> **Amended 2026-08-20 (ADR-0035).** "Never passed as an environment variable"
+> stands, and so does everything above about the environment. "Substituted into
+> the integration script text" is retired: that text travelled in the SSH command,
+> so the capability reached the far host's process arguments and every recorder of
+> the exec request — the surface the sentence above does not cover. It now arrives
+> as a bounded frame on the session channel and is read once from an unlinked
+> descriptor. See the amendment below.
+
 **Why the capability is mandatory rather than belt-and-braces, measured.** A child
 of the shell inherits the descriptor: `bash -c 'exec {fd}>/tmp/x; …'` allocates fd
 10 and the child still sees `10 -> /tmp/x` in `/proc/self/fd`. Bash's `{var}`
@@ -309,6 +389,23 @@ broke" — three situations that are one indistinguishable ten-second silence wh
 the handshake bound is the only detector. The second fact is written **before** the
 capability is substituted into the rcfile, so the diagnosis widens the window in
 which the user's own rc could read the capability by exactly nothing.
+
+**Amended 2026-08-20: the three conditions stand, and they do not reach the
+bootstrap window.** Decision 1's second carve-out reads tokens on the terminal,
+which is the first condition's exact prohibition, so the two must be told apart
+here rather than left to a reader to reconcile. They are different things. This
+channel reports the progress of a shell that already exists, to a human reading a
+diagnosis, for as long as the session lives, and **nothing waits on it** — which is
+why a wrong answer on it can only be a wrong sentence. The bootstrap window is a
+two-party handshake with a program of ours, before any shell exists, and the whole
+reason it exists is that something waits on it. The first condition is what keeps
+this channel safe and it stays exactly as written: a diagnostic on the terminal
+would be read while a user shell is running, when every process on that tty can
+write it and there is no interval that ever closes. Where the two meet, the
+stricter rule wins in both directions — a merely diagnostic fact may not be moved
+onto the bootstrap reader to escape "it is not the terminal", and a token on the
+bootstrap reader may not outlive the terminal outcome in order to become a
+diagnostic.
 
 ### 5. The lifecycle is attempt-based, and a start may come from either side
 
@@ -510,16 +607,91 @@ with — which is why nothing may be built on it that a wrong answer would break
 That second list is irreducible in kind. We can authenticate **who spoke**; we can
 never prove a compromised speaker told the truth.
 
+## Amendment (2026-08-20) — how the capability travels, and whom it is for
+
+Made by [ADR-0035](0035-the-channel-we-own-is-the-carrier.md) and the
+integration-delivery-carrier design (D8 and §5.4). Two things change: an open
+question closes, and decision 10 gains an actor it named only in passing.
+
+### The capability touches no name, and no longer touches the command
+
+The question this ADR left open — whether the capability ever touches a named
+file — is closed the way it said it preferred. It touches none, and installed
+scripts stay capability-free.
+
+The mechanism, in one sentence: the bootstrap stage `mktemp`s, opens a read and a
+write descriptor, **unlinks the name before writing anything**, writes the
+capability and the recovery fence to the writer, closes it, and `exec`s the
+launcher with the read descriptor surviving the `exec` — its number travels in
+argv, which is a name and not a secret. After the user's own startup has run, the
+startup hook reads that descriptor once, closes it, and assigns non-exported
+variables. If the `unlink` fails, nothing is written at all; the name exists only
+between `mktemp` and `unlink`, and nothing secret is written in that window.
+
+What this replaces is worse than the open question assumed. The capability was
+substituted into the integration script text, and that text travelled in the SSH
+command — so the capability reached the far host's process arguments, where any
+process of the same remote user reads it, and reached any recorder of the exec
+request. Measured verbatim for bash, zsh and auto, together with the one-shot
+recovery fence. The code beside it said "never exported, never in the
+environment": the threat model had considered `/proc/<pid>/environ` and had not
+considered argv.
+
+### Decision 10 gains the actor, and loses a pretence
+
+Three statements, in the order that decides how to read them.
+
+**Anything that can observe and write the session's input already owns the
+session.** Our own backend, the server the user chose and whose host key they
+accepted, and any intermediary they connect through are all in that position. A
+session-scoped bearer grants them nothing they do not already have, because they
+are inside the session. **This is a tautology, not a concession weighed and
+accepted** — it is written down in that form so that no later reader takes it for
+a trade-off somebody made on the user's behalf. A component that records the
+session records a credential already expired by the time anyone reads the
+recording.
+
+**The actor the capability exists for is a different one:** a process on the far
+host, running as the same user, that inherited the transport but was never handed
+the token — the descendant this ADR named when it made the capability mandatory
+rather than belt-and-braces. Against that actor the token is the whole defence,
+and unlike the participants above it is an actor for whom the token is live and
+valuable **during** the session. That is exactly why the previous arrangement was
+a defect rather than an untidiness: the descendant read the token with `ps` while
+it was still valid, and it also sat in the command, which is a discrete field of a
+record — indexed, forwarded, and retained on a schedule of its own, unlike the
+session stream.
+
+**What is removed is ambient disclosure, and only that:** argv, the environment,
+named filesystem entries, the shell's history, product logs — each asserted per
+surface rather than in aggregate. Decision 10's exclusion list is therefore
+adjusted at three points:
+
+- **the exec-request recorder is out of scope for the bearer**, because no bearer
+  is in an exec request any more;
+- **the session-input recorder is inside the trusted transport boundary** by the
+  first statement above — not defended against, and never was;
+- **same-user active inspection remains named and undefeated.** `/proc/<pid>/fd`,
+  `ptrace` and a debugger attached to the shell all defeat an unlinked descriptor,
+  exactly as they defeated a `0600` file. This ADR already said mode bits prove
+  nothing there and the amendment does not pretend otherwise. The answer to that
+  threat model is still a compiled remote component, and is still out of scope.
+
+The distinction the last point turns on is worth stating plainly, because it is
+the whole value of the change: ambient disclosure needs no privilege and no
+intent — a `ps` while the session runs, a log somebody greps a week later. Active
+inspection needs a process already able to attach to the shell it is inspecting,
+which is the compromised-shell case this ADR excluded from the start.
+
 ## What this deliberately leaves open
 
-- **Whether the capability ever touches a named file.** The in-band installer
-  writes its script to a remote `mktemp` file (`inband.go:113`), and `0600` plus
-  unlink-after-source does **not** protect it from another process running as the
-  same remote user — sourcing executes the whole file before the unlink. Preferred:
-  the per-epoch capability never enters a filesystem object, and installed scripts
-  stay capability-free. If the adapters make that impossible, decision 10 must name
-  same-user bootstrap inspection as excluded rather than pretend the mode bits
-  cover it.
+- ~~**Whether the capability ever touches a named file.**~~ **Closed
+  2026-08-20 (ADR-0035), in the direction this ADR preferred:** the per-epoch
+  capability never enters a filesystem object under a name, and installed scripts
+  stay capability-free. The condition attached to the preference is also
+  discharged, and in the harder direction — decision 10 does now name same-user
+  inspection as excluded, rather than resting on mode bits it never had a right
+  to rest on. The amendment above is the whole answer.
 - **The local descriptor's mechanics.** Discovery without exporting a secret,
   socket type (`SOCK_SEQPACKET` would preserve message boundaries where supported),
   direction, behaviour across a shell that `exec`s another shell, and shutdown

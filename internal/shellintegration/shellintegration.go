@@ -49,11 +49,6 @@ type ShellIntegration interface {
 	// rc gate activates the integration. When enhanced is true, it also
 	// emits NOCX_PROMPT_MODE=marker-only and a unique NOCX_SESSION_ID.
 	ActivationEnv(enhanced bool) []string
-
-	// RemoteStartCommand returns the installed-mode start command (design
-	// §3.3): the far-side guard that execs the compact carrier when a
-	// generation is committed, else a native login shell.
-	RemoteStartCommand() string
 }
 
 // Impl is the production implementation.

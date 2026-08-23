@@ -32,6 +32,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"sync"
 	"time"
@@ -510,7 +512,10 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
 		case lifecycle.KindAccept:
-			p.beginEstablishment(out)
+			if bErr := p.beginEstablishment(out); bErr != nil {
+				p.publishLane(env.Lane)
+				return bErr
+			}
 		case lifecycle.KindDomainGrant:
 			// The grant is the answer to the parent's own request — it
 			// grants no suppression authority and no new state, so it is
@@ -536,10 +541,18 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 // acknowledgement (an old generation) can never release a newer accept —
 // and arms the establishment bound. A later hello for the same domain
 // supersedes the pending accept.
-func (p *Publisher) beginEstablishment(out lifecycle.Outbound) {
+func (p *Publisher) beginEstablishment(out lifecycle.Outbound) error {
 	env := out.Envelope
 	key := estKey{lane: env.Lane, domain: env.Domain, epoch: env.Epoch}
-	gen := "est-" + p.randomHex(8)
+	// Minted before anything is recorded: an establishment that cannot be
+	// told apart from the previous one is not begun at all. The domain then
+	// never establishes and the shell falls back — the same fail-open every
+	// other refusal on this path takes.
+	genHex, err := p.randomHex(8)
+	if err != nil {
+		return err
+	}
+	gen := "est-" + genHex
 	p.mu.Lock()
 	if cur, ok := p.pending[key]; ok && cur.timer != nil {
 		cur.timer.Stop()
@@ -548,6 +561,7 @@ func (p *Publisher) beginEstablishment(out lifecycle.Outbound) {
 	p.pending[key] = pendingAccept{gen: gen, out: out}
 	p.mu.Unlock()
 	p.armEstablishmentTimer(key, gen)
+	return nil
 }
 
 func (p *Publisher) armEstablishmentTimer(key estKey, gen string) {
@@ -612,10 +626,27 @@ func (p *Publisher) AcknowledgeEstablishment(lane lifecycle.LaneID, domain lifec
 	return p.kernel.Deliver(out)
 }
 
-func (p *Publisher) randomHex(n int) string {
+// randReader is the randomness seam, the same shape internal/shellintegration
+// already uses for its own: a package var so a test can make the source fail,
+// because "for every external call your code makes there is a test where that
+// call fails" (AGENTS.md) and crypto/rand is one.
+var randReader io.Reader = rand.Reader
+
+// randomHex mints the establishment GENERATION. It is not an authenticator,
+// but it is a discriminator against a stale actor — a late acknowledgement
+// from a previous episode must not release the accept of a newer one — and
+// the check is `pend.gen != generation`, an equality. Two zero values compare
+// equal, so a source that failed would let exactly the stale ack this value
+// exists to reject through, and would let a superseded timer cancel a live
+// establishment. It is also echoed by the far side, so it must be
+// unguessable as well as distinct. A failed read is therefore an error, not
+// a tolerated zero (nocx-s16k8).
+func (p *Publisher) randomHex(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(randReader, b); err != nil {
+		return "", fmt.Errorf("lifecyclepub: the randomness source failed; no establishment generation was minted: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // Domain returns the read model of one domain, forwarding to the kernel. The

@@ -87,6 +87,91 @@ type liveSshd struct {
 	// reported (the production RegisterLifecycleLane wiring); the tests
 	// assert the minted lane reached the session it belongs to.
 	registeredLanes []string
+
+	// The seams the epic's end-to-end check (nocx-m8jwn.8) needs and the
+	// proofs above do not. Each is nil/empty by default, so every existing
+	// caller composes exactly as it did.
+	//
+	// logger is the PRODUCT logger this fixture's compositions are wired
+	// with. "Product logs" is one of the surfaces the taint canary must not
+	// appear on, and a surface nothing captures cannot be asserted.
+	logger log.Logger
+	// rand is the kernel's randomness. The canary is placed IN the
+	// capability and the fence by minting them from a reader that stamps a
+	// marker into every 32-byte read — which is exactly those two values
+	// and nothing else the kernel reads.
+	rand io.Reader
+	// launcher, when set, replaces the launcher adapter connect() would
+	// build. It is how the emitted remote command is recorded: the product
+	// deliberately never logs it (it used to carry both bearers).
+	launcher ssh.RemoteLauncher
+	// tmpRoot is the session's TMPDIR, fixture-owned so "any remote root we
+	// write to, including the temp root" is a directory the test can walk.
+	tmpRoot string
+	// recDir holds the far-side recordings: the argv and the environment of
+	// every non-interactive bash the session ran, and the shell history.
+	// It lives OUTSIDE the session home so the "nothing installed" walk is
+	// unaffected by the recording.
+	recDir string
+	// histFile is $HISTFILE for the far shell, when recording is on.
+	histFile string
+}
+
+// liveSshdOption tunes the fixture for one test. Variadic and additive: the
+// existing callers pass none and get the server they always got.
+type liveSshdOption func(*liveSshdConfig)
+
+type liveSshdConfig struct {
+	extraConfig string
+	record      bool
+}
+
+// withSshdConfig appends lines to sshd_config. A Match block must be last,
+// and only one caller may use it, so it is a single string rather than a
+// list.
+func withSshdConfig(lines string) liveSshdOption {
+	return func(c *liveSshdConfig) { c.extraConfig = lines }
+}
+
+// withFarSideRecording turns on the three fixture-owned surfaces the canary
+// is asserted against on the far host: a private TMPDIR, a real HISTFILE, and
+// a recorder that writes the argv and the environment of the very process
+// that runs our exec request.
+//
+// The recorder has to run INSIDE that process, because the argv exists
+// nowhere else and not for long: sshd runs an exec request as
+// `<login shell> -c <request>`, and the loader immediately execs, which
+// replaces the argv. Nothing outside can look in time.
+//
+// The seam is `~/.bashrc`, and which seam it is was MEASURED rather than
+// assumed. $BASH_ENV is the obvious answer and it is the wrong one here: bash
+// reads $BASH_ENV for a non-interactive shell only when it does not think it
+// was started by sshd, and when SSH_CLIENT is in the environment it sources
+// `~/.bashrc` INSTEAD. A first attempt set BASH_ENV through sshd's SetEnv;
+// the variable arrived on the far side (verified in the session's own
+// environment) and the file was never sourced. So the recorder is sourced
+// from the fixture's own `~/.bashrc`, and BASH_ENV is left pointing at it as
+// well, so either rule fires and the records simply append.
+//
+// It writes to files and never to a descriptor of the session: a byte on
+// stdout here would land in the middle of the loader's frame protocol.
+func withFarSideRecording() liveSshdOption {
+	return func(c *liveSshdConfig) { c.record = true }
+}
+
+// log is the product logger this fixture's compositions use.
+func (fx *liveSshd) log() log.Logger {
+	if fx.logger != nil {
+		return fx.logger
+	}
+	return log.NewSlogAdapter(nil)
+}
+
+// authCount is how many times the server accepted an authentication — the
+// observable that says whether a refusal cost the user a second credential
+// use. LogLevel VERBOSE is what makes it observable.
+func (fx *liveSshd) authCount() int {
+	return strings.Count(fx.logBuf.String(), "Accepted publickey")
 }
 
 // sshdBinary returns the sshd path, failing (not skipping) when absent.
@@ -164,8 +249,12 @@ func reservePort(t *testing.T) int {
 // carries a .bashrc naming the native prompt. The host and client keys are
 // generated in Go; nothing beyond the sshd binary is required of the
 // environment.
-func startLiveSshd(t *testing.T, allowForward bool) *liveSshd {
+func startLiveSshd(t *testing.T, allowForward bool, opts ...liveSshdOption) *liveSshd {
 	t.Helper()
+	var fxCfg liveSshdConfig
+	for _, o := range opts {
+		o(&fxCfg)
+	}
 	sshdPath := sshdBinary(t)
 	userName := requireLoginUser(t)
 
@@ -197,8 +286,50 @@ func startLiveSshd(t *testing.T, allowForward bool) *liveSshd {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatalf("mkdir session home: %v", err)
 	}
+	// $HISTFILE is redirected away by default so the session leaves nothing
+	// behind. With recording on it is redirected to a fixture-owned file
+	// INSTEAD, because "the shell's history" is one of the surfaces the
+	// canary must not appear on and /dev/null cannot be searched.
+	sessionEnv := []string{"HOME=" + home}
+	rcHist := "HISTFILE=/dev/null\n"
+	rcRecorder := ""
+	var recDir, tmpRoot, histFile string
+	if fxCfg.record {
+		recDir = filepath.Join(dir, "rec")
+		if err := os.Mkdir(recDir, 0o700); err != nil {
+			t.Fatalf("mkdir recording dir: %v", err)
+		}
+		tmpRoot = filepath.Join(dir, "tmp")
+		if err := os.Mkdir(tmpRoot, 0o700); err != nil {
+			t.Fatalf("mkdir session TMPDIR: %v", err)
+		}
+		histFile = filepath.Join(recDir, "history")
+		// The recorder. Every write is redirected to a file: a byte on this
+		// process's stdout would arrive in the middle of the loader's frame
+		// protocol. /proc is the exact answer and `ps` the portable one; the
+		// redirection makes a failure of either silent rather than visible
+		// on the terminal, and an empty recording is what the test reads as
+		// "the recorder never fired".
+		recScript := "{ tr '\\0' ' ' < /proc/$$/cmdline || ps -o args= -p $$ ; printf '\\n' ; } >> " +
+			shellQuoteForSh(filepath.Join(recDir, "argv")) + " 2>/dev/null\n" +
+			"{ tr '\\0' '\\n' < /proc/$$/environ || env ; } >> " +
+			shellQuoteForSh(filepath.Join(recDir, "environ")) + " 2>/dev/null\n"
+		recPath := filepath.Join(recDir, "rec.sh")
+		if err := os.WriteFile(recPath, []byte(recScript), 0o600); err != nil {
+			t.Fatalf("write far-side recorder: %v", err)
+		}
+		sessionEnv = append(sessionEnv,
+			"TMPDIR="+tmpRoot,
+			"HISTFILE="+histFile,
+			"BASH_ENV="+recPath)
+		rcRecorder = ". " + shellQuoteForSh(recPath) + "\n"
+		// The rc must not overwrite the $HISTFILE the environment carries:
+		// which rc file a far shell reads depends on how the launcher starts
+		// it, and the environment reaches every one of them.
+		rcHist = ""
+	}
 	if err := os.WriteFile(filepath.Join(home, ".bashrc"),
-		[]byte("PS1='NATIVE_PROMPT> '\nHISTFILE=/dev/null\n"), 0o600); err != nil {
+		[]byte(rcRecorder+"PS1='NATIVE_PROMPT> '\n"+rcHist), 0o600); err != nil {
 		t.Fatalf("write fixture .bashrc: %v", err)
 	}
 
@@ -221,9 +352,11 @@ PubkeyAuthentication yes
 PermitRootLogin no
 AllowTcpForwarding %s
 Subsystem sftp internal-sftp
-SetEnv HOME=%s
+SetEnv %s
 LogLevel VERBOSE
-`, port, hostKeyPath, filepath.Join(dir, "sshd.pid"), authKeys, forward, home)
+%s
+`, port, hostKeyPath, filepath.Join(dir, "sshd.pid"), authKeys, forward,
+		strings.Join(sessionEnv, " "), fxCfg.extraConfig)
 	cfgPath := filepath.Join(dir, "sshd_config")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write sshd_config: %v", err)
@@ -235,6 +368,11 @@ LogLevel VERBOSE
 	// into flaking unrelated suites. Kill the whole group instead
 	// (nocx-u7uh.29 found the leak this way).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// And the bound for a session child that has left that group, holding
+	// the log pipe: see fixtureWaitDelay. The group kill above is what ends
+	// this in the ordinary case; without the bound, one survivor turns this
+	// cleanup into a package timeout.
+	cmd.WaitDelay = fixtureWaitDelay
 	logBuf := &lockedBuffer{}
 	cmd.Stdout = logBuf
 	cmd.Stderr = logBuf
@@ -260,6 +398,9 @@ LogLevel VERBOSE
 				hostKey:   hostSigner.PublicKey(),
 				cmd:       cmd,
 				logBuf:    logBuf,
+				tmpRoot:   tmpRoot,
+				recDir:    recDir,
+				histFile:  histFile,
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -444,6 +585,7 @@ type recordingKernel struct {
 	lane       lifecycle.LaneID
 	domain     lifecycle.DomainID
 	capability lifecycle.Capability // the per-epoch bearer, from the handle
+	recovery   lifecycle.FenceNonce // the one-shot recovery fence, from the handle
 	minted     int
 }
 
@@ -454,6 +596,7 @@ func (r *recordingKernel) RequestDomain(lane lifecycle.LaneID, parent *lifecycle
 		r.lane = lane
 		r.domain = h.Domain
 		r.capability = h.Capability
+		r.recovery = h.Recovery
 		r.minted++
 		r.mu.Unlock()
 	}
@@ -496,6 +639,15 @@ func (r *recordingKernel) capabilityHex() string {
 	return fmt.Sprintf("%x", r.capability)
 }
 
+// recoveryHex is the one-shot recovery fence as the launch embedded it. It is
+// the second bearer §11 assertion 7 names, and it is asserted against every
+// surface alongside the capability — "neither bearer" is two statements.
+func (r *recordingKernel) recoveryHex() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return fmt.Sprintf("%x", r.recovery)
+}
+
 // ---------------------------------------------------------------------------
 // Connect through the production composition.
 
@@ -516,6 +668,32 @@ func (o *outputBuffer) String() string {
 	defer o.mu.Unlock()
 	return string(o.b)
 }
+
+// fixtureWaitDelay bounds what a fixture's cleanup may cost when a process it
+// spawned leaves a descendant behind.
+//
+// A lockedBuffer is an io.Writer and not a file, so os/exec gives the child a
+// PIPE and copies it on a goroutine that Cmd.Wait waits for. Every descendant
+// inherits the write end, and Wait cannot finish while one of them holds it —
+// the process itself being long dead makes no difference. Killing the process
+// GROUP is what ends that in the ordinary case, and every fixture here does
+// it; this is for the descendant that has left the group, which no kill can
+// reach: sshd gives each connection its own session, and ssh's backgrounded
+// multiplex master detaches and keeps STDERR (it sends stdin and stdout to
+// /dev/null, which is why exactly one copier survives it).
+//
+// Measured on 2026-08-21, CI run 32474316825: a mux fixture cleanup parked in
+// awaitGoroutines for 8m33s after ITS TEST HAD ALREADY FAILED, and Go's
+// 10-minute panic took the whole internal/app package with it — a one-line
+// failure reported as a dead suite. Reproduced here with a real ssh that
+// backgrounds a master: killing the pid alone left the cleanup blocked past
+// 60s, killing the group returned it in 0.30s, and for the descendant no
+// kill reaches this bound is what ends it — at a cost of seconds, and to
+// this test rather than to the package.
+//
+// It is a HANG DETECTOR, never an expectation: a run that has to wait it out
+// has already failed for its own reasons, and no assertion may depend on it.
+const fixtureWaitDelay = 10 * time.Second
 
 type lockedBuffer struct {
 	mu sync.Mutex
@@ -542,7 +720,7 @@ func (l *lockedBuffer) String() string {
 // publication path inside RealClient.Connect.
 func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.ShellKind, installers ...ssh.RemoteInstaller) (ssh.Channel, *outputBuffer) {
 	t.Helper()
-	logger := log.NewSlogAdapter(nil)
+	logger := fx.log()
 	client, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(fx.knownHostsPath(t)))
 	if err != nil {
 		t.Fatalf("NewReal: %v", err)
@@ -558,7 +736,10 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 			fx.registeredLanes = append(fx.registeredLanes, string(lane)+"->"+sid)
 		},
 	}
-	launcher := &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}
+	var launcher ssh.RemoteLauncher = &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}
+	if fx.launcher != nil {
+		launcher = fx.launcher
+	}
 
 	opts := []ssh.ConnectOption{
 		ssh.WithUser(fx.user),
@@ -648,7 +829,7 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash)
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -751,7 +932,7 @@ func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	fx := startLiveSshd(t, false)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellBash)
+	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	// The refusal is synchronous: no domain may ever be minted.
 	time.Sleep(500 * time.Millisecond)
@@ -797,7 +978,7 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, _ := fx.connect(t, kernel, ssh.ShellBash)
+	ch, _ := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
@@ -866,7 +1047,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 
 	fx := startLiveSshd(t, true)
 	kernel := newRecordingKernel()
-	ch, out := fx.connect(t, kernel, ssh.ShellZsh)
+	ch, out := fx.connect(t, kernel, ssh.ShellZsh, shellintegration.New(log.NewSlogAdapter(nil)))
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()

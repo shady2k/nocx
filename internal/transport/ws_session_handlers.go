@@ -40,6 +40,12 @@ type sessionMachine interface {
 	closeSession(sid session.ID, sess session.Session)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
+	// flushUploadDone re-emits the upload outcomes that settled while
+	// nothing was attached (upload design §5.3). Separate from the files
+	// flush because it is a terminal fact rather than an invalidation: a
+	// missed files.changed costs a stale listing the next poll corrects,
+	// and a missed uploadDone leaves the UI saying "uploading" forever.
+	flushUploadDone(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
 	// replayLifecycleFacts re-emits the current lifecycle projection of the
 	// session's lanes on reattach (ADR-0024 decision 8 / AD-9). One narrow
@@ -88,6 +94,10 @@ type openHandlers struct {
 	resolver *resolverHolder // profile resolver, readable post-construction
 	sshCfg   ssh.ConfigResolver
 	launcher ssh.RemoteLauncher
+	// installer publishes the bundle over SFTP on the direct-host path,
+	// which is the only thing that installs it now that the command
+	// carries no payload.
+	installer ssh.RemoteInstaller
 	// lifecycle is the authenticated-channel seam (ADR-0024): the dial
 	// hands it to the far side so the shell can hand its lifecycle back
 	// over a channel that is not the terminal. An explicit seam, not the
@@ -421,6 +431,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					Cols:            params.Cols,
 					Rows:            params.Rows,
 					RemoteLauncher:  h.launcher,
+					RemoteInstaller: h.installer,
 					RemoteLifecycle: h.lifecycle,
 				}
 
@@ -827,6 +838,13 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// made).
 		h.machine.flushFilesChanged(sid, wconn)
 
+		// Uploads (upload design §5.3): the same reasoning one step
+		// further. A transfer is bounded by its SESSION, so it runs on
+		// through a WebSocket drop and can settle with nothing attached;
+		// the outcome was retained then, and this is the attach it was
+		// retained for.
+		h.machine.flushUploadDone(sid, wconn)
+
 		// Lifecycle (ADR-0024 decision 8): a reattached frontend must resume
 		// the existing domain, so its current projection is re-emitted to
 		// THIS connection — after the attach response and after
@@ -916,7 +934,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

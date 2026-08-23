@@ -12,11 +12,13 @@
 // its binding (design §5.5: sidebar collapsed → polling stops, the binding
 // stays) and is fresh the moment it is seen again.
 
+import { Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { ActiveOrigin } from '../pane-content'
 import type { SidebarViewDescriptor } from '../sidebar'
 import { IconButton } from '../ui/icon-button'
 import { RefreshIcon } from '../ui/icons'
+import { SearchField } from '../ui/search-field'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
 import { createUrlOpener, type UrlOpener } from '../open-url'
 import type { GitPanelServices } from './git-client'
@@ -80,10 +82,47 @@ export interface GitViewDeps {
 export function createGitView(deps: GitViewDeps): SidebarViewDescriptor {
   const opener: GitDiffOpener = deps.opener ?? { open: (target) => openGitDiff(target) }
   const store = deps.store ?? createGitStore(deps.services)
+
+  /** THE FILTER (nocx-52by), declared for the shell's pinned slot rather
+   *  than rendered in the body. It stood above the two lists it narrows and
+   *  scrolled away with them, which is exactly backwards — the control that
+   *  narrows a long list is the one thing that must stay reachable while you
+   *  scroll it (owner, 2026-08-22). The shell pins it; this only says which
+   *  child it is.
+   *
+   *  It closes over the same `store` the refresh action and the panel body
+   *  do, so the field and the lists read one signal and cannot disagree.
+   *
+   *  It is present only in the states that HOLD a list: every other state is
+   *  a StatusCard or an EmptyState explaining why there is nothing, and a
+   *  search box above an explanation is noise (the rule the Ports panel
+   *  states as `listAvailable`). The panel's own `<Match>` carried this
+   *  before; now it is said here, on the same two states, from the same
+   *  store. */
+  const GitFilter: Component = () => (
+    <Show when={store.state() === 'ready' || store.state() === 'tooManyChanges'}>
+      <div class="git-filter" data-testid="git-filter">
+        <SearchField
+          value={store.filter()}
+          onInput={(v) => store.setFilter(v)}
+          placeholder="Filter files…"
+          ariaLabel="Filter changed files"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape' && store.filter() !== '') {
+              e.stopPropagation()
+              store.setFilter('')
+            }
+          }}
+        />
+      </div>
+    </Show>
+  )
+
   return {
     id: GIT_VIEW_ID,
     title: 'Git',
     icon: GitBranchIcon,
+    filter: GitFilter,
     actions: () => (
       <IconButton
         data-testid="git-refresh"

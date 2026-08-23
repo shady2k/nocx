@@ -19,11 +19,11 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/git/spawn"
+	"github.com/shady2k/nocx/internal/proc"
 )
 
 // errEnough is the sentinel a stdout sink returns to stop the traversal
@@ -158,7 +158,7 @@ func run(ctx context.Context, spec spec) execResult {
 	cmd := exec.Command(spec.argv[0], spec.argv[1:]...)
 	cmd.Dir = spec.dir
 	cmd.Env = spec.env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	proc.InOwnGroup(cmd)
 
 	stdinW, err := cmd.StdinPipe()
 	if err != nil {
@@ -195,7 +195,7 @@ func run(ctx context.Context, spec spec) execResult {
 		case <-done:
 			// the child finished on its own; nothing to kill
 		case <-stopped:
-			killGroup(cmd, done)
+			proc.KillGroup(cmd, done, signalGrace)
 		}
 	}()
 
@@ -303,35 +303,11 @@ func run(ctx context.Context, spec spec) execResult {
 	return res
 }
 
-// killGroup escalates INT → TERM → KILL against the child's process group and
-// returns as soon as the child is reaped or KILL has been sent. The child's
-// group id is its own pid because the child was started with Setpgid.
-func killGroup(cmd *exec.Cmd, done <-chan struct{}) {
-	if cmd.Process == nil {
-		return
-	}
-	pgid := cmd.Process.Pid
-	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL} {
-		select {
-		case <-done:
-			return
-		default:
-		}
-		_ = syscall.Kill(-pgid, sig)
-		if sig == syscall.SIGKILL {
-			return
-		}
-		select {
-		case <-done:
-			return
-		case <-time.After(signalGrace):
-		}
-	}
-}
-
-// signalGrace is the pause between escalation steps. git handles INT
-// promptly, so the whole escalation completes in ~2×grace even against a
-// child that ignores everything.
+// signalGrace is the pause between escalation steps proc.KillGroup takes.
+// git handles INT promptly, so the whole escalation completes in ~2×grace
+// even against a child that ignores everything. It is this adapter's value
+// and not proc's: the escalation is shared, how long a caller can afford to
+// ask politely is not.
 const signalGrace = 200 * time.Millisecond
 
 // stopSink wraps the caller's stdout sink and fires the deliberate-stop

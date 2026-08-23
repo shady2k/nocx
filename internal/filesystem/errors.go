@@ -168,3 +168,49 @@ func (e *ErrHandleReleased) Error() string { return "filesystem: handle released
 type ErrWatchUnavailable struct{}
 
 func (e *ErrWatchUnavailable) Error() string { return "filesystem: watching is not available yet" }
+
+// ErrUploadUnsupported — Uploader was called on a binding with no write seam,
+// which is a binding whose provider did not implement Uploader. That is the
+// upload design's rule R1 ("a file can only be uploaded to the machine the
+// tab is actually on") arriving as a typed refusal rather than as a check
+// somebody performs: a provider that cannot write contributes no sink, and
+// the binding then has nothing to write through.
+//
+// Both shipped providers CAN write, so no binding the composition root mints
+// takes this refusal today (D7, as corrected: a browser drop on a local tab
+// has bytes and no path, so it uploads onto the backend's own machine, which
+// is the machine that tab's shell is on). The refusal is the seam's shape,
+// not a case that has gone away: the next provider that cannot write inherits
+// it without anybody adding a check.
+//
+// It names the binding rather than the path: the refusal is a property of the
+// binding, not of what was being written.
+type ErrUploadUnsupported struct {
+	BindingID string
+}
+
+func (e *ErrUploadUnsupported) Error() string {
+	return fmt.Sprintf("filesystem: binding %q has no write seam; files cannot be uploaded to this tab", e.BindingID)
+}
+
+// ErrDownloadUnsupported — Downloader was called on a binding with no
+// read-stream seam, which is a binding whose provider did not implement
+// Downloader. It is rule R1 in the read direction, arriving as a typed
+// refusal rather than as a check somebody performs: a provider that cannot
+// stream contributes no source, and the binding then has nothing to read
+// through.
+//
+// Both shipped providers CAN stream, so no binding the composition root
+// mints takes this refusal today. The refusal is the seam's shape, not a
+// case that has gone away: the next provider that cannot stream inherits it
+// without anybody adding a check.
+//
+// It names the binding rather than the path, because the refusal is a
+// property of the binding and not of what was being read.
+type ErrDownloadUnsupported struct {
+	BindingID string
+}
+
+func (e *ErrDownloadUnsupported) Error() string {
+	return fmt.Sprintf("filesystem: binding %q has no read-stream seam; files cannot be downloaded from this tab", e.BindingID)
+}

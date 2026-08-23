@@ -96,7 +96,34 @@ func (s *filesystemOpenService) OpenBinding(ctx context.Context, sess session.Se
 	if a, ok := provider.(filesystemEndpointAttester); ok {
 		endpointID = a.EndpointID()
 	}
-	bid, err := s.reg.Register(provider, sess.ID(), endpointID)
+	// The write seam is resolved HERE, beside the attestation, because this
+	// is the last moment the provider is in hand: Binding.provider is
+	// unexported and Acquire returns a Handle, so nothing downstream can
+	// perform this assertion (upload design D7). A provider that does not
+	// implement it contributes no sink, and that nil is rule R1: the
+	// binding's Upload refuses because it has nothing to write through, not
+	// because somebody remembered to check where the tab is.
+	//
+	// Both shipped providers implement it, so the nil branch is the seam's
+	// shape rather than a case in production. It stayed an assertion rather
+	// than becoming a required Provider method because Provider is read-only
+	// by contract (§5.1) and because R1 must keep being expressible: the
+	// next provider that cannot write inherits the refusal here without
+	// anybody adding a check for it.
+	// The read-stream seam is resolved in the same breath and for the same
+	// reasons, one direction over: reading a file off the wrong host is as
+	// wrong as writing to it, so R1 is a nil Source here exactly as it is a
+	// nil Sink above. Both assertions are here rather than two lines apart
+	// in two files because they answer one question — what can this
+	// provider do — and a second site would be a second place to forget.
+	var caps filesystem.Capabilities
+	if u, ok := provider.(filesystem.Uploader); ok {
+		caps.Sink = u.Sink()
+	}
+	if d, ok := provider.(filesystem.Downloader); ok {
+		caps.Source = d.Source()
+	}
+	bid, err := s.reg.Register(provider, sess.ID(), endpointID, caps)
 	if err != nil {
 		return "", "", err
 	}

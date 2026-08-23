@@ -3,8 +3,12 @@ package shellintegration
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/shady2k/nocx/internal/commandnames"
 )
 
 // The scripts are installed into ~/.nocx once and then never rewritten while
@@ -152,6 +156,13 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// lifecycle is suspended, and nested Bash cannot inherit nocx's
 		// internal extdebug through an exported BASHOPTS (nocx-kf5w).
 		"39": "a4d1de89f1a3851ddb8f8c0fd050a52235cda23f3b3346678f0300a1455278b7",
+		// v40: the snapshot carries the session-local tables only — aliases,
+		// builtins, keywords and functions — and no longer the PATH
+		// executables (nocx-m8jwn.6). That half is computed once per host by
+		// internal/commandnames and shared across tabs; enumerating it in
+		// every shell as well is the per-session scan §8 removes.
+		"40": "ba20c03432b7b31072ba5878b07032189d73fec0d5bcc16308ebd94b86852eda",
+		"41": "aba1857806f6f43c2fbc19b418eda23f36fcd9585d581940fcf32601b9447f0d",
 	}
 
 	h := sha256.New()
@@ -216,6 +227,35 @@ func TestFrameParseAvoidsLongestMatch(t *testing.T) {
 			}
 			t.Errorf("%s parses the frame with a longest-match expansion, which is "+
 				"quadratic on a grant-sized frame: %s", name, strings.TrimSpace(line))
+		}
+	}
+}
+
+// TestSessionLocalBudget_ShellsDeclareTheSameBounds holds the two halves of
+// §8's budget table together.
+//
+// The shell tiers own the session-local enumeration: how long the first
+// prompt waits for it, and how many names it may emit. internal/commandnames
+// owns the shared half and DECLARES both numbers so the whole table is
+// readable in one place. A number stated in two files and enforced in
+// neither is how the two drift apart — which is the shape nocx-beib had when
+// the hello advertised one frame bound and the reader kept another.
+func TestSessionLocalBudget_ShellsDeclareTheSameBounds(t *testing.T) {
+	wantWait := strconv.Itoa(int(commandnames.SessionLocalBudget / time.Millisecond))
+	wantNames := strconv.Itoa(commandnames.MaxSessionLocalNames)
+
+	for _, tier := range []struct{ file, wait, cap string }{
+		{"scripts/nocx.bash", "readonly __nocx_snapshot_wait_ms=" + wantWait, "n >= " + wantNames},
+		{"scripts/nocx.zsh", "readonly __nocx_snapshot_wait_ms=" + wantWait, "__n >= " + wantNames},
+	} {
+		body := scriptFor(t, tier.file)
+		if !strings.Contains(body, tier.wait) {
+			t.Errorf("%s does not declare the session-local grace as %q; commandnames.SessionLocalBudget says %s",
+				tier.file, tier.wait, commandnames.SessionLocalBudget)
+		}
+		if !strings.Contains(body, tier.cap) {
+			t.Errorf("%s does not cap the session-local half at %s; commandnames.MaxSessionLocalNames says so",
+				tier.file, wantNames)
 		}
 	}
 }

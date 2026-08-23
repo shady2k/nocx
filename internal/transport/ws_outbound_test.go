@@ -203,7 +203,7 @@ func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 	ws := stallServer(t, live)
 	connA := connectWS(t, ws)
 	t.Cleanup(func() { _ = connA.Close() })
-	sid := openSSHOverSocket(t, connA, 1)
+	sid := openSSHOverSocket(t, ws, connA, 1)
 
 	// A fresh connection attaches to the same session and types into it —
 	// BEFORE the flood starts. The session and its input path must survive

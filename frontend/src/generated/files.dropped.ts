@@ -1,0 +1,41 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/files.dropped.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * The files.dropped JSON-RPC notification: files were dropped onto the window, and the backend has minted a source ticket for each of them that can be uploaded. Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape — which is exactly where an addressing defect would hide, and why it is declared here like a result. In the Wails window a drop delivers absolute paths to the Go side, not File objects, and a path is what R2 says the renderer may never NAME INBOUND — so for the tab where an upload actually happens, Go mints and sends a ticket, a name and a size instead, and the directory never leaves its address space. It is addressed to the renderer attached to the session it names, resolved at emit time, the way files.changed is — never broadcast: a ticket is a bearer credential, and handing every attached client the credentials for a drop it was not the target of gives away more than any later refusal can take back. Read what this notification does NOT carry as part of the contract: there is no bindingId and no destDir, because the native side resolves NO destination; and no path either, except on the one branch that mints nothing and uploads nothing — a drop on a LOCAL tab, which carries `localPath` for the prompt insert D9 promises and is described on that field. The renderer takes these tickets and calls files.upload with its own bindingId, like any other caller, so the drop gesture joins the same authorised route rather than becoming a second addressing scheme that skips the connection's session set.
+ */
+export interface FilesDropped {
+  /**
+   * The session the drop target belonged to, read from the drop element's data-session-id attribute, held to the shape a server-minted session id has (32 lowercase hex characters) and then to the harder question the shape cannot ask: that it names a session this backend actually has open. It tells the renderer which tab was dropped on. What authorises the write is still the binding the renderer names in files.upload, re-checked against the requesting connection; what the ticket adds is that the write goes to THIS tab and not to some other tab the same connection happens to own.
+   */
+  sessionId: string
+  /**
+   * One entry per dropped file that could be read. Never empty: a drop where nothing could be minted emits nothing at all, and a drop where some members were unusable (a directory, which is out of scope) emits the rest and reports the refusal in the backend's log rather than silently claiming everything arrived.
+   */
+  sources: {
+    /**
+     * The one-shot source ticket for this file, 32 lowercase hex characters from crypto/rand — or EMPTY, which is not an omission but the answer for a drop on a local tab. A local tab does not copy (design D9): the terminal inserts the dropped file's path at the prompt — see `localPath` — because copying a file onto the machine it is already on is not a thing anybody asked for. So nothing is minted for it, and the notification is still sent because in the Wails window the drop never becomes a DOM event the renderer could read the file from. A credential nobody redeems is still a credential that exists, which is why the empty string is here rather than a ticket the renderer would abandon. When it is present it is bound to the session above and files.upload refuses to pair it with a binding on any other tab. Same bearer-credential rules: never logged, never in an error string, claimed exactly once.
+     */
+    sourceTicket: string
+    /**
+     * The dropped file's BASE name, for display and for the default destination name. Never a path: the directory it came from stays in the backend's address space.
+     */
+    name: string
+    /**
+     * The dropped file's size in bytes at the moment of the drop. Advisory, like every stat.
+     */
+    size: number
+    /**
+     * The dropped file's ABSOLUTE path, present ONLY for a drop on a local tab and absent from every other pick — a drop on a remote tab, and the dialog.openFileForUpload result this same struct answers, whose contract forbids additional properties and so rejects one outright. It is the other half of design D9: a local tab does not copy, it puts the dropped file's path at the person's own prompt, and the base name in `name` only looks like one — `report.pdf` at a prompt resolves against whatever the shell's cwd happens to be, so it names a different file or no file. The renderer inserts this value shell-quoted and calls no upload method. This does not weaken R2, which is a rule about DIRECTION: the renderer may never NAME a source inbound, because a path it can spell is a file it can ask the backend to read and send to a host of its choosing, and files.upload accordingly has no such parameter and decodes with DisallowUnknownFields so the request cannot express one. This field runs the other way — to the same human who just chose the file, for their own command line on the machine the file is already on — and there is no inbound field that takes it back. Optional rather than empty-when-absent, so that the tab where a credential exists and bytes will move does not carry the key at all.
+     */
+    localPath?: string
+  }[]
+}

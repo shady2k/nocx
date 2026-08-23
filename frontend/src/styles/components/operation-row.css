@@ -1,0 +1,192 @@
+/* OperationRow — one line of background work (nocx-hbdw4), composed on the
+   kit CollectionRow. This file owns only what the row adds: the kind glyph,
+   the title-and-destination line, and the progress detail. Everything about
+   the row itself — density, selection, focus — is CollectionRow's, and the
+   Badge, the Button and the ProgressBar inside it are the kit's own and are
+   not repainted here. */
+
+/* The parts' own box. It sits INSIDE `.ui-collection-row__info`, never
+   around CollectionRow — outside, it would orphan role="listitem" from its
+   role="list" — and it declares the flex context the parts need, because
+   the info slot is a plain block and must stay one (see
+   file-status-row.css for what depends on that). */
+.ui-operation-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: var(--font-size-sm);
+}
+
+/* AND THE SLOT SIZES THE GLYPH, because the glyph has no size of its own:
+   the kit's icons are inline `<svg viewBox>` with no width or height, which
+   WebKit resolves to zero and Chromium resolves against the slot. A slot
+   that does not say how big its svg is renders an empty column in the
+   packaged app and a correct one in the dev stand (nocx-8830c). */
+.ui-operation-row__kind-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  /* A hair below the first text line, so the glyph reads as a mark on the
+     row rather than as the start of a second column. */
+  margin-top: 2px;
+  color: var(--color-text-dim);
+}
+
+.ui-operation-row__kind-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* The name over the numbers: two lines in a rail's width, because a
+   progress line and a file name side by side leave neither enough room. */
+.ui-operation-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.ui-operation-row__line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* WHICH FILE THIS IS IS WHAT THE ROW EXISTS TO SAY, and in a rail-width panel
+   it gets the whole first line to say it in. It shared the line with the
+   destination once, and the shrink went to whichever the browser felt like:
+   in a 239 px panel the name ellipsised while a path nobody can read to the
+   end sat beside it. The path moved to its own line (see the component), and
+   what is left here is the name and the badge (nocx-hbdw4.1). */
+.ui-operation-row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* BODY SIZE, not the row's own smaller step. The row set everything to
+     --font-size-sm and let the name inherit it, so the one thing a person is
+     looking for was the same size as the numbers explaining it and the panel
+     read as undifferentiated small text (owner, 2026-08-22). The token, never
+     14px: --font-size-md IS 14px at rest and it is the one that follows
+     --ui-scale when somebody zooms. */
+  font-size: var(--font-size-md);
+}
+
+/* AND THE BADGE NEVER SHRINKS. `.ui-badge` clips its own overflow — it must,
+   or a long value wraps inside the pill — and an overflow-hidden flex item's
+   automatic minimum size is zero, so as a sibling of the title it was free to
+   shrink to a few pixels: "Done" rendered as "D…" in the first, narrow
+   surface this row shipped in. A badge that cannot fit its own word is worse
+   than no badge, and the word is short and fixed, so it is the one part of
+   the line that keeps its size whatever else has to give. */
+.ui-operation-row__line > .ui-badge {
+  flex: none;
+}
+
+/* The destination: dim, one line, and the FIRST thing to be ellipsised,
+   because it is now the only thing on its line and takes room from nothing.
+   The component puts the whole value on a title attribute, since what is on
+   screen is usually an ellipsis of it. */
+.ui-operation-row__destination {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+}
+
+/* THE RUNNING NUMBERS NEVER WRAP. They shared `__detail` with the failure
+   reason, and the two want opposite things: a reason is a sentence and must
+   wrap, while these change several times a second and a wrap made the row's
+   height twitch as the digits changed width (nocx-hbdw4.5). Tabular figures
+   so a 9 turning into a 1 does not move everything after it. */
+.ui-operation-row__progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The failure reason — a sentence, under the name, allowed to wrap. */
+.ui-operation-row__detail {
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  /* A failure reason is a sentence and may wrap; the line above never
+     does, which is what keeps the wrap from moving the file name. */
+  overflow-wrap: anywhere;
+}
+
+/* What a FINISHED row says about itself: size, when it ended, how long it
+   took. Same weight and colour as the progress detail it replaces, because
+   it is the same kind of statement on the other side of the split — the row
+   explaining itself under its own name. It never wraps: the three parts are
+   short and fixed, and a wrap here would move the destination line under
+   them for a fraction of a second every time the relative label ages. */
+.ui-operation-row__summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+}
+
+/* THE PERCENTAGE IS WHAT THE EYE LANDS ON. The row's parts were all within a
+   step of each other in size, so nothing led and the whole thing read as
+   undifferentiated small text — which is what "too small" actually meant
+   (nocx-hbdw4.5). This is the one part deliberately larger than the body,
+   and it never shrinks: it is three characters and the title beside it is
+   what gives way. */
+.ui-operation-row__percent {
+  flex: none;
+  /* The title's size, carried by weight rather than by scale: a percentage
+     SMALLER than the name it belongs to would stop being the thing the eye
+     lands on, which is the whole reason it is there. */
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+/* WHERE IT LANDED, as one line and two parts. The machine cannot be
+   ellipsised away — the list is global, and a path with no machine beside it
+   names nowhere once a second connection is open — so it keeps its size and
+   the path is what gives. */
+.ui-operation-row__machine {
+  flex: none;
+  white-space: nowrap;
+}
+
+.ui-operation-row__where-sep {
+  flex: none;
+  white-space: pre;
+}
+
+/* AND THE PATH KEEPS ITS LEAF. Ellipsised from the end it read `/home/...`,
+   hiding the only part that identifies the directory; the head of a path is
+   the part a reader can guess. Reversing the base direction moves the
+   overflow to the FRONT, and `unicode-bidi: plaintext` leaves the characters
+   in logical order so a leading slash does not migrate to the other end. */
+.ui-operation-row__path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}

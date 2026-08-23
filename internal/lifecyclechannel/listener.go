@@ -80,10 +80,15 @@ func NewListener(log log.Logger, k Kernel) (*Listener, error) {
 		_ = ln.Close()
 		return nil, fmt.Errorf("lifecyclechannel: loopback listener is not TCP (%T)", ln.Addr())
 	}
+	tptHex, herr := randHex(8)
+	if herr != nil {
+		_ = ln.Close()
+		return nil, herr
+	}
 	l := &Listener{
 		log:     log,
 		kernel:  k,
-		id:      lifecycle.TransportID("tpt-" + randHex(8)),
+		id:      lifecycle.TransportID("tpt-" + tptHex),
 		ln:      ln,
 		port:    addr.Port,
 		conns:   make(map[net.Conn]struct{}),

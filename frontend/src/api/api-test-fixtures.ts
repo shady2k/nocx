@@ -411,6 +411,66 @@ export function nativeDropFixture(sessionId: string | null = DROP_SESSION): Nati
  *  the field pass every test. */
 export const DEFAULT_ROOT = '/home/dev/.local/share/nocx/collections'
 
+/**
+ * A backend whose FOLDER actually changes: a write lands in the listing and
+ * reads back afterwards, so "the row appears from the collection listing"
+ * and "the second copy did not overwrite the first" are questions a test can
+ * ask at all.
+ *
+ * `servicesFixture` answers one canned listing and one canned request
+ * whatever it is asked, which is right for a test about a single call and
+ * useless for every test about a file that did not exist before and is on
+ * screen afterwards — the listing would go on describing the folder as it
+ * was, and a path allocator counting FILES would hand out the same name
+ * twice and look correct doing it.
+ *
+ * It starts holding the worked example's own `users/create.json`, so a test
+ * that makes a second request is making it beside a real one.
+ */
+export function folderOnDisk(over: Partial<ApiWorkbenchServices> = {}) {
+  const files = new Map<string, ApiRequest>([[CREATE_REL_PATH, REQUEST]])
+  const writeRequest = vi.fn((_handle: string, relPath: string, request: ApiRequest) => {
+    files.set(relPath, request)
+    return Promise.resolve({})
+  })
+  const readRequest = vi.fn((_handle: string, relPath: string) => {
+    const file = files.get(relPath)
+    return file === undefined
+      ? Promise.reject(new Error(`no such request: ${relPath}`))
+      : Promise.resolve({ request: file })
+  })
+  const listCollections = vi.fn(() =>
+    Promise.resolve({
+      collections: [
+        collectionsFixture({
+          collection: collectionFixture({
+            requests: [...files].map(([relPath, request]) => ({
+              relPath,
+              name: request.name,
+              method: request.method,
+            })),
+          }),
+        }),
+      ],
+      defaultRoot: DEFAULT_ROOT,
+    }),
+  )
+  return {
+    files,
+    writeRequest,
+    readRequest,
+    listCollections,
+    /** The three overrides, for whichever door a test comes through:
+     *  `mountApp` on the surface or `createApiStore` under it. */
+    services: {
+      writeRequest,
+      readRequest,
+      listCollections,
+      ...over,
+    } as Partial<ApiWorkbenchServices>,
+  }
+}
+
 /** Every backend call the workbench makes, as spies that succeed. A test
  *  that is about a failure overrides exactly the one call it is about. */
 export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWorkbenchServices {

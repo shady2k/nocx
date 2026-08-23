@@ -62,7 +62,7 @@ import {
   type ApiSentRoute,
   type ApiTimings,
 } from './api-model'
-import { slugify } from './api-paths'
+import { proposedRequestName, slugify } from './api-paths'
 import { foldQueryIntoParams } from './api-url'
 import type { Unsupported as PostmanNote } from '../generated/api.import.postman'
 
@@ -428,6 +428,12 @@ function newToken(): string {
  * (punctuation, another script) falls back to `untitled`, which is a file
  * name rather than a judgement about the name.
  */
+/** What a request is called before anybody — a person or the offer below —
+ *  has said. It is a file name's worth of nothing on purpose: the request a
+ *  person is about to type has no name yet, and asking for one puts a
+ *  decision before the thing they came to do. */
+const UNTITLED = 'Untitled request'
+
 function freePath(open: readonly ApiOpenCollection[], handle: string, name: string): string {
   const taken = new Set(
     open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.relPath) ?? [],
@@ -947,6 +953,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // snapshot as well is what keeps `dirty` false, so opening a request
       // does not report itself as edited.
       const adopted = foldQueryIntoParams(result.request)
+      // WHOSE NAME IS IN THE FORM NOW. A file still called `Untitled
+      // request` has been named by nobody, so the offer is live on it — that
+      // is the request `newRequest` has just written and reopened. Every
+      // other name on disk is one somebody gave, including one this offer
+      // gave earlier, and it is never taken away again.
+      offered = adopted.name === UNTITLED ? UNTITLED : ''
       setDraft(adopted)
       setSaved(adopted)
       setError('')
@@ -957,8 +969,47 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
   }
 
+  // ── A request names itself, until somebody names it (nocx-lpo2m) ──────
+  //
+  // WHAT THE STORE IS STILL FREE TO REPLACE: the name it last put in the
+  // form, and '' once a person has taken the name over. That one string is
+  // the whole interval, and both its ends are named — it opens when a
+  // request arrives unnamed and it closes, for good, the moment `editDraft`
+  // is handed a different name than the one in the draft. Only the header's
+  // rename field can do that: everything else edits the address, the rows or
+  // the body, and hands the name straight back.
+  //
+  // It is here rather than in the form because the DRAFT is here. A surface
+  // deriving the name from the URL it is rendering would have to remember
+  // what the name was a moment ago and who changed it, which is exactly what
+  // this variable is, in a component that is rebuilt whenever the pane is.
+  let offered = ''
+
   const editDraft = (next: ApiRequest): void => {
-    setDraft(next)
+    const current = untrack(draft)
+    if (current === null || next.name !== current.name) {
+      // A PERSON NAMED IT. Not when the URL changes, not ever: the offer is
+      // spent, and it stays spent across a save and a reopen, because what
+      // the file then holds is a name somebody gave.
+      offered = ''
+      setDraft(next)
+      return
+    }
+    if (offered === '' || next.name !== offered) {
+      setDraft(next)
+      return
+    }
+    // AN OFFER, NOT A DERIVATION (api-paths.ts). '' is "there is nothing in
+    // this address to take a name from" — a bare host, an address that is
+    // all references — and then the request keeps the name it has and the
+    // offer stays live, because absent is not spent.
+    const name = proposedRequestName(next.method, next.url)
+    if (name === '') {
+      setDraft(next)
+      return
+    }
+    offered = name
+    setDraft({ ...next, name })
   }
 
   const saveDraftAs = async (): Promise<void> => {
@@ -1015,9 +1066,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // NO ASK. A person pressing "new request" has already said what they
     // want, and answering with a dialog puts a naming decision before the
     // thing they came to do — which is type a URL. The request arrives
-    // named "Untitled request" and is renamed in the header, in place,
-    // whenever they know what it is (api-pane.tsx).
-    const name = 'Untitled request'
+    // named "Untitled request", NAMES ITSELF from the address as that is
+    // typed (editDraft), and is renamed in the header, in place, the moment
+    // the person knows better (api-pane.tsx).
+    const name = UNTITLED
     const relPath = freePath(untrack(collections), handle, name)
     try {
       // A GET at no address, which is the request a person is about to type
@@ -1286,6 +1338,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // is nothing on disk for api.request.send to send.
       setSelected(null)
       setSaved(null)
+      // THE IMPORTER NAMED IT, off the line the person pasted, so there is
+      // no offer to make: a curl line converted into the form arrives called
+      // something, and rewriting that from the address would be this store
+      // arguing with the importer about one request's name.
+      offered = ''
       setDraft(foldQueryIntoParams(adoptImportedRequest(result.request)))
       setNotes(result.unsupported)
       setError('')

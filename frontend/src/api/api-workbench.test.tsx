@@ -44,6 +44,7 @@ import {
   nativeDropFixture,
   type NativeDropFixture,
   createdFixture,
+  folderOnDisk,
   failedSendFixture,
   requestRawFixture,
   responseRawFixture,
@@ -3460,52 +3461,6 @@ describe('a variable in the address says whether anything answers it', () => {
 // and each drives the seam a person reaches — the control, from the state
 // they start in, and what is on screen afterwards.
 
-/**
- * A backend whose FOLDER actually changes: a write lands in the listing and
- * reads back, so "the row appears from the collection listing" is a question
- * this file can ask at all.
- *
- * The default fixture answers one canned listing and one canned request
- * whatever it is asked, which is right for a test about one call and useless
- * for these three — every one of them is about a file that did not exist
- * before being on screen afterwards.
- */
-function folderOnDisk(over: Partial<ApiWorkbenchServices> = {}) {
-  const files = new Map<string, ApiRequest>([[CREATE_REL_PATH, REQUEST]])
-  const writeRequest = vi.fn((_handle: string, relPath: string, request: ApiRequest) => {
-    files.set(relPath, request)
-    return Promise.resolve({})
-  })
-  const readRequest = vi.fn((_handle: string, relPath: string) => {
-    const file = files.get(relPath)
-    return file === undefined
-      ? Promise.reject(new Error(`no such request: ${relPath}`))
-      : Promise.resolve({ request: file })
-  })
-  const listCollections = vi.fn(() =>
-    Promise.resolve({
-      collections: [
-        collectionsFixture({
-          collection: collectionFixture({
-            requests: [...files].map(([relPath, request]) => ({
-              relPath,
-              name: request.name,
-              method: request.method,
-            })),
-          }),
-        }),
-      ],
-      defaultRoot: DEFAULT_ROOT,
-    }),
-  )
-  return {
-    files,
-    writeRequest,
-    readRequest,
-    services: servicesFixture({ writeRequest, readRequest, listCollections, ...over }),
-  }
-}
-
 /** The name the header's crumb trail is showing, or '' when it shows none. */
 function crumbName(): string {
   const el = workbench().querySelector<HTMLElement>('.api-crumbs__name')
@@ -3598,5 +3553,83 @@ describe('a new request has a door that does not move', () => {
         ?.querySelectorAll('button') ?? []),
     ].find((b) => (b.textContent ?? '').trim() === 'New request')
     expect(item, 'the row menu still offers New request').toBeTruthy()
+  })
+})
+
+describe('a request names itself from what you typed', () => {
+  /** Rename the open request the way a person does: the name in the crumb
+   *  trail is a control, and pressing it puts a field in its place. */
+  function rename(to: string): void {
+    fireEvent.click(button(crumbName()))
+    const nameField = field('api-request-name')
+    fireEvent.input(nameField, { target: { value: to } })
+    fireEvent.blur(nameField)
+  }
+
+  /** Make one through the header's door and wait for it to be in the form. */
+  async function newRequest(bar: HTMLElement): Promise<void> {
+    fireEvent.click(button('New request'))
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+  }
+
+  it('a request nobody has named takes its name as the URL is typed', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    await newRequest(bar)
+
+    fireEvent.input(field('api-url'), {
+      target: { value: 'http://127.0.0.1:8080/v1/broker-access' },
+    })
+
+    await vi.waitFor(() => expect(crumbName()).toBe('GET broker-access'))
+    // The verb is half the name, so changing it changes the name too —
+    // while nobody has taken it over.
+    fireEvent.change(control('method'), { target: { value: 'POST' } })
+    await vi.waitFor(() => expect(crumbName()).toBe('POST broker-access'))
+  })
+
+  it('a request the person HAS named is never renamed by this, whatever the URL does', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    await newRequest(bar)
+
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/v1/broker-access' } })
+    await vi.waitFor(() => expect(crumbName()).toBe('GET broker-access'))
+
+    rename('Broker access, live')
+    await vi.waitFor(() => expect(crumbName()).toBe('Broker access, live'))
+
+    // Not when the URL changes, and not ever.
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/v2/tenants' } })
+    fireEvent.change(control('method'), { target: { value: 'DELETE' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('https://h/v2/tenants'))
+    expect(crumbName()).toBe('Broker access, live')
+  })
+
+  it('an address with nothing to take a name from leaves the request named as it is', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    await newRequest(bar)
+
+    // A host is not a path segment: the offer is absent rather than wrong.
+    fireEvent.input(field('api-url'), { target: { value: 'http://127.0.0.1:8080' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('http://127.0.0.1:8080'))
+    expect(crumbName()).toBe('Untitled request')
+  })
+
+  it('a request that came off disk under its own name keeps it', async () => {
+    // The offer is for a request nobody has named. `create` is a name
+    // somebody gave — the file carries it — so typing an address must not
+    // take it away, and reopening the request must not start the offer over.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/v1/broker-access' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('https://h/v1/broker-access'))
+    expect(crumbName()).toBe('create')
   })
 })

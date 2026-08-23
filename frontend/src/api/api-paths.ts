@@ -145,3 +145,54 @@ export function proposedDestinationFromURL(defaultRoot: string, url: string): st
   if (stem === '') return ''
   return `${defaultRoot.replace(/[\\/]+$/, '')}/${stem}`
 }
+
+/**
+ * What a request CALLS ITSELF while nobody has named it: the method and the
+ * last path segment of the address, which is the pair the crumbs above the
+ * form already read — `POST http://127.0.0.1:8080/v1/broker-access` is
+ * `POST broker-access`.
+ *
+ * ONE DERIVATION, HERE. The name is offered as the URL is typed and it is
+ * read back in the tree row, the crumb trail and the file the allocator
+ * names; a second place that worked out "what is this request called" would
+ * be the two-owners defect with a person's own name for their request as the
+ * thing the two disagreed about.
+ *
+ * AN OFFER, NOT A DERIVATION — this module's rule, stated at the top. The
+ * moment somebody names the request themselves the offer stops for good; the
+ * store owns that interval, because it owns the draft and knows when the
+ * name last changed and who changed it (api-store.ts).
+ *
+ * The segments are taken SYNTACTICALLY rather than through `new URL`,
+ * because the address most requests carry is not a URL any parser accepts:
+ * `{{baseUrl}}/users` is what a Postman export holds and what a person
+ * writing against an environment types. The authority is dropped where there
+ * is one — `POST 127.0.0.1:8080` names the machine and not the call — and a
+ * segment that is nothing but a `{{reference}}` is passed over, because
+ * `DELETE {{id}}` is a row nobody can tell from the next one.
+ *
+ * '' is the answer for every address with nothing to take, and the caller
+ * leaves the name exactly as it is: an offer that is absent is a row still
+ * called what it was, and an offer that is wrong is a row named after our
+ * machinery.
+ */
+export function proposedRequestName(method: string, url: string): string {
+  const trimmed = url.trim()
+  if (trimmed === '') return ''
+  const address = trimmed.split('#')[0].split('?')[0]
+  let path = address
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i
+  if (scheme.test(address)) {
+    const rest = address.replace(scheme, '')
+    const slash = rest.indexOf('/')
+    path = slash === -1 ? '' : rest.slice(slash)
+  }
+  const segment = path
+    .split('/')
+    .map((s) => s.trim())
+    .filter((s) => s !== '' && !/^\{\{[^}]*\}\}$/.test(s))
+    .pop()
+  if (segment === undefined) return ''
+  const verb = method.trim()
+  return verb === '' ? segment : `${verb} ${segment}`
+}

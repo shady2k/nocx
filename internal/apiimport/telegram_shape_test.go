@@ -13,6 +13,8 @@ package apiimport
 import (
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/apicoll"
 )
 
 //nolint:gosec // a test fixture, and the same string the e2e export carries
@@ -36,7 +38,7 @@ func TestImport_ATokenInThePathBecomesAReferenceAndABinding(t *testing.T) {
 
 	dest := destUnder(t)
 	binder := &recordingBinder{}
-	if _, err := ImportInto(t.Context(), NewOSFS(), binder, dest, strings.NewReader(doc)); err != nil {
+	if _, err := ImportInto(t.Context(), NewOSFS(), binder, dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 

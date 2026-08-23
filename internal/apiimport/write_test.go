@@ -197,7 +197,7 @@ func TestImportIntoPostmanWritesTheFolder(t *testing.T) {
 	p := newProbeFS()
 	b := &recordingBinder{}
 
-	unsup, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture))
+	unsup, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture), apicoll.Route{})
 	if err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestImportIntoCurlLine(t *testing.T) {
 	b := &recordingBinder{}
 
 	line := `curl -X POST 'https://api.acme.test/users' -H 'Authorization: Bearer ` + token + `' -d '{"a":1}'`
-	if _, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(line)); err != nil {
+	if _, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(line), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	files := walkFiles(t, dest)
@@ -337,7 +337,7 @@ func TestImportIntoCurlLine(t *testing.T) {
 func TestImportIntoStagesInsideTheDestinationsParent(t *testing.T) {
 	dest := destUnder(t)
 	p := newProbeFS()
-	if _, err := ImportInto(t.Context(), p, &recordingBinder{}, dest, strings.NewReader(postmanFixture)); err != nil {
+	if _, err := ImportInto(t.Context(), p, &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	mk := p.ops("MkdirTemp")
@@ -364,7 +364,7 @@ func TestImportIntoRefusesAnExistingDestination(t *testing.T) {
 
 	p := newProbeFS()
 	b := &recordingBinder{}
-	_, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture))
+	_, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture), apicoll.Route{})
 	if err == nil {
 		t.Fatal("an existing destination was accepted")
 	}
@@ -400,7 +400,7 @@ func TestImportIntoRefusesAnExistingDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	pe := newProbeFS()
-	if _, err := ImportInto(t.Context(), pe, &recordingBinder{}, empty, strings.NewReader(postmanFixture)); err == nil {
+	if _, err := ImportInto(t.Context(), pe, &recordingBinder{}, empty, strings.NewReader(postmanFixture), apicoll.Route{}); err == nil {
 		t.Fatal("an existing EMPTY destination was accepted")
 	}
 	if n := len(pe.ops("MkdirTemp")) + len(pe.ops("WriteFile")); n != 0 {
@@ -423,7 +423,7 @@ func TestImportIntoRefusesAnExistingDestination(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	pl := newProbeFS()
-	if _, err := ImportInto(t.Context(), pl, &recordingBinder{}, link, strings.NewReader(postmanFixture)); err == nil {
+	if _, err := ImportInto(t.Context(), pl, &recordingBinder{}, link, strings.NewReader(postmanFixture), apicoll.Route{}); err == nil {
 		t.Fatal("a symlink at the destination was accepted")
 	}
 	if n := len(pl.ops("MkdirTemp")) + len(pl.ops("WriteFile")); n != 0 {
@@ -439,7 +439,7 @@ func TestImportIntoRefusesAnExistingDestination(t *testing.T) {
 	if err := os.WriteFile(dest2, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest2, strings.NewReader(postmanFixture)); err == nil {
+	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest2, strings.NewReader(postmanFixture), apicoll.Route{}); err == nil {
 		t.Fatal("a file at the destination was accepted")
 	}
 }
@@ -449,7 +449,7 @@ func TestImportIntoRefusesAnExistingDestination(t *testing.T) {
 func TestImportIntoSyncsFilesTheStagingDirectoryAndThenTheParent(t *testing.T) {
 	dest := destUnder(t)
 	p := newProbeFS()
-	if _, err := ImportInto(t.Context(), p, &recordingBinder{}, dest, strings.NewReader(postmanFixture)); err != nil {
+	if _, err := ImportInto(t.Context(), p, &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 
@@ -617,7 +617,7 @@ func TestImportIntoLeavesNoDestinationWhenAStepFails(t *testing.T) {
 			}
 			b := &recordingBinder{fail: tc.bindErr}
 
-			_, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture))
+			_, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture), apicoll.Route{})
 			if err == nil {
 				t.Fatal("the failure was swallowed")
 			}
@@ -639,7 +639,7 @@ func TestImportIntoSucceedsWithNothingInjected(t *testing.T) {
 	dest := destUnder(t)
 	p := newProbeFS()
 	b := &recordingBinder{}
-	if _, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture)); err != nil {
+	if _, err := ImportInto(t.Context(), p, b, dest, strings.NewReader(postmanFixture), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	if fi, err := os.Stat(dest); err != nil || !fi.IsDir() {
@@ -655,7 +655,7 @@ func TestImportIntoSucceedsWithNothingInjected(t *testing.T) {
 // external call this path makes first.
 func TestImportIntoFailsWhenTheParentIsMissing(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "nope", "collection")
-	_, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture))
+	_, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{})
 	if err == nil {
 		t.Fatal("a destination with no parent was accepted")
 	}
@@ -664,7 +664,7 @@ func TestImportIntoFailsWhenTheParentIsMissing(t *testing.T) {
 
 func TestImportIntoRefusesAnUnusableDestination(t *testing.T) {
 	for _, dest := range []string{"", ".", "/", string(filepath.Separator)} {
-		if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture)); err == nil {
+		if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{}); err == nil {
 			t.Fatalf("ImportInto(dest=%q) succeeded", dest)
 		}
 	}
@@ -674,7 +674,7 @@ func TestImportIntoStopsOnACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	dest := destUnder(t)
-	_, err := ImportInto(ctx, newProbeFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture))
+	_, err := ImportInto(ctx, newProbeFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -684,7 +684,7 @@ func TestImportIntoStopsOnACancelledContext(t *testing.T) {
 
 func TestImportIntoRejectsAnUnreadableDocument(t *testing.T) {
 	dest := destUnder(t)
-	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(`{"nonsense":true}`)); err == nil {
+	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(`{"nonsense":true}`), apicoll.Route{}); err == nil {
 		t.Fatal("an unrecognisable document was accepted")
 	}
 	assertGone(t, dest)
@@ -695,7 +695,7 @@ func TestImportIntoRejectsAnUnreadableDocument(t *testing.T) {
 // making it world-readable on the machine it was imported to.
 func TestImportIntoWritesPrivateFiles(t *testing.T) {
 	dest := destUnder(t)
-	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture)); err != nil {
+	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	err := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
@@ -726,10 +726,10 @@ func TestImportIntoWritesPrivateFiles(t *testing.T) {
 // (§6.4), so what a reader parses back has to be what the importer meant.
 func TestImportIntoWritesReadableJSON(t *testing.T) {
 	dest := destUnder(t)
-	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture)); err != nil {
+	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(postmanFixture), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
-	converted, err := parsePostman(strings.NewReader(postmanFixture))
+	converted, err := parsePostman(strings.NewReader(postmanFixture), apicoll.Route{})
 	if err != nil {
 		t.Fatal(err)
 	}

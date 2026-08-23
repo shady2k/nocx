@@ -35,14 +35,7 @@
  * dialog, a directory on disk, a row in the tree, a run in the list.
  */
 import { test as base, expect } from '@playwright/test'
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -87,14 +80,11 @@ test.describe('a secret in the path: the value crosses to the server and never t
   let disposable: DisposableRoot
   let backend: VaultBackend
   let server: PathTokenServer
-  let exportPath: string
   let collectionRoot: string
 
   test.beforeAll(async () => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-secret-path-')) }
     server = await startPathTokenServer({ expectedToken: TELEGRAM_BOT_TOKEN })
-    exportPath = join(disposable.root, 'telegram.postman_collection.json')
-    writeFileSync(exportPath, telegramExport(server.baseUrl), 'utf8')
     // It must NOT exist beforehand: an import refuses an occupied
     // destination rather than replacing it (§12.2).
     collectionRoot = join(disposable.root, TELEGRAM_COLLECTION_NAME)
@@ -138,10 +128,41 @@ test.describe('a secret in the path: the value crosses to the server and never t
 
     await workbench.locator('#api-collections-menu').click()
     await page.getByRole('menuitem', { name: 'Import collection…' }).click()
-    await expect(page.locator('#api-import-postman-file')).toBeVisible()
-    await page.locator('#api-import-postman-file').fill(exportPath)
+    const ask = page.getByRole('dialog').filter({ hasText: 'Import collection' })
+    await expect(ask).toBeVisible()
+
+    // ── THE EXPORT, AS TEXT AND NOT AS A PATH ─────────────────────────────
+    //
+    // The ask stopped naming two absolute paths (nocx-ysyy2), and on a build
+    // with no Wails neither gesture that ANSWERS with a path exists: no
+    // system picker, no native window drop. What is left is the ask's one
+    // question, and the export's own text is a source it takes — bytes reach
+    // the backend wherever it runs, where a path only names a file on the
+    // machine running Go (spec §1a).
+    //
+    // ASSERTION 2 IS UNAFFECTED by the change of entrance, and it is worth
+    // saying why rather than hoping. Every entrance this build has hands the
+    // renderer the BYTES: a chosen file is read with `File.text()` and sent
+    // as a document too (api-pane.tsx). What that assertion watches is the
+    // serialised DOM, and the box holds what was pasted as a property rather
+    // than as markup — so it says exactly what it always said, that nothing
+    // nocx RENDERS carries the value.
+    await page.locator('#api-import-paste').fill(telegramExport(server.baseUrl))
+    // The ask HOLDS it, and says so — the source line is how a person sees
+    // what the ask is holding and can take it back (spec §2), and waiting on
+    // it is waiting for the paste to have landed rather than for a duration.
+    // A document has no name of its own, so the line says what it is.
+    await expect(ask.locator('.api-import-source')).toContainText('Pasted Postman export')
+
+    // ── AND WHERE IT GOES, through the pencil ─────────────────────────────
+    //
+    // The destination is an offer rendered as a sentence; the field behind
+    // it is still the truth and is still what a person types into once they
+    // disagree with the offer. This spec disagrees: the collection must land
+    // where the walk below can read it, not under the collections root.
+    await ask.getByRole('button', { name: 'Change where this goes' }).click()
     await page.locator('#api-import-postman-dest').fill(collectionRoot)
-    await page.getByRole('button', { name: 'Import', exact: true }).click()
+    await ask.getByRole('button', { name: 'Import', exact: true }).click()
 
     // The folder arriving is the import's closing event (§12.2), so waiting
     // on it is waiting on a state rather than on a duration.
@@ -165,14 +186,16 @@ test.describe('a secret in the path: the value crosses to the server and never t
     const env = readFileSync(join(collectionRoot, 'environments', 'default.json')).toString('utf8')
     expect(JSON.parse(env) as { secretVars?: string[] }).toMatchObject({ secretVars: ['token'] })
 
-    // ── Open it, and send ─────────────────────────────────────────────────
-    await workbench.locator('#api-collections-menu').click()
-    await page.getByRole('menuitem', { name: 'Open folder…' }).click()
-    const folderAsk = page.getByRole('dialog').filter({ hasText: 'Open a collection folder' })
-    await expect(folderAsk).toBeVisible()
-    await page.locator('#api-collection-path').fill(collectionRoot)
-    await folderAsk.getByRole('button', { name: 'Open', exact: true }).click()
-
+    // ── Send, and NOTHING IS PRESSED TO GET HERE ──────────────────────────
+    //
+    // The import OPENS what it wrote (nocx-vkp9d). This spec used to go to
+    // the panel's other ask afterwards and type the path that had been in the
+    // field in front of it a second earlier, and that second open is now a
+    // SECOND handle on the same folder: the tree drew the collection twice
+    // and every row in it matched two elements, which is a strict-mode
+    // violation rather than a subtle wrong. What arrives below with nothing
+    // pressed is the difference between a directory on disk and a collection
+    // somebody can use.
     const requestRow = workbench
       .locator('.api-tree__row')
       .filter({ hasText: TELEGRAM_REQUEST_NAME })

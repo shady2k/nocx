@@ -51,7 +51,7 @@
  * disk.
  */
 import { test as base, expect, type Page } from '@playwright/test'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -72,10 +72,12 @@ const devharnessBin = (): string => readStand().devharness
  *  nothing here asserts its absence and it never reaches a collection. */
 const VAULT_PASSPHRASE = 'api-import-ask-e2e-master-pass'
 
-/** The export's file NAME is load-bearing: the destination the ask proposes
- *  is `<defaultRoot>/<the name without any of its extensions>`, so this name
- *  is what makes the proposal `…/collections/acme` (api-paths.ts). */
-const EXPORT_FILE = 'acme.postman_collection.json'
+/** The export's `info.name` is load-bearing HERE, where a file's name used to
+ *  be: a PASTED export proposes `<defaultRoot>/<slug of info.name>`
+ *  (proposedDestinationFromDocument), so this constant is what makes the
+ *  proposal `…/collections/acme-api`. The file's name proposes nothing any
+ *  more because there is no file — see the paste in the first test. */
+const PROPOSED_STEM = POSTMAN_COLLECTION_NAME
 
 /** The base URL the export declares. Nothing is sent in this spec — no test
  *  server is started — so it only has to be a URL the import can carry into
@@ -89,11 +91,6 @@ test.describe('the import ask on a stand with no Wails', () => {
 
   let disposable: DisposableRoot
   let backend: VaultBackend
-  /** The export on disk, as a person would have it after clicking Export in
-   *  Postman. Outside the backend's isolated home on purpose: a document
-   *  somebody downloaded is not in the app's own directory, and the ask has
-   *  to accept a path from anywhere. */
-  let exportPath: string
 
   // A BACKEND PER TEST, not per file. Both tests set the vault up through
   // Settings, and a vault is a once-only walk: the second test on a shared
@@ -102,8 +99,6 @@ test.describe('the import ask on a stand with no Wails', () => {
   // "the destination does not exist yet" a fact rather than a hope.
   test.beforeEach(() => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-import-')) }
-    exportPath = join(disposable.root, EXPORT_FILE)
-    writeFileSync(exportPath, postmanExport(UNREACHED_BASE_URL), 'utf8')
     backend = new VaultBackend(devharnessBin(), disposable, true)
   })
 
@@ -163,11 +158,18 @@ test.describe('the import ask on a stand with no Wails', () => {
     return { workbench, ask }
   }
 
-  test('the ask opens on our collections folder and imports a typed path', async ({ page }) => {
+  test('the ask opens on our collections folder and imports a pasted export', async ({ page }) => {
     const { workbench, ask } = await openTheAsk(page)
 
     // ── The ask opens already holding OUR folder ──────────────────────────
     //
+    // THROUGH THE PENCIL, because the destination is a SENTENCE until
+    // somebody disagrees with it (nocx-ysyy2). The field is still the truth
+    // and still where every refusal is said, but it is only on screen once
+    // it has been asked for — so this is the control a person clicks, and
+    // reading the value any other way would be reading a field nobody can
+    // see.
+    await ask.getByRole('button', { name: 'Change where this goes' }).click()
     // Matched by shape rather than against a second derivation of the path:
     // `<DataDir>/collections` is resolved by internal/storage from the
     // isolated home, and a spec that recomputed it would be a second owner of
@@ -185,12 +187,18 @@ test.describe('the import ask on a stand with no Wails', () => {
     const importButton = ask.getByRole('button', { name: 'Import', exact: true })
     await expect(importButton).toBeDisabled()
 
-    // ── Naming the export completes the proposal ──────────────────────────
+    // ── Pasting the export completes the proposal ─────────────────────────
     //
-    // Typed, not dropped and not picked: this is the path a person takes on
-    // any stand without Wails, and it is the only one this harness has.
-    await page.locator('#api-import-postman-file').fill(exportPath)
-    await expect(dest).toHaveValue(/[\\/]collections[\\/]acme$/)
+    // THE EXPORT'S TEXT, into the ask's one question. It used to be an
+    // absolute path typed into a field that no longer exists: on a build
+    // with no Wails there is no system picker and no native drop, so the
+    // PATH route has no user gesture behind it at all, and the general case
+    // is the one that carries bytes (spec §1a). What the box is holding is
+    // classified once, in `classifyPastedSource`, and a document proposes
+    // its destination from `info.name` where a file proposed it from a
+    // stem — hence the collection's own name below rather than a filename's.
+    await page.locator('#api-import-paste').fill(postmanExport(UNREACHED_BASE_URL))
+    await expect(dest).toHaveValue(new RegExp(`[\\\\/]collections[\\\\/]${PROPOSED_STEM}$`))
     await expect(importButton).toBeEnabled()
 
     // The field is the truth (api-paths.ts: an offer, not a derivation), so
@@ -237,8 +245,11 @@ test.describe('the import ask on a stand with no Wails', () => {
 
     // The ask is really here and really usable — otherwise the assertions
     // below would pass on a dialog that never opened, which is the way an
-    // absence assertion usually lies.
-    await expect(page.locator('#api-import-postman-file')).toBeVisible()
+    // absence assertion usually lies. The ask's ONE QUESTION is what says so
+    // now; `#api-import-postman-file` is where a native drop's answer lands
+    // and is deliberately hidden (import-dialogs.tsx), so a visibility check
+    // on it would fail on the reshape rather than on a missing ask.
+    await expect(page.locator('#api-import-paste')).toBeVisible()
 
     const zone = ask.locator('.ui-drop-zone')
     await expect(zone).toHaveCount(1)
@@ -253,6 +264,19 @@ test.describe('the import ask on a stand with no Wails', () => {
     // `dialog.openFile` answers -32601 with no Wails, and what this build has
     // instead yields a `File` — the same currency the drop yields, which is
     // why both answers go to one handler.
+    //
+    // THIS ONE IS RED, and it is red about the product rather than about the
+    // reshape. The region draws `button "Or select a file"` here — the SYSTEM
+    // picker's control — because the capability is probed as
+    // `'openFileDialog' in dialogClient` (api-client.ts, `filePicker`), and a
+    // method on a class is always in it; the picker only retires once a person
+    // has pressed it and read a -32601. Its neighbour `nativeDrop` is decided
+    // by `hasWailsWebview()` instead, which is the answer this one wants.
+    // Measured, not deduced: at HEAD, with only the line the reshape broke
+    // taken out, this same assertion fails identically — so it predates
+    // nocx-hqbv3 and predates T6. It is left standing rather than weakened,
+    // because a control advertising a route nothing travels is exactly what
+    // the header of this file says the ask must not do.
     await expect(zone.locator('.ui-file-input__native')).toHaveCount(1)
 
     // What is still absent is the NATIVE route. `data-file-drop-target` is

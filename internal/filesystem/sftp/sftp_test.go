@@ -14,7 +14,9 @@ import (
 	"unicode/utf8"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transfer"
 )
 
 // tempDir is t.TempDir() with its symlinks already resolved, and everything in
@@ -68,17 +70,103 @@ func skipIfRoot(t *testing.T) {
 }
 
 // TestSSHLeaseSatisfiesSeam pins the wiring the package depends on: the
-// committed ssh.FSConn satisfies the narrow fsConn seam, so a real lease can
-// construct a provider. A change to the lease that drops a method breaks this
-// test with a clear compile error.
+// committed ssh.FSConn satisfies the read half of the seam, so a real lease
+// can serve every listing call. A change to the lease that drops a method
+// breaks this test with a clear compile error.
+//
+// It pins the read half only. The write half is transfer.RemoteFS, whose
+// Create returns transfer.RemoteFile where the lease returns ssh.FSFile —
+// two names for one shape, and Go matches result types by identity — so the
+// lease reaches this provider through an adapter built at the composition
+// root, which is also the only place allowed to know both vocabularies.
 func TestSSHLeaseSatisfiesSeam(t *testing.T) {
-	var _ fsConn = ssh.FSConn(nil)
+	var _ fsReader = ssh.FSConn(nil)
 }
 
 // TestProviderImplementsContract pins the package's reason to exist: the same
 // Provider contract as local, satisfied by the sftp provider.
 func TestProviderImplementsContract(t *testing.T) {
 	var _ filesystem.Provider = (*Provider)(nil)
+}
+
+// uploaderSeam is the compile-time half of rule R1's positive direction: a
+// remote provider carries the write seam.
+var uploaderSeam filesystem.Uploader = (*Provider)(nil)
+
+// TestRemoteProviderIsAnUploader states the positive direction at runtime
+// too, so the assertion above cannot be deleted silently.
+func TestRemoteProviderIsAnUploader(t *testing.T) {
+	if _, ok := any(New(newFakeFS(t))).(filesystem.Uploader); !ok {
+		t.Fatal("the sftp provider must implement Uploader — a remote tab is what can be uploaded to")
+	}
+	_ = uploaderSeam
+}
+
+// TestBothProvidersAreUploaders is the other half of the pair, and it is
+// here — beside the remote one — because the two are the same claim seen
+// from two sides: whoever this backend can list files for, it can write a
+// file for.
+//
+// It asserted the OPPOSITE until D7 was corrected: that local must NOT
+// implement Uploader, because R1 was read as "only a remote tab may be
+// written to". That was reasoned from the desktop build, where a drop on a
+// local tab yields an absolute path and inserting it is the whole gesture.
+// A browser drop yields bytes and no path, and the machine those bytes
+// belong on is the backend's own — which IS the machine that tab's shell is
+// on, so R1 is satisfied rather than bent. R1's structural expression moved
+// with it: it is now "a provider that cannot write implements no Uploader
+// and its binding holds a nil sink", asserted in
+// internal/filesystem/upload_test.go, not "local is that provider".
+func TestBothProvidersAreUploaders(t *testing.T) {
+	if _, ok := any(local.New()).(filesystem.Uploader); !ok {
+		t.Error("local must implement Uploader — a browser drop on a local tab has bytes and no path, so the upload is the only thing the gesture can mean")
+	}
+	if _, ok := any(New(newFakeFS(t))).(filesystem.Uploader); !ok {
+		t.Error("sftp must implement Uploader — the remote path is unchanged by the local one landing")
+	}
+}
+
+// TestSinkWritesThroughTheLease is the paired success of the seam: the sink
+// the provider hands out actually writes a file on the machine the lease
+// views, through the lease and nothing else.
+func TestSinkWritesThroughTheLease(t *testing.T) {
+	f := newFakeFS(t)
+	p := New(f)
+
+	out, err := p.Sink().Put(context.Background(),
+		transfer.Upload{DestDir: f.root, Name: "landed.txt", Size: 5, OnExists: transfer.Overwrite},
+		strings.NewReader("hello"), func(int64) {})
+	if err != nil {
+		t.Fatalf("Put through the provider's sink: %v", err)
+	}
+	if out.State != transfer.StateWritten || out.FinalName != "landed.txt" {
+		t.Fatalf("outcome %+v, want landed.txt written", out)
+	}
+	if len(out.Stranded) != 0 {
+		t.Errorf("stranded %v, want nothing left behind", out.Stranded)
+	}
+	got, err := os.ReadFile(filepath.Join(f.root, "landed.txt"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("file holds %q, want %q", got, "hello")
+	}
+}
+
+// TestSinkReportsALeaseFailure is the failure path of that same external
+// call: a lease that cannot write is reported, and the provider does not
+// invent a success.
+func TestSinkReportsALeaseFailure(t *testing.T) {
+	f := newFakeFS(t)
+	_ = f.Close() // a released lease: every call answers errLeaseClosed
+
+	_, err := New(f).Sink().Put(context.Background(),
+		transfer.Upload{DestDir: f.root, Name: "landed.txt", Size: 5, OnExists: transfer.Overwrite},
+		strings.NewReader("hello"), nil)
+	if !errors.Is(err, errLeaseClosed) {
+		t.Fatalf("Put on a closed lease: %v, want the lease's own error", err)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -67,8 +67,18 @@ func (c *liveChannel) Resize(_ context.Context, _, _, _, _ uint16) error { retur
 func (c *liveChannel) ShellIntegrationReason() ssh.RefusalReason         { return ssh.ReasonNone }
 
 // openSSHOverSocket opens an SSH session through the real control plane and
-// returns its id.
-func openSSHOverSocket(t *testing.T, conn *websocket.Conn, id int) string {
+// returns its server-authoritative id.
+//
+// It takes the server because the open is not OVER when the response arrives:
+// handleOpen answers the request and only THEN installs the connection as the
+// session's subscriber, so a test that reads or replaces rx.getSubscriber()
+// straight afterwards can be holding nil. That is the same wait
+// openSessionOnConn has, for the same reason, and it was missing here —
+// TestInputStalled_LatchDoesNotOutliveAnUnsentNotification captured the
+// subscriber, put it back, and then found no notification had been sent,
+// because what it put back was the nil it had read before the handler got
+// there.
+func openSSHOverSocket(t *testing.T, ws *WSServer, conn *websocket.Conn, id int) string {
 	t.Helper()
 	resp := jsonrpcCallWithID(t, conn, "open", map[string]any{
 		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
@@ -91,6 +101,7 @@ func openSSHOverSocket(t *testing.T, conn *websocket.Conn, id int) string {
 	if r.Result.SessionID == "" {
 		t.Fatal("open returned no session id")
 	}
+	awaitSubscriber(t, ws, session.ID(r.Result.SessionID))
 	return r.Result.SessionID
 }
 
@@ -150,8 +161,8 @@ func TestDeadSession_DoesNotFreezeAnotherPane(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	deadSID := openSSHOverSocket(t, conn, 1)
-	liveSID := openSSHOverSocket(t, conn, 2)
+	deadSID := openSSHOverSocket(t, ws, conn, 1)
+	liveSID := openSSHOverSocket(t, ws, conn, 2)
 
 	// Bury the dead session under more frames than its queue can hold, so
 	// its write path is thoroughly stuck before the healthy tab types.
@@ -187,7 +198,7 @@ func TestDeadSession_TellsThePaneItsInputIsBeingDropped(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, conn, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
 	notifs := make(chan string, 64)
 	go func() {
@@ -254,7 +265,7 @@ func TestInputStalled_LatchDoesNotOutliveAnUnsentNotification(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, conn, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
 	rx := ws.getRx(session.ID(sid))
 	if rx == nil {

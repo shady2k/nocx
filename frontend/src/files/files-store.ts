@@ -182,8 +182,25 @@ export interface FilesTreeStore {
   binding(): FilesBinding | null
   origin(): ActiveOrigin | null
   root(): FilesRoot | null
-  /** The visible rows in display order (the flatten of the expanded tree). */
+  /** The visible rows in display order (the flatten of the expanded tree).
+   *  The NAME FILTER IS NOT APPLIED HERE — narrowing is the view's, over
+   *  `files-filter.ts`, because a filter that reached into the flatten
+   *  would be a store deciding what is on screen, and the store's rows are
+   *  also what the reveal walk and the watch-set reconciliation reason
+   *  about. Both must go on seeing the whole tree. */
   rows(): FilesFlatRow[]
+  /** The panel's name filter (nocx-708q.2), and its residence is the same
+   *  choice Git's made: in the store, so it survives the view being
+   *  swapped out and back — the panel is unmounted whenever another
+   *  sidebar view is in front, and a filter that evaporated on a glance at
+   *  Ports would be a control nobody could rely on.
+   *
+   *  It is NOT cleared on a re-scope. A name is a stable vocabulary across
+   *  machines in a way a session id is not: somebody filtering for
+   *  "nginx.conf" while comparing two hosts is doing exactly what the
+   *  control is for. */
+  filter(): string
+  setFilter(value: string): void
   /** Walk from the root down to `path`, listing and expanding each level
    *  that is not already expanded, then select the target (revealTarget)
    *  and expand it too — arriving somewhere shows you what is there, so
@@ -264,6 +281,12 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   const [watchMode, setWatchMode] = createSignal<'watching' | 'polling' | null>(null)
   const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
   const [watchFailed, setWatchFailed] = createSignal<string | null>(null)
+  /** The panel's name filter (nocx-708q.2): the one string that narrows the
+   *  tree. Renderer-side over the rows the store already holds — typing
+   *  issues no request, so it can neither churn the watch set nor race a
+   *  reveal walk. Deliberately NOT reset by `dispose`, which is what makes
+   *  it survive a sidebar view switch. */
+  const [filter, setFilter] = createSignal('')
   /** The path the last completed reveal selected (see the interface doc).
    *  Reset on every re-scope and dispose — a selection from a previous
    *  machine must not linger. */
@@ -559,14 +582,57 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     )
   }
 
-  /** The §5.1 refresh form: re-list at offset 0 with the count currently
-   *  displayed, replacing every displayed row atomically. With no explicit
-   *  ctx this starts a new cycle (it supersedes in-flight page requests). */
+  /** How wide a re-list of an already-displayed directory asks (nocx-o97xj).
+   *  The single owner of that rule: both the change-driven refreshDir and the
+   *  header's whole-tree refresh() call it, because two copies of one window
+   *  rule drifting is how this defect gets a second life.
+   *
+   *  A change notification names a directory and carries no diff (§5.5), so
+   *  the width of the re-list decides what the panel is able to see at all.
+   *  Asking for exactly the count on screen — which is what this did — cannot
+   *  see an entry that sorts past the last displayed row, so a file arriving
+   *  in a directory the user is looking at stayed invisible behind a
+   *  "Show next 1" button, which is the opposite of the promise D5 makes.
+   *
+   *  The rule turns on whether the user has paged:
+   *
+   *  - Fully displayed (`hasMore` false) — the window IS the directory, so it
+   *    must have room to grow: one page of headroom above what is displayed.
+   *    This is a fixed point rather than a ratchet; the window follows the
+   *    directory's real size and stops there.
+   *  - Paged into (`hasMore` true) — exactly the displayed count. That window
+   *    is the user's: a refresh must not shrink it back to page one, and must
+   *    not page them deeper into a directory they never asked to see more of.
+   *    Arrivals that sort inside the window still appear, and the tail is
+   *    already represented honestly by "Show next N", whose count is `total`
+   *    and so is right after every re-list.
+   *
+   *  Why one page of headroom and not one row: a change event is a coalesced
+   *  invalidation hint (§5.5), so one notification can stand for a burst — a
+   *  checkout, an unpacked archive, an agent writing a batch — and headroom
+   *  of one would surface one of them. Why not the whole directory: both
+   *  providers enumerate, sort and cap the entire directory before slicing
+   *  the page (internal/filesystem/{local,sftp}), so a wider limit buys wire
+   *  bytes and merged rows, never round trips — but handing back everything
+   *  would override the paging budget the user is already living under.
+   *  FILES_PAGE_SIZE is the increment they have already accepted here; a
+   *  separate number would be a second rule to keep in step.
+   *
+   *  A capped directory never reaches this: onFilesChanged requires state
+   *  'ok', and the backend does not poll a tooLarge directory at all. */
+  function refreshLimit(dir: FilesRoot | FilesNode): number {
+    const displayed = dir.children.length
+    if (displayed === 0) return FILES_PAGE_SIZE
+    return dir.hasMore ? displayed : displayed + FILES_PAGE_SIZE
+  }
+
+  /** The §5.1 refresh form: re-list at offset 0 over the displayed window,
+   *  replacing every displayed row atomically. With no explicit ctx this
+   *  starts a new cycle (it supersedes in-flight page requests). */
   function refreshDir(dir: FilesRoot | FilesNode, ctx?: ListCtx): void {
     const next = ctx ?? captureCtx()
     if (next === null) return
-    const limit = dir.children.length > 0 ? dir.children.length : FILES_PAGE_SIZE
-    void issueList(dir, 0, limit, next)
+    void issueList(dir, 0, refreshLimit(dir), next)
   }
 
   /** Send the watch set the panel currently renders — files.watch REPLACES
@@ -1158,8 +1224,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       return
     }
     // One cycle for the whole tree: every expanded directory is re-listed
-    // at its displayed count, so a refresh is a single snapshot per
-    // directory and in-flight page requests are superseded by the bump.
+    // over its displayed window (refreshLimit owns how wide that is), so a
+    // refresh is a single snapshot per directory and in-flight page requests
+    // are superseded by the bump.
     // Submit those listings serially: they all claim the same filesystem
     // conflict gate, and parallel refresh work would make sibling
     // directories refuse one another after the bounded gate wait.
@@ -1181,8 +1248,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       .reduce<Promise<void>>((chain, dir) => {
         return chain.then(() => {
           if (!scopeCurrent(ctx)) return
-          const limit = dir.children.length > 0 ? dir.children.length : FILES_PAGE_SIZE
-          return issueList(dir, 0, limit, ctx)
+          return issueList(dir, 0, refreshLimit(dir), ctx)
         })
       }, Promise.resolve())
       // The watch set rides the refresh cycle too: re-establishing it is
@@ -1239,6 +1305,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     origin,
     root,
     rows,
+    filter,
+    setFilter,
     rescope,
     toggle,
     revealPath,

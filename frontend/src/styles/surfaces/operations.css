@@ -1,0 +1,66 @@
+/* The operations view (nocx-hbdw4, replaced in nocx-hbdw4.1) — the sidebar
+   panel that lists everything running.
+
+   PLACEMENT ONLY. Each row is the kit's OperationRow and the empty state is
+   the kit's EmptyState; what this file owns is where they sit. The BADGE and
+   the PROGRESS BAR that ride the activity-bar icon are not here — they are
+   drawn by the bar for any view with a `status`, and live in
+   components/sidebar.css beside the rest of the rail. */
+
+.ops-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* The list scrolls itself rather than growing the panel: the panel's own
+   height is what bounds it, and a list that scrolled the page would take the
+   scroll from whatever is underneath. */
+/* NO SCROLLER HERE. There is one scroll owner in a panel and it is
+   .ui-sidebar-view__body (nocx-708q.3): a list that scrolls inside the
+   scrolling body gives a person two scrollbars for one list and a wheel that
+   stops at the wrong boundary. Worse here than elsewhere, because there are
+   TWO of these lists — running and finished — so the panel would have had
+   three scrollers. */
+.ops-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* THE HEADING SAYS THE STATE, so the rows do not have to. Every finished row
+   carried a "Done" pill before this: one heading says once what a pill
+   repeated down the list, and it says it in space the file name wanted
+   (nocx-hbdw4.5). A row still marks an outcome that is NEWS — failed,
+   cancelled, skipped — because those differ from the expected end. */
+.ops-group__heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  /* Vertical only. 16px of horizontal inset on top of the body's own put the
+     headings 24px in while their rows sat at 8px — one panel disagreeing with
+     itself, never mind with the other three (nocx-708q.3). */
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-dim);
+}
+
+/* The count, so a collapsed glance answers "how many" without counting
+   rows. Tabular so it does not shift the heading as it changes. */
+.ops-group__count {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+/* AND THE FIRST GROUP ADDS NOTHING. The margin above a heading separates it
+   from the group before it; the first one has no group before it, only the
+   panel's own header, which already carries that room. Both together read as
+   a hole rather than a join (owner, 2026-08-22). */
+.ops-group__heading:first-child {
+  margin-top: 0;
+}

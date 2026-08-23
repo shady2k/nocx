@@ -53,6 +53,7 @@ import (
 	"unicode/utf8"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/transfer"
 )
 
 // maxReadBytes is the read ceiling of spec §5.1: the effective limit is
@@ -89,14 +90,15 @@ const defaultSizeCap = 8 << 20 // 8 MiB
 // number (spec §9).
 const defaultListTimeout = 10 * time.Second
 
-// fsConn is the narrow transport seam this provider consumes: the SFTP lease
-// surface (spec D3). ssh.FSConn satisfies it structurally; the interface is
-// declared here, in the feature package, so the provider is testable against
-// a double without a live connection. ReadLink is the one operation the
-// lease surface must gain to serve the symlink entries of §5.1 (LinkTarget
-// and LinkKind are required fields of Rev): pkg/sftp's *Client has it
-// (client.go:497), the committed FSConn interface does not expose it yet.
-type fsConn interface {
+// fsReader is the read half of the narrow transport seam this provider
+// consumes: the SFTP lease surface (spec D3). ssh.FSConn satisfies it
+// structurally; the interface is declared here, in the feature package, so
+// the provider is testable against a double without a live connection.
+// ReadLink is the one operation the lease surface must gain to serve the
+// symlink entries of §5.1 (LinkTarget and LinkKind are required fields of
+// Rev): pkg/sftp's *Client has it (client.go:497), the committed FSConn
+// interface does not expose it yet.
+type fsReader interface {
 	// ReadDir lists the directory at path. Natively cancellable: the lease
 	// implements it with ReadDirContext, which checks the context on each
 	// READDIR packet, so the provider's elapsed-time cap is enforced through
@@ -118,6 +120,24 @@ type fsConn interface {
 	// from this provider is in flight after Close returns (the lease's own
 	// close-to-cancel guarantee).
 	Close() error
+}
+
+// fsConn is the whole seam: a lease this provider can read AND write
+// through. The write half is transfer.RemoteFS verbatim rather than a
+// second spelling of the same four calls, because the sink is what consumes
+// it and a paraphrase here would be a second owner of that contract.
+//
+// ssh.FSConn does NOT satisfy this one, and the reason is Go's rather than
+// the design's: its Create returns ssh.FSFile where RemoteFS asks for
+// transfer.RemoteFile, and interface satisfaction compares result types by
+// identity, not by shape. The composition root adapts it — which is also
+// where the two error vocabularies are translated, since only it may import
+// internal/ssh and internal/transfer at once. TestSSHLeaseSatisfiesSeam
+// still pins the read half against the committed lease.
+type fsConn interface {
+	fsReader
+	transfer.RemoteFS
+	transfer.RemoteReadFS
 }
 
 // Option configures a Provider.
@@ -174,6 +194,29 @@ func New(conn fsConn, opts ...Option) *Provider {
 	}
 	return p
 }
+
+// Sink returns the write half of this provider's lease — the optional
+// filesystem.Uploader seam (design D7). Implementing it is what makes a
+// remote binding writable, and the local provider's silence is what makes a
+// local one refuse: rule R1 is this method's absence over there, not a check
+// performed anywhere.
+//
+// It is never nil, so a binding that carries one can always be written to.
+// The sink is built per call rather than cached because it holds no state of
+// its own: it is the lease plus a chunk size, and the lease is the field.
+func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(p.conn, transfer.DefaultChunk) }
+
+// Source returns the read-stream half of this provider's lease — the
+// optional filesystem.Downloader seam. It is Sink's mirror in construction
+// and in lifetime: never nil, built per call because it holds no state of
+// its own, and reading through the same lease every other call on this
+// provider uses.
+//
+// It is a separate seam from Read, which is this provider's bounded,
+// buffered, text-decoded answer to "show me this file". A download is
+// unbounded and never decoded, and one method cannot be both without one of
+// the two answers being wrong (filesystem.Downloader says which).
+func (p *Provider) Source() transfer.Source { return transfer.NewSource(p.conn, transfer.DefaultChunk) }
 
 // Root computes the navigation root (spec D2) from the provider, never from a
 // shell: the server canonicalises "." — the SFTP session's starting

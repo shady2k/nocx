@@ -71,3 +71,31 @@
   margin: var(--space-2) var(--space-4) 0;
   padding: var(--space-2) var(--space-3);
 }
+
+/* The drop target while a files drag is over it (terminal-drop.ts sets the
+   attribute). An outline rather than a background: the terminal underneath
+   is a live grid and tinting it would repaint somebody's output. */
+[data-file-drop-target][data-drop-active] {
+  outline: 2px dashed var(--color-accent);
+  outline-offset: calc(-1 * var(--space-1));
+}
+
+/* The name filter (nocx-708q.2) lives in the shell's pinned slot now
+   (nocx-708q.3), and the slot supplies its own spacing and inset. What was
+   here — a margin of its own — is what left the field 48px narrower than the
+   panel; keeping any of it would leave Files roomier than the other three
+   for no reason anybody could name. The SearchField takes the row.
+
+   There WAS a Names/Contents toggle beside it, from the file-manager
+   design's Orca reference. It went: content search is not built, so the
+   other half was permanently disabled, and a two-option control with one
+   option is not a control. If content search is ever built the toggle
+   returns with it, which is the only moment it means anything. */
+.files-filter {
+  display: flex;
+}
+
+.files-filter > .ui-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}

@@ -8,6 +8,7 @@ import {
   type SidebarViewDescriptor,
   type SidebarAction,
   type SidebarViewProps,
+  type SidebarCountKind,
 } from './sidebar'
 import { createSidebarWidthController } from './sidebar-width'
 import type { Component } from 'solid-js'
@@ -327,6 +328,156 @@ describe('sidebar', () => {
   })
 })
 
+// ── What a view's icon says about work behind it (nocx-hbdw4.1) ─────────
+//
+// The activity bar is the one part of the sidebar that stays on screen
+// whatever the panel is doing, so a count and an aggregate progress drawn on
+// a view's BUTTON are what answer "I cannot see that something is running" —
+// the list behind the button is an ordinary view and vanishes with the panel
+// like every other. These assert the half that must survive the panel being
+// elsewhere, which is the half the epic exists for.
+describe('sidebar — a view’s icon carries its status', () => {
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  /* eslint-disable solid/reactivity -- `status` is consumed reactively, inside
+     the bar's own JSX (see SidebarViewDescriptor.status); the gate cannot see
+     across the mountSidebar boundary, exactly as it cannot in main.tsx. */
+
+  /** Two views where the SECOND carries a status, so every assertion below
+   *  also says the mark landed on the right button. */
+  function withStatus(
+    status: () => { count: number; progress: number | null; kind?: SidebarCountKind } | null,
+  ) {
+    // `kind` defaults to 'running' HERE, in the test helper, and is required
+    // on the descriptor itself — the cases below are all about running work
+    // and saying so five times would bury what each is actually testing.
+    const withKind = () => {
+      const s = status()
+      return s === null ? null : { ...s, kind: s.kind ?? ('running' as const) }
+    }
+    return [TWO_VIEWS[0], { ...TWO_VIEWS[1], status: withKind }] as SidebarViewDescriptor[]
+  }
+
+  const badge = (bar: HTMLElement, id: string) =>
+    bar.querySelector<HTMLElement>(`[data-view-badge="${id}"]`)
+  const progress = (bar: HTMLElement, id: string) =>
+    bar.querySelector<HTMLElement>(`[data-view-progress="${id}"]`)
+
+  it('draws the count on the view’s own button, and nothing at zero', () => {
+    const { bar, panel } = mount()
+    const [count, setCount] = createSignal(0)
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: count(), progress: null })),
+      [SETTINGS_ACTION],
+    )
+
+    expect(badge(bar, 'beta')).toBeNull()
+    setCount(3)
+    expect(badge(bar, 'beta')?.textContent).toBe('3')
+    expect(badge(bar, 'alpha')).toBeNull()
+    // Inside the button, so it cannot become a second toolbar stop.
+    expect(badge(bar, 'beta')?.closest('button')).toBe(viewBtn(bar, 'beta'))
+    expect(bar.querySelectorAll('.activity-bar-top button')).toHaveLength(2)
+  })
+
+  it('keeps the count in the accessible name, for somebody who cannot see it', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 2, progress: null })),
+      [SETTINGS_ACTION],
+    )
+    expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 2 running')
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-label')).toBe('Alpha')
+  })
+
+  it('says what the count is ABOUT, so a bell does not report unread as running', () => {
+    // The bar owns the wording — a view names a KIND and never a string, or
+    // two views end up describing the same number in two vocabularies. What
+    // this pins is that the closed set has more than one member and the bar
+    // reads the right one: Notifications counts unread things, which do not
+    // run, and "Notifications — 3 running" was false for a screen reader.
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 3, kind: 'unread', progress: null })),
+      [SETTINGS_ACTION],
+    )
+    expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 3 unread')
+  })
+
+  it('draws the bar only while something is running, and at zero it is still drawn', () => {
+    // Zero is a MEASUREMENT and null is its absence: a transfer that has
+    // not moved a byte yet is running, and a bar that vanished at 0 would
+    // say it was not.
+    const { bar, panel } = mount()
+    const [fraction, setFraction] = createSignal<number | null>(null)
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 1, progress: fraction() })),
+      [SETTINGS_ACTION],
+    )
+
+    expect(progress(bar, 'beta')).toBeNull()
+    setFraction(0)
+    expect(progress(bar, 'beta')).not.toBeNull()
+    expect(
+      progress(bar, 'beta')!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow'),
+    ).toBe('0')
+    setFraction(0.5)
+    expect(
+      progress(bar, 'beta')!.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow'),
+    ).toBe('50')
+    setFraction(null)
+    expect(progress(bar, 'beta')).toBeNull()
+  })
+
+  it('goes on reporting while ANOTHER view is on screen and while the panel is collapsed', () => {
+    // The whole reason the status is on the bar and not in the panel. This
+    // is the jsdom half of e2e/ops-indicator.spec.ts.
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 1, progress: 0.25 })),
+      [SETTINGS_ACTION],
+    )
+
+    // The panel is showing the OTHER view, and beta still reports.
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
+    expect(badge(bar, 'beta')?.textContent).toBe('1')
+    expect(progress(bar, 'beta')).not.toBeNull()
+
+    // Collapse the panel altogether — the case that bought this feature.
+    viewBtn(bar, 'alpha').click()
+    expect(panel.classList.contains('collapsed')).toBe(true)
+    expect(badge(bar, 'beta')?.textContent).toBe('1')
+    expect(progress(bar, 'beta')).not.toBeNull()
+  })
+
+  it('a view with no status draws neither, and the bottom zone holds only actions', () => {
+    // The bottom zone's contract is one kind of entry again (nocx-hbdw4.1):
+    // the indicator that briefly widened it is gone with its popover.
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
+    expect(bar.querySelector('[data-view-badge]')).toBeNull()
+    expect(bar.querySelector('[data-view-progress]')).toBeNull()
+    const bottom = bar.querySelector('.activity-bar-bottom')
+    expect(bottom?.querySelectorAll('button')).toHaveLength(1)
+    expect(bottom?.querySelector('[data-action="settings"]')).not.toBeNull()
+  })
+})
+
+/* eslint-enable solid/reactivity */
+
 describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
   afterEach(() => {
     document.body.replaceChildren()
@@ -569,64 +720,50 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
   })
 })
 
-describe('sidebar — a view may carry a badge count (nocx-708q.1)', () => {
+// ── The pinned filter slot (nocx-708q.3) ─────────────────────────────────
+//
+// `SidebarViewDescriptor.filter` is how a panel says WHICH of its children
+// is the filter, and the shell pins it between the header and the scrolling
+// body. Two things have to hold for that to be one shape rather than a
+// fourth arrangement: a view that declares one gets it OUT of the scroller,
+// and a view that declares none gets no row at all.
+
+describe('the filter slot', () => {
   afterEach(() => {
     document.body.replaceChildren()
   })
 
-  function mountWithCount(count: () => number): HTMLElement {
+  it('pins a declared filter between the header and the scrolling body', () => {
     const { bar, panel } = mount()
-    const views: SidebarViewDescriptor[] = [
-      { id: 'alpha', title: 'Alpha', icon: TestIcon, view: TestView('alpha'), order: 0 },
-      {
-        id: 'bell',
-        title: 'Notifications',
-        icon: TestIcon,
-        view: TestView('bell'),
-        badgeCount: count,
-        testId: 'activity-bell',
-        order: 1,
-      },
-    ]
-    mountSidebar(bar, panel, views, [SETTINGS_ACTION])
-    return bar
-  }
+    const withFilter: SidebarViewDescriptor = {
+      ...TWO_VIEWS[0],
+      filter: () => <input data-testid="probe-filter" />,
+    }
+    mountSidebar(bar, panel, [withFilter], [])
 
-  it('renders NO badge element at zero — a quiet entry point, not a dead grey nought', () => {
-    const bar = mountWithCount(() => 0)
-    expect(viewBtn(bar, 'bell').querySelector('.ui-badge')).toBeNull()
+    const field = panel.querySelector<HTMLElement>('[data-testid="probe-filter"]')
+    expect(field).not.toBeNull()
+    // Pinned means exactly this: it is inside the filter row and outside the
+    // scroller, so it cannot scroll away with the list it filters.
+    expect(field!.closest('.ui-sidebar-view__filter')).not.toBeNull()
+    expect(field!.closest('.ui-sidebar-view__body')).toBeNull()
   })
 
-  it('renders the count once there is something to say', () => {
-    const bar = mountWithCount(() => 3)
-    expect(viewBtn(bar, 'bell').querySelector('.ui-badge')?.textContent).toBe('3')
+  it('draws NO filter row for a view that declares none', () => {
+    // The row was drawn for every view: `ActiveView` handed SidebarView a
+    // `<Show>` element, and a Show element is truthy whether or not its
+    // condition holds — so the shell's own `<Show when={props.filter}>` was
+    // always taken. It cost nothing while the row had no box; it costs a
+    // strip of dead panel the moment the row carries the shell's inset,
+    // which is the same 8px the header and the body carry (nocx-708q.3).
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [])
+    expect(panel.querySelector('.ui-sidebar-view__filter')).toBeNull()
   })
 
-  it('appears and disappears with the count, without a remount', async () => {
-    const [count, setCount] = createSignal(0)
-    /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes the
-       accessor reactively: the descriptor's badgeCount is read inside the rail
-       button's tracked scope, and the gate cannot see across the call
-       boundary. main.tsx disables the same rule at the same seam. */
-    const bar = mountWithCount(count)
-    expect(viewBtn(bar, 'bell').querySelector('.ui-badge')).toBeNull()
-
-    setCount(2)
-    await vi.waitFor(() =>
-      expect(viewBtn(bar, 'bell').querySelector('.ui-badge')?.textContent).toBe('2'),
-    )
-
-    setCount(0)
-    await vi.waitFor(() => expect(viewBtn(bar, 'bell').querySelector('.ui-badge')).toBeNull())
-  })
-
-  it('a view without a badgeCount renders no badge at all', () => {
-    const bar = mountWithCount(() => 5)
-    expect(viewBtn(bar, 'alpha').querySelector('.ui-badge')).toBeNull()
-  })
-
-  it('carries the testId Task 9 targets onto the activity-bar button', () => {
-    const bar = mountWithCount(() => 0)
-    expect(bar.querySelector('[data-testid="activity-bell"]')).toBe(viewBtn(bar, 'bell'))
+  it('draws no actions row for a view that declares none, for the same reason', () => {
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [])
+    expect(panel.querySelector('.ui-sidebar-view__actions')).toBeNull()
   })
 })

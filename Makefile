@@ -89,7 +89,7 @@ dev-web:
 	./scripts/dev-web.sh
 
 lint:
-	$(GOLANGCI_LINT) run ./...
+	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 format:
 	$(GOFUMPT) -l -w .

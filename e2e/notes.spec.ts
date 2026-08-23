@@ -18,6 +18,15 @@ import { test, expect, promptReady, showSidebarView, type Page } from './harness
 const PANEL = '.notes-panel'
 const ROW = `${PANEL} .ui-record-row__title`
 
+/** The filter, BY ITS ACCESSIBLE NAME rather than by where it sits.
+ *  It used to be `.notes-panel input[type="search"]`, and that stopped
+ *  matching the day the shell took the filter row over (nocx-708q.3): the
+ *  field is now in `.ui-sidebar-view__filter`, a SIBLING of the body the
+ *  panel root lives in. Naming it the way a person finds it survives the
+ *  shell deciding where to put it, which is the point of the slot
+ *  (nocx-708q.6). */
+const filterField = (page: Page) => page.getByRole('searchbox', { name: 'Search notes' })
+
 /** The chord is matched on the physical key (notes/chord.ts). */
 async function pressChord(page: Page): Promise<void> {
   await page.keyboard.press('Alt+Meta+n')
@@ -72,7 +81,7 @@ test.describe('notes', () => {
     await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 15_000 })
 
     await openPanel(page)
-    await page.locator(`${PANEL} input[type="search"]`).fill('zephyrine')
+    await filterField(page).fill('zephyrine')
 
     // Found by a word that is only in the body — the title says nothing
     // about zephyrine, so a filter over titles could not have found it.
@@ -97,7 +106,7 @@ test.describe('notes', () => {
 
     // A query that matches nothing says so — it does not look like a
     // library that failed to load.
-    await page.locator(`${PANEL} input[type="search"]`).fill('quixotictermite')
+    await filterField(page).fill('quixotictermite')
     await expect(page.locator(`${PANEL} .ui-empty-state`)).toContainText('Nothing matches', {
       timeout: 10_000,
     })

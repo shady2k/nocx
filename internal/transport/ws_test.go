@@ -58,6 +58,9 @@ func connectWS(t *testing.T, ws *WSServer) *websocket.Conn {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
+	// The inbox is keyed by the connection and outlives no test that dialled
+	// one (ws_inbox_test.go).
+	t.Cleanup(func() { forgetInbox(conn) })
 	return conn
 }
 
@@ -143,34 +146,17 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	if werr != nil {
 		t.Fatalf("write request: %v", werr)
 	}
-	// Read until the matching response-id appears. Reset the deadline on
-	// each iteration so a slow response under load does not trip gorilla's
-	// permanent error store (see wsReader doc). 30 s is a generous failsafe;
-	// the test succeeds as soon as the condition is met, not when the clock
-	// runs out.
-	for {
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		_, resp, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("read response: %v", err)
-		}
-		// Skip notifications (exit, etc.) — they have no id.
-		var check struct {
-			ID *json.RawMessage `json:"id"`
-		}
-		_ = json.Unmarshal(resp, &check)
-		if check.ID == nil {
-			continue
-		}
-		var idCheck struct {
-			ID int `json:"id"`
-		}
-		_ = json.Unmarshal(resp, &idCheck)
-		if idCheck.ID != id {
-			continue
-		}
-		return resp
+	// Through the inbox, which is what makes this safe to call before a
+	// wait for a notification. This loop used to `continue` past every
+	// frame that was not its response — the exit notification a close
+	// causes, the files.uploadDone a transfer causes, the git.changed a
+	// teardown causes — and drop it. The frame is now RETAINED for
+	// whoever wants it (ws_inbox_test.go).
+	resp, err := awaitFrame(conn, time.Now().Add(wantWithin), isResponseTo(id))
+	if err != nil {
+		t.Fatalf("read response to %s (id %d): %v", method, id, err)
 	}
+	return resp
 }
 
 // TestOpenParamsIgnoresEnhanced pins the removal (nocx-tr2n, superseding
@@ -2126,12 +2112,25 @@ func TestWSServer_CreditCloseUnblocksWriter(t *testing.T) {
 	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte(cmd)}
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
-	// Read enough to fill credit partially.
-	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-	for i := 0; i < 10; i++ {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			break
+	// Read enough to fill credit partially. A FIXED number of frames, not
+	// whatever turns up in a second: reads do not ack, so the writer parks
+	// on the credit window either way, and the count is what this loop is
+	// actually for.
+	//
+	// The second was worse than a duration in a test — it was a duration
+	// this connection could not survive. 128 KiB in frames of at most
+	// FairChunk (8 KiB) is at least sixteen frames, of which the 64 KiB
+	// credit window guarantees eight arrive unacked, so four are there to
+	// be read on any machine. On a slow one the old bound expired instead,
+	// and gorilla stores the first read error in c.readErr and returns it
+	// from every later read: the close below then failed on a socket that
+	// was never broken, at 1.01s, under this test's name (nocx-2h08).
+	// SetReadDeadline(time.Time{}) cannot undo that.
+	deadline := time.Now().Add(wantWithin)
+	for i := 0; i < 4; i++ {
+		_ = conn.SetReadDeadline(deadline)
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("reading flood frame %d of 4: %v", i+1, err)
 		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})

@@ -198,6 +198,87 @@ async function mountTerminal(
   }
 }
 
+describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
+  // In the Wails window a drop delivers absolute paths on the BACKEND's
+  // machine, and the renderer may never learn one (design R2). The runtime
+  // finds the nearest ancestor carrying data-file-drop-target and hands Go
+  // every attribute of that element, so these two attributes are the whole
+  // renderer half of the native drop: which element takes the drop, and
+  // which session it belongs to. Without data-session-id a drop mints
+  // tickets nothing can route.
+  it('marks the pane with data-file-drop-target and the session it belongs to', async () => {
+    const { content, tab, teardown } = await mountTerminal()
+    expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(true)
+    expect(tab.pane.getAttribute('data-session-id')).toBe(sessionOf(content).sessionId)
+    teardown()
+  })
+
+  it('stops being a drop target when the session is gone', async () => {
+    const { tab, teardown } = await mountTerminal()
+    expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(true)
+    teardown()
+    expect(tab.pane.hasAttribute('data-file-drop-target')).toBe(false)
+    expect(tab.pane.hasAttribute('data-session-id')).toBe(false)
+  })
+
+  // D9, through the seam a person actually reaches: the pane element, a
+  // real drag, and the draft afterwards. The module's own tests cover the
+  // routing; this one covers that the pane is WIRED to it — a handler
+  // nothing attached is a gesture that does nothing, and no unit test of
+  // the handler can say so.
+  //
+  // This is the BROWSER half, and it is the half that cannot honour D9: a
+  // `File` has a name and no location, so there is no path to insert and
+  // the module refuses and says why (its own tests assert the message). The
+  // draft therefore stays empty — inserting the base name would look like
+  // it worked and then run the command against a different file or none.
+  // What says the pane is wired at all is that the drop was CLAIMED:
+  // preventDefault is the handler's first act on a files drag, and an
+  // unattached one leaves the event untouched.
+  it('a drop on a LOCAL tab is claimed, inserts no bare name, and uploads nothing', async () => {
+    const client = makeClient()
+    const { content, view, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      editorOf(content).show()
+      const transfer = {
+        types: ['Files'],
+        files: [new File(['hello'], 'notes.txt')],
+      } as unknown as DataTransfer
+      const drop = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+      Object.defineProperty(drop, 'dataTransfer', { value: transfer })
+      tab.pane.dispatchEvent(drop)
+
+      expect(drop.defaultPrevented).toBe(true)
+      await vi.waitFor(() => expect(view.state.doc.toString()).toBe(''))
+      // Copying a file onto the machine it is already on is not a thing
+      // anybody asked for: no upload method is called at all.
+      expect(client.dispatcher.call).not.toHaveBeenCalledWith('files.upload', expect.anything())
+      expect(client.dispatcher.call).not.toHaveBeenCalledWith('files.open', expect.anything())
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaves a drag that is not a files drag alone, so the tab strip still reorders', async () => {
+    const { tab, teardown } = await mountTerminal()
+    try {
+      // The tab strip's own drag carries application/x-nocx-tab, never
+      // Files (layout/strip-drag.ts) — and this is the same condition v3's
+      // runtime applies before it touches a drag.
+      const transfer = {
+        types: ['application/x-nocx-tab'],
+        files: [],
+      } as unknown as DataTransfer
+      const over = new Event('dragover', { bubbles: true, cancelable: true }) as DragEvent
+      Object.defineProperty(over, 'dataTransfer', { value: transfer })
+      tab.pane.dispatchEvent(over)
+      expect(over.defaultPrevented).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+})
+
 describe('SSH open host-key recovery', () => {
   const routeEvidence = {
     host: 'db.example.com:22',
@@ -4857,6 +4938,57 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       renderer._fireTitle('herdr')
       expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
       expect(onProgramTitleChange).toHaveBeenLastCalledWith('herdr')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('names the machine with the SAME string the strip prints, never a second spelling', async () => {
+    // The amendment to nocx-hbdw4.4. The operations list is global — one
+    // list for every tab — so each row has to say which machine, and the
+    // name must be the one the person already reads on the tab. A second
+    // `${user}@${host}` beside this one would agree everywhere anybody
+    // looked and disagree the day there is no user, which is why the
+    // derivation moved to machine-name.ts and both sides call it.
+    //
+    // Asserted against the strip's OWN value rather than against a literal:
+    // if the two ever part, this fails.
+    const onSubtitleChange = vi.fn()
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onSubtitleChange } },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // A program title is a name of its own, so the strip's second line is
+      // the LOCATION line — which is where the strip names a machine.
+      renderer._fireTitle('herdr')
+
+      // Local: the strip has nothing but the directory to show, and the
+      // origin still names the machine, in words rather than a blank.
+      expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
+      expect(content.activeOrigin()?.machine).toBe('This machine')
+
+      // Walk into a hand-typed ssh (protocol §9: the parent suspends first).
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '192.168.0.93', user: 'pi' },
+      })
+
+      const subtitle = onSubtitleChange.mock.lastCall?.[0] as string
+      expect(subtitle).toBe('pi@192.168.0.93')
+      expect(content.activeOrigin()?.machine).toBe(subtitle)
     } finally {
       restoreScroll()
       teardown()

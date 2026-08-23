@@ -5,6 +5,23 @@ import { Tab, type TabProps } from './tab'
 
 afterEach(() => cleanup())
 
+/** A jsdom stand-in for DataTransfer, which jsdom does not implement. It
+ *  records what the drag carries — the `types` list is the only thing a
+ *  document-level listener can read mid-drag, and it is exactly what Wails'
+ *  file-drop listeners test before they act. */
+function makeDataTransfer(): DataTransfer {
+  const data = new Map<string, string>()
+  return {
+    get types() {
+      return [...data.keys()]
+    },
+    files: [] as unknown as FileList,
+    setData: (type: string, value: string) => data.set(type, value),
+    getData: (type: string) => data.get(type) ?? '',
+    setDragImage: () => {},
+  } as unknown as DataTransfer
+}
+
 const defaults: TabProps = {
   id: 'tab-btn-42',
   paneId: 42,
@@ -191,6 +208,54 @@ describe('Tab', () => {
     subject()
     const tab = screen.getByRole('tab')
     expect(tab.getAttribute('draggable')).toBe('true')
+  })
+
+  // ── EnableFileDrop must not eat the tab drag (nocx-9le.5.8) ────────────
+  //
+  // The desktop window turns on Wails' EnableFileDrop so a file dropped on a
+  // terminal reaches Go (main.go). Wails installs document-level
+  // dragenter/dragover/drop listeners that preventDefault, which would kill
+  // every drag on the page — except that each one returns immediately unless
+  // the drag's `types` contain 'Files' (v3.0.0-beta.9 window.ts:712). A tab
+  // drag carries application/x-nocx-tab and text/plain, so it passes through
+  // untouched.
+  //
+  // These two tests are that argument asserted rather than believed. The
+  // first says what a tab drag puts on the wire; the second says the whole
+  // reorder still completes. Neither can fail today — which is the point: a
+  // runtime bump that widened Wails' check, or a change here that put a file
+  // on the drag, would otherwise break tab reordering in the shipped app
+  // with every unit test green.
+  it('a tab drag is not a files drag, so the window-level file-drop listeners let it through', () => {
+    subject()
+    const tab = screen.getByRole('tab')
+    const dataTransfer = makeDataTransfer()
+    fireEvent.dragStart(tab, { dataTransfer })
+
+    expect(dataTransfer.types).toContain('application/x-nocx-tab')
+    expect(dataTransfer.types).not.toContain('Files')
+    expect(dataTransfer.files.length).toBe(0)
+  })
+
+  it('reorders on a drop whose types carry no Files entry', () => {
+    const onReorder = vi.fn()
+    render(() => <Tab {...defaults} paneId={7} onReorder={onReorder} />)
+    render(() => <Tab {...defaults} paneId={9} onReorder={onReorder} />)
+    const rows = screen.getAllByRole('tab')
+
+    const dataTransfer = makeDataTransfer()
+    fireEvent.dragStart(rows[0], { dataTransfer })
+    fireEvent.dragOver(rows[1], { dataTransfer, clientX: 0, clientY: 0 })
+    fireEvent.drop(rows[1], { dataTransfer })
+
+    expect(dataTransfer.types).not.toContain('Files')
+    // The dragged pane and the pane it landed on. The third argument is
+    // WHICH SIDE, decided from the row's bounding rect — jsdom reports every
+    // rect as zeros, so the side it computes here says nothing about the
+    // real strip and is deliberately not asserted. That the reorder happens
+    // at all is what a file-drop listener eating the drag would take away.
+    expect(onReorder).toHaveBeenCalledTimes(1)
+    expect(onReorder.mock.calls[0].slice(0, 2)).toEqual([7, 9])
   })
 
   it('marks the row hidden with data-hidden when the hidden prop is true', () => {

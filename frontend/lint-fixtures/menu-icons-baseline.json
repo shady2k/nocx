@@ -1,0 +1,18 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:menu-icons-update`.",
+    "",
+    "Every entry is a context-menu row literal (id + label + onSelect) that",
+    "ships with no icon, so the column the kit reserves for it stays empty",
+    "(nocx-inbw1). The baseline may only shrink; a row it does not list is",
+    "new and fails the lint gate.",
+    "",
+    "It is EMPTY, and that is the normal state: the kit cannot know which",
+    "glyph a label wants, so every call site chooses one. An entry here is a",
+    "deliberate exception and carries the one line that says why it is",
+    "acceptable to keep. When that reason stops holding, delete the entry",
+    "(or regenerate — the updater copies reasons forward by key and refuses",
+    "to grow)."
+  ],
+  "violations": []
+}

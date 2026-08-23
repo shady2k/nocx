@@ -924,6 +924,49 @@ const severalFiles = statusFixture({
 })
 
 describe('the path filter (nocx-52by)', () => {
+  it('is pinned above the scroller, where it cannot scroll away (nocx-708q.3)', async () => {
+    // It used to stand above the two lists INSIDE the body, so scrolling a
+    // repository with more changes than fit took the control that narrows
+    // them off the top of the panel (owner, 2026-08-22). It is the
+    // descriptor's `filter` slot now, and the shell pins it.
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const field = filterInput(panel)
+    expect(field.closest('.ui-sidebar-view__filter')).not.toBeNull()
+    expect(field.closest('.ui-sidebar-view__body')).toBeNull()
+    // And the rows it narrows are inside the scroller, which is the whole
+    // point of the pair.
+    expect(
+      panel.querySelector('[data-testid="git-unstaged-list"]')?.closest('.ui-sidebar-view__body'),
+    ).not.toBeNull()
+  })
+
+  it('offers no field in a state that holds no list', async () => {
+    // Not a repository: the panel is one StatusCard saying so. A search box
+    // above an explanation of why there is nothing to search is noise, and
+    // that rule moved out of the body with the field.
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue({
+        state: 'notARepository',
+        bindingId: null,
+        toplevel: null,
+        envState: 'resolved',
+        status: null,
+      }),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    expect(panel.textContent).toContain('Not a git repository')
+    expect(panel.querySelector('[data-testid="git-filter"]')).toBeNull()
+  })
+
   it('typing part of a path leaves only the matching rows in BOTH lists, and clearing restores them', async () => {
     const services = fakeServices({
       open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),

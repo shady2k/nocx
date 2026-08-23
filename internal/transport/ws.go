@@ -313,11 +313,17 @@ type WSServer struct {
 	// returns, cancelled or not — that is what releases the admission slot
 	// for the next connection.
 	probeSub control.Submission
-	// dialogSub admits and runs dialog.openFile off the read loop. Capacity
-	// one composed with the lane: while a dialog is open the native
-	// capability is busy, and a second dialog.openFile from any connection
-	// is refused rather than stacking a second picker over the first.
+	// dialogSub runs the dialog methods off the read loop under a bounded
+	// queue. It does NOT carry the native-picker capability: that is
+	// dialogAdmit, acquired on the task goroutine.
 	dialogSub control.Submission
+	// dialogAdmit is the native picker itself — a capacity-one WAITING gate
+	// composed with the lane, acquired inside the task (dialogHandlers), not
+	// at submit time. It is a serialisation point, not an execution bound:
+	// one picker at a time, and a request that arrives while the capability
+	// is held waits for it. Only exhausting a bound refuses, which is what
+	// still stops a second picker stacking over one a human left open.
+	dialogAdmit control.Admission
 	// inflight tracks admitted off-loop tasks so Stop cancels them and
 	// waits, bounded, for them to drain (see Stop's documented maximum).
 	inflight inflight
@@ -489,6 +495,29 @@ type WSServer struct {
 	// session closes — a late ack is rejected (session death wins).
 	recoveryMu sync.Mutex
 	recoveries map[session.ID]*recoveryState
+	// transfers is the running-transfer registry and the one-shot tickets
+	// that name their bodies (ws_upload.go), in BOTH directions: an upload
+	// waiting for a body and a download waiting for a reader are the same
+	// record with the same lifetime, so they share one map, one TTL, one
+	// bound and — the part that matters — one cancellation fan-out.
+	// Registering downloads in a second registry would be a second place
+	// for files.close and session teardown to remember to look.
+	//
+	// Its zero value is usable, so it is a value rather than a pointer and
+	// needs no line in the constructor. A transfer is registered per
+	// SESSION (design D8): closing the binding, closing the session or
+	// stopping the server cancels the set and waits for it to unwind,
+	// bounded — never for the transfer.
+	transfers transferRegistry
+
+	// sources is the SOURCE-ticket mint (ws_upload_source.go) — the other
+	// half of R2. The server owns it rather than being handed one, because
+	// it is both ends of the same mechanism: the two mint sites reach it
+	// through this server (the picker seam and the window drop), and
+	// files.upload redeems from it. Two stores would be a ticket minted in
+	// one and unclaimable in the other, which is the defect this field
+	// exists to make unspellable.
+	sources *SourceTicketStore
 }
 
 // ── Tabby import plan store (server-side, never reaches renderer) ─────────
@@ -987,6 +1016,10 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		resolver:            &resolverHolder{},
 		satNotify:           newSaturatedNotifyLimiter(time.Second),
 	}
+	// The mint's emitter is this server: a drop is told to the renderer
+	// over this socket. Constructed here so there is exactly one store per
+	// server and no window in which a mint site could reach a different one.
+	s.sources = NewSourceTicketStore(s)
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
 		// capture saves are refused. A predictable fingerprint key would be
@@ -1010,18 +1043,36 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 func (s *WSServer) buildControlPlane() {
 	lane := control.NewSemaphore("control", s.laneCapacity)
 	s.lane = control.NewBoundedSubmission(lane)
-	// Probe, agent probe and dialog keep their own capacity-one resource
-	// admissions composed with the lane (canonical order: resource before
-	// execution permit): a second probe or dialog is refused even while the
-	// lane has free permits, and every task still occupies one lane permit.
+	// Probe and agent probe keep their own capacity-one resource admissions
+	// composed with the lane (canonical order: resource before execution
+	// permit): a second probe is refused even while the lane has free
+	// permits, and every task still occupies one lane permit.
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
 	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("agent-probe", 1), lane))}
 	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("agent-ask", askStreamCapacity), lane))}
-	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
-		control.NewSemaphore("dialog", 1), lane))}
+	// The native picker is the one of these that is NOT an execution bound.
+	// A probe competes for a scarce worker; a picker is a serialisation
+	// point — one at a time, and the second may proceed once the first
+	// closes. Held in the instant-refusal class it refused its own tail: a
+	// handler enqueues its response inside the task and the permit is
+	// returned only after the task goroutine returns, so a sequential
+	// client's very next dialog request landed in that window and was told
+	// "Control plane busy" for doing nothing wrong. That is precisely the
+	// window ADR-0026 item 4 says the waiting gate exists to bridge, and it
+	// is what made the R2 sweep report the picker opening zero times:
+	// dialog.openFile sorts immediately before dialog.openFileForUpload.
+	//
+	// So the capability moves to the waiting class and, because a waiting
+	// admission may never be wired into a Submission (ADR-0026 item 3 of
+	// Enforcement — a compile error, not a convention), it is acquired on
+	// the task goroutine by the handler. The submission that remains is a
+	// bounded queue, exactly as a domain operation's is.
+	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("dialog")}
+	s.dialogAdmit = control.NewComposite(
+		control.NewWaitingSemaphore("dialog", 1, s.domainMaxQueue, s.domainWaitTimeout), lane)
 	// Domain-gated methods do not register on the lane submission: their
 	// operation acquires the conflict gates (waiting, bounded) and THEN the
 	// lane inside Run, on the task goroutine, so waiting conflict work never
@@ -1107,6 +1158,36 @@ func (s *WSServer) Start(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/session", s.handleSession)
+	// The upload route (ADR: an HTTP upload beside the WebSocket, upload
+	// design D3). Bytes travel as a streamed POST rather than as a new
+	// binary msg-type because the data plane carries PTY I/O: a
+	// multi-gigabyte upload multiplexed onto it would compete with terminal
+	// responsiveness and would need application-level credit and reconnect
+	// semantics invented for the purpose, where an HTTP request is an
+	// independently flow-controlled byte stream on its own connection.
+	//
+	// The method is in each pattern, so anything but POST and OPTIONS is
+	// still answered 405 by the mux itself. OPTIONS is a route of its own
+	// rather than a branch inside handleUpload because the two share
+	// nothing past the origin check: the preflight never reads the ticket
+	// (ws_upload.go, the CORS block), and a branch is how it would one day
+	// come to.
+	mux.HandleFunc("POST "+uploadRoutePrefix+"{ticket}", s.handleUpload)
+	mux.HandleFunc("OPTIONS "+uploadRoutePrefix+"{ticket}", s.handleUploadPreflight)
+	// The download route, and the argument for it being HTTP is the
+	// upload's argument with every term stronger (ws_download.go): the
+	// bytes travel the SAME direction as bulk PTY output, the outbound
+	// queue is deliberately lossy and a file's bytes may not be dropped,
+	// and a browser can stream a response to disk where a page holding
+	// WebSocket messages would have to buffer the whole file in the
+	// renderer's heap first.
+	//
+	// GET only, and no OPTIONS beside it: a GET with no request header
+	// outside the CORS safelist is a simple request, so a browser never
+	// preflights it, and a route answering a request nobody makes is a
+	// route nobody exercises. The origin headers still go on the reply,
+	// because a page reading this with fetch needs them.
+	mux.HandleFunc("GET "+downloadRoutePrefix+"{ticket}", s.handleDownloadFetch)
 
 	addr := s.listenAddr
 	if addr == "" {
@@ -1125,11 +1206,36 @@ func (s *WSServer) Start(ctx context.Context) error {
 	s.port = tcpAddr.Port
 
 	s.server = &http.Server{
-		Handler:           mux,
+		Handler: mux,
+		// Deliberately zero: /session is a long-lived upgrade, and this
+		// setting would bound its header block along with everything
+		// else's. The upload route's own header deadline is applied one
+		// layer down, by uploadGuardConn, which can tell the two routes
+		// apart before the parse finishes because it reads the request
+		// line itself (ws_upload.go, §5.4).
 		ReadHeaderTimeout: 0,
+		// The guard is the net.Conn the listener returned, so this is
+		// where a handler gets hold of the one watching its own request —
+		// which is how the upload route sees a body that overran its own
+		// Content-Length (§5.4), something net/http hides by design.
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if g, ok := c.(*uploadGuardConn); ok {
+				return context.WithValue(ctx, uploadGuardKey{}, g)
+			}
+			return ctx
+		},
+		// StateIdle is the only moment net/http says "that request is
+		// over and the next has not started", which is exactly the
+		// interval the guard needs to re-open on a reused connection.
+		ConnState: func(c net.Conn, state http.ConnState) {
+			if g, ok := c.(*uploadGuardConn); ok && state == http.StateIdle {
+				g.restart()
+			}
+		},
 	}
+	guarded := uploadGuardListener{Listener: listener, timeout: s.transfers.headerDeadline}
 	go func() {
-		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := s.server.Serve(guarded); err != nil && err != http.ErrServerClosed {
 			s.log.Error("ws server error", "error", err)
 		}
 	}()
@@ -1145,6 +1251,18 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
+	// Cancel every running upload first. A transfer holds (over SFTP) a
+	// pooled connection reference for its lifetime and nothing else in this
+	// teardown would release it, and the POST that carries its body waits
+	// on the transfer — so an uncancelled one would also hold Shutdown open
+	// below. The wait inside is bounded and never waits for the upload.
+	s.cancelAllTransfers()
+	// And let go of every unredeemed source ticket. Each holds an open
+	// descriptor on a file a person chose (ws_upload_source.go), and a
+	// stopped server is the last of the three events that end that
+	// interval — the other two being the claim and the TTL.
+	s.sources.Close()
+
 	// Cancel and drain in-flight off-loop control work (probes, dialogs).
 	// Cancellation makes cooperative tasks return promptly; waitDrained
 	// bounds the wait at controlDrainTimeout (the documented maximum, see

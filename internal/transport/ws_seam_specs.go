@@ -59,11 +59,20 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
-		// dialog.openFile owns its own admission (dialog capacity-one
-		// composed with the lane, wrapped in the inflight set).
+		// The dialog methods run under a bounded queue submission wrapped
+		// in the inflight set; the native-picker capability itself is
+		// dialogAdmit, a capacity-one WAITING gate the handler acquires on
+		// the task goroutine (ws.go says why it may not be a submission's).
 		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
-			h := dialogHandlers{dialog: dialog, r: r}
+			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
+		}),
+		// dialog.openFileForUpload rides the SAME capacity-one picker
+		// gate: it opens the same native picker, and two pickers must
+		// never stack whichever method asked for them.
+		regResponder(s.dialogSub, "dialog.openFileForUpload", noParams(), func(r Responder) handlerFunc {
+			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFileForUpload(ctx, req) }
 		}),
 		regResponder(s.lane, "sshConfig.aliases", noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}

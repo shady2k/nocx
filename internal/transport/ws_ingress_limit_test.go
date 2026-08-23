@@ -100,7 +100,7 @@ func TestOversizedFrame_DoesNotStallSessionInput(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, conn, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
 	// 2 MiB of params on an ordinary method: above the default budget,
 	// comfortably below the read limit.

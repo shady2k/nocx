@@ -18,6 +18,48 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 )
 
+// readLifecycleWhere answers with the first lifecycle.changed on this
+// connection that `want` accepts, RAW and decoded — the lifecycle half of
+// readIntegrationWhere, and bought the same way.
+//
+// A test that registers its lane after `open` has RETURNED is racing
+// handleOpen's tail, which replays the lane's current projection as soon as
+// the subscriber is installed. Land that replay after the test has already
+// published a fact and the projection goes out TWICE, so a wait that skipped
+// "the prompt_ready" by position read the DUPLICATE instead of the loss it
+// meant. That is TestLifecycleRecoverAck_Rejections failing on "a live
+// session's lost fact must carry the recovery contract", which is what a
+// prompt_ready fact looks like to a reader expecting a lost one; injecting
+// the replay reproduces all five subtests exactly.
+//
+// So a wait for a fact names the fact. Not the count before it — the count is
+// not the test's to choose.
+func readLifecycleWhere(t *testing.T, conn *websocket.Conn, what string,
+	want func(lifecyclepub.Fact) bool,
+) (json.RawMessage, lifecyclepub.Fact) {
+	t.Helper()
+	deadline := time.Now().Add(wantWithin)
+	for {
+		msg, err := awaitFrame(conn, deadline, isNotification("lifecycle.changed"))
+		if err != nil {
+			t.Fatalf("waiting for %s: %v", what, err)
+		}
+		f, _ := decodeFrame(msg)
+		var fact lifecyclepub.Fact
+		if derr := json.Unmarshal(f.Params, &fact); derr != nil {
+			t.Fatalf("decode lifecycle.changed: %v\nraw: %s", derr, f.Params)
+		}
+		if want(fact) {
+			return f.Params, fact
+		}
+	}
+}
+
+// lifecycleIs accepts a published fact that reports this lifecycle state.
+func lifecycleIs(state string) func(lifecyclepub.Fact) bool {
+	return func(f lifecyclepub.Fact) bool { return f.Lifecycle == state }
+}
+
 // lifecycleTestEnv boots a WSServer and connects one client, exactly like the
 // files and git test envs; lifecycle wiring is added per test because only
 // some of them need a publisher.
@@ -528,21 +570,17 @@ func TestLifecycleChanged_ReplayOnAttachAfterLoss(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
+	readLifecycleWhere(t, e.conn, "the hello's prompt_ready fact",
+		lifecycleIs(lifecyclepub.LifecyclePromptReady))
 
 	// The SSH transport dies while the frontend is detached. The lost fact
-	// is published (and consumed here); the domain is permanently lost.
+	// is published (and consumed here, by name rather than by position);
+	// the domain is permanently lost.
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	lost := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
-	var lostParams lifecyclepub.Fact
-	if err := json.Unmarshal(lost, &lostParams); err != nil {
-		t.Fatalf("decode lost: %v", err)
-	}
-	if lostParams.Lifecycle != lifecyclepub.LifecycleLost {
-		t.Fatalf("fact after loss = %+v, want lost", lostParams)
-	}
+	_, lostParams := readLifecycleWhere(t, e.conn, "the lane's lost fact",
+		lifecycleIs(lifecyclepub.LifecycleLost))
 
 	// Detach and reattach: the replay must re-emit the LOST projection.
 	e.ws.getRx(session.ID(sid)).setSubscriber(nil, nil)
@@ -821,15 +859,16 @@ func recoverEnv(t *testing.T) (*lifecycleTestEnv, *lifecyclepub.Publisher, strin
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
+	readLifecycleWhere(t, e.conn, "the hello's prompt_ready fact",
+		lifecycleIs(lifecyclepub.LifecyclePromptReady))
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
-	var lost lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &lost); err != nil {
-		t.Fatalf("decode lost: %v", err)
-	}
+	// The lost fact BY NAME. A duplicate prompt_ready — the open handler's
+	// replay, landing after the ingest — sits exactly where this read is,
+	// and reading the next fact rather than the wanted one takes it.
+	_, lost := readLifecycleWhere(t, e.conn, "the lane's lost fact",
+		lifecycleIs(lifecyclepub.LifecycleLost))
 	if lost.Recovery == nil {
 		t.Fatal("a live session's lost fact must carry the recovery contract")
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -47,6 +48,25 @@ const (
 	// fsModeNeverInit accepts the subsystem and never answers the version
 	// handshake either — FSConn construction itself must time out.
 	fsModeNeverInit
+	// fsModeNoPosixRename serves a real SFTP server with the
+	// posix-rename@openssh.com extension withheld: the request is answered
+	// SSH_FX_OP_UNSUPPORTED, as OpenSSH answers an extension it does not
+	// implement. Everything else is served normally.
+	fsModeNoPosixRename
+	// fsModeStallWrites serves a real SFTP server that answers every
+	// request except SSH_FXP_WRITE, which it swallows forever — a write
+	// wedged against a silent server, unblockable only by closing the
+	// subsystem.
+	fsModeStallWrites
+)
+
+// SFTP packet types this file's fixtures speak directly (draft-ietf-secsh-
+// filexfer-02 §3, and posix-rename@openssh.com in OpenSSH's PROTOCOL).
+const (
+	fsPktWrite            = 6   // SSH_FXP_WRITE
+	fsPktStatus           = 101 // SSH_FXP_STATUS
+	fsPktExtended         = 200 // SSH_FXP_EXTENDED
+	fsStatusOpUnsupported = 8   // SSH_FX_OP_UNSUPPORTED
 )
 
 // fsTestServer is the FSConn test double for testSSHServer: the existing
@@ -205,6 +225,10 @@ func (s *fsTestServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Reques
 				s.serveNeverReply(ch, false)
 			case fsModeNeverInit:
 				s.serveNeverReply(ch, true)
+			case fsModeNoPosixRename:
+				s.serveSFTPFiltered(ch, filterNoPosixRename)
+			case fsModeStallWrites:
+				s.serveSFTPFiltered(ch, filterStallWrites)
 			default:
 				s.serveSFTP(ch)
 			}
@@ -285,6 +309,148 @@ func readSFTPPacket(r io.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	return buf[0], buf[1:], nil
+}
+
+// fsVerdict is what the filtering proxy does with one client packet.
+type fsVerdict int
+
+const (
+	// fsForward passes the packet through to the real SFTP server.
+	fsForward fsVerdict = iota
+	// fsUnsupported answers SSH_FX_OP_UNSUPPORTED without forwarding —
+	// what a server that does not implement an extension replies.
+	fsUnsupported
+	// fsSwallow never answers at all — a request wedged against a silent
+	// server, unblockable only by closing the subsystem.
+	fsSwallow
+)
+
+// filterNoPosixRename withholds posix-rename@openssh.com and nothing else.
+// pkg/sftp's Client.PosixRename sends the extended request unconditionally
+// rather than consulting the VERSION advertisement (client.go:912), so what
+// distinguishes a server without the extension is the status it returns,
+// which is exactly what this reproduces.
+func filterNoPosixRename(typ byte, payload []byte) fsVerdict {
+	if typ == fsPktExtended && fsExtendedName(payload) == "posix-rename@openssh.com" {
+		return fsUnsupported
+	}
+	return fsForward
+}
+
+// filterStallWrites answers everything but SSH_FXP_WRITE, which never comes
+// back — the open succeeds, the first write hangs.
+func filterStallWrites(typ byte, _ []byte) fsVerdict {
+	if typ == fsPktWrite {
+		return fsSwallow
+	}
+	return fsForward
+}
+
+// fsExtendedName reads the extended-request name out of an SSH_FXP_EXTENDED
+// payload (uint32 request-id, string extended-request).
+func fsExtendedName(payload []byte) string {
+	if len(payload) < 8 {
+		return ""
+	}
+	n := binary.BigEndian.Uint32(payload[4:8])
+	if uint64(len(payload)) < 8+uint64(n) {
+		return ""
+	}
+	return string(payload[8 : 8+n])
+}
+
+// fsPacketID reads the request id every packet this fixture answers carries
+// first in its payload.
+func fsPacketID(payload []byte) uint32 {
+	if len(payload) < 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(payload[:4])
+}
+
+// fsFramePacket re-frames a packet the proxy read back into wire form.
+func fsFramePacket(typ byte, payload []byte) []byte {
+	out := make([]byte, 4, 5+len(payload))
+	// #nosec G115 — fixture packets are a few hundred bytes; the SFTP
+	// length prefix is uint32 by protocol.
+	binary.BigEndian.PutUint32(out, uint32(1+len(payload)))
+	out = append(out, typ)
+	return append(out, payload...)
+}
+
+// fsStatusPacket builds an SSH_FXP_STATUS reply: id, code, message, lang.
+func fsStatusPacket(id uint32, code uint32, msg string) []byte {
+	payload := make([]byte, 0, 16+len(msg))
+	payload = binary.BigEndian.AppendUint32(payload, id)
+	payload = binary.BigEndian.AppendUint32(payload, code)
+	// #nosec G115 — msg is a fixture constant.
+	payload = binary.BigEndian.AppendUint32(payload, uint32(len(msg)))
+	payload = append(payload, msg...)
+	payload = binary.BigEndian.AppendUint32(payload, 0) // empty language tag
+	return fsFramePacket(fsPktStatus, payload)
+}
+
+// serveSFTPFiltered puts a packet filter between the client and a real SFTP
+// server, so a fixture can withhold one operation the way a real server
+// does — on the wire — while everything else works. Server replies are
+// copied back verbatim; injected replies take the same write lock, so the
+// two never interleave mid-packet.
+func (s *fsTestServer) serveSFTPFiltered(ch gossh.Channel, filter func(typ byte, payload []byte) fsVerdict) {
+	defer func() { _ = ch.Close() }()
+	clientSide, serverSide := net.Pipe()
+	srv, err := sftp.NewServer(serverSide, sftp.WithServerWorkingDirectory(s.rootDir))
+	if err != nil {
+		return
+	}
+	defer func() { _ = clientSide.Close() }()
+	go func() {
+		defer func() { _ = serverSide.Close() }()
+		_ = srv.Serve()
+	}()
+
+	var wmu sync.Mutex
+	writeCh := func(b []byte) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		_, err := ch.Write(b)
+		return err
+	}
+	go func() {
+		buf := make([]byte, 64<<10)
+		for {
+			n, err := clientSide.Read(buf)
+			if n > 0 {
+				if werr := writeCh(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		typ, payload, err := readSFTPPacket(ch)
+		if err != nil {
+			return
+		}
+		switch filter(typ, payload) {
+		case fsUnsupported:
+			if werr := writeCh(fsStatusPacket(fsPacketID(payload), fsStatusOpUnsupported, "operation unsupported")); werr != nil {
+				return
+			}
+		case fsSwallow:
+			select {
+			case s.requestSeen <- struct{}{}:
+			default:
+			}
+		default:
+			if _, werr := clientSide.Write(fsFramePacket(typ, payload)); werr != nil {
+				return
+			}
+		}
+	}
 }
 
 // fsTestClient builds a RealClient pointed at the test server, cleaned up
@@ -998,4 +1164,545 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	waitPoolEmpty(t, client)
+}
+
+// ---------------------------------------------------------------------------
+// The write half — Create/Write/Close, rename and remove (design §5.1, D2, D5)
+// ---------------------------------------------------------------------------
+
+// newTestFSConnOn stands up a fixture server in mode and takes a lease on it
+// whose watchdog fires after hardTimeout. The lease is closed with the test.
+func newTestFSConnOn(t *testing.T, mode fsServerMode, hardTimeout time.Duration) (*fsConn, *fsTestServer, *RealClient) {
+	t.Helper()
+	srv := startFSTestServer(t, mode)
+	client := fsTestClient(t, srv)
+	acq, err := client.acquirePooled(context.Background(), srv.addr, fsConnectOpts(srv))
+	if err != nil {
+		t.Fatalf("acquirePooled: %v", err)
+	}
+	fc, err := newFSConnLane(acq.client, func() { client.pool.Release(acq.handle) }, context.Background(), hardTimeout)
+	if err != nil {
+		t.Fatalf("newFSConnLane: %v", err)
+	}
+	t.Cleanup(func() { _ = fc.Close() })
+	return fc, srv, client
+}
+
+// newTestFSConn is the ordinary fixture: a real SFTP server, the production
+// hard timeout, and the served directory so a test can check the bytes that
+// actually landed on disk.
+func newTestFSConn(t *testing.T) (FSConn, string) {
+	t.Helper()
+	fc, srv, _ := newTestFSConnOn(t, fsModeReal, fsHardTimeout)
+	return fc, srv.rootDir
+}
+
+// newTestFSConnWithTimeout is the same fixture with a watchdog short enough
+// that a test can prove a property about it without waiting on a duration.
+func newTestFSConnWithTimeout(t *testing.T, hardTimeout time.Duration) (FSConn, string) {
+	t.Helper()
+	fc, srv, _ := newTestFSConnOn(t, fsModeReal, hardTimeout)
+	return fc, srv.rootDir
+}
+
+// newTestFSConnNoPosixRename serves everything except the
+// posix-rename@openssh.com extension, which is answered unsupported.
+func newTestFSConnNoPosixRename(t *testing.T) (FSConn, string) {
+	t.Helper()
+	fc, srv, _ := newTestFSConnOn(t, fsModeNoPosixRename, fsHardTimeout)
+	return fc, srv.rootDir
+}
+
+// TestFSConn_CreateIsExclusiveAndDoesNotTruncate pins D5: the create is the
+// arbiter of a collision, so it must refuse an existing path rather than
+// empty it. sftp.Client.Create is O_RDWR|O_CREATE|O_TRUNC (client.go:304) and
+// would have destroyed the file this test writes first.
+func TestFSConn_CreateIsExclusiveAndDoesNotTruncate(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := c.Create(path)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("Create on an existing path must fail; sftp.Client.Create would have truncated it")
+	}
+	if f != nil {
+		t.Fatal("Create returned a handle alongside the error")
+	}
+
+	got, err := os.ReadFile(path) // #nosec G304 — test-owned path under the fixture's served temp directory.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("Create truncated an existing file: content is now %q", got)
+	}
+}
+
+// TestFSConn_CreateWriteClose_LandsTheBytes is the paired success: on an
+// ordinary server the write half writes, and the file on disk is exactly
+// what was written.
+func TestFSConn_CreateWriteClose_LandsTheBytes(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "new.txt")
+
+	f, err := c.Create(path)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := []byte("hello upload")
+	n, err := f.Write(want)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(want) {
+		t.Fatalf("Write n = %d, want %d", n, len(want))
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+
+	got, err := os.ReadFile(path) // #nosec G304 — test-owned path under the fixture's served temp directory.
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("file contains %q, want %q", got, want)
+	}
+}
+
+// TestFSConn_ManyShortWritesOutliveTheHardTimeout is D2 stated as a test:
+// the watchdog times one lane CALL, never the transfer, so a transfer made
+// of short chunks runs arbitrarily longer than fsHardTimeout without
+// poisoning the lease. It deliberately does not sleep — it makes many real
+// calls whose sum exceeds a deliberately short watchdog while each one is
+// short.
+func TestFSConn_ManyShortWritesOutliveTheHardTimeout(t *testing.T) {
+	c, dir := newTestFSConnWithTimeout(t, 200*time.Millisecond)
+	path := filepath.Join(dir, "big.bin")
+	f, err := c.Create(path)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	chunk := bytes.Repeat([]byte("x"), 4096)
+	const chunks = 40
+	start := time.Now()
+	for i := 0; i < chunks; i++ {
+		if _, writeErr := f.Write(chunk); writeErr != nil {
+			t.Fatalf("write %d failed — the watchdog is timing the transfer, not the call: %v", i, writeErr)
+		}
+	}
+	elapsed := time.Since(start)
+	if closeErr := f.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	t.Logf("%d chunks in %s against a %s watchdog", chunks, elapsed, 200*time.Millisecond)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() != int64(chunks*len(chunk)) {
+		t.Fatalf("file size = %d, want %d", info.Size(), chunks*len(chunk))
+	}
+	// The lease is still usable: nothing was poisoned along the way.
+	if _, err := c.Stat(path); err != nil {
+		t.Fatalf("lease unusable after the transfer: %v", err)
+	}
+}
+
+// TestFSConn_WriteHalfRespectsTheLease proves the write half runs INSIDE the
+// lane rather than beside it: after the lease is released, every call on it —
+// including the ones a handle makes — reports the lease's own state instead
+// of reaching the wire. A *sftp.File handed out raw would happily keep
+// writing here.
+func TestFSConn_WriteHalfRespectsTheLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "closed.txt")
+	f, err := c.Create(path)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("lease Close: %v", err)
+	}
+
+	if _, err := f.Write([]byte("x")); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Write after lease Close = %v, want ErrFSClosed", err)
+	}
+	if err := f.Close(); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("handle Close after lease Close = %v, want ErrFSClosed", err)
+	}
+	if _, err := c.Create(filepath.Join(dir, "other.txt")); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Create after lease Close = %v, want ErrFSClosed", err)
+	}
+	if err := c.PosixRename(path, filepath.Join(dir, "b")); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("PosixRename after lease Close = %v, want ErrFSClosed", err)
+	}
+	if err := c.Rename(path, filepath.Join(dir, "b")); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Rename after lease Close = %v, want ErrFSClosed", err)
+	}
+	if err := c.Remove(path); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Remove after lease Close = %v, want ErrFSClosed", err)
+	}
+	// Nothing reached the server after the lease was released.
+	if _, err := os.Stat(filepath.Join(dir, "other.txt")); !os.IsNotExist(err) {
+		t.Fatalf("a call escaped the released lease and created a file: %v", err)
+	}
+}
+
+// TestFSConn_WedgedWriteIsUnblockedByPoison closes the interval the lane
+// opens: a write against a server that never answers is stuck from the
+// moment its packet leaves until the watchdog poisons the lease, which
+// closes the subsystem and is the only thing that unblocks it. The handle is
+// invalidated by the same event, so nothing survives the poisoning.
+func TestFSConn_WedgedWriteIsUnblockedByPoison(t *testing.T) {
+	fc, srv, client := newTestFSConnOn(t, fsModeStallWrites, 300*time.Millisecond)
+	f, err := fc.Create(filepath.Join(srv.rootDir, "stalled.bin"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	outCh := make(chan error, 1)
+	go func() {
+		_, werr := f.Write([]byte("payload"))
+		outCh <- werr
+	}()
+	select {
+	case <-srv.requestSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never received the WRITE request")
+	}
+
+	select {
+	case werr := <-outCh:
+		if !errors.Is(werr, ErrFSDead) {
+			t.Fatalf("wedged Write = %v, want ErrFSDead", werr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wedged Write did not return after the hard timeout — poisoning did not unblock it")
+	}
+
+	// The handle is dead with the lease, not merely this one call.
+	if _, werr := f.Write([]byte("more")); !errors.Is(werr, ErrFSDead) {
+		t.Fatalf("Write after poison = %v, want ErrFSDead", werr)
+	}
+	if werr := f.Close(); !errors.Is(werr, ErrFSDead) {
+		t.Fatalf("Close after poison = %v, want ErrFSDead", werr)
+	}
+	waitPoolEmpty(t, client)
+}
+
+// TestFSConn_PosixRenameUnsupportedIsDistinguishable pins the one error the
+// sink's fallback keys on (D6). A server without the extension must be
+// distinguishable from a dead lease, a lost connection, a released lease and
+// an ordinary failure — otherwise the fallback either never runs or runs
+// when it must not.
+func TestFSConn_PosixRenameUnsupportedIsDistinguishable(t *testing.T) {
+	c, dir := newTestFSConnNoPosixRename(t)
+	if err := os.WriteFile(filepath.Join(dir, "a"), []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := c.PosixRename(filepath.Join(dir, "a"), filepath.Join(dir, "b"))
+	if !errors.Is(err, ErrPosixRenameUnsupported) {
+		t.Fatalf("the fallback keys on exactly this error; got %v", err)
+	}
+	for _, other := range []error{ErrFSDead, ErrFSLost, ErrFSClosed, ErrFSTimedOut} {
+		if errors.Is(err, other) {
+			t.Fatalf("unsupported-extension error also matches %v — the fallback cannot tell them apart", other)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "b")); !os.IsNotExist(err) {
+		t.Fatalf("the refused rename moved the file anyway: %v", err)
+	}
+
+	// The lease survives a refused extension: it is a server capability
+	// answer, not a transport failure.
+	if _, err := c.Stat(filepath.Join(dir, "a")); err != nil {
+		t.Fatalf("lease unusable after an unsupported extension: %v", err)
+	}
+}
+
+// TestFSConn_PosixRename_ReplacesOnAnOrdinaryServer is the paired success:
+// on a server that has the extension, the rename happens and replaces an
+// existing destination atomically (D6).
+func TestFSConn_PosixRename_ReplacesOnAnOrdinaryServer(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	src := filepath.Join(dir, "temp.nocx-upload-1")
+	dst := filepath.Join(dir, "dest.txt")
+	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.PosixRename(src, dst); err != nil {
+		t.Fatalf("PosixRename: %v", err)
+	}
+	got, err := os.ReadFile(dst) // #nosec G304 — test-owned path under the fixture's served temp directory.
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("dest contains %q, want %q", got, "new")
+	}
+	if _, statErr := os.Stat(src); !os.IsNotExist(statErr) {
+		t.Fatalf("source still present after the rename: %v", statErr)
+	}
+
+	// The other half of the same partition: on a server that HAS the
+	// extension, an ordinary failure must not claim the extension is
+	// missing, or the fallback replaces a file the server was willing to
+	// replace atomically.
+	err = c.PosixRename(filepath.Join(dir, "missing"), filepath.Join(dir, "c"))
+	if err == nil {
+		t.Fatal("PosixRename of a missing source succeeded")
+	}
+	if errors.Is(err, ErrPosixRenameUnsupported) {
+		t.Fatalf("a missing source was reported as an unsupported extension: %v", err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PosixRename of a missing source = %v, want os.ErrNotExist", err)
+	}
+}
+
+// TestFSConn_Rename_MovesAFile is the plain v3 rename's success half: the
+// fallback's two moves (dest → backup, temp → dest) are this call.
+func TestFSConn_Rename_MovesAFile(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	src := filepath.Join(dir, "src.txt")
+	dst := filepath.Join(dir, "dst.txt")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Rename(src, dst); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	got, err := os.ReadFile(dst) // #nosec G304 — test-owned path under the fixture's served temp directory.
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("dest contains %q, want %q", got, "payload")
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source still present after the rename: %v", err)
+	}
+}
+
+// TestFSConn_Rename_MissingSourceFails is its failure half: the call the
+// fallback makes can fail, and it must say so rather than report success.
+func TestFSConn_Rename_MissingSourceFails(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	err := c.Rename(filepath.Join(dir, "missing.txt"), filepath.Join(dir, "dst.txt"))
+	if err == nil {
+		t.Fatal("Rename of a missing source succeeded")
+	}
+	if errors.Is(err, ErrPosixRenameUnsupported) {
+		t.Fatalf("an ordinary rename failure claimed the extension is unsupported: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dst.txt")); !os.IsNotExist(err) {
+		t.Fatalf("a failed rename created the destination: %v", err)
+	}
+}
+
+// TestFSConn_Remove_DeletesAFile is the success half of the fallback's last
+// step, unlinking the backup once the replacement is in place.
+func TestFSConn_Remove_DeletesAFile(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "bak.txt")
+	if err := os.WriteFile(path, []byte("backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Remove(path); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file still present after Remove: %v", err)
+	}
+}
+
+// TestFSConn_Remove_MissingPathFails is its failure half: a cleanup that
+// silently succeeds on a path it never removed hides a leaked temp file.
+func TestFSConn_Remove_MissingPathFails(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	err := c.Remove(filepath.Join(dir, "never-existed"))
+	if err == nil {
+		t.Fatal("Remove of a missing path succeeded")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove of a missing path = %v, want os.ErrNotExist", err)
+	}
+}
+
+// ── the read-stream half (FSConn.Open) ───────────────────────────────────
+
+// TestFSConn_OpenReadsAFileBackOverTheLease is the paired success for the
+// read direction, against a real SFTP server: the handle opens, reports the
+// size the file actually has, and reads back byte for byte.
+func TestFSConn_OpenReadsAFileBackOverTheLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	want := []byte("hello download")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, size, err := c.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	if size != int64(len(want)) {
+		t.Fatalf("size = %d, want %d", size, len(want))
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("read %q, want %q", got, want)
+	}
+}
+
+// TestFSConn_OpenRefusesADirectory pins the kind check, which is the one
+// thing about this method that is not obvious from its signature. Opening a
+// directory over SFTP SUCCEEDS on an OpenSSH server and fails only at the
+// first read, so without the check a download of a folder would become a
+// framed 200 that dies mid-body — and the person would be told the transfer
+// broke rather than that they picked a folder.
+func TestFSConn_OpenRefusesADirectory(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _, err := c.Open(sub)
+	if err == nil {
+		_ = r.Close()
+		t.Fatal("Open of a directory succeeded; the kind check is what keeps it out of a framed response")
+	}
+	if !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("Open of a directory: %v, want ErrNotRegularFile", err)
+	}
+	if r != nil {
+		t.Fatal("Open returned a handle alongside the error")
+	}
+}
+
+// TestFSConn_OpenOfAMissingPathReportsNotExist is the contract
+// transfer.RemoteReadFS documents and the compiler cannot check: the
+// transport turns fs.ErrNotExist into a request-shaped refusal a person can
+// act on, and anything unclassified into a server fault.
+func TestFSConn_OpenOfAMissingPathReportsNotExist(t *testing.T) {
+	c, dir := newTestFSConn(t)
+
+	if _, _, err := c.Open(filepath.Join(dir, "nope")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Open of a missing path: %v, want an error satisfying fs.ErrNotExist", err)
+	}
+}
+
+// TestFSConn_ManyShortReadsOutliveTheHardTimeout is D2 in the read
+// direction, and it is the assertion that makes a large download possible
+// at all: the watchdog times one lane CALL and never the transfer, so a
+// read made of short chunks runs arbitrarily longer than the hard timeout
+// without poisoning the lease. Like its write counterpart it sleeps for
+// nothing — it makes many real calls whose sum exceeds a deliberately short
+// watchdog while each one is short.
+func TestFSConn_ManyShortReadsOutliveTheHardTimeout(t *testing.T) {
+	c, dir := newTestFSConnWithTimeout(t, 200*time.Millisecond)
+	path := filepath.Join(dir, "big.bin")
+	const chunks = 40
+	body := bytes.Repeat([]byte("y"), 4096*chunks)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, size, err := c.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+	if size != int64(len(body)) {
+		t.Fatalf("size = %d, want %d", size, len(body))
+	}
+	buf := make([]byte, 4096)
+	var total int
+	start := time.Now()
+	for total < len(body) {
+		n, readErr := r.Read(buf)
+		total += n
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			t.Fatalf("read at %d failed — the watchdog is timing the transfer, not the call: %v", total, readErr)
+		}
+	}
+	elapsed := time.Since(start)
+	if total != len(body) {
+		t.Fatalf("read %d of %d bytes", total, len(body))
+	}
+	t.Logf("%d chunks in %s against a %s watchdog", chunks, elapsed, 200*time.Millisecond)
+	// The lease is still usable: nothing was poisoned along the way. That
+	// is the assertion, and it is a state rather than a duration — a
+	// watchdog that timed the whole read would have poisoned the lease
+	// before this line, and the loop above would already have failed.
+	if _, err := c.Stat(path); err != nil {
+		t.Fatalf("lease unusable after the transfer: %v", err)
+	}
+}
+
+// TestFSConn_ReadHalfRespectsTheLease proves the read half runs INSIDE the
+// lane rather than beside it: after the lease is released, every call the
+// handle makes reports the lease's own state instead of reaching the wire.
+// A *sftp.File handed out raw would happily keep reading here — which is
+// the whole reason fsReadFile keeps the lease instead of the file.
+func TestFSConn_ReadHalfRespectsTheLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := c.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("lease Close: %v", err)
+	}
+
+	if _, err := r.Read(make([]byte, 4)); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Read after lease Close = %v, want ErrFSClosed", err)
+	}
+	if err := r.Close(); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("handle Close after lease Close = %v, want ErrFSClosed", err)
+	}
+}
+
+// TestFSConn_OpenAfterCloseReportsAClosedLease closes the read handle's
+// interval at the far end: once the lease is closed nothing opened through
+// it can succeed, and the failure is the lease's own typed answer rather
+// than an I/O error nobody can classify.
+func TestFSConn_OpenAfterCloseReportsAClosedLease(t *testing.T) {
+	c, dir := newTestFSConn(t)
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, _, err := c.Open(path); !errors.Is(err, ErrFSClosed) {
+		t.Fatalf("Open on a closed lease: %v, want ErrFSClosed", err)
+	}
 }

@@ -248,8 +248,8 @@ func TestDeadResize_DoesNotDelayAnotherSession(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	deadSID := openSSHOverSocket(t, conn, 1)
-	liveSID := openSSHOverSocket(t, conn, 2)
+	deadSID := openSSHOverSocket(t, ws, conn, 1)
+	liveSID := openSSHOverSocket(t, ws, conn, 2)
 
 	// Fire a resize at the dead session, then wait until it is genuinely
 	// in flight: the read loop must already have moved past the request.
@@ -287,7 +287,7 @@ func TestDeadResize_DoesNotDelayItsOwnClose(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, conn, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
 	sendResizeRaw(t, conn, sid, 100, 30, 1)
 	select {
@@ -317,7 +317,7 @@ func TestRapidResizesSettleOnLastDimensions(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, conn, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
 	// A window drag fires a burst of resizes with nobody awaiting the
 	// answers — exactly how the renderer sends them. Hold the first in
@@ -352,30 +352,16 @@ func TestRapidResizesSettleOnLastDimensions(t *testing.T) {
 		"rapid resize burst")
 }
 
-// awaitResponse reads frames until the response with the given id arrives,
-// discarding notifications and other ids (they are collected separately
-// afterwards). It is the sync point for "the read loop has processed a
-// specific request".
+// awaitResponse waits for the response with the given id. It is the sync
+// point for "the read loop has processed a specific request".
+//
+// Notifications and other ids seen on the way are RETAINED, not discarded:
+// the tests that use this collect them afterwards, and this used to be the
+// reader that had already thrown them away (ws_inbox_test.go).
 func awaitResponse(t *testing.T, conn *websocket.Conn, id int, d time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	_ = conn.SetReadDeadline(deadline)
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("await response %d: %v", id, err)
-		}
-		var env struct {
-			ID json.RawMessage `json:"id"`
-		}
-		if json.Unmarshal(data, &env) != nil || len(env.ID) == 0 || string(env.ID) == "null" {
-			continue // notification
-		}
-		var got int
-		if json.Unmarshal(env.ID, &got) != nil || got != id {
-			continue
-		}
-		return
+	if _, err := awaitFrame(conn, time.Now().Add(d), isResponseTo(id)); err != nil {
+		t.Fatalf("await response %d: %v", id, err)
 	}
 }
 
@@ -388,7 +374,7 @@ func TestResizeAfterCloseAdmissionNeverReachesSession(t *testing.T) {
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, conn, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
 	// One resize in flight, one queued behind it, when close is admitted.
 	sendResizeRaw(t, conn, sid, 100, 30, 1)
@@ -455,7 +441,7 @@ func TestResizeFromAttachedConnectionAfterCloseIsRefused(t *testing.T) {
 	t.Cleanup(func() { _ = connA.Close() })
 	t.Cleanup(func() { _ = connB.Close() })
 
-	sid := openSSHOverSocket(t, connA, 1)
+	sid := openSSHOverSocket(t, ws, connA, 1)
 
 	// Connection B attaches, so the session is in B's connState too — the
 	// state gate alone can no longer refuse B's resize.

@@ -324,9 +324,26 @@ select:focus-visible {
      spent 13% of it on air before a surface added its own — the Git panel's
      rows were losing the file name to it. The header and the body move
      together, because the invariant below is that they match. */
-  padding: 12px var(--space-2);
+  /* Asymmetric on purpose: the room ABOVE separates the panel's name from
+     the tab strip, the room BELOW only pushed the content away from the
+     title it belongs to. 12px each side put 24px between the heading and the
+     first row once a surface added its own group spacing, which read as a
+     gap rather than as a join (owner, 2026-08-22). */
+  /* NOTHING below. The room above separates the panel's name from the tab
+     strip; the room below only pushed the content away from the title it
+     belongs to, and every surface adds its own spacing under the header
+     anyway. Every activity-bar panel, because they are one family and this
+     is the kit's decision to make once (owner, 2026-08-22). */
+  padding: 12px var(--space-2) 0;
   font-weight: 600;
-  font-size: var(--font-size-sm);
+  /* BODY SIZE, and it is shared by every panel — Files, Git, Ports,
+     Operations — so they stay one family. It was --font-size-sm, which left
+     a panel's own name SMALLER than the content inside it once the
+     operations row took its title to body size: an inverted hierarchy, where
+     the quietest thing on screen was the one that says where you are
+     (owner, 2026-08-22). Uppercase at 600 with the tracking below carries a
+     title at this size without shouting. */
+  font-size: var(--font-size-md);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   display: flex;
@@ -353,13 +370,40 @@ select:focus-visible {
 }
 
 /* The title never gives up room to an action — losing the panel's name is a
-   worse trade than truncating what sits beside it. */
+   worse trade than truncating what sits beside it.
+
+   AND IT CARRIES NO DEFAULTS OF ITS OWN. This rule set only `flex`, so the
+   h2 kept the user agent's `font-size: 1.5em` and `margin: 0.83em 0`: the
+   header asked for 14px and rendered 21px, with about 35px of heading margin
+   inside a box whose own padding had just been trimmed to nothing. The header
+   measured 72px tall and the gap the owner kept pointing at was never the
+   padding at all (owner, 2026-08-22). `.ui-section h2` has always reset both;
+   this one had been missed. `inherit` rather than a token, because the header
+   above already declares the size and two declarations would drift. */
 .ui-sidebar-view__header > h2 {
   flex: 0 0 auto;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.2;
 }
 
+/* The pinned filter row — the slot `SidebarViewDescriptor.filter` lands in.
+   It carries the SAME horizontal inset as the header above it and the body
+   below it, because the three are one column and a control that starts 8px
+   left of the list it narrows reads as a broken layout. That was the state:
+   the row had no box at all, so the one control a user aims at was the one
+   thing out of column, and each panel was left to remember the inset for
+   itself — which is how `.files-filter` came to add 16px and end up 48px
+   narrower than the panel around it (nocx-708q.2).
+
+   The vertical padding is the kit's too, for the same reason the header's
+   is: the header deliberately has NO room below it, so the space between
+   the panel's name and its filter has to come from somewhere, and one
+   answer here beats the same rule written in four surfaces. */
 .ui-sidebar-view__filter {
   flex: 0 0 auto;
+  padding: var(--space-2);
 }
 
 /* The body carries the SAME horizontal padding as the header. Content running
@@ -371,6 +415,19 @@ select:focus-visible {
   min-height: 0;
   overflow-y: auto;
   padding: 0 var(--space-2);
+}
+
+/* AND WHEN THERE IS NO FILTER ROW, THE BODY SUPPLIES THE ROOM IT WOULD HAVE.
+   The header carries nothing below it on purpose (see above) on the argument
+   that whatever follows it does — and for four panels that is the filter row,
+   whose own `var(--space-2)` is exactly this room. Operations has no filter,
+   so nothing followed the header and nothing supplied it: its panel name and
+   its first group heading touched, which is the one place the family visibly
+   broke (owner, 2026-08-23). The room is the SHELL's either way, so a panel
+   that wants no filter does not have to remember it — and a panel that has
+   one is untouched, because the filter is then the adjacent sibling. */
+.ui-sidebar-view__header + .ui-sidebar-view__body {
+  padding-top: var(--space-2);
 }
 
 /* ── Settings-specific fix: .st-container needs min-height: 0 ──────── */

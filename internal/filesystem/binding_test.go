@@ -117,11 +117,11 @@ func owner(sids ...session.ID) fakeCaller {
 
 func TestRegisterMintsUnguessableIDs(t *testing.T) {
 	reg := New()
-	id1, err := reg.Register(newStubProvider(), "s1", "")
+	id1, err := reg.Register(newStubProvider(), "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := reg.Register(newStubProvider(), "s1", "")
+	id2, err := reg.Register(newStubProvider(), "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestRegisterMintsUnguessableIDs(t *testing.T) {
 	if _, err := hex.DecodeString(id1); err != nil {
 		t.Fatalf("id %q not hex: %v", id1, err)
 	}
-	if _, err := reg.Register(nil, "s1", ""); err == nil {
+	if _, err := reg.Register(nil, "s1", "", Capabilities{}); err == nil {
 		t.Fatal("Register accepted a nil provider")
 	}
 }
@@ -149,7 +149,7 @@ func TestAcquireUnknownBinding(t *testing.T) {
 
 func TestAcquireRequiresOwnership(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "")
+	id, err := reg.Register(newStubProvider(), "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestAcquireRequiresOwnership(t *testing.T) {
 
 func TestBindingIdentityAccessors(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "v1:abc")
+	id, err := reg.Register(newStubProvider(), "s1", "v1:abc", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestBindingIdentityAccessors(t *testing.T) {
 // errors with ErrHandleReleased.
 func TestHandleValidUntilReleaseInvalidAfter(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "")
+	id, err := reg.Register(newStubProvider(), "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestHandleValidUntilReleaseInvalidAfter(t *testing.T) {
 
 func TestReleaseIsIdempotent(t *testing.T) {
 	reg := New()
-	id, err := reg.Register(newStubProvider(), "s1", "")
+	id, err := reg.Register(newStubProvider(), "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestReleaseIsIdempotent(t *testing.T) {
 func TestCloseWaitsForTheUseGuard(t *testing.T) {
 	reg := New()
 	p := newStubProvider()
-	id, err := reg.Register(p, "s1", "")
+	id, err := reg.Register(p, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,15 +312,15 @@ func TestCloseSessionClosesOnlyThatSessionsBindings(t *testing.T) {
 	pA := newStubProvider()
 	pB := newStubProvider()
 	pC := newStubProvider()
-	idA, err := reg.Register(pA, "s1", "")
+	idA, err := reg.Register(pA, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	idB, err := reg.Register(pB, "s1", "")
+	idB, err := reg.Register(pB, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	idC, err := reg.Register(pC, "s2", "")
+	idC, err := reg.Register(pC, "s2", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestCloseSessionClosesOnlyThatSessionsBindings(t *testing.T) {
 func TestWatchSwapIsAtomicAndReplaces(t *testing.T) {
 	reg := New()
 	p := newStubProvider()
-	id, err := reg.Register(p, "s1", "")
+	id, err := reg.Register(p, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestWatchSwapIsAtomicAndReplaces(t *testing.T) {
 func TestWatchModeAggregation(t *testing.T) {
 	reg := New()
 	p := newStubProvider()
-	id, err := reg.Register(p, "s1", "")
+	id, err := reg.Register(p, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestRegistryConcurrentUse(t *testing.T) {
 	reg := New()
 	ids := make([]string, 8)
 	for i := range ids {
-		id, err := reg.Register(newStubProvider(), session.ID("s1"), "")
+		id, err := reg.Register(newStubProvider(), session.ID("s1"), "", Capabilities{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -527,7 +527,7 @@ func (p *blockingProvider) Close() error {
 func TestUseGuardHoldsForTheCallsDuration(t *testing.T) {
 	reg := New()
 	p := newBlockingProvider()
-	id, err := reg.Register(p, "s1", "")
+	id, err := reg.Register(p, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestUseGuardHoldsForTheCallsDuration(t *testing.T) {
 func TestCloseWaitsForTheGuardBeforeTearingDownWatches(t *testing.T) {
 	reg := New()
 	p := newStubProvider()
-	id, err := reg.Register(p, "s1", "")
+	id, err := reg.Register(p, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +659,7 @@ func TestCloseReportsProviderAndWatchErrors(t *testing.T) {
 	perr := errors.New("provider close boom")
 	werr := errors.New("watch close boom")
 	p := newFailingCloseProvider(perr)
-	id, err := reg.Register(p, "s1", "")
+	id, err := reg.Register(p, "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func TestCloseReportsProviderAndWatchErrors(t *testing.T) {
 	}
 	// The clean path still reports success.
 	reg2 := New()
-	id2, err := reg2.Register(newStubProvider(), "s1", "")
+	id2, err := reg2.Register(newStubProvider(), "s1", "", Capabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +696,7 @@ func TestCloseReportsProviderAndWatchErrors(t *testing.T) {
 func TestRegisterRejectsTypedNilProvider(t *testing.T) {
 	reg := New()
 	var p *stubProvider // typed nil: non-nil interface, nil pointer
-	if _, err := reg.Register(p, "s1", ""); err == nil {
+	if _, err := reg.Register(p, "s1", "", Capabilities{}); err == nil {
 		t.Fatal("Register accepted a typed-nil provider")
 	}
 }

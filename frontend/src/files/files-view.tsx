@@ -15,17 +15,19 @@
 // there to report. The root the panel is actually showing lives on the panel
 // element as data-root, which is what the checks read.
 
-import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
+import { hasWailsWebview } from '../wails-runtime'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { EmptyState } from '../ui/empty-state'
 import { IconButton } from '../ui/icon-button'
-import { RefreshIcon } from '../ui/icons'
+import { ArrowDownIcon, ArrowUpIcon, CopyIcon, ExternalLinkIcon, RefreshIcon } from '../ui/icons'
+import { SearchField } from '../ui/search-field'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
@@ -36,6 +38,13 @@ import {
   type FilesNode,
   type FilesTreeStore,
 } from './files-store'
+import { downloadReachesTheBytes } from './download-eligibility'
+import type { DownloadSurface } from './download-surface'
+import { filterIsActive, narrowFilesRows } from './files-filter'
+import { uploadMovesTheFile } from './upload-eligibility'
+import { pickUploadSources } from './upload-picker'
+import type { UploadDestination, UploadSource } from './upload-flow'
+import type { UploadSurface } from './upload-surface'
 
 // ── The opener seam ────────────────────────────────────────────────────────
 
@@ -84,6 +93,27 @@ const FilesIcon: Component = () => (
   </svg>
 )
 
+/** The overflow mark — three dots, the same stroke vocabulary and viewBox
+ *  as the kit's icons and as FilesIcon above. It lives here for the same
+ *  reason FilesIcon does: it is this surface's glyph, and the control it
+ *  marks is the kit's IconButton. */
+const MoreIcon: Component = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <circle cx="5" cy="12" r="1" />
+    <circle cx="12" cy="12" r="1" />
+    <circle cx="19" cy="12" r="1" />
+  </svg>
+)
+
 // ── Panel ─────────────────────────────────────────────────────────────────
 
 export const FILES_VIEW_ID = 'files'
@@ -104,6 +134,25 @@ interface FilesPanelProps {
   /** The ACTIVE tab's origin — a reactive accessor, never a capture: the
    *  panel follows the tab in front. */
   activeOrigin: () => ActiveOrigin | null
+  /** The app's single upload surface, or null where none was injected —
+   *  the panel then shows no transfers and offers no Upload action, rather
+   *  than offering one that reaches nothing. */
+  upload: UploadSurface | null
+  /** How the person names the files to upload — the descriptor's own `pick`,
+   *  handed down so the row menu and the header overflow raise the SAME
+   *  picker. Building a second one here is how the two placements would come
+   *  to differ, and they would differ first over which services the picker
+   *  asks, which is the half a test substitutes. */
+  pickSources: () => Promise<UploadSource[]>
+  /** The app's single download surface, or null where none was injected —
+   *  the panel then offers no Download action, rather than offering one
+   *  that reaches nothing. */
+  download: DownloadSurface | null
+  /** "Are we inside the Wails webview" — half of the upload rule
+   *  (upload-eligibility.ts) and half of the download one
+   *  (download-eligibility.ts), handed down rather than asked here so the
+   *  panel's two menus and a test see the same answer. */
+  native: () => boolean
 }
 
 function FilesPanel(props: FilesPanelProps) {
@@ -226,9 +275,80 @@ function FilesPanel(props: FilesPanelProps) {
     }
   }
 
+  /**
+   * Upload into the directory the menu was opened on (nocx-9le.5.21).
+   *
+   * THE ROW IS THE DESTINATION, which is what makes this a different thing
+   * from the header's Upload: that one puts files in the folder the panel is
+   * SHOWING and has to say so when no reveal has landed, while here the
+   * person has named the folder by right-clicking it, so there is nothing to
+   * derive and nothing that can be unknown.
+   *
+   * It reuses the flow and the picker the panel already has — a second path
+   * to "send these files there" would be a second answer to one question,
+   * and the two would first disagree over collisions, which is the part a
+   * person is asked about.
+   */
+  const uploadInto = async (node: FilesNode): Promise<void> => {
+    const u = props.upload
+    const b = props.store.binding()
+    if (u === null || b === null) return
+    const sources = await props.pickSources()
+    if (sources.length === 0) return
+    // WHICH MACHINE, from the origin the store is BOUND to rather than from
+    // whatever tab is active now: the machine is a property of the binding,
+    // and the operations list is global, so the row has no tab to ask later.
+    await u.flow.send(
+      { bindingId: b.bindingId, destDir: node.path, machine: props.store.origin()?.machine ?? '' },
+      sources,
+    )
+  }
+
+  /**
+   * Download the file the menu was opened on (nocx-9le.8.3).
+   *
+   * THE RENDERER NAMES NO DESTINATION. It says which file, and the browser
+   * saves it wherever that person's browser saves files, under the name the
+   * backend put on Content-Disposition. There is no path for the panel to
+   * choose and it must not invent one; the desktop build's native save
+   * dialog is a backend method (nocx-9le.8.4) and will arrive as another
+   * implementation of the saver, not as a path threaded through here.
+   *
+   * It appears in the operations list because the flow records it in the
+   * download store, which the activity bar reads as a source — the same row
+   * an upload draws, with the same progress and the same cancel. There is
+   * no second list and no second row: that is the thing the operations
+   * surface exists to prevent.
+   */
+  const downloadFile = async (node: FilesNode): Promise<void> => {
+    const d = props.download
+    const b = props.store.binding()
+    if (d === null || b === null) return
+    // The machine comes off the origin the panel is already following —
+    // the same place the Upload action reads it from, and the same string,
+    // because `machine-name.ts` answered it once in the composition root.
+    await d.flow.fetch({
+      bindingId: b.bindingId,
+      path: node.path,
+      machine: props.store.origin()?.machine ?? '',
+    })
+  }
+
   /** The menu's items for the row it is open on. The two copy entries are
    *  always there — they are two different answers, and both were asked
-   *  for. Show in Finder joins only on a LOCAL origin. */
+   *  for. Upload joins only on a REMOTE origin and only on a folder; Show in
+   *  Finder joins only on a LOCAL one; Download joins wherever the bytes are
+   *  out of reach, and only on a file.
+   *
+   *  EVERY ROW CARRIES ITS MARK, from the kit's set and nowhere else
+   *  (nocx-inbw1). The column is reserved whether or not one is passed, so
+   *  three unmarked rows shipped as three empty columns and a menu that has
+   *  to be read word by word every time. Both copies wear the SAME copy
+   *  glyph deliberately: they are one verb with two objects, and the label
+   *  is what separates them — a second glyph invented to tell them apart
+   *  would be a mark that means "relative", which nothing else in the
+   *  product would honour. Show in Finder wears the external-link mark
+   *  because the action leaves nocx entirely. */
   const menuItems = (): ContextMenuItem[] => {
     const m = menu()
     if (m === null) return []
@@ -236,19 +356,90 @@ function FilesPanel(props: FilesPanelProps) {
       {
         id: 'copy-relative',
         label: 'Copy Relative Path',
+        icon: CopyIcon,
         onSelect: () => void copyPath(m.node, 'relative'),
       },
       {
         id: 'copy-absolute',
         label: 'Copy Absolute Path',
+        icon: CopyIcon,
         onSelect: () => void copyPath(m.node, 'absolute'),
       },
     ]
     const o = props.store.origin()
+    // Upload joins where an upload would actually MOVE the file, expressed
+    // as ABSENCE — the same mechanism "Show in Finder" uses below in the
+    // opposite direction, and for the same reason: where the capability does
+    // not apply to that machine, a greyed-out row would be a promise the
+    // product cannot keep. It also joins only on a folder, because a file is
+    // not a place to put a file.
+    //
+    // The rule is D9's and it is `uploadMovesTheFile`'s, not this file's
+    // (nocx-9le.5.24). It used to read `o.kind === 'ssh'` here, which is a
+    // second answer to the question the drop handler already answers — and
+    // the two disagreed about a browser on a local tab, where the drop
+    // uploads and this menu said there was no uploader.
+    //
+    // This is NOT the drop-on-a-folder-row that design §4 refuses. That
+    // refused a GESTURE — a third target rule for a drag, where the folder
+    // under the pointer is a guess about what the person meant. A menu item
+    // on a row they right-clicked is an explicit choice with an unambiguous
+    // target, and the panel's own Upload keeps its single derivation.
+    //
+    // Directory-ness is asked of isExpandable, which already owns it here
+    // (the row that draws a disclosure is the row that is a folder). That
+    // puts a cyclic symlink out of the set: it is drawn as a leaf, so the
+    // menu offers what the tree shows rather than a second reading of the
+    // same row.
+    if (
+      props.upload !== null &&
+      o !== null &&
+      uploadMovesTheFile({ native: props.native(), kind: o.kind }) &&
+      isExpandable(m.node.kind, m.node.linkKind, m.node.cyclic)
+    ) {
+      items.push({
+        id: 'upload-into',
+        label: 'Upload…',
+        // The mark the panel's other Upload already wears: one action, one
+        // glyph, whichever surface raises it.
+        icon: ArrowUpIcon,
+        onSelect: () => void uploadInto(m.node),
+      })
+    }
+    // Download joins where the person cannot reach the bytes any other way,
+    // expressed as ABSENCE — the same mechanism the two items around it use,
+    // and for the same reason: on the one combination where the file is
+    // already on the disk the window is running from, `Show in Finder` is
+    // the action for it and it is in this menu on exactly that combination.
+    //
+    // The rule is `downloadReachesTheBytes`'s and not this file's. It is a
+    // different question from the upload rule with the same answer today,
+    // and the two are separate predicates deliberately — see
+    // download-eligibility.ts for the case that would split them.
+    //
+    // Only on a FILE: a directory download is a second thing (an archive, a
+    // recursive walk, a question about symlinks) that nobody has specified,
+    // and `openable` is already the panel's owner of "is this row a file
+    // whose bytes can be got at" — the same predicate the click uses to
+    // decide whether the row opens.
+    if (
+      props.download !== null &&
+      o !== null &&
+      downloadReachesTheBytes({ native: props.native(), kind: o.kind }) &&
+      openable(m.node)
+    ) {
+      items.push({
+        id: 'download',
+        label: 'Download',
+        icon: ArrowDownIcon,
+        onSelect: () => void downloadFile(m.node),
+      })
+    }
     if (o !== null && o.kind === 'local') {
       items.push({
         id: 'reveal',
         label: 'Show in Finder',
+        icon: ExternalLinkIcon,
         onSelect: () => void revealInFinder(m.node),
       })
     }
@@ -260,6 +451,26 @@ function FilesPanel(props: FilesPanelProps) {
    *  dir expands, other (FIFO, device) does neither. */
   const openable = (node: FilesNode): boolean =>
     node.kind === 'regular' || (node.kind === 'symlink' && node.linkKind === 'regular')
+
+  /**
+   * The rows after the name filter (nocx-708q.2).
+   *
+   * NOTHING HERE WRITES TO THE STORE, and that is the whole difference
+   * between a filter and a new listing: no folder is collapsed, no page is
+   * dropped, no reveal is re-run. Clearing the box therefore restores the
+   * exact view the person had built, because that view never went anywhere
+   * — it was only being drawn through a narrower opening.
+   */
+  const visibleRows = createMemo<FilesFlatRow[]>(() =>
+    narrowFilesRows(props.store.rows(), props.store.filter()),
+  )
+  /** A filter is typed AND the tree has nothing to show for it. Not "the
+   *  tree is empty": an empty directory with no filter is a different state
+   *  and says a different thing. A memo because both this and the list read
+   *  the narrowing, and walking the tree twice per render for one answer is
+   *  the kind of waste a long tree makes visible. */
+  const filterMatchedNothing = (): boolean =>
+    filterIsActive(props.store.filter()) && visibleRows().length === 0
 
   const renderRow = (row: FilesFlatRow) => {
     if (row.kind === 'entry') {
@@ -378,6 +589,19 @@ function FilesPanel(props: FilesPanelProps) {
   // central state, and something has to be able to say WHICH machine and
   // directory this tree is: a check that waits on "a row appeared" cannot
   // tell a correct tree from a wrong machine's.
+  // THE TRANSFERS ARE NOT DRAWN HERE ANY MORE (nocx-hbdw4). They were, above
+  // the tree, and the panel was the only place a running transfer could be
+  // seen: switching sidebar view or collapsing the panel made a 2 GB upload
+  // invisible and uncancellable while it went on running on its own SSH
+  // lease. The list belongs to the activity bar's operations indicator,
+  // which is on screen whatever the panel is doing.
+  //
+  // The panel keeps NO contextual copy, and that is a decision rather than
+  // an omission. A copy would have to answer "which transfers belong to
+  // this panel", which is a second rule about where an operation appears —
+  // and the store deliberately has no bindingId to answer it with. It would
+  // also bring back exactly what the owner asked to be rid of: a finished
+  // transfer sitting above the tree until somebody dismissed it.
   return (
     <div class="files-panel" data-testid="files-panel" data-root={props.store.root()?.path}>
       <Show when={props.store.phase() === 'no-origin'}>
@@ -414,8 +638,27 @@ function FilesPanel(props: FilesPanelProps) {
             </Button>
           </div>
         </Show>
+        {/* A filter that matches nothing is a STATE, never a blank tree —
+            the Git panel's rule, and the same one action: drop the filter.
+            Without it the panel is indistinguishable from a machine with no
+            files on it. */}
+        <Show when={filterMatchedNothing()}>
+          <EmptyState
+            title="No files match"
+            description="Only the folders you have opened are searched."
+            action={
+              <Button
+                size="sm"
+                data-testid="files-filter-clear"
+                onClick={() => props.store.setFilter('')}
+              >
+                Clear filter
+              </Button>
+            }
+          />
+        </Show>
         <div class="files-tree" role="tree" aria-label="Files" ref={treeEl}>
-          <For each={props.store.rows()}>{(row) => renderRow(row)}</For>
+          <For each={visibleRows()}>{(row) => renderRow(row)}</For>
         </div>
       </Show>
       <ContextMenu
@@ -444,6 +687,29 @@ export interface FilesViewDeps {
    *  it to PaneManager.activeOrigin() through onActivePaneChange, exactly like
    *  the ports target id. */
   activeOrigin: () => ActiveOrigin | null
+  /** The app's single upload surface (upload-surface.ts). Optional so the
+   *  panel still runs standalone in a test; main.tsx owns the real one, and
+   *  the terminal drop resolves the SAME instance from the same dispatcher
+   *  — one store, because a transfer has one state. */
+  upload?: UploadSurface
+  /** How the person names the files to upload. The default raises the
+   *  native picker where Wails exists and the browser's where it does not
+   *  (upload-picker.ts); it is a parameter because a picker is the one step
+   *  a test cannot perform, and a gesture whose middle step cannot be
+   *  driven is a gesture no test can watch a user complete. */
+  pickSources?: () => Promise<UploadSource[]>
+  /** The app's single download surface (download-surface.ts). Optional so
+   *  the panel still runs standalone in a test; main.tsx owns the real one.
+   *  Absent means the Download item is not offered — the same rule the
+   *  upload surface follows, because an item that reaches nothing is worse
+   *  than no item. */
+  download?: DownloadSurface
+  /** "Are we inside the Wails webview" — half of the upload rule
+   *  (upload-eligibility.ts) and half of the download one. Defaults to the
+   *  one owner of that question; a parameter because a test cannot be in
+   *  two environments at once and each rule has four combinations that all
+   *  have to be watched. */
+  native?: () => boolean
 }
 
 /** Build the Files view descriptor. The store is created once, per
@@ -453,11 +719,88 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const opener = deps.opener ?? NOOP_OPENER
   const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
-  return {
-    id: FILES_VIEW_ID,
-    title: 'Files',
-    icon: FilesIcon,
-    actions: () => (
+  const upload = deps.upload ?? null
+  const download = deps.download ?? null
+  const native = deps.native ?? hasWailsWebview
+  /** Who asks the person for files. The default is the real picker; a
+   *  test substitutes its own, because raising a picker is the one step a
+   *  test cannot perform. */
+  const pick = (): Promise<UploadSource[]> => {
+    if (deps.pickSources !== undefined) return deps.pickSources()
+    if (upload === null) return Promise.resolve([])
+    return pickUploadSources({
+      services: upload.services,
+      report: (message, level) => showToast({ message, level }),
+    })
+  }
+
+  /**
+   * Where the panel's Upload action puts a file: the folder the panel is
+   * SHOWING (design §4), which is the path the last completed reveal
+   * reached — the tab's verified cwd, since that is what moves the panel.
+   * Null before any reveal has landed, and the action then says so rather
+   * than picking somewhere.
+   *
+   * This is the one derivation; dropping onto an individual folder row is
+   * deliberately out (§4), so there is no second rule that could disagree
+   * with it.
+   */
+  const uploadDestination = (): UploadDestination | null => {
+    const b = store.binding()
+    const folder = store.revealTarget()
+    if (b === null || folder === null) return null
+    return { bindingId: b.bindingId, destDir: folder, machine: store.origin()?.machine ?? '' }
+  }
+
+  const uploadHere = async (): Promise<void> => {
+    if (upload === null) return
+    const destination = uploadDestination()
+    if (destination === null) {
+      showToast({
+        level: 'warning',
+        message: 'nocx does not know which folder this panel is showing yet.',
+      })
+      return
+    }
+    const sources = await pick()
+    if (sources.length === 0) return
+    await upload.flow.send(destination, sources)
+  }
+
+  /**
+   * The header's actions, including the OVERFLOW.
+   *
+   * The Upload action is in the overflow menu and not in the header, and
+   * that is deliberate rather than incidental: the header is already
+   * over-full and how it overflows belongs to nocx-a8cz. A seventh button
+   * in a header that cannot hold six is the thing that bead exists to stop.
+   *
+   * The item is absent where an upload would move nothing — inside the
+   * Wails window on a local tab, and only there (upload-eligibility.ts).
+   * That is not a greyed-out row: the capability does not apply to that
+   * machine, and absence is what says so — the same rule "Show in Finder"
+   * follows in the opposite direction. The predicate is shared with the row
+   * menu and with the terminal drop, so all three give one answer about one
+   * tab (nocx-9le.5.24).
+   */
+  const FilesHeaderActions: Component = () => {
+    const [overflowAt, setOverflowAt] = createSignal<{ x: number; y: number } | null>(null)
+
+    const overflowItems = (): ContextMenuItem[] => {
+      const items: ContextMenuItem[] = []
+      const o = store.origin()
+      if (upload !== null && o !== null && uploadMovesTheFile({ native: native(), kind: o.kind })) {
+        items.push({
+          id: 'upload',
+          label: 'Upload File…',
+          icon: ArrowUpIcon,
+          onSelect: () => void uploadHere(),
+        })
+      }
+      return items
+    }
+
+    return (
       <>
         {/* Read store.root() INSIDE the JSX: a component body executes once,
             so capturing `const root = store.root()` would freeze the header
@@ -515,8 +858,65 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
             </Badge>
           </Show>
         </span>
+        {/* The overflow. It draws nothing when it would open empty — a
+            menu button that opens on nothing is worse than no button. */}
+        <Show when={overflowItems().length > 0}>
+          <IconButton
+            data-testid="files-overflow"
+            size="sm"
+            ariaLabel="More file actions"
+            title="More file actions"
+            onClick={(e: MouseEvent) => {
+              const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+              setOverflowAt({ x: r.left, y: r.bottom })
+            }}
+          >
+            <MoreIcon />
+          </IconButton>
+          <ContextMenu
+            open={overflowAt() !== null}
+            x={overflowAt()?.x ?? 0}
+            y={overflowAt()?.y ?? 0}
+            items={overflowItems()}
+            data-testid="files-overflow-menu"
+            onClose={() => setOverflowAt(null)}
+          />
+        </Show>
       </>
-    ),
+    )
+  }
+
+  /** THE FILTER, declared for the shell's pinned slot rather than rendered
+   *  in the body. Inside the body it scrolled away with the tree it filters,
+   *  which is exactly backwards: the control that narrows a long list is the
+   *  one thing that must stay reachable while you scroll it (owner,
+   *  2026-08-22). The shell pins it; this only says which child it is.
+   *
+   *  It closes over `store` the same way FilesHeaderActions does, so the
+   *  field and the tree read one signal and cannot disagree. */
+  const FilesFilter: Component = () => (
+    <div class="files-filter" data-testid="files-filter">
+      <SearchField
+        value={store.filter()}
+        onInput={(v) => store.setFilter(v)}
+        placeholder="Filter by name…"
+        ariaLabel="Filter files by name"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && store.filter() !== '') {
+            e.stopPropagation()
+            store.setFilter('')
+          }
+        }}
+      />
+    </div>
+  )
+
+  return {
+    id: FILES_VIEW_ID,
+    title: 'Files',
+    icon: FilesIcon,
+    actions: FilesHeaderActions,
+    filter: FilesFilter,
     view: (props) => (
       <FilesPanel
         store={store}
@@ -524,6 +924,10 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         opener={opener}
         clipboard={clipboard}
         activeOrigin={props.activeOrigin}
+        upload={upload}
+        download={download}
+        pickSources={pick}
+        native={native}
       />
     ),
     order: FILES_VIEW_ORDER,

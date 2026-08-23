@@ -55,10 +55,15 @@ rather than a preference.
 
 ## §1 — One gesture, and the two capabilities it needs
 
-The dialog as a whole is the drop target. The affordance appears on `dragover`
-rather than occupying height permanently — a permanent dashed box in a dialog
-that already carries two fields and a footer is a third thing competing for the
-same 480px column.
+The dialog's BODY is the drop target — the region holding the two fields, not the
+`<dialog>` element itself. `ui/dialog.tsx` does not forward arbitrary `data-*`
+onto its element (`DialogProps`, `dialog.tsx:51`), and reaching past the kit to
+set them there would be the repaint rule in another form. Same gesture for the
+person; the kit keeps its boundary.
+
+The affordance appears on `dragover` rather than occupying height permanently — a
+permanent dashed box in a dialog that already carries two fields and a footer is
+a third thing competing for the same 480px column.
 
 A drop does **both** halves of the ask in one gesture: it writes the export's
 path into the source field and proposes the destination, exactly as the file
@@ -69,6 +74,14 @@ drop delivers `File` objects with no location, and `api.import.postman` takes a
 path — so in the dev stand the drop cannot answer and typing is how it is done.
 This follows `CollectionDialog`'s established rule verbatim: a capability that is
 absent is not drawn, so it never looks like a fallback from something broken.
+
+**Which makes the capability test two conditions, not one:** a Wails runtime
+(`hasWailsWebview()`, `frontend/src/wails-runtime.ts:58`) **and** a live local
+session. The second alone is not enough and the difference is not theoretical —
+the dev stand and the e2e harness both have real local sessions and no Wails, so
+a target gated on the session alone would light up under a drag and then deliver
+nothing. A drop surface that highlights and does nothing is worse than no drop
+surface, because it has already promised.
 
 **Multiple files are refused with a sentence.** The import makes one collection;
 N collections is N destinations, which is a different question and not this one.
@@ -181,15 +194,42 @@ half of the browser drop.
 
 ## §5 — Acceptance criteria, as assertions
 
-The happy path, watched end to end (rule 2): **a person drops a Postman export
-onto the import dialog and the collection appears in the tree.**
+**The e2e suite cannot watch the native drop, and this spec says so rather than
+claiming a check it does not have.** `e2e/drop-gesture.ts` performs a BROWSER
+drop — it builds a `DataTransfer` and dispatches `DragEvent`s
+(`drop-gesture.ts:35`) — because the harness runs `cmd/devharness` plus vite and
+has no Wails. The native drop is not a DOM event at all: Wails hands Go the
+absolute paths directly, and `SourceTicketStore.Dropped` is not reachable over
+JSON-RPC by design (R2 — the wire may never mint a source). So no Playwright
+gesture can produce one.
 
-- `e2e`: dropping an export onto the dialog (via the existing `e2e/drop-gesture.ts`
-  from `nocx-9le.5`) fills the source field with its absolute path AND the
-  destination with `<defaultRoot>/<stem>`; pressing Import puts the collection in
-  the tree.
-- `e2e`: after that same drop, the terminal pane's prompt draft is **unchanged** —
-  §3's assertion, and the one that fails today.
+What covers the happy path instead is **three checks meeting at the contract**,
+which is what rule 5 says the contract is for:
+
+1. Go: `Dropped` on a local tab with `target: "api-import"` emits `files.dropped`
+   carrying the absolute path and that target.
+2. `..._OverTheWireConformsToContract` for `files.dropped` — the real
+   notification off the real socket, against the schema.
+3. Frontend: that notification fills both fields, and pressing Import calls
+   `api.import.postman` with them.
+
+The gap is named and filed rather than left implied: **no automated check watches
+a human perform the native gesture**, and `nocx-9le.5.23` ("the local-tab drop has
+no end-to-end check, and it is the half that broke twice") is the precedent for
+taking that seriously. A bead carries it.
+
+What the e2e CAN assert, and does:
+
+- `e2e`: with no Wails runtime the ask draws **no** drop target, and typing the
+  export's path plus pressing Import still puts the collection in the tree — the
+  dev-stand path, which is also every contributor's path.
+- `e2e`: the ask opens with `<defaultRoot>/` already in the destination and Import
+  disabled until it grows a last segment.
+
+And §3's assertion — the terminal not acting on the ask's drop — is a frontend
+test driving `files.dropped` directly, because that is the only place the
+notification can be produced outside the Wails window.
+
 - Frontend: opening the dialog with `defaultRoot: "/data/collections"` renders
   `/data/collections/` in `#api-import-postman-dest`, and Import is DISABLED
   until that value grows a last segment.
@@ -198,8 +238,10 @@ onto the import dialog and the collection appears in the tree.**
 - Frontend: a destination the test types is not overwritten when a source is then
   chosen (the `nocx-6hg2w.14` rule, re-asserted because this change moves the
   code that honours it).
-- Frontend: with no live local session, the dialog renders no drop target
-  (`data-file-drop-target` absent), and the source field and picker still work.
+- Frontend: with no Wails runtime, OR with no live local session, the dialog
+  renders no drop target (`data-file-drop-target` absent), and the source field
+  and picker still work. Both conditions asserted separately — they fail
+  independently and a test covering one would pass while the other was wrong.
 - Frontend: a multi-file drop leaves both fields unchanged and renders a refusal
   in the kit's validation slot.
 - Go: `Dropped` with a target naming `api-import` emits `files.dropped` carrying

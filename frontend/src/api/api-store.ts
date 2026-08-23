@@ -389,9 +389,11 @@ export interface ApiStore {
   writeEnvironment(relPath: string, environment: ApiEnvironment): Promise<void>
   importCurl(line: string): Promise<void>
   /** Convert an export into a collection folder at `dest`. The export is an
-   *  ImportSource — a path on the backend's machine, or the document itself
-   *  — because a browser drop and the kit's file input hold BYTES and no
-   *  location, and bytes reach a backend wherever it runs (api-client.ts). */
+   *  ImportSource — a path on the backend's machine, the document itself, or
+   *  a URL the backend fetches over a route — because a browser drop and the
+   *  kit's file input hold BYTES and no location, bytes reach a backend
+   *  wherever it runs, and an export can sit behind a network only the
+   *  backend is on (api-client.ts). */
   importPostman(source: ImportSource, dest: string): Promise<void>
   setRunView(id: number, view: ApiRunView): void
 }

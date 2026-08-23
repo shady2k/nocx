@@ -69,3 +69,79 @@ export function proposedDestination(defaultRoot: string, exportPath: string): st
   const root = defaultRoot.replace(/[\\/]+$/, '')
   return `${root}/${stem}`
 }
+
+/**
+ * What a pasted string IS, decided HERE and nowhere else.
+ *
+ * Two derivations of this question is the defect AGENTS.md names about `ssh`
+ * without a trailing space: they agree on every case anybody tries and
+ * disagree on the one that matters. The ask, the destination offer and the
+ * client call all read this one answer.
+ *
+ * `unusable` is a real answer rather than an error: a person who pasted a
+ * curl line gets a sentence from the ask, and no round trip is spent to
+ * learn what the form already knew. Curl is not this ask's question — it has
+ * its own door in the request editor.
+ */
+export type PastedSource =
+  { kind: 'url'; url: string } | { kind: 'document'; document: string } | { kind: 'unusable' }
+
+export function classifyPastedSource(text: string): PastedSource {
+  const trimmed = text.trim()
+  if (trimmed === '') return { kind: 'unusable' }
+  if (/^https?:\/\//i.test(trimmed)) return { kind: 'url', url: trimmed }
+  if (trimmed.startsWith('{') || trimmed.startsWith('['))
+    return { kind: 'document', document: trimmed }
+  return { kind: 'unusable' }
+}
+
+/**
+ * The destination a PASTED EXPORT proposes: `<defaultRoot>/<slug of
+ * info.name>`.
+ *
+ * A syntactic offer and not a parse of the format — the module's own rule at
+ * the top of this file. It reads one field, validates nothing, refuses
+ * nothing, and answers '' for every failure, because the backend is the only
+ * reader of hostile input and this is a suggestion in a field the person can
+ * overwrite.
+ */
+export function proposedDestinationFromDocument(defaultRoot: string, document: string): string {
+  if (defaultRoot === '') return ''
+  let name = ''
+  try {
+    const parsed: unknown = JSON.parse(document)
+    const info = (parsed as { info?: { name?: unknown } } | null)?.info
+    if (typeof info?.name === 'string') name = info.name
+  } catch {
+    return ''
+  }
+  const slug = slugify(name)
+  if (slug === '') return ''
+  return `${defaultRoot.replace(/[\\/]+$/, '')}/${slug}`
+}
+
+/**
+ * The destination a URL proposes: the last path segment, without any of its
+ * suffixes, exactly as proposedDestination treats a file name.
+ *
+ * '' when the URL has no last segment — a share link ending in a slash — and
+ * the ask then opens the destination as an empty required field rather than
+ * proposing a folder named after nothing.
+ */
+export function proposedDestinationFromURL(defaultRoot: string, url: string): string {
+  if (defaultRoot === '') return ''
+  let path = ''
+  try {
+    path = new URL(url).pathname
+  } catch {
+    return ''
+  }
+  const last =
+    path
+      .split('/')
+      .filter((s) => s !== '')
+      .pop() ?? ''
+  const stem = decodeURIComponent(last).split('.')[0].trim()
+  if (stem === '') return ''
+  return `${defaultRoot.replace(/[\\/]+$/, '')}/${stem}`
+}

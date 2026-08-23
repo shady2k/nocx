@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"strings"
 	"unicode"
+
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 // A Postman name is arbitrary text out of a file, and a file that arrives
@@ -14,29 +16,35 @@ import (
 // is MINTED from it, so "../../etc" is a folder called "etc" rather than a
 // traversal that has to be caught.
 const (
-	maxNameRunes    = 64
-	maxFolderDepth  = 32
+	// maxNameRunes is a READABILITY bound, not a filesystem one: a folder
+	// named after a paragraph is unreadable in a tree long before it is
+	// illegal. The filesystem's bound is pathname.MaxComponentBytes, and it
+	// is in BYTES — sixty-four runes of Japanese are 180 of them, which is
+	// how a minter with only a rune bound produced names the store refused.
+	maxNameRunes = 64
+	// collisionMargin is the room take() leaves for what it appends after
+	// the extension: `-2` through `-20000`, six bytes, and two spare.
+	collisionMargin = 8
 	maxItems        = 20000
 	fallbackRequest = "request"
 	fallbackFolder  = "folder"
 )
 
-// windowsReserved are device names that are not filenames on Windows, at
-// any extension. A collection is meant to be shared, so a folder that only
-// clones correctly on one OS is a folder that is broken on the others.
-var windowsReserved = map[string]bool{
-	"con": true, "prn": true, "aux": true, "nul": true,
-	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
-	"com6": true, "com7": true, "com8": true, "com9": true,
-	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
-	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
-}
-
-// slug turns a display name into one path segment, or "" when nothing
-// usable is left. It cannot produce "", ".", ".." or a segment containing a
-// separator, which is what makes the traversal unspellable rather than
-// caught.
-func slug(name string) string {
+// slug turns a display name into one path segment that fits in budget bytes,
+// or "" when nothing usable is left. It cannot produce "", ".", ".." or a
+// segment containing a separator, which is what makes the traversal
+// unspellable rather than caught.
+//
+// Two rules, and only the first is this package's. The CHARSET pass below is
+// the import's own: letters and digits survive, everything else collapses to
+// a dash, so "../.." cannot come through as dots at all. What makes the
+// result a name a filesystem will take — the Windows device names, a
+// trailing dot or space, the byte bound — belongs to internal/pathname,
+// which is also what internal/apicoll VALIDATES with. Minting through it is
+// what makes "a name the importer mints is a name the store accepts" true by
+// construction; this package used to carry its own copy of the device list,
+// where no validator could reach it.
+func slug(name string, budget int) string {
 	var b strings.Builder
 	lastDash := false
 	for _, r := range name {
@@ -62,13 +70,7 @@ func slug(name string) string {
 	if r := []rune(out); len(r) > maxNameRunes {
 		out = strings.Trim(string(r[:maxNameRunes]), "-")
 	}
-	if out == "" || out == "." || out == ".." {
-		return ""
-	}
-	if windowsReserved[strings.ToLower(out)] {
-		out = "_" + out
-	}
-	return out
+	return pathname.Portable(out, budget)
 }
 
 // pathAllocator hands out paths inside the collection that do not collide.
@@ -82,8 +84,12 @@ type pathAllocator struct{ used map[string]bool }
 func newPathAllocator() *pathAllocator { return &pathAllocator{used: map[string]bool{}} }
 
 // take returns dir/<unique segment><ext>.
+//
+// The base is minted with room for what take itself appends — the extension
+// and, on a collision, the counter — because the component the filesystem
+// has to take is the whole of it, not the base.
 func (p *pathAllocator) take(dir, name, fallback, ext string) string {
-	base := slug(name)
+	base := slug(name, pathname.MaxComponentBytes-len(ext)-collisionMargin)
 	if base == "" {
 		base = fallback
 	}

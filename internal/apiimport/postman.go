@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 // MaxDocumentBytes bounds the import document. A Postman export with saved
@@ -375,8 +376,15 @@ func (c *pmConv) declareSecret(name, value string) {
 }
 
 func (c *pmConv) walk(items []pmItem, dir string, depth int, inherited *pmAuth) error {
-	if depth > maxFolderDepth {
-		return fmt.Errorf("apiimport: folders nested deeper than %d", maxFolderDepth)
+	// The bound is the PATH's, not the folder chain's, and it is stated once
+	// (pathname.MaxDepth) rather than here as well: what the store and the
+	// filesystem have to take is the finished path, and a request inside
+	// this chain is one component deeper than the chain. depth counts from
+	// 1, so at depth d the folder chain is d-1 long and a request in it is a
+	// d-component path — which is why the comparison is against the path
+	// bound itself and the sentence names one less.
+	if depth > pathname.MaxDepth {
+		return fmt.Errorf("apiimport: folders nested deeper than %d", pathname.MaxDepth-1)
 	}
 	for _, it := range items {
 		c.items++

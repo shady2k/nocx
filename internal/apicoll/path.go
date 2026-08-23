@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 // environmentsDirName sits beside the requests and is not one of them (§6.2).
@@ -28,6 +30,10 @@ const requestExt = ".json"
 //  2. Does it name a request file — a `.json` that is neither the manifest
 //     nor an environment? ErrNotARequestPath.
 //  3. Is it spelled canonically? ErrPathOutsideCollection.
+//  4. Is every component of it a name every platform we ship to can take,
+//     and is the path bounded? ErrNotARequestPath. Last, because it is the
+//     mildest of the four: the caller named a request file, it just named
+//     one that cannot exist on a colleague's machine.
 //
 // Nothing is cleaned. `./req.json` and `sub/../req.json` both denote req.json
 // after a filepath.Clean and both are refused, because a caller that meant
@@ -52,6 +58,27 @@ func validateRequestPath(relPath string) error {
 	if relPath != filepath.Clean(relPath) {
 		return fmt.Errorf("%w: %q is not already clean; it is refused rather than rewritten",
 			ErrPathOutsideCollection, relPath)
+	}
+	return checkPortablePath(relPath, ErrNotARequestPath)
+}
+
+// checkPortablePath asks the one owner of "is this name usable as a path
+// component on every platform we ship to" (internal/pathname) about relPath
+// as a whole: every component, how deep it goes, how long it is in total.
+//
+// It is a WRAPPER and not a rule. The rule is one rule with one owner —
+// apiimport MINTS through the same package, so a name the importer produces
+// is a name this package accepts, by construction rather than by both being
+// kept in step. What belongs here is only the sentinel, because the sentence
+// a surface shows differs by what the caller was naming.
+//
+// A collection that already holds such a name still LISTS it, and the
+// refusal names it: the remedy is to rename the file, which is the same
+// thing the colleague on Windows needs done before they can check the folder
+// out at all.
+func checkPortablePath(relPath string, sentinel error) error {
+	if err := pathname.CheckRelPath(relPath); err != nil {
+		return fmt.Errorf("%w: %q: %s", sentinel, relPath, err)
 	}
 	return nil
 }
@@ -136,6 +163,12 @@ func validateFolderPath(relPath string) error {
 		return fmt.Errorf("%w: %q is not already clean; it is refused rather than rewritten",
 			ErrPathOutsideCollection, relPath)
 	}
+	if err := checkPortablePath(relPath, ErrInvalidFolderName); err != nil {
+		return err
+	}
+	// Every component has already been held to the portable-name rule by the
+	// line above. This loop is what only a COLLECTION knows: no dotfiles, and
+	// `environments` at the top is taken (§6.2).
 	for i, el := range strings.Split(relPath, "/") {
 		if err := validateComponentName(el, ErrInvalidFolderName, "folder"); err != nil {
 			return err

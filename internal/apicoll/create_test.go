@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 // TestCreate_MintsACollectionTheUserCanUse is the happy path and the pair
@@ -140,7 +142,7 @@ func TestCreate_RefusesANameThatIsNotAName(t *testing.T) {
 		"a leading dot":    ".hidden",
 		"a NUL byte":       "ac\x00me",
 		"an absolute path": "/etc/acme",
-		"too long":         strings.Repeat("a", maxCollectionNameLen+1),
+		"too long":         strings.Repeat("a", pathname.MaxComponentBytes+1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := fakePaths{root: t.TempDir()}

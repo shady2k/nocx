@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 // File and directory modes. A collection is shared by committing it, not by
@@ -349,6 +350,11 @@ func layout(res postmanResult) ([]plannedFile, error) {
 // that stops being true — which is exactly when a check is worth having,
 // because §13.1's rule is that a path out of a collection is refused rather
 // than clamped.
+//
+// It asks pathname the same question apicoll asks it, which makes this the
+// place where "what the importer mints is what the store accepts" is checked
+// at RUN time rather than only in a test: an import that would write a path
+// the store would then refuse fails here, whole, before a single file lands.
 func safeRelPath(rel string) error {
 	if rel == "" || strings.HasPrefix(rel, "/") || filepath.IsAbs(rel) {
 		return fmt.Errorf("apiimport: refusing the path %q", rel)
@@ -356,10 +362,8 @@ func safeRelPath(rel string) error {
 	if path.Clean(rel) != rel {
 		return fmt.Errorf("apiimport: refusing the path %q", rel)
 	}
-	for _, seg := range strings.Split(rel, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return fmt.Errorf("apiimport: refusing the path %q", rel)
-		}
+	if err := pathname.CheckRelPath(rel); err != nil {
+		return fmt.Errorf("apiimport: refusing the path %q: %w", rel, err)
 	}
 	return nil
 }

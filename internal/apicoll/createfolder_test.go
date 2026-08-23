@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 func folderSet(t *testing.T, svc *service, h HandleID) map[string]bool {
@@ -194,7 +196,7 @@ func TestCreateFolder_RefusesANameThatIsNotOneComponent(t *testing.T) {
 		"a hidden folder":  ".git",
 		"a leading slash":  "/etc",
 		"a NUL byte":       "us\x00ers",
-		"longer than 128B": strings.Repeat("x", maxCollectionNameLen+1),
+		"longer than 128B": strings.Repeat("x", pathname.MaxComponentBytes+1),
 	}
 	for name, folder := range cases {
 		t.Run(name, func(t *testing.T) {

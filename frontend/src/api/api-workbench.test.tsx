@@ -3731,6 +3731,49 @@ describe('a request can be duplicated', () => {
     expect(crumbName()).toBe('create copy 2')
   })
 
+  it('copies what is in the FORM when the form is showing that request', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users'))
+
+    // An edit that has NOT been saved — which is the state a person is in
+    // when they think "this is how I want it, now give me another one".
+    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/users/search' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users/search'))
+
+    await pickOnRow(CREATE_REL_PATH, 'Duplicate')
+    await vi.waitFor(() => expect(disk.files.has('users/create-copy.json')).toBe(true))
+
+    // What they were looking at is what they got.
+    expect((disk.files.get('users/create-copy.json') as ApiRequest).url).toBe(
+      '{{baseUrl}}/users/search',
+    )
+    // And duplicating is not a save: the original's file is what it was.
+    expect((disk.files.get(CREATE_REL_PATH) as ApiRequest).url).toBe(REQUEST.url)
+  })
+
+  it('copies the FILE for a row the form is not showing', async () => {
+    const disk = folderOnDisk()
+    disk.files.set('users/archive.json', { ...REQUEST, id: 'users/archive', name: 'archive' })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('users/archive.json'))
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users'))
+    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/nowhere' } })
+
+    // The row aimed at has no draft anywhere — the open request's edits are
+    // not it, and copying them onto another request's copy is the defect the
+    // pairing above exists to make impossible.
+    await pickOnRow('users/archive.json', 'Duplicate')
+
+    await vi.waitFor(() => expect(disk.files.has('users/archive-copy.json')).toBe(true))
+    expect((disk.files.get('users/archive-copy.json') as ApiRequest).url).toBe(REQUEST.url)
+  })
+
   it('a copy that could not be written says so and puts no row in the tree', async () => {
     const disk = folderOnDisk({
       writeRequest: vi.fn().mockRejectedValue(new Error('read-only file system')),

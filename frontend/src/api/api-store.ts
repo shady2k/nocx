@@ -1160,10 +1160,36 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
 
   const duplicateRequest = async (handle: string, relPath: string): Promise<void> => {
     try {
-      // Read first, and let a source that will not read stop the whole act:
-      // a copy written from a request nobody could read would be a file
-      // whose contents nothing accounts for.
-      const source = (await services.readRequest(handle, relPath)).request
+      // WHAT A PERSON SEES IS WHAT THEY COPY.
+      //
+      // The source is the FORM while the form is showing this request, and
+      // the file for every other row — and the second half is not a
+      // preference, it is the only thing there is: a row a person
+      // right-clicked without opening has no draft anywhere to copy.
+      //
+      // It read the file in both cases first, on the argument that the file
+      // is the truth (§6.4). That argument is about what gets SENT, and even
+      // there the store does not apply it this way — `send` writes the dirty
+      // draft to the file BEFORE sending, precisely so that what goes is what
+      // the person is looking at. Copying past their edits would have been
+      // this surface stating the rule at them instead of applying it for
+      // them, and worse than that it lost the edits: the copy is opened, and
+      // the draft it replaces lives only in a signal (nocx-2aunx).
+      //
+      // The original's FILE is left exactly as it was. Duplicating is not a
+      // save, and a copy that quietly wrote the original too would be a
+      // second act nobody asked for; the edits are not lost by that, because
+      // they are what the copy now holds and the copy is what the person is
+      // now in.
+      const open = untrack(selected)
+      const inTheForm = open !== null && open.handle === handle && open.relPath === relPath
+      // A source that will not read stops the whole act: a copy written from
+      // a request nobody could read would be a file whose contents nothing
+      // accounts for.
+      const source = inTheForm
+        ? untrack(draft)
+        : (await services.readRequest(handle, relPath)).request
+      if (source === null) return
       const name = freeCopyName(untrack(collections), handle, source.name)
       // BESIDE THE ORIGINAL — the same directory inside the collection, so
       // the copy of `users/create.json` lands under `users/` where a person

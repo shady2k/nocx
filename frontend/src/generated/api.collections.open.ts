@@ -26,6 +26,10 @@ export interface Collection {
    */
   requests: RequestRef[]
   /**
+   * Every directory inside the collection, each as a path relative to the root, parents before their children. It is here because a folder with nothing in it yet is invisible in `requests`, and that is the state a folder spends its first minutes in — a tree drawn from the request paths alone would lose the folder the person just made. It is also the ONE answer to "what folders are there": a renderer deriving them from the request paths as well would agree with this list about every folder that holds a request and disagree about every folder that does not. `environments/` is not among them (§6.2), nor is anything beginning with a dot — the same exclusions the request walk makes, because this list comes off the same walk. Never null — a collection with no folders is [].
+   */
+  folders: string[]
+  /**
    * The files inside the folder that are not requests OR not environments: bad JSON, a field the format does not declare, a symlink that was not followed. It is ON the collection rather than in an error beside it, because a caller returning early on an error would let one broken file hide every good one. ONE list for both halves of the folder on purpose — "a file in here that cannot be read" is one concept, and a second list would be a second owner of it. Never null — a clean collection is [].
    */
   malformed: MalformedRef[]

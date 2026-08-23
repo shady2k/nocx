@@ -58,7 +58,7 @@ func seedCollection(t *testing.T) string {
 // AGENTS.md forbids, asked of this folder: a directory that can be TRAVERSED
 // but not LISTED (mode 0o300, which is what `chmod 0300` gives you) lets the
 // manifest and every known file be read while WalkDir's ReadDir on the root
-// refuses. listRequests drops that refusal on the floor — its walkErr branch
+// refuses. listContents drops that refusal on the floor — its walkErr branch
 // records a bad path only when `rel != "."` (internal/apicoll/folder.go:171)
 // — so the caller is handed a collection that says it has no requests while
 // ReadRequest still reads them by name.
@@ -66,12 +66,12 @@ func seedCollection(t *testing.T) string {
 // SKIPPED, NOT DELETED, and skipped rather than rewritten to assert what the
 // code does: a test written from the implementation cannot report a missing
 // feature. Delete the t.Skip line to see it fail. The fix is one branch in
-// listRequests — the root's own walkErr is an error from the listing, or a
+// listContents — the root's own walkErr is an error from the listing, or a
 // MalformedRef named "." — and it is outside this task's ownership, so it is
 // reported to the coordinator instead of made here (REPORT-failures-4f8e.md).
 func TestOpen_AnUnlistableFolderIsReportedNotAnsweredAsEmpty(t *testing.T) {
 	t.Skip("DEFECT nocx-unfiled: an unlistable collection folder is answered as an EMPTY collection; " +
-		"fix belongs in internal/apicoll/folder.go listRequests, which this task does not own")
+		"fix belongs in internal/apicoll/folder.go listContents, which this task does not own")
 	skipIfRoot(t)
 	root := seedCollection(t)
 	chmodDir(t, root, 0o300) // write + traverse, no read: openable, not listable

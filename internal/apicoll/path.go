@@ -109,3 +109,41 @@ func resolveWithin(root, rel string) (string, error) {
 	}
 	return filepath.Join(root, rel), nil
 }
+
+// validateFolderPath decides whether relPath may name a FOLDER inside the
+// collection — the parent a new folder is created in. "" is the collection
+// root itself, which is where a folder created with no parent named goes.
+//
+// It is validateRequestPath's sibling and shares its first half
+// (checkInsideCollection) rather than restating it: "outside the
+// collection" is one question with one owner. What differs is the second
+// half — a folder is not a `.json`, so the suffix rule cannot apply, and
+// each COMPONENT is instead held to the same rule a new folder's name is
+// (validateComponentName). That is what keeps `.git`, `..` and an
+// over-long segment out by the same sentence in both directions.
+//
+// Nothing is cleaned, for validateRequestPath's reason: a caller that meant
+// `a/b` can say `a/b`, and one that said `a/./b` must not be quietly given
+// it.
+func validateFolderPath(relPath string) error {
+	if relPath == "" {
+		return nil
+	}
+	if err := checkInsideCollection(relPath); err != nil {
+		return err
+	}
+	if relPath != filepath.Clean(relPath) {
+		return fmt.Errorf("%w: %q is not already clean; it is refused rather than rewritten",
+			ErrPathOutsideCollection, relPath)
+	}
+	for i, el := range strings.Split(relPath, "/") {
+		if err := validateComponentName(el, ErrInvalidFolderName, "folder"); err != nil {
+			return err
+		}
+		if i == 0 && el == environmentsDirName {
+			return fmt.Errorf("%w: %q is where the collection keeps its environments, not its requests (§6.2)",
+				ErrInvalidFolderName, environmentsDirName)
+		}
+	}
+	return nil
+}

@@ -5699,6 +5699,9 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 				Requests: []apiRequestRefWire{
 					{RelPath: "ping.json", Name: "ping", Method: "GET"},
 				},
+				// A folder holding a request and one holding nothing: the
+				// second is the case this list exists for.
+				Folders: []string{"v1", "v1/reports"},
 				Malformed: []apiMalformedRefWire{
 					{RelPath: "broken.json", Reason: "invalid JSON"},
 					{RelPath: "environments/bad.json", Reason: "not a regular file; symlinks are not followed"},
@@ -5718,6 +5721,7 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 			Collection: apiCollectionWire{
 				Name:         "acme",
 				Requests:     []apiRequestRefWire{},
+				Folders:      []string{},
 				Malformed:    []apiMalformedRefWire{},
 				Environments: []apiEnvironmentRefWire{},
 			},
@@ -5748,6 +5752,7 @@ func TestAPICollectionsCreate_DTOConformsToContract(t *testing.T) {
 			Collection: apiCollectionWire{
 				Name:      "acme",
 				Requests:  []apiRequestRefWire{},
+				Folders:   []string{},
 				Malformed: []apiMalformedRefWire{},
 				// Create makes `environments/` and leaves it empty, so a
 				// freshly minted collection carries [] rather than null.
@@ -5804,6 +5809,188 @@ func TestAPICollectionsCreate_OverTheWireConformsToContract(t *testing.T) {
 	if len(chosen) != 1 || chosen[0].Handle != made.Handle {
 		t.Fatalf("opened folders = %+v, want the collection just created", chosen)
 	}
+}
+
+// api.collections.createFolder carries the folder that was made AND the
+// collection it is in, so the two shapes are validated together. The
+// interesting case is the empty one: a folder made a second ago holds
+// nothing, and `folders` is the only field in which it exists at all.
+func TestAPICollectionsCreateFolder_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.collections.createFolder.schema.json")
+
+	cases := map[string]apiCollectionsCreateFolderResponse{
+		"a folder at the root": {
+			RelPath: "users",
+			Collection: apiCollectionWire{
+				Name:         "acme",
+				Requests:     []apiRequestRefWire{},
+				Folders:      []string{"users"},
+				Malformed:    []apiMalformedRefWire{},
+				Environments: []apiEnvironmentRefWire{},
+			},
+		},
+		"a folder inside a folder, beside a request": {
+			RelPath: "v1/users",
+			Collection: apiCollectionWire{
+				Name:         "acme",
+				Requests:     []apiRequestRefWire{{RelPath: "ping.json", Name: "ping", Method: "GET"}},
+				Folders:      []string{"v1", "v1/users"},
+				Malformed:    []apiMalformedRefWire{},
+				Environments: []apiEnvironmentRefWire{},
+			},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.collections.createFolder DTO")
+		})
+	}
+}
+
+// The real result off the real socket, and then the real listing: a folder
+// the tree cannot see is a folder that does not exist as far as a person is
+// concerned, so the assertion is not that the call succeeded but that
+// api.collections.list carries it afterwards.
+func TestAPICollectionsCreateFolder_OverTheWireConformsToContract(t *testing.T) {
+	folderSchema := loadSchema(t, "api.collections.createFolder.schema.json")
+	listSchema := loadSchema(t, "api.collections.list.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if created.Error != nil {
+		t.Fatalf("api.collections.create: %+v", created.Error)
+	}
+	var made apiOpenResponse
+	if err := json.Unmarshal(created.Result, &made); err != nil {
+		t.Fatalf("unmarshal create result: %v", err)
+	}
+	if made.Collection.Folders == nil || len(made.Collection.Folders) != 0 {
+		t.Errorf("a new collection's folders = %v, want []", made.Collection.Folders)
+	}
+
+	resp := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": made.Handle, "name": "users"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.createFolder: %+v", resp.Error)
+	}
+	validateJSON(t, folderSchema, resp.Result, "api.collections.createFolder result")
+
+	var folder apiCollectionsCreateFolderResponse
+	if err := json.Unmarshal(resp.Result, &folder); err != nil {
+		t.Fatalf("unmarshal createFolder result: %v", err)
+	}
+	if folder.RelPath != "users" {
+		t.Errorf("relPath = %q, want users", folder.RelPath)
+	}
+
+	// One inside it, named by the relPath the call before handed back —
+	// which is how nesting is spelled on this surface.
+	nested := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": made.Handle, "parentRelPath": folder.RelPath, "name": "admin"}, 3)
+	if nested.Error != nil {
+		t.Fatalf("api.collections.createFolder nested: %+v", nested.Error)
+	}
+	validateJSON(t, folderSchema, nested.Result, "api.collections.createFolder nested result")
+	var deeper apiCollectionsCreateFolderResponse
+	if err := json.Unmarshal(nested.Result, &deeper); err != nil {
+		t.Fatalf("unmarshal nested result: %v", err)
+	}
+	if deeper.RelPath != "users/admin" {
+		t.Errorf("nested relPath = %q, want users/admin", deeper.RelPath)
+	}
+
+	// And the listing every surface actually reads carries both, with
+	// nothing in either of them.
+	listed := vaultCall(t, conn, "api.collections.list", map[string]any{}, 4)
+	if listed.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listed.Error)
+	}
+	validateJSON(t, listSchema, listed.Result, "api.collections.list after createFolder")
+	var list apiCollectionsListResponse
+	if err := json.Unmarshal(listed.Result, &list); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	chosen := chosenCollections(list.Collections)
+	if len(chosen) != 1 {
+		t.Fatalf("opened folders = %+v, want the one collection", chosen)
+	}
+	got := map[string]bool{}
+	for _, f := range chosen[0].Collection.Folders {
+		got[f] = true
+	}
+	for _, want := range []string{"users", "users/admin"} {
+		if !got[want] {
+			t.Errorf("api.collections.list folders = %v, want %q among them",
+				chosen[0].Collection.Folders, want)
+		}
+	}
+	if len(chosen[0].Collection.Requests) != 0 {
+		t.Errorf("requests = %+v, want none — the folders are visible because they are listed",
+			chosen[0].Collection.Requests)
+	}
+}
+
+// The refusals, each with the pair that succeeds on the same socket
+// (AGENTS.md testing rule 3). A name that is not one path component is
+// refused BY NAME rather than sanitised — a folder quietly created under a
+// name the person did not type is a surface reporting something it did not
+// do — and every one of them is the caller's error, so every one is -32602.
+func TestAPICollectionsCreateFolder_RefusesOverTheWire(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if created.Error != nil {
+		t.Fatalf("api.collections.create: %+v", created.Error)
+	}
+	var made apiOpenResponse
+	if err := json.Unmarshal(created.Result, &made); err != nil {
+		t.Fatalf("unmarshal create result: %v", err)
+	}
+
+	id := 10
+	refused := func(what string, params map[string]any) {
+		t.Helper()
+		id++
+		resp := vaultCall(t, conn, "api.collections.createFolder", params, id)
+		if resp.Error == nil {
+			t.Errorf("%s was accepted, want a refusal", what)
+			return
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("%s answered %d, want -32602 — the caller's move is to name something else",
+				what, resp.Error.Code)
+		}
+		if resp.Error.Message == "" {
+			t.Errorf("%s answered no sentence; a surface has nothing to show", what)
+		}
+	}
+
+	refused("a name that is a path", map[string]any{"handle": made.Handle, "name": "a/b"})
+	refused("a traversal", map[string]any{"handle": made.Handle, "name": ".."})
+	refused("an empty name", map[string]any{"handle": made.Handle, "name": ""})
+	refused("a name that is only dots", map[string]any{"handle": made.Handle, "name": "..."})
+	refused("the environments directory", map[string]any{"handle": made.Handle, "name": "environments"})
+	refused("a parent that is not there",
+		map[string]any{"handle": made.Handle, "parentRelPath": "nope", "name": "users"})
+	refused("a parent outside the collection",
+		map[string]any{"handle": made.Handle, "parentRelPath": "../..", "name": "users"})
+	refused("a handle nobody minted",
+		map[string]any{"handle": "0123456789abcdef0123456789abcdef", "name": "users"})
+
+	// And on an ordinary machine it succeeds — twice for one name is the
+	// only refusal left, and it is a refusal rather than a merge.
+	id++
+	ok := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": made.Handle, "name": "users"}, id)
+	if ok.Error != nil {
+		t.Fatalf("an ordinary folder name was refused: %+v", ok.Error)
+	}
+	refused("a name that is already taken", map[string]any{"handle": made.Handle, "name": "users"})
 }
 
 func TestAPIRequestRead_DTOConformsToContract(t *testing.T) {
@@ -6877,13 +7064,14 @@ func TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath(t *testing.T) {
 	// Every method on the surface except the two that legitimately take
 	// one, with valid params for the method plus a path bolted on.
 	base := map[string]map[string]any{
-		"api.collections.list":   {},
-		"api.collections.create": {"name": "made-up"},
-		"api.collections.close":  {"handle": handle},
-		"api.request.read":       {"handle": handle, "relPath": "ping.json"},
-		"api.request.write":      {"handle": handle, "relPath": "ping.json", "request": map[string]any{"id": "r1", "name": "ping", "method": "GET", "url": "https://example.test", "body": map[string]any{"kind": "none"}, "auth": map[string]any{"kind": "none"}}},
-		"api.request.send":       {"handle": handle, "relPath": "ping.json"},
-		"api.import.curl":        {"line": "curl https://example.test"},
+		"api.collections.list":         {},
+		"api.collections.create":       {"name": "made-up"},
+		"api.collections.createFolder": {"handle": handle, "name": "made-up"},
+		"api.collections.close":        {"handle": handle},
+		"api.request.read":             {"handle": handle, "relPath": "ping.json"},
+		"api.request.write":            {"handle": handle, "relPath": "ping.json", "request": map[string]any{"id": "r1", "name": "ping", "method": "GET", "url": "https://example.test", "body": map[string]any{"kind": "none"}, "auth": map[string]any{"kind": "none"}}},
+		"api.request.send":             {"handle": handle, "relPath": "ping.json"},
+		"api.import.curl":              {"line": "curl https://example.test"},
 	}
 	// The names a path arrives under. Any of them reaching a handler would
 	// be a second way to address a file.

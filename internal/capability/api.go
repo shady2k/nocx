@@ -251,6 +251,21 @@ type APICollectionService interface {
 	// that takes something away, and it takes away exactly one file: a
 	// collection is closed through Close and never emptied through this.
 	DeleteRequest(h apicoll.HandleID, relPath string) error
+	// CreateFolder makes ONE folder inside an open collection: a NAME, and
+	// the existing folder to put it in ("" is the collection root).
+	//
+	// It is Create's grammar one level down — a component the backend turns
+	// into a location, never a location the caller supplies — so it joins
+	// neither of the two api.* methods that accept a root (§13.1). Nesting
+	// is repeated calls, each naming a parent that already exists, which is
+	// what lets "that folder is not there" be answered at all
+	// (apicoll/createfolder.go).
+	//
+	// The collection comes back with it because the caller's next move is
+	// to draw the tree: a folder made and then listed at a second moment is
+	// two accounts of one folder, and the first thing a person does after
+	// making one is look for it.
+	CreateFolder(h apicoll.HandleID, parentRelPath, name string) (apicoll.FolderCreated, error)
 	// Snapshot takes what a send needs and nothing else, so the gate can be
 	// released before the dial. envRelPath names the environment to send
 	// under, addressed inside the collection like everything else; "" is no
@@ -589,6 +604,21 @@ func (s *apiCollectionService) DeleteRequest(h apicoll.HandleID, relPath string)
 		return err
 	}
 	return s.svc.DeleteRequest(h, relPath)
+}
+
+// CreateFolder answers out of a folder the user still has open, and
+// refuses one they have closed — the rule every method beside it keeps,
+// and it binds hardest on the one that WRITES: apicoll's own table would go
+// on resolving a closed handle, and a folder made through it would land in
+// a collection the user believes they have shut.
+func (s *apiCollectionService) CreateFolder(h apicoll.HandleID, parentRelPath, name string) (apicoll.FolderCreated, error) {
+	if err := s.guard.check(); err != nil {
+		return apicoll.FolderCreated{}, err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return apicoll.FolderCreated{}, err
+	}
+	return s.svc.CreateFolder(h, parentRelPath, name)
 }
 
 func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {

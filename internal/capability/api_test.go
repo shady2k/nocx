@@ -166,6 +166,9 @@ func TestAPICollectionService_IsUselessOutsideItsOperation(t *testing.T) {
 	if _, err := escaped.Create("later"); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("Create outside the operation = %v, want ErrOperationInactive", err)
 	}
+	if _, err := escaped.CreateFolder(handle, "", "later"); !errors.Is(err, capability.ErrOperationInactive) {
+		t.Errorf("CreateFolder outside the operation = %v, want ErrOperationInactive", err)
+	}
 	// It reaches no folder and answers a derived path, and it is still
 	// refused: one method that kept answering would be an exception to "a
 	// service that escaped is useless" that somebody has to remember.
@@ -218,6 +221,9 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 		}
 		if _, err := svc.Snapshot(context.Background(), h, "ping.json", ""); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("Snapshot after Close = %v, want ErrUnknownHandle", err)
+		}
+		if _, err := svc.CreateFolder(h, "", "users"); !errors.Is(err, apicoll.ErrUnknownHandle) {
+			t.Errorf("CreateFolder after Close = %v, want ErrUnknownHandle", err)
 		}
 		if err := svc.Close(h); !errors.Is(err, apicoll.ErrUnknownHandle) {
 			t.Errorf("second Close = %v, want ErrUnknownHandle", err)
@@ -475,6 +481,72 @@ func TestAPICollectionService_CreateLeavesTheCollectionOpen(t *testing.T) {
 			apicoll.Request{ID: "r1", Name: "ping", Method: "GET", URL: "https://example.test/"})
 	}); err != nil {
 		t.Fatalf("after Create: %v", err)
+	}
+}
+
+// A folder inside a collection somebody made in nocx, as a person reaches
+// it: they name it, and it is in the listing the panel draws from — which
+// is the difference between "a directory was created" and "the user has a
+// folder". Before this the only folders in existence were the Postman
+// importer's.
+func TestAPICollectionService_CreateFolderShowsUpInTheListing(t *testing.T) {
+	op := newAPIOperation(t)
+
+	var made apicoll.Created
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		var err error
+		made, err = svc.Create("acme")
+		if err != nil {
+			return err
+		}
+		folder, err := svc.CreateFolder(made.Handle, "", "users")
+		if err != nil {
+			return err
+		}
+		if folder.RelPath != "users" {
+			t.Errorf("relPath = %q, want users", folder.RelPath)
+		}
+		// And one inside it, which is what makes the tree a tree.
+		nested, err := svc.CreateFolder(made.Handle, "users", "admin")
+		if err != nil {
+			return err
+		}
+		if nested.RelPath != "users/admin" {
+			t.Errorf("nested relPath = %q, want users/admin", nested.RelPath)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Create then CreateFolder: %v", err)
+	}
+
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		listed, err := svc.ListOpen()
+		if err != nil {
+			return err
+		}
+		open := chosenFolders(listed)
+		if len(open) != 1 {
+			t.Fatalf("opened folders = %+v, want the one created", open)
+		}
+		want := map[string]bool{"users": true, "users/admin": true}
+		got := map[string]bool{}
+		for _, f := range open[0].Collection.Folders {
+			got[f] = true
+		}
+		for f := range want {
+			if !got[f] {
+				t.Errorf("the listing's folders = %v, want %q among them — a folder the tree "+
+					"cannot see does not exist to a person", open[0].Collection.Folders, f)
+			}
+		}
+		// Empty, both of them: the folders are visible because they are
+		// LISTED, not because anything is in them.
+		if len(open[0].Collection.Requests) != 0 {
+			t.Errorf("requests = %+v, want none", open[0].Collection.Requests)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ListOpen: %v", err)
 	}
 }
 

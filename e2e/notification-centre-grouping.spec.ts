@@ -52,7 +52,13 @@ import { readStand } from './stand'
  */
 
 const TAB = '.nocx-tab'
-const BELL = 'activity-bell'
+/** The bell's rail button. Addressed by `data-view`, which is the sidebar's
+ *  OWN vocabulary for a view button and what every other view is found by —
+ *  this spec used to carry a `data-testid` of its own until the merge with
+ *  main, where `SidebarViewDescriptor` grew `status` and dropped the parallel
+ *  test hook. Two ways to name one button is the defect, whichever one a
+ *  reader happens to find first. */
+const BELL = 'button[data-view="notifications"]'
 const BADGE = '.ui-badge'
 const INPUT = '.pane.active .nocx-editor-input'
 const LIST = '.notifications-panel__list'
@@ -268,7 +274,7 @@ async function quietBell(page: Page): Promise<void> {
   await showSidebarView(page, 'notifications')
   const markRead = page.getByTestId('notifications-mark-read')
   if (await markRead.isEnabled()) await markRead.click()
-  await expect(page.getByTestId(BELL).locator(BADGE)).toHaveCount(0)
+  await expect(page.locator(BELL).locator(BADGE)).toHaveCount(0)
   await backToTheTerminal(page)
 }
 
@@ -350,7 +356,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // And the bell counts ROWS, so three announcements that collapsed are one
     // thing waiting. This is also what makes "1" here a fact about this test
     // rather than about the stand: quietBell zeroed it a moment ago.
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('1')
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('1')
 
     // ── opening the row shows what it stands for ─────────────────────────
     const disclosure = collapsed.locator('.ui-record-row__disclosure')
@@ -423,7 +429,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // Two things are now waiting: the local run, and this. Waiting on the
     // badge rather than on the row keeps the wait on the count that the last
     // assertion of this test is about.
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('2', { timeout: 30_000 })
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2', { timeout: 30_000 })
 
     await showSidebarView(page, 'notifications')
     const remoteRow = page.locator(ROW).filter({ hasText: REMOTE })
@@ -442,7 +448,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     expect(total).toBeGreaterThanOrEqual(2)
     // Unnarrowed, the panel says nothing: "12 of 12 shown" would be noise.
     await expect(page.getByTestId(SHOWN)).toHaveCount(0)
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('2')
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2')
 
     await filterFor(page, 'Host').selectOption({ label: remoteHost })
 
@@ -470,14 +476,14 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // you narrowed a list would be lying about what is waiting — and it is
     // asserted here, with both surfaces on screen, because nothing below this
     // level has both.
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('2')
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2')
 
     // Clearing it puts every row back, which is what makes the narrowing a
     // VIEW over the feed rather than something done to it.
     await filterFor(page, 'Host').selectOption('')
     await expect(page.locator(ROW)).toHaveCount(total)
     await expect(page.getByTestId(SHOWN)).toHaveCount(0)
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('2')
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2')
   } finally {
     // Take the profile back out. The stand's home is shared by every spec in
     // the run AND by both browser projects, so a profile left here becomes the

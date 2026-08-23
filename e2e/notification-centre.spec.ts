@@ -40,7 +40,13 @@ import type { Page } from './harness'
  */
 
 const TAB = '.nocx-tab'
-const BELL = 'activity-bell'
+/** The bell's rail button. Addressed by `data-view`, which is the sidebar's
+ *  OWN vocabulary for a view button and what every other view is found by —
+ *  this spec used to carry a `data-testid` of its own until the merge with
+ *  main, where `SidebarViewDescriptor` grew `status` and dropped the parallel
+ *  test hook. Two ways to name one button is the defect, whichever one a
+ *  reader happens to find first. */
+const BELL = 'button[data-view="notifications"]'
 const BADGE = '.ui-badge'
 const INPUT = '.pane.active .nocx-editor-input'
 const ROW_TITLE = '.notifications-panel__list .ui-record-row__title'
@@ -65,13 +71,13 @@ async function quietBell(page: Page): Promise<void> {
   await showSidebarView(page, 'notifications')
   const markRead = page.getByTestId('notifications-mark-read')
   if (await markRead.isEnabled()) await markRead.click()
-  await expect(page.getByTestId(BELL).locator(BADGE)).toHaveCount(0)
+  await expect(page.locator(BELL).locator(BADGE)).toHaveCount(0)
   // Collapse it again: the bell is a toggle, and the rest of this test opens
   // the panel the way a person does.
-  await page.getByTestId(BELL).click()
+  await page.locator(BELL).click()
   // Collapsed, the button drops the attribute rather than setting it false
   // (ui/icon-button.tsx), so this asks the question the button answers.
-  await expect(page.getByTestId(BELL)).not.toHaveAttribute('aria-selected', 'true')
+  await expect(page.locator(BELL)).not.toHaveAttribute('aria-selected', 'true')
   await backToTheTerminal(page)
 }
 
@@ -107,8 +113,8 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     await promptReady(page)
 
     // Nothing has happened: the bell is quiet, not a grey zero (nocx-708q.1).
-    await expect(page.getByTestId(BELL)).toBeVisible()
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveCount(0)
+    await expect(page.locator(BELL)).toBeVisible()
+    await expect(page.locator(BELL).locator(BADGE)).toHaveCount(0)
 
     // Backgrounded, and only now may the shell exit. Nothing before this
     // line can have raised anything, which is the property under test.
@@ -118,7 +124,7 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     // not a claim about how fast a shared runner is: this predicate spans a
     // real pty's exit, the session layer's classification, the feed and a
     // change notification back to the renderer.
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('1', { timeout: 30_000 })
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('1', { timeout: 30_000 })
 
     // The tab that ended closed itself, which is what a clean exit has always
     // done. Asserted because it is the reason the row below is inert, and
@@ -127,7 +133,7 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
 
     // The bell is the activity-bar's view button, so clicking it IS opening
     // the panel.
-    await page.getByTestId(BELL).click()
+    await page.locator(BELL).click()
 
     // Rows are targeted by the kit's identity class scoped to the panel —
     // the established pattern (notes.spec.ts:19, snippets.spec.ts). RecordRow
@@ -154,7 +160,7 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     // ONLY thing that clears the count: looking at a tab is not the same
     // fact as "you saw what we told you".
     await page.getByTestId('notifications-mark-read').click()
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveCount(0)
+    await expect(page.locator(BELL).locator(BADGE)).toHaveCount(0)
     // The row stays: this is an inbox over a journal, not a queue that
     // empties.
     await expect(page.locator(ROW_TITLE)).toHaveCount(rowsBefore)
@@ -173,7 +179,7 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     await expect(page.locator(TAB)).toHaveCount(2)
     await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
 
-    await expect(page.getByTestId(BELL).locator(BADGE)).toHaveText('1', { timeout: 30_000 })
+    await expect(page.locator(BELL).locator(BADGE)).toHaveText('1', { timeout: 30_000 })
     await showSidebarView(page, 'notifications')
     const deployRow = page.locator(UNREAD_TITLE)
     await expect(deployRow).toHaveCount(1)

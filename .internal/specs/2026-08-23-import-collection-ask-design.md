@@ -61,9 +61,24 @@ onto its element (`DialogProps`, `dialog.tsx:51`), and reaching past the kit to
 set them there would be the repaint rule in another form. Same gesture for the
 person; the kit keeps its boundary.
 
-The affordance appears on `dragover` rather than occupying height permanently — a
-permanent dashed box in a dialog that already carries two fields and a footer is
-a third thing competing for the same 480px column.
+**The affordance is PERMANENT, and the first version of this spec got that
+wrong.** It said the region should appear on `dragover` only, reasoning that a
+permanent dashed box in a dialog already carrying two fields and a footer is a
+third thing competing for the same 480px column.
+
+That reasoning was about the layout and forgot the person. The owner opened the
+finished ask in the real Wails window and said the import had not changed at all
+(2026-08-23) — the destination prefill was on screen and everything else looked
+identical, because the one genuinely new capability said nothing about itself
+until you were already doing it. A gesture nobody can discover is a gesture
+nobody performs, and the dashed box costing 60px is a cheaper loss than the
+feature costing all of itself.
+
+It is also the half of Postman this spec had failed to copy while claiming
+Postman as its reference. Postman's dialog says **"Drop anywhere to import / Or
+select files or folders"** at rest, permanently, with an icon — the words are
+there before the drag, not during it. This spec took its question COUNT and left
+its most visible sentence behind.
 
 A drop does **both** halves of the ask in one gesture: it writes the export's
 path into the source field and proposes the destination, exactly as the file

@@ -412,9 +412,9 @@ func (f *Feed) collapsibleLocked(ev Event) int {
 // FeedLimits.MaxRetainedBytes states: it returns with f.bytes still over
 // budget when the only thing held is one unread occurrence, because
 // victimLocked refuses to name it. Both ends: eviction runs while more than
-// one occurrence is held, and stops at the last unread one. Read occurrences
-// go first; an unread one is evicted only when no read one is left. Caller
-// holds mu.
+// one occurrence is held, and stops at the last unread one. What goes first
+// is victimLocked's to say — informational before must-ack, read before
+// unread — and whatever goes is recorded. Caller holds mu.
 //
 // Refusing the new occurrence instead would freeze the feed at the moment a
 // flood began, which is the failure the design's flood argument rejects
@@ -432,21 +432,89 @@ func (f *Feed) enforceLocked() {
 	}
 }
 
-// victimLocked picks the oldest read occurrence, or the oldest occurrence of
-// any kind when none is read. Never the one just added when another exists.
+// MustAcknowledge answers a third retention axis, beside trust (how much we
+// believe a fact) and level (how alarming it is): who may decide to forget
+// this row — the system, or the person.
+//
+//	mustAck = level ∈ {warning, danger} AND trust ≠ heuristic
+//
+// DERIVED, never stored. No field on Event, no change to any contract in
+// contracts/, and no second dimension in the settings catalogue: the
+// catalogue keeps routing CHANNELS per kind, and this decides only
+// retention. One function, one place — a second copy of this rule is a
+// second answer to one question (AD-8).
+//
+// LEVEL, NOT KIND. One block.finished is "ls succeeded" and another is "make
+// failed". Classing by kind alone would force a choice between making a
+// person acknowledge every successful ls and losing a failed build.
+// Grouping does not resist this either: collapseKeyOf ALREADY includes
+// Level, so a success and a failure never shared a row to begin with.
+//
+// HEURISTIC IS EXCLUDED, ALWAYS. pane.workFinished is a guess from a pane
+// title, and the spinner behind it matches `npm install` as readily as an
+// agent. Making someone confirm a guess teaches them to mark everything read
+// without looking, which destroys the acknowledgement for the events that
+// earned it. ADR-0029 §3 already confines heuristic to local attention and
+// never a network destination; this is that rule continued into retention.
+func MustAcknowledge(ev Event) bool {
+	if ev.Trust == TrustHeuristic {
+		return false
+	}
+	return ev.Level == LevelWarning || ev.Level == LevelDanger
+}
+
+// victimLocked names the row the feed gives up next. It reads what a row is
+// WORTH before it reads how old the row is, which is the whole of nocx-9brr5:
+// a bell fires from readline hitting the start of a line, bells 31s apart do
+// not collapse, and ~116 of them an hour used to push an unread "the build
+// failed" out of the drawer within two hours. The feed is deliberately small
+// — a "what did I miss" surface, not an archive — so the fix is not a bigger
+// feed but a better answer to what goes when it is full.
+//
+// Four tiers, oldest first inside each:
+//
+//  1. read informational
+//  2. unread informational
+//  3. read must-ack
+//  4. unread must-ack — the last resort, and enforceLocked always records it
+//
+// MustAcknowledge is the primary key and the read mark the secondary one, so
+// a cheap row can only ever evict another cheap row.
+//
+// Read-before-unread survives INSIDE each tier rather than being replaced by
+// the new axis: an unread informational row is still something the person has
+// not seen, and no reading of "who may decide to forget this" makes it
+// cheaper than a read row of the same weight. This is what
+// TestFeedEvictsNewerReadBeforeOlderUnread pins, and it costs nothing to
+// keep.
+//
+// The last UNREAD occurrence is never named — the exception stated in full,
+// with both its ends, on FeedLimits.MaxRetainedBytes. A lone READ one is
+// evicted like any other. Caller holds mu.
 func (f *Feed) victimLocked() int {
 	if len(f.items) == 0 {
 		return -1
 	}
-	for i := range f.items {
-		if f.items[i].ReadAt != nil {
+	if len(f.items) == 1 && f.items[0].ReadAt == nil {
+		return -1
+	}
+	for _, tier := range [...]struct{ mustAck, read bool }{
+		{mustAck: false, read: true},
+		{mustAck: false, read: false},
+		{mustAck: true, read: true},
+		{mustAck: true, read: false},
+	} {
+		for i := range f.items {
+			if MustAcknowledge(f.items[i].Event) != tier.mustAck {
+				continue
+			}
+			if (f.items[i].ReadAt != nil) != tier.read {
+				continue
+			}
 			return i
 		}
 	}
-	if len(f.items) == 1 {
-		return -1
-	}
-	return 0
+	return -1
 }
 
 func (f *Feed) recordDroppedLocked(o Occurrence) {

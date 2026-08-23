@@ -959,3 +959,271 @@ func TestFeedDeliveryFailureWithNoNamedChannelStillSaysSomething(t *testing.T) {
 		t.Fatalf("failure row body %q does not name the reason", row.Body)
 	}
 }
+
+// ── retention: what the drawer gives up first (nocx-9brr5) ──────────────
+
+// mustAckEvent is a row only the PERSON may decide to forget: an attested
+// danger, the shape of "the build failed".
+func mustAckEvent(session, title string) Event {
+	return Event{SessionID: session, Title: title, Kind: KindBlockFinished, Trust: TrustAttested, Level: LevelDanger}
+}
+
+// bellEvent is the cheap row that measured the defect: readline hitting the
+// start of a line, or Tab finding no candidate.
+func bellEvent(session, title string) Event {
+	return Event{SessionID: session, Title: title, Kind: KindBell, Trust: TrustProgramRequest, Level: LevelInfo}
+}
+
+// The predicate is one rule in one place, so it is worth stating the whole
+// matrix rather than the two corners a caller happens to reach. Twelve cases:
+// four levels against three trust classes.
+func TestMustAcknowledgeReadsLevelAndExcludesHeuristic(t *testing.T) {
+	levels := []Level{LevelInfo, LevelSuccess, LevelWarning, LevelDanger}
+	for _, trust := range []Trust{TrustAttested, TrustProgramRequest, TrustHeuristic} {
+		for _, level := range levels {
+			alarming := level == LevelWarning || level == LevelDanger
+			want := alarming && trust != TrustHeuristic
+			if got := MustAcknowledge(Event{Trust: trust, Level: level}); got != want {
+				t.Errorf("MustAcknowledge(trust=%s level=%s) = %v, want %v", trust, level, got, want)
+			}
+		}
+	}
+}
+
+// The defect, in the numbers that measured it.
+//
+// A bell fires from readline hitting the start of a line or Tab finding no
+// candidate. Bells more than 30s apart never collapse (CollapseWindow is
+// 30s), so one every 31s is ~116 rows an hour; two hours of that is 232 rows
+// against a 200-row feed, which is 33 evictions more than enough to reach the
+// bottom. Before this change the bottom is where the unread "the build
+// failed" sat, and the person never learned it happened.
+//
+// Both ends of the interval: the unread must-ack row is held from the Add
+// that created it until the person reads it, and no volume of informational
+// arrivals in between may take it.
+func TestFeedFloodOfInformationalKeepsAnUnreadMustAck(t *testing.T) {
+	clk := NewManualClock()
+	const capacity = 200
+	f, err := NewFeed(FeedLimits{MaxOccurrences: capacity, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
+	if err != nil {
+		t.Fatalf("NewFeed: %v", err)
+	}
+
+	build := mustAckEvent("s-build", "the build failed")
+	build.At = clk.Now()
+	kept := f.Add(build)
+
+	const bells = 232
+	for i := 0; i < bells; i++ {
+		clk.Advance(31 * time.Second) // past the window: 232 rows, not one run
+		e := bellEvent("s-noise", "ding")
+		e.At = clk.Now()
+		f.Add(e)
+	}
+
+	snap := f.Snapshot()
+	if len(snap.Occurrences) != capacity {
+		t.Fatalf("held %d occurrences, want %d", len(snap.Occurrences), capacity)
+	}
+	// The bells must genuinely have arrived as separate rows, or the flood
+	// never happened and the test proves nothing.
+	if want := bells + 1 - capacity; snap.Dropped.Count != want {
+		t.Fatalf("Dropped.Count = %d, want %d — %d bells did not arrive as separate rows",
+			snap.Dropped.Count, want, bells)
+	}
+	var found bool
+	for _, o := range snap.Occurrences {
+		if o.ID == kept {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a drip of %d bells evicted the unread %q; a cheap row must never evict an expensive one",
+			bells, build.Title)
+	}
+	// And what went instead: the oldest bells, which is the whole trade.
+	if got := snap.Occurrences[len(snap.Occurrences)-1].Event.Title; got != build.Title {
+		t.Fatalf("oldest held row is %q, want %q", got, build.Title)
+	}
+}
+
+// The last resort, and the promise broken only out loud. When everything held
+// is an unread must-ack row there is nothing cheap left to give up, so the
+// oldest goes — and DroppedRecord, which lives outside the occurrence budget
+// and is never itself evicted, is where the product says so.
+func TestFeedFullOfUnreadMustAckEvictsTheOldestAndRecordsIt(t *testing.T) {
+	clk := NewManualClock()
+	f, err := NewFeed(FeedLimits{MaxOccurrences: 3, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
+	if err != nil {
+		t.Fatalf("NewFeed: %v", err)
+	}
+
+	ids := make([]OccurrenceID, 0, 3)
+	firstAt := clk.Now()
+	for i := 0; i < 3; i++ {
+		e := mustAckEvent(fmt.Sprintf("s%d", i), fmt.Sprintf("failure %d", i))
+		e.At = clk.Now()
+		ids = append(ids, f.Add(e))
+		clk.Advance(time.Minute)
+	}
+	if got := f.Snapshot().Dropped.Count; got != 0 {
+		t.Fatalf("Dropped.Count = %d before the feed was full, want 0", got)
+	}
+
+	overflow := mustAckEvent("s3", "failure 3")
+	overflow.At = clk.Now()
+	f.Add(overflow)
+
+	snap := f.Snapshot()
+	if len(snap.Occurrences) != 3 {
+		t.Fatalf("held %d occurrences, want 3", len(snap.Occurrences))
+	}
+	for _, o := range snap.Occurrences {
+		if o.ID == ids[0] {
+			t.Fatalf("kept %q and evicted something newer; the last resort is oldest first", o.Event.Title)
+		}
+	}
+	if snap.Dropped.Count != 1 {
+		t.Fatalf("Dropped.Count = %d, want 1 — an unread must-ack was dropped silently", snap.Dropped.Count)
+	}
+	if !snap.Dropped.Oldest.Equal(firstAt) || !snap.Dropped.Newest.Equal(firstAt) {
+		t.Fatalf("Dropped span is [%s, %s], want both %s", snap.Dropped.Oldest, snap.Dropped.Newest, firstAt)
+	}
+}
+
+// The exclusion, and the one a plausible implementation gets wrong by reading
+// level alone. A heuristic warning is a GUESS at a warning; it is
+// informational for retention, so it is given up before an attested one and
+// before a plain informational row that arrived after it.
+func TestFeedHeuristicWarningIsInformational(t *testing.T) {
+	clk := NewManualClock()
+	f, err := NewFeed(FeedLimits{MaxOccurrences: 2, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
+	if err != nil {
+		t.Fatalf("NewFeed: %v", err)
+	}
+
+	guess := Event{SessionID: "s-guess", Title: "pane looks idle", Kind: KindPaneWorkFinished, Trust: TrustHeuristic, Level: LevelWarning, At: clk.Now()}
+	guessID := f.Add(guess)
+	clk.Advance(time.Minute)
+
+	attested := mustAckEvent("s-build", "the build failed")
+	attested.At = clk.Now()
+	attestedID := f.Add(attested)
+	clk.Advance(time.Minute)
+
+	later := bellEvent("s-noise", "ding")
+	later.At = clk.Now()
+	laterID := f.Add(later)
+
+	snap := f.Snapshot()
+	if len(snap.Occurrences) != 2 {
+		t.Fatalf("held %d occurrences, want 2", len(snap.Occurrences))
+	}
+	held := map[OccurrenceID]bool{}
+	for _, o := range snap.Occurrences {
+		held[o.ID] = true
+	}
+	if held[guessID] {
+		t.Fatalf("kept the heuristic warning %q: reading level alone made a guess unforgettable", guess.Title)
+	}
+	if !held[attestedID] {
+		t.Fatalf("evicted the attested danger %q", attested.Title)
+	}
+	if !held[laterID] {
+		t.Fatalf("evicted the later informational row %q while an OLDER informational one was held", later.Title)
+	}
+}
+
+// Inside the must-ack tier the read axis still decides: a row the person has
+// already seen goes before one they have not.
+func TestFeedEvictsReadMustAckBeforeUnreadMustAck(t *testing.T) {
+	clk := NewManualClock()
+	f, err := NewFeed(FeedLimits{MaxOccurrences: 2, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
+	if err != nil {
+		t.Fatalf("NewFeed: %v", err)
+	}
+
+	older := mustAckEvent("s0", "older unread failure")
+	older.At = clk.Now()
+	olderID := f.Add(older)
+	clk.Advance(time.Minute)
+
+	newer := mustAckEvent("s1", "newer read failure")
+	newer.At = clk.Now()
+	newerID := f.Add(newer)
+
+	// MarkAllRead marks every row, so the one state that separates the two
+	// tiers — a READ row newer than an unread one — is only reachable from
+	// inside the package, exactly as TestFeedEvictsNewerReadBeforeOlderUnread
+	// reaches for it.
+	at := clk.Now()
+	f.mu.Lock()
+	f.items[1].ReadAt = &at
+	f.mu.Unlock()
+
+	clk.Advance(time.Minute)
+	third := mustAckEvent("s2", "newest unread failure")
+	third.At = clk.Now()
+	thirdID := f.Add(third)
+
+	snap := f.Snapshot()
+	if len(snap.Occurrences) != 2 {
+		t.Fatalf("held %d occurrences, want 2", len(snap.Occurrences))
+	}
+	for _, o := range snap.Occurrences {
+		if o.ID == newerID {
+			t.Fatalf("kept the READ must-ack %q; it is evicted before any unread one", o.Event.Title)
+		}
+	}
+	held := map[OccurrenceID]bool{}
+	for _, o := range snap.Occurrences {
+		held[o.ID] = true
+	}
+	if !held[olderID] || !held[thirdID] {
+		t.Fatalf("evicted an UNREAD must-ack while a read one was held; held %v", held)
+	}
+	if snap.Dropped.Count != 1 {
+		t.Fatalf("Dropped.Count = %d, want 1", snap.Dropped.Count)
+	}
+}
+
+// The ordinary case, both ends: under capacity the new axis changes nothing —
+// every row is held, in arrival order, and nothing is recorded as dropped.
+func TestFeedUnderCapacityGivesUpNothing(t *testing.T) {
+	clk := NewManualClock()
+	f, err := NewFeed(FeedLimits{MaxOccurrences: 10, MaxRetainedBytes: 1 << 20, MaxRunRetained: 20, CollapseWindow: 30 * time.Second}, clk)
+	if err != nil {
+		t.Fatalf("NewFeed: %v", err)
+	}
+
+	want := []string{"ding", "the build failed", "pane looks idle", "note"}
+	events := []Event{
+		bellEvent("s0", want[0]),
+		mustAckEvent("s1", want[1]),
+		{SessionID: "s2", Title: want[2], Kind: KindPaneWorkFinished, Trust: TrustHeuristic, Level: LevelWarning},
+		evEvent("s3", want[3]),
+	}
+	for _, e := range events {
+		e.At = clk.Now()
+		f.Add(e)
+		clk.Advance(time.Minute)
+	}
+
+	snap := f.Snapshot()
+	if len(snap.Occurrences) != len(want) {
+		t.Fatalf("held %d occurrences, want %d", len(snap.Occurrences), len(want))
+	}
+	// Snapshot is newest first; the feed keeps arrival order underneath it.
+	for i, title := range want {
+		if got := snap.Occurrences[len(want)-1-i].Event.Title; got != title {
+			t.Fatalf("row %d is %q, want %q", i, got, title)
+		}
+	}
+	if snap.Dropped.Count != 0 {
+		t.Fatalf("Dropped.Count = %d under capacity, want 0", snap.Dropped.Count)
+	}
+	if snap.UnreadCount != len(want) {
+		t.Fatalf("UnreadCount = %d, want %d", snap.UnreadCount, len(want))
+	}
+}

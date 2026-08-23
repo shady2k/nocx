@@ -51,7 +51,13 @@ import { showToast } from '../ui/toast'
 import { filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
 import { CollectionDialog } from './collection-dialog'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
-import { environmentPath, proposedDestination } from './api-paths'
+import {
+  classifyPastedSource,
+  environmentPath,
+  proposedDestination,
+  proposedDestinationFromDocument,
+  proposedDestinationFromURL,
+} from './api-paths'
 import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
 import { RequestEditor, RequestLine } from './request-form'
@@ -105,6 +111,58 @@ const MIN_REQUEST_WIDTH = 320
  *  and N collections is N destinations, which is a different question and
  *  not one this ask can answer by guessing which of them was meant. */
 const MULTIPLE_EXPORTS_REFUSAL = 'Drop one export at a time — an import makes one collection.'
+
+/** What a paste that is neither a URL nor a document is told. The sentence
+ *  names the two things this ask takes rather than the one it refused,
+ *  because curl has its own door in the request editor and a person who
+ *  pasted a command line is one control away from the right one. */
+const NOT_AN_EXPORT_REFUSAL =
+  "That is not a Postman export or a URL — paste the export's text, or drop the file below."
+
+/**
+ * The one source the import ask is holding.
+ *
+ * `path` is a place on the machine running Go — the native drop and the
+ * system picker. `file` is the bytes themselves — a browser drop and the kit's
+ * file input — read at submit rather than now, because a file can move or be
+ * revoked between the gesture and the press. `document` and `url` are what
+ * the paste box yielded, classified once by `classifyPastedSource`.
+ */
+type HeldSource =
+  | { kind: 'none' }
+  | { kind: 'path'; path: string }
+  | { kind: 'file'; file: File }
+  | { kind: 'document'; text: string }
+  | { kind: 'url'; url: string }
+
+/** What the source line says the ask is holding, in the currency the person
+ *  recognises: the path they picked, the file they dropped, the address they
+ *  pasted — and for the export's own text, which has no name of its own, what
+ *  it is. '' is "holding nothing", which is also what disables Import. */
+function sourceLabel(held: HeldSource): string {
+  switch (held.kind) {
+    case 'path':
+      return held.path
+    case 'file':
+      return held.file.name
+    case 'document':
+      return 'Pasted Postman export'
+    case 'url':
+      return held.url
+    default:
+      return ''
+  }
+}
+
+/** What the (hidden) export field shows — the half of the held source that is
+ *  a FILE by any route. It is derived rather than stored so that the field
+ *  cannot go on displaying a path the ask has already replaced with a paste:
+ *  one source, one place it is read from. */
+function sourcePath(held: HeldSource): string {
+  if (held.kind === 'path') return held.path
+  if (held.kind === 'file') return held.file.name
+  return ''
+}
 
 /** The empty set a filtered tree is flattened against — one object rather
  *  than a new Set per read, because `rows()` runs on every keystroke. */
@@ -257,22 +315,40 @@ export function ApiPane(props: ApiPaneProps) {
   const [envBusy, setEnvBusy] = createSignal(false)
 
   const [importing, setImporting] = createSignal(false)
-  const [postmanFile, setPostmanFile] = createSignal('')
   /**
-   * The export as a DOCUMENT rather than as a place — the file a browser
-   * drop or the kit's file input handed over, holding the bytes.
+   * THE ONE SOURCE THE ASK IS HOLDING, and the reason it is one signal.
    *
-   * It is what makes the import work at all when the backend is not on the
-   * person's machine: `srcPath` names a file on the machine running Go, and
-   * `make dev-web` is documented as forwarding both ports over SSH, so a
-   * path typed there names a file on the server (spec §1a).
+   * Four entrances answer the same question — the native Wails drop and the
+   * system picker answer with a PATH on the machine running Go, a browser
+   * drop and the kit's file input answer with a FILE holding the bytes, and
+   * the paste box answers with the export's TEXT or with a URL. Exactly one
+   * is held at a time and a new one visibly replaces the last (spec §2),
+   * which is the wire's own rule reflected in the surface: an ask that could
+   * hold two would have to decide which wins, and the loser would go on
+   * being displayed.
    *
-   * Null the moment a PATH is named instead — typed, picked or dropped
-   * natively — because two sources for one field would be two owners of the
-   * answer and the stale one would win by evaluation order: the person edits
-   * the field, and the import sends the bytes they had just replaced.
+   * It was two signals — a path string and a File — and the pair carried
+   * exactly that defect in miniature: two owners of one answer, with the
+   * stale one winning by evaluation order unless every gesture remembered to
+   * clear the other. A union cannot be in two states.
+   *
+   * The bytes matter because the backend is not always on the person's
+   * machine: a path names a file where Go runs, and `make dev-web` is
+   * documented as forwarding both ports over SSH (spec §1a).
    */
-  const [postmanDoc, setPostmanDoc] = createSignal<File | null>(null)
+  const [postmanSource, setPostmanSource] = createSignal<HeldSource>({ kind: 'none' })
+  /** What is in the paste box, verbatim. What it MEANS is
+   *  `classifyPastedSource`'s answer and nobody else's (api-paths.ts). */
+  const [postmanPasted, setPostmanPasted] = createSignal('')
+  /** Why the pasted text is not a source, or ''. Said in the renderer
+   *  because the backend would not refuse it — `parseImport` hands anything
+   *  that does not start `{` or `[` to the CURL parser, so a shell command
+   *  would come back as a collection minted from it, or as an error
+   *  mentioning curl in a dialog that never offered curl (spec §2). */
+  const [pasteRefused, setPasteRefused] = createSignal('')
+  /** Whether the destination is open as a FIELD. False is the summary line;
+   *  the pencil is what changes it, and `askForImport` puts it back. */
+  const [editingDest, setEditingDest] = createSignal(false)
   const [postmanDest, setPostmanDest] = createSignal('')
   const [importRefused, setImportRefused] = createSignal('')
   /**
@@ -477,50 +553,119 @@ export function ApiPane(props: ApiPaneProps) {
 
   /** The same picker, for the folder an import is about to CREATE. It is the
    *  destination and not the export, because `dialog.openDirectory` chooses
-   *  a directory — the export itself is typed until there is a file picker
-   *  to reach for. */
+   *  a directory — the export has a picker of its own over `dialog.openFile`
+   *  (`browseForExport`), and the two capabilities retire independently. */
   const browseForImportDest = (): void => browseInto(setPostmanDest, setImportRefused)
 
   /**
-   * PROPOSE WHERE THE COLLECTION LANDS, from whatever named the export.
+   * PROPOSE WHERE THE COLLECTION LANDS, from the export's PLACE — the
+   * picker's answer, a native drop's path, a browser drop's file.
    *
-   * The second half of every one of these gestures — the picker's answer, a
-   * native drop's path, a browser drop's file — and one derivation of it, so
-   * that answering the ask one way cannot propose a different folder from
-   * answering it another. It is here rather than in the dialog because only
-   * this level knows both what was chosen and the backend's default location.
-   *
-   * It is skipped once somebody has typed a destination: a person who has
-   * said where the folder goes has said it, and a later pick that overwrote
-   * them would be the surface arguing.
+   * One derivation for all three, so that answering the ask one way cannot
+   * propose a different folder from answering it another. It is here rather
+   * than in the dialog because only this level knows both what was chosen
+   * and the backend's default location. The paste box's two sources propose
+   * from what they read instead — `info.name`, a URL's last segment — and
+   * meet these three at `offerDestination`, which is where the rule about
+   * not arguing with the person lives.
    *
    * A NAME does as well as a path — `proposedDestination` takes the basename
    * and then its stem, and a bare `acme.postman_collection.json` is already
    * both (api-paths.ts).
    */
   const proposeDestination = (nameOrPath: string): void => {
-    // Both reads below are READS AT A MOMENT rather than subscriptions —
-    // this runs from a click, a picker's answer or a drop, never from a
-    // render — so they are untracked: nothing here should re-run when the
-    // listing refreshes and rewrite a field somebody is typing into.
-    if (untrack(destTyped)) return
-    const proposal = proposedDestination(
-      untrack(() => store.defaultRoot()),
-      nameOrPath,
+    offerDestination(
+      proposedDestination(
+        // A READ AT A MOMENT rather than a subscription — this runs from a
+        // click, a picker's answer or a drop, never from a render — so it is
+        // untracked: nothing here should re-run when the listing refreshes
+        // and rewrite a field somebody is typing into.
+        untrack(() => store.defaultRoot()),
+        nameOrPath,
+      ),
     )
+  }
+
+  /**
+   * THE OFFER ITSELF, once, whichever of the three derivations made it — a
+   * file's stem, a pasted export's `info.name`, a URL's last segment.
+   *
+   * Each is its own function in api-paths.ts because each reads a different
+   * thing; what they share is the rule, and a second copy of it is how one
+   * entrance starts arguing with a person the others leave alone. The rule:
+   * an offer is skipped once somebody has typed a destination, because a
+   * person who has said where the folder goes has said it.
+   */
+  const offerDestination = (proposal: string): void => {
+    if (untrack(destTyped)) return
     if (proposal !== '') setPostmanDest(proposal)
   }
 
-  /** Choose the EXPORT as a PLACE — typed, picked with the system picker, or
-   *  dropped into the Wails window, all three of which answer with a path on
-   *  the machine running Go. */
+  /** Choose the EXPORT as a PLACE — picked with the system picker, or dropped
+   *  into the Wails window, both of which answer with a path on the machine
+   *  running Go, and both of which land in the field that used to be the
+   *  question and is now only where the answer goes. */
   const chooseExport = (path: string): void => {
-    setPostmanFile(path)
-    // A path is the OTHER source, so whatever document was held stops being
-    // the answer the moment one is named — including when the person types
-    // over the name a drop left in the field.
-    setPostmanDoc(null)
+    // A path REPLACES whatever was held, and the paste box empties with it:
+    // exactly one source at a time (spec §2), and a box still showing the
+    // text it was holding would go on offering a source the ask has let go.
+    setPostmanSource(path === '' ? { kind: 'none' } : { kind: 'path', path })
+    clearPaste()
     proposeDestination(path)
+  }
+
+  /** Empty the paste box and its refusal, without touching the held source —
+   *  the half every OTHER entrance performs when it takes the answer over. */
+  const clearPaste = (): void => {
+    setPostmanPasted('')
+    setPasteRefused('')
+  }
+
+  /**
+   * THE EXPORT AS TEXT, OR AS AN ADDRESS — the paste box, on every keystroke.
+   *
+   * What the text IS is `classifyPastedSource`'s answer and not a second one
+   * made here (api-paths.ts): two derivations of "is this a URL" is the
+   * `ssh`-without-a-space defect in another costume — they agree on every
+   * case anybody tries and disagree on the one that matters.
+   *
+   * A BLANK BOX IS NOT A REFUSAL. It is a person who has cleared what they
+   * pasted, and the only thing it takes back is the source the box itself
+   * was holding: a file dropped a moment ago is not un-dropped by a
+   * keystroke in another control.
+   */
+  const pasteSource = (text: string): void => {
+    setPostmanPasted(text)
+    const held = untrack(postmanSource)
+    const fromPaste = held.kind === 'document' || held.kind === 'url'
+    const source = classifyPastedSource(text)
+    if (source.kind === 'unusable') {
+      setPasteRefused(text.trim() === '' ? '' : NOT_AN_EXPORT_REFUSAL)
+      if (fromPaste) setPostmanSource({ kind: 'none' })
+      return
+    }
+    setPasteRefused('')
+    // The last attempt's refusal belonged to the source it was refused
+    // about. A new one is a new attempt, and leaving the old sentence up
+    // would have it read as a verdict on this one.
+    setImportRefused('')
+    const root = untrack(() => store.defaultRoot())
+    if (source.kind === 'url') {
+      setPostmanSource({ kind: 'url', url: source.url })
+      offerDestination(proposedDestinationFromURL(root, source.url))
+      return
+    }
+    setPostmanSource({ kind: 'document', text: source.document })
+    offerDestination(proposedDestinationFromDocument(root, source.document))
+  }
+
+  /** Let the held source go, whichever entrance it came through. The person
+   *  who dropped the wrong file gets the ask back empty rather than having to
+   *  drop the right one over it. */
+  const clearSource = (): void => {
+    setPostmanSource({ kind: 'none' })
+    clearPaste()
+    setImportRefused('')
   }
 
   /**
@@ -533,8 +678,8 @@ export function ApiPane(props: ApiPaneProps) {
    * the whole of the difference, because bytes reach a backend wherever it
    * runs while a path only names a file on the machine running Go.
    *
-   * The field shows the file's NAME. It is not a path and is never sent as
-   * one: the document route is chosen by what this gesture answered with, so
+   * The source line shows the file's NAME. It is not a path and is never
+   * sent as one: the route is chosen by what this gesture answered with, so
    * `importPostman` below spells `{ document }` and never `{ path }` while a
    * file is held. The name is there because it is what the person recognises
    * from their downloads folder, and because the destination is proposed from
@@ -550,8 +695,8 @@ export function ApiPane(props: ApiPaneProps) {
     const file = files[0]
     if (file === undefined) return
     setImportRefused('')
-    setPostmanFile(file.name)
-    setPostmanDoc(file)
+    setPostmanSource({ kind: 'file', file })
+    clearPaste()
     proposeDestination(file.name)
   }
 
@@ -631,8 +776,13 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   const askForImport = (): void => {
-    setPostmanFile('')
-    setPostmanDoc(null)
+    setPostmanSource({ kind: 'none' })
+    setPostmanPasted('')
+    setPasteRefused('')
+    // The destination opens as a SENTENCE, whatever the last ask left it as:
+    // it is an offer, and an ask that opened with the field already out
+    // would be asking the question the reshape removed.
+    setEditingDest(false)
     // OUR FOLDER, before anything is chosen. `proposedDestination` completes
     // this to <defaultRoot>/<stem> the moment a source is named, but until
     // then the field said nothing at all and its placeholder said
@@ -925,15 +1075,15 @@ export function ApiPane(props: ApiPaneProps) {
    * is not in the tree.
    */
   const importPostman = (): void => {
-    const file = postmanFile().trim()
     const dest = postmanDest().trim()
-    const doc = postmanDoc()
-    if ((doc === null && file === '') || dest === '') return
+    const held = postmanSource()
+    if (held.kind === 'none' || dest === '') return
     setImportingBusy(true)
     // WHICH ROUTE IS DECIDED BY WHAT THE GESTURE ANSWERED WITH, never by
-    // what kind of build this is: a held document goes as bytes, a named
-    // place goes as a path, and a person naming a file on the backend's own
-    // machine gets the path route in a browser too (api-client.ts,
+    // what kind of build this is: a held file goes as bytes, a named place
+    // goes as a path, a pasted export goes as itself, an address goes as a
+    // URL the backend fetches — and a person naming a file on the backend's
+    // own machine gets the path route in a browser too (api-client.ts,
     // ImportSource).
     //
     // Reading the file can fail — it may have moved, or been revoked —
@@ -941,7 +1091,15 @@ export function ApiPane(props: ApiPaneProps) {
     // its refusal goes where the backend's own refusals go: under the field,
     // with the ask still open.
     const source: Promise<ImportSource> =
-      doc !== null ? doc.text().then((document) => ({ document })) : Promise.resolve({ path: file })
+      held.kind === 'file'
+        ? held.file.text().then((document) => ({ document }))
+        : Promise.resolve(
+            held.kind === 'path'
+              ? { path: held.path }
+              : held.kind === 'document'
+                ? { document: held.text }
+                : { url: held.url },
+          )
     void source
       .then((chosen) => store.importPostman(chosen, dest))
       .then(async (): Promise<void> => {
@@ -1189,8 +1347,15 @@ export function ApiPane(props: ApiPaneProps) {
         />
         <PostmanImportDialog
           open={importing()}
-          file={postmanFile()}
+          pasted={postmanPasted()}
+          onPaste={pasteSource}
+          pasteRefusal={pasteRefused()}
+          sourceLabel={sourceLabel(postmanSource())}
+          onClearSource={clearSource}
+          file={sourcePath(postmanSource())}
           dest={postmanDest()}
+          editingDest={editingDest()}
+          onEditDest={() => setEditingDest(true)}
           onFile={chooseExport}
           onDest={(value) => {
             setDestTyped(true)

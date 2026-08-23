@@ -121,16 +121,25 @@ function control(field: string): HTMLSelectElement {
   return el
 }
 
-/** True when the element is not sealed inside a closed `<dialog>`.
+/** True when the element is not sealed inside a closed `<dialog>`, and not
+ *  inside a hidden subtree.
  *
  *  A closed native dialog keeps its children in the document, so the
  *  workbench holds the controls of BOTH its asks at all times and a plain
  *  `querySelectorAll` would answer with a Cancel the person cannot see. This
  *  is the difference between "rendered" and "reachable", and every helper
- *  below asks for the second. */
+ *  below asks for the second.
+ *
+ *  `[hidden]` is the same distinction one level in, and it arrived with the
+ *  import ask's reshape (nocx-ysyy2): the two path fields stay ADDRESSABLE —
+ *  a native drop and the system picker answer with a path that has to land
+ *  somewhere, and every drop test names them by id — while ceasing to be
+ *  fields a person is asked to fill in. Without this half, "the ask no
+ *  longer shows a path field" is not a question this file can ask. */
 function reachable(el: Element): boolean {
   const dialog = el.closest('dialog')
-  return dialog === null || dialog.open
+  if (dialog !== null && !dialog.open) return false
+  return el.closest('[hidden]') === null
 }
 
 function button(name: string): HTMLButtonElement {
@@ -1388,7 +1397,10 @@ async function openImportAsk(bar: HTMLElement): Promise<void> {
   fireEvent.click(button('More collection actions'))
   await vi.waitFor(() => menuItem('Import collection…'))
   fireEvent.click(menuItem('Import collection…'))
-  await vi.waitFor(() => expect(reachable(field('api-import-postman-file'))).toBe(true))
+  // The paste box, because it is what the ask now OPENS as: the two path
+  // fields are present and not reachable, so waiting on one of those would
+  // wait for something that never comes (nocx-ysyy2).
+  await vi.waitFor(() => expect(reachable(field('api-import-paste'))).toBe(true))
 }
 
 describe('a Postman export is imported through an ask', () => {
@@ -1438,9 +1450,13 @@ describe('a Postman export is imported through an ask', () => {
     await openImportAsk(bar)
 
     // The control is reachable from the state the ask opens in — which is
-    // the half a test that called the picker directly could not say.
-    expect(buttonNames()).toContain('Choose export…')
-    fireEvent.click(button('Choose export…'))
+    // the half a test that called the picker directly could not say. It is
+    // the REGION's now: the export field's own trailing picker went with the
+    // field when the ask stopped asking for paths (nocx-ysyy2), and one
+    // capability had two controls only for as long as there were two places
+    // to put one.
+    expect(buttonNames()).toContain('Or select a file')
+    fireEvent.click(button('Or select a file'))
 
     await vi.waitFor(() =>
       expect(field('api-import-postman-file').value).toBe('/work/acme.postman_collection.json'),
@@ -1459,7 +1475,7 @@ describe('a Postman export is imported through an ask', () => {
     await openImportAsk(bar)
 
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/elsewhere/mine' } })
-    fireEvent.click(button('Choose export…'))
+    fireEvent.click(button('Or select a file'))
 
     await vi.waitFor(() =>
       expect(field('api-import-postman-file').value).toBe('/work/acme.postman_collection.json'),
@@ -1511,11 +1527,18 @@ describe('a Postman export is imported through an ask', () => {
     })
     await openImportAsk(bar)
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/half-typed.json' } })
-    expect(buttonNames()).toContain('Choose export…')
+    // What retires is the NATIVE picker, and the region is where it is
+    // reached now (nocx-ysyy2). Its absence is read off the kit's own file
+    // input, which is what the region falls back to: the browser half never
+    // depended on Wails, so "the control is gone" cannot be read off the
+    // button's words — both halves use them.
+    expect(importAskBody().querySelector('.ui-file-input__native')).toBeNull()
 
-    fireEvent.click(button('Choose export…'))
+    fireEvent.click(button('Or select a file'))
 
-    await vi.waitFor(() => expect(buttonNames()).not.toContain('Choose export…'))
+    await vi.waitFor(() =>
+      expect(importAskBody().querySelector('.ui-file-input__native')).not.toBeNull(),
+    )
     // The refusal costs the person nothing they typed, and is said where
     // every other refusal in this ask is said.
     expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
@@ -1527,7 +1550,7 @@ describe('a Postman export is imported through an ask', () => {
     await openImportAsk(bar)
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/half-typed.json' } })
 
-    fireEvent.click(button('Choose export…'))
+    fireEvent.click(button('Or select a file'))
 
     await vi.waitFor(() => expect(button('Import')).toBeTruthy())
     expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
@@ -1542,7 +1565,7 @@ describe('a Postman export is imported through an ask', () => {
     await vi.waitFor(() => menuItem('Import collection…'))
     fireEvent.click(menuItem('Import collection…'))
 
-    await vi.waitFor(() => expect(reachable(field('api-import-postman-file'))).toBe(true))
+    await vi.waitFor(() => expect(reachable(field('api-import-paste'))).toBe(true))
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
     fireEvent.click(button('Import'))
@@ -1550,6 +1573,212 @@ describe('a Postman export is imported through an ask', () => {
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
     )
+  })
+})
+
+// ── ONE QUESTION, NOT TWO PATHS ───────────────────────────────────────────
+//
+// nocx-ysyy2. The ask still opened as a form of two ABSOLUTE PATHS with a
+// drop region added above them: a file a person downloaded thirty seconds
+// ago, and a folder that does not exist yet, neither of which they can
+// answer without leaving the app. Postman's own dialog — the owner's
+// reference — asks one question across the top and offers the destination
+// rather than demanding it.
+//
+// So the paste box is the ask now, the two fields stop being visible, and
+// what the ask is holding is stated in one line a person can take back.
+// The ids do not change: moving a field is not renaming it, and a native
+// drop and the system picker still answer with a path that has to land
+// somewhere.
+
+/** What the ask says it is currently holding, or '' when it holds nothing. */
+function sourceLine(): string {
+  const el = importAskBody().querySelector<HTMLElement>('.api-import-source')
+  return el === null || !reachable(el) ? '' : (el.textContent ?? '').trim()
+}
+
+/** The destination the one summary line NAMES, or '' when it names none —
+ *  which is the line inviting the person to choose one, and is also what it
+ *  reads while the field is out instead. */
+function destSummary(): string {
+  const el = importAskBody().querySelector<HTMLElement>('.api-import-dest')
+  if (el === null || !reachable(el)) return ''
+  const named = /^Imports into: (.+)$/.exec((el.textContent ?? '').trim())
+  return named === null ? '' : named[1]
+}
+
+function paste(text: string): void {
+  fireEvent.input(field('api-import-paste'), { target: { value: text } })
+}
+
+describe('the import ask asks one question', () => {
+  it('opens with a paste box, and neither path field is reachable', async () => {
+    const { bar } = await mountApp({})
+    await openImportAsk(bar)
+
+    expect(reachable(field('api-import-paste'))).toBe(true)
+    // Present — a drop and the picker still land in it — and not something
+    // the person is asked to fill in.
+    expect(reachable(field('api-import-postman-file'))).toBe(false)
+    expect(reachable(field('api-import-postman-dest'))).toBe(false)
+  })
+
+  it('proposes the collection name from a pasted export', async () => {
+    const { bar } = await mountApp({})
+    await openImportAsk(bar)
+
+    paste('{"info":{"name":"Acme API"}}')
+
+    await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme-api`))
+    expect(sourceLine()).not.toBe('')
+  })
+
+  it('refuses a curl line here rather than spending a round trip on it', async () => {
+    // curl has its own door in the request editor and is deliberately not
+    // this ask's question: `parseImport` would hand it to the curl parser,
+    // so a person who pasted a shell command would get a collection minted
+    // from it, or an error mentioning curl in a dialog that never offered
+    // curl.
+    const importPostman = vi.fn()
+    const { bar } = await mountApp({ importPostman })
+    await openImportAsk(bar)
+
+    paste('curl https://h -X POST')
+
+    await vi.waitFor(() => expect(importAskBody().textContent).toMatch(/not a Postman export/i))
+    expect(sourceLine()).toBe('')
+    expect(destSummary()).toBe('')
+    // And the line says so in words rather than standing empty: the pencil
+    // beside it is the control that answers it.
+    expect(importAskBody().textContent).toContain('Choose where this goes')
+    expect(button('Import').disabled).toBe(true)
+    expect(importPostman).not.toHaveBeenCalled()
+  })
+
+  it('sends the pasted document, and a second source replaces the first', async () => {
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({ importPostman })
+    await openImportAsk(bar)
+
+    // A path first, the way the picker and a native drop answer.
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    paste('{"info":{"name":"Acme"}}')
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { document: '{"info":{"name":"Acme"}}' },
+        `${DEFAULT_ROOT}/acme`,
+      ),
+    )
+    // Exactly one source is held: the path is gone from the seam it landed
+    // in, not merely outranked by the paste at submit time.
+    expect(field('api-import-postman-file').value).toBe('')
+  })
+
+  it('a pasted URL is a source too, and proposes from its last segment', async () => {
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({ importPostman })
+    await openImportAsk(bar)
+
+    paste('https://example.test/exports/acme.postman_collection.json')
+
+    await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`))
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { url: 'https://example.test/exports/acme.postman_collection.json' },
+        `${DEFAULT_ROOT}/acme`,
+      ),
+    )
+  })
+
+  it('reveals the destination field behind the pencil, under its own id', async () => {
+    const { bar } = await mountApp({ openDirectory: vi.fn().mockResolvedValue({ path: '/w' }) })
+    await openImportAsk(bar)
+    paste('{"info":{"name":"Acme"}}')
+
+    await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`))
+    fireEvent.click(button('Change where this goes'))
+
+    await vi.waitFor(() => expect(reachable(field('api-import-postman-dest'))).toBe(true))
+    expect(field('api-import-postman-dest').value).toBe(`${DEFAULT_ROOT}/acme`)
+    // The Browse control comes with it, in the field's trailing slot where
+    // it has always been.
+    expect(buttonNames()).toContain('Browse…')
+  })
+
+  it('forgetting the source empties the summary and disables Import', async () => {
+    // A person who dropped the wrong file must be able to see what the ask
+    // is holding and take it back.
+    const { bar } = await mountApp({})
+    await openImportAsk(bar)
+    paste('{"info":{"name":"Acme"}}')
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+
+    fireEvent.click(button('Forget this source'))
+
+    await vi.waitFor(() => expect(sourceLine()).toBe(''))
+    expect(destSummary()).toBe('')
+    expect(button('Import').disabled).toBe(true)
+    // And the box it was pasted into is empty, because the paste WAS the
+    // source: a box still holding the text would go on offering a source
+    // the ask no longer holds.
+    expect(field('api-import-paste').value).toBe('')
+  })
+
+  it('the system picker fills the source line and proposes the folder', async () => {
+    const openFile = vi.fn().mockResolvedValue({ path: '/downloads/acme.postman_collection.json' })
+    const { bar } = await mountApp({ openFile })
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Or select a file'))
+
+    await vi.waitFor(() =>
+      expect(sourceLine()).toContain('/downloads/acme.postman_collection.json'),
+    )
+    expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`)
+  })
+
+  it('a native drop fills the source line and proposes the folder', async () => {
+    // The gesture the ask exists for on the desktop, and the one entrance
+    // whose answer is a PATH nobody typed. It says what it is holding in the
+    // same line a paste and a pick do — one statement, four entrances.
+    const drop = nativeDropFixture()
+    const { bar } = await mountApp({ nativeDrop: drop })
+    await openImportAsk(bar)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'api-import',
+      sources: [
+        {
+          sourceTicket: '',
+          name: 'acme.postman_collection.json',
+          size: 12,
+          localPath: '/downloads/acme.postman_collection.json',
+        },
+      ],
+    })
+
+    await vi.waitFor(() =>
+      expect(sourceLine()).toContain('/downloads/acme.postman_collection.json'),
+    )
+    expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`)
+  })
+
+  it('a destination the person edited is never overwritten by a later paste', async () => {
+    const { bar } = await mountApp({})
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Change where this goes'))
+    await vi.waitFor(() => expect(reachable(field('api-import-postman-dest'))).toBe(true))
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/elsewhere/mine' } })
+
+    paste('{"info":{"name":"Acme API"}}')
+
+    await vi.waitFor(() => expect(sourceLine()).not.toBe(''))
+    expect(field('api-import-postman-dest').value).toBe('/elsewhere/mine')
   })
 })
 
@@ -1623,7 +1852,7 @@ describe('the import ask proposes our folder', () => {
     await openImportAsk(bar)
 
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/work/mine' } })
-    fireEvent.click(button('Choose export…'))
+    fireEvent.click(button('Or select a file'))
 
     await vi.waitFor(() =>
       expect(field('api-import-postman-file').value).toBe(
@@ -1645,7 +1874,7 @@ describe('the import ask proposes our folder', () => {
     })
     await openImportAsk(bar)
 
-    fireEvent.click(button('Choose export…'))
+    fireEvent.click(button('Or select a file'))
 
     await vi.waitFor(() =>
       expect(field('api-import-postman-dest').value).toBe('/data/collections/acme'),
@@ -1833,15 +2062,20 @@ describe('the import ask accepts a drop', () => {
     expect(zone.hasAttribute('data-file-drop-target')).toBe(false)
   })
 
-  it("the region's picker is the export field's picker — one capability, two controls", async () => {
-    // Two controls, ONE derivation of "choose an export": the region's button
-    // is threaded the handler the field's trailing button already calls, so a
-    // pick made either way proposes the destination the same way.
+  it("the region's picker is the ask's ONLY picker, and it answers the whole gesture", async () => {
+    // It used to be one of two — the export field carried the same handler
+    // in its trailing slot — and the test asserted that both reached one
+    // mock, because one derivation of "choose an export" was the point. The
+    // field stopped being visible when the ask stopped asking for paths
+    // (nocx-ysyy2), so the second control went with it rather than staying
+    // on as a button nobody can reach. What is left to assert is the half
+    // that still matters: a pick answers BOTH halves of the ask, exactly as
+    // a drop does.
     const openFile = vi.fn().mockResolvedValue({ path: '/downloads/acme.postman_collection.json' })
     const { bar } = await mountApp({ openFile, nativeDrop: nativeDropFixture() })
     await openImportAsk(bar)
 
-    expect(buttonNames()).toContain('Choose export…')
+    expect(buttonNames()).not.toContain('Choose export…')
     fireEvent.click(button('Or select a file'))
 
     await vi.waitFor(() =>
@@ -1850,10 +2084,7 @@ describe('the import ask accepts a drop', () => {
       ),
     )
     expect(openFile).toHaveBeenCalledTimes(1)
-    // The field's own control reaches the very same mock — which is the
-    // assertion that the two controls are one capability rather than two.
-    fireEvent.click(button('Choose export…'))
-    await vi.waitFor(() => expect(openFile).toHaveBeenCalledTimes(2))
+    expect(field('api-import-postman-dest').value).toBe(`${DEFAULT_ROOT}/acme`)
   })
 })
 

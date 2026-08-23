@@ -1544,6 +1544,106 @@ describe('a Postman export is imported through an ask', () => {
   })
 })
 
+// ── The ask opens on our folder ───────────────────────────────────────────
+//
+// nocx-9ivof. `nocx-6hg2w.14` put `defaultRoot` on the wire and proposed a
+// destination AFTER a source was chosen; before that both fields were empty
+// and the destination's placeholder read `/work/acme-api` — an arbitrary
+// path rather than the place this product keeps collections, which is where
+// `Create` next door puts one without asking. Proposing on open also mints a
+// value that could only ever be refused (the root itself certainly exists),
+// so `ready()` has to know its own proposal.
+
+/** The ask, opened on a build whose collections live at `root`. */
+async function openAskWithRoot(root: string): Promise<void> {
+  const { bar } = await mountApp({
+    listCollections: vi.fn().mockResolvedValue({ collections: [], defaultRoot: root }),
+  })
+  await openImportAsk(bar)
+}
+
+describe('the import ask proposes our folder', () => {
+  it('opens with the default root already in the destination, and Import disabled', async () => {
+    await openAskWithRoot('/data/collections')
+
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/')
+    // The root names a folder that certainly exists, so submitting it could
+    // only come back "a folder is already there" about the collections root
+    // rather than about anything the person chose.
+    expect(button('Import').disabled).toBe(true)
+
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    fireEvent.input(field('api-import-postman-dest'), {
+      target: { value: '/data/collections/acme' },
+    })
+    expect(button('Import').disabled).toBe(false)
+  })
+
+  it('refuses the root without its separator too', async () => {
+    // Both values `askForImport` can leave behind: a person who deletes the
+    // trailing slash has still said nothing.
+    await openAskWithRoot('/data/collections')
+
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/data/collections' } })
+    expect(button('Import').disabled).toBe(true)
+  })
+
+  it('proposes nothing on a build with no default location', async () => {
+    // '' is the degraded state — apicoll.ErrNoDefaultLocation. Nothing was
+    // promised, so the field says nothing at all rather than an example path
+    // from somebody else's disk.
+    await openAskWithRoot('')
+
+    const dest = field('api-import-postman-dest')
+    expect(dest.value).toBe('')
+    expect(dest.getAttribute('placeholder')).toBe('')
+  })
+
+  it('does not overwrite a destination the person edited', async () => {
+    // The nocx-6hg2w.14 rule, re-asserted because the prefill moves the code
+    // that honours it: the proposal writes the signal directly and must not
+    // count as the person having spoken.
+    const openFile = vi.fn().mockResolvedValue({ path: '/downloads/acme.postman_collection.json' })
+    const { bar } = await mountApp({
+      openFile,
+      listCollections: vi
+        .fn()
+        .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+    })
+    await openImportAsk(bar)
+
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/work/mine' } })
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe(
+        '/downloads/acme.postman_collection.json',
+      ),
+    )
+    expect(field('api-import-postman-dest').value).toBe('/work/mine')
+  })
+
+  it('still completes the proposal when nobody has touched the destination', async () => {
+    // The other side of the same rule: the field opening non-empty must not
+    // look like a person having typed, or the pick would never land.
+    const openFile = vi.fn().mockResolvedValue({ path: '/downloads/acme.postman_collection.json' })
+    const { bar } = await mountApp({
+      openFile,
+      listCollections: vi
+        .fn()
+        .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+    })
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Choose export…'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-dest').value).toBe('/data/collections/acme'),
+    )
+  })
+})
+
 // ── The environment a request goes out under ──────────────────────────────
 //
 // nocx-pnvnn. `envRelPath` appeared NOWHERE in frontend/ or contracts/: the

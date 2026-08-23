@@ -60,6 +60,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/apibind"
@@ -751,7 +752,19 @@ type APIImportService interface {
 	// binding store. It is the second and last method on this surface that
 	// accepts a path (§13.1) — and it accepts two, because an import names
 	// both what to read and where to put it.
+	//
+	// srcPath is a path on the machine running THIS process, which is the
+	// person's machine only when the desktop app is what is calling. It is
+	// therefore the NARROW route; ImportPostmanDocument is the general one.
 	ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error)
+
+	// ImportPostmanDocument writes the same collection from the export's
+	// BYTES, which the caller already holds. It is not a second import: the
+	// writer takes an io.Reader (apiimport.ImportInto), and ImportPostman
+	// differs only by opening a file to get one. A renderer reached over a
+	// forwarded port has the bytes and cannot name a file the backend can
+	// see, which is the case the path route cannot serve.
+	ImportPostmanDocument(ctx context.Context, document, dest string) ([]apiimport.Unsupported, error)
 }
 
 // SecretBinder is the binding document's WRITE half, narrowed to the one
@@ -872,4 +885,20 @@ func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest stri
 	}
 	defer func() { _ = f.Close() }()
 	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, f)
+}
+
+// ImportPostmanDocument runs the same import over the bytes it was given.
+//
+// There is no Lstat half here and nothing is missing: the two refusals above
+// are about a FILE the process was asked to open — a fifo that would block
+// the read while both domain gates are held, a directory with nothing in it
+// to parse — and a document that arrived as bytes opens nothing. What
+// bounds this route is the caller's: the transport refuses a document over
+// maxAPIImportDocumentRunes before the call, and apiimport's own 16 MiB cap
+// governs the parse whichever way the document arrived.
+func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, dest string) ([]apiimport.Unsupported, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, strings.NewReader(document))
 }

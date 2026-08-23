@@ -1810,7 +1810,22 @@ func paramsBudgetForMethod(method string) int {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
-		"profiles.importTabby", "profiles.tabbyPreview":
+		"profiles.importTabby", "profiles.tabbyPreview",
+		// api.import.postman carries a Postman export INLINE as `document`
+		// (the route for a backend that is not the person's machine), so
+		// it is a document-carrying method in exactly the sense this tier
+		// names. budgetDefault is 64 KiB because it was sized on an
+		// ORDINARY frame — a pasted key, a form — and an export of a
+		// working API with its saved examples is not that size class;
+		// apiimport bounds the document it parses at 16 MiB, which is the
+		// size an export is expected to reach.
+		//
+		// This tier is not the bound a caller meets. That is
+		// maxAPIImportDocumentRunes (1 MiB, ws_api_handlers.go), which is
+		// what the refusal names and what points at `path` for anything
+		// larger; the budget only has to sit above it so the refusal comes
+		// from the method rather than from the frame.
+		"api.import.postman":
 		return budgetDocument
 	default:
 		return budgetDefault

@@ -574,7 +574,18 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
 			return nil
 		}
-		unsup, err := svc.ImportPostman(ctx, p.Path, p.Dest)
+		// One import, two ways in, and the choice is already made: the
+		// validator refused both-and-neither, so exactly one of these is
+		// set and there is no precedence rule here to disagree with it.
+		var (
+			unsup []apiimport.Unsupported
+			err   error
+		)
+		if p.Document != "" {
+			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest)
+		} else {
+			unsup, err = svc.ImportPostman(ctx, p.Path, p.Dest)
+		}
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
 			return nil
@@ -751,9 +762,28 @@ type apiRequestWriteParams struct {
 	Request apiRequestWire `json:"request"`
 }
 
+// apiImportPostmanParams names the export TWO ways, and exactly one of them
+// may be given (validateAPIImportPostmanRaw).
+//
+// Path names a file on the machine running THIS process. In the desktop app
+// that is also the person's machine, which is why it reads naturally there;
+// reached over a forwarded port (`make dev-web` forwards both ports over
+// SSH) it names a file on the server, which is almost never the export a
+// person just downloaded. Document carries the export's bytes instead, and
+// bytes reach a backend wherever it runs.
+//
+// This is NOT ws_upload.go's R2 in reverse. R2 says the renderer may name an
+// upload's DESTINATION and may never name its SOURCE path, because a
+// renderer that could spell a backend path could have the backend read
+// ~/.ssh/id_ed25519 and send it somewhere. `path` here is an existing
+// parameter of an existing method — design §13.1's second and last path,
+// unchanged and not widened by this — and `document` names no path at all,
+// which is strictly the safer of the two routes rather than a new way to
+// spell a source.
 type apiImportPostmanParams struct {
-	Path string `json:"path"`
-	Dest string `json:"dest"`
+	Path     string `json:"path"`
+	Document string `json:"document"`
+	Dest     string `json:"dest"`
 }
 
 type apiImportCurlParams struct {
@@ -1478,6 +1508,20 @@ const (
 	// the wire-cost ceiling before the parse, at the same order of
 	// magnitude so nothing legitimate sits between them.
 	maxAPICurlLineRunes = 1 << 20
+	// maxAPIImportDocumentRunes bounds a Postman export carried INLINE, as
+	// the `document` parameter of api.import.postman. It is deliberately
+	// the same 1 MiB as maxAPICurlLineRunes above, and the two are ONE
+	// decision stated twice rather than two opinions: this is what a text
+	// parameter may cost this control plane, whether the text is a curl
+	// line somebody pasted or an export the renderer read.
+	//
+	// Over the bound the import still happens — by `path`, which names the
+	// file on the machine running Go and carries no bytes over the socket
+	// at all — and the refusal says so rather than leaving a person with an
+	// export and nowhere to put it. apiimport's own 16 MiB cap
+	// (maxDocumentBytes) is a different bound in a different place: it
+	// governs a document already being read, however it arrived.
+	maxAPIImportDocumentRunes = 1 << 20
 	// maxAPIBodyTextRunes bounds a request body written back through
 	// api.request.write. A body too large for a line lives in a file that
 	// the request NAMES (§6.4), so an inline body is a phrase a person
@@ -1825,13 +1869,33 @@ func validateAPIRequestBody(r apiRequestWire) string {
 	return boundedRunes("request.auth.user", r.Auth.User, maxUserRunes)
 }
 
+// validateAPIImportPostmanRaw checks the import's two halves: WHICH export,
+// and where it goes.
+//
+// The export is named either by `path` or by `document`, and both-or-neither
+// is refused BY NAME. A precedence rule would be the cheaper code and the
+// worse answer: a caller that sent both would have one of them silently do
+// nothing, and would never learn which one the server ignored.
 func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 	var p apiImportPostmanParams
 	if msg := decodeAPIParams(raw, &p); msg != "" {
 		return msg
 	}
-	if msg := validateAPIFolderPath(p.Path, "path"); msg != "" {
-		return msg
+	switch {
+	case p.Path != "" && p.Document != "":
+		return "path and document are two routes to one import — path names the export on the machine running nocx, document carries the export's bytes; give one of them, not both"
+	case p.Path == "" && p.Document == "":
+		return "an import needs the export: either path, naming it on the machine running nocx, or document, carrying its bytes"
+	case p.Document != "":
+		if n := utf8.RuneCountInString(p.Document); n > maxAPIImportDocumentRunes {
+			return fmt.Sprintf(
+				"document exceeds %d characters; an export this large is imported with path, which names the file on the machine running nocx and sends no bytes over this socket",
+				maxAPIImportDocumentRunes)
+		}
+	default:
+		if msg := validateAPIFolderPath(p.Path, "path"); msg != "" {
+			return msg
+		}
 	}
 	return validateAPIFolderPath(p.Dest, "dest")
 }

@@ -372,6 +372,54 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 	}
 }
 
+// The document route: the same import from bytes the caller already holds.
+//
+// It exists because srcPath names a file on the machine running THIS
+// process, which is the person's machine only in the desktop app — over a
+// forwarded port it is the server's disk, and the export a person just
+// downloaded is not on it. Its failure half is the one external call it
+// makes: a document apiimport cannot parse.
+func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
+	op := capability.NewAPIImportOperation(
+		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
+		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate("lane", 8, 64, 5*time.Second),
+		apiimport.NewOSFS(),
+		stubBindWriter{},
+	)
+	const export = `{"info":{"name":"acme",` +
+		`"schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},` +
+		`"item":[{"name":"ping","request":{"method":"GET","url":"https://example.test/ping"}}]}`
+
+	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
+		dest := filepath.Join(t.TempDir(), "dest")
+		unsup, err := svc.ImportPostmanDocument(ctx, export, dest)
+		if err != nil {
+			t.Fatalf("ImportPostmanDocument(an ordinary export): %v", err)
+		}
+		if len(unsup) != 0 {
+			t.Errorf("unsupported = %+v, want nothing itemised for an export that converts whole", unsup)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dest, "nocx-collection.json")); statErr != nil {
+			t.Errorf("Lstat(the manifest) = %v, want the imported collection", statErr)
+		}
+
+		// And the failure: bytes that are not a Postman export. The
+		// destination must not survive it — an import is one atomic
+		// arrival on this route too.
+		bad := filepath.Join(t.TempDir(), "bad")
+		if _, err := svc.ImportPostmanDocument(ctx, "not a postman export", bad); err == nil {
+			t.Error("ImportPostmanDocument(bytes that are not an export) succeeded")
+		}
+		if _, statErr := os.Lstat(bad); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("Lstat(%s) = %v, want not-exist — a failed import leaves nothing behind", bad, statErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 // ─── creating one ──────────────────────────────────────────────────────────
 
 // "Just make one" (§6.1) as the user does it: they name a collection and it

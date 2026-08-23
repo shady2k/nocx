@@ -31,6 +31,13 @@ type Service interface {
 	// property being asserted: a caller that cannot name a file cannot
 	// delete one.
 	DeleteRequest(h HandleID, relPath string) error
+	// CreateFolder makes one folder inside the collection: a NAME, and the
+	// EXISTING folder to put it in ("" is the root). It is here for
+	// DeleteRequest's reason — it is addressed by the handle plus a path
+	// relative to it, so §13.1 holds — and its name is a component rather
+	// than a path, which is api.collections.create's grammar one level
+	// down (createfolder.go says why nesting is repeated calls).
+	CreateFolder(h HandleID, parentRelPath, name string) (FolderCreated, error)
 }
 
 // handle is one opened folder, held as three facts because a replaced root

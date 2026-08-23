@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.collections.createFolder.schema.json",
+  "title": "ApiCollectionsCreateFolderResult",
+  "description": "Result of the api.collections.createFolder JSON-RPC method: ONE folder made inside a collection the user has open, and the collection as it is afterwards. A collection is a folder and it may contain folders (design §6.2) — the Postman importer already writes them, so an imported collection has structure and one built inside nocx had none. The method takes a NAME and the EXISTING folder to put it in, both addressed through the backend-held handle, so it does not join the two api.* methods that accept a root (§13.1). Nesting is repeated calls rather than a path, because a create that made its intermediate folders would silently mint a misspelling and could never answer \"that folder is not there\".",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["relPath", "collection"],
+  "properties": {
+    "relPath": {
+      "description": "The new folder's path WITHIN the collection — the parent joined to the name, or just the name when it was made at the root. It is what the caller passes back as `parentRelPath` to make a folder inside this one, and it is carried rather than left to be reassembled: a renderer joining a parent and a name itself would be a second answer to what this folder is called from the root.",
+      "type": "string"
+    },
+    "collection": {
+      "description": "The collection as it is now, with the new folder in it. It rides on the result because the caller's next move is to draw the tree, and a listing fetched in a second round trip would be a second account of one folder taken at a second moment. It is api.collections.open's shape, through the same assembler, so the three results cannot disagree about what a collection is.",
+      "$ref": "api.collections.open.schema.json#/$defs/collection"
+    }
+  }
+}

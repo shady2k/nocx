@@ -26,6 +26,10 @@ export interface Collection {
    */
   requests: RequestRef[]
   /**
+   * Every folder inside the collection (api.collections.open.schema.json says what the list is for). A collection that has just been minted has none, so this is []. Never null. It is declared here because this result is api.collections.open's shape and the two must not drift.
+   */
+  folders: string[]
+  /**
    * The files inside the folder that are not requests or not environments. A collection that has just been created has none, so this is []. Never null — a renderer walking null is a crash rather than an empty view.
    */
   malformed: MalformedRef[]

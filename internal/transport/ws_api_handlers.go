@@ -144,6 +144,30 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				Handle:     string(made.Handle),
 				Collection: wire,
 			}))
+		case "api.collections.createFolder":
+			var p apiCollectionsCreateFolderParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			made, err := svc.CreateFolder(apicoll.HandleID(p.Handle), p.ParentRelPath, p.Name)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			// The collection AFTER the folder was made, through the one
+			// assembler every api.collections.* result goes through: the
+			// caller's next move is to draw the tree, and a listing taken
+			// in a second round trip would be a second account of one
+			// folder.
+			wire, envErr := wireCollectionOf(svc, apicoll.HandleID(p.Handle), made.Collection)
+			if envErr != nil {
+				h.fail(req, envErr)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiCollectionsCreateFolderResponse{
+				RelPath:    made.RelPath,
+				Collection: wire,
+			}))
 		case "api.collections.close":
 			var p apiHandleParams
 			if !h.decode(req, &p) {
@@ -647,6 +671,9 @@ func apiMethodErrorCode(err error) int {
 		errors.Is(err, apicoll.ErrNoManifest),
 		errors.Is(err, apicoll.ErrCollectionExists),
 		errors.Is(err, apicoll.ErrInvalidCollectionName),
+		errors.Is(err, apicoll.ErrInvalidFolderName),
+		errors.Is(err, apicoll.ErrFolderExists),
+		errors.Is(err, apicoll.ErrFolderNotFound),
 		errors.Is(err, capability.ErrImportNotAFile):
 		return -32602
 	default:
@@ -696,6 +723,26 @@ type apiRequestParams struct {
 // therefore does not join the two that accept a root (§13.1).
 type apiCollectionsCreateParams struct {
 	Name string `json:"name"`
+}
+
+// apiCollectionsCreateFolderParams carries a NAME and the folder to put it
+// in, and neither is a root.
+//
+// name is a single component — api.collections.create's grammar one level
+// down. parentRelPath is an EXISTING folder inside the collection,
+// addressed the way every other thing here is addressed: the backend-held
+// handle plus a path relative to it (§13.1). Absent is the collection root,
+// which is where a folder made with no parent chosen goes.
+//
+// Why not one relative path with the intermediate folders made along the
+// way: MkdirAll succeeds for a request nobody made — a misspelled month
+// would mint the misspelling and there would be no moment at which the
+// caller could be told the parent is not there. Nesting is repeated calls,
+// each naming a parent that already exists.
+type apiCollectionsCreateFolderParams struct {
+	Handle        string `json:"handle"`
+	ParentRelPath string `json:"parentRelPath"`
+	Name          string `json:"name"`
 }
 
 // apiRequestSendParams is api.request.send's own params rather than
@@ -835,9 +882,32 @@ type apiOpenResponse struct {
 	Collection apiCollectionWire `json:"collection"`
 }
 
+// apiCollectionsCreateFolderResponse is the folder that was made and the
+// collection it is in.
+//
+// relPath is carried rather than left to be reassembled from the params:
+// the caller passes it straight back as the parent of the next folder, and
+// a renderer joining a parent and a name itself would be a second answer to
+// "what is this folder called from the root".
+type apiCollectionsCreateFolderResponse struct {
+	RelPath    string            `json:"relPath"`
+	Collection apiCollectionWire `json:"collection"`
+}
+
 type apiCollectionWire struct {
 	Name     string              `json:"name"`
 	Requests []apiRequestRefWire `json:"requests"`
+	// Folders is every directory inside the collection, parents before
+	// their children. It is on the wire because a folder holding nothing
+	// yet is invisible in Requests, and that is the state a folder is in
+	// for as long as it takes the person to fill it — a tree drawing itself
+	// from the request paths alone would lose the folder they just made.
+	//
+	// It is also the ONE answer to "what folders are there": a renderer
+	// deriving them from the request paths as well would agree with this
+	// list about every folder that holds a request and disagree about every
+	// folder that does not. Never nil.
+	Folders []string `json:"folders"`
 	// Malformed carries the unreadable files from BOTH halves of the folder
 	// — requests and environments — in one list, because "a file in here
 	// that cannot be read" is one concept and a second list would be a
@@ -1323,7 +1393,14 @@ func wireCollection(c apicoll.Collection, envs []apicoll.EnvironmentRef, badEnvs
 	for _, e := range envs {
 		out = append(out, apiEnvironmentRefWire{RelPath: e.RelPath, Name: e.Environment.Name})
 	}
-	return apiCollectionWire{Name: c.Name, Requests: reqs, Malformed: mal, Environments: out}
+	folders := c.Folders
+	if folders == nil {
+		// apicoll already answers [] rather than null; this is the wire's
+		// own guarantee rather than a trust in the layer below, because the
+		// renderer's first .map on a null throws.
+		folders = []string{}
+	}
+	return apiCollectionWire{Name: c.Name, Requests: reqs, Folders: folders, Malformed: mal, Environments: out}
 }
 
 // apiBodyKinds and apiAuthKinds are the closed sets the wire declares, and
@@ -1659,6 +1736,34 @@ func validateAPICollectionsCreateRaw(raw json.RawMessage) string {
 		return "name is required"
 	}
 	return boundedRunes("name", p.Name, maxConfigNameRunes)
+}
+
+// validateAPICollectionsCreateFolderRaw bounds the wire cost of a new
+// folder's name and of the parent that holds it. Whether the name is one
+// path component, and whether the parent is inside the collection, are
+// apicoll's rules and stay there (validateComponentName, validateFolderPath)
+// — a second copy here would be two derivations of one fact, and the two
+// would agree until somebody widened only one.
+func validateAPICollectionsCreateFolderRaw(raw json.RawMessage) string {
+	var p apiCollectionsCreateFolderParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	if p.Name == "" {
+		return "name is required"
+	}
+	if msg := boundedRunes("name", p.Name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	// "" is the collection root, which is where a folder with no parent
+	// chosen goes — so an absent parent is not a missing parameter.
+	if p.ParentRelPath == "" {
+		return ""
+	}
+	return boundedRunes("parentRelPath", p.ParentRelPath, maxPathRunes)
 }
 
 // validateAPIRequestSendRaw is validateAPIRequestRaw plus the optional
@@ -2041,6 +2146,10 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
 		whenAvailable(regResponder(sub, "api.collections.create", params(validateAPICollectionsCreateRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.collections.createFolder", params(validateAPICollectionsCreateFolderRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),

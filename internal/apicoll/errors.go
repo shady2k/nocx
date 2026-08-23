@@ -62,3 +62,28 @@ var ErrInvalidCollectionName = errors.New("apicoll: that is not a collection nam
 // already has a folder. Creating it again would write a fresh manifest over
 // somebody's collection, which is data loss wearing the word "create".
 var ErrCollectionExists = errors.New("apicoll: a collection with that name already exists")
+
+// ErrInvalidFolderName — the name given for a new folder inside a
+// collection is not a single path component: it is empty, it is a path, it
+// is `.` or `..`, it starts with a dot, or it is longer than a filesystem
+// component allows. It is also what `environments` gets at the top of a
+// collection, because that name is already taken by the environments
+// directory (§6.2).
+//
+// A sentinel of its own beside ErrInvalidCollectionName, sharing one
+// implementation (validateComponentName): the RULE is one rule and has one
+// owner, but the SENTENCE a surface shows is not — "that is not a
+// collection name" under a New Folder field would name the wrong thing.
+var ErrInvalidFolderName = errors.New("apicoll: that is not a folder name")
+
+// ErrFolderExists — a folder was asked for under a name something already
+// occupies. Refused rather than merged, which is the rule the import
+// already follows for its destination: a create that quietly adopted
+// somebody's folder would report making a thing it found.
+var ErrFolderExists = errors.New("apicoll: something with that name is already there")
+
+// ErrFolderNotFound — the folder a new one was to be created inside is not
+// in the collection, or is not a folder. Distinct from ErrRequestNotFound
+// because it is a different question with a different remedy: the caller
+// named a parent that is not there, and the move is to make it first.
+var ErrFolderNotFound = errors.New("apicoll: no such folder in the collection")

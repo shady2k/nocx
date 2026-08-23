@@ -183,14 +183,16 @@ func (s *service) DeleteRequest(h HandleID, relPath string) error {
 // readCollection walks the folder and builds the listing. A decode failure is
 // collected, never fatal: one bad file must not hide a collection.
 func readCollection(hd *handle, m manifest) (Collection, error) {
-	refs, bad, err := listRequests(hd.root)
+	refs, folders, bad, err := listContents(hd.root)
 	if err != nil {
 		return Collection{}, err
 	}
-	return Collection{Name: m.Name, Requests: refs, Malformed: bad}, nil
+	return Collection{Name: m.Name, Requests: refs, Folders: folders, Malformed: bad}, nil
 }
 
-// listRequests walks the folder for request files.
+// listContents walks the folder for the two things a tree draws: the
+// request files, and the directories holding them — including the ones
+// holding nothing yet.
 //
 // filepath.WalkDir reads directory entries rather than stat-ing through them,
 // so a symlinked request file arrives here AS a symlink and is named as
@@ -198,8 +200,9 @@ func readCollection(hd *handle, m manifest) (Collection, error) {
 // applies, reached by a different route, and it has to hold here too: a
 // listing that opened `steal.json` would have read the file before anybody
 // clicked anything.
-func listRequests(root string) ([]RequestRef, []MalformedRef, error) {
+func listContents(root string) ([]RequestRef, []string, []MalformedRef, error) {
 	var refs []RequestRef
+	var folders []string
 	var bad []MalformedRef
 
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
@@ -233,6 +236,9 @@ func listRequests(root string) ([]RequestRef, []MalformedRef, error) {
 				// its own metadata is inside it and is not the user's data.
 				return fs.SkipDir
 			}
+			// Every directory that survived those three is a folder of the
+			// user's, whether or not anything is in it yet.
+			folders = append(folders, rel)
 			return nil
 		}
 
@@ -261,7 +267,7 @@ func listRequests(root string) ([]RequestRef, []MalformedRef, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("apicoll: list collection %s: %w", root, err)
+		return nil, nil, nil, fmt.Errorf("apicoll: list collection %s: %w", root, err)
 	}
 
 	// WalkDir is lexical, so the order is already deterministic; the empty
@@ -270,8 +276,11 @@ func listRequests(root string) ([]RequestRef, []MalformedRef, error) {
 	if refs == nil {
 		refs = []RequestRef{}
 	}
+	if folders == nil {
+		folders = []string{}
+	}
 	if bad == nil {
 		bad = []MalformedRef{}
 	}
-	return refs, bad, nil
+	return refs, folders, bad, nil
 }

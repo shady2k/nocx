@@ -1,7 +1,7 @@
 /**
  * GENERATED FILE — do not edit.
  *
- * Source: contracts/api.collections.list.schema.json
+ * Source: contracts/api.collections.createFolder.schema.json
  * Regenerate: cd frontend && npm run contracts
  *
  * Editing this file is editing the wrong end of the contract. If the renderer
@@ -10,34 +10,18 @@
  */
 
 /**
- * Result of the api.collections.list JSON-RPC method: every collection folder the user currently has open, in the order they opened them. The app remembers the LIST of opened folders and never their contents (design §6.1), so each entry's collection is re-read from disk on every call — a request file a colleague's git pull added appears without anything being told about it.
+ * Result of the api.collections.createFolder JSON-RPC method: ONE folder made inside a collection the user has open, and the collection as it is afterwards. A collection is a folder and it may contain folders (design §6.2) — the Postman importer already writes them, so an imported collection has structure and one built inside nocx had none. The method takes a NAME and the EXISTING folder to put it in, both addressed through the backend-held handle, so it does not join the two api.* methods that accept a root (§13.1). Nesting is repeated calls rather than a path, because a create that made its intermediate folders would silently mint a misspelling and could never answer "that folder is not there".
  */
-export interface ApiCollectionsListResult {
+export interface ApiCollectionsCreateFolderResult {
   /**
-   * Never null — nothing open is [].
+   * The new folder's path WITHIN the collection — the parent joined to the name, or just the name when it was made at the root. It is what the caller passes back as `parentRelPath` to make a folder inside this one, and it is carried rather than left to be reassembled: a renderer joining a parent and a name itself would be a second answer to what this folder is called from the root.
    */
-  collections: OpenCollection[]
-  /**
-   * WHERE a collection made with no place named goes — the DIRECTORY that holds them, `<data dir>/collections`, and never a collection inside it. It rides the listing because it is a fact about this build rather than about any one folder, and the listing is the call every surface already makes.
-   *
-   * It exists so an ask can PROPOSE a destination instead of demanding one. `api.collections.create` takes a name and puts the folder here; the import ask next door asked for an absolute path with nothing filled in, which is the same concept behind two doors of very different difficulty — and the harder one is what somebody arriving from Postman meets. A proposal rather than "send nothing and let the backend decide": the person has to be able to SEE where their collection is about to land and change it, which an empty field with a sentence under it does not give them.
-   *
-   * "" when this build has no app directory to derive it from — the state apicoll.ErrNoDefaultLocation names for the creation path. A surface that gets "" proposes nothing and the person types a path, which is what they already do; nothing was promised, so nothing degraded.
-   */
-  defaultRoot: string
-}
-export interface OpenCollection {
-  handle: string
-  /**
-   * The path the user chose, exactly as they gave it. It is what the folder is CALLED, never something to send back: addressing a request means the handle plus a path relative to it (design §13.1).
-   */
-  path: string
+  relPath: string
   collection: Collection
-  /**
-   * Why this one folder could not be re-read — a root replaced or removed since it was opened — and "" when it could. On the entry rather than in an error beside the listing, so one dead folder cannot hide every live one, and present rather than dropped, so a vanished collection is visible in the product and not only in a log.
-   */
-  error: string
 }
+/**
+ * The collection as it is now, with the new folder in it. It rides on the result because the caller's next move is to draw the tree, and a listing fetched in a second round trip would be a second account of one folder taken at a second moment. It is api.collections.open's shape, through the same assembler, so the three results cannot disagree about what a collection is.
+ */
 export interface Collection {
   name: string
   /**

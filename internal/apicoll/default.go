@@ -81,19 +81,33 @@ func NewDefaultCollection(p storage.Paths, name string) (string, error) {
 // stripped of its slashes creates a folder the user did not ask for under a
 // name they did not choose.
 func validateCollectionName(name string) error {
+	return validateComponentName(name, ErrInvalidCollectionName, "collection")
+}
+
+// validateComponentName is that rule, once, for every name this package
+// turns into one path segment: the collection folder here, and a folder
+// inside a collection (createfolder.go).
+//
+// It is parameterised by the sentinel and the noun rather than copied,
+// because the two callers differ only in what a surface must SAY. The rule
+// itself — a single component, no separator, no leading dot, nothing that
+// denotes a directory, bounded — has one owner, and a second copy of it
+// would agree with this one everywhere anybody looked and disagree on the
+// day somebody widened only one.
+func validateComponentName(name string, sentinel error, what string) error {
 	switch {
 	case name == "":
-		return fmt.Errorf("%w: a collection needs a name", ErrInvalidCollectionName)
+		return fmt.Errorf("%w: a %s needs a name", sentinel, what)
 	case len(name) > maxCollectionNameLen:
-		return fmt.Errorf("%w: it is %d bytes, longer than the %d-byte limit", ErrInvalidCollectionName, len(name), maxCollectionNameLen)
+		return fmt.Errorf("%w: it is %d bytes, longer than the %d-byte limit", sentinel, len(name), maxCollectionNameLen)
 	case name == "." || name == "..":
-		return fmt.Errorf("%w: %q names a directory, not a collection", ErrInvalidCollectionName, name)
+		return fmt.Errorf("%w: %q names a directory, not a %s", sentinel, name, what)
 	case strings.HasPrefix(name, "."):
-		return fmt.Errorf("%w: %q starts with a dot", ErrInvalidCollectionName, name)
+		return fmt.Errorf("%w: %q starts with a dot", sentinel, name)
 	case strings.ContainsRune(name, 0):
-		return fmt.Errorf("%w: it contains a NUL byte", ErrInvalidCollectionName)
+		return fmt.Errorf("%w: it contains a NUL byte", sentinel)
 	case strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator):
-		return fmt.Errorf("%w: %q is a path, not a name", ErrInvalidCollectionName, name)
+		return fmt.Errorf("%w: %q is a path, not a name", sentinel, name)
 	}
 	return nil
 }

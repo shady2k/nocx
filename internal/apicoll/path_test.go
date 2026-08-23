@@ -209,6 +209,14 @@ func TestOperations_ReportARootReplacedAfterOpen(t *testing.T) {
 	if err := svc.WriteRequest(h, "req.json", Request{Name: "x"}); !errors.Is(err, ErrRootChanged) {
 		t.Errorf("WriteRequest after the swap: err = %v, want ErrRootChanged", err)
 	}
+	// A folder made now would be made in the impostor: the check is on the
+	// operation, so a method that writes has it as much as one that reads.
+	if _, err := svc.CreateFolder(h, "", "users"); !errors.Is(err, ErrRootChanged) {
+		t.Errorf("CreateFolder after the swap: err = %v, want ErrRootChanged", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "users")); err == nil {
+		t.Error("CreateFolder made a folder in the impostor after the swap")
+	}
 }
 
 func TestOperations_ReportARootThatHasGone(t *testing.T) {
@@ -232,6 +240,12 @@ func TestMethods_RefuseAnUnknownHandle(t *testing.T) {
 	}
 	if err := svc.WriteRequest(h, "a.json", Request{}); !errors.Is(err, ErrUnknownHandle) {
 		t.Errorf("WriteRequest: err = %v, want ErrUnknownHandle", err)
+	}
+	// The refusal for a handle that is not open is THIS one for every
+	// method, including the one that creates: a second way to say it would
+	// be a second sentence a surface has to learn.
+	if _, err := svc.CreateFolder(h, "", "users"); !errors.Is(err, ErrUnknownHandle) {
+		t.Errorf("CreateFolder: err = %v, want ErrUnknownHandle", err)
 	}
 }
 

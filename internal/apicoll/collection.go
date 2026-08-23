@@ -149,6 +149,24 @@ type Environment struct {
 type Collection struct {
 	Name     string       `json:"name"`
 	Requests []RequestRef `json:"requests"`
+	// Folders names every directory inside the collection, each as a path
+	// relative to the root, parents before their children.
+	//
+	// It is here because a folder with nothing in it yet is still a folder,
+	// and until this list existed there was no way to say so: the tree
+	// derived its shape from the request paths, so a folder a person had
+	// just made was invisible until they put something in it — which is a
+	// folder that does not exist as far as they are concerned.
+	//
+	// It is also the ONE answer to "what folders are there". A surface
+	// deriving them from the request paths as well would be a second
+	// derivation of one fact, agreeing with this one for every folder that
+	// holds a request and disagreeing about every folder that does not.
+	//
+	// `environments/` is not among them (§6.2), nor is anything beginning
+	// with a dot: they are the same exclusions the request walk already
+	// makes, because this list comes off the same walk.
+	Folders []string `json:"folders"`
 	// Malformed names the files that could not be read as requests. It is
 	// ON the collection, not in an error beside it, and that placement is
 	// the whole point: a caller which returns early on err != nil would

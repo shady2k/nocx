@@ -71,10 +71,11 @@ func TestCreate_TheFolderOpensAgainFromScratch(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, coll, err := NewCollections(p).Open(made.Root)
+	op, err := NewCollections(p).Open(made.Root)
 	if err != nil {
 		t.Fatalf("Open the collection that was just created: %v", err)
 	}
+	coll := op.Collection
 	if coll.Name != "acme" {
 		t.Errorf("name = %q, want %q", coll.Name, "acme")
 	}

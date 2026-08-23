@@ -21,7 +21,16 @@ import (
 // List returns the collection with its malformed files named on it rather
 // than in an error — see Collection.Malformed.
 type Service interface {
-	Open(root string) (HandleID, Collection, error)
+	Open(root string) (Opened, error)
+	// Close ends one handle's interval. Every later call naming it is
+	// refused, and the folder is no longer open — so the next Open of it
+	// is an open rather than an already-open (Opened.AlreadyOpen).
+	//
+	// It is on the MINTER because the minter is what remembers: a list
+	// kept anywhere else could forget a folder this table still answered
+	// for, and the two would then disagree about whether a collection is
+	// open — which is the same one-owner rule Open keeps.
+	Close(h HandleID) error
 	List(h HandleID) (Collection, error)
 	ReadRequest(h HandleID, relPath string) (Request, error)
 	WriteRequest(h HandleID, relPath string, r Request) error
@@ -38,6 +47,27 @@ type Service interface {
 	// than a path, which is api.collections.create's grammar one level
 	// down (createfolder.go says why nesting is repeated calls).
 	CreateFolder(h HandleID, parentRelPath, name string) (FolderCreated, error)
+}
+
+// Opened is one folder that is now open: the handle every later call names,
+// what is in it, and whether this call is what opened it.
+//
+// AlreadyOpen is here because a folder can be asked for twice and there is
+// only ever ONE handle for it — the import opens its destination, the person
+// then reaches for "Open a collection folder…" out of habit, and the second
+// call has to answer with the identity that exists. A surface deciding
+// between "add a row" and "reveal the row that is there" needs to be told
+// which happened; deriving it from the tree would make the renderer a second
+// reader of collection identity, and identity has one owner: this package,
+// which mints it (§13.1).
+//
+// It is a struct rather than a third return value for Created's reason
+// (create.go): the two are one answer, and a caller that wants only the
+// handle says so by name.
+type Opened struct {
+	Handle      HandleID
+	Collection  Collection
+	AlreadyOpen bool
 }
 
 // handle is one opened folder, held as three facts because a replaced root
@@ -105,10 +135,14 @@ func newHandleID() (HandleID, error) {
 // true and the check belongs on every operation.
 //
 // The interval this closes, both ends named: a handle is usable from Open
-// until the directory it was opened on stops being that directory — replaced,
-// removed, or swapped for a symlink — and from that moment every method on it
-// reports ErrRootChanged rather than answering out of whatever now sits at
-// the path.
+// until either of two events, whichever comes first — the directory it was
+// opened on stops being that directory (replaced, removed, or swapped for a
+// symlink), from which moment every method on it reports ErrRootChanged
+// rather than answering out of whatever now sits at the path; or Close
+// forgets it, from which moment every method reports ErrUnknownHandle. The
+// second end is why Close is on this package at all: while the table went on
+// answering for a folder somebody had closed, the next Open of it came back
+// "already open" naming a handle no list held.
 func (s *service) resolve(h HandleID) (*handle, error) {
 	s.mu.Lock()
 	hd, ok := s.handles[h]
@@ -116,7 +150,62 @@ func (s *service) resolve(h HandleID) (*handle, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownHandle, h)
 	}
+	if err := hd.check(); err != nil {
+		return nil, err
+	}
+	return hd, nil
+}
 
+// openHandleFor answers which open handle already names this directory, so
+// Open hands back the handle that exists instead of minting a second
+// identity for one folder.
+//
+// IDENTITY IS THE DIRECTORY, NOT THE PATH. os.SameFile compares the device
+// and inode the directory was opened as, which is what makes two spellings
+// of one folder one collection: a trailing slash, a `.` or `..` segment, a
+// symlink, a second mount of the same filesystem. The path is exactly the
+// thing a caller can write more than one way, and the pair that reaches this
+// in practice is an importer's destination and the same folder chosen by
+// hand in a file dialog.
+//
+// A handle that no longer resolves is not an answer. It can match by
+// identity and still be dead — the name it was opened under repointed
+// elsewhere — and answering an open that SUCCEEDED with a handle every later
+// call refuses would be worse than minting a fresh one. check() is the same
+// question resolve() asks, asked here rather than restated, because "is this
+// handle still good" has one owner too.
+//
+// The caller holds s.mu: this scan and the mint that may follow it are one
+// decision, and a second Open landing between them would register the second
+// identity this exists to prevent. That holds the mutex across a few
+// syscalls per open handle, which is the price of the decision being atomic;
+// the alternative is the defect.
+func (s *service) openHandleFor(fi os.FileInfo) (HandleID, bool) {
+	for id, hd := range s.handles {
+		if os.SameFile(fi, hd.openedAs) && hd.check() == nil {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// Close forgets one handle, which is the closing event named in resolve's
+// interval below.
+func (s *service) Close(h HandleID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.handles[h]; !ok {
+		return fmt.Errorf("%w: %q", ErrUnknownHandle, h)
+	}
+	delete(s.handles, h)
+	return nil
+}
+
+// check is the whole of "does this handle still name the folder it was
+// opened on". It is a method on the handle rather than inline in resolve
+// because Open asks it too — a handle that fails it is not a folder anybody
+// can be handed back — and two copies of it would be two answers.
+func (hd *handle) check() error {
 	// The chosen path must still lead to the folder it led to at Open. This
 	// catches the case identity alone cannot: a symlinked root that has been
 	// repointed. The directory we opened is still there and still itself, so
@@ -124,10 +213,10 @@ func (s *service) resolve(h HandleID) (*handle, error) {
 	// been swapped underneath the name they chose.
 	nowResolved, err := filepath.EvalSymlinks(hd.namedAs)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrRootChanged, hd.namedAs, err)
+		return fmt.Errorf("%w: %s: %w", ErrRootChanged, hd.namedAs, err)
 	}
 	if nowResolved != hd.root {
-		return nil, fmt.Errorf("%w: %s now resolves to %s, not %s",
+		return fmt.Errorf("%w: %s now resolves to %s, not %s",
 			ErrRootChanged, hd.namedAs, nowResolved, hd.root)
 	}
 
@@ -135,13 +224,13 @@ func (s *service) resolve(h HandleID) (*handle, error) {
 	// when the symlink happens to point somewhere plausible.
 	fi, err := os.Lstat(hd.root)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrRootChanged, hd.root, err)
+		return fmt.Errorf("%w: %s: %w", ErrRootChanged, hd.root, err)
 	}
 	if !fi.IsDir() {
-		return nil, fmt.Errorf("%w: %s is no longer a directory", ErrRootChanged, hd.root)
+		return fmt.Errorf("%w: %s is no longer a directory", ErrRootChanged, hd.root)
 	}
 	if !os.SameFile(fi, hd.openedAs) {
-		return nil, fmt.Errorf("%w: %s is a different directory from the one that was opened", ErrRootChanged, hd.root)
+		return fmt.Errorf("%w: %s is a different directory from the one that was opened", ErrRootChanged, hd.root)
 	}
-	return hd, nil
+	return nil
 }

@@ -186,9 +186,15 @@ type PlacedSecret struct {
 type APICollectionService interface {
 	// ListOpen returns every folder the user has open, contents re-read.
 	ListOpen() ([]OpenCollection, error)
-	// Open adds a folder to the list and returns its handle plus the
-	// collection. It is the ONLY method here that accepts a root (§13.1).
-	Open(root string) (apicoll.HandleID, apicoll.Collection, error)
+	// Open adds a folder to the list and returns its handle, the
+	// collection, and whether the folder was ALREADY open. It is the ONLY
+	// method here that accepts a root (§13.1).
+	//
+	// One folder is one handle for as long as it is open, and that is
+	// apicoll's rule rather than this list's: a path already open answers
+	// with the identity that exists, so re-opening it adds no row here and
+	// draws no second collection in the tree (nocx-ghuq3).
+	Open(root string) (apicoll.Opened, error)
 	// Create mints an empty collection under a NAME — never a path — in the
 	// default location apicoll decides, and leaves it OPEN: it lands in
 	// this list exactly as Open's folder does, so a caller has one thing to
@@ -417,34 +423,51 @@ func (s *apiCollectionService) starterFailure() (string, error) {
 	return s.starterAt, s.starterErr
 }
 
-func (s *apiCollectionService) Open(root string) (apicoll.HandleID, apicoll.Collection, error) {
+func (s *apiCollectionService) Open(root string) (apicoll.Opened, error) {
 	if err := s.guard.check(); err != nil {
-		return "", apicoll.Collection{}, err
+		return apicoll.Opened{}, err
 	}
-	h, coll, err := s.svc.Open(root)
+	op, err := s.svc.Open(root)
 	if err != nil {
-		return "", apicoll.Collection{}, err
+		return apicoll.Opened{}, err
 	}
-	s.register(h, root)
-	return h, coll, nil
+	s.register(op.Handle, root)
+	return op, nil
 }
 
-// register puts one folder in the opened list, or replaces the row that is
-// already there.
+// register puts one folder in the opened list, and leaves the row that is
+// already there exactly as it is.
 //
-// One folder is one entry however many times it is opened: re-opening
-// replaces the row rather than listing the same folder twice, and the
-// previous handle stops resolving. The match is on the path AS NAMED, which
-// is best-effort — apicoll canonicalises the root internally and does not
-// expose the canonical form, so two different names for one directory list
-// as two folders. That is a duplicate row in a list, not a folder anybody
-// loses.
+// One folder is one entry however many times it is opened, and the row is
+// found by its HANDLE. That is the whole of the matching rule here now,
+// because the handle IS the folder's identity: apicoll answers an open of a
+// folder that is already open with the handle that exists, so two calls
+// naming one directory arrive here with one id.
+//
+// It used to match on the path AS NAMED, and called itself best-effort for
+// it: two spellings of one directory — a symlink, a trailing slash, an
+// importer's destination and the same folder chosen by hand — listed as two
+// folders and drew the collection twice in the tree (nocx-ghuq3). That was a
+// second, weaker owner of collection identity sitting a layer above the one
+// that mints it; the fix was to delete it rather than to strengthen it.
+//
+// The row keeps the path it was FIRST opened under, which is the name
+// apicoll re-validates that handle against — so the list and the table name
+// the folder the same way rather than two ways.
+//
+// One case is deliberately left as two rows: a folder DELETED and re-created
+// at the same path, then re-opened. It is a different directory, so it gets
+// a different handle, and the row for the one that is gone stays — carrying
+// the reason ListOpen reads off it. Path-matching used to replace it
+// silently, which is the listing quietly dropping a dead folder it promises
+// to REPORT (TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne).
+// The two rows name two directories, only one of which exists, and closing
+// the dead one is a click.
 func (s *apiCollectionService) register(h apicoll.HandleID, root string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.open {
-		if s.open[i].path == root {
-			s.open[i].handle = h
+		if s.open[i].handle == h {
 			return
 		}
 	}
@@ -500,6 +523,16 @@ func (s *apiCollectionService) Close(h apicoll.HandleID) error {
 	defer s.mu.Unlock()
 	for i := range s.open {
 		if s.open[i].handle == h {
+			// The table that MINTED the handle forgets it first, and the
+			// row goes only if that succeeded. The order is what keeps the
+			// two accounts of "which folders are open" from disagreeing: a
+			// close that half-happened leaves the folder open in both
+			// places, which the user can close again, rather than gone from
+			// the list while the next Open of it still answers "already
+			// open" with a handle no row holds.
+			if err := s.svc.Close(h); err != nil {
+				return err
+			}
 			s.open = append(s.open[:i], s.open[i+1:]...)
 			return nil
 		}

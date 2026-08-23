@@ -118,9 +118,13 @@ func (s *service) Create(name string) (Created, error) {
 	if err = os.Mkdir(filepath.Join(root, environmentsDirName), 0o700); err != nil {
 		return Created{}, fmt.Errorf("apicoll: create %s/ in the new collection %s: %w", environmentsDirName, root, err)
 	}
-	h, coll, err := s.Open(root)
+	// A folder that did not exist a moment ago cannot be one somebody
+	// already has open, so Opened.AlreadyOpen is false here by construction
+	// and Created has no field for it: the question only has an answer worth
+	// carrying where a caller names a folder that was already there.
+	op, err := s.Open(root)
 	if err != nil {
 		return Created{}, err
 	}
-	return Created{Root: root, Handle: h, Collection: coll}, nil
+	return Created{Root: root, Handle: op.Handle, Collection: op.Collection}, nil
 }

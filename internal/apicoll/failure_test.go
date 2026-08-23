@@ -68,7 +68,8 @@ func TestOpen_ReportsAFailingIDSource(t *testing.T) {
 	svc := newService()
 	svc.newID = func() (HandleID, error) { return "", boom }
 
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
+	h := op.Handle
 	if !errors.Is(err, boom) {
 		t.Fatalf("Open: err = %v, want the id source's error", err)
 	}
@@ -135,7 +136,7 @@ func TestOpen_ReportsAnUnreadableManifest(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
 
 	svc := newService()
-	_, _, err := svc.Open(root)
+	_, err := svc.Open(root)
 	if err == nil {
 		t.Fatal("Open succeeded with an unreadable manifest")
 	}
@@ -155,11 +156,12 @@ func TestService_IsSafeUnderConcurrentUse(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			h, _, err := svc.Open(root)
+			op, err := svc.Open(root)
 			if err != nil {
 				t.Errorf("Open: %v", err)
 				return
 			}
+			h := op.Handle
 			rel := filepath.Join("concurrent", string(rune('a'+i))+".json")
 			if err := svc.WriteRequest(h, rel, Request{ID: "1", Name: "A", Method: "GET", URL: "http://x/"}); err != nil {
 				t.Errorf("WriteRequest: %v", err)

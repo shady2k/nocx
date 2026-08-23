@@ -31,10 +31,11 @@ func mustImportAndOpen(t *testing.T, doc string) (apicoll.Collections, apicoll.H
 	// nil Paths: this service reads the folder the user chose and mints
 	// none, which is exactly the service the app hands an imported folder.
 	svc := apicoll.NewCollections(nil)
-	h, coll, err := svc.Open(dest)
+	op, err := svc.Open(dest)
 	if err != nil {
 		t.Fatalf("the import wrote %s and apicoll could not open it: %v", dest, err)
 	}
+	h, coll := op.Handle, op.Collection
 	return svc, h, coll
 }
 

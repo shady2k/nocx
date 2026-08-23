@@ -21,10 +21,11 @@ func TestOpen_ListsTwoRequestsWithMethodAndName(t *testing.T) {
 	writeFile(t, root, "users/create.json", requestJSON("2", "Create user", "POST", "http://x/users"))
 
 	svc := newService()
-	h, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h, coll := op.Handle, op.Collection
 	if h == "" {
 		t.Error("Open minted an empty handle")
 	}
@@ -85,7 +86,8 @@ func TestOpen_RefusesAFolderWithNoManifest(t *testing.T) {
 	writeFile(t, root, "list-users.json", requestJSON("1", "List users", "GET", "http://x/users"))
 
 	svc := newService()
-	h, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
+	h, coll := op.Handle, op.Collection
 	if !errors.Is(err, ErrNoManifest) {
 		t.Fatalf("Open: err = %v, want ErrNoManifest", err)
 	}
@@ -110,10 +112,11 @@ func TestOpen_NamesAMalformedRequestAndStillListsTheRest(t *testing.T) {
 	writeFile(t, root, "unknown-field.json", `{"id":"4","name":"D","surprise":1}`)
 
 	svc := newService()
-	_, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v — one malformed file must not refuse the collection", err)
 	}
+	coll := op.Collection
 	if len(coll.Requests) != 2 {
 		t.Errorf("listed %d requests, want the 2 good ones: %+v", len(coll.Requests), coll.Requests)
 	}
@@ -163,10 +166,11 @@ func TestList_ExcludesTheManifestAndEnvironments(t *testing.T) {
 	writeFile(t, root, "req.json", requestJSON("1", "A", "GET", "http://x/a"))
 
 	svc := newService()
-	_, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	coll := op.Collection
 	if len(coll.Requests) != 1 || coll.Requests[0].RelPath != "req.json" {
 		t.Errorf("listed %+v, want only req.json", coll.Requests)
 	}
@@ -193,10 +197,11 @@ func TestList_DoesNotFollowASymlinkedRequestFile(t *testing.T) {
 	writeFile(t, root, "req.json", requestJSON("1", "A", "GET", "http://x/a"))
 
 	svc := newService()
-	_, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	coll := op.Collection
 	for _, r := range coll.Requests {
 		if r.RelPath == "steal.json" {
 			t.Fatal("a symlinked request file was listed — it was followed")
@@ -215,24 +220,32 @@ func TestList_DoesNotFollowASymlinkedRequestFile(t *testing.T) {
 	}
 }
 
-// A handle is not guessable and two opens of the same root are two handles.
-func TestOpen_MintsAFreshHandleEachTime(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "coll")
-	writeFile(t, root, ManifestName, manifestJSON)
+// A handle is not guessable, and two folders opened in one session do not
+// get handles anybody could have predicted from each other.
+//
+// It used to say that two opens of ONE root are two handles. They are one —
+// handle_test.go holds that rule and why — and this is what is left of the
+// property that test does not cover: the id itself.
+func TestOpen_MintsAnUnguessableHandle(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "one")
+	second := filepath.Join(dir, "two")
+	writeFile(t, first, ManifestName, manifestJSON)
+	writeFile(t, second, ManifestName, manifestJSON)
 	svc := newService()
-	a, _, err := svc.Open(root)
+	one, err := svc.Open(first)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	b, _, err := svc.Open(root)
+	two, err := svc.Open(second)
 	if err != nil {
-		t.Fatalf("Open again: %v", err)
+		t.Fatalf("Open the second folder: %v", err)
 	}
-	if a == b {
-		t.Error("two opens returned the same handle")
+	if one.Handle == two.Handle {
+		t.Error("two folders were given the same handle")
 	}
-	if len(a) < 16 {
-		t.Errorf("handle %q is short enough to guess", a)
+	if len(one.Handle) < 16 {
+		t.Errorf("handle %q is short enough to guess", one.Handle)
 	}
 }
 
@@ -245,10 +258,11 @@ func TestList_SkipsDotDirectories(t *testing.T) {
 	writeFile(t, root, "req.json", requestJSON("1", "A", "GET", "http://x/a"))
 
 	svc := newService()
-	_, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	coll := op.Collection
 	if len(coll.Requests) != 1 || coll.Requests[0].RelPath != "req.json" {
 		t.Errorf("listed %+v, want only req.json", coll.Requests)
 	}

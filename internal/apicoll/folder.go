@@ -10,11 +10,21 @@ import (
 )
 
 // Open resolves the folder the user chose, refuses it if it is not a
-// collection, and mints the handle every later call names. This is the ONLY
-// method that takes a root (§13.1).
-func (s *service) Open(root string) (HandleID, Collection, error) {
+// collection, and answers with the handle every later call names — the one
+// that already exists if the folder is already open, a freshly minted one if
+// it is not. This is the ONLY method that takes a root (§13.1).
+//
+// ONE FOLDER HAS ONE HANDLE, for as long as it is open. Before that, opening
+// a path that was already open minted a SECOND identity for it, and the same
+// collection appeared twice in the tree under two handles — reached by the
+// ordinary sequence, since the import opens its own destination and the
+// person then chooses that folder by hand (nocx-ghuq3). The decision belongs
+// here because this is what mints identity: a renderer asking "do I already
+// have this path" would be a second owner of it, agreeing until the day the
+// two spellings differed.
+func (s *service) Open(root string) (Opened, error) {
 	if !filepath.IsAbs(root) {
-		return "", Collection{}, fmt.Errorf("%w: %q is not an absolute path", ErrPathOutsideCollection, root)
+		return Opened{}, fmt.Errorf("%w: %q is not an absolute path", ErrPathOutsideCollection, root)
 	}
 
 	// Resolve the root's symlinks ONCE, here. The user may legitimately have
@@ -23,39 +33,48 @@ func (s *service) Open(root string) (HandleID, Collection, error) {
 	// symlink inside it is ever followed.
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", Collection{}, fmt.Errorf("apicoll: open collection %s: %w", root, err)
+		return Opened{}, fmt.Errorf("apicoll: open collection %s: %w", root, err)
 	}
 	fi, err := os.Lstat(resolved)
 	if err != nil {
-		return "", Collection{}, fmt.Errorf("apicoll: open collection %s: %w", root, err)
+		return Opened{}, fmt.Errorf("apicoll: open collection %s: %w", root, err)
 	}
 	if !fi.IsDir() {
-		return "", Collection{}, fmt.Errorf("apicoll: %s is not a directory; a collection is a folder", root)
+		return Opened{}, fmt.Errorf("apicoll: %s is not a directory; a collection is a folder", root)
 	}
 
 	m, err := readManifest(resolved)
 	if err != nil {
-		return "", Collection{}, err
+		return Opened{}, err
 	}
 
-	id, err := s.newID()
-	if err != nil {
-		return "", Collection{}, err
-	}
 	hd := &handle{root: resolved, namedAs: filepath.Clean(root), openedAs: fi}
-
 	coll, err := readCollection(hd, m)
 	if err != nil {
-		return "", Collection{}, err
+		return Opened{}, err
 	}
 
-	// Registered last: a folder that could not be listed hands back no
-	// handle, so there is no id in the table that names a collection the
-	// caller was never given.
+	// The table is decided under ONE lock, and this is the last step: a
+	// folder that could not be listed reaches none of it, so there is no id
+	// in the table that names a collection the caller was never given, and
+	// no window in which a second Open sees the folder as unopened.
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id, ok := s.openHandleFor(fi); ok {
+		// The listing was read from the directory os.SameFile just called
+		// the existing handle's own, so it IS that handle's listing and
+		// there is nothing to re-read. The provisional handle above is
+		// dropped, which is what keeps the name the folder was FIRST opened
+		// under as the one it is re-validated against — the user chose it,
+		// and a later spelling does not get to replace it.
+		return Opened{Handle: id, Collection: coll, AlreadyOpen: true}, nil
+	}
+	id, err := s.newID()
+	if err != nil {
+		return Opened{}, err
+	}
 	s.handles[id] = hd
-	s.mu.Unlock()
-	return id, coll, nil
+	return Opened{Handle: id, Collection: coll}, nil
 }
 
 // List re-reads the folder. Contents are never cached: the folder is shared

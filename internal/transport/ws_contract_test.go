@@ -5726,6 +5726,21 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 				Environments: []apiEnvironmentRefWire{},
 			},
 		},
+		// The folder that was ALREADY open. It is a case here because the
+		// field is a bool and false is its zero value: a struct that had
+		// dropped it would marshal indistinguishably from the two above,
+		// and the schema would go on accepting them.
+		"already open": {
+			Handle:      "0123456789abcdef0123456789abcdef",
+			AlreadyOpen: true,
+			Collection: apiCollectionWire{
+				Name:         "acme",
+				Requests:     []apiRequestRefWire{},
+				Folders:      []string{},
+				Malformed:    []apiMalformedRefWire{},
+				Environments: []apiEnvironmentRefWire{},
+			},
+		},
 	}
 	for name, resp := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -5738,15 +5753,18 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 	}
 }
 
-// api.collections.create answers the SAME shape api.collections.open does —
-// a create leaves the collection open — so it is the same DTO validated
-// against its own schema. The interesting case is the one the method
+// api.collections.create answers the handle and collection
+// api.collections.open does — a create leaves the collection open — through
+// the same assembler, validated against its own schema. What it does not
+// carry is alreadyOpen: a folder minted a moment ago cannot have been open,
+// and the schema's additionalProperties:false is what holds the two results
+// apart on that one field. The interesting case is the one the method
 // actually produces: an empty collection, whose two lists must be [] and
 // never null.
 func TestAPICollectionsCreate_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.collections.create.schema.json")
 
-	cases := map[string]apiOpenResponse{
+	cases := map[string]apiCreateResponse{
 		"a collection just made": {
 			Handle: "0123456789abcdef0123456789abcdef",
 			Collection: apiCollectionWire{
@@ -6068,6 +6086,9 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	if len(opened.Collection.Requests) != 2 {
 		t.Errorf("requests = %+v, want the two request files", opened.Collection.Requests)
 	}
+	if opened.AlreadyOpen {
+		t.Error("the first open of a folder answered alreadyOpen:true")
+	}
 
 	listResp := vaultCall(t, conn, "api.collections.list", map[string]any{}, 3)
 	if listResp.Error != nil {
@@ -6084,6 +6105,68 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if chosen[0].Path != root {
 		t.Errorf("listed path = %q, want %q", chosen[0].Path, root)
+	}
+
+	// THE SAME FOLDER, NAMED A SECOND WAY, off the real socket. This is the
+	// sequence that put one collection in the tree twice under two handles:
+	// the importer opens its destination, the person then reaches for "Open
+	// a collection folder…" out of habit, and the two spellings of the path
+	// need not match (nocx-ghuq3). One folder has one handle, the list does
+	// not grow, and the RESULT says which of the two things happened so the
+	// renderer need not read it off the tree.
+	againResp := vaultCall(t, conn, "api.collections.open",
+		map[string]any{"path": root}, 10)
+	if againResp.Error != nil {
+		t.Fatalf("api.collections.open of a folder already open: %+v", againResp.Error)
+	}
+	validateJSON(t, openSchema, againResp.Result, "api.collections.open result (already open)")
+	var again apiOpenResponse
+	if err := json.Unmarshal(againResp.Result, &again); err != nil {
+		t.Fatalf("unmarshal the second open: %v", err)
+	}
+	if again.Handle != opened.Handle {
+		t.Errorf("re-opening minted %q beside %q; one folder has one handle", again.Handle, opened.Handle)
+	}
+	if !again.AlreadyOpen {
+		t.Error("re-opening answered alreadyOpen:false; a surface cannot then tell an open from an already-open")
+	}
+	if again.Collection.Name != opened.Collection.Name || len(again.Collection.Requests) != 2 {
+		t.Errorf("the second open answered %+v, want the same collection", again.Collection)
+	}
+	sameList := vaultCall(t, conn, "api.collections.list", map[string]any{}, 11)
+	if sameList.Error != nil {
+		t.Fatalf("api.collections.list after a re-open: %+v", sameList.Error)
+	}
+	validateJSON(t, listSchema, sameList.Result, "api.collections.list result (after a re-open)")
+	var listedAgain apiCollectionsListResponse
+	if err := json.Unmarshal(sameList.Result, &listedAgain); err != nil {
+		t.Fatalf("unmarshal list after a re-open: %v", err)
+	}
+	if still := chosenCollections(listedAgain.Collections); len(still) != 1 || still[0].Handle != opened.Handle {
+		t.Errorf("opened-folder list after a re-open = %+v, want the one folder under the one handle", still)
+	}
+
+	// And a DIFFERENT path that leads to the same folder. The wire refuses a
+	// path that is not already clean and absolute (validateAPIFolderPath),
+	// so a symlink is the spelling that actually reaches this method twice —
+	// and it is the one a person hits, since a dialog answers with whatever
+	// name they walked in by.
+	link := filepath.Join(t.TempDir(), "acme-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	byLink := vaultCall(t, conn, "api.collections.open", map[string]any{"path": link}, 12)
+	if byLink.Error != nil {
+		t.Fatalf("api.collections.open through a symlink: %+v", byLink.Error)
+	}
+	validateJSON(t, openSchema, byLink.Result, "api.collections.open result (a second name)")
+	var linked apiOpenResponse
+	if err := json.Unmarshal(byLink.Result, &linked); err != nil {
+		t.Fatalf("unmarshal the open through a symlink: %v", err)
+	}
+	if linked.Handle != opened.Handle || !linked.AlreadyOpen {
+		t.Errorf("opening %q answered handle %q alreadyOpen=%v, want the handle that exists and true — "+
+			"two names for one directory are one collection", link, linked.Handle, linked.AlreadyOpen)
 	}
 	// WHERE A NEW COLLECTION WOULD GO, off the real socket. The renderer
 	// proposes an import destination from it, so a listing that answered ""

@@ -100,12 +100,12 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			if !h.decode(req, &p) {
 				return nil
 			}
-			handle, coll, err := svc.Open(p.Path)
+			opened, err := svc.Open(p.Path)
 			if err != nil {
 				h.fail(req, err)
 				return nil
 			}
-			wire, envErr := wireCollectionOf(svc, handle, coll)
+			wire, envErr := wireCollectionOf(svc, opened.Handle, opened.Collection)
 			if envErr != nil {
 				// The folder opened and its environments did not read. That
 				// is the folder being unusable rather than a partial answer
@@ -114,13 +114,16 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				// truth and send {{baseUrl}} unresolved (§6.5). The open is
 				// refused with the reason instead — and the handle stays
 				// registered, so a retry after the permission is fixed needs
-				// no second Open.
+				// no second Open. That retry answers alreadyOpen:true, which
+				// is the truth: the folder IS open and api.collections.list
+				// has been carrying it since the call that failed here.
 				h.fail(req, envErr)
 				return nil
 			}
 			_ = h.r.TryResult(req.ID, mustMarshal(apiOpenResponse{
-				Handle:     string(handle),
-				Collection: wire,
+				Handle:      string(opened.Handle),
+				AlreadyOpen: opened.AlreadyOpen,
+				Collection:  wire,
 			}))
 		case "api.collections.create":
 			var p apiCollectionsCreateParams
@@ -132,15 +135,17 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				h.fail(req, err)
 				return nil
 			}
-			// The SAME result shape api.collections.open answers with, and
-			// deliberately so: a create leaves the collection open, so the
-			// renderer has one thing to do afterwards rather than two.
+			// The handle and the collection api.collections.open answers
+			// with, through the same assembler and deliberately so: a create
+			// leaves the collection open, so the renderer has one thing to
+			// do afterwards rather than two. What it does NOT carry is
+			// alreadyOpen — apiCreateResponse says why.
 			wire, envErr := wireCollectionOf(svc, made.Handle, made.Collection)
 			if envErr != nil {
 				h.fail(req, envErr)
 				return nil
 			}
-			_ = h.r.TryResult(req.ID, mustMarshal(apiOpenResponse{
+			_ = h.r.TryResult(req.ID, mustMarshal(apiCreateResponse{
 				Handle:     string(made.Handle),
 				Collection: wire,
 			}))
@@ -878,6 +883,30 @@ type apiOpenCollectionWire struct {
 }
 
 type apiOpenResponse struct {
+	Handle string `json:"handle"`
+	// AlreadyOpen is whether the folder was open before this call. It is on
+	// the wire because one folder has ONE handle for as long as it is open
+	// (apicoll.Opened): a path that is already open answers with the handle
+	// that exists, and a surface has to be able to tell "I opened it" from
+	// "you already had it" in order to reveal the row it has rather than
+	// add a second one. Reading it off the tree instead would put a second
+	// reader of collection identity in the renderer (nocx-ghuq3).
+	AlreadyOpen bool              `json:"alreadyOpen"`
+	Collection  apiCollectionWire `json:"collection"`
+}
+
+// apiCreateResponse is api.collections.create's answer: the same handle and
+// collection an open carries, and no alreadyOpen.
+//
+// It is a separate type rather than apiOpenResponse for exactly that field.
+// A folder minted a moment ago in a location the backend chose cannot be one
+// somebody already had open, so the question has no answer here worth
+// sending; a hard-coded false on the wire would be a field the renderer
+// could branch on and never see change. What the two results DO share — the
+// handle and the collection, assembled by one wireCollectionOf — is what the
+// create schema means by "the shape is api.collections.open's on purpose",
+// and that has not moved.
+type apiCreateResponse struct {
 	Handle     string            `json:"handle"`
 	Collection apiCollectionWire `json:"collection"`
 }

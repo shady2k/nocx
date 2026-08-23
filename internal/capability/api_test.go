@@ -138,7 +138,8 @@ func TestAPICollectionService_IsUselessOutsideItsOperation(t *testing.T) {
 	var handle apicoll.HandleID
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
 		escaped = svc
-		h, _, err := svc.Open(root)
+		opened, err := svc.Open(root)
+		h := opened.Handle
 		handle = h
 		return err
 	}); err != nil {
@@ -148,7 +149,7 @@ func TestAPICollectionService_IsUselessOutsideItsOperation(t *testing.T) {
 	if _, err := escaped.ListOpen(); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("ListOpen outside the operation = %v, want ErrOperationInactive", err)
 	}
-	if _, _, err := escaped.Open(root); !errors.Is(err, capability.ErrOperationInactive) {
+	if _, err := escaped.Open(root); !errors.Is(err, capability.ErrOperationInactive) {
 		t.Errorf("Open outside the operation = %v, want ErrOperationInactive", err)
 	}
 	if err := escaped.Close(handle); !errors.Is(err, capability.ErrOperationInactive) {
@@ -187,10 +188,11 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 	root := apiFolder(t)
 
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-		h, coll, openErr := svc.Open(root)
+		opened, openErr := svc.Open(root)
 		if openErr != nil {
 			return openErr
 		}
+		h, coll := opened.Handle, opened.Collection
 		if coll.Name != "acme" {
 			t.Errorf("collection name = %q, want acme", coll.Name)
 		}
@@ -242,24 +244,38 @@ func TestAPICollectionService_CloseEndsTheHandlesInterval(t *testing.T) {
 	}
 }
 
-// One folder is one entry however many times it is opened, and the previous
-// handle stops resolving — otherwise re-opening the collection a user
-// already has open would grow the list without bound.
-func TestAPICollectionService_ReopeningReplacesTheEntry(t *testing.T) {
+// One folder is one entry however many times it is opened, and re-opening
+// it answers with the handle it already has. The list does not grow, the
+// tree does not draw the collection twice, and the answer SAYS it was
+// already open so a surface can reveal the row it has rather than guess.
+//
+// The sequence is the ordinary one: the importer opens its destination, and
+// the person then reaches for "Open a collection folder…" out of habit
+// (nocx-ghuq3).
+func TestAPICollectionService_ReopeningAnsweredWithTheHandleThatExists(t *testing.T) {
 	op := newAPIOperation(t)
 	root := apiFolder(t)
+	// The SAME directory named a second way, which is what a dialog and an
+	// importer legitimately disagree about.
+	alias := filepath.Join(root, ".") + string(filepath.Separator)
 
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-		first, _, err := svc.Open(root)
+		first, err := svc.Open(root)
 		if err != nil {
 			return err
 		}
-		second, _, err := svc.Open(root)
+		if first.AlreadyOpen {
+			t.Error("the first open reported AlreadyOpen; it is what opened the folder")
+		}
+		second, err := svc.Open(alias)
 		if err != nil {
 			return err
 		}
-		if first == second {
-			t.Fatal("re-opening minted the same handle; each open mints its own")
+		if second.Handle != first.Handle {
+			t.Fatalf("re-opening minted %q beside %q; one folder has one handle", second.Handle, first.Handle)
+		}
+		if !second.AlreadyOpen {
+			t.Error("re-opening reported AlreadyOpen=false; the surface cannot then tell an open from an already-open")
 		}
 		listed, err := svc.ListOpen()
 		open := chosenFolders(listed)
@@ -269,11 +285,8 @@ func TestAPICollectionService_ReopeningReplacesTheEntry(t *testing.T) {
 		if len(open) != 1 {
 			t.Errorf("opened-folder list = %+v, want one entry for one folder", open)
 		}
-		if _, err := svc.ReadRequest(first, "ping.json"); !errors.Is(err, apicoll.ErrUnknownHandle) {
-			t.Errorf("the superseded handle still resolves: %v", err)
-		}
-		if _, err := svc.ReadRequest(second, "ping.json"); err != nil {
-			t.Errorf("the current handle does not resolve: %v", err)
+		if _, err := svc.ReadRequest(first.Handle, "ping.json"); err != nil {
+			t.Errorf("the handle the folder was opened under does not resolve: %v", err)
 		}
 		return nil
 	}); err != nil {
@@ -290,10 +303,10 @@ func TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne(t *testin
 	doomed := apiFolder(t)
 
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-		if _, _, err := svc.Open(doomed); err != nil {
+		if _, err := svc.Open(doomed); err != nil {
 			return err
 		}
-		if _, _, err := svc.Open(live); err != nil {
+		if _, err := svc.Open(live); err != nil {
 			return err
 		}
 		if err := os.RemoveAll(doomed); err != nil {
@@ -626,10 +639,11 @@ func TestAPICollectionService_SnapshotMovesTheAddressAndTheRouteTogether(t *test
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-				h, _, err := svc.Open(root)
+				opened, err := svc.Open(root)
 				if err != nil {
 					return err
 				}
+				h := opened.Handle
 				in, err := svc.Snapshot(context.Background(), h, "users.json", tc.env)
 				if err != nil {
 					return err
@@ -659,10 +673,11 @@ func TestAPICollectionService_SnapshotWithNoEnvironmentIsTheDirectRoute(t *testi
 	root := apiFolder(t)
 
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-		h, _, err := svc.Open(root)
+		opened, err := svc.Open(root)
 		if err != nil {
 			return err
 		}
+		h := opened.Handle
 		in, err := svc.Snapshot(context.Background(), h, "ping.json", "")
 		if err != nil {
 			return err
@@ -687,10 +702,11 @@ func TestAPICollectionService_SnapshotBlocksOnAnUnresolvedVariable(t *testing.T)
 	root := apiFolderWithEnvironments(t)
 
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-		h, _, err := svc.Open(root)
+		opened, err := svc.Open(root)
 		if err != nil {
 			return err
 		}
+		h := opened.Handle
 		in, snapErr := svc.Snapshot(context.Background(), h, "users.json", "environments/broken.json")
 		if !errors.Is(snapErr, apicoll.ErrUnresolvedVariable) {
 			t.Fatalf("Snapshot = (%+v, %v), want ErrUnresolvedVariable", in, snapErr)
@@ -722,10 +738,11 @@ func TestAPICollectionService_SnapshotRefusesAnEnvironmentPathOutsideTheCollecti
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
-				h, _, err := svc.Open(root)
+				opened, err := svc.Open(root)
 				if err != nil {
 					return err
 				}
+				h := opened.Handle
 				if in, snapErr := svc.Snapshot(context.Background(), h, "users.json", rel); snapErr == nil {
 					t.Fatalf("Snapshot with envRelPath %q succeeded: %+v", rel, in)
 				}

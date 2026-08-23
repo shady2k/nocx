@@ -4,7 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/pathname"
 )
 
 // writeFile drops raw bytes at root/rel, creating parents. Tests build their
@@ -330,4 +333,120 @@ func TestOperations_ReportASymlinkedRootRepointed(t *testing.T) {
 	if _, err := svc.List(h); !errors.Is(err, ErrRootChanged) {
 		t.Errorf("List after the symlinked root was repointed: err = %v, want ErrRootChanged", err)
 	}
+}
+
+// A collection is meant to be put under git and shared (§6.1), so a name is
+// only usable if it is usable on every platform this ships to. `con` is a
+// device on Windows, at any extension, and a folder called `con` made here
+// is a collection a colleague there cannot check out at all.
+//
+// Refused by name, never rewritten: a request quietly saved as `_con.json`
+// is a file the user cannot find under the name they typed.
+func TestPaths_RefuseANameNoWindowsMachineCanTake(t *testing.T) {
+	svc, h, _ := openTestCollection(t)
+
+	for _, rel := range []string{"con.json", "prn.json", "com1.json", "users/aux.json", "docs./req.json", "LPT9.json"} {
+		if err := svc.WriteRequest(h, rel, Request{ID: "1", Name: "x", Method: "GET", URL: "http://x/"}); !errors.Is(err, ErrNotARequestPath) {
+			t.Errorf("WriteRequest(%q) err = %v, want ErrNotARequestPath", rel, err)
+		}
+		if _, err := os.Lstat(filepath.Join(rootOf(t, svc, h), filepath.FromSlash(rel))); err == nil {
+			t.Errorf("WriteRequest(%q) wrote it anyway", rel)
+		}
+		if _, err := svc.ReadRequest(h, rel); !errors.Is(err, ErrNotARequestPath) {
+			t.Errorf("ReadRequest(%q) err = %v, want ErrNotARequestPath", rel, err)
+		}
+		if err := svc.DeleteRequest(h, rel); !errors.Is(err, ErrNotARequestPath) {
+			t.Errorf("DeleteRequest(%q) err = %v, want ErrNotARequestPath", rel, err)
+		}
+	}
+
+	for _, name := range []string{"con", "PRN", "com9", "docs.", "docs ", "a:b", `a\b`} {
+		_, err := svc.CreateFolder(h, "", name)
+		if !errors.Is(err, ErrInvalidFolderName) {
+			t.Errorf("CreateFolder(%q) err = %v, want ErrInvalidFolderName", name, err)
+		}
+		// A sentence a surface can show, not a bare sentinel.
+		if err != nil && len(err.Error()) <= len(ErrInvalidFolderName.Error()) {
+			t.Errorf("the refusal for %q is %q, which says nothing beyond the sentinel", name, err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(rootOf(t, svc, h), name)); statErr == nil {
+			t.Errorf("CreateFolder(%q) made it anyway", name)
+		}
+	}
+
+	for _, rel := range []string{"environments/con.json", "environments/nul.json"} {
+		if err := svc.WriteEnvironment(h, rel, Environment{Name: "dev", Route: Route{Kind: RouteDirect}}); !errors.Is(err, ErrNotAnEnvironmentPath) {
+			t.Errorf("WriteEnvironment(%q) err = %v, want ErrNotAnEnvironmentPath", rel, err)
+		}
+	}
+}
+
+// The other end of every refusal above, on the same service: the ordinary
+// names those refusals are meant to leave alone still work end to end.
+func TestPaths_AcceptTheNamesPeopleActuallyUse(t *testing.T) {
+	svc, h, _ := openTestCollection(t)
+
+	if _, err := svc.CreateFolder(h, "", "users"); err != nil {
+		t.Fatalf(`CreateFolder("users"): %v`, err)
+	}
+	// `console` is not `con`, and `com10` is not `com1`: the rule is the
+	// device list, not anything that looks like it.
+	for _, name := range []string{"console", "com10", "lpt", "api.example.com"} {
+		if _, err := svc.CreateFolder(h, "", name); err != nil {
+			t.Errorf("CreateFolder(%q): %v", name, err)
+		}
+	}
+	req := Request{ID: "1", Name: "Create user", Method: "POST", URL: "http://x/users"}
+	if err := svc.WriteRequest(h, "users/create.json", req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	if got, err := svc.ReadRequest(h, "users/create.json"); err != nil || got.ID != "1" {
+		t.Fatalf("ReadRequest: %+v, %v", got, err)
+	}
+	if err := svc.WriteEnvironment(h, "environments/dev.json", Environment{Name: "dev", Route: Route{Kind: RouteDirect}}); err != nil {
+		t.Fatalf("WriteEnvironment: %v", err)
+	}
+}
+
+// A path has to be bounded as a whole, not only per component: thirty-two
+// legal folder names in a row are a path no Windows checkout will take.
+// The bounds live with the name rule (internal/pathname) so the importer
+// that MINTS a path and the store that ACCEPTS one cannot hold two numbers.
+func TestPaths_AreBoundedInDepthAndInTotalLength(t *testing.T) {
+	svc, h, _ := openTestCollection(t)
+
+	deep := strings.Repeat("ab/", pathname.MaxDepth) + "x.json"
+	if err := svc.WriteRequest(h, deep, Request{ID: "1", Name: "x", Method: "GET", URL: "http://x/"}); !errors.Is(err, ErrNotARequestPath) {
+		t.Errorf("WriteRequest at %d components: err = %v, want ErrNotARequestPath", pathname.MaxDepth+1, err)
+	}
+	long := strings.Repeat(strings.Repeat("a", 99)+"/", 3) + "x.json"
+	if len(long) <= pathname.MaxRelPathBytes {
+		t.Fatalf("the fixture is %d bytes and does not exceed the bound", len(long))
+	}
+	if err := svc.WriteRequest(h, long, Request{ID: "1", Name: "x", Method: "GET", URL: "http://x/"}); !errors.Is(err, ErrNotARequestPath) {
+		t.Errorf("WriteRequest at %d bytes: err = %v, want ErrNotARequestPath", len(long), err)
+	}
+
+	// And the paired success, one component inside each bound.
+	ok := strings.Repeat("ab/", pathname.MaxDepth-1) + "x.json"
+	for _, dir := range strings.Split(strings.TrimSuffix(ok, "/x.json"), "/") {
+		_ = dir
+	}
+	if err := os.MkdirAll(filepath.Join(rootOf(t, svc, h), filepath.FromSlash(strings.TrimSuffix(ok, "/x.json"))), 0o750); err != nil {
+		t.Fatalf("mkdir the deep folder: %v", err)
+	}
+	if err := svc.WriteRequest(h, ok, Request{ID: "1", Name: "x", Method: "GET", URL: "http://x/"}); err != nil {
+		t.Errorf("WriteRequest at %d components and %d bytes: %v", pathname.MaxDepth, len(ok), err)
+	}
+}
+
+// rootOf is the folder behind an open handle, for tests that check the disk
+// directly rather than through the service.
+func rootOf(t *testing.T, svc *service, h HandleID) string {
+	t.Helper()
+	hd, err := svc.resolve(h)
+	if err != nil {
+		t.Fatalf("resolve the handle: %v", err)
+	}
+	return hd.root
 }

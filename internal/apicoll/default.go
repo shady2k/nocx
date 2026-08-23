@@ -7,17 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/pathname"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
 // DefaultCollectionsDirName is the folder under the app's data directory that
 // holds collections the user did not choose a place for.
 const DefaultCollectionsDirName = "collections"
-
-// maxCollectionNameLen keeps a name inside every filesystem's component
-// limit with room to spare. It is a refusal, not a truncation: a name silently
-// shortened is a folder the user cannot find again.
-const maxCollectionNameLen = 128
 
 // NewDefaultCollection creates an empty collection in the default location
 // and returns its root, ready for Open.
@@ -91,23 +87,28 @@ func validateCollectionName(name string) error {
 // It is parameterised by the sentinel and the noun rather than copied,
 // because the two callers differ only in what a surface must SAY. The rule
 // itself — a single component, no separator, no leading dot, nothing that
-// denotes a directory, bounded — has one owner, and a second copy of it
-// would agree with this one everywhere anybody looked and disagree on the
-// day somebody widened only one.
+// denotes a directory, bounded, and nothing a platform we ship to refuses —
+// has one owner, and a second copy of it would agree with this one
+// everywhere anybody looked and disagree on the day somebody widened only
+// one.
+//
+// TWO rules meet here and only one of them is this package's. "Is this one
+// usable path component anywhere" belongs to internal/pathname, which the
+// importer mints through as well, so the two sides cannot drift. "No
+// dotfiles" is a COLLECTION's rule and stays here: `.git` is a perfectly
+// portable name, and the reason it is refused is that a hidden folder in a
+// collection is one a reviewer never sees in the diff.
 func validateComponentName(name string, sentinel error, what string) error {
 	switch {
 	case name == "":
+		// pathname refuses this too and owns the rule; the branch is here
+		// only to name which noun is missing, which it cannot know.
 		return fmt.Errorf("%w: a %s needs a name", sentinel, what)
-	case len(name) > maxCollectionNameLen:
-		return fmt.Errorf("%w: it is %d bytes, longer than the %d-byte limit", sentinel, len(name), maxCollectionNameLen)
-	case name == "." || name == "..":
-		return fmt.Errorf("%w: %q names a directory, not a %s", sentinel, name, what)
-	case strings.HasPrefix(name, "."):
+	case strings.HasPrefix(name, ".") && name != "." && name != "..":
 		return fmt.Errorf("%w: %q starts with a dot", sentinel, name)
-	case strings.ContainsRune(name, 0):
-		return fmt.Errorf("%w: it contains a NUL byte", sentinel)
-	case strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator):
-		return fmt.Errorf("%w: %q is a path, not a name", sentinel, name)
+	}
+	if err := pathname.CheckComponent(name); err != nil {
+		return fmt.Errorf("%w: %s", sentinel, err)
 	}
 	return nil
 }

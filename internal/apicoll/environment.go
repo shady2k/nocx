@@ -212,7 +212,11 @@ func validateEnvironmentPath(relPath string) error {
 	if !strings.HasSuffix(file, requestExt) || file == requestExt {
 		return fmt.Errorf("%w: %q is not a %s file", ErrNotAnEnvironmentPath, relPath, requestExt)
 	}
-	return nil
+	// An environment file is shared in the same pull request as everything
+	// else in the folder, so it is held to the same portable-name rule
+	// (path.go, and internal/pathname behind it): `environments/con.json` is
+	// a file a colleague on Windows cannot check out either.
+	return checkPortablePath(relPath, ErrNotAnEnvironmentPath)
 }
 
 // readEnvironmentFile reads and validates one file. It takes an already

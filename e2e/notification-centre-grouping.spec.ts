@@ -72,10 +72,33 @@ const SHOWN = 'notifications-shown-count'
  *  (internal/app/app.go: notifyFeedCollapseWindow). Their titles DIFFER on
  *  purpose: collapse keeps the newest one for the row, and an expansion whose
  *  members all read the same is not evidence that the members are real. */
-const RUN_TITLES = ['build one', 'build two', 'build three'] as const
+/**
+ * The titles carry the PROJECT NAME, and that is load-bearing rather than
+ * decorative.
+ *
+ * Both browser projects run this file against ONE devharness and one $HOME
+ * (playwright.config.ts declares chromium and webkit; workers is 1, so they
+ * run in sequence), and marking the feed read does not empty it. So the
+ * second project starts with the first project's rows already in the feed.
+ * The totals below are READ rather than assumed for exactly that reason
+ * (trap 2) — but a `hasText` filter cannot be read, it has to MATCH, and an
+ * untagged 'build three ×3' matched chromium's row as well as webkit's and
+ * came back with 2.
+ *
+ * CI hid it: `ci-e2e` runs one job per browser IN PARALLEL, so each browser
+ * gets its own backend there and the collision cannot happen. The container
+ * runs both in sequence against one, which is why it is the thing that saw
+ * this. Neither environment is lying — the spec had a precondition (a feed
+ * holding only its own rows) that it never established, and tagging the
+ * titles is what establishes it without inventing a "clear the feed" the
+ * product does not offer.
+ */
+const runTitles = (project: string) =>
+  [`build one ${project}`, `build two ${project}`, `build three ${project}`] as const
 /** What the row reads as: the newest title and the count (notifications-panel.tsx). */
-const COLLAPSED = `${RUN_TITLES[RUN_TITLES.length - 1]} ×${RUN_TITLES.length}`
-const REMOTE = 'deploy remote'
+const collapsedLabel = (titles: readonly string[]) =>
+  `${titles[titles.length - 1]} ×${titles.length}`
+const remoteTitle = (project: string) => `deploy remote ${project}`
 
 // ── the second host ───────────────────────────────────────────────────────
 // The in-process SSH server, spawned and trusted exactly as shell-mode.spec.ts
@@ -285,7 +308,11 @@ test.use({ viewport: { width: 1280, height: 900 } })
 
 test('a run collapses into one row that opens, and narrowing the feed leaves the bell alone', async ({
   page,
-}) => {
+}, testInfo) => {
+  // Tagged per project so this test's rows are ITS OWN — see runTitles above.
+  const RUN_TITLES = runTitles(testInfo.project.name)
+  const COLLAPSED = collapsedLabel(RUN_TITLES)
+  const REMOTE = remoteTitle(testInfo.project.name)
   // Well past the suite's 30 s ceiling, and for a reason the ceiling's comment
   // allows for: this spec builds a Go binary, completes a real SSH handshake
   // and drives two real ptys. Every WAIT inside it is still on an observable.

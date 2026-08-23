@@ -686,3 +686,21 @@
 .api-timing__swatch[data-phase='download'] {
   background: var(--color-text-dim);
 }
+
+/* THE IMPORT ASK'S TWO STATEMENT LINES — what the ask is holding, and where
+   the collection goes. PLACEMENT ONLY, and there is nothing else to write:
+   the words are the dialog body's own type and the control beside them is the
+   kit's IconButton, so a colour, a border or a font here would be this
+   surface repainting a component it only places (nocx-ysyy2).
+
+   `overflow-wrap` is here because the two values are a person's: a downloads
+   path and a share URL are both longer than a 480px panel, and a line that
+   cannot break pushes the dialog wider than the width Dialog names. */
+.api-import-source,
+.api-import-dest {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

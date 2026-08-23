@@ -39,6 +39,9 @@ import {
   collectionFixture,
   collectionsFixture,
   DEFAULT_ROOT,
+  DROP_SESSION,
+  nativeDropFixture,
+  type NativeDropFixture,
   createdFixture,
   failedSendFixture,
   requestRawFixture,
@@ -1641,6 +1644,150 @@ describe('the import ask proposes our folder', () => {
     await vi.waitFor(() =>
       expect(field('api-import-postman-dest').value).toBe('/data/collections/acme'),
     )
+  })
+})
+
+// ── The ask accepts a drop ────────────────────────────────────────────────
+//
+// nocx-txoxr. The window drop already reaches the renderer as
+// `files.dropped`, and for a LOCAL tab it carries the file's absolute path —
+// which is exactly what `api.import.postman` consumes. What was missing is
+// the surface saying it accepts one: without a drop target on the ask, a
+// person who had just downloaded an export had to find its path and type it,
+// beside a dialog that was already asking for a path.
+//
+// The drop is filtered by TARGET as well as by session, because the local
+// tab's terminal pane is a drop surface of the same session and the session
+// alone cannot tell the two apart.
+
+/** The ask, opened on a build whose window drop is `drop` — `undefined` is a
+ *  build with no Wails runtime at all, which is every `make dev-web` run and
+ *  the whole e2e harness. */
+async function openAskWithDrop(drop?: NativeDropFixture): Promise<void> {
+  const { bar } = await mountApp({
+    listCollections: vi
+      .fn()
+      .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+    nativeDrop: drop,
+  })
+  await openImportAsk(bar)
+}
+
+/** The ask's BODY — the element the drop zone is inside. Not the `<dialog>`:
+ *  the kit does not forward arbitrary `data-*` to it, and reaching past the
+ *  component to paint attributes on it would be the repaint rule in another
+ *  form. */
+function importAskBody(): HTMLElement {
+  const el = dialogFor('api-import-postman-file').querySelector<HTMLElement>('.nocx-dialog__body')
+  if (!el) throw new Error('the import ask has no body')
+  return el
+}
+
+/** What the destination field's validation slot says right now, or ''. */
+function destError(): string {
+  return importAskBody().querySelector('#api-import-postman-dest__error')?.textContent ?? ''
+}
+
+/** One dropped file, described the way a LOCAL tab's drop is: nothing minted,
+ *  and the absolute path in `localPath`. */
+function droppedSource(name: string, localPath: string) {
+  return { sourceTicket: '', name, size: 12, localPath }
+}
+
+describe('the import ask accepts a drop', () => {
+  it('advertises itself as a drop target while it is open', async () => {
+    await openAskWithDrop(nativeDropFixture())
+
+    const zone = importAskBody().querySelector<HTMLElement>('[data-file-drop-target]')
+    expect(zone?.getAttribute('data-file-drop-target')).toBe('api-import')
+    expect(zone?.getAttribute('data-session-id')).toBe(DROP_SESSION)
+  })
+
+  it('fills both fields from one gesture', async () => {
+    const drop = nativeDropFixture()
+    await openAskWithDrop(drop)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'api-import',
+      sources: [
+        droppedSource('acme.postman_collection.json', '/downloads/acme.postman_collection.json'),
+      ],
+    })
+
+    expect(field('api-import-postman-file').value).toBe('/downloads/acme.postman_collection.json')
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
+  })
+
+  it('ignores a drop meant for the terminal', async () => {
+    // The same session owns both surfaces, so this is the case the target
+    // field exists for: without it one gesture reached both and the winner
+    // was evaluation order.
+    const drop = nativeDropFixture()
+    await openAskWithDrop(drop)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'terminal',
+      sources: [droppedSource('a.json', '/downloads/a.json')],
+    })
+
+    expect(field('api-import-postman-file').value).toBe('')
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/')
+  })
+
+  it('refuses several files with a sentence, and changes nothing', async () => {
+    // One import makes one collection; N collections is N destinations,
+    // which is a different question and not one this ask can answer by
+    // guessing which of them was meant.
+    const drop = nativeDropFixture()
+    await openAskWithDrop(drop)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'api-import',
+      sources: [
+        droppedSource('a.json', '/downloads/a.json'),
+        droppedSource('b.json', '/downloads/b.json'),
+      ],
+    })
+
+    expect(field('api-import-postman-file').value).toBe('')
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/')
+    expect(destError()).toMatch(/one export/i)
+  })
+
+  it('ignores a drop that names no path — a remote tab mints a ticket instead', async () => {
+    // Nothing here can read a ticket: `api.import.postman` takes a path, and
+    // a remote tab's drop carries none.
+    const drop = nativeDropFixture()
+    await openAskWithDrop(drop)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'api-import',
+      sources: [{ sourceTicket: 'f'.repeat(32), name: 'a.json', size: 12 }],
+    })
+
+    expect(field('api-import-postman-file').value).toBe('')
+  })
+
+  // The two absences fail independently, so they are two tests. A build with
+  // no Wails still has local sessions — `make dev-web` and the e2e harness
+  // both do — so a target gated on the session alone would light up under a
+  // drag there and then deliver nothing.
+  it('draws no drop target where there is no native drop at all', async () => {
+    await openAskWithDrop(undefined)
+
+    expect(importAskBody().querySelector('[data-file-drop-target]')).toBeNull()
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/downloads/a.json' } })
+    expect(field('api-import-postman-file').value).toBe('/downloads/a.json')
+  })
+
+  it('draws no drop target when this window has no local session', async () => {
+    await openAskWithDrop(nativeDropFixture(null))
+
+    expect(importAskBody().querySelector('[data-file-drop-target]')).toBeNull()
   })
 })
 

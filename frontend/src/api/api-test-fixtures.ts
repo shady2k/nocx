@@ -6,8 +6,9 @@
 // The values are the design's own worked example (§9.2, §11): an acme-api
 // collection with a POST that answers 201 in 184ms.
 import { vi } from 'vitest'
-import type { ApiWorkbenchServices, CollectionWatchPort } from './api-client'
+import type { ApiWorkbenchServices, CollectionWatchPort, NativeDropPort } from './api-client'
 import type { FilesChanged } from '../generated/files.changed'
+import type { FilesDropped } from '../generated/files.dropped'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesWatchResult } from '../generated/files.watch'
 import type { FilesCloseResult } from '../generated/files.close'
@@ -360,6 +361,45 @@ const ENVIRONMENT = {
 export function noCollections(): Partial<ApiWorkbenchServices> {
   return {
     listCollections: vi.fn().mockResolvedValue({ collections: [], defaultRoot: DEFAULT_ROOT }),
+  }
+}
+
+/** The session a dropped file's notification names. Thirty-two lowercase hex
+ *  characters, the shape a server-minted session id has, because the drop
+ *  path is where that id is carried end to end and a fixture spelling it
+ *  `s1` would let a surface that mishandles the real thing pass. */
+export const DROP_SESSION = '5f3a9c2b7e814d60a1c8f2b46d09e735'
+
+/** The native window drop, as a test drives it: the port the workbench
+ *  consumes, plus the one thing only a test needs — a way to deliver a
+ *  `files.dropped` to whoever subscribed.
+ *
+ *  It is a fixture rather than a stub built per test because the port has
+ *  two halves that must agree: the session it answers is the session the
+ *  surface advertises in `data-session-id`, and the notification a test
+ *  emits is the one the surface filters by target. */
+export interface NativeDropFixture extends NativeDropPort {
+  /** Deliver one `files.dropped` to every live subscriber. */
+  emit(p: FilesDropped): void
+}
+
+/** A window drop whose local session is `sessionId` — null for a window that
+ *  has no local tab open, which draws no drop target at all. */
+export function nativeDropFixture(sessionId: string | null = DROP_SESSION): NativeDropFixture {
+  const handlers = new Set<(p: FilesDropped) => void>()
+  return {
+    session: () => sessionId,
+    subscribe(handler) {
+      handlers.add(handler)
+      return () => {
+        handlers.delete(handler)
+      }
+    },
+    emit(p) {
+      // A copy, so a handler that unsubscribes on delivery does not mutate
+      // the set being walked.
+      for (const h of [...handlers]) h(p)
+    },
   }
 }
 

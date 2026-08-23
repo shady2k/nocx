@@ -52,12 +52,12 @@ import { filterCollections, flattenCollections, type ApiTreeRow } from './api-tr
 import { CollectionDialog } from './collection-dialog'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
 import { environmentPath, proposedDestination } from './api-paths'
-import { CurlImportDialog, PostmanImportDialog } from './import-dialogs'
+import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
 import { RequestEditor, RequestLine } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
-import type { DirectoryPicker, FilePicker } from './api-client'
+import type { DirectoryPicker, FilePicker, NativeDropPort } from './api-client'
 import type { ApiRoute } from './api-model'
 
 export interface ApiPaneProps {
@@ -80,6 +80,16 @@ export interface ApiPaneProps {
    * honour (api-client.ts).
    */
   openFile?: FilePicker
+  /**
+   * The native window drop, when the build has one.
+   *
+   * Absent wherever there is no Wails runtime, which is every `make dev-web`
+   * run and the whole e2e harness — a browser drop delivers `File` objects
+   * with no location, and `api.import.postman` takes a path. So the ask draws
+   * no drop surface there rather than one that highlights and delivers
+   * nothing.
+   */
+  nativeDrop?: NativeDropPort
 }
 
 /** Floors for the two seams: a tree column narrower than this cannot show a
@@ -104,6 +114,8 @@ export function ApiPane(props: ApiPaneProps) {
   const picker = props.openDirectory
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const filePicker = props.openFile
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const nativeDrop = props.nativeDrop
   const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(new Set())
   // The Import section used to be a collapsible form here, and its
   // disclosure was written `open={false} onToggle={() => undefined}` — a
@@ -465,6 +477,37 @@ export function ApiPane(props: ApiPaneProps) {
         setFilePickerLive(false)
         setImportRefused(err instanceof Error ? err.message : String(err))
       },
+    )
+  }
+
+  // THE DROP, answered as the same gesture the picker already answers: it
+  // calls `chooseExport`, so the export path and the proposed destination
+  // are one code path rather than two that agree until they do not.
+  //
+  // Filtered by TARGET as well as by session: the local tab's terminal pane
+  // is a drop surface of the same session, and the session alone cannot tell
+  // the two apart (nocx-cx442).
+  if (nativeDrop) {
+    onCleanup(
+      nativeDrop.subscribe((p) => {
+        if (p.target !== API_IMPORT_DROP_TARGET) return
+        // A drop that arrives while the ask is closed belongs to nobody: the
+        // target only exists while it is open, so this is a stale delivery.
+        if (!untrack(importing)) return
+        if (p.sources.length > 1) {
+          // One import makes one collection, and N collections is N
+          // destinations — a different question, and not one this ask can
+          // answer by guessing which of them was meant.
+          setImportRefused('Drop one export at a time — an import makes one collection.')
+          return
+        }
+        const path = p.sources[0]?.localPath
+        // No path means the drop was minted rather than described — a remote
+        // tab. Nothing here can read a ticket.
+        if (path === undefined || path === '') return
+        setImportRefused('')
+        chooseExport(path)
+      }),
     )
   }
 
@@ -1013,6 +1056,7 @@ export function ApiPane(props: ApiPaneProps) {
             setPostmanDest(value)
           }}
           defaultRoot={store.defaultRoot()}
+          dropSession={nativeDrop?.session() ?? null}
           error={importRefused()}
           busy={importingBusy()}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}

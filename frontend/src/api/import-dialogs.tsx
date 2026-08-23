@@ -22,9 +22,15 @@
 
 import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
+import { DropZone } from '../ui/drop-zone'
 import { IconButton } from '../ui/icon-button'
 import { FolderOpenIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
+
+/** This ask's name in `data-file-drop-target`. Exported so the element that
+ *  carries it and the subscriber that filters on it read one constant — two
+ *  string literals is how they drift apart. */
+export const API_IMPORT_DROP_TARGET = 'api-import'
 
 export interface PostmanImportDialogProps {
   open: boolean
@@ -38,6 +44,12 @@ export interface PostmanImportDialogProps {
    *  field opens holding it, and the root by itself names a folder that is
    *  already there. */
   defaultRoot: string
+  /** The local session a drop on this ask belongs to, or null — null draws no
+   *  drop target, and so does a build whose composition root passed no drop
+   *  capability at all. The ask does not decide either half: whether there is
+   *  a Wails runtime is the build's, and which local tab is open is the pane
+   *  manager's. */
+  dropSession: string | null
   /** The backend's reason the last attempt was refused, or ''. */
   error: string
   busy: boolean
@@ -96,7 +108,20 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         </>
       }
     >
-      {/* THE EXPORT HAS A PICKER TOO, and it is the same control in the same
+      {/* THE ASK IS A DROP TARGET, and it is the BODY that carries the
+          attributes rather than the `<dialog>`: the kit's Dialog does not
+          forward arbitrary `data-*`, and reaching past it to stamp them on
+          the element itself would be the repaint rule in another form. The
+          zone owns the affordance and none of the meaning — what a dropped
+          file means to this ask is answered by the subscriber in
+          api-pane.tsx, which is the same code path the export picker
+          already goes through. */}
+      <DropZone
+        target={API_IMPORT_DROP_TARGET}
+        sessionId={props.dropSession}
+        hint="Drop a Postman export here"
+      >
+        {/* THE EXPORT HAS A PICKER TOO, and it is the same control in the same
           slot as the destination's below. Without it this field named a
           file by PATH with no way to choose one: a person opened a
           terminal, found the export, copied its path and pasted it back —
@@ -104,56 +129,57 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           capability was there the whole time (`dialog.openFile`, used by
           Connections and Secrets for a private key); only the wiring was
           missing (nocx-6hg2w.15). */}
-      <TextField
-        id="api-import-postman-file"
-        label="Postman v2.1 export"
-        description="Read, never executed."
-        placeholder="/work/acme.postman_collection.json"
-        value={props.file}
-        onInput={props.onFile}
-        autoFocus
-        required
-        trailing={
-          props.onBrowseFile ? (
-            <IconButton
-              size="sm"
-              ariaLabel="Choose export…"
-              title="Choose a Postman export with the system picker"
-              onClick={() => props.onBrowseFile?.()}
-            >
-              <FolderOpenIcon />
-            </IconButton>
-          ) : undefined
-        }
-      />
-      {/* The picker sits INSIDE the field, in the kit's trailing slot, because
+        <TextField
+          id="api-import-postman-file"
+          label="Postman v2.1 export"
+          description="Read, never executed."
+          placeholder="/work/acme.postman_collection.json"
+          value={props.file}
+          onInput={props.onFile}
+          autoFocus
+          required
+          trailing={
+            props.onBrowseFile ? (
+              <IconButton
+                size="sm"
+                ariaLabel="Choose export…"
+                title="Choose a Postman export with the system picker"
+                onClick={() => props.onBrowseFile?.()}
+              >
+                <FolderOpenIcon />
+              </IconButton>
+            ) : undefined
+          }
+        />
+        {/* The picker sits INSIDE the field, in the kit's trailing slot, because
           the field and its picker are one control. Beside it, they were two:
           the button was aligned to the input by a hand-measured margin that
           assumed a label and nothing else, so a field that also carries a
           description — this one — floated its button up beside the sentence
           instead. A slot the kit positions cannot come apart that way, and on
           a 480px panel it gives the path the whole width. */}
-      <TextField
-        id="api-import-postman-dest"
-        label="New collection folder"
-        description="Must not exist yet — the import arrives whole or not at all."
-        value={props.dest}
-        error={refusal()}
-        onInput={props.onDest}
-        required
-        trailing={
-          props.onBrowse ? (
-            <IconButton
-              size="sm"
-              ariaLabel="Browse…"
-              title="Choose a folder with the system picker"
-              onClick={() => props.onBrowse?.()}
-            >
-              <FolderOpenIcon />
-            </IconButton>
-          ) : undefined
-        }
-      />
+        <TextField
+          id="api-import-postman-dest"
+          label="New collection folder"
+          description="Must not exist yet — the import arrives whole or not at all."
+          value={props.dest}
+          error={refusal()}
+          onInput={props.onDest}
+          required
+          trailing={
+            props.onBrowse ? (
+              <IconButton
+                size="sm"
+                ariaLabel="Browse…"
+                title="Choose a folder with the system picker"
+                onClick={() => props.onBrowse?.()}
+              >
+                <FolderOpenIcon />
+              </IconButton>
+            ) : undefined
+          }
+        />
+      </DropZone>
     </Dialog>
   )
 }

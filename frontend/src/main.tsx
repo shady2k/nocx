@@ -9,7 +9,7 @@ import { render } from 'solid-js/web'
 import { Show, createSignal } from 'solid-js'
 import App from './App'
 import { log } from './log'
-import { installBrowserTransport } from './wails-runtime'
+import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
@@ -24,6 +24,7 @@ import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
+import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
@@ -570,6 +571,26 @@ async function main() {
       // bound separately from the directory one because they are two
       // capabilities that can be absent independently (api-client.ts).
       filePicker(dialogClient),
+      // The native drop, and BOTH halves of "is there one" are decided here
+      // because only the composition root knows both: the Wails runtime is a
+      // property of this build (wails-runtime.ts), and the open local session
+      // is the pane manager's to answer. The workbench is handed the
+      // capability or it is handed nothing — a drop target under
+      // `make dev-web`, which has real local sessions and no Wails, would
+      // highlight under a drag and then deliver nothing.
+      //
+      // Bound off the ONE upload surface's services rather than a second
+      // subscription to files.dropped: two subscribers to one notification
+      // is two owners of when it has been handled, and the terminal pane's
+      // subscriber is already the other one. They do not collide because
+      // each filters on its own `target` (files.dropped's contract).
+      hasWailsWebview()
+        ? {
+            session: () => tm.anyLocalSession(),
+            subscribe: (handler: (p: FilesDropped) => void) =>
+              uploadSurface.services.subscribeDropped(handler),
+          }
+        : undefined,
     ),
   )
 

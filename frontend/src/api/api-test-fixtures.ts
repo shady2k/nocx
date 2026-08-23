@@ -136,6 +136,7 @@ export function collectionFixture(over: Partial<ApiCollection> = {}): ApiCollect
       { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
       { relPath: LIST_REL_PATH, name: 'list', method: 'GET' },
     ],
+    folders: [],
     malformed: [],
     environments: [],
     ...over,
@@ -252,7 +253,7 @@ export function stoppedSendFixture(): ApiRequestSendResult {
 export function createdFixture(name = CREATED_NAME): ApiCollectionsCreateResult {
   return {
     handle: CREATED_HANDLE,
-    collection: { name, requests: [], malformed: [], environments: [] },
+    collection: { name, requests: [], folders: [], malformed: [], environments: [] },
   }
 }
 

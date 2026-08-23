@@ -196,7 +196,10 @@ export function adoptOpenedCollection(opened: OpenedCollection): ApiCollection {
   const requests: ApiRequestRef[] = opened.requests satisfies OpenedRequestRef[]
   const malformed: ApiMalformedRef[] = opened.malformed satisfies OpenedMalformedRef[]
   const environments: ApiEnvironmentRef[] = opened.environments satisfies OpenedEnvironmentRef[]
-  return { name: opened.name, requests, malformed, environments }
+  // `folders` rides through the same door as the rest, and its absence here
+  // was caught by the compiler the moment the schema grew it — which is the
+  // whole reason this function exists rather than a cast.
+  return { name: opened.name, requests, folders: opened.folders, malformed, environments }
 }
 
 /**
@@ -218,7 +221,7 @@ export function adoptCreatedCollection(created: CreatedCollection): ApiCollectio
   const requests: ApiRequestRef[] = created.requests satisfies CreatedRequestRef[]
   const malformed: ApiMalformedRef[] = created.malformed satisfies CreatedMalformedRef[]
   const environments: ApiEnvironmentRef[] = created.environments satisfies CreatedEnvironmentRef[]
-  return { name: created.name, requests, malformed, environments }
+  return { name: created.name, requests, folders: created.folders, malformed, environments }
 }
 
 // ── Reading a response, in the product's words ────────────────────────────

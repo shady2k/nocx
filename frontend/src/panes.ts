@@ -1981,6 +1981,27 @@ export class PaneManager {
     return pane && origin ? { paneId: pane.id, ...origin } : null
   }
 
+  /** The session id of SOME open local pane, or null.
+   *
+   *  Read at call time and never latched. It replaces a signal in the
+   *  composition root that held the first local session ever seen and was
+   *  never cleared: a gesture that names a session — a window drop, a
+   *  files.open for a collection watch — is refused by the backend when that
+   *  session is not open, and the refusal then named a tab the person had
+   *  closed and was not thinking about.
+   *
+   *  ACTIVE is deliberately not the question. The collection watch and the
+   *  import drop both want "a local session this window can address", and the
+   *  tab in front is not that question — the workbench pane is usually the one
+   *  in front while either happens. */
+  anyLocalSession(): string | null {
+    for (const pane of this.panes) {
+      const origin = pane.content.activeOrigin?.()
+      if (origin && origin.kind === 'local') return origin.sessionId
+    }
+    return null
+  }
+
   /** The ACTIVE pane's surface type (B.8) — the seam chrome reads to answer
    *  "what kind of pane is in front" without instanceof tests. The sidebar's
    *  Settings collapse (nocx-3e3b) reads this through the composition root:

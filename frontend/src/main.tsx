@@ -426,31 +426,11 @@ async function main() {
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
-  // The most recent LOCAL session this window has seen, for surfaces that
-  // need a filesystem on THIS machine rather than on whichever tab is in
-  // front. `files.open` mints a binding for a session the connection owns and
-  // builds that session's provider, so watching a backend-local folder — an
-  // API collection (design §13.1) — through the ACTIVE origin would watch the
-  // wrong machine the moment an SSH tab came forward, and would detach
-  // entirely when a tab with no origin at all (the workbench's own) did.
-  //
-  // Latched rather than tracked: it is the answer to "is there a local
-  // session here", and the tab in front does not change that answer. Null
-  // until the first local session opens, which is the state a build with no
-  // terminal is honestly in — the surfaces reading it draw no capability then
-  // rather than one that fails when used.
-  const [localSessionId, setLocalSessionId] = createSignal<string | null>(null)
-  const latchLocalSession = (): void => {
-    const origin = tm.activeOrigin()
-    if (origin !== null && origin.kind === 'local') setLocalSessionId(origin.sessionId)
-  }
-  latchLocalSession()
   tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
-    latchLocalSession()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -564,7 +544,12 @@ async function main() {
       dispatcher,
       directoryPicker(dialogClient),
       {
-        localSession: () => localSessionId(),
+        // Which local session this window can address, asked at call time —
+        // PaneManager.anyLocalSession() walks the open panes, so a tab that
+        // has been closed cannot be named. A latch here held the first local
+        // session ever seen and outlived its tab, and `files.open` refuses a
+        // session the registry no longer has open.
+        localSession: () => tm.anyLocalSession(),
         open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
         watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
         close: (bindingId) => filesServicesTracked.close(bindingId),

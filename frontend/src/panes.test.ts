@@ -2217,3 +2217,39 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
     expect(message).not.toContain('Still running')
   })
 })
+
+describe('anyLocalSession — a live answer, never a latch', () => {
+  it('answers a local pane that is open, and null once it is gone', async () => {
+    const { manager, client } = await mountPaneManager()
+
+    const sessionId = client._sessions[0].sessionId
+    expect(manager.activeOrigin()?.kind).toBe('local')
+    expect(manager.anyLocalSession()).toBe(sessionId)
+
+    manager.closeActivePane()
+
+    // Read at call time: nothing was re-rendered and nothing was notified,
+    // and the answer is still right. That is the whole point — the latch it
+    // replaces stayed true after its tab was gone.
+    expect(manager.anyLocalSession()).toBeNull()
+  })
+
+  it('answers null when no pane is local', async () => {
+    const { manager } = await mountPaneManager()
+
+    // The only local tab goes, and what is left is a remote tab plus a pane
+    // whose content answers no origin at all (a viewer). Neither is a
+    // filesystem on THIS machine.
+    manager.closeActivePane()
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
+    manager.openPane(new CountingTestContent(), {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    })
+
+    expect(manager.anyLocalSession()).toBeNull()
+  })
+})

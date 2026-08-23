@@ -66,7 +66,8 @@ import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
-import type { ApiRoute } from './api-model'
+import type { ApiRequest, ApiRoute } from './api-model'
+import { findVariables } from './variable-reference'
 
 export interface ApiPaneProps {
   store: ApiStore
@@ -125,6 +126,92 @@ const NOT_AN_EXPORT_REFUSAL =
  *  per site, because "direct" is one state and three spellings of it is
  *  three states that agree until they do not. */
 const DIRECT_ROUTE: ApiRoute = { kind: 'direct', profileId: '', insecureTls: false }
+
+/** The two header names HTTP itself defines as carrying credentials. A LIST
+ *  OF NAMES, not a detector: `internal/secrets.Detect` is the one owner of
+ *  "is this text credential-shaped", it lives on the backend, and a second
+ *  derivation of it here would agree with it about every value anyone tried
+ *  and disagree about the one that mattered (AGENTS.md). What this side can
+ *  own without a second owner is a GRAMMAR question, and that is all it
+ *  asks. */
+const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set(['authorization', 'proxy-authorization'])
+
+/** Whether `s` is exactly one `{{name}}` and nothing else — the renderer's
+ *  half of `apiimport.varRef`, over the scan that already mirrors the
+ *  backend's variable grammar (variable-reference.ts). */
+function isOneVariableReference(s: string): boolean {
+  const spans = findVariables(s)
+  return spans.length === 1 && spans[0].from === 0 && spans[0].to === s.length
+}
+
+/**
+ * The header a credential is sitting in AS TEXT, or '' when there is none.
+ *
+ * WHY THE SURFACE ASKS AT ALL (nocx-flidy). The folder ask used to promise
+ * "no secret value is ever written into it", which was true while every
+ * credential arrived as a variable NAME resolved from the vault. nocx-14exx
+ * decided — deliberately, and re-confirmed since — that a credential a person
+ * pastes stays where they put it, so a curl line's Authorization header is
+ * text in the request file, in the folder that sentence is about. Nothing
+ * here rewrites, refuses or sanitises it; the sentence is the only thing that
+ * changes.
+ *
+ * THE RULE IS `authFromHeader`'s, mirrored: an Authorization value is a
+ * scheme, a space, and the credential, and the credential is variable-bound
+ * exactly when it is one `{{name}}`. `Bearer {{token}}` therefore carries
+ * nothing, and `Bearer ghp_…` carries everything. A value with no space at
+ * all is the whole credential.
+ *
+ * IT ANSWERS ABOUT THE REQUEST IN THE FORM, which is what is about to be
+ * saved into the folder being named, and never about the collection's other
+ * files: `api.collections.list` carries a request's path, name and method and
+ * no header at all, so a claim about the whole folder would be one the
+ * renderer cannot make. That is why the sentence NAMES what it looked at.
+ */
+function literalCredentialHeader(req: ApiRequest | null): string {
+  if (req === null) return ''
+  for (const h of req.headers) {
+    if (!h.enabled) continue
+    if (!CREDENTIAL_HEADERS.has(h.name.trim().toLowerCase())) continue
+    const value = h.value.trim()
+    if (value === '') continue
+    const space = value.indexOf(' ')
+    const credential = space < 0 ? value : value.slice(space + 1).trim()
+    if (credential === '' || isOneVariableReference(credential)) continue
+    return h.name.trim()
+  }
+  return ''
+}
+
+/**
+ * One import's report, as the foot panel names it (nocx-q2cx5).
+ *
+ * The panel is the import's unsupported list, and it lives OUT of the ask
+ * that closes so a soft degrade is visible in the product rather than only in
+ * a log. What it lacked was an owner and an end: it sat under the tree until
+ * the next import replaced it, naming neither what had been imported nor
+ * when, and pointing at none of the requests in the tree.
+ *
+ * One record for both halves, because they are one fact: a report that is
+ * dismissed is a report that is gone, and `null` says so. Dismissing loses
+ * the REPORT and nothing else — what could not be carried is absent from the
+ * request either way, the request itself is in the form, and the next import
+ * files its own.
+ */
+interface ImportReport {
+  /** What was imported: the request a curl line became, or the folder an
+   *  export was written into. */
+  about: string
+  /** When, in the person's own clock — the panel's other missing half. */
+  at: string
+}
+
+/** The clock, read once per import rather than per render: a panel that
+ *  restated the current time would be a report about now instead of about
+ *  the act it describes. */
+function reportOf(about: string): ImportReport {
+  return { about, at: new Date().toLocaleTimeString(undefined, { timeStyle: 'short' }) }
+}
 
 /**
  * The one source the import ask is holding.
@@ -418,6 +505,36 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [destTyped, setDestTyped] = createSignal(false)
   const [importingBusy, setImportingBusy] = createSignal(false)
+  /** WHOSE list the foot panel is showing, and whether it is still showing
+   *  it. Set by whichever import produced the notes; cleared by the person
+   *  who has read them. It is HERE rather than beside `notes` because it is
+   *  a fact about the act this surface performed, not about the store's
+   *  state — and a report that outlived the workbench would be one nobody
+   *  could attribute. */
+  const [report, setReport] = createSignal<ImportReport | null>(null)
+  /** The header a credential is sitting in as text, in the request that is in
+   *  the form — '' when there is none. See literalCredentialHeader. */
+  const pastedCredential = (): string => literalCredentialHeader(store.draft())
+  /**
+   * What a folder ask says under its field about committing the folder.
+   *
+   * TWO STATES, and the second is shown only when it is TRUE of the request
+   * in the form. A caveat on every ask is a caveat nobody reads, and the
+   * ordinary case — a collection with nothing pasted in it — must not be made
+   * frightening by a warning about somebody else's folder. Neither state
+   * claims the folder is safe to commit: the first says only what nocx
+   * actually guarantees, which is about values bound to variables.
+   */
+  const commitNote = (lead: string): string => {
+    const header = pastedCredential()
+    if (header === '') {
+      return `${lead} A value bound to a variable stays in the vault: the file carries the name, never the value.`
+    }
+    return (
+      `${lead} A value bound to a variable stays in the vault — but the request you have open ` +
+      `carries a credential as text in its ${header} header, and saving it here writes that into the folder.`
+    )
+  }
 
   // The two asks. Each owns what is typed into it, the reason its last
   // attempt was refused, and whether a call is in flight.
@@ -1252,6 +1369,11 @@ export function ApiPane(props: ApiPaneProps) {
       // it yet (api-store.ts) — so the ask closes and the request pane is
       // where the person looks next.
       if (store.error() !== '') return
+      // WHOSE the foot panel's list is: the request this line became, named
+      // by the importer off the line itself. Set unconditionally — an import
+      // that carried everything has an empty list and therefore no panel, so
+      // there is no state where this attributes a report that is not shown.
+      setReport(reportOf(store.draft()?.name ?? 'a curl line'))
       setCurling(false)
     })
   }
@@ -1320,6 +1442,9 @@ export function ApiPane(props: ApiPaneProps) {
         const refused = store.error()
         setImportRefused(refused)
         if (refused !== '') return
+        // The folder is what a person can point at afterwards, so it is what
+        // the foot panel's report is about.
+        setReport(reportOf(dest))
         const notOpened = await putInTree(dest)
         setImporting(false)
         if (notOpened !== '') {
@@ -1627,7 +1752,9 @@ export function ApiPane(props: ApiPaneProps) {
           submitLabel="Create"
           fieldId="api-new-collection-name"
           fieldLabel="Name"
-          fieldDescription="A name, not a path — the folder is made where nocx keeps collections. It is safe to commit: no secret value is ever written into it."
+          fieldDescription={commitNote(
+            'A name, not a path — the folder is made where nocx keeps collections.',
+          )}
           placeholder="orders-api"
           value={name()}
           onInput={setName}
@@ -1642,7 +1769,7 @@ export function ApiPane(props: ApiPaneProps) {
           submitLabel="Open"
           fieldId="api-collection-path"
           fieldLabel="Collection folder"
-          fieldDescription="The folder you place. It is safe to commit: no secret value is ever written into it."
+          fieldDescription={commitNote('The folder you place.')}
           placeholder="/work/acme-api"
           value={folderPath()}
           onInput={setFolderPath}
@@ -2037,20 +2164,49 @@ export function ApiPane(props: ApiPaneProps) {
         {/* The foot is the whole element, not a container that empties: a
             box with a rule above it and nothing in it is a line the surface
             draws for no reason. */}
-        <Show when={store.notes().length > 0}>
+        <Show when={store.notes().length > 0 && report() !== null}>
           <div class="api-workbench__foot">
-            {/* WHAT THE LAST IMPORT COULD NOT CARRY. It used to live inside
-              the Import form, which is exactly where it could not be read:
-              the form closed, and the list of what was silently dropped went
-              with it. A degrade that is only visible while the control that
-              caused it is open is a degrade nobody sees (AGENTS.md). It is
-              absent when there is nothing to say. */}
-            <Section title="Not imported">
+            {/* WHAT ONE IMPORT COULD NOT CARRY. It used to live inside the
+              Import form, which is exactly where it could not be read: the
+              form closed, and the list of what was silently dropped went with
+              it. A degrade that is only visible while the control that caused
+              it is open is a degrade nobody sees (AGENTS.md). It is absent
+              when there is nothing to say — and "nothing to say" is now the
+              ordinary answer, because the importer stopped itemising flags
+              that cannot change the request that is sent (nocx-q2cx5, and
+              internal/apiimport/curl.go's disposition table states the rule
+              once, beside the flags it is about).
+
+              IT NAMES ITS IMPORT AND IT ENDS. The lead line is the report's
+              own attribution — what was imported, and when — and the control
+              on the heading is how a person who has read it says so. Both
+              are the one `report` record: dismissing sets it to null, which
+              is what "this report is over" means. The next import files its
+              own, so a dismiss can never silence the degrade after it. */}
+            <Section
+              title="Not imported"
+              actions={
+                <IconButton
+                  ariaLabel="Dismiss what was not imported"
+                  title="Dismiss"
+                  size="xs"
+                  onClick={() => setReport(null)}
+                >
+                  <CloseIcon />
+                </IconButton>
+              }
+            >
               <MarkerList
-                items={store.notes().map((n) => ({
-                  tone: 'excluded' as const,
-                  text: `${n.what} — ${n.why}`,
-                }))}
+                items={[
+                  {
+                    tone: 'note' as const,
+                    text: `From ${report()?.about ?? ''}, ${report()?.at ?? ''}`,
+                  },
+                  ...store.notes().map((n) => ({
+                    tone: 'excluded' as const,
+                    text: `${n.what} — ${n.why}`,
+                  })),
+                ]}
               />
             </Section>
           </div>

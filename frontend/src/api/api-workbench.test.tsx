@@ -4296,3 +4296,254 @@ describe('a collection can be given a folder', () => {
     expect(buttonNames().filter((n) => n.startsWith('More actions for'))).toEqual([])
   })
 })
+
+// ── The import's report: whose it is, and how it ends (nocx-q2cx5) ────────
+//
+// The "Not imported" panel is the soft degrade AGENTS.md asks to be visible
+// in the product rather than only in a log, and it stays out of the ask that
+// closes for exactly that reason. What it lacked was an OWNER and an END: it
+// sat under the tree naming no import, about none of the requests in the
+// tree in particular, until the next import replaced it.
+//
+// Every check below drives the seam a person reaches — the ask is opened by
+// its words, the line is typed, and what appears afterwards is the assertion.
+
+/** The foot panel, or null when it is not on screen. */
+function notImportedPanel(): HTMLElement | null {
+  return workbench().querySelector<HTMLElement>('.api-workbench__foot')
+}
+
+/** Import one curl line the way a person does: the door on the request
+ *  line, the field, the button. */
+async function convertCurl(line: string): Promise<void> {
+  fireEvent.click(button('Import a curl command'))
+  await vi.waitFor(() => field('api-import-curl'))
+  fireEvent.input(field('api-import-curl'), { target: { value: line } })
+  fireEvent.click(button('Convert to a request'))
+}
+
+describe('the import report says whose it is and can be ended', () => {
+  const DROPPED = [
+    { what: '--insecure', why: 'a transport option: the send owns this, not the request' },
+  ]
+
+  it('names the request the curl line became, and the itemised entry keeps its words', async () => {
+    const { bar } = await mountApp({
+      importCurl: vi
+        .fn()
+        .mockResolvedValue({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: DROPPED }),
+    })
+    await openWorkbench(bar)
+    await convertCurl('curl -k https://h/v1/ping')
+
+    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
+    const text = notImportedPanel()?.textContent ?? ''
+    expect(text).toContain('Not imported')
+    // WHICH import. Without this the panel is a list about nothing a person
+    // can point at in the tree.
+    expect(text).toContain('ping')
+    // …and the entry itself is unchanged: the feature named, and why.
+    expect(text).toContain('--insecure')
+  })
+
+  it('names the folder a Postman export was imported into', async () => {
+    const { bar } = await mountApp({
+      importPostman: vi.fn().mockResolvedValue({ unsupported: DROPPED }),
+    })
+    await openImportAsk(bar)
+    paste('{"info":{"name":"Acme"}}')
+    await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`))
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
+    expect(notImportedPanel()?.textContent ?? '').toContain(`${DEFAULT_ROOT}/acme`)
+  })
+
+  it('a person can dismiss it, and what it was about is still in the form', async () => {
+    const { bar } = await mountApp({
+      importCurl: vi
+        .fn()
+        .mockResolvedValue({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: DROPPED }),
+    })
+    await openWorkbench(bar)
+    await convertCurl('curl -k https://h/v1/ping')
+    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
+
+    fireEvent.click(button('Dismiss what was not imported'))
+
+    await vi.waitFor(() => expect(notImportedPanel()).toBeNull())
+    // Dismissing loses the REPORT and nothing else: the request the import
+    // produced is still the one in the form.
+    expect(crumbName()).toBe('ping')
+  })
+
+  it('a later import brings its own report back', async () => {
+    const importCurl = vi
+      .fn()
+      .mockResolvedValueOnce({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: DROPPED })
+      .mockResolvedValueOnce({
+        request: { ...REQUEST, id: '', name: 'pong' },
+        unsupported: [{ what: '--proxy', why: 'refused: it changes where the request goes' }],
+      })
+    const { bar } = await mountApp({ importCurl })
+    await openWorkbench(bar)
+    await convertCurl('curl -k https://h/v1/ping')
+    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
+    fireEvent.click(button('Dismiss what was not imported'))
+    await vi.waitFor(() => expect(notImportedPanel()).toBeNull())
+
+    // A dismiss ends ONE import's report. The next import is a new one, and
+    // a panel that stayed dismissed would be the silent degrade the panel
+    // exists to prevent.
+    await convertCurl('curl --proxy http://p https://h/v1/pong')
+    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
+    expect(notImportedPanel()?.textContent ?? '').toContain('pong')
+    expect(notImportedPanel()?.textContent ?? '').toContain('--proxy')
+  })
+
+  it('an import that lost nothing shows no panel at all', async () => {
+    // The importer's own rule (internal/apiimport/curl.go): a flag that
+    // cannot change the request that is sent is not itemised, so `-sS`
+    // arrives with an EMPTY list — and an empty list is no panel, not a
+    // reassuring one.
+    const { bar } = await mountApp({
+      importCurl: vi
+        .fn()
+        .mockResolvedValue({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await convertCurl('curl -sS https://h/v1/ping')
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    expect(notImportedPanel()).toBeNull()
+  })
+})
+
+// ── What the folder ask promises about committing (nocx-flidy) ────────────
+//
+// The ask used to say "It is safe to commit: no secret value is ever written
+// into it", which was true while every credential arrived as a variable NAME
+// resolved from the vault. nocx-14exx made a pasted credential stay where the
+// person put it, so a curl line's Authorization header is TEXT in the request
+// file — in the folder the sentence is about.
+
+/** A request carrying a credential the way a pasted curl line leaves one:
+ *  the header, as text, exactly as it was typed. */
+function withPastedCredential(): ApiRequest {
+  return {
+    ...REQUEST,
+    id: '',
+    name: 'ping',
+    auth: { kind: 'none', var: '', user: '' },
+    headers: [
+      { name: 'Content-Type', value: 'application/json', enabled: true },
+      { name: 'Authorization', value: 'Bearer ghp_liveTokenTypedByHand', enabled: true },
+    ],
+  }
+}
+
+/** What the New collection ask says under its field. */
+function newCollectionNote(): string {
+  return newCollectionDialog().textContent ?? ''
+}
+
+describe('the folder ask says what it actually covers', () => {
+  it('promises only the variable half, and does not warn, when nothing pasted is open', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => button('New collection'))
+    fireEvent.click(button('New collection'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+
+    const note = newCollectionNote()
+    // The promise that was false is gone.
+    expect(note).not.toContain('safe to commit')
+    expect(note).not.toContain('no secret value is ever written')
+    // What is true is still said.
+    expect(note).toContain('bound to a variable')
+    // And the ordinary case — a collection with nothing pasted in it — is
+    // not made frightening by a caveat about somebody else's folder.
+    expect(note).not.toContain('Authorization')
+  })
+
+  it('says so when the request about to go in carries a credential as text', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({ request: withPastedCredential(), unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await convertCurl("curl -H 'Authorization: Bearer ghp_liveTokenTypedByHand' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    fireEvent.click(button('New collection'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+
+    const note = newCollectionNote()
+    expect(note).toContain('Authorization')
+    expect(note).toContain('bound to a variable')
+    // The VALUE is never repeated back — naming the header is the whole of
+    // what the sentence has to say.
+    expect(note).not.toContain('ghp_liveTokenTypedByHand')
+  })
+
+  it('says nothing about a header whose credential IS a variable', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({
+        request: {
+          ...withPastedCredential(),
+          headers: [{ name: 'Authorization', value: 'Bearer {{token}}', enabled: true }],
+        },
+        unsupported: [],
+      }),
+    })
+    await openWorkbench(bar)
+    await convertCurl("curl -H 'Authorization: Bearer {{token}}' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    fireEvent.click(button('New collection'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+
+    expect(newCollectionNote()).not.toContain('Authorization')
+  })
+
+  it('and nothing is rewritten, refused or sanitised on the way in', async () => {
+    // nocx-14exx, re-confirmed: the product does not hide or relocate what a
+    // person typed. The sentence is the only thing this bead changes.
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({ request: withPastedCredential(), unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await convertCurl("curl -H 'Authorization: Bearer ghp_liveTokenTypedByHand' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    fireEvent.click(button('Headers 2'))
+    await vi.waitFor(() =>
+      expect(
+        [...workbench().querySelectorAll<HTMLInputElement>('input')].some(
+          (i) => i.value === 'Bearer ghp_liveTokenTypedByHand',
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('the open-a-folder ask says the same thing, in both states', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({ request: withPastedCredential(), unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await openFolderAsk()
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
+    expect(openFolderDialog().textContent ?? '').not.toContain('safe to commit')
+    expect(openFolderDialog().textContent ?? '').not.toContain('Authorization')
+    fireEvent.click(button('Cancel'))
+
+    await convertCurl("curl -H 'Authorization: Bearer ghp_liveTokenTypedByHand' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+    await openFolderAsk()
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
+    expect(openFolderDialog().textContent ?? '').toContain('Authorization')
+  })
+})

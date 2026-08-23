@@ -16,7 +16,7 @@ const request = (over: Partial<ApiRequest> = {}): ApiRequest => ({
   query: [],
   variables: [],
   body: { kind: 'none', text: '', fileRef: '' },
-  auth: { kind: 'none', var: '', user: '' },
+  auth: { kind: 'none', token: '', password: '', user: '' },
   ...over,
 })
 

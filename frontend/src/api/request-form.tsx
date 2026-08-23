@@ -5,17 +5,24 @@
 // Every control is a kit component and this file places them; nothing here
 // repaints one. The two things worth knowing before reading it:
 //
-// A SECRET IS NEVER A TEXT INPUT — not in the request, which is the property
-// design §8 buys by leaving no field in the whole contract where a value or a
-// vault identifier could be spelled: the attack is unspellable rather than
-// guarded. `auth.var` is a VARIABLE NAME and the field editing it is that
-// name's only owner.
+// AUTH IS TEXT, LIKE EVERY OTHER FIELD (nocx-6hg2w.20). The token, the
+// password and the username are values — a literal the person pasted is
+// sent and is written to their file, and a `{{name}}` written into one
+// resolves through the same substitution as the URL, a header or the body.
+// There is only ONE resolver from here on; nothing resolves an auth
+// variable a second time.
 //
-// The Auth tab can nonetheless MAKE one (AuthSecret, below), and that costs
-// the property nothing: the value is typed into a control that hands it
-// straight to the vault and keeps no copy, and what lands in the draft is the
-// name. Nothing about the file changed — there is still nowhere in it a value
-// could go.
+// The plain-vs-vault distinction is by construction, not by heuristic: a
+// variable the binding document answers is a secret. Design §8 still holds —
+// there is no syntax in which a FILE names a secret, so an identifier typed
+// here is the literal it is, and the binding from a name to a stored value
+// lives in the binding document, nowhere in this folder.
+//
+// The Auth tab can nonetheless MAKE a secret (AuthSecret, below), and that
+// costs the property nothing: the value is typed into a control that hands
+// it straight to the vault and keeps no copy, and what lands in the draft is
+// the `{{name}}` reference. Nothing about the file changed — there is still
+// nowhere in it a byte of a value could go but the text the person typed.
 //
 // A DISABLED ROW IS A ROW THE USER KEEPS. Header and query rows carry
 // `enabled`, and turning one off is a checkbox rather than deleting it:
@@ -405,10 +412,19 @@ function AuthSecret(props: {
   onName: (name: string) => void
   onCreate: (variable: string, value: string) => Promise<void>
 }) {
-  /** What it will be called: what the person typed, or what the product
-   *  proposes. The field above shows the proposal as its placeholder, so the
-   *  name is on screen before anything is pressed. */
-  const name = (): string => props.auth.var.trim() || proposeSecretName(props.auth)
+  /** What a new secret is called. If the credential field already holds
+   *  exactly one `{{name}}` reference, that is the name — the person is
+   *  ADDING the value for a reference they already wrote, which is the
+   *  "referenced by typing its name" case this door has always served.
+   *  Otherwise it is the product's proposal for this scheme; the credential
+   *  field is now a VALUE (possibly a literal the person pasted,
+   *  nocx-6hg2w.20), so a name is never derived from value-like text. */
+  const name = (): string => {
+    const field = props.auth.kind === 'basic' ? props.auth.password : props.auth.token
+    const ref = /^\{\{\s*([^{}\s]+)\s*\}\}$/.exec(field)
+    if (ref) return ref[1]
+    return proposeSecretName(props.auth)
+  }
   const bindable = (): { name: string } | null =>
     props.target.kind === 'environment' ? props.target : null
 
@@ -448,7 +464,7 @@ function AuthSecret(props: {
           />
           <p class="api-request__idle">
             The value goes to the vault under {environment().name} — never into this file, which
-            keeps the name and nothing else.
+            keeps the reference and no byte of the value.
           </p>
         </>
       )}
@@ -717,7 +733,9 @@ export function RequestEditor(props: RequestEditorProps) {
                           ariaLabel="Body kind"
                           value={req().body.kind}
                           onChange={(v) =>
-                            patch({ body: { ...req().body, kind: v as ApiRequest['body']['kind'] } })
+                            patch({
+                              body: { ...req().body, kind: v as ApiRequest['body']['kind'] },
+                            })
                           }
                           options={BODY_KINDS}
                         />
@@ -823,7 +841,9 @@ export function RequestEditor(props: RequestEditorProps) {
                           ariaLabel="Auth scheme"
                           value={req().auth.kind}
                           onChange={(v) =>
-                            patch({ auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] } })
+                            patch({
+                              auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] },
+                            })
                           }
                           options={AUTH_KINDS}
                         />
@@ -843,37 +863,59 @@ export function RequestEditor(props: RequestEditorProps) {
                           onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
                         />
                       </Show>
-                      {/* THE NAME, and the field is still its only owner. The
-                          placeholder is what the product would call a secret
-                          made below, so the proposal is on screen before
-                          anything is pressed and typing over it is how a person
-                          chooses their own. */}
+                      {/* THE CREDENTIAL, AS TEXT, LIKE EVERY OTHER FIELD.
+                          Since nocx-6hg2w.20 the product does not refuse or
+                          move a value a person types: a literal pasted here
+                          is sent and is written to the request file, and a
+                          person who writes `{{name}}` gets the SAME
+                          substitution every other field gets. The
+                          placeholder is what the product would call a
+                          variable made below, so the proposal is on screen
+                          before anything is pressed. */}
                       <TextField
                         id="api-auth-var"
-                        label="Secret variable"
-                        description="The NAME of a variable. Its value lives in the vault, and this file keeps the name and nothing else."
+                        label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
+                        description={
+                          req().auth.kind === 'basic'
+                            ? 'The password. A literal you paste is sent; a {{name}} resolves like one in the URL.'
+                            : 'The token. A literal you paste is sent; a {{name}} resolves like one in the URL.'
+                        }
                         placeholder={proposeSecretName(req().auth)}
-                        value={req().auth.var}
-                        onInput={(v) => patch({ auth: { ...req().auth, var: v } })}
+                        value={req().auth.kind === 'basic' ? req().auth.password : req().auth.token}
+                        onInput={(v) =>
+                          patch({
+                            auth:
+                              req().auth.kind === 'basic'
+                                ? { ...req().auth, password: v }
+                                : { ...req().auth, token: v },
+                          })
+                        }
                       />
-                      {/* NO CHIP UNDER THE FIELD. It used to print `Sends
-                          🔒name` — the field's own contents, verbatim, two
-                          lines apart. The chip earns its place in the RUN view,
-                          where it stands where a credential's BYTES were and
-                          says whose they are without showing them; here there
-                          is nothing hidden for it to stand for, and the one
-                          fact it could have added — that the name resolves to a
-                          bound value — is not a fact this side has: the
-                          renderer never learns what the vault holds (ADR-0021),
-                          and a name bound through the door below is not
-                          declared in the environment file either. A line that
-                          can only guess is worse than no line (nocx-qoavg). */}
+                      {/* NO CHIP UNDER THE FIELD. The chip earns its place
+                          in the RUN view, where it stands where a
+                          credential's BYTES were and says whose they are
+                          without showing them; here there is nothing hidden
+                          for it to stand for, and the one fact it could
+                          have added — that the text resolves to a bound
+                          value — is not a fact this side has: the renderer
+                          never learns what the vault holds (ADR-0021), and
+                          a name bound through the door below is not
+                          declared in the environment file either. A line
+                          that can only guess is worse than no line
+                          (nocx-qoavg). */}
                       <Show when={props.onCreateSecret && props.secretTarget}>
                         {(target) => (
                           <AuthSecret
                             auth={req().auth}
                             target={target()}
-                            onName={(name) => patch({ auth: { ...req().auth, var: name } })}
+                            onName={(name) =>
+                              patch({
+                                auth:
+                                  req().auth.kind === 'basic'
+                                    ? { ...req().auth, password: `{{${name}}}` }
+                                    : { ...req().auth, token: `{{${name}}}` },
+                              })
+                            }
                             onCreate={(variable, value) =>
                               props.onCreateSecret?.(variable, value) ?? Promise.resolve()
                             }

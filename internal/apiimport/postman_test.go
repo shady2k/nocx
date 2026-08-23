@@ -304,14 +304,14 @@ func TestPostmanSecretVariableBecomesANameOnly(t *testing.T) {
 }
 
 // A collection whose request auth carries a live token — not a template —
-// still writes only a variable name.
+// still writes only a variable reference.
 func TestPostmanLiteralTokenBecomesAVariable(t *testing.T) {
 	coll, reqs, _, _ := mustPostman(t, postmanFixture)
 	req, _ := findRequest(t, coll, reqs, "Literal token")
 	if req.Auth.Kind != apicoll.AuthBearer {
 		t.Fatalf("auth = %+v", req.Auth)
 	}
-	if req.Auth.Var == "" {
+	if req.Auth.Token == "" {
 		t.Fatal("auth names no variable")
 	}
 	assertAbsent(t, req, pmSecretValue)
@@ -321,7 +321,7 @@ func TestPostmanAuthInheritance(t *testing.T) {
 	coll, reqs, _, _ := mustPostman(t, postmanFixture)
 	// No auth of its own: the collection's bearer applies.
 	req, _ := findRequest(t, coll, reqs, "Create user")
-	if req.Auth.Kind != apicoll.AuthBearer || req.Auth.Var != "apiToken" {
+	if req.Auth.Kind != apicoll.AuthBearer || req.Auth.Token != "{{apiToken}}" {
 		t.Fatalf("inherited auth = %+v", req.Auth)
 	}
 	// noauth overrides the inheritance rather than being ignored.

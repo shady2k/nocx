@@ -39,7 +39,7 @@ const REQUEST: ApiRequest = {
   query: [],
   variables: [],
   body: { kind: 'raw', text: '{"email":"a@b.c"}', fileRef: '' },
-  auth: { kind: 'bearer', var: 'API_TOKEN', user: '' },
+  auth: { kind: 'bearer', token: 'API_TOKEN', password: '', user: '' },
 }
 
 describe('ApiClient — one method per contract', () => {
@@ -327,7 +327,7 @@ describe('nativePickers', () => {
     expect(client.directory).toHaveBeenCalledTimes(1)
   })
 
-  it('lets the picker\'s own refusal through rather than swallowing it', async () => {
+  it("lets the picker's own refusal through rather than swallowing it", async () => {
     // The paired failure half: a runtime that is there and a method that
     // reports itself unavailable anyway is what the surface retires on.
     const client = new FakeDialogClient()

@@ -1242,7 +1242,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         query: [],
         variables: [],
         body: { kind: 'none', text: '', fileRef: '' },
-        auth: { kind: 'none', var: '', user: '' },
+        auth: { kind: 'none', token: '', password: '', user: '' },
       })
       setError('')
       await refresh()

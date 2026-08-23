@@ -34,6 +34,7 @@ func TestSubstitute_ResolvesInURLHeadersQueryAndBody(t *testing.T) {
 			{Name: "q-{{queryName}}", Value: "{{queryValue}}", Enabled: true},
 		},
 		Body: Body{Kind: BodyRaw, Text: `{"tenant":"{{tenant}}"}`},
+		Auth: Auth{Kind: AuthBearer, Token: "{{token}}"},
 	}
 	look := staticLookup(map[string]string{
 		"baseUrl":     "https://api.example.com",
@@ -43,6 +44,7 @@ func TestSubstitute_ResolvesInURLHeadersQueryAndBody(t *testing.T) {
 		"queryName":   "page",
 		"queryValue":  "2",
 		"tenant":      "acme",
+		"token":       "t0k3n",
 	})
 
 	got, err := Substitute(in, look)
@@ -61,10 +63,38 @@ func TestSubstitute_ResolvesInURLHeadersQueryAndBody(t *testing.T) {
 	if got.Body.Text != `{"tenant":"acme"}` {
 		t.Errorf("body = %q, want the resolved body", got.Body.Text)
 	}
+	if got.Auth.Token != "t0k3n" {
+		t.Errorf("auth Token = %q, want the resolved token — auth is text like every other field", got.Auth.Token)
+	}
+}
+
+// TestSubstitute_ResolvesInAuthBearerAndBasic pushes the same text semantics
+// through the two credential fields: a `{{name}}` written into a bearer
+// Token or a basic Password resolves in the same pass as the URL.
+func TestSubstitute_ResolvesInAuthBearerAndBasic(t *testing.T) {
+	in := Request{
+		Method: "GET",
+		URL:    "https://api/",
+		Auth: Auth{
+			Kind:     AuthBasic,
+			User:     "ada",
+			Password: "{{pw}}",
+		},
+	}
+	got, err := Substitute(in, staticLookup(map[string]string{"pw": "lovelace"}))
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	if got.Auth.Password != "lovelace" {
+		t.Errorf("auth Password = %q, want the resolved password", got.Auth.Password)
+	}
+	if got.Auth.User != "ada" {
+		t.Errorf("auth User = %q, want the untouched literal", got.Auth.User)
+	}
 }
 
 // TestSubstitute_AnUnresolvedVariableBlocksTheSendAndNamesItself is §6.5's
-// rule, checked in each of the four places: the answer is an error naming
+// rule, checked in each of the five places: the answer is an error naming
 // the variable, never a request that goes out.
 func TestSubstitute_AnUnresolvedVariableBlocksTheSendAndNamesItself(t *testing.T) {
 	cases := []struct {
@@ -75,6 +105,7 @@ func TestSubstitute_AnUnresolvedVariableBlocksTheSendAndNamesItself(t *testing.T
 		{"header", Request{URL: "https://h/", Headers: []Header{{Name: "A", Value: "{{missing}}", Enabled: true}}}},
 		{"query", Request{URL: "https://h/", Query: []Param{{Name: "a", Value: "{{missing}}", Enabled: true}}}},
 		{"body", Request{URL: "https://h/", Body: Body{Kind: BodyRaw, Text: "{{missing}}"}}},
+		{"auth", Request{URL: "https://h/", Auth: Auth{Kind: AuthBearer, Token: "{{missing}}"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.where, func(t *testing.T) {

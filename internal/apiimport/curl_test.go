@@ -274,9 +274,10 @@ func TestCurlFlag_u_User(t *testing.T) {
 	}
 
 	// A password the LINE spells as a variable stays a variable: that name
-	// is the person's own, and the environment answers it.
+	// is the person's own, and the environment answers it. The auth field
+	// is text, so the reference is spelled `{{pw}}` in it.
 	req3, _ := mustCurl(t, `curl -u alice:{{pw}} https://api.example/x`)
-	if req3.Auth.Kind != apicoll.AuthBasic || req3.Auth.User != "alice" || req3.Auth.Var != "pw" {
+	if req3.Auth.Kind != apicoll.AuthBasic || req3.Auth.User != "alice" || req3.Auth.Password != "{{pw}}" {
 		t.Fatalf("auth = %+v", req3.Auth)
 	}
 	if _, ok := headerValue(req3, "Authorization"); ok {
@@ -312,8 +313,11 @@ func TestCurlFlag_u_UserToBinder(t *testing.T) {
 	if len(unsup) != 0 {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
-	if req.Auth.Kind != apicoll.AuthBasic || req.Auth.User != "alice" || req.Auth.Var == "" {
+	if req.Auth.Kind != apicoll.AuthBasic || req.Auth.User != "alice" || req.Auth.Password == "" {
 		t.Fatalf("auth = %+v", req.Auth)
+	}
+	if req.Auth.Password == "s3cr3t-p4ssw0rd" {
+		t.Fatal("the password's TEXT is in the file — a bound value is a {{name}} here")
 	}
 	assertAbsent(t, req, "s3cr3t-p4ssw0rd")
 	if len(offers) != 1 || string(offers[0].Value) != "s3cr3t-p4ssw0rd" {
@@ -323,7 +327,7 @@ func TestCurlFlag_u_UserToBinder(t *testing.T) {
 	// No colon: the variable is named and unbound, so the send blocks and
 	// says which variable is missing (§6.5).
 	req2, _, _ := mustCurlBinder(t, `curl -u alice https://api.example/x`)
-	if req2.Auth.Kind != apicoll.AuthBasic || req2.Auth.User != "alice" || req2.Auth.Var == "" {
+	if req2.Auth.Kind != apicoll.AuthBasic || req2.Auth.User != "alice" || req2.Auth.Password == "" {
 		t.Fatalf("auth = %+v", req2.Auth)
 	}
 }
@@ -481,15 +485,20 @@ func TestCurlAuthorizationBearerBecomesAVariable(t *testing.T) {
 	if req.Auth.Kind != apicoll.AuthBearer {
 		t.Fatalf("auth kind = %q, want bearer", req.Auth.Kind)
 	}
-	if req.Auth.Var == "" {
+	if req.Auth.Token == "" {
 		t.Fatal("auth names no variable")
+	}
+	if req.Auth.Token == token {
+		t.Fatal("the token's TEXT is in the file — a value at the binder is a {{name}} here")
 	}
 	if _, ok := headerValue(req, "Authorization"); ok {
 		t.Fatal("the Authorization header survived into the request")
 	}
 	assertAbsent(t, req, token)
-	if len(offers) != 1 || offers[0].Variable != req.Auth.Var || string(offers[0].Value) != token {
-		t.Fatalf("offers = %d, want the token offered under %q", len(offers), req.Auth.Var)
+	if len(offers) != 1 || offers[0].Variable != "token" || string(offers[0].Value) != token ||
+		req.Auth.Token != "{{"+offers[0].Variable+"}}" {
+		t.Fatalf("offers = %d, auth = %+v, want the token offered under the reference in the file",
+			len(offers), req.Auth)
 	}
 }
 
@@ -508,7 +517,7 @@ func TestCurlAuthorizationStaysOnTheRequestForTheForm(t *testing.T) {
 	}
 	// And no variable was invented: a name nobody can bind is what the old
 	// behaviour left behind, and it is what made the request unsendable.
-	if req.Auth.Kind != "" || req.Auth.Var != "" {
+	if req.Auth.Kind != "" || req.Auth.Token != "" {
 		t.Fatalf("auth = %+v, want none: this entrance mints no variable", req.Auth)
 	}
 }
@@ -517,7 +526,7 @@ func TestCurlAuthorizationBasicBecomesAVariable(t *testing.T) {
 	// base64("alice:s3cr3t-p4ssw0rd")
 	const enc = "YWxpY2U6czNjcjN0LXA0c3N3MHJk"
 	req, _, _ := mustCurlBinder(t, `curl -H 'Authorization: Basic `+enc+`' https://api.example/x`)
-	if req.Auth.Kind != apicoll.AuthBasic || req.Auth.User != "alice" || req.Auth.Var == "" {
+	if req.Auth.Kind != apicoll.AuthBasic || req.Auth.User != "alice" || req.Auth.Password == "" {
 		t.Fatalf("auth = %+v", req.Auth)
 	}
 	assertAbsent(t, req, "s3cr3t-p4ssw0rd")
@@ -552,8 +561,8 @@ func TestCurlAuthorizationAlreadyAVariableIsCarriedThrough(t *testing.T) {
 	if len(unsup) != 0 {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
-	if req.Auth.Kind != apicoll.AuthBearer || req.Auth.Var != "tok" {
-		t.Fatalf("auth = %+v, want the existing variable name", req.Auth)
+	if req.Auth.Kind != apicoll.AuthBearer || req.Auth.Token != "{{tok}}" {
+		t.Fatalf("auth = %+v, want the existing variable reference", req.Auth)
 	}
 	if len(offers) != 0 {
 		t.Fatalf("offers = %d, want none: the reference is not a credential", len(offers))

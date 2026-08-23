@@ -1,7 +1,9 @@
 package apicoll
 
 // Variable substitution: `{{var}}` resolves in the URL, the headers, the
-// query and the body (design §6.5).
+// query, the body and the auth (design §6.5). An auth field is text like
+// every other — a person pastes a token and it is SENT; a person writes
+// `{{token}}` and it resolves in the same pass as the address above it.
 //
 // The rule that shapes this file is the one §6.5 states and then explains:
 // AN UNRESOLVED VARIABLE BLOCKS THE SEND AND NAMES ITSELF. Not the literal
@@ -40,10 +42,6 @@ const (
 // given this variable a value" is not "the vault is locked" and not "the
 // server refused" — and a surface that cannot tell them apart offers the
 // wrong remedy.
-//
-// It is ALSO the answer for an auth variable that is not bound
-// (internal/apisend/auth.go). One concept, one owner: an unbound auth
-// variable is an unresolved variable, and the UI has one message for it.
 var ErrUnresolvedVariable = errors.New("apicoll: the request uses a variable with no value")
 
 // VarUse is one unresolved reference: which variable, and where it was
@@ -210,18 +208,20 @@ func (e Environment) Lookup() Lookup {
 // (§6.4) and a resolved request is a projection of it, so a caller that
 // substituted and then saved would write the token into the collection
 // folder.
+// Five places, and there is a test for each: a substitution that works in
+// four out of five is the shape that ships.
 //
-// Four places, and there is a test for each: a substitution that works in
-// three out of four is the shape that ships.
+// The auth is among them since nocx-6hg2w.20: an auth field is text like
+// every other, so a `{{token}}` written into it resolves in the same pass
+// as one written into the URL. There is exactly ONE resolver from here on;
+// nothing resolves an auth variable a second time.
 //
-// Three places it deliberately does NOT reach:
+// Two places it deliberately does NOT reach:
 //
 //   - Body.FileRef. A file reference is a path inside a hostile collection
 //     folder (§13.1); a variable expanded into a path is a traversal the
 //     path rules never see, because they validate the literal text in the
 //     file and this would hand them something else.
-//   - Auth.Var. That field IS a variable name, not text containing one.
-//     internal/apisend resolves it through the same Lookup.
 //   - A disabled row. It is a row the user keeps and does not send, so a
 //     variable in one cannot block a send it takes no part in.
 //
@@ -249,6 +249,15 @@ func Substitute(r Request, look Lookup) (Request, error) {
 		name := out.Query[i].Name
 		out.Query[i].Name = s.expand(name, fmt.Sprintf("query %q name", name))
 		out.Query[i].Value = s.expand(out.Query[i].Value, fmt.Sprintf("query %q value", name))
+	}
+	// An auth block whose scheme is none is inert, exactly like a disabled
+	// row: stray braces in a field no send reads must not block a request
+	// that goes out anonymously.
+	if r.Auth.Kind == AuthBearer || r.Auth.Kind == AuthBasic || r.Auth.Kind == AuthAPIKey {
+		out.Auth = r.Auth
+		out.Auth.Token = s.expand(r.Auth.Token, "the auth token")
+		out.Auth.Password = s.expand(r.Auth.Password, "the auth password")
+		out.Auth.User = s.expand(r.Auth.User, "the auth user")
 	}
 	if r.Body.Kind == BodyRaw || r.Body.Kind == BodyForm {
 		out.Body.Text = s.expand(r.Body.Text, "the body")
@@ -353,14 +362,32 @@ func validVarName(name string) bool {
 		return false
 	}
 	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == '.':
-		default:
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '_' || r == '-' || r == '.') {
 			return false
 		}
 	}
 	return true
+}
+
+// MaxVarNameLen is the bound validVarName applies.
+func MaxVarNameLen() int { return maxVarNameLen }
+
+// ExactReference reports whether s is EXACTLY one `{{name}}` reference and
+// the name inside it — the whole string and nothing else. It is the grammar
+// validVarName applies, exported for a caller that must know whether a
+// FIELD resolved as a single variable (capability.Snapshot answers "which
+// auth field came from the binding document" this way). A value that is
+// partly text — `Bearer {{token}}` — is not a bare reference and gets "", ok.
+func ExactReference(s string) (string, bool) {
+	if !strings.HasPrefix(s, varOpen) || !strings.HasSuffix(s, varClose) || len(s) < len(varOpen)+len(varClose) {
+		return "", false
+	}
+	name := strings.TrimSpace(s[len(varOpen) : len(s)-len(varClose)])
+	if !validVarName(name) {
+		return "", false
+	}
+	return name, true
 }
 
 func cloneHeaders(in []Header) []Header {

@@ -360,8 +360,8 @@ func TestSend_RefusesWhatItCannotResolve(t *testing.T) {
 			ErrFileBody,
 		},
 		{
-			"auth that names a variable",
-			apicoll.Request{Method: http.MethodGet, URL: srv.URL, Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Var: "token"}},
+			"auth that was never applied",
+			apicoll.Request{Method: http.MethodGet, URL: srv.URL, Auth: apicoll.Auth{Kind: apicoll.AuthBearer, Token: "t0k3n"}},
 			ErrAuthUnresolved,
 		},
 	}

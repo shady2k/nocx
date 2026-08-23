@@ -345,37 +345,34 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
-	// The auth variable becomes a header HERE — outside the gate, and
-	// before the dial. It is done by the caller rather than inside apisend
-	// for two reasons the sender's own doc gives: that package knows nothing
-	// about the vault and has no syntax in which an identifier could be
-	// written (§8), and the resolved credential has to arrive at Send as a
-	// NAMED SECRET or it would ride the raw diagnostic in the clear (§11.2).
+	// The already-SUBSTITUTED auth text becomes a header HERE — outside the
+	// gate, and before the dial. The lookup is gone: since nocx-6hg2w.20
+	// the auth is text like every other field, resolved inside
+	// apicoll.Substitute at the snapshot, and there is exactly ONE
+	// resolver. What Apply still needs is the caller's knowledge of which
+	// auth FIELD was answered by the binding document (inputs.AuthSecrets):
+	// a variable-sourced credential reaches Send as a NAMED SECRET or it
+	// would ride the raw diagnostic in the clear (§11.2). A LITERAL the
+	// person typed places nothing and is shown — the decision recorded in
+	// nocx-tg9l8.
 	//
-	// The lookup is built per send and does not outlive it. It is keyed by
-	// the collection and the environment's NAME — the same triple
-	// api.import.postman binds under, so a token an import stored is the one
-	// this resolves. With no binding store the lookup is nil, and Apply then
-	// refuses the send naming the variable rather than sending an empty
-	// credential (§6.5).
-	var look apicoll.Lookup
-	if h.values != nil {
-		look = h.values.Variables(sendCtx, inputs.CookieScope, inputs.Environment)
-	}
-	sending, used, err := apisend.Apply(inputs.Request, look)
-	// The values the SUBSTITUTION placed, beside the one the auth block
-	// placed. Both are handed to the sender for the same reason and end in
+	// The snapshot computed that fact field-wise, from the FILE's text
+	// against the names the binding answered — never from the resolved
+	// VALUE — so a literal that happens to equal a vault value is still not
+	// elided, which is the point of answering by construction.
+	sending, used, err := apisend.Apply(inputs.Request, inputs.AuthSecrets)
+	// The values the SUBSTITUTION placed are beside the one the auth block
+	// placed; both are handed to the sender for the same reason and end in
 	// the same place: it locates them in the text it composes and elides
-	// them, so the raw view shows a chip where a token went (§11.2). The
-	// auth's is added by Apply above; these are the ones a variable put in
-	// the URL, the query, a header or the body.
+	// them, so the raw view shows a chip where a token went (§11.2).
 	if err != nil {
-		// The SAME division as the snapshot's above, at the fourth place a
-		// variable can be used: an auth variable nothing can resolve is a
-		// run at `compose`, because it is a thing that happened to somebody
-		// who pressed Send. Anything else Apply refuses — a scheme this
-		// build does not implement — is the caller's to fix and stays an
-		// error.
+		// The SAME division as the snapshot's above: an auth block that
+		// cannot become a header — a scheme chosen with an EMPTY
+		// credential, §6.5's blocked send that must never downgrade to
+		// anonymous — is a run at `compose`, because it is a thing that
+		// happened to somebody who pressed Send. Anything else Apply
+		// refuses — a scheme this build does not implement — is the
+		// caller's to fix and stays an error.
 		if composeRefusal(err) {
 			_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
 				apisend.Unsent(inputs.Request, apisend.PhaseCompose, err),
@@ -1136,14 +1133,19 @@ type apiBodyWire struct {
 	FileRef string `json:"fileRef"`
 }
 
-// apiAuthWire names a VARIABLE and never a secret. Var is a variable name in
-// the current environment; there is no field here in which a stored
-// credential's identifier can be spelled, which is the whole of design §8 —
-// the attack is unspellable rather than guarded.
+// apiAuthWire is TEXT like every other field the wire carries: the token,
+// the password and the username are what the file holds — a literal the
+// person typed, or a `{{variable}}` reference — never an identifier for a
+// stored secret. Design §8 still holds: there is no syntax in which a file
+// names a secret, and the binding from a name to a stored value lives in
+// the binding document, nowhere in this request.
 type apiAuthWire struct {
 	Kind string `json:"kind"`
-	Var  string `json:"var"`
 	User string `json:"user"`
+	// Token is the bearer token or the api-key value.
+	Token string `json:"token"`
+	// Password is the basic-auth password.
+	Password string `json:"password"`
 }
 
 // apiSendResponse is ONE EXCHANGE — what was attempted, how far it got, and
@@ -1493,8 +1495,8 @@ func wireRequest(r apicoll.Request) (apiRequestWire, error) {
 		Headers:   wireHeaders(r.Headers),
 		Query:     wireParams(r.Query),
 		Variables: wireParams(r.Variables),
+		Auth:      apiAuthWire{Kind: authKind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
 		Body:      apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
-		Auth:      apiAuthWire{Kind: authKind, Var: r.Auth.Var, User: r.Auth.User},
 	}, nil
 }
 
@@ -1521,7 +1523,7 @@ func storedRequest(r apiRequestWire) apicoll.Request {
 		Query:     query,
 		Variables: variables,
 		Body:      apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
-		Auth:      apicoll.Auth{Kind: r.Auth.Kind, Var: r.Auth.Var, User: r.Auth.User},
+		Auth:      apicoll.Auth{Kind: r.Auth.Kind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
 	}
 }
 
@@ -2023,7 +2025,13 @@ func validateAPIRequestBody(r apiRequestWire) string {
 	if msg := boundedRunes("request.auth.kind", r.Auth.Kind, maxEnumRunes); msg != "" {
 		return msg
 	}
-	if msg := boundedRunes("request.auth.var", r.Auth.Var, maxConfigNameRunes); msg != "" {
+	// The token and password are now TEXT that reaches the wire, so they
+	// take the same bound as a header value; only the user name stays a
+	// name.
+	if msg := boundedRunes("request.auth.token", r.Auth.Token, maxHeaderValueRunes); msg != "" {
+		return msg
+	}
+	if msg := boundedRunes("request.auth.password", r.Auth.Password, maxHeaderValueRunes); msg != "" {
 		return msg
 	}
 	return boundedRunes("request.auth.user", r.Auth.User, maxUserRunes)

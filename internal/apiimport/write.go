@@ -62,7 +62,15 @@ const (
 // Ordering within the binding store is apibind's (§8.2, §12.2: the vault
 // value first, the binding second). This package hands over one value at a
 // time and that is the whole of its part in it.
-func ImportInto(ctx context.Context, fsys FS, b BindWriter, dest string, r io.Reader) ([]Unsupported, error) {
+//
+// route is how the document was ACQUIRED, and the environment this mints
+// inherits it (§6): a collection fetched through a connection whose
+// environment said `direct` is a collection where every request fails until
+// the person sets by hand the thing they had already told the import. Only
+// Kind and ProfileID are inherited — InsecureTLS is the environment's own
+// choice (apicoll/collection.go:126) and a one-off fetch may not make it
+// for every request the collection will ever send.
+func ImportInto(ctx context.Context, fsys FS, b BindWriter, dest string, r io.Reader, route apicoll.Route) ([]Unsupported, error) {
 	if fsys == nil || b == nil {
 		return nil, errors.New("apiimport: an importer needs both a filesystem and a binding store")
 	}
@@ -78,7 +86,7 @@ func ImportInto(ctx context.Context, fsys FS, b BindWriter, dest string, r io.Re
 		return nil, err
 	}
 
-	res, err := parseImport(r)
+	res, err := parseImport(r, route)
 	if err != nil {
 		return nil, err
 	}
@@ -184,21 +192,21 @@ func ImportInto(ctx context.Context, fsys FS, b BindWriter, dest string, r io.Re
 // parseImport picks the entrance. A Postman export is JSON and a curl line
 // is not, and one byte tells them apart — which is the whole of "two
 // entrances, one converter" (§10).
-func parseImport(r io.Reader) (postmanResult, error) {
+func parseImport(r io.Reader, route apicoll.Route) (postmanResult, error) {
 	var res postmanResult
-	raw, err := io.ReadAll(io.LimitReader(r, maxDocumentBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(r, MaxDocumentBytes+1))
 	if err != nil {
 		return res, fmt.Errorf("apiimport: read import document: %w", err)
 	}
-	if len(raw) > maxDocumentBytes {
-		return res, fmt.Errorf("apiimport: import document is over the %d-byte limit", maxDocumentBytes)
+	if len(raw) > MaxDocumentBytes {
+		return res, fmt.Errorf("apiimport: import document is over the %d-byte limit", MaxDocumentBytes)
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return res, errors.New("apiimport: the import document is empty")
 	}
 	if trimmed[0] == '{' || trimmed[0] == '[' {
-		return parsePostman(bytes.NewReader(raw))
+		return parsePostman(bytes.NewReader(raw), route)
 	}
 	return curlImport(string(trimmed))
 }

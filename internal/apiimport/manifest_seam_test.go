@@ -25,7 +25,7 @@ import (
 func mustImportAndOpen(t *testing.T, doc string) (apicoll.Collections, apicoll.HandleID, apicoll.Collection) {
 	t.Helper()
 	dest := destUnder(t)
-	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(doc)); err != nil {
+	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	// nil Paths: this service reads the folder the user chose and mints
@@ -39,7 +39,7 @@ func mustImportAndOpen(t *testing.T, doc string) (apicoll.Collections, apicoll.H
 }
 
 func TestImportedPostmanCollectionOpensAndListsItsRequests(t *testing.T) {
-	converted, err := parsePostman(strings.NewReader(postmanFixture))
+	converted, err := parsePostman(strings.NewReader(postmanFixture), apicoll.Route{})
 	if err != nil {
 		t.Fatalf("parsePostman: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestImportedPostmanCollectionOpensAndListsItsRequests(t *testing.T) {
 // The environments half of the same seam: the importer writes
 // `environments/`, and the reader is the one that has to accept it.
 func TestImportedPostmanCollectionOpensItsEnvironments(t *testing.T) {
-	converted, err := parsePostman(strings.NewReader(postmanFixture))
+	converted, err := parsePostman(strings.NewReader(postmanFixture), apicoll.Route{})
 	if err != nil {
 		t.Fatalf("parsePostman: %v", err)
 	}

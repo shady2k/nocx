@@ -12,11 +12,14 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 )
 
-// maxDocumentBytes bounds the import document. A Postman export with saved
+// MaxDocumentBytes bounds the import document. A Postman export with saved
 // responses is comfortably inside this; anything past it is not an export
 // somebody made, and an unbounded read makes the reader's memory the
 // caller's to choose.
-const maxDocumentBytes = 16 << 20 // 16 MiB
+//
+// Exported because the URL entrance bounds its read by the same number, and
+// two spellings of one ceiling is two ceilings.
+const MaxDocumentBytes = 16 << 20 // 16 MiB
 
 // defaultEnvName is the environment a collection export's own variables
 // become. A Postman collection's variables are not scoped to an
@@ -198,24 +201,38 @@ type pmEvent struct {
 // ---- conversion ----
 
 type pmConv struct {
-	res        postmanResult
-	alloc      *pathAllocator
-	namer      *varNamer
-	env        *apicoll.Environment
+	res   postmanResult
+	alloc *pathAllocator
+	namer *varNamer
+	env   *apicoll.Environment
+	// route is how the DOCUMENT arrived, not where its requests go: every
+	// environment this converter mints leaves by it (§6).
+	route      apicoll.Route
 	items      int
 	descs      int
 	behaviours int
 }
 
-func parsePostman(r io.Reader) (postmanResult, error) {
+// arrivalRoute is the route the document arrived through, normalised: an
+// empty kind is `direct`, and InsecureTLS is dropped — it is the
+// environment's own choice (apicoll/collection.go:126) and a one-off fetch
+// may not make it for every request the collection will ever send.
+func (c *pmConv) arrivalRoute() apicoll.Route {
+	if c.route.Kind != apicoll.RouteConnection {
+		return apicoll.Route{Kind: apicoll.RouteDirect}
+	}
+	return apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: c.route.ProfileID}
+}
+
+func parsePostman(r io.Reader, route apicoll.Route) (postmanResult, error) {
 	var res postmanResult
 
-	raw, err := io.ReadAll(io.LimitReader(r, maxDocumentBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(r, MaxDocumentBytes+1))
 	if err != nil {
 		return res, fmt.Errorf("apiimport: read import document: %w", err)
 	}
-	if len(raw) > maxDocumentBytes {
-		return res, fmt.Errorf("apiimport: import document is over the %d-byte limit", maxDocumentBytes)
+	if len(raw) > MaxDocumentBytes {
+		return res, fmt.Errorf("apiimport: import document is over the %d-byte limit", MaxDocumentBytes)
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return res, errors.New("apiimport: the import document is empty")
@@ -232,7 +249,7 @@ func parsePostman(r io.Reader) (postmanResult, error) {
 		return res, errors.New("apiimport: trailing data after the import document")
 	}
 
-	c := &pmConv{alloc: newPathAllocator(), namer: newVarNamer()}
+	c := &pmConv{alloc: newPathAllocator(), namer: newVarNamer(), route: route}
 
 	switch {
 	case doc.Info == nil && doc.Item == nil && doc.Values != nil:
@@ -241,7 +258,7 @@ func parsePostman(r io.Reader) (postmanResult, error) {
 		if name == "" {
 			name = defaultEnvName
 		}
-		c.env = &apicoll.Environment{Name: name, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
+		c.env = &apicoll.Environment{Name: name, Route: c.arrivalRoute()}
 		c.readVariables(doc.Values)
 		c.res.Environments = append(c.res.Environments, *c.env)
 		return c.res, nil
@@ -270,7 +287,7 @@ func (c *pmConv) collection(doc pmDoc) (postmanResult, error) {
 	c.res.Collection.Requests = []apicoll.RequestRef{}
 
 	if len(doc.Variable) > 0 {
-		c.env = &apicoll.Environment{Name: defaultEnvName, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
+		c.env = &apicoll.Environment{Name: defaultEnvName, Route: c.arrivalRoute()}
 		c.readVariables(doc.Variable)
 	}
 	if len(doc.Event) > 0 {
@@ -340,7 +357,7 @@ func (c *pmConv) readVariables(vars []pmVariable) {
 
 func (c *pmConv) ensureEnv() {
 	if c.env == nil {
-		c.env = &apicoll.Environment{Name: defaultEnvName, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
+		c.env = &apicoll.Environment{Name: defaultEnvName, Route: c.arrivalRoute()}
 	}
 }
 

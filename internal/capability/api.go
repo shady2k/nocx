@@ -884,7 +884,7 @@ func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest stri
 		return nil, fmt.Errorf("capability: read the import document: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, f)
+	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
 }
 
 // ImportPostmanDocument runs the same import over the bytes it was given.
@@ -900,5 +900,5 @@ func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, 
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
-	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, strings.NewReader(document))
+	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, strings.NewReader(document), apicoll.Route{Kind: apicoll.RouteDirect})
 }

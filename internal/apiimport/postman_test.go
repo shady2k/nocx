@@ -153,7 +153,7 @@ const postmanFixture = `{
 
 func mustPostman(t *testing.T, doc string) (apicoll.Collection, []apicoll.Request, []apicoll.Environment, []Unsupported) {
 	t.Helper()
-	res, err := parsePostman(strings.NewReader(doc))
+	res, err := parsePostman(strings.NewReader(doc), apicoll.Route{})
 	if err != nil {
 		t.Fatalf("parsePostman: %v", err)
 	}
@@ -530,15 +530,15 @@ func TestPostmanRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := parsePostman(strings.NewReader(tc.doc)); err == nil {
-				t.Fatalf("parsePostman(%.40q) succeeded, want an error", tc.doc)
+			if _, err := parsePostman(strings.NewReader(tc.doc), apicoll.Route{}); err == nil {
+				t.Fatalf("parsePostman(%.40q, apicoll.Route{}) succeeded, want an error", tc.doc)
 			}
 		})
 	}
 }
 
 func TestPostmanRefusesAnEndlessDocument(t *testing.T) {
-	if _, err := parsePostman(&endlessSpaces{}); err == nil {
+	if _, err := parsePostman(&endlessSpaces{}, apicoll.Route{}); err == nil {
 		t.Fatal("an endless document was accepted")
 	}
 }
@@ -766,5 +766,63 @@ func TestPostmanOrdinaryURLIsNotReportedAsTemplated(t *testing.T) {
 	_, _, _, unsup := mustPostman(t, doc)
 	if anyUnsupportedContaining(unsup, "templated path") || anyUnsupportedContaining(unsup, "path variables") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
+	}
+}
+
+// The route the document ARRIVED through is the route the environment it
+// mints leaves by (§6): a collection fetched from behind a bastion whose
+// environment says `direct` is a collection where every request fails until
+// the person sets by hand the thing they had already told the import.
+func TestImportIntoEnvironmentCarriesTheRouteTheDocumentArrivedThrough(t *testing.T) {
+	dest := destUnder(t)
+	doc := `{"info":{"name":"acme","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[],"variable":[{"key":"baseUrl","value":"https://acme.test"}]}`
+
+	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(doc),
+		apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "prod-bastion", InsecureTLS: true}); err != nil {
+		t.Fatalf("ImportInto: %v", err)
+	}
+
+	files := walkFiles(t, dest)
+	body, ok := files["environments/default.json"]
+	if !ok {
+		t.Fatalf("no environments/default.json; have %v", keysOf(files))
+	}
+	var env apicoll.Environment
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		t.Fatalf("unmarshal the environment: %v", err)
+	}
+	if env.Route.Kind != apicoll.RouteConnection {
+		t.Errorf("route kind = %q, want %q", env.Route.Kind, apicoll.RouteConnection)
+	}
+	if env.Route.ProfileID != "prod-bastion" {
+		t.Errorf("profile = %q, want prod-bastion", env.Route.ProfileID)
+	}
+	// InsecureTLS is per-ENVIRONMENT on purpose (collection.go:126): a
+	// fetch is not an environment, so it may not turn verification off for
+	// every request the collection will ever send.
+	if env.Route.InsecureTLS {
+		t.Error("insecureTls was carried in from the fetch route; it must never be")
+	}
+}
+
+// And the zero route is `direct`, which is what every caller that did not
+// fetch anything passes.
+func TestImportIntoZeroRouteWritesDirect(t *testing.T) {
+	dest := destUnder(t)
+	doc := `{"info":{"name":"acme","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[],"variable":[{"key":"baseUrl","value":"https://acme.test"}]}`
+
+	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
+		t.Fatalf("ImportInto: %v", err)
+	}
+
+	var env apicoll.Environment
+	if err := json.Unmarshal([]byte(walkFiles(t, dest)["environments/default.json"]), &env); err != nil {
+		t.Fatalf("unmarshal the environment: %v", err)
+	}
+	if env.Route.Kind != apicoll.RouteDirect {
+		t.Errorf("route kind = %q, want %q", env.Route.Kind, apicoll.RouteDirect)
+	}
+	if env.Route.ProfileID != "" {
+		t.Errorf("profile = %q, want empty", env.Route.ProfileID)
 	}
 }

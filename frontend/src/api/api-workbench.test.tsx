@@ -128,9 +128,9 @@ function field(name: string): HTMLInputElement | HTMLTextAreaElement {
  *  "the picker is not offered on a tab it does not govern" is not a question
  *  this file can ask. */
 function control(field: string): HTMLSelectElement {
-  const el = [...workbench().querySelectorAll<HTMLSelectElement>(
-    `[data-api-field="${field}"] select`,
-  )].find(reachable)
+  const el = [
+    ...workbench().querySelectorAll<HTMLSelectElement>(`[data-api-field="${field}"] select`),
+  ].find(reachable)
   if (!el) throw new Error(`no control for ${field}`)
   return el
 }
@@ -1734,9 +1734,7 @@ describe("a section's own controls are inside that section", () => {
     expect(() => control('body-kind')).toThrow()
 
     // ABSENCE, NOT A GREYED CONTROL — neither row ever holds an inert one.
-    expect(
-      workbench().querySelectorAll('.api-request__controls [disabled]'),
-    ).toHaveLength(0)
+    expect(workbench().querySelectorAll('.api-request__controls [disabled]')).toHaveLength(0)
   })
 
   it('the tab row of this surface passes no actions at all, on every tab', async () => {
@@ -3997,7 +3995,7 @@ describe("a request's actions are behind the right button", () => {
     expect(disk.files.has('users/create-copy.json')).toBe(false)
   })
 
-  it('the header\'s ⋮ offers the same list, about the request in the form', async () => {
+  it("the header's ⋮ offers the same list, about the request in the form", async () => {
     const disk = twoRequests()
     const { bar } = await mountApp(disk.services)
     await openWorkbench(bar)
@@ -4206,9 +4204,7 @@ describe('a collection can be given a folder', () => {
     // The ask is still open and still holds the answer, so the correction is
     // one keystroke rather than a retype.
     expect(dialogFor('api-new-folder-name').open).toBe(true)
-    expect(
-      document.querySelector<HTMLInputElement>('#api-new-folder-name')?.value,
-    ).toBe('a/b')
+    expect(document.querySelector<HTMLInputElement>('#api-new-folder-name')?.value).toBe('a/b')
   })
 
   it('a folder that is already there is refused rather than merged into', async () => {
@@ -4315,11 +4311,39 @@ function notImportedPanel(): HTMLElement | null {
 
 /** Import one curl line the way a person does: the door on the request
  *  line, the field, the button. */
-async function convertCurl(line: string): Promise<void> {
+/**
+ * The ask the store raises before an import throws away unsaved work
+ * (nocx-86wvw). It renders into `document.body` through `showConfirm`, OUTSIDE
+ * the workbench, so it is reached document-wide rather than through `button`.
+ *
+ * Answered the way a person answers it rather than mocked away: the ask is on
+ * the path this suite is about, and a suite that stubbed the door would go on
+ * passing on the day the door stopped opening.
+ */
+async function answerDiscard(): Promise<void> {
+  const ok = await vi.waitFor(() => {
+    const found = [...document.querySelectorAll('button')].find(
+      (b) => (b.textContent ?? '').trim() === 'Discard and import',
+    )
+    if (!found) throw new Error('the discard ask is not on screen')
+    return found
+  })
+  fireEvent.click(ok)
+}
+
+/**
+ * `discarding` says the form is holding work this import will replace, so the
+ * ask above stands between Convert and the result. It is a parameter rather
+ * than a look-and-click-if-present because "was the person asked" is the fact
+ * each test is making a claim about: a test that shrugged either way could not
+ * tell the ask disappearing from a defect.
+ */
+async function convertCurl(line: string, discarding = false): Promise<void> {
   fireEvent.click(button('Import a curl command'))
   await vi.waitFor(() => field('api-import-curl'))
   fireEvent.input(field('api-import-curl'), { target: { value: line } })
   fireEvent.click(button('Convert to a request'))
+  if (discarding) await answerDiscard()
 }
 
 describe('the import report says whose it is and can be ended', () => {
@@ -4380,7 +4404,10 @@ describe('the import report says whose it is and can be ended', () => {
   it('a later import brings its own report back', async () => {
     const importCurl = vi
       .fn()
-      .mockResolvedValueOnce({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: DROPPED })
+      .mockResolvedValueOnce({
+        request: { ...REQUEST, id: '', name: 'ping' },
+        unsupported: DROPPED,
+      })
       .mockResolvedValueOnce({
         request: { ...REQUEST, id: '', name: 'pong' },
         unsupported: [{ what: '--proxy', why: 'refused: it changes where the request goes' }],
@@ -4395,7 +4422,9 @@ describe('the import report says whose it is and can be ended', () => {
     // A dismiss ends ONE import's report. The next import is a new one, and
     // a panel that stayed dismissed would be the silent degrade the panel
     // exists to prevent.
-    await convertCurl('curl --proxy http://p https://h/v1/pong')
+    // The first import left a request in the form with no file behind it, so
+    // this one is replacing unsaved work and is asked about it first.
+    await convertCurl('curl --proxy http://p https://h/v1/pong', true)
     await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
     expect(notImportedPanel()?.textContent ?? '').toContain('pong')
     expect(notImportedPanel()?.textContent ?? '').toContain('--proxy')

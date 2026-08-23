@@ -3450,3 +3450,153 @@ describe('a variable in the address says whether anything answers it', () => {
     })
   })
 })
+
+// ── The doors a request was missing (nocx-c8ozb, nocx-lpo2m, nocx-bp44a) ──
+//
+// Making a request meant aiming at a collection row and hitting a plus that
+// is only there while the pointer is over it; naming one meant renaming
+// `Untitled request` by hand, so a tree filled with rows nobody could tell
+// apart; and copying one meant retyping it. These three describe the doors,
+// and each drives the seam a person reaches — the control, from the state
+// they start in, and what is on screen afterwards.
+
+/**
+ * A backend whose FOLDER actually changes: a write lands in the listing and
+ * reads back, so "the row appears from the collection listing" is a question
+ * this file can ask at all.
+ *
+ * The default fixture answers one canned listing and one canned request
+ * whatever it is asked, which is right for a test about one call and useless
+ * for these three — every one of them is about a file that did not exist
+ * before being on screen afterwards.
+ */
+function folderOnDisk(over: Partial<ApiWorkbenchServices> = {}) {
+  const files = new Map<string, ApiRequest>([[CREATE_REL_PATH, REQUEST]])
+  const writeRequest = vi.fn((_handle: string, relPath: string, request: ApiRequest) => {
+    files.set(relPath, request)
+    return Promise.resolve({})
+  })
+  const readRequest = vi.fn((_handle: string, relPath: string) => {
+    const file = files.get(relPath)
+    return file === undefined
+      ? Promise.reject(new Error(`no such request: ${relPath}`))
+      : Promise.resolve({ request: file })
+  })
+  const listCollections = vi.fn(() =>
+    Promise.resolve({
+      collections: [
+        collectionsFixture({
+          collection: collectionFixture({
+            requests: [...files].map(([relPath, request]) => ({
+              relPath,
+              name: request.name,
+              method: request.method,
+            })),
+          }),
+        }),
+      ],
+      defaultRoot: DEFAULT_ROOT,
+    }),
+  )
+  return {
+    files,
+    writeRequest,
+    readRequest,
+    services: servicesFixture({ writeRequest, readRequest, listCollections, ...over }),
+  }
+}
+
+/** The name the header's crumb trail is showing, or '' when it shows none. */
+function crumbName(): string {
+  const el = workbench().querySelector<HTMLElement>('.api-crumbs__name')
+  return (el?.textContent ?? '').trim()
+}
+
+/** Every dialog that is OPEN — the assertion behind "with no dialog". */
+function openDialogs(): HTMLDialogElement[] {
+  return [...workbench().querySelectorAll('dialog')].filter((d) => d.open)
+}
+
+describe('a new request has a door that does not move', () => {
+  it('the control in the header makes one in the active collection and puts it in the form', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    fireEvent.click(button('New request'))
+
+    // The file is written into the collection the workbench is pointed at,
+    // under a path the allocator chose — nothing was asked.
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'untitled-request.json',
+        expect.objectContaining({ name: 'Untitled request', method: 'GET', url: '' }),
+      ),
+    )
+    // And it is what the form is showing, read back off the file.
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+    // The URL field follows too. The pane leaves the caret in it
+    // (api-content.ts) and on macOS a button click does not take it away, so
+    // this is the state a person is actually in when they press the control.
+    await vi.waitFor(() => expect(field('api-url').value).toBe(''))
+    expect(openDialogs()).toEqual([])
+  })
+
+  it("and a person's own typing is still theirs — the caret keeps the field", async () => {
+    // The other end of the interval the door moved. The field owns its text
+    // while it has the caret AND is showing the same request: type the `?`
+    // of a query by hand and the model cannot represent it yet, so a form
+    // that pushed the derived address back would erase the character as it
+    // was typed.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    field('api-url').focus()
+    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/users?' } })
+
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users?'))
+  })
+
+  it('it is there before any request is open — an empty collection is where it is needed', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // Nothing is in the form yet, and the door is still there.
+    expect(crumbName()).toBe('')
+    fireEvent.click(button('New request'))
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+  })
+
+  it('with no collection open the control is ABSENT, not present and refusing', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(workbench().textContent).toContain('No collections open'))
+
+    expect(buttonNames()).not.toContain('New request')
+  })
+
+  it('the existing doors stay — the row is how a person makes one somewhere else', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // The row's own plus, which names the collection it acts on.
+    expect(buttonNames()).toContain('New request in acme-api')
+    // And the row's menu still offers it.
+    fireEvent.click(button('More actions for acme-api'))
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="api-collection-row-menu"]')).toBeTruthy(),
+    )
+    const item = [
+      ...(document
+        .querySelector('[data-testid="api-collection-row-menu"]')
+        ?.querySelectorAll('button') ?? []),
+    ].find((b) => (b.textContent ?? '').trim() === 'New request')
+    expect(item, 'the row menu still offers New request').toBeTruthy()
+  })
+})

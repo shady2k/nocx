@@ -1807,6 +1807,13 @@ export function ApiPane(props: ApiPaneProps) {
             savable={store.draft() !== null && (store.dirty() || store.selected() === null)}
             onSave={saveRequest}
             onMore={store.selected() !== null ? openRequestMenu : undefined}
+            // ABSENCE IS THE CAPABILITY. `newRequest` writes into the ACTIVE
+            // collection and answers nothing when there is none, so a
+            // control handed in with none open would be one that swallows
+            // the press. The row's plus and the row's menu are untouched:
+            // they are how a request is made in a collection that is not the
+            // one the workbench is pointed at.
+            onNew={store.activeCollection() !== '' ? () => void store.newRequest() : undefined}
           />
         </Show>
       </div>

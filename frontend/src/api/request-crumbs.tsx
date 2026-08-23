@@ -19,7 +19,7 @@
 import { Show, createSignal } from 'solid-js'
 import { Button } from '../ui/button'
 import { IconButton } from '../ui/icon-button'
-import { MoreIcon, SaveIcon } from '../ui/icons'
+import { MoreIcon, PlusIcon, SaveIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
 
 export interface RequestCrumbsProps {
@@ -42,6 +42,25 @@ export interface RequestCrumbsProps {
    * there is then no request for it to be about.
    */
   onMore?: (e: MouseEvent) => void
+  /**
+   * Make a new request in the collection the workbench is pointed at.
+   *
+   * A FIXED DOOR. The other two are on a collection row — a plus that is
+   * only there while the pointer is over it, and that row's menu — so making
+   * a request meant aiming at a line in a list that moves as folders are
+   * expanded. This one is where the open request is already named, it needs
+   * no aiming, and it asks nothing: the store writes into the ACTIVE
+   * collection, which is the one this trail's first segment names.
+   *
+   * Optional, and that is the capability: a workbench with no collection
+   * open hands nothing in, so there is no control rather than one that
+   * refuses. It is present with no request open, though — an empty
+   * collection is exactly where a person needs it.
+   *
+   * The row's plus and the row's menu stay. They answer a different
+   * question: a request in a collection that is NOT the active one.
+   */
+  onNew?: () => void
 }
 
 export function RequestCrumbs(props: RequestCrumbsProps) {
@@ -110,17 +129,34 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
           </form>
         </Show>
       </Show>
-      <Show when={props.name !== null}>
+      {/* The trailing group: what this request can be, and the one door that
+          is about the NEXT one. It stands while there is either — a
+          collection with nothing open in the form still offers New request,
+          and that is the state a person is in when they need it most. */}
+      <Show when={props.name !== null || props.onNew}>
         <div class="api-crumbs__save">
-          <Button
-            id="api-save-request"
-            disabled={!props.savable}
-            title={props.savable ? 'Write this request to its file' : 'Nothing to save'}
-            onClick={props.onSave}
-          >
-            <SaveIcon />
-            Save
-          </Button>
+          <Show when={props.name !== null}>
+            <Button
+              id="api-save-request"
+              disabled={!props.savable}
+              title={props.savable ? 'Write this request to its file' : 'Nothing to save'}
+              onClick={props.onSave}
+            >
+              <SaveIcon />
+              Save
+            </Button>
+          </Show>
+          <Show when={props.onNew}>
+            <IconButton
+              id="api-new-request"
+              size="sm"
+              title="New request"
+              ariaLabel="New request"
+              onClick={() => props.onNew?.()}
+            >
+              <PlusIcon />
+            </IconButton>
+          </Show>
           <Show when={props.onMore}>
             <IconButton
               id="api-request-menu"

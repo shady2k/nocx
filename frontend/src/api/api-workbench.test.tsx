@@ -128,9 +128,9 @@ function field(name: string): HTMLInputElement | HTMLTextAreaElement {
  *  "the picker is not offered on a tab it does not govern" is not a question
  *  this file can ask. */
 function control(field: string): HTMLSelectElement {
-  const el = [...workbench().querySelectorAll<HTMLSelectElement>(
-    `[data-api-field="${field}"] select`,
-  )].find(reachable)
+  const el = [
+    ...workbench().querySelectorAll<HTMLSelectElement>(`[data-api-field="${field}"] select`),
+  ].find(reachable)
   if (!el) throw new Error(`no control for ${field}`)
   return el
 }
@@ -1734,9 +1734,7 @@ describe("a section's own controls are inside that section", () => {
     expect(() => control('body-kind')).toThrow()
 
     // ABSENCE, NOT A GREYED CONTROL — neither row ever holds an inert one.
-    expect(
-      workbench().querySelectorAll('.api-request__controls [disabled]'),
-    ).toHaveLength(0)
+    expect(workbench().querySelectorAll('.api-request__controls [disabled]')).toHaveLength(0)
   })
 
   it('the tab row of this surface passes no actions at all, on every tab', async () => {
@@ -3997,7 +3995,7 @@ describe("a request's actions are behind the right button", () => {
     expect(disk.files.has('users/create-copy.json')).toBe(false)
   })
 
-  it('the header\'s ⋮ offers the same list, about the request in the form', async () => {
+  it("the header's ⋮ offers the same list, about the request in the form", async () => {
     const disk = twoRequests()
     const { bar } = await mountApp(disk.services)
     await openWorkbench(bar)
@@ -4206,9 +4204,7 @@ describe('a collection can be given a folder', () => {
     // The ask is still open and still holds the answer, so the correction is
     // one keystroke rather than a retype.
     expect(dialogFor('api-new-folder-name').open).toBe(true)
-    expect(
-      document.querySelector<HTMLInputElement>('#api-new-folder-name')?.value,
-    ).toBe('a/b')
+    expect(document.querySelector<HTMLInputElement>('#api-new-folder-name')?.value).toBe('a/b')
   })
 
   it('a folder that is already there is refused rather than merged into', async () => {
@@ -4297,6 +4293,307 @@ describe('a collection can be given a folder', () => {
   })
 })
 
+// ── A request can be put into a folder (nocx-8aczn.2) ────────────────────
+//
+// api.request.move existed on the wire; the tree had no door onto it. A
+// person who right-clicked a request got Duplicate and Delete and nothing
+// for the obvious question — "this request should live under that folder".
+// The gesture is one more item in the row's menu plus a chooser for where:
+// this collection's own folders and its root (the store already holds them,
+// `collection.folders`), and a way to make a folder from the same place.
+//
+// Every check below drives the seam a person reaches: the menu is opened on
+// a real row, the destination is picked in the chooser, and what appears
+// afterwards is the assertion. Nothing calls the store directly.
+
+describe('a request can be moved to a folder', () => {
+  /** The chooser's folder group — the dialog is found THROUGH it, because
+   *  the kit's Dialog takes no data-* and a field id appears inside it only
+   *  once New folder is the chosen destination. */
+  function moveChooser(): HTMLElement {
+    const group = workbench().querySelector<HTMLElement>('.api-move__folders')
+    if (!group) throw new Error('the move chooser is not on screen')
+    return group
+  }
+
+  /** One destination row of the chooser, by the words it shows. The kit's
+   *  Radio puts the label in a sibling span, so the row is found by its
+   *  text — the aria-label is the same sentence, but the span is what a
+   *  person reads. */
+  function moveOption(label: string): HTMLInputElement {
+    const options = [...moveChooser().querySelectorAll<HTMLLabelElement>('label.ui-radio')]
+    const row = options.find((r) => (r.textContent ?? '').trim() === label)
+    if (!row) throw new Error(`no move destination named ${label}`)
+    const input = row.querySelector<HTMLInputElement>('input[type="radio"]')
+    if (!input) throw new Error(`the ${label} destination has no radio input`)
+    return input
+  }
+
+  /** The chooser's affirmative button, by the words it carries now. */
+  function moveSubmit(): HTMLButtonElement {
+    const dialog = moveChooser().closest('dialog')
+    if (!dialog) throw new Error('the move chooser is not in a dialog')
+    const found = [...dialog.querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) =>
+        (b.textContent ?? '').trim() === 'Move here' ||
+        (b.textContent ?? '').trim() === 'Create and move',
+    )
+    if (!found) throw new Error('no Move button on the chooser')
+    return found
+  }
+
+  /** A backend whose FOLDER actually changes under a move: the file leaves
+   *  one path and lands at another, so "the row is under the new folder
+   *  afterwards" is a question the test can ask at all. */
+  interface MovingDisk {
+    files: Map<string, ApiRequest>
+    moveRequest: ReturnType<typeof vi.fn>
+    listCollections: ReturnType<typeof vi.fn>
+    readRequest: ReturnType<typeof vi.fn>
+    createFolder: ReturnType<typeof vi.fn>
+    services: Partial<ApiWorkbenchServices>
+  }
+
+  function movingDisk(folders: string[] = ['users', 'reports']): MovingDisk {
+    const files = new Map<string, ApiRequest>([
+      [CREATE_REL_PATH, REQUEST],
+      ['ping.json', { ...REQUEST, id: 'ping', name: 'ping', url: 'https://example.test/ping' }],
+    ])
+    const listCollections = vi.fn(() =>
+      Promise.resolve({
+        collections: [
+          collectionsFixture({
+            collection: collectionFixture({
+              requests: [...files].map(([relPath, request]) => ({
+                relPath,
+                name: request.name,
+                method: request.method,
+              })),
+              folders,
+            }),
+          }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+    )
+    const readRequest = vi.fn((_handle: string, relPath: string) => {
+      const file = files.get(relPath)
+      return file === undefined
+        ? Promise.reject(new Error(`no such request: ${relPath}`))
+        : Promise.resolve({ request: file })
+    })
+    const moveRequest = vi.fn((_handle: string, from: string, to: string) => {
+      const file = files.get(from)
+      if (file === undefined) return Promise.reject(new Error(`no such request: ${from}`))
+      files.delete(from)
+      files.set(to, file)
+      return Promise.resolve({ relPath: to })
+    })
+    const createFolder = vi.fn().mockResolvedValue(folderCreatedFixture('reports'))
+    return {
+      files,
+      moveRequest,
+      listCollections,
+      readRequest,
+      createFolder,
+      services: {
+        listCollections,
+        readRequest,
+        moveRequest,
+        createFolder,
+      },
+    }
+  }
+
+  it("the menu offers Move to folder…, and the chooser lists this collection's folders, its root, and New folder", async () => {
+    const { bar } = await mountApp({})
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    await pickOnRow(CREATE_REL_PATH, 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+
+    // The store's own list, not a second one derived from the requests'
+    // paths: `users` is the folder the worked example's requests live in,
+    // and a folder with nothing in it would be listed the same way.
+    expect(moveOption('Root of acme-api')).toBeTruthy()
+    expect(moveOption('users')).toBeTruthy()
+    // The new-folder door, because createFolder exists and a young
+    // collection is exactly where somebody moves into a folder that is not
+    // there yet.
+    expect(moveOption('New folder…')).toBeTruthy()
+  })
+
+  it('choosing a folder reaches the client method, and the row is under it afterwards', async () => {
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    // A request AT THE ROOT, so the move from beside the folders into one
+    // of them is visible: `users/create.json` already LIVES in `users/`,
+    // and moving it there would be a no-op that proves nothing.
+    await vi.waitFor(() => row('ping.json'))
+
+    await pickOnRow('ping.json', 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    fireEvent.click(moveOption('users'))
+    fireEvent.click(moveSubmit())
+
+    // THE CALL IS THE CONTRACT: from the row's path to the destination
+    // FILE inside the chosen folder — the folder the person picked, joined
+    // to the request's own name (the wire takes two file paths; the
+    // chooser offers folders).
+    await vi.waitFor(() =>
+      expect(disk.moveRequest).toHaveBeenCalledWith(HANDLE, 'ping.json', 'users/ping.json'),
+    )
+    // And the tree draws it there and no longer beside the root's rows —
+    // the destination is where the row is, which is what a move IS. The
+    // row is re-read from the listing AFTER the call, so this asserts the
+    // outcome, not the call.
+    await vi.waitFor(() => row('users/ping.json'))
+    expect(disk.files.has('ping.json')).toBe(false)
+    expect(disk.files.has('users/ping.json')).toBe(true)
+  })
+
+  it('moving the OPEN request leaves it open, and the header names the new place', async () => {
+    const disk = movingDisk(['users', 'reports'])
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // The request in the form, in `users/`.
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(crumbName()).toBe('create'))
+
+    await pickOnRow(CREATE_REL_PATH, 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    fireEvent.click(moveOption('reports'))
+    fireEvent.click(moveSubmit())
+
+    // Still the same request in the form — the move did not throw it away —
+    // and the crumb trail now names the folder it lives in.
+    await vi.waitFor(() => expect(crumbName()).toBe('create'))
+    await vi.waitFor(() => expect(folderCrumb()).toContain('reports'))
+    expect(disk.files.has(CREATE_REL_PATH)).toBe(false)
+    expect(disk.files.has('reports/create.json')).toBe(true)
+  })
+
+  it('a chooser cancelled and reopened starts empty — the last answer is not the next one', async () => {
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    // First opening: pick a NEW folder and start typing a name, then walk
+    // away (Cancel). What was chosen must not survive the reopen.
+    await pickOnRow('ping.json', 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    fireEvent.click(moveOption('New folder…'))
+    await vi.waitFor(() => field('api-move-new-folder-name'))
+    fireEvent.input(field('api-move-new-folder-name'), { target: { value: 'reports' } })
+    fireEvent.click(button('Cancel'))
+    await vi.waitFor(() => expect(moveChooser().closest('dialog')?.open).toBe(false))
+    expect(disk.moveRequest).not.toHaveBeenCalled()
+    expect(disk.createFolder).not.toHaveBeenCalled()
+
+    // Second opening, still on the same request: the chooser is back at
+    // the root choice with nothing typed — pressing the primary would move
+    // it to the ROOT, not to a folder nobody chose for it this time.
+    await pickOnRow('ping.json', 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    expect(moveOption('Root of acme-api').checked).toBe(true)
+    expect(moveOption('New folder…').checked).toBe(false)
+    expect(moveSubmit().textContent).toBe('Move here')
+    expect(document.querySelector('#api-move-new-folder-name')).toBeNull()
+  })
+
+  it('a refusal from the backend reaches the chooser, and the request does not move', async () => {
+    const moveRequest = vi
+      .fn()
+      .mockRejectedValue(new Error('a request with that name is already there'))
+    const { bar } = await mountApp({ moveRequest })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    await pickOnRow(CREATE_REL_PATH, 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    fireEvent.click(moveOption('users'))
+    fireEvent.click(moveSubmit())
+
+    // The backend's own sentence, on the chooser, which stays open.
+    await vi.waitFor(() =>
+      expect(moveChooser().closest('dialog')?.textContent).toContain('already there'),
+    )
+    expect(row(CREATE_REL_PATH)).toBeTruthy()
+    expect(moveSubmit()).toBeTruthy()
+  })
+
+  it('an unsaved draft on the open request is refused, and nothing moves', async () => {
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(crumbName()).toBe('create'))
+    fireEvent.input(field('api-url'), { target: { value: 'https://h/edited' } })
+    await vi.waitFor(() => expect(saveArmed()).toBe(true))
+
+    await pickOnRow(CREATE_REL_PATH, 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    fireEvent.click(moveOption('users'))
+    fireEvent.click(moveSubmit())
+
+    // THE RULE, STATED IN THE PRODUCT: a move carries the file and not the
+    // draft. The person is told the remedy — save, then move — and the
+    // request stays where it is.
+    await vi.waitFor(() =>
+      expect(moveChooser().closest('dialog')?.textContent).toContain('Save the request first'),
+    )
+    expect(disk.moveRequest).not.toHaveBeenCalled()
+    expect(disk.files.has(CREATE_REL_PATH)).toBe(true)
+    expect(disk.files.has('users/create.json')).toBe(true)
+  })
+
+  /** True when Save is armed — the surface's own public state for "the
+   *  draft differs from its file". */
+  function saveArmed(): boolean {
+    const btn = document.querySelector<HTMLButtonElement>('#api-save-request')
+    return btn !== null && !btn.disabled
+  }
+
+  it('makes the folder from the same place, then moves — one gesture for a young collection', async () => {
+    const disk = movingDisk(['users'])
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    await pickOnRow(CREATE_REL_PATH, 'Move to folder…')
+    await vi.waitFor(() => moveChooser())
+    fireEvent.click(moveOption('New folder…'))
+    await vi.waitFor(() => field('api-move-new-folder-name'))
+    fireEvent.input(field('api-move-new-folder-name'), { target: { value: 'reports' } })
+    fireEvent.click(moveSubmit())
+
+    // The two acts a person asked for in one: make the folder at the root,
+    // then move the request into it. Both through the store's own methods,
+    // so the spies the fixture owns are the ones asserted.
+    await vi.waitFor(() => expect(disk.createFolder).toHaveBeenCalledWith(HANDLE, '', 'reports'))
+    await vi.waitFor(() =>
+      expect(disk.moveRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, 'reports/create.json'),
+    )
+    // And the row is under the new folder — the chip on the tree.
+    await vi.waitFor(() => row('reports/create.json'))
+    expect(disk.files.has('reports/create.json')).toBe(true)
+    expect(disk.files.has(CREATE_REL_PATH)).toBe(false)
+  })
+
+  /** The crumb segment between the collection and the request name. */
+  function folderCrumb(): string {
+    const el = workbench().querySelector<HTMLElement>('.api-crumbs__folder')
+    return (el?.textContent ?? '').trim()
+  }
+})
+
 // ── The import's report: whose it is, and how it ends (nocx-q2cx5) ────────
 //
 // The "Not imported" panel is the soft degrade AGENTS.md asks to be visible
@@ -4380,7 +4677,10 @@ describe('the import report says whose it is and can be ended', () => {
   it('a later import brings its own report back', async () => {
     const importCurl = vi
       .fn()
-      .mockResolvedValueOnce({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: DROPPED })
+      .mockResolvedValueOnce({
+        request: { ...REQUEST, id: '', name: 'ping' },
+        unsupported: DROPPED,
+      })
       .mockResolvedValueOnce({
         request: { ...REQUEST, id: '', name: 'pong' },
         unsupported: [{ what: '--proxy', why: 'refused: it changes where the request goes' }],

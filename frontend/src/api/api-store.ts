@@ -399,6 +399,16 @@ export interface ApiStore {
    */
   duplicateRequest(handle: string, relPath: string): Promise<void>
   /**
+   * Move one request file to another path inside the SAME collection.
+   *
+   * The file is renamed on the backend, never copied-then-deleted. The
+   * OPEN request follows the file: if this is the request in the form, the
+   * form ends up pointed at the new path with the moved file's contents.
+   * A move of the open request with unsaved edits is REFUSED (see the
+   * implementation), because moving carries the file and not the draft.
+   */
+  moveRequest(handle: string, fromRelPath: string, toRelPath: string): Promise<void>
+  /**
    * Make a request that does not exist yet, in the collection the workbench
    * is pointed at, and open it.
    *
@@ -1343,6 +1353,52 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
   }
 
+  const moveRequest = async (
+    handle: string,
+    fromRelPath: string,
+    toRelPath: string,
+  ): Promise<void> => {
+    const open = untrack(selected)
+    const movingTheOpenOne = open !== null && open.handle === handle && open.relPath === fromRelPath
+    // THE UNSAVED-DRAFT RULE, stated (nocx-8aczn.2): a move does not carry
+    // edits. The file is the truth (§6.4) — api.request.move renames the
+    // FILE, and nothing this side may smuggle the draft into the moved
+    // file or silently discard it. DeleteRequest clears the form when the
+    // deleted file was the open one; a move that did the same would lose
+    // unsaved edits, and a move that wrote the draft to the destination
+    // first would be a second act (a save) performed by somebody who asked
+    // for a different one. So when the request being moved is the one open
+    // AND its draft differs from the file, the move is refused with the
+    // remedy named: save, then move. The whole of the choice lives here so
+    // every door that reaches the move gets the same answer.
+    if (movingTheOpenOne && untrack(dirty)) {
+      setError(
+        'Save the request first — moving it to a new path would carry the unsaved edits with it.',
+      )
+      return
+    }
+    try {
+      const result = await services.moveRequest(handle, fromRelPath, toRelPath)
+      // The OPEN request stays open, pointed at the new path — the result
+      // carries it, never derived (api-client.ts). The form is re-pointed
+      // and the file re-read, so what a person is looking at is the moved
+      // file with its saved contents, exactly as if they had closed it and
+      // opened the new path. Nothing else about the form changes: the runs
+      // stay, because they are answers to THIS question and the question did
+      // not move.
+      if (open !== null && open.handle === handle && open.relPath === fromRelPath) {
+        setSelected({ handle, relPath: result.relPath })
+        setSaved(null)
+        setDraft(null)
+        await openRequest(handle, result.relPath)
+      }
+      setError('')
+      await refresh()
+    } catch (err) {
+      setError(message(err))
+    }
+  }
+
   const send = async (): Promise<void> => {
     let request = untrack(draft)
     if (request === null) return
@@ -1716,6 +1772,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     deleteRequest,
     newRequest,
     duplicateRequest,
+    moveRequest,
     editDraft,
     setEnvironment,
     send,

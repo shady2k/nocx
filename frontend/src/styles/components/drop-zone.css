@@ -1,0 +1,33 @@
+/* DropZone — the kit's drop surface. The overlay is drawn only while a drag
+   is over it: a permanent dashed box in a dialog that already carries fields
+   and a footer is a third thing competing for the same column. */
+.ui-drop-zone {
+  position: relative;
+  display: contents;
+}
+
+.ui-drop-zone[data-drop-active] {
+  display: block;
+}
+
+/* The hint covers the fields rather than tinting them: it is drawn over a
+   dialog body whose own controls stay readable underneath a translucent
+   wash only in the dark themes, and half of the themes here are light.
+   --color-surface-raised is opaque in every one of them, so the hint reads
+   the same in all ten. The plan's --radius-md and --color-surface-overlay
+   are not names this token layer has: radii are --control-radius-*, and the
+   nearest overlay colour is --color-scrim, which is rgba(0,0,0,0.5) in the
+   light themes too and would put dark text on a dimmed light panel. */
+.ui-drop-zone__hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-accent);
+  border-radius: var(--control-radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  pointer-events: none;
+}

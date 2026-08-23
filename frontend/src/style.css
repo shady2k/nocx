@@ -34,6 +34,7 @@
 @import './styles/components/checkbox.css';
 @import './styles/components/radio.css';
 @import './styles/components/file-input.css';
+@import './styles/components/drop-zone.css';
 @import './styles/components/field.css';
 @import './styles/components/grouped-rail.css';
 @import './styles/components/icon-button.css';

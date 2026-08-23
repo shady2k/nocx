@@ -4,7 +4,7 @@
 // Send writes the draft before it sends, because api.request.send takes a
 // handle and a path and sends what the FILE holds. A form that could send
 // something the file does not contain would be a second truth.
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApiStore } from './api-store'
 import type { ApiWorkbenchServices } from './api-client'
 import type { ApiEnvironmentRef, ApiRequest } from './api-model'
@@ -32,6 +32,19 @@ import {
   watchFixture,
   type WatchFixture,
 } from './api-test-fixtures'
+
+// ── The ask that stands between an import and somebody's unsaved work ─────
+//
+// The store asks the kit for confirmation, the way every other "are you
+// sure" in this product does (panes.ts, notes-panel.tsx). The real helper
+// mounts a `<dialog>` on `document.body`, and these tests run under node —
+// so the helper is mocked and the assertions are on what it was ASKED, which
+// is the half that matters: a question naming nothing is a question about
+// nothing.
+const showConfirmMock = vi.fn<(...args: unknown[]) => Promise<boolean>>()
+vi.mock('../ui/dialog', () => ({
+  showConfirm: (...args: unknown[]) => showConfirmMock(...args),
+}))
 
 function storeWith(over: Partial<ApiWorkbenchServices> = {}) {
   return { store: createApiStore(servicesFixture(over)) }
@@ -423,6 +436,140 @@ describe('ApiStore — import', () => {
     await store.importCurl('rm -rf /')
     expect(store.draft()).toBeNull()
     expect(store.error()).toBe('not a curl command line')
+  })
+})
+
+// ── A curl import does not destroy unsaved work (nocx-86wvw) ──────────────
+//
+// The conversion is a VALUE and not a file (design §10): it fills the form,
+// and nothing is written until the request is saved. "Fills the form" was
+// read as "fills THIS form" — and the open request is the one thing in the
+// workbench a person has unsaved work in, so an import over it took the
+// edits with it and asked nothing.
+//
+// The answer is the kit's `showConfirm`, NAMING what goes, and it is asked
+// only when there is something to lose. Both halves are tested here: the ask
+// appears where work would be destroyed, and it stays away where a person
+// had nothing to lose — an empty form, and a request open exactly as its
+// file holds it.
+describe('ApiStore — a curl import over unsaved work', () => {
+  /** A store with a request open and one field typed into, which is the
+   *  state the defect was reported from. */
+  async function withEditedRequest() {
+    const { store } = storeWith({
+      importCurl: vi.fn().mockResolvedValue({
+        request: { ...REQUEST, name: 'ping', url: 'https://h/v1/ping' },
+        unsupported: [],
+      }),
+    })
+    await store.openRequest('h1', 'users/create.json')
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://example.test/edited' })
+    return store
+  }
+
+  beforeEach(() => {
+    showConfirmMock.mockReset()
+    showConfirmMock.mockResolvedValue(true)
+  })
+
+  it('asks before replacing a request with unsaved edits, naming the request', async () => {
+    const store = await withEditedRequest()
+    showConfirmMock.mockResolvedValue(false)
+
+    await store.importCurl('curl https://h/v1/ping')
+
+    expect(showConfirmMock).toHaveBeenCalledTimes(1)
+    const [message] = showConfirmMock.mock.calls[0]
+    // The question names what is about to go. "Are you sure" is a question
+    // about nothing.
+    expect(message).toContain('create')
+    expect(message).toContain('unsaved')
+  })
+
+  it('answering no leaves the edited request in the form, still attached to its file', async () => {
+    const store = await withEditedRequest()
+    showConfirmMock.mockResolvedValue(false)
+
+    await store.importCurl('curl https://h/v1/ping')
+
+    expect(store.draft()?.url).toBe('https://example.test/edited')
+    expect(store.draft()?.name).toBe('create')
+    expect(store.selected()).toEqual({ handle: 'h1', relPath: 'users/create.json' })
+    expect(store.dirty()).toBe(true)
+  })
+
+  it('answering yes imports, and the form is detached from the file as before', async () => {
+    const store = await withEditedRequest()
+    showConfirmMock.mockResolvedValue(true)
+
+    await store.importCurl('curl https://h/v1/ping')
+
+    expect(store.draft()?.url).toBe('https://h/v1/ping')
+    expect(store.selected()).toBeNull()
+  })
+
+  it('asks nothing when the form is empty — nothing was there to lose', async () => {
+    const { store } = storeWith({
+      importCurl: vi.fn().mockResolvedValue({ request: REQUEST, unsupported: [] }),
+    })
+    await store.importCurl('curl https://example.test/users')
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    expect(store.draft()?.url).toBe('{{baseUrl}}/users')
+  })
+
+  it('asks nothing when the open request is exactly what its file holds', async () => {
+    const { store } = storeWith({
+      importCurl: vi.fn().mockResolvedValue({ request: { ...REQUEST, name: 'ping' }, unsupported: [] }),
+    })
+    await store.openRequest('h1', 'users/create.json')
+
+    await store.importCurl('curl https://h/v1/ping')
+
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    expect(store.draft()?.name).toBe('ping')
+  })
+
+  it('asks before replacing an imported draft, which has no file to have been saved into', async () => {
+    // The second import is the case `dirty` cannot see: there is no saved
+    // snapshot to differ from, so everything in the form is unsaved.
+    const { store } = storeWith({
+      importCurl: vi
+        .fn()
+        .mockResolvedValueOnce({ request: { ...REQUEST, name: 'first' }, unsupported: [] })
+        .mockResolvedValueOnce({ request: { ...REQUEST, name: 'second' }, unsupported: [] }),
+    })
+    await store.importCurl('curl https://h/first')
+    expect(showConfirmMock).not.toHaveBeenCalled()
+
+    showConfirmMock.mockResolvedValue(false)
+    await store.importCurl('curl https://h/second')
+
+    expect(showConfirmMock).toHaveBeenCalledTimes(1)
+    expect(showConfirmMock.mock.calls[0][0]).toContain('first')
+    expect(store.draft()?.name).toBe('first')
+  })
+
+  it('a line that is not a curl command is refused without asking anybody to discard anything', async () => {
+    const { store } = storeWith({
+      importCurl: vi.fn().mockRejectedValue(new Error('not a curl command line')),
+    })
+    await store.openRequest('h1', 'users/create.json')
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://example.test/edited' })
+
+    await store.importCurl('rm -rf /')
+
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    expect(store.error()).toBe('not a curl command line')
+    expect(store.draft()?.url).toBe('https://example.test/edited')
+  })
+
+  it('the notes of an import nobody accepted are not shown', async () => {
+    const store = await withEditedRequest()
+    showConfirmMock.mockResolvedValue(false)
+
+    await store.importCurl('curl https://h/v1/ping')
+
+    expect(store.notes()).toEqual([])
   })
 })
 

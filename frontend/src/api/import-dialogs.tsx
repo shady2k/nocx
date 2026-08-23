@@ -16,6 +16,14 @@
 // rendered in the kit's validation slot, and a blank answer is not worth a
 // round trip.
 //
+// AND THE CURL ASK SAYS WHAT IT IS ABOUT TO REPLACE. It fills THE form —
+// the only one — so a person with an open request holding unsaved edits was
+// having them taken by an import that asked nothing (nocx-86wvw). The
+// question itself is the store's, because the store is what detaches the
+// form from its file and so is the only place that knows there is anything
+// to lose; what belongs here is the standing fact, said before the person
+// presses anything rather than only in the modal that catches them.
+//
 // The Postman ask no longer NAMES two paths. It asks one question — paste
 // the export or a URL, or drop the file — and offers the destination rather
 // than demanding it (nocx-ysyy2). The field ids are unchanged
@@ -441,7 +449,7 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
       <TextField
         id="api-import-curl"
         label="curl command line"
-        description="Parsed, never executed — there is no shell behind this field. It fills the form; nothing is written until the request is saved."
+        description="Parsed, never executed — there is no shell behind this field. It fills the form, replacing what is open there; nothing is written until the request is saved. A request with unsaved changes is not replaced without asking."
         multiline
         value={props.value}
         error={refusal()}

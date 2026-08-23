@@ -280,6 +280,26 @@ func mustCatalogue() *Catalogue {
 	c, err := NewCatalogue(
 		[]RoutableKind{
 			{
+				// No DefaultChannels, and that is a CHOICE rather than an
+				// omission (nocx-n3nfg). Every other kind here fires a
+				// handful of times a session; this one fires once per
+				// command, which in a terminal is hundreds of times an hour
+				// — shipping it to the banner would make `ls` interrupt the
+				// user and would train them to turn the whole matrix off.
+				// The surface the design gives this kind is the ONE-SHOT
+				// completion subscription (§A3, "уведомить, когда
+				// закончится"), which is why it is attested: only an
+				// attested event may match one, and a subscription is
+				// reached through the same table without needing a default
+				// row here.
+				//
+				// It is still raised for every closed block, and that is the
+				// point: ingress records the occurrence before the router
+				// decides anything (ingress.go), so with no channel at all
+				// the notification centre can finally answer "what did I
+				// miss" — which is the defect this bead was filed for. The
+				// toggles beside this row now govern a real event; they
+				// simply start off.
 				Kind: KindBlockFinished, ID: "blockFinished",
 				Label:       "A command finished",
 				Description: "nocx's own block ledger recorded that a command finished.",

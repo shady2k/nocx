@@ -1,10 +1,16 @@
 // Command e2e-sshd runs an in-process SSH server for the nocx e2e suite
-// (e2e/shell-mode.spec.ts, e2e/nocxify-journey.spec.ts) that executes REAL
-// commands on a REAL PTY with the REAL shell. The nocx integration path needs
-// the far side to actually run `exec bash --rcfile <(...) -i` (or a plain
-// `bash -i` shell) and emit OSC 133 markers — an echo server cannot. Hermetic
-// and deterministic: keys are minted at startup, the address is ephemeral,
-// and everything the spec needs is printed machine-readable.
+// (e2e/shell-mode.spec.ts, e2e/nocxify-journey.spec.ts,
+// e2e/api-import-url.spec.ts) that executes REAL commands on a REAL PTY with
+// the REAL shell. The nocx integration path needs the far side to actually run
+// `exec bash --rcfile <(...) -i` (or a plain `bash -i` shell) and emit OSC 133
+// markers — an echo server cannot. Hermetic and deterministic: keys are minted
+// at startup, the address is ephemeral, and everything the spec needs is
+// printed machine-readable.
+//
+// It also carries TCP, in both directions: `tcpip-forward` with the
+// `forwarded-tcpip` channels that answer it (the remote lifecycle channel,
+// ADR-0024), and `direct-tcpip` (an API request routed through a connection,
+// design §7.1). Everything else is refused by name.
 //
 // Dev-only; never shipped. Usage:
 //
@@ -33,6 +39,12 @@
 //	                        rendering the password prompt. The journey waits for
 //	                        this line before typing the password, so the run is
 //	                        deterministic, not timed.
+//	TCPIP=<host:port>       printed once per direct-tcpip channel, after the
+//	                        server has connected to the address the channel
+//	                        named and accepted the channel. A spec routing an
+//	                        HTTP request through this server waits for it to
+//	                        know the bytes went over the connection rather
+//	                        than out of this machine's own interface.
 //	READY
 package main
 
@@ -47,8 +59,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/pkg/sftp"
@@ -88,11 +102,10 @@ func run() error {
 	}
 	defer func() { _ = ln.Close() }()
 
-	fmt.Printf("ADDR=%s\n", ln.Addr().String())
-	fmt.Printf("USERKEY=%s\n", userKeyPath)
-	fmt.Printf("KNOWNHOSTS=%s\n", knownhosts.Line([]string{ln.Addr().String()}, hostSigner.PublicKey()))
-	fmt.Println("READY")
-	_ = os.Stdout.Sync()
+	printLine("ADDR=" + ln.Addr().String())
+	printLine("USERKEY=" + userKeyPath)
+	printLine("KNOWNHOSTS=" + knownhosts.Line([]string{ln.Addr().String()}, hostSigner.PublicKey()))
+	printLine("READY")
 
 	for {
 		conn, err := ln.Accept()
@@ -106,10 +119,7 @@ func run() error {
 		// deterministic.
 		var once sync.Once
 		config := buildConfig(userSigner, hostSigner, *banner, *password, func() {
-			once.Do(func() {
-				fmt.Printf("CONN=%s\n", conn.RemoteAddr().String())
-				_ = os.Stdout.Sync()
-			})
+			once.Do(func() { printLine("CONN=" + conn.RemoteAddr().String()) })
 		})
 		go serveConn(conn, config)
 	}
@@ -234,16 +244,130 @@ func serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	go fwd.serveGlobalRequests(reqs)
 
 	for newChan := range chans {
-		if newChan.ChannelType() != "session" {
+		switch newChan.ChannelType() {
+		case "session":
+			ch, reqs, err := newChan.Accept()
+			if err != nil {
+				return
+			}
+			go handleSession(ch, reqs)
+		case "direct-tcpip":
+			go serveDirectTCPIP(newChan)
+		default:
+			// Everything else is still refused BY NAME. The fixture serves
+			// what nocx asks of a far side and nothing more: a channel type
+			// it does not implement must fail as a real sshd fails it, not
+			// be accepted and quietly dropped.
 			_ = newChan.Reject(gossh.UnknownChannelType, "unknown channel type")
-			continue
 		}
-		ch, reqs, err := newChan.Accept()
-		if err != nil {
-			return
-		}
-		go handleSession(ch, reqs)
 	}
+}
+
+// directTCPIPDialTimeout bounds the fixture's own dial to the address a
+// channel names. A refusal is a legitimate answer and arrives on its own —
+// a closed port answers RST at once — but a filtered or blackholed address
+// answers nothing at all, and a fixture that waits forever on it turns a
+// wrong address in a spec into a timeout somewhere else entirely. Bounded
+// here, so the far side always says something.
+const directTCPIPDialTimeout = 10 * time.Second
+
+// serveDirectTCPIP answers the channel a `-L`-shaped dial opens: the client
+// names an address, the SERVER connects to it, and the two are spliced.
+//
+// This is the traffic an API request routed through a connection is made of.
+// `apisend`'s route leases the pooled SSH connection and dials through it
+// (apisend/routes.go → apisend/ssh_dialer.go → ssh.tunnelConn.Dial →
+// gossh.Client.Dial), which is exactly one direct-tcpip channel per HTTP
+// connection. While this fixture rejected the type, the only SSH server the
+// e2e suite can start forwarded no TCP at all, so the connection half of the
+// import — the half the feature exists for — could not be watched end to end
+// by anything: a routed fetch failed here for a reason that has nothing to
+// do with the product (nocx-n4rep).
+//
+// Same principle as the denied `tcpip-forward` above: a fixture may be
+// small, it may not be dishonest about the protocol.
+//
+// THE DIAL HAPPENS BEFORE THE ACCEPT, deliberately. RFC 4254 §7.2 says the
+// server opens the connection and answers the open with success or failure,
+// and gossh's client turns a rejection into an error from Dial. Accepting
+// first and closing the channel afterwards would report a connection that
+// briefly existed instead of one that was refused — and the caller above it
+// (`apisend`) distinguishes exactly those two.
+//
+// It reaches only what the channel names, and every spec that starts this
+// fixture names a loopback address it bound itself. Nothing here consults
+// the developer's ssh agent, ~/.ssh or any host outside the run.
+func serveDirectTCPIP(newChan gossh.NewChannel) {
+	// RFC 4254 §7.2: the address the SERVER should connect to, then the
+	// originator's. gossh's channelOpenDirectMsg marshals them in that order.
+	var p struct {
+		DestAddr   string
+		DestPort   uint32
+		OriginAddr string
+		OriginPort uint32
+	}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &p); err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, "direct-tcpip: unreadable payload")
+		return
+	}
+	dest := net.JoinHostPort(p.DestAddr, strconv.FormatUint(uint64(p.DestPort), 10))
+	c, err := net.DialTimeout("tcp", dest, directTCPIPDialTimeout)
+	if err != nil {
+		_ = newChan.Reject(gossh.ConnectionFailed, fmt.Sprintf("direct-tcpip: dial %s: %v", dest, err))
+		return
+	}
+	defer func() { _ = c.Close() }()
+
+	ch, reqs, err := newChan.Accept()
+	if err != nil {
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	go gossh.DiscardRequests(reqs)
+
+	// TCPIP= is the fixture's account of having carried the traffic, and it
+	// is printed only once the channel is open and the far end connected —
+	// so a spec waiting for it is waiting on a state and not on a duration.
+	// Without it, a routed fetch and a direct one look identical from the
+	// outside when both endpoints are on this machine's loopback, and the
+	// spec would be asserting that the import worked rather than that it
+	// went where the person sent it.
+	printLine(fmt.Sprintf("TCPIP=%s", dest))
+
+	pipe(ch, c)
+}
+
+// stdoutMu serialises the machine-readable lines. Until direct-tcpip there
+// was one writer per connection and one at startup; a forwarded channel is
+// opened per HTTP connection and several can be in flight at once, so the
+// reader — which splits on newlines — needs the writes not to interleave.
+var stdoutMu sync.Mutex
+
+// printLine writes one machine-readable line to stdout and flushes it. It is
+// the ONE place any of them is printed: a second spelling would be a second
+// answer to "what does this server say when it does something", and the
+// flush is what makes a spec waiting on a line see it rather than wait out a
+// buffer.
+func printLine(s string) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	fmt.Println(s)
+	_ = os.Stdout.Sync()
+}
+
+// pipe splices an SSH channel and a TCP connection, returning when either
+// direction ends. The caller closes both, which unblocks the copy that is
+// still running.
+//
+// One owner for "join these two", used by the direct-tcpip channel above and
+// by the forwarded-tcpip one below: the two differ only in which side opened
+// the channel, and a second copy of the loop would be a second answer to one
+// question.
+func pipe(ch gossh.Channel, c net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(ch, c); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(c, ch); done <- struct{}{} }()
+	<-done
 }
 
 // forwards implements remote port forwarding — the `tcpip-forward` global
@@ -369,10 +493,7 @@ func (f *forwards) splice(c net.Conn, bindAddr string, bindPort uint32) {
 	defer func() { _ = ch.Close() }()
 	go gossh.DiscardRequests(reqs)
 
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(ch, c); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(c, ch); done <- struct{}{} }()
-	<-done
+	pipe(ch, c)
 }
 
 func (f *forwards) cancel(key string) {

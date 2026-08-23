@@ -345,6 +345,17 @@ func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
 	if out.Outcome != ledgerApplied || out.Phase != string(content.PhaseClosed) {
 		return
 	}
+	// THE OTHER RAISE IS IN handleHistoryRecord, and this is not a duplicate
+	// (nocx-n3nfg). The two are the ledger's two durable writers of one
+	// product object — the split `command` below already documents — and a
+	// command travels exactly one of them: today's renderer sends
+	// history.record and never a close, and a client that sends closes is on
+	// the fuller lifecycle protocol and sends no record. Two raises for one
+	// command would need one client doing both, which nothing does. Deleting
+	// this one instead would leave `ledger.close` — a contracted method with
+	// its own schema, its own create-the-row-from-the-envelope path and a
+	// renderer migration still ahead of it — silently unable to tell anybody
+	// that a command ended.
 	// Background, deliberately, and for the reason ws.go's session.ended
 	// raise gives at the same seam. Owner: this handler, which runs once per
 	// applied close on the content queue. Closing event: the return of
@@ -358,7 +369,8 @@ func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
 	// The MASKED intent, never the envelope's: cmd.entry.Intent is what
 	// maskCommandSafe returned and what the row stores (ws_ledger.go's
 	// command), and a title reaches further than a database row does.
-	h.raiser.Raise(context.Background(), blockFinishedEvent(sess, cmd.entry.Intent, p))
+	h.raiser.Raise(context.Background(), blockFinishedEvent(
+		sess, cmd.entry.Intent, content.EntryStatus(p.Status), p.Facts))
 }
 
 // command turns the envelope into the store's own shapes: the environment

@@ -102,7 +102,7 @@ func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admi
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
 		}),
 		reg(contentSub, "history.record", params(validateHistoryRecordRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, status: s.historyStatus, clientID: connectionID(w), r: r}
+			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, status: s.historyStatus, clientID: connectionID(w), raiser: s.notifyRaiser, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) {
 				h.handleHistoryRecord(ctx, w, state, req)
 			}

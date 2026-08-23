@@ -1,17 +1,29 @@
 package transport
 
-// block.finished — the notification the ledger's own close raises
-// (nocx-n3nfg, design §3).
+// block.finished — the notification a closed block raises (nocx-n3nfg,
+// design §3).
 //
 // WHY HERE AND NOT ANYWHERE ELSE. The design names this source "block ledger
 // (ADR-0024) — exit code and duration", and §2.2 closes ingress authority:
 // `block.finished` "originates only at the lifecycle publication boundary".
-// ledger.close IS that boundary — the one place a command's end becomes a
-// durable fact of nocx's own ledger — so this is the only seam that may stamp
-// the event `attested`. Nothing here looks at the byte stream: the outcome
-// arrives as a typed fact the renderer derived from markers it owns and the
-// backend RECORDS, exactly as ws_ledger.go's header argues (AD-6 untouched,
-// AD-1 as amended by nocx-m64b).
+// That boundary is where a command's end becomes a durable fact of nocx's own
+// ledger, which is what lets the event be stamped `attested`. There are TWO
+// durable writers of that fact and there always were — ws_ledger.go's
+// `command` says so in as many words, "this method is the second durable
+// writer of the same product object" — so the boundary is both of them:
+// history.record (ws_history_record.go, the seam the renderer actually
+// sends) and ledger.close (ws_ledger.go, the fuller lifecycle protocol).
+// One command goes down exactly one of the two, never both.
+//
+// The event is built HERE, once, for both. It was raised at ledger.close
+// alone until nocx-n3nfg, and the feature did not exist: the renderer sends
+// history.record and no close, so every unit test was green over a product
+// where "A command finished" was a Settings toggle governing nothing.
+//
+// Nothing here looks at the byte stream: the outcome arrives as a typed fact
+// the renderer derived from markers it owns and the backend RECORDS, exactly
+// as ws_ledger.go's header argues (AD-6 untouched, AD-1 as amended by
+// nocx-m64b).
 //
 // It sits in its own file rather than inside handleClose because the WORDING
 // is a product decision with one owner, the way sessionEndedTitle is
@@ -39,20 +51,26 @@ const maxBlockSubjectRunes = 96
 // blockFinishedEvent is the event one closed block raises.
 //
 // intent is the MASKED intent — the same text the row stores, screened by
-// maskCommandSafe in ledgerHandlers.command. It must never be the raw
-// envelope text: a title is presentation data that reaches a banner, a toast
-// and (once targets land) a network sink, so a secret escaping here would
-// escape further than one escaping into the database.
+// maskCommandSafe, which both writers call (ledgerHandlers.command for the
+// close, handleHistoryRecord's rowCommand for the record). It must never be
+// the raw submitted text: a title is presentation data that reaches a banner,
+// a toast and (once targets land) a network sink, so a secret escaping here
+// would escape further than one escaping into the database.
 //
 // At is deliberately not stamped, as at ws.go's session.ended raise: ingress
 // is the first nocx-owned stage and stamps it once, so a relay replaying a
 // buffered batch keeps its own instants (internal/notify/ingress.go).
-func blockFinishedEvent(sess session.Session, intent string, p ledgerCloseParams) notify.Event {
-	status := content.EntryStatus(p.Status)
+//
+// status and facts arrive as the closing facts themselves rather than as one
+// seam's params struct: history.record carries them as a status plus an exit
+// code and derives the termination reason (terminationForStatus), ledger.close
+// carries them on its envelope, and a constructor typed to either one's wire
+// shape could only serve that one.
+func blockFinishedEvent(sess session.Session, intent string, status content.EntryStatus, facts ledgerCloseFacts) notify.Event {
 	return notify.Event{
 		SessionID: string(sess.ID()),
 		Title:     blockFinishedTitle(intent, status),
-		Body:      blockFinishedBody(p.Facts),
+		Body:      blockFinishedBody(facts),
 		Kind:      notify.KindBlockFinished,
 		Trust:     notify.TrustAttested,
 		Level:     blockFinishedLevel(status),
@@ -85,10 +103,11 @@ func blockFinishedLevel(status content.EntryStatus) notify.Level {
 
 // blockFinishedTitle says what finished and how it went, in that order,
 // because the subject is what the user scans a banner for and the verb is
-// what they need next. The status vocabulary is closed
-// (validateLedgerCloseRaw), and the default arm covers the three statuses a
-// close may legitimately still carry — pending, running, unknown — which say
-// the run ended without saying how.
+// what they need next. The status vocabulary is closed at both writers'
+// wires (validateLedgerCloseRaw, validateHistoryRecord), and the default arm
+// covers the statuses that say the run ended without saying how — of which
+// only `unknown` reaches a raise, because neither caller raises for a status
+// that is not an outcome.
 func blockFinishedTitle(intent string, status content.EntryStatus) string {
 	subject := blockSubject(intent)
 	switch status {

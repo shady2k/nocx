@@ -11,9 +11,15 @@ package transport
 // opening anything.
 //
 // Driven through the REAL socket into the REAL store, like ws_ledger_test.go,
-// because the point is that a close a renderer actually sends produces the
+// because the point is that a call a renderer actually sends produces the
 // event — not that a constructor called with hand-built arguments returns
 // what it was passed (AGENTS.md rule 1).
+//
+// TWO SEAMS, in two sections. The first drives ledger.close; the second
+// drives history.record, which is the one the renderer sends. Everything in
+// the first section was green while the feature did not exist, and that is
+// why the second exists: "a call a renderer actually sends" was true of the
+// harness and false of the product.
 
 import (
 	"context"
@@ -117,7 +123,7 @@ func registryHost(t *testing.T, reg *session.Reg, sid string) string {
 	return sess.Host()
 }
 
-// ── the event a close raises ──────────────────────────────────────────────
+// ── ledger.close: the event a close raises ────────────────────────────────
 
 // A user runs a command and it finishes. The close the renderer sends reaches
 // the router as an attested block.finished carrying the kind, trust, level
@@ -436,5 +442,221 @@ func TestLedgerClose_StoreFailure_RaisesNothing(t *testing.T) {
 	// to agree with: nothing closed, so nothing finished.
 	if row := mustEntry(t, real, "doomed"); row.Phase == content.PhaseClosed {
 		t.Fatalf("phase = %q after a failed close, want it not closed", row.Phase)
+	}
+}
+
+// ── the seam the renderer actually reaches ────────────────────────────────
+//
+// Everything above drives ledger.close, which the renderer does not call.
+// history.record is the one it does (frontend/src/history-client.ts), and
+// until nocx-n3nfg nothing on that path raised anything — so the whole
+// section above was green over a product where a finished command produced
+// no notification at all.
+//
+// These drive the REAL socket into the REAL store with the layout chain
+// seeded and a session opened as the pipe of a pane, because the raise has to
+// walk pane -> session to attribute the event and a stand with no pane row
+// cannot exercise that walk at all.
+
+// newRecordNotifyWS is the renderer's stand: content store, notify raiser,
+// one seeded pane and a session that is its pipe. It hands back the registry
+// (so attribution is asserted against what the backend holds, not a literal),
+// the connection and the session id.
+func newRecordNotifyWS(t *testing.T, db content.ContentDB, raiser NotifyRaiser) (*session.Reg, *websocket.Conn, string) {
+	t.Helper()
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	ws := NewWSServer(logger, reg, WithContentDB(db), WithNotifyRaiser(raiser))
+	ctx := t.Context()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	seedWire(t, conn)
+	sid, rpcErr := openSessionInPane(t, conn, paneID1, 10)
+	if rpcErr != nil {
+		t.Fatalf("open in pane: %+v", rpcErr)
+	}
+	return reg, conn, sid
+}
+
+// recordOf is one history.record, as the renderer sends it: the facts it
+// derived from the markers it owns, anchored on the pane it minted. No
+// session id — this method carries none, which is the whole reason the raise
+// has to walk the pane.
+func recordOf(pane, command, status string, exitCode *int) map[string]any {
+	return map[string]any{
+		"command":   command,
+		"cwd":       "/repos/nocx",
+		"host":      "",
+		"status":    status,
+		"exitCode":  exitCode,
+		"startedAt": int64(1_750_000_000_000),
+		"endedAt":   int64(1_750_000_000_040),
+		"paneId":    pane,
+	}
+}
+
+// mustRecord sends one history.record and fails on an error ack.
+func mustRecord(t *testing.T, conn *websocket.Conn, params map[string]any, id int) {
+	t.Helper()
+	if resp := vaultCall(t, conn, "history.record", params, id); resp.Error != nil {
+		t.Fatalf("history.record %v: %+v", params["command"], resp.Error)
+	}
+}
+
+// THE DEFECT, at the seam that had it. A user runs a command, the renderer
+// records it the only way it records anything, and the notification centre
+// has the event — attested, attributed from the session the backend holds,
+// and worded the same way the close's would have been.
+func TestHistoryRecord_RaisesAnAttestedBlockFinished(t *testing.T) {
+	raiser := newBlockRaiser()
+	reg, conn, sid := newRecordNotifyWS(t, newLayoutStore(t), raiser)
+	host := registryHost(t, reg, sid)
+
+	mustRecord(t, conn, recordOf(paneID1, "ls", "success", intPtr(0)), 11)
+
+	got := raiser.await(t)
+	if got.Kind != notify.KindBlockFinished {
+		t.Errorf("Kind = %q, want %q", got.Kind, notify.KindBlockFinished)
+	}
+	if got.Trust != notify.TrustAttested {
+		t.Errorf("Trust = %q, want %q — the ledger attested this, no program asked for it", got.Trust, notify.TrustAttested)
+	}
+	if got.Level != notify.LevelSuccess {
+		t.Errorf("Level = %q, want success for a command that worked", got.Level)
+	}
+	if got.Title != "ls succeeded" {
+		t.Errorf("Title = %q, want it to name the command and say it worked", got.Title)
+	}
+	if got.Body != "" {
+		t.Errorf("Body = %q, want empty — `exit status 0` says nothing the title has not", got.Body)
+	}
+	// The session the record never named: derived from its pane, off the
+	// registry, never from the renderer's `host` (AD-7).
+	if got.SessionID != sid {
+		t.Errorf("SessionID = %q, want the pane's session %q", got.SessionID, sid)
+	}
+	if got.Attribution.Backend != commandnames.LocalRoute {
+		t.Errorf("Attribution.Backend = %q, want %q", got.Attribution.Backend, commandnames.LocalRoute)
+	}
+	if got.Attribution.Host != host {
+		t.Errorf("Attribution.Host = %q, want the registry's %q", got.Attribution.Host, host)
+	}
+	if got.Attribution.Session != sid {
+		t.Errorf("Attribution.Session = %q, want %q", got.Attribution.Session, sid)
+	}
+	if !got.At.IsZero() {
+		t.Errorf("At = %v, want the zero time — ingress stamps it, not the source", got.At)
+	}
+}
+
+// The owner's screenshot, on the path it actually happened on: `ls` was fine,
+// the other command was not, and the centre said "Nothing to catch up on".
+func TestHistoryRecord_AFailedCommandIsDistinguishableFromASuccessfulOne(t *testing.T) {
+	raiser := newBlockRaiser()
+	_, conn, _ := newRecordNotifyWS(t, newLayoutStore(t), raiser)
+
+	mustRecord(t, conn, recordOf(paneID1, "ls", "success", intPtr(0)), 11)
+	good := raiser.await(t)
+	mustRecord(t, conn, recordOf(paneID1, "du -Hs", "interrupted", intPtr(130)), 12)
+	bad := raiser.await(t)
+
+	if bad.Level != notify.LevelWarning {
+		t.Errorf("failing command Level = %q, want warning", bad.Level)
+	}
+	if bad.Level == good.Level {
+		t.Errorf("both commands raised Level %q — a user cannot tell them apart", bad.Level)
+	}
+	if bad.Title != "du -Hs was interrupted" {
+		t.Errorf("Title = %q, want it to name the command and say it did not finish normally", bad.Title)
+	}
+	if bad.Body != "exit status 130" {
+		t.Errorf("Body = %q, want the exit code the shell reported", bad.Body)
+	}
+	if bad.Title == good.Title || bad.Body == good.Body {
+		t.Errorf("the two events read the same:\n ok  %q / %q\n bad %q / %q",
+			good.Title, good.Body, bad.Title, bad.Body)
+	}
+}
+
+// The title carries the command text and the command text reaches a banner,
+// so it is the text the ROW keeps — history.record's rowCommand, which is
+// what maskCommandSafe returned — and never what the renderer submitted.
+func TestHistoryRecord_TitleCarriesTheMaskedIntentNeverTheSecret(t *testing.T) {
+	raiser := newBlockRaiser()
+	_, conn, _ := newRecordNotifyWS(t, newLayoutStore(t), raiser)
+
+	mustRecord(t, conn, recordOf(paneID1, ledgerSecretIntent, "success", intPtr(0)), 11)
+
+	got := raiser.await(t)
+	if strings.Contains(got.Title, ledgerSecret) {
+		t.Fatalf("the raw secret is in the notification title: %q", got.Title)
+	}
+	if !strings.Contains(got.Title, "curl") {
+		t.Fatalf("Title = %q, want it to still name the command", got.Title)
+	}
+}
+
+// `running` is a legal history.record status — the renderer sends it for a
+// command it is still watching (validateHistoryRecord) — and a command still
+// running has no ending to announce. This is the phase check of the close's
+// raise, on the vocabulary this seam actually has.
+//
+// The second record is the barrier AND the positive control: its event proves
+// the raiser was reachable all along, so the zero above is an absence and not
+// a broken harness.
+func TestHistoryRecord_ARunningCommandRaisesNothing(t *testing.T) {
+	raiser := newBlockRaiser()
+	_, conn, _ := newRecordNotifyWS(t, newLayoutStore(t), raiser)
+
+	mustRecord(t, conn, recordOf(paneID1, "tail -f log", "running", nil), 11)
+	mustRecord(t, conn, recordOf(paneID1, "barrier-cmd", "success", intPtr(0)), 12)
+
+	if got := raiser.await(t); got.Title != "barrier-cmd succeeded" {
+		t.Fatalf("the first event was %q — a command still running announced an ending", got.Title)
+	}
+	if evs := raiser.captured(); len(evs) != 1 {
+		t.Fatalf("raised %d events for one running command and one that ended, want exactly 1", len(evs))
+	}
+}
+
+// The store call the record depends on fails. There is no recorded ending, so
+// there is nothing to announce — and the ack is an error, which is what makes
+// the count below final the moment it arrives.
+func TestHistoryRecord_StoreFailure_RaisesNothing(t *testing.T) {
+	raiser := newBlockRaiser()
+	db := &failingLedgerDB{ContentDB: newLayoutStore(t), failOn: "RecordCompleted", err: errBlockNotifyBoom}
+	_, conn, _ := newRecordNotifyWS(t, db, raiser)
+
+	resp := vaultCall(t, conn, "history.record", recordOf(paneID1, "make test", "failure", intPtr(1)), 11)
+	if resp.Error == nil {
+		t.Fatal("history.record succeeded with RecordCompleted failing")
+	}
+	if evs := raiser.captured(); len(evs) != 0 {
+		t.Fatalf("a record that failed to store raised %d events, want none: %+v", len(evs), evs)
+	}
+}
+
+// A record whose pane names no session on this connection. The command is
+// still recorded — losing it would be the worse answer, and that is the rule
+// the unanchored block already follows — but nothing is announced, because an
+// event may only be attributed from a session the backend holds (AD-7) and
+// there is none to hold. An absence, stated, rather than an attribution
+// guessed from the renderer's `host`.
+func TestHistoryRecord_APaneWithNoSessionRaisesNothing(t *testing.T) {
+	raiser := newBlockRaiser()
+	_, conn, _ := newRecordNotifyWS(t, newLayoutStore(t), raiser)
+
+	mustRecord(t, conn, recordOf(paneID2, "orphan-cmd", "success", intPtr(0)), 11)
+	mustRecord(t, conn, recordOf(paneID1, "barrier-cmd", "success", intPtr(0)), 12)
+
+	if got := raiser.await(t); got.Title != "barrier-cmd succeeded" {
+		t.Fatalf("the first event was %q — a record from a session-less pane was attributed anyway", got.Title)
+	}
+	if evs := raiser.captured(); len(evs) != 1 {
+		t.Fatalf("raised %d events, want exactly 1", len(evs))
 	}
 }

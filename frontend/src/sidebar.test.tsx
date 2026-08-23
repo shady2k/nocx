@@ -933,4 +933,37 @@ describe('sidebar view-zone actions', () => {
     expect(shield.dataset.railIndicator).toBe('true')
     expect(panel.querySelector('[data-testid="sandbox-shield"]')).toBeNull()
   })
+
+  it('skips a disabled shield during roving keyboard navigation', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      [TWO_VIEWS[0]],
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          id: 'sandbox-shield',
+          title: 'Sandbox unavailable',
+          icon: TestIcon,
+          onActivate: () => {},
+          disabled: () => true,
+        },
+      ],
+    )
+
+    const view = viewBtn(bar, 'alpha')
+    const shield = actionBtn(bar, 'sandbox-shield')
+    view.focus()
+    fireEvent.keyDown(view, { key: 'ArrowDown' })
+
+    expect(document.activeElement).toBe(view)
+    expect(view.tabIndex).toBe(0)
+    expect(shield.tabIndex).toBe(-1)
+  })
 })

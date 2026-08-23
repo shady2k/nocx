@@ -16,7 +16,7 @@ A startup transaction selects open panes joined to `sandbox_grants`, marks them 
 
 ## Open gate and enforcement ordering
 
-A sandbox `open` must name an open pane with no existing grant. Duplicate grants return `-32602`. After `sandbox.BuildPolicy` realizes canonical roots, the PTY boundary invokes a grant callback before `StartWithSize`. Grant insertion failure closes prepared resources and returns `-32007`; no helper starts and no session registers. Native readiness remains the final session-registration gate.
+A sandbox `open` must name an open pane with no existing grant. Duplicate grants return `-32602`; lookup/storage failures remain internal errors. After `sandbox.BuildPolicy` realizes canonical roots, the PTY boundary invokes a grant callback before `StartWithSize`. Grant insertion failure closes prepared resources and no helper starts. If process start or native readiness fails after insertion, the launch path removes the grant through the same serialized repository writer before returning; rollback failure remains fail-closed and is reported with the setup failure. Native readiness is the boundary after which the grant is immutable and the session may register.
 
 ## Shield eligibility
 
@@ -28,9 +28,9 @@ A confirmed sandbox tab prefixes its title line with `ShieldIcon`. The marker is
 
 ## Conversion
 
-Clicking a ready shield opens the existing permission dialog with the verified cwd supplied as the workspace; the initial native picker is skipped, while the dialog's per-grant folder pickers remain native. Confirmation creates a new sandbox pane. The source pane is captured before creation. On create acknowledgement the new durable tab replaces the source tab id in the workspace's cached order, then the source pane closes. On create failure the existing toast is shown and the source remains unchanged.
+Clicking a ready shield disables it for the duration of the conversion, then opens the existing permission dialog with the verified cwd supplied as the workspace; the initial native picker is skipped, while the dialog's per-grant folder pickers remain native. Confirmation creates a new sandbox pane. The source pane is captured before creation. On create acknowledgement and successful transcript installation the new durable tab replaces the source tab id in the workspace's cached order, then the source pane closes. On create or transcript-installation failure the failed replacement closes and the source remains unchanged.
 
-Removing sandbox is the reverse replacement. The selected shield creates an ordinary local pane with the verified current cwd carried in the strict `open.cwd` field. The backend accepts only an existing absolute local directory and canonicalizes symlinks; SSH and sandbox requests reject `cwd`. After create acknowledgement the new tab takes the old strip position and the sandbox pane closes. The immutable grant is not deleted or mutated; it remains attached to the closed historical pane.
+Removing sandbox is the reverse replacement. The selected shield creates an ordinary local pane with the verified current cwd carried in the strict `open.cwd` field. The backend accepts only an existing absolute local directory and canonicalizes symlinks; SSH and sandbox requests reject `cwd`. After create acknowledgement and transcript installation the new tab takes the old strip position and the sandbox pane closes. A failed replacement closes without touching the source. The immutable grant is not deleted or mutated; it remains attached to the closed historical pane.
 
 ## Transcript handoff
 

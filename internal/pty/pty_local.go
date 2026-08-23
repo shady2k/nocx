@@ -169,6 +169,16 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	// readiness error closes the PTY, tears down the helper and runtime tree,
 	// and returns the typed error — no session is registered.
 	var prepared *sandbox.PreparedCommand
+	grantRecorded := false
+	rollbackGrant := func(cause error) error {
+		if !grantRecorded || cfg.SandboxStartFailed == nil {
+			return cause
+		}
+		if rollbackErr := cfg.SandboxStartFailed(); rollbackErr != nil {
+			return sandbox.NewSetupErrorf("%v; rollback sandbox grant: %v", cause, rollbackErr)
+		}
+		return cause
+	}
 	if cfg.Sandbox != nil {
 		if cfg.sandboxService == nil {
 			return nil, sandbox.NewSetupErrorf("sandbox request without a sandbox service")
@@ -186,8 +196,9 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		if cfg.SandboxPrepared != nil {
 			if err := cfg.SandboxPrepared(pc); err != nil {
 				pc.Close()
-				return nil, sandbox.NewSetupErrorf("record sandbox grant: %v", err)
+				return nil, fmt.Errorf("record sandbox grant: %w", err)
 			}
+			grantRecorded = true
 		}
 		cmd = pc.Cmd
 		prepared = pc
@@ -202,7 +213,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	if err != nil {
 		if prepared != nil {
 			prepared.Close()
-			return nil, sandbox.NewSetupErrorf("start sandboxed command: %v", err)
+			return nil, rollbackGrant(sandbox.NewSetupErrorf("start sandboxed command: %v", err))
 		}
 		return nil, err
 	}
@@ -214,7 +225,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		if readyErr != nil {
 			_ = f.Close()
 			prepared.Close()
-			return nil, readyErr
+			return nil, rollbackGrant(readyErr)
 		}
 	}
 

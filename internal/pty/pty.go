@@ -83,6 +83,9 @@ type Config struct {
 	// SandboxPrepared runs after policy realization and before process start.
 	// It is used to durably record the grant that caused enforcement.
 	SandboxPrepared func(*sandbox.PreparedCommand) error
+	// SandboxStartFailed rolls back the recorded grant when the child cannot
+	// establish enforcement. It is never called after readiness succeeds.
+	SandboxStartFailed func() error
 	// sandboxService is injected by the composition root via
 	// WithSandboxService; it is never part of the wire contract.
 	sandboxService sandbox.Service

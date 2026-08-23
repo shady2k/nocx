@@ -11,7 +11,7 @@ The same draft exposed sandbox launch in Quick Connect and the tab-strip More me
 
 ## Decision
 
-Add `sandbox_grants` as a parallel table whose subject is one durable pane. A grant contains version, backend issue time, canonical workspace, and the realized policy metadata serialized in `payload`. One pane has at most one grant. The grant is inserted after policy realization and before the native helper starts; insertion failure aborts launch with `setup-failed`. A running grant is immutable.
+Add `sandbox_grants` as a parallel table whose subject is one durable pane. A grant contains version, backend issue time, canonical workspace, and the realized policy metadata serialized in `payload`. One pane has at most one grant. The grant is inserted after policy realization and before the native helper starts; insertion failure aborts launch. If process start or native readiness then fails, the same launch path removes that pre-enforcement grant so a transient failure does not permanently consume the pane. A grant becomes immutable once native readiness succeeds.
 
 Non-restorability is derived. At backend startup, every open pane named by `sandbox_grants` is closed before the first `layout.read`; the renderer also refuses to adopt any granted row. Authority therefore ends with the backend incarnation and cannot be silently re-issued. `layout.read` annotates open panes with `sandboxGranted`; `panes` stores no sandbox flag.
 
@@ -21,9 +21,9 @@ The only launch entry is the shield in the activity bar's top zone beside the Fi
 
 After native readiness confirms the sandbox, the activity-bar shield stays selected and the replacement tab's title line is prefixed with the shield icon. The title shield is the first name-line element, before pin, warning, activity, program title, cwd, or other status.
 
-Pressing the selected shield removes sandbox by replacement, never by widening the running process: create an ordinary local pane in the verified current cwd, wait for its durable create acknowledgement, place it at the sandbox tab's strip position, then close the sandbox pane. The old pane's immutable grant remains historical and the closed pane is not restorable. A failed ordinary create leaves the sandbox tab untouched.
+Pressing the selected shield removes sandbox by replacement, never by widening the running process: create an ordinary local pane in the verified current cwd, wait for its durable create acknowledgement and transcript installation, place it at the sandbox tab's strip position, then close the sandbox pane. The old pane's immutable grant remains historical and the closed pane is not restorable. A failed ordinary create or transcript installation closes the failed replacement and leaves the sandbox tab untouched.
 
-Applying sandbox follows the symmetric replacement sequence. A failed create leaves the source untouched. The existing descendant-close confirmation still governs source closure.
+Applying sandbox follows the symmetric replacement sequence. While either conversion is in flight the shield is disabled, preventing duplicate permission dialogs and replacement tabs. A failed create or transcript installation closes the failed replacement and leaves the source untouched. The existing descendant-close confirmation still governs source closure.
 
 Both replacement directions preserve the frontend-owned transcript before closing the source. Frozen blocks are copied through the existing restored-block grammar, the normal xterm buffer through the existing SGR serializer, and the unsent editor draft with its selection and scroll offset. The replacement inserts `Sandbox enabled — new shell` or `Sandbox removed — new shell` as the session boundary. This handoff is memory-only and frontend-only under AD-6: raw PTY bytes never enter JSON or persistence. Alternate-screen program state and running processes are not transferable because the replacement is a new shell.
 

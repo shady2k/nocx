@@ -41,7 +41,7 @@ import {
 } from '../ui/icons'
 import { MarkerList } from '../ui/marker-list'
 import { ResizeHandle } from '../ui/resize-handle'
-import { ContextMenu } from '../ui/context-menu'
+import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { Section } from '../ui/section'
 import { TextField } from '../ui/text-field'
 import { StatusCard } from '../ui/status-card'
@@ -276,11 +276,28 @@ export function ApiPane(props: ApiPaneProps) {
   // `onClose` is what clears the open state. Reading the row out of a signal
   // that close had just cleared meant every item acted on nothing.
   let rowMenuHandle = ''
-  /** Where the open request's menu hangs, or null when it is closed. WHICH
-   *  request it is about is not held here: it is the one the header is
-   *  naming, which is `store.selected()` — one owner of "the open request",
-   *  and a copy would be a second that could disagree with it. */
-  const [doomed, setDoomed] = createSignal<{ x: number; y: number } | null>(null)
+  /** Where a REQUEST's menu hangs, or null when it is closed. */
+  const [requestMenu, setRequestMenu] = createSignal<{ x: number; y: number } | null>(null)
+  /**
+   * WHICH request that menu is about — the handle, the path and the name to
+   * say it by.
+   *
+   * It used to be `store.selected()`, read at the moment an item fired, on
+   * the argument that the header names the open request and a copy would be
+   * a second owner of it. That was right while the header's ⋮ was the only
+   * door. It is wrong now that a row has one: the row a person right-clicks
+   * is very often NOT the one in the form, and a Delete that read the open
+   * request would name one file in its question and remove another.
+   *
+   * So the target is what the DOOR aimed at, and `store.selected()` stays
+   * the one owner of "the open request" — the header's door asks it for the
+   * answer rather than keeping its own (`openRequestMenu`).
+   *
+   * A plain variable, for the reason `rowMenuHandle` above is one: the kit
+   * closes the menu before it calls `onSelect`, and close is what clears the
+   * signal.
+   */
+  let requestMenuTarget: { handle: string; relPath: string; name: string } | null = null
 
   const [filter, setFilter] = createSignal('')
   const [menuOpen, setMenuOpen] = createSignal(false)
@@ -1218,10 +1235,70 @@ export function ApiPane(props: ApiPaneProps) {
     setRowMenu({ x: box.left, y: box.bottom })
   }
 
-  const openRequestMenu = (e: MouseEvent): void => {
-    const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    setDoomed({ x: box.left, y: box.bottom })
+  /** Point the request menu at one request. Both doors go through here, so
+   *  there is one place that can leave the target unset. */
+  const aimRequestMenu = (handle: string, relPath: string, name: string): void => {
+    requestMenuTarget = { handle, relPath, name }
   }
+
+  /** The header's ⋮ — about the request in the form, whose identity is
+   *  `store.selected()` and whose name is the draft's, because a rename that
+   *  has not been saved is still the name a person would be asked about. */
+  const openRequestMenu = (e: MouseEvent): void => {
+    const open = store.selected()
+    if (open === null) return
+    const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    aimRequestMenu(open.handle, open.relPath, store.draft()?.name ?? '')
+    setRequestMenu({ x: box.left, y: box.bottom })
+  }
+
+  /**
+   * WHAT A REQUEST CAN BE — one list, built once, reached by two doors: the
+   * right button on its row in the tree, and the ⋮ over the one in the form.
+   *
+   * Two hand-written lists would be this repo's most recurrent defect with a
+   * menu as the thing the two owners disagreed about — they would agree for
+   * as long as anyone looked, and diverge the day an act was added to one.
+   *
+   * Every item reads `requestMenuTarget` when it FIRES rather than when it is
+   * built: the kit closes the menu before calling `onSelect`, so anything
+   * read from a signal at build time is read from a signal that close has
+   * already cleared.
+   */
+  const requestMenuItems = (): ContextMenuItem[] => [
+    {
+      id: 'api-row-duplicate',
+      label: 'Duplicate',
+      icon: CopyIcon,
+      onSelect: () => {
+        const target = requestMenuTarget
+        if (target === null) return
+        void store.duplicateRequest(target.handle, target.relPath)
+      },
+    },
+    {
+      id: 'api-row-delete',
+      label: 'Delete request…',
+      icon: TrashIcon,
+      onSelect: () => {
+        const target = requestMenuTarget
+        if (target === null) return
+        // AND THEN IT ASKS — through the kit's own confirm, which is where
+        // "are you sure" lives in this product. A delete removes a file from
+        // a folder somebody shares through git, and the only undo is a
+        // working tree they may not have committed. The question NAMES what
+        // goes, because "are you sure" is a question about nothing — and it
+        // names the row that was AIMED AT, which is the whole reason the
+        // target is not the open request any more.
+        void showConfirm(
+          `Delete ${target.name}? The file is removed from the collection folder.`,
+          'Delete',
+        ).then((yes) => {
+          if (yes) void store.deleteRequest(target.handle, target.relPath)
+        })
+      },
+    },
+  ]
 
   const openMenu = (e: MouseEvent): void => {
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -1303,40 +1380,20 @@ export function ApiPane(props: ApiPaneProps) {
             },
           ]}
         />
-        {/* What the OPEN request can be. Deleting is a menu item rather than a
-            control for the reason closing a collection is: it takes
+        {/* What a REQUEST can be — one menu, mounted once, opened by either
+            door: the right button on a row, or the ⋮ over the open one. It
+            is one element rather than one per door for the same reason it is
+            one item list: two would be two surfaces owning one popover, and
+            the second to open would close the first from under the pointer.
+            Deleting is a menu item rather than a control because it takes
             something away, so it has to be read and chosen. */}
         <ContextMenu
-          open={doomed() !== null}
-          x={doomed()?.x ?? 0}
-          y={doomed()?.y ?? 0}
+          open={requestMenu() !== null}
+          x={requestMenu()?.x ?? 0}
+          y={requestMenu()?.y ?? 0}
           data-testid="api-request-row-menu"
-          onClose={() => setDoomed(null)}
-          items={[
-            {
-              id: 'api-row-delete',
-              label: 'Delete request…',
-              icon: TrashIcon,
-              onSelect: () => {
-                const target = store.selected()
-                const named = store.draft()?.name ?? ''
-                if (!target) return
-                // AND THEN IT ASKS — through the kit's own confirm, which is
-                // where "are you sure" lives in this product. A delete
-                // removes a file from a folder somebody shares through git,
-                // and the only undo is a working tree they may not have
-                // committed. The question NAMES what goes, because "are you
-                // sure" is a question about nothing.
-                void showConfirm(
-                  `Delete ${named}? The file is removed from the collection folder.`,
-                  'Delete',
-                ).then((yes) => {
-                  setDoomed(null)
-                  if (yes) void store.deleteRequest(target.handle, target.relPath)
-                })
-              },
-            },
-          ]}
+          onClose={() => setRequestMenu(null)}
+          items={requestMenuItems()}
         />
 
         {/* What a collection row can do. Closing is here rather than on the
@@ -1566,13 +1623,57 @@ export function ApiPane(props: ApiPaneProps) {
                     data-rel-path={row.kind === 'request' ? row.relPath : undefined}
                     data-row-key={row.key}
                     onClick={() => activate(row)}
+                    /* THE RIGHT BUTTON, which this tree answered by handing
+                       the webview's own menu — reload, save image as — to a
+                       person who had asked what they could do with a
+                       request. The kit's ContextMenu says in its own first
+                       line that this is what it is for, and the Files panel
+                       (files-view.tsx) and the tab strip (tab.tsx) both
+                       wire exactly this. The point is the POINTER's here,
+                       unlike the control in the strip: a menu a person
+                       opened by aiming should appear where they aimed. */
+                    onContextMenu={(e: MouseEvent) => {
+                      if (row.kind === 'request') {
+                        e.preventDefault()
+                        aimRequestMenu(row.handle, row.relPath, row.name)
+                        setRequestMenu({ x: e.clientX, y: e.clientY })
+                        return
+                      }
+                      if (row.kind === 'collection') {
+                        e.preventDefault()
+                        rowMenuHandle = row.handle
+                        setRowMenu({ x: e.clientX, y: e.clientY })
+                      }
+                      /* A directory and an unreadable file are left with the
+                         platform's menu, because there is nothing yet to put
+                         in one of ours: a folder's acts arrive with the tree
+                         that can make one (nocx-8v1fu), and a malformed row's
+                         whole answer is the reason printed under it. An empty
+                         menu is worse than no menu. */
+                    }}
                   >
                     <TreeRow
                       name={row.name}
                       depth={row.depth}
                       kind={row.kind === 'request' ? 'regular' : rowKind(row)}
+                      /* WHAT THE MARK MEANS, per kind. A collection row is
+                         marked when it is the one new requests go into; a
+                         request row is marked when it is the one in the form
+                         — the fact the header states as `Playground › test`
+                         and the tree did not state at all, in a list where
+                         two rows are routinely one word apart. The mark is
+                         the kit's own (`data-selected`), the same vocabulary
+                         the environment list below uses. It follows
+                         `store.selected()`, which is the ONE owner of "the
+                         open request": a curl import detaches the form from
+                         every file and nulls it, and the tree then marks
+                         nothing rather than the row it used to be. */
                       selected={
-                        row.kind === 'collection' && row.handle === store.activeCollection()
+                        row.kind === 'collection'
+                          ? row.handle === store.activeCollection()
+                          : row.kind === 'request' &&
+                            store.selected()?.handle === row.handle &&
+                            store.selected()?.relPath === row.relPath
                       }
                       disabled={row.kind === 'malformed'}
                       expanded={row.expanded}
@@ -1589,30 +1690,15 @@ export function ApiPane(props: ApiPaneProps) {
                             nothing between the pointer and the act. Closing
                             is a menu item now, where a destructive thing has
                             to be chosen rather than brushed past. */}
-                          {/* A REQUEST ROW'S OWN ACTION: copy this one.
-                            It is on the row and not in the header beside
-                            Save, and the two lines' division is why —
-                            the header is about the one request a person has
-                            open, and this acts on the row it is on, which is
-                            very often not that one. Delete stays where it
-                            was for the same reason it went there: it takes
-                            something away, so it has to be read and chosen
-                            rather than brushed past. */}
-                          <Show when={row.kind === 'request'}>
-                            <span class="api-tree__row-actions">
-                              <IconButton
-                                size="sm"
-                                title="Duplicate"
-                                ariaLabel={`Duplicate ${row.name}`}
-                                onClick={(e: MouseEvent) => {
-                                  e.stopPropagation()
-                                  void store.duplicateRequest(row.handle, row.relPath)
-                                }}
-                              >
-                                <CopyIcon />
-                              </IconButton>
-                            </span>
-                          </Show>
+                          {/* A REQUEST ROW CARRIES NO ACTIONS OF ITS OWN.
+                            Duplicate was drawn here first and looked wrong,
+                            and the reason it looked wrong is the reason the
+                            kit has a menu: a row is a NAME in a list that is
+                            already narrow, and an always-drawn control on it
+                            competes with the one thing the row exists to
+                            say. The acts are on the right button now
+                            (nocx-rmjj8), where the tab strip and the Files
+                            panel already put theirs. */}
                           <Show when={row.kind === 'collection'}>
                             <span class="api-tree__row-actions">
                               <IconButton

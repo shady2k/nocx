@@ -898,6 +898,29 @@ async function openFolderAsk(): Promise<void> {
 /** A row of the kit's context menu. It is searched in the DOCUMENT and not
  *  in the workbench: the menu is a Portal onto document.body, which is what
  *  keeps a popover out of the scroll box it was opened from. */
+/** Open a row's own menu the way a person does — the right button, aimed at
+ *  the row. Returns the event, because "and the webview's own menu did not
+ *  appear" is an assertion about it. */
+function rightClick(el: HTMLElement): MouseEvent {
+  const e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+  el.dispatchEvent(e)
+  return e
+}
+
+/** Right-click a request row and pick one of its actions. */
+async function pickOnRow(relPath: string, label: string): Promise<void> {
+  rightClick(row(relPath))
+  await vi.waitFor(() => menuItem(label))
+  fireEvent.click(menuItem(label))
+}
+
+/** The confirm the kit puts up — it renders onto document.body, outside the
+ *  workbench, so it is never found by a query rooted in the pane. */
+function confirmText(): string {
+  const dialogs = [...document.querySelectorAll<HTMLDialogElement>('dialog')].filter((d) => d.open)
+  return dialogs.map((d) => d.textContent ?? '').join(' ')
+}
+
 function menuItem(label: string): HTMLButtonElement {
   const found = [...document.querySelectorAll<HTMLButtonElement>('.ui-context-menu__item')].find(
     (b) => (b.textContent ?? '').trim() === label,
@@ -3641,7 +3664,7 @@ describe('a request can be duplicated', () => {
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
-    fireEvent.click(button('Duplicate create'))
+    await pickOnRow(CREATE_REL_PATH, 'Duplicate')
 
     // BESIDE THE ORIGINAL: the same folder inside the collection, under a
     // path the allocator chose — a copy of `users/create.json` at the
@@ -3667,7 +3690,7 @@ describe('a request can be duplicated', () => {
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
-    fireEvent.click(button('Duplicate create'))
+    await pickOnRow(CREATE_REL_PATH, 'Duplicate')
     await vi.waitFor(() => expect(disk.files.has('users/create-copy.json')).toBe(true))
 
     const copy = disk.files.get('users/create-copy.json') as ApiRequest
@@ -3692,9 +3715,9 @@ describe('a request can be duplicated', () => {
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
-    fireEvent.click(button('Duplicate create'))
+    await pickOnRow(CREATE_REL_PATH, 'Duplicate')
     await vi.waitFor(() => row('users/create-copy.json'))
-    fireEvent.click(button('Duplicate create'))
+    await pickOnRow(CREATE_REL_PATH, 'Duplicate')
     await vi.waitFor(() => row('users/create-copy-2.json'))
 
     // Three requests where there was one, and the first copy still holds
@@ -3716,9 +3739,167 @@ describe('a request can be duplicated', () => {
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
-    fireEvent.click(button('Duplicate create'))
+    await pickOnRow(CREATE_REL_PATH, 'Duplicate')
 
     await vi.waitFor(() => expect(workbench().textContent).toContain('read-only file system'))
     expect(workbench().querySelector('[data-rel-path="users/create-copy.json"]')).toBeNull()
+  })
+})
+
+// ── The right button, and one list behind two doors (nocx-rmjj8) ──────────
+//
+// Duplicate arrived as an IconButton drawn on every request row and the owner
+// stopped at it on sight. The row is a NAME in a narrow list; an always-drawn
+// control on it competes with the one thing the row is for. Meanwhile the
+// right button — which the kit's own ContextMenu docstring names as its
+// purpose, and which the Files panel and the tab strip both wire — did
+// nothing here at all, so right-clicking a request handed over the webview's
+// menu: reload, save image as.
+
+describe("a request's actions are behind the right button", () => {
+  /** The same collection with a second request in it, because the defect this
+   *  is about only exists when the row aimed at is not the one in the form. */
+  function twoRequests(over: Partial<ApiWorkbenchServices> = {}) {
+    const disk = folderOnDisk(over)
+    disk.files.set('users/archive.json', { ...REQUEST, id: 'users/archive', name: 'archive' })
+    return disk
+  }
+
+  it('offers the actions at the pointer, and the webview keeps its own menu to itself', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    const e = rightClick(row(CREATE_REL_PATH))
+
+    // The platform's menu is what a person got before, over a request.
+    expect(e.defaultPrevented).toBe(true)
+    await vi.waitFor(() => menuItem('Duplicate'))
+    expect(menuItem('Delete request…')).toBeTruthy()
+  })
+
+  it('acts on the row that was aimed at, not on the request that happens to be open', async () => {
+    const remove = vi.fn().mockResolvedValue({})
+    const disk = twoRequests({ deleteRequest: remove })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('users/archive.json'))
+
+    // One request in the form, and the right button aimed at the OTHER one.
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(crumbName()).toBe('create'))
+    await pickOnRow('users/archive.json', 'Delete request…')
+
+    // The question names the file that goes. Reading the OPEN request here —
+    // which is what the header's door used to hand in — would name one file
+    // and remove another.
+    await vi.waitFor(() => expect(confirmText()).toContain('archive'))
+    expect(confirmText()).not.toContain('Delete create?')
+
+    fireEvent.click(
+      [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
+        (b) => (b.textContent ?? '').trim() === 'Delete',
+      ) as HTMLButtonElement,
+    )
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(HANDLE, 'users/archive.json'))
+  })
+
+  it('duplicates the row that was aimed at, leaving the open request alone', async () => {
+    const disk = twoRequests()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('users/archive.json'))
+
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(crumbName()).toBe('create'))
+    await pickOnRow('users/archive.json', 'Duplicate')
+
+    await vi.waitFor(() => expect(disk.files.has('users/archive-copy.json')).toBe(true))
+    expect(disk.files.has('users/create-copy.json')).toBe(false)
+  })
+
+  it('the header\'s ⋮ offers the same list, about the request in the form', async () => {
+    const disk = twoRequests()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(crumbName()).toBe('create'))
+
+    fireEvent.click(button('More actions for this request'))
+
+    // Same words as the row's, because it is the same list — the ⋮ held
+    // Delete alone while the only other act a request had was drawn on a
+    // different line entirely.
+    await vi.waitFor(() => menuItem('Duplicate'))
+    expect(menuItem('Delete request…')).toBeTruthy()
+    fireEvent.click(menuItem('Duplicate'))
+    await vi.waitFor(() => expect(disk.files.has('users/create-copy.json')).toBe(true))
+  })
+
+  it('a collection row answers the right button with the menu its ⋮ opens', async () => {
+    const { bar } = await mountApp()
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    const collection = workbench().querySelector<HTMLElement>(`[data-row-key="${HANDLE}:"]`)
+    if (!collection) throw new Error('no collection row')
+    const e = rightClick(collection)
+
+    expect(e.defaultPrevented).toBe(true)
+    await vi.waitFor(() => menuItem('New request'))
+    expect(menuItem('Close collection')).toBeTruthy()
+  })
+})
+
+// ── The tree says which request is open (nocx-aug1m) ──────────────────────
+
+describe('the tree says which request is open', () => {
+  const marked = (): string[] =>
+    [...workbench().querySelectorAll<HTMLElement>('[data-rel-path] [data-selected="true"]')].map(
+      (el) => el.closest('[data-rel-path]')?.getAttribute('data-rel-path') ?? '',
+    )
+
+  it('marks the open request, and only it, and moves the mark', async () => {
+    const disk = folderOnDisk()
+    disk.files.set('users/archive.json', { ...REQUEST, id: 'users/archive', name: 'archive' })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('users/archive.json'))
+
+    // Nothing is open, so nothing is marked — the header names no request
+    // either, and the two have to agree.
+    expect(marked()).toEqual([])
+
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(marked()).toEqual([CREATE_REL_PATH]))
+
+    fireEvent.click(row('users/archive.json'))
+    await vi.waitFor(() => expect(marked()).toEqual(['users/archive.json']))
+  })
+
+  it('a request detached from its file leaves no row marked', async () => {
+    const disk = folderOnDisk({
+      importCurl: vi
+        .fn()
+        .mockResolvedValue({ request: { ...REQUEST, id: '', name: 'ping' }, unsupported: [] }),
+    })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(marked()).toEqual([CREATE_REL_PATH]))
+
+    // A curl line converted into the form is a request with no file behind
+    // it (api-store.ts nulls `selected`), so the mark must GO rather than sit
+    // on a row the form is no longer showing. This is the half a mark driven
+    // by anything other than `store.selected()` would get wrong.
+    fireEvent.click(button('Import a curl command'))
+    fireEvent.input(field('api-import-curl'), { target: { value: 'curl https://h/v1/ping' } })
+    fireEvent.click(button('Convert to a request'))
+
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+    expect(marked()).toEqual([])
   })
 })

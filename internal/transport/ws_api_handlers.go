@@ -574,16 +574,19 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
 			return nil
 		}
-		// One import, two ways in, and the choice is already made: the
-		// validator refused both-and-neither, so exactly one of these is
+		// One import, three ways in, and the choice is already made: the
+		// validator refused several-and-none, so exactly one of these is
 		// set and there is no precedence rule here to disagree with it.
 		var (
 			unsup []apiimport.Unsupported
 			err   error
 		)
-		if p.Document != "" {
+		switch {
+		case p.URL != "":
+			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest)
+		case p.Document != "":
 			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest)
-		} else {
+		default:
 			unsup, err = svc.ImportPostman(ctx, p.Path, p.Dest)
 		}
 		if err != nil {
@@ -762,8 +765,8 @@ type apiRequestWriteParams struct {
 	Request apiRequestWire `json:"request"`
 }
 
-// apiImportPostmanParams names the export TWO ways, and exactly one of them
-// may be given (validateAPIImportPostmanRaw).
+// apiImportPostmanParams names the export THREE ways, and exactly one of
+// them may be given (validateAPIImportPostmanRaw).
 //
 // Path names a file on the machine running THIS process. In the desktop app
 // that is also the person's machine, which is why it reads naturally there;
@@ -783,7 +786,13 @@ type apiRequestWriteParams struct {
 type apiImportPostmanParams struct {
 	Path     string `json:"path"`
 	Document string `json:"document"`
-	Dest     string `json:"dest"`
+	// URL is the third and most general source: the document is neither on
+	// the backend's disk nor in the renderer's hands, because it is behind a
+	// network the renderer may not be on. Route says how to reach it, and
+	// means nothing without it.
+	URL   string        `json:"url"`
+	Route *apiRouteWire `json:"route"`
+	Dest  string        `json:"dest"`
 }
 
 type apiImportCurlParams struct {
@@ -929,6 +938,23 @@ func wireRoute(r apicoll.Route) apiRouteWire {
 		kind = apicoll.RouteDirect
 	}
 	return apiRouteWire{Kind: kind, ProfileID: r.ProfileID, InsecureTLS: r.InsecureTLS}
+}
+
+// storedRoute is wireRoute's inverse for a route that may be ABSENT: no
+// route is the direct one, which is the same normalisation wireRoute writes
+// in the other direction, so a renderer meets one spelling of one state
+// whichever way the value is travelling.
+//
+// InsecureTLS is deliberately NOT carried. It is per-ENVIRONMENT on purpose
+// (apicoll/collection.go:126) — a person turns it on for the dev environment
+// and cannot thereby turn it on for production — and a fetch is not an
+// environment. The import ask has no such control either, so a value here
+// could only have been invented by a caller.
+func storedRoute(w *apiRouteWire) apicoll.Route {
+	if w == nil {
+		return apicoll.Route{Kind: apicoll.RouteDirect}
+	}
+	return apicoll.Route{Kind: w.Kind, ProfileID: w.ProfileID}
 }
 
 // wireEnvironment renders one environment for the renderer, filling in the
@@ -1872,27 +1898,51 @@ func validateAPIRequestBody(r apiRequestWire) string {
 // validateAPIImportPostmanRaw checks the import's two halves: WHICH export,
 // and where it goes.
 //
-// The export is named either by `path` or by `document`, and both-or-neither
-// is refused BY NAME. A precedence rule would be the cheaper code and the
-// worse answer: a caller that sent both would have one of them silently do
-// nothing, and would never learn which one the server ignored.
+// The export is named by `path`, by `document` or by `url`, and several or
+// none is refused BY NAME, naming all three. A precedence rule would be the
+// cheaper code and the worse answer: a caller that sent two would have one
+// of them silently do nothing, and would never learn which one the server
+// ignored. The same reasoning is why `route` beside anything but `url` is
+// refused rather than dropped — a parameter that quietly does nothing is
+// worse than an error, because the caller believes it worked.
+//
+// There is deliberately NO length or shape check on `url` here. apifetch
+// refuses a scheme it cannot GET by name and before any dial, and a second
+// URL parser in the validator would be a second answer to "is this a URL",
+// agreeing with the first everywhere anyone looked.
 func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 	var p apiImportPostmanParams
 	if msg := decodeAPIParams(raw, &p); msg != "" {
 		return msg
 	}
+	named := 0
+	for _, given := range []bool{p.Path != "", p.Document != "", p.URL != ""} {
+		if given {
+			named++
+		}
+	}
 	switch {
-	case p.Path != "" && p.Document != "":
-		return "path and document are two routes to one import — path names the export on the machine running nocx, document carries the export's bytes; give one of them, not both"
-	case p.Path == "" && p.Document == "":
-		return "an import needs the export: either path, naming it on the machine running nocx, or document, carrying its bytes"
-	case p.Document != "":
+	case named > 1:
+		return "path, document and url are three routes to one import — path names the export on the machine running nocx, document carries its bytes, url says where to fetch it; give one of them, not several"
+	case named == 0:
+		return "an import needs the export: path, naming it on the machine running nocx, document, carrying its bytes, or url, naming where to fetch it"
+	}
+	if p.Route != nil {
+		if p.URL == "" {
+			return "route says how to REACH a url and means nothing beside path or document; give it with url or leave it out"
+		}
+		if !slices.Contains(apiRouteKinds, p.Route.Kind) {
+			return fmt.Sprintf("route.kind must be one of %v", apiRouteKinds)
+		}
+	}
+	if p.Document != "" {
 		if n := utf8.RuneCountInString(p.Document); n > maxAPIImportDocumentRunes {
 			return fmt.Sprintf(
 				"document exceeds %d characters; an export this large is imported with path, which names the file on the machine running nocx and sends no bytes over this socket",
 				maxAPIImportDocumentRunes)
 		}
-	default:
+	}
+	if p.Path != "" {
 		if msg := validateAPIFolderPath(p.Path, "path"); msg != "" {
 			return msg
 		}
@@ -1943,7 +1993,10 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 	}
 	var importOp capability.APIImportOperation
 	if importWired {
-		importOp = capability.NewAPIImportOperation(vaultGate, apiGate, lane, apiimport.NewOSFS(), s.apiBindings)
+		// s.apiFetch may be nil, and that is a build without the URL
+		// entrance rather than a broken one: the other two entrances are
+		// untouched and `url` is refused by name.
+		importOp = capability.NewAPIImportOperation(vaultGate, apiGate, lane, apiimport.NewOSFS(), s.apiBindings, s.apiFetch)
 	}
 	// The binding write shares the import's gates and its store: both put a
 	// value in the vault and record it in the one binding document, so they

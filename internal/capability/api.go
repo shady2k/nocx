@@ -56,6 +56,7 @@ package capability
 // readable.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -65,6 +66,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -742,6 +744,12 @@ func (s *apiCollectionService) pathFor(h apicoll.HandleID) (string, error) {
 // refused by name rather than read.
 var ErrImportNotAFile = errors.New("capability: the import document is not a regular file")
 
+// ErrImportURLUnavailable — this build has no fetcher, so the URL entrance
+// is not offered. Absence is the capability (the rule the pickers follow);
+// the renderer draws the entrance from what the backend answers rather than
+// from what it hopes.
+var ErrImportURLUnavailable = errors.New("capability: this build cannot fetch an import by URL")
+
 // APIImportService is the api.import.postman surface. The curl entrance is
 // deliberately absent: it converts a line into a request VALUE, touches no
 // store and no filesystem, so giving it an operation would serialise a pure
@@ -765,6 +773,17 @@ type APIImportService interface {
 	// forwarded port has the bytes and cannot name a file the backend can
 	// see, which is the case the path route cannot serve.
 	ImportPostmanDocument(ctx context.Context, document, dest string) ([]apiimport.Unsupported, error)
+
+	// ImportPostmanURL fetches the export over route and writes the same
+	// collection. It is the general route in the other direction from
+	// ImportPostmanDocument: there the renderer had the bytes, here NOBODY
+	// on this side has them yet, because the document lives on a network
+	// the backend can reach and the renderer may not.
+	//
+	// route is how to REACH the document, and the environment the import
+	// mints inherits it (apiimport.ImportInto): a collection fetched from
+	// behind a bastion must not arrive routed direct.
+	ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string) ([]apiimport.Unsupported, error)
 }
 
 // SecretBinder is the binding document's WRITE half, narrowed to the one
@@ -843,16 +862,22 @@ type APIImportOperation interface {
 // filesystem touch the writer makes and bindings is where the secret values
 // go; both are apiimport's own narrow contracts, so this constructor names
 // no lifecycle the importer has no part in.
+//
+// fetch acquires a document by URL and may be nil, which is a build without
+// the URL entrance rather than a build with a broken one: ImportPostmanURL
+// then refuses by name (ErrImportURLUnavailable) and the other two
+// entrances are untouched.
 func NewAPIImportOperation(
 	vaultGate, apiGate, lane control.Admission,
 	fsys apiimport.FS,
 	bindings apiimport.BindWriter,
+	fetch apifetch.Fetcher,
 ) APIImportOperation {
 	g := &guard{}
 	return newOperation[APIImportService](
 		control.NewComposite(vaultGate, apiGate, lane),
 		g,
-		&apiImportService{guard: g, fsys: fsys, bindings: bindings},
+		&apiImportService{guard: g, fsys: fsys, bindings: bindings, fetch: fetch},
 	)
 }
 
@@ -860,6 +885,7 @@ type apiImportService struct {
 	guard    *guard
 	fsys     apiimport.FS
 	bindings apiimport.BindWriter
+	fetch    apifetch.Fetcher
 }
 
 func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error) {
@@ -901,4 +927,31 @@ func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, 
 		return nil, err
 	}
 	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, strings.NewReader(document), apicoll.Route{Kind: apicoll.RouteDirect})
+}
+
+// ImportPostmanURL fetches the export and imports it over the same route.
+//
+// The order is the whole of what this layer adds. The document is fetched
+// COMPLETELY and only then handed to the writer: ImportInto's arrival is
+// atomic, so from before the fetch until the collection is whole there is
+// nothing at dest, and a fetch that failed halfway leaves no half-collection
+// for the person to wonder about. The cost is one document in memory,
+// bounded by the ceiling the parse already uses.
+//
+// The refusals are apifetch's own and are passed through unwrapped — a
+// scheme this cannot GET, a body over the ceiling, an address whose bytes
+// are not a document. Restating them here would be a second refusal
+// vocabulary for one act.
+func (s *apiImportService) ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string) ([]apiimport.Unsupported, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	if s.fetch == nil {
+		return nil, ErrImportURLUnavailable
+	}
+	doc, err := s.fetch.Fetch(ctx, rawURL, route)
+	if err != nil {
+		return nil, err
+	}
+	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, bytes.NewReader(doc), route)
 }

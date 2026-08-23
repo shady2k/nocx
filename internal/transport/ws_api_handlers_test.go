@@ -831,3 +831,66 @@ func (p apiTestPathsT) DataDir() string   { return filepath.Join(p.root, "data")
 func (p apiTestPathsT) CacheDir() string  { return filepath.Join(p.root, "cache") }
 
 func apiTestPaths(t *testing.T) storage.Paths { return apiTestPathsT{root: t.TempDir()} }
+
+// THREE routes to one import, and exactly one of them may be given.
+//
+// The rule was two-way and is now three-way, and the refusal has to widen
+// with it: a caller told only "path and document are exclusive" would never
+// learn that url is a third way in, and one that sent url beside path would
+// have one of the two silently ignored.
+func TestValidateAPIImportPostman_ExactlyOneOfThreeSources(t *testing.T) {
+	cases := []struct {
+		name   string
+		params string
+		want   []string // substrings the refusal must carry
+	}{
+		{"none", `{"dest":"/w/acme"}`, []string{"path", "document", "url"}},
+		{"path and url", `{"path":"/w/a.json","url":"https://h/a.json","dest":"/w/acme"}`, []string{"path", "document", "url", "give one of them"}},
+		{"document and url", `{"document":"{}","url":"https://h/a.json","dest":"/w/acme"}`, []string{"give one of them"}},
+		{"path and document", `{"path":"/w/a.json","document":"{}","dest":"/w/acme"}`, []string{"give one of them"}},
+		{"all three", `{"path":"/w/a.json","document":"{}","url":"https://h/a.json","dest":"/w/acme"}`, []string{"give one of them"}},
+		{"route without url, beside path", `{"path":"/w/a.json","route":{"kind":"connection","profileId":"p"},"dest":"/w/acme"}`, []string{"route", "url"}},
+		{"route without url, beside document", `{"document":"{}","route":{"kind":"direct"},"dest":"/w/acme"}`, []string{"route", "url"}},
+		{"unknown route kind", `{"url":"https://h/a.json","route":{"kind":"carrier-pigeon"},"dest":"/w/acme"}`, []string{"route.kind"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := validateAPIImportPostmanRaw(json.RawMessage(c.params))
+			if got == "" {
+				t.Fatalf("accepted %s", c.params)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("refusal %q does not carry %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// The paired positives: each of the three sources alone is accepted, and a
+// url with a route beside it is the whole point of the new one.
+func TestValidateAPIImportPostman_AcceptsEachSourceAlone(t *testing.T) {
+	for name, params := range map[string]string{
+		"url with a route":       `{"url":"https://h/a.json","route":{"kind":"direct"},"dest":"/w/acme"}`,
+		"url with a connection":  `{"url":"https://h/a.json","route":{"kind":"connection","profileId":"p"},"dest":"/w/acme"}`,
+		"url with no route":      `{"url":"https://h/a.json","dest":"/w/acme"}`,
+		"document with no route": `{"document":"{}","dest":"/w/acme"}`,
+		"path with no route":     `{"path":"/w/a.json","dest":"/w/acme"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if msg := validateAPIImportPostmanRaw(json.RawMessage(params)); msg != "" {
+				t.Fatalf("refused a valid import (%s): %s", params, msg)
+			}
+		})
+	}
+}
+
+// There is deliberately no second URL parser here: the shape of the address
+// is apifetch's to refuse, by name and before any dial. What the validator
+// still owns is dest, on every route in.
+func TestValidateAPIImportPostman_StillGuardsDestOnTheURLRoute(t *testing.T) {
+	if msg := validateAPIImportPostmanRaw(json.RawMessage(`{"url":"https://h/a.json","dest":"relative/acme"}`)); msg == "" {
+		t.Fatal("a relative dest was accepted on the url route")
+	}
+}

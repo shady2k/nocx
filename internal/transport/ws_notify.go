@@ -193,9 +193,15 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-// notifySpecs declares the notify.raise control method. It runs on the
+// notifySpecs declares the renderer-callable notify methods. They run on the
 // ordinary lane: Raise is synchronous and can block on a sink invocation, so
-// it must never run on the read loop.
+// neither may run on the read loop.
+//
+// There are two of them and there is one reason: kind is stamped from the
+// method invoked, so a second SOURCE is a second METHOD (ws_notify_bell.go
+// says why at length). Anything that would let one method answer for both —
+// a kind argument, a variant, a header — would put the caller in charge of
+// the field this design keeps off the wire.
 func (s *WSServer) notifySpecs() []methodSpec {
 	return []methodSpec{
 		reg(s.lane, "notify.raise", params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -207,5 +213,6 @@ func (s *WSServer) notifySpecs() []methodSpec {
 				r:        r,
 			}.handleNotifyRaise
 		}),
+		s.notifyBellSpec(),
 	}
 }

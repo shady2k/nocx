@@ -5623,3 +5623,102 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BEL is two facts (nocx-n3nfg)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A program printed BEL. That is a local attention signal — the tab dot,
+// which costs nothing and needs no backend — AND a notification event with a
+// kind, a trust class, an attribution and a feed row. The wiring must do
+// both, because they are different facts: the dot says "output you have not
+// seen", the event says "a program asked for you", and neither answers the
+// other's question. Replacing one with the other is the defect these tests
+// exist to catch, so every one of them asserts both halves.
+//
+// The BEL BYTE reaching onBell is proven against the real VT parser in
+// renderers/xterm.test.ts ("onBell through the real parser"), including that
+// the BEL terminating an OSC sequence does NOT ring. This file owns the
+// other half of the chain: what the callback does when it fires.
+describe('a program printing BEL (nocx-n3nfg)', () => {
+  /** The bell only lights the dot on a pane that has SETTLED and is not the
+   *  one being looked at (panes.ts markActivity): a shell's banner and first
+   *  prompt are not unread output. The B marker is what a real prompt-end
+   *  delivers, so the settle here is the one a user's session performs. */
+  const settle = (content: TerminalContent): void => {
+    rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+  }
+
+  /** The notify.bell requests this pane sent, in order. */
+  const bellCalls = (client: ClientFake): unknown[][] =>
+    client.dispatcher.call.mock.calls.filter((c: unknown[]) => c[0] === 'notify.bell')
+
+  it('reports the bell AND marks the tab, addressing the live session', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      settle(content)
+      expect(tab.hasActivity).toBe(false)
+
+      rendererOf(content)._fireBell()
+
+      // The notification: its own method, carrying addressing and nothing
+      // else. The kind is not here because it cannot be — it is stamped from
+      // the method invoked, which is the whole reason notify.bell exists
+      // rather than an argument on notify.raise (ADR-0029 §2.2, design §3).
+      expect(bellCalls(client)).toEqual([
+        ['notify.bell', { sessionId: sessionOf(content).sessionId }],
+      ])
+      // The tab dot, which is local and never went near the backend.
+      expect(tab.hasActivity).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  // AGENTS.md rule 3: for every external call, a test where that call fails.
+  // The bell is fire-and-forget, so the failure must cost the report and
+  // nothing else — the pane keeps running and the tab dot, which never
+  // needed the backend, still lights. A rejection that escaped here would be
+  // an unhandled promise rejection on a byte any shell prints.
+  it('keeps the tab dot when the backend refuses the report', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      settle(content)
+      // Set after the mount so this rejection belongs to the bell alone.
+      client.dispatcher.call.mockRejectedValue(new Error('notify.bell not available'))
+
+      rendererOf(content)._fireBell()
+      // Let the rejection settle: an unhandled one surfaces here, not later.
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(bellCalls(client).length).toBe(1)
+      expect(tab.hasActivity).toBe(true)
+      expect(content.shellState).toBeDefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  // The id is read at FIRE time, not at subscribe time: it is
+  // server-authoritative (AD-7) and a reattach replaces it, so a captured one
+  // would address the session the pane used to hold. With no session there is
+  // nothing to address — and the half that never needed one still happens.
+  it('marks the tab and reports nothing when the pane holds no session', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      settle(content)
+      ;(content as unknown as { session: SessionFake | null }).session = null
+
+      rendererOf(content)._fireBell()
+
+      expect(bellCalls(client)).toEqual([])
+      expect(tab.hasActivity).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+})

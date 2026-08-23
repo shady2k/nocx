@@ -15,6 +15,7 @@
 // there is no argument here by which a request could name one.
 
 import type { Dispatcher } from './dispatcher'
+import type { NotifyBell } from './generated/notify.bell'
 import type { NotifyRaise } from './generated/notify.raise'
 
 export class NotifyClient {
@@ -28,5 +29,25 @@ export class NotifyClient {
    *  "this notification did not happen" rather than retrying. */
   raise(params: NotifyRaise): Promise<void> {
     return this.dispatcher.call('notify.raise', params)
+  }
+
+  /** Report that a program printed BEL in a session. Resolves when the
+   *  backend has accepted it, and rejects on the same three finals raise()
+   *  does — the method missing, the session not live on this connection, or
+   *  the pipeline refusing the delivery.
+   *
+   *  A SECOND METHOD, not a kind argument on raise(). The event's kind is
+   *  stamped from the method invoked (ADR-0029 §2.2), and ingress authority
+   *  is closed: no renderer-callable method may produce an attested event.
+   *  A `kind` parameter would hand the choice to the caller, which is the
+   *  same forging one level up — so the method name is the choice, and this
+   *  client has no argument by which a bell could become anything else.
+   *
+   *  It carries a session id and nothing else because BEL carries nothing
+   *  else: there is no title and no body on the wire, and the backend stamps
+   *  the words. Do not add fields here — a program supplying the text of a
+   *  bell would have raise()'s payload without raise()'s kind. */
+  bell(params: NotifyBell): Promise<void> {
+    return this.dispatcher.call('notify.bell', params)
   }
 }

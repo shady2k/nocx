@@ -6144,3 +6144,56 @@ func TestSettingsSet_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, env.Result, "settings.set result over the socket")
 }
+
+// ── notify.bell (nocx-n3nfg) ───────────────────────────────────────────
+
+// TestNotifyBell_DTOConformsToContract pins the Go struct against
+// contracts/notify.bell.schema.json in BOTH directions, which is the only
+// way `additionalProperties: false` plus an explicit `required` is worth
+// anything: the positive case says the DTO marshals to something the schema
+// accepts, and the refusals say the schema actually refuses — a contract
+// whose negative cases are untested has never been shown to refuse a thing.
+//
+// The refusals are not decoration here. They are the wire half of the
+// provenance rule: title, body, kind, trust, level, attribution and at are
+// absent from notify.bell's record, and this is where "absent" is checked.
+// The one that matters most is `title` — for notify.raise it is a legitimate
+// field, and for notify.bell it is a protected one, because BEL carries no
+// text and the backend stamps the words. A schema that accepted it would let
+// a program write the sentence on a notification whose kind it did not have
+// to earn.
+//
+// The over-the-socket half lives in ws_notify_bell_test.go beside the rest
+// of the method's behaviour (TestNotifyBell_OverTheWireConformsToContract),
+// the same place notify.raise keeps its own.
+func TestNotifyBell_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.bell.schema.json")
+
+	raw, err := json.Marshal(notifyBellParams{SessionID: "0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "notify.bell params DTO")
+
+	refusals := map[string]any{
+		"sessionId absent":       map[string]any{},
+		"sessionId not a string": map[string]any{"sessionId": 7},
+		// Every field the backend stamps. A record that could carry one of
+		// these is a record whose provenance is validated rather than
+		// structural, which is the thing ADR-0029 §2.2 rules out.
+		"a title":        map[string]any{"sessionId": "s", "title": "Ваш банк: подтвердите вход"},
+		"a body":         map[string]any{"sessionId": "s", "body": "tap here"},
+		"a kind":         map[string]any{"sessionId": "s", "kind": "block.finished"},
+		"a trust":        map[string]any{"sessionId": "s", "trust": "attested"},
+		"a level":        map[string]any{"sessionId": "s", "level": "danger"},
+		"an attribution": map[string]any{"sessionId": "s", "attribution": map[string]any{"host": "h"}},
+		"an at":          map[string]any{"sessionId": "s", "at": "2026-08-23T00:00:00Z"},
+	}
+	for name, payload := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, mustMarshal(payload)); err == nil {
+				t.Fatalf("the contract accepts %s; it is not exact", name)
+			}
+		})
+	}
+}

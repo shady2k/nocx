@@ -2588,7 +2588,35 @@ export class TerminalContent extends BasePaneContent {
         this.env?.recordCwd(path)
       })
       renderer.onBell(() => {
+        // TWO facts, not one, and neither replaces the other. The tab dot is
+        // "something happened in a pane you are not looking at" — local,
+        // instant, and free. The notification is "a program asked for you",
+        // which is a routable event with a trust class, an attribution and a
+        // feed row. A bell is both, so it does both.
         host.requestAttention()
+        // A program printed BEL (ADR-0029). Reported through its OWN method:
+        // kind is stamped from the method invoked, so notify.bell is what
+        // makes this a bell, and there is no argument here — or anywhere on
+        // this client — by which it could become a different kind or reach a
+        // destination the renderer named.
+        //
+        // Fire-and-forget, and the id is read at fire time rather than at
+        // subscribe time, for the same reasons the OSC 9 / 777 wiring above
+        // gives: the session id is server-authoritative (AD-7) and a reattach
+        // replaces it, and a bell is not worth blocking terminal output on.
+        // Every refusal is final rather than retryable. No session means the
+        // pane is between sessions and the bell has nothing to address — the
+        // tab dot above still lit, which is the half that never needed one.
+        const sid = this.session?.sessionId
+        if (!sid) return
+        void new NotifyClient(this.client.dispatcher)
+          .bell({ sessionId: sid })
+          .catch((err: unknown) => {
+            log.warn('nocx: bell not reported', {
+              sid,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
       })
       // ── Clipboard ────────────────────────────────────────────────────
       renderer.onSelectionChange((text) => {

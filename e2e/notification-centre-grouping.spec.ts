@@ -73,6 +73,23 @@ const ROW = `${LIST} > .ui-collection-row`
 const META = `${LIST} .ui-record-row__meta-text`
 const RUN = '.notifications-panel__run'
 const SHOWN = 'notifications-shown-count'
+/** The panel's own rows that you have NOT seen. quietBell marks everything read
+ *  before this test does anything, so an unread row is one this test caused —
+ *  the same discipline trap 2 states, addressed by the kit's own account of the
+ *  panel's `selected={!o.read}` (ui/collection-view.tsx). */
+const UNREAD_ROW = `${LIST} > .ui-collection-row[data-selected="true"]`
+
+/** The rows one SOURCE raised. The panel puts the event's kind on every row as
+ *  a badge, in the same words its own kind filter offers
+ *  (notify/notifications-panel.tsx) — the panel's own vocabulary for "what
+ *  raised this", not a hook invented for a test.
+ *
+ *  Necessary rather than tidy. A `block.finished` row's title is THE COMMAND
+ *  TEXT (internal/transport/ws_ledger_notify.go, blockSubject), so the row that
+ *  the announcement's own `printf` raises BY ENDING carries the words of the
+ *  announcement, and a match on those words alone finds both rows. */
+const rowsOfKind = (page: Page, kind: string) =>
+  page.locator(ROW).filter({ has: page.getByText(kind, { exact: true }) })
 
 /** Three announcements from one session, inside the 30 s collapse window
  *  (internal/app/app.go: notifyFeedCollapseWindow). Their titles DIFFER on
@@ -105,6 +122,13 @@ const runTitles = (project: string) =>
 const collapsedLabel = (titles: readonly string[]) =>
   `${titles[titles.length - 1]} ×${titles.length}`
 const remoteTitle = (project: string) => `deploy remote ${project}`
+/** An ordinary command whose whole job is to put a command's ENDING in the feed
+ *  before the announcements arrive — the reasoning is at its first use below.
+ *  Tagged per PANE because two sessions settle separately (the collapse key
+ *  names the session), and per PROJECT for the reason runTitles is: both
+ *  browser projects share one feed and a `hasText` has to match. */
+const settlingCommand = (project: string, where: string) =>
+  `true settling the ${where} feed ${project}`
 
 // ── the second host ───────────────────────────────────────────────────────
 // The in-process SSH server, spawned and trusted exactly as shell-mode.spec.ts
@@ -340,6 +364,27 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     await promptReady(page)
     await quietBell(page)
 
+    // One ordinary command first, and wait until the feed carries its ENDING.
+    //
+    // A command that finished is itself something to catch up on
+    // (`block.finished`, nocx-n3nfg), so every line this test types puts a row
+    // in the feed — and the feed collapses a run per session, kind and level
+    // (internal/notify/feed.go, collapseKeyOf), so once THIS row exists the
+    // announcements' own endings join it instead of adding rows of their own.
+    // That is what makes the rise below a fact about the announcements rather
+    // than arithmetic over however many sources a command happens to have. The
+    // arithmetic is what broke: it read 1 while the centre's only sources were
+    // OSC and a session ending, and 2 the day a command's ending was wired,
+    // with nothing about this test's own subject changed.
+    const localSettling = settlingCommand(testInfo.project.name, 'local')
+    await run(page, localSettling)
+    await expect(page.locator(UNREAD_ROW).filter({ hasText: localSettling })).toHaveCount(1, {
+      timeout: 30_000,
+    })
+    const badge = page.locator(BELL).locator(BADGE)
+    await expect(badge).toHaveText(/^\d+$/)
+    const waitingBefore = Number(await badge.textContent())
+
     // ── one session, three announcements, ONE row ────────────────────────
     for (const title of RUN_TITLES) {
       await run(page, osc777(title, 'step'))
@@ -353,10 +398,13 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     const collapsed = page.locator(ROW).filter({ hasText: COLLAPSED })
     await expect(collapsed).toHaveCount(1, { timeout: 30_000 })
 
-    // And the bell counts ROWS, so three announcements that collapsed are one
-    // thing waiting. This is also what makes "1" here a fact about this test
-    // rather than about the stand: quietBell zeroed it a moment ago.
-    await expect(page.locator(BELL).locator(BADGE)).toHaveText('1')
+    // And the bell counts ROWS, so three announcements that collapsed are ONE
+    // more thing waiting than there was before them — not three, and not one
+    // per command that ran. Measured as a rise from a count this test READ,
+    // which is what keeps it a fact about the announcements: an absolute number
+    // here would be arithmetic over every source a command has, and it is that
+    // arithmetic, never this claim, that changed.
+    await expect(badge).toHaveText(String(waitingBefore + 1))
 
     // ── opening the row shows what it stands for ─────────────────────────
     const disclosure = collapsed.locator('.ui-record-row__disclosure')
@@ -423,16 +471,33 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     const remoteEditor = page.locator(INPUT)
     await expect(remoteEditor).toBeVisible({ timeout: 10_000 })
     await remoteEditor.click()
+
+    // This pane settles separately from the local one, for the reason the
+    // collapse key gives: it names the SESSION, so a second session's endings
+    // are rows of their own however quiet the first pane is. Same command, same
+    // reason, and waiting on its row is also what proves the remote shell has
+    // finished a command before the next line is typed at it.
+    const remoteSettling = settlingCommand(testInfo.project.name, 'remote')
+    await remoteEditor.pressSequentially(remoteSettling)
+    await remoteEditor.press('Enter')
+    await showSidebarView(page, 'notifications')
+    await expect(page.locator(UNREAD_ROW).filter({ hasText: remoteSettling })).toHaveCount(1, {
+      timeout: 30_000,
+    })
+    await expect(badge).toHaveText(/^\d+$/)
+    const waitingBeforeRemote = Number(await badge.textContent())
+
+    await remoteEditor.click()
     await remoteEditor.pressSequentially(osc777(REMOTE, 'done'))
     await remoteEditor.press('Enter')
 
-    // Two things are now waiting: the local run, and this. Waiting on the
-    // badge rather than on the row keeps the wait on the count that the last
+    // One more thing is waiting than a moment ago, and it is this announcement:
+    // the remote command's ending joined the row above. Waiting on the badge
+    // rather than on the row keeps the wait on the count that the last
     // assertion of this test is about.
-    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2', { timeout: 30_000 })
+    await expect(badge).toHaveText(String(waitingBeforeRemote + 1), { timeout: 30_000 })
 
-    await showSidebarView(page, 'notifications')
-    const remoteRow = page.locator(ROW).filter({ hasText: REMOTE })
+    const remoteRow = rowsOfKind(page, 'program.notify').filter({ hasText: REMOTE })
     await expect(remoteRow).toHaveCount(1)
     // It says where it came from, which is the axis the filter narrows on.
     await expect(remoteRow.locator('.ui-record-row__meta-text')).toContainText(remoteHost)
@@ -448,7 +513,12 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     expect(total).toBeGreaterThanOrEqual(2)
     // Unnarrowed, the panel says nothing: "12 of 12 shown" would be noise.
     await expect(page.getByTestId(SHOWN)).toHaveCount(0)
-    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2')
+    // What the bell is counting with nothing narrowed — READ, like the totals
+    // above and for the same reason. The claim the two assertions below make is
+    // that this number DOES NOT CHANGE, and the number itself is about the
+    // whole feed, which is the one thing this test does not own.
+    const counted = (await badge.textContent()) ?? ''
+    expect(counted).toMatch(/^\d+$/)
 
     await filterFor(page, 'Host').selectOption({ label: remoteHost })
 
@@ -476,14 +546,14 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // you narrowed a list would be lying about what is waiting — and it is
     // asserted here, with both surfaces on screen, because nothing below this
     // level has both.
-    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2')
+    await expect(badge).toHaveText(counted)
 
     // Clearing it puts every row back, which is what makes the narrowing a
     // VIEW over the feed rather than something done to it.
     await filterFor(page, 'Host').selectOption('')
     await expect(page.locator(ROW)).toHaveCount(total)
     await expect(page.getByTestId(SHOWN)).toHaveCount(0)
-    await expect(page.locator(BELL).locator(BADGE)).toHaveText('2')
+    await expect(badge).toHaveText(counted)
   } finally {
     // Take the profile back out. The stand's home is shared by every spec in
     // the run AND by both browser projects, so a profile left here becomes the

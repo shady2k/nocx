@@ -60,6 +60,19 @@ const ROW_TITLE = '.notifications-panel__list .ui-record-row__title'
 const UNREAD_ROW = '.notifications-panel__list .ui-collection-row[data-selected="true"]'
 const UNREAD_TITLE = `${UNREAD_ROW} .ui-record-row__title`
 
+/** The unread rows one SOURCE raised. The panel puts the event's kind on every
+ *  row as a badge, in the same words its own kind filter offers
+ *  (notify/notifications-panel.tsx) — so this is the panel's own vocabulary for
+ *  "what raised this", not a hook invented for a test.
+ *
+ *  Necessary rather than tidy. A `block.finished` row's title is THE COMMAND
+ *  TEXT (internal/transport/ws_ledger_notify.go, blockSubject), so the row that
+ *  `printf …deploy done…` raises BY ENDING carries the words of the message the
+ *  printf asked us to show, and a match on the announcement's own words finds
+ *  both rows. */
+const unreadRowsOfKind = (page: Page, kind: string) =>
+  page.locator(UNREAD_ROW).filter({ has: page.getByText(kind, { exact: true }) })
+
 /** Leave the bell quiet and the keyboard back in the terminal.
  *
  * Marking read is the product's own way to say "I have seen these", so the
@@ -170,6 +183,30 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     // centre's other source). Its tab is still open, so this is the row the
     // epic's "clicking the row focuses the tab" is about.
     await backToTheTerminal(page)
+
+    // One ordinary command first, and wait until the feed carries its ENDING.
+    //
+    // A command that finished is itself something to catch up on
+    // (`block.finished`, nocx-n3nfg), so every line this test types puts a row
+    // in the feed — and the feed collapses a run per session, kind and level
+    // (internal/notify/feed.go, collapseKeyOf), so once THIS row exists the
+    // printf's own ending joins it instead of adding a second one. That is what
+    // makes the number below a fact about the program's message rather than
+    // arithmetic over however many sources a command happens to have. The
+    // arithmetic is what broke: it read 1 while the centre's only sources were
+    // OSC and a session ending, and 2 the day a command's ending was wired,
+    // with nothing about this test's own subject changed.
+    const settling = 'true settling the feed'
+    await page.keyboard.type(settling)
+    await page.keyboard.press('Enter')
+    await promptReady(page)
+    await expect(page.locator(UNREAD_ROW).filter({ hasText: settling })).toHaveCount(1, {
+      timeout: 30_000,
+    })
+    const badge = page.locator(BELL).locator(BADGE)
+    await expect(badge).toHaveText(/^\d+$/)
+    const waitingBefore = Number(await badge.textContent())
+
     await page.keyboard.type(`printf '\\033]777;notify;deploy done;staging\\007'`)
     await page.keyboard.press('Enter')
 
@@ -179,15 +216,19 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     await expect(page.locator(TAB)).toHaveCount(2)
     await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
 
-    await expect(page.locator(BELL).locator(BADGE)).toHaveText('1', { timeout: 30_000 })
+    // Exactly ONE more thing is waiting than was waiting a moment ago. The bell
+    // counts ROWS and the printf's ending joined the settling row, so the row
+    // the bell gained is the message the program asked us to present.
+    await expect(badge).toHaveText(String(waitingBefore + 1), { timeout: 30_000 })
     await showSidebarView(page, 'notifications')
-    const deployRow = page.locator(UNREAD_TITLE)
+    const deployRow = unreadRowsOfKind(page, 'program.notify')
     await expect(deployRow).toHaveCount(1)
-    await expect(deployRow).toContainText('deploy done')
+    const deployTitle = deployRow.locator('.ui-record-row__title')
+    await expect(deployTitle).toHaveText('deploy done')
 
     // Clicking the row takes you to the tab it came from — the reason the
     // row is worth reading rather than merely counting.
-    await deployRow.click()
+    await deployTitle.click()
     await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })

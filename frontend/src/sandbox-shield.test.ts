@@ -14,7 +14,7 @@ const localOrigin: ActiveOrigin = {
 
 const base = {
   enabled: true,
-  statusAvailable: true,
+  status: { available: true },
   origin: localOrigin,
   sandboxed: false,
 }
@@ -23,12 +23,26 @@ describe('shieldState', () => {
   it.each([
     [{ ...base, enabled: false }, { kind: 'hidden' }],
     [
-      { ...base, statusAvailable: null },
+      { ...base, status: null },
       { kind: 'disabled', reason: 'Sandbox unavailable (status-unavailable)' },
     ],
     [
-      { ...base, statusAvailable: false },
-      { kind: 'disabled', reason: 'Sandbox unavailable (status-unavailable)' },
+      { ...base, status: { available: false, reason: 'landlock-abi-too-old' } },
+      { kind: 'disabled', reason: 'Sandbox unavailable (landlock-abi-too-old)' },
+    ],
+    [
+      {
+        ...base,
+        status: {
+          available: false,
+          reason: 'landlock-abi-too-old',
+          detail: 'kernel Landlock ABI 2 is below the required floor of 3',
+        },
+      },
+      {
+        kind: 'disabled',
+        reason: 'Sandbox unavailable (kernel Landlock ABI 2 is below the required floor of 3)',
+      },
     ],
     [
       { ...base, origin: null },
@@ -52,7 +66,7 @@ describe('shieldState', () => {
     ],
     [base, { kind: 'ready', workspace: '/repo', action: 'apply' }],
     [
-      { ...base, enabled: false, statusAvailable: false, sandboxed: true },
+      { ...base, enabled: false, status: { available: false }, sandboxed: true },
       { kind: 'ready', workspace: '/repo', action: 'remove' },
     ],
   ])('maps eligibility %#', (input, expected) => {

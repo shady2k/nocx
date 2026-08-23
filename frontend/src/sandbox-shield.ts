@@ -1,8 +1,14 @@
 import type { ActiveOrigin } from './pane-content'
 
+interface SandboxAvailabilityStatus {
+  available: boolean
+  reason?: string
+  detail?: string
+}
+
 export interface ShieldStateInput {
   enabled: boolean
-  statusAvailable: boolean | null
+  status: SandboxAvailabilityStatus | null
   origin: ActiveOrigin | null
   sandboxed: boolean
 }
@@ -23,8 +29,9 @@ export function shieldState(input: ShieldStateInput): ShieldState {
   if (input.sandboxed) {
     return { kind: 'ready', workspace: input.origin.cwd, action: 'remove' }
   }
-  if (input.statusAvailable !== true) {
-    return { kind: 'disabled', reason: 'Sandbox unavailable (status-unavailable)' }
+  if (input.status?.available !== true) {
+    const reason = input.status?.detail || input.status?.reason || 'status-unavailable'
+    return { kind: 'disabled', reason: `Sandbox unavailable (${reason})` }
   }
   return { kind: 'ready', workspace: input.origin.cwd, action: 'apply' }
 }

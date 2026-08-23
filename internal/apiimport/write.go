@@ -217,7 +217,7 @@ func parseImport(r io.Reader, route apicoll.Route) (postmanResult, error) {
 func curlImport(line string) (postmanResult, error) {
 	var res postmanResult
 	namer := newVarNamer()
-	req, offers, unsup, err := parseCurl(line, namer)
+	req, offers, unsup, err := parseCurl(line, namer, credentialsToBinder)
 	if err != nil {
 		return res, err
 	}

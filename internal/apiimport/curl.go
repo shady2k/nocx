@@ -11,27 +11,60 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 )
 
-// FromCurl converts one curl command line into a request.
+// FromCurl converts one curl command line into a request, for the FORM.
 //
 // The line is PARSED, never executed (design §10): see tokenize for the
 // quoting rules and TestPackageNeverExecs for the assertion that no exec
 // exists to reach.
 //
-// Any credential the line carries — a Bearer token, a -u password, a
-// secret-shaped header — becomes a VARIABLE NAME in the returned request,
-// and the value is dropped on the floor here, because this function has
-// nowhere safe to put it. ImportInto is the entry point that holds a
-// BindWriter and therefore the one that offers the value to the binding
-// store; a request converted through FromCurl alone names a variable
-// nobody has bound yet, which the send reports as unresolved rather than
-// sending empty (§6.5).
+// # It mints no variable it cannot bind (nocx-14exx)
+//
+// This entrance writes no file and holds no BindWriter: what it returns
+// goes straight back to the person who pasted the line, into the request
+// form, with no collection and no environment behind it yet. It therefore
+// leaves a credential the line carries exactly where the line put it — in
+// the Authorization header, in the -u argument — and names no variable for
+// it.
+//
+// It used to do the opposite: an Authorization header became
+// Auth{bearer, Var: "token"} and the value was dropped on the floor, so the
+// person got a request naming a variable that had nowhere to be bound, no
+// Variables row to bind it in, and a Send that refused with `the auth
+// variable "token" is not bound in this environment` about a name they had
+// never chosen. The credential was not protected by that, only lost; the
+// only thing §8 protects is a FILE, and this entrance writes none.
+// ImportInto is the entrance that writes files, and there the old
+// behaviour is still exactly right — see parseCurl's credentials argument.
 //
 // Everything the bounded flag set does not carry comes back in
 // []Unsupported. Nothing is only logged.
 func FromCurl(line string) (apicoll.Request, []Unsupported, error) {
-	req, _, unsup, err := parseCurl(line, newVarNamer())
+	req, _, unsup, err := parseCurl(line, newVarNamer(), credentialsStayOnRequest)
 	return req, unsup, err
 }
+
+// credentials says where a credential the curl line carries is allowed to
+// go, which is a property of THE CALLER and not of the line.
+//
+// Two entrances, two answers, one converter (§10). Getting this wrong in
+// either direction is a defect with a name: a collection file that spells a
+// token is what §8 exists to prevent, and a form that names an unbindable
+// variable is nocx-14exx.
+type credentials int
+
+const (
+	// credentialsToBinder is the ImportInto route: a collection is being
+	// written, so a credential becomes a VARIABLE NAME in the files and the
+	// value goes to the BindWriter and nowhere else (§8). It is the ZERO
+	// value deliberately — a caller that forgets this argument gets the
+	// answer that never writes a secret to disk.
+	credentialsToBinder credentials = iota
+	// credentialsStayOnRequest is the FromCurl route: nothing here can bind
+	// a value, so nothing here mints a name for one. A variable the LINE
+	// ITSELF spells — `Authorization: Bearer {{tok}}` — is still honoured,
+	// because that name is the person's own and not one we invented.
+	credentialsStayOnRequest
+)
 
 // curlFlag describes one flag we recognise.
 type curlFlag struct {
@@ -124,20 +157,29 @@ var curlFlags = map[string]curlFlag{
 	"--speed-time":      {"--speed-time", true, false, whyTransport},
 
 	// Files we will not read or write.
-	"--output":       {"--output", true, false, whyFile},
-	"--output-dir":   {"--output-dir", true, false, whyFile},
-	"--remote-name":  {"--remote-name", false, false, whyFile},
-	"--upload-file":  {"--upload-file", true, false, whyFile},
-	"--cookie-jar":   {"--cookie-jar", true, false, whyFile},
-	"--config":       {"--config", true, false, whyFile},
-	"--dump-header":  {"--dump-header", true, false, whyFile},
-	"--trace":        {"--trace", true, false, whyFile},
-	"--trace-ascii":  {"--trace-ascii", true, false, whyFile},
-	"--continue-at":  {"--continue-at", true, false, whyFile},
-	"--create-dirs":  {"--create-dirs", false, false, whyFile},
-	"--remote-time":  {"--remote-time", false, false, whyFile},
-	"--range":        {"--range", true, false, whyMeaning},
-	"--time-cond":    {"--time-cond", true, false, whyMeaning},
+	"--output":      {"--output", true, false, whyFile},
+	"--output-dir":  {"--output-dir", true, false, whyFile},
+	"--remote-name": {"--remote-name", false, false, whyFile},
+	"--upload-file": {"--upload-file", true, false, whyFile},
+	"--cookie-jar":  {"--cookie-jar", true, false, whyFile},
+	"--config":      {"--config", true, false, whyFile},
+	"--dump-header": {"--dump-header", true, false, whyFile},
+	"--trace":       {"--trace", true, false, whyFile},
+	"--trace-ascii": {"--trace-ascii", true, false, whyFile},
+	"--continue-at": {"--continue-at", true, false, whyFile},
+	"--create-dirs": {"--create-dirs", false, false, whyFile},
+	"--remote-time": {"--remote-time", false, false, whyFile},
+	"--range":       {"--range", true, false, whyMeaning},
+	"--time-cond":   {"--time-cond", true, false, whyMeaning},
+
+	// Ignored in silence: every one of these governs what CURL PRINTS or
+	// how it exits, and none of them can change the bytes that go out or
+	// the address they go to. `curl -sS …` is the ordinary way a person
+	// writes a line they mean to read the output of, and an import of it
+	// reports nothing, because nothing was lost. -g is here for a
+	// different reason with the same answer: it turns curl's URL globbing
+	// OFF, and this importer never globbed, so the flag asks for what it
+	// already gets. -w takes a value and must stay in the table to eat it.
 	"--write-out":    {"--write-out", true, false, whyOutput},
 	"--silent":       {"--silent", false, false, whyOutput},
 	"--show-error":   {"--show-error", false, false, whyOutput},
@@ -178,8 +220,8 @@ type dataPart struct {
 }
 
 // parseCurl is FromCurl plus the secret values, which only ImportInto may
-// see.
-func parseCurl(line string, namer *varNamer) (apicoll.Request, []secretOffer, []Unsupported, error) {
+// see. creds decides whether there is anywhere for them to go at all.
+func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request, []secretOffer, []Unsupported, error) {
 	var (
 		req     apicoll.Request
 		offers  []secretOffer
@@ -346,20 +388,43 @@ func parseCurl(line string, namer *varNamer) (apicoll.Request, []secretOffer, []
 
 	// -u first, so an explicit Authorization header still wins — which is
 	// the order curl resolves them in.
-	if hasUser {
-		auth, offer := basicFromUserArg(userArg, namer)
-		req.Auth = auth
-		if offer != nil {
-			offers = append(offers, *offer)
+	switch creds {
+	case credentialsToBinder:
+		if hasUser {
+			auth, offer := basicFromUserArg(userArg, namer)
+			req.Auth = auth
+			if offer != nil {
+				offers = append(offers, *offer)
+			}
 		}
-	}
+		kept, headerAuth, headerOffers, headerUnsup := absorbHeaderSecrets(headers, namer)
+		req.Headers = kept
+		offers = append(offers, headerOffers...)
+		unsup = append(unsup, headerUnsup...)
+		if headerAuth != nil {
+			req.Auth = *headerAuth
+		}
 
-	kept, headerAuth, headerOffers, headerUnsup := absorbHeaderSecrets(headers, namer)
-	req.Headers = kept
-	offers = append(offers, headerOffers...)
-	unsup = append(unsup, headerUnsup...)
-	if headerAuth != nil {
-		req.Auth = *headerAuth
+	case credentialsStayOnRequest:
+		// EVERY HEADER THE LINE CARRIES, IN THE ORDER IT GAVE THEM. There
+		// is no absorption here and no secret detector: a header is a
+		// header, which is the only shape in which the request that comes
+		// out is the command that went in (nocx-9jnu6).
+		req.Headers = headers
+		if hasUser {
+			auth, header, why := userArgOnRequest(userArg, hasHeader(headers, "Authorization"))
+			switch {
+			case why != "":
+				itemise("-u without a password", why)
+			case auth != nil:
+				req.Auth = *auth
+			case header != nil:
+				// After the line's own headers: curl generates this one
+				// itself, so it was never among them, and appending keeps
+				// the order the person wrote.
+				req.Headers = append(req.Headers, *header)
+			}
+		}
 	}
 
 	// -G moves the data to the query rather than sending it as a body.
@@ -527,6 +592,46 @@ func basicFromUserArg(arg string, namer *varNamer) (apicoll.Auth, *secretOffer) 
 	v := namer.take("password")
 	auth.Var = v
 	return auth, &secretOffer{Variable: v, Value: []byte(pass)}
+}
+
+// userArgOnRequest maps -u for the entrance that binds nothing, and returns
+// exactly one of three things: an auth block, a header, or the reason there
+// is neither.
+//
+// hasAuthHeader is curl's own precedence, not ours: `-H "Authorization: …"`
+// REPLACES the header -u would have generated, so a line carrying both is a
+// line whose -u never reached the wire, and importing it as though it had
+// would send a credential curl did not.
+//
+// The three cases:
+//
+//   - `-u user:{{pw}}` — the LINE named the variable, so the model's basic
+//     auth carries it and the environment answers it. Nothing was minted.
+//   - `-u user:password` — the header curl itself would have built. base64
+//     is an encoding and not a protection, which is the whole reason
+//     apisend.Apply reports the ENCODED value as the placed secret rather
+//     than the plaintext.
+//   - `-u user` — curl would prompt. An import has nobody to ask, so
+//     nothing is carried and the reason is itemised: a request that
+//     authenticates as nobody, sent while the person believes it
+//     authenticates as them, is the silent degrade AGENTS.md forbids.
+func userArgOnRequest(arg string, hasAuthHeader bool) (*apicoll.Auth, *apicoll.Header, string) {
+	if hasAuthHeader {
+		return nil, nil, ""
+	}
+	user, pass, ok := strings.Cut(arg, ":")
+	if !ok {
+		return nil, nil, "curl would have prompted for the password and an import has nobody to ask, " +
+			"so no credential was carried: give it in the Auth tab"
+	}
+	if name, isRef := varRef(pass); isRef {
+		return &apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Var: name}, nil, ""
+	}
+	return nil, &apicoll.Header{
+		Name:    "Authorization",
+		Value:   "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)),
+		Enabled: true,
+	}, ""
 }
 
 // splitURLEncodeArg reads a --data-urlencode argument. The @ forms name a

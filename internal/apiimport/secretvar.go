@@ -10,8 +10,13 @@ import (
 // secretOffer is one value the import will hand to the BindWriter and to
 // nobody else. It exists only inside an ImportInto call: FromCurl is
 // deliberately unable to return one and the Postman converter is not
-// exported at all, so there is no public path in this package by which a
-// credential leaves it (design §8).
+// exported at all, so no credential this package LIFTED OUT OF A DOCUMENT
+// AND INTO A VARIABLE can leave it by any path but the BindWriter (§8).
+//
+// That is a statement about values this package took charge of, and not
+// about every byte a line contains: FromCurl leaves a curl line's own
+// Authorization header alone, on the request, because it has no file to
+// write it into and nowhere to bind it (see FromCurl).
 type secretOffer struct {
 	Environment string
 	Variable    string
@@ -124,10 +129,16 @@ func headerValueIsSecret(name, value string) bool {
 }
 
 // absorbHeaderSecrets is the one owner of "a header may carry a
-// credential", used by both entrances. Two derivations of that question
-// would agree on every header anyone tried and disagree on the one that
-// mattered (AGENTS.md), and the two entrances converge on one model, so
-// they converge on this too.
+// credential", used by both entrances that WRITE A COLLECTION — the Postman
+// document and the curl line, through ImportInto. Two derivations of that
+// question would agree on every header anyone tried and disagree on the one
+// that mattered (AGENTS.md), and the two entrances converge on one model,
+// so they converge on this too.
+//
+// The curl line converted for the FORM does not come here at all, and that
+// is not a third derivation: it is the same question answered "there is no
+// file, so nothing is absorbed" once, in parseCurl, by the argument that
+// says so.
 //
 // It returns the headers that survive, the auth an Authorization header
 // resolved to (nil when there was none), the values to offer the

@@ -14,10 +14,17 @@
 //     Postman variable of "type": "secret", a curl line's
 //     Authorization header, a -u password: the NAME goes into the
 //     environment file, the VALUE goes to the BindWriter, and no identifier
-//     for it is written anywhere under the collection root. The one public
-//     converter — FromCurl — deliberately does not return the values at
-//     all, and the Postman one is not public at all; only ImportInto, which
-//     has a BindWriter to hand them to, ever holds one.
+//     for it is written anywhere under the collection root. ImportInto is
+//     the only thing here that writes a file, so it is the only thing here
+//     that the rule binds, and it is the only one holding a BindWriter to
+//     hand a value to.
+//
+//     FromCurl writes NO FILE. It converts one line for the request form
+//     and hands the result straight back to the person who pasted it, so a
+//     credential on that line stays where the line put it — see FromCurl,
+//     and nocx-14exx for what minting an unbindable variable there cost.
+//     The two answers are one argument to one converter (parseCurl's
+//     credentials), not two converters that agree until they do not.
 //
 //   - CURL IS PARSED, NEVER EXECUTED (design §10). The quoting and
 //     continuation rules in curl_lex.go are our own. There is no shell, so

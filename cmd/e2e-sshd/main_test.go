@@ -367,3 +367,123 @@ func TestExec_ReportsTheCommandsOwnNonZeroStatus(t *testing.T) {
 		t.Errorf("exit status = %d, want 3", exitErr.ExitStatus())
 	}
 }
+
+// The fixture must carry a direct-tcpip channel, because that is what an API
+// request routed through a connection IS.
+//
+// `apisend`'s connection route leases the pooled SSH connection and dials
+// through it — one direct-tcpip channel per HTTP connection — and REFUSES
+// rather than falling back to a local dial, so a far side that rejects the
+// channel type makes the whole routed half of the import unwatchable: the
+// fetch fails for a reason that has nothing to do with the product. This
+// fixture rejected every type but `session` until nocx-n4rep.
+//
+// A round trip, not an accept. A server that accepted the channel and spliced
+// nothing would satisfy `Dial` and fail every byte after it, so this writes
+// through the channel and reads the answer back off a listener the test owns.
+func TestDirectTCPIP_ForwardsToTheAddressTheChannelNames(t *testing.T) {
+	client := dialFixture(t)
+
+	// The far side of the forward: an echo listener this test binds on an
+	// ephemeral port, so nothing outside the run is ever reached.
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = target.Close() })
+	go func() {
+		for {
+			c, acceptErr := target.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				_, _ = io.Copy(c, c)
+			}()
+		}
+	}()
+
+	conn, err := client.Dial("tcp", target.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial through the fixture: %v — the far side forwards no TCP, so nothing routed through a connection can be watched", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	const payload = "the request rides the channel, not this machine's interface"
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		t.Fatalf("Write through the channel: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("ReadFull from the channel: %v", err)
+	}
+	if string(got) != payload {
+		t.Errorf("read back %q, want %q", got, payload)
+	}
+}
+
+// And the paired failure: an address the fixture cannot reach is REFUSED, and
+// the refusal arrives — it does not hang.
+//
+// Both halves matter. A fixture that answered success for an address nothing
+// is listening on would let a spec pass while the bytes went nowhere; one that
+// simply never answered would turn a wrong address into a timeout somewhere
+// else entirely, which is the failure mode the dial bound above exists for.
+func TestDirectTCPIP_AnAddressItCannotReachIsRefusedNotHung(t *testing.T) {
+	client := dialFixture(t)
+
+	// A port nothing holds: bound and released, so the number is real and
+	// certainly free rather than hand-picked.
+	spare, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	dead := spare.Addr().String()
+	if err := spare.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The bound is the assertion: `Dial` must come back, not sit there. It is
+	// far below the fixture's own dial timeout, so a fixture that waited out
+	// its bound would fail here rather than pass slowly.
+	answered := make(chan error, 1)
+	go func() {
+		c, dialErr := client.Dial("tcp", dead)
+		if c != nil {
+			_ = c.Close()
+		}
+		answered <- dialErr
+	}()
+	select {
+	case dialErr := <-answered:
+		if dialErr == nil {
+			t.Errorf("Dial(%s) succeeded; nothing is listening there", dead)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Dial(%s) never answered; a far side that hangs turns a wrong address into a timeout elsewhere", dead)
+	}
+}
+
+// Everything the fixture does not serve is STILL refused, and by name.
+//
+// Teaching it direct-tcpip widened what it accepts, and the risk of that
+// change is a handler that accepts anything: a fixture that took an x11
+// channel and did nothing with it would let a spec above it prove the wrong
+// thing. `UnknownChannelType` is the reason code gossh reports as
+// `ssh.OpenChannelError`, and it is what a real sshd answers.
+func TestChannel_AnUnknownTypeIsStillRejectedByName(t *testing.T) {
+	client := dialFixture(t)
+
+	_, _, err := client.OpenChannel("x11", nil)
+	if err == nil {
+		t.Fatal("the fixture accepted a channel type it does not serve")
+	}
+	var openErr *gossh.OpenChannelError
+	if !errors.As(err, &openErr) {
+		t.Fatalf("OpenChannel(x11) error = %v, want an *ssh.OpenChannelError", err)
+	}
+	if openErr.Reason != gossh.UnknownChannelType {
+		t.Errorf("reason = %v, want %v", openErr.Reason, gossh.UnknownChannelType)
+	}
+}

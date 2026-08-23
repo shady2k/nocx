@@ -1,9 +1,10 @@
 // The in-process SSH fixture, as a module rather than a fourth private copy.
 //
-// `cmd/e2e-sshd` is a REAL sshd: it authenticates, runs `bash` on a real PTY
-// and serves the SFTP subsystem from the real filesystem, which is what makes
-// it usable as the far side of an upload — the bytes nocx sends land in a
-// directory this process can read back.
+// `cmd/e2e-sshd` is a REAL sshd: it authenticates, runs `bash` on a real PTY,
+// serves the SFTP subsystem from the real filesystem — which is what makes it
+// usable as the far side of an upload, the bytes nocx sends land in a
+// directory this process can read back — and forwards TCP in both directions,
+// so a request routed through a connection actually crosses it.
 //
 // Three specs already start it and each spells the same handshake out again
 // (connection-password.spec.ts:112, shell-mode.spec.ts:32,
@@ -39,6 +40,21 @@ export interface SshdFixture {
   userKey: string
   /** A known_hosts line for the host key this spawn minted. */
   knownHosts: string
+  /**
+   * Every machine-readable line the server has printed so far, in arrival
+   * order — the handshake lines above and everything after READY.
+   *
+   * It exists for `TCPIP=<host:port>`, which the server prints once it has
+   * connected the far end of a `direct-tcpip` channel. A spec routing an HTTP
+   * request through this fixture polls for that line: when both endpoints sit
+   * on this machine's loopback, a request that went through the connection and
+   * one that went around it look identical at the destination, so the server's
+   * own account is the only thing that tells them apart.
+   *
+   * A live array, not a snapshot: it keeps filling as the server prints, so a
+   * caller polls it rather than waiting a while and reading once.
+   */
+  lines(): readonly string[]
 }
 
 export interface StartSshdOptions {
@@ -103,7 +119,7 @@ export function startSshd(opts: StartSshdOptions): Promise<SshdFixture> {
       if (trimmed === 'READY' && addr && userKey && knownHosts) {
         clearTimeout(timer)
         const [host, port] = addr.split(':')
-        resolve({ proc, host, port: Number(port), userKey, knownHosts })
+        resolve({ proc, host, port: Number(port), userKey, knownHosts, lines: () => lines })
       }
     }
   })

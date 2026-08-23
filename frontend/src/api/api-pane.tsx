@@ -497,7 +497,18 @@ export function ApiPane(props: ApiPaneProps) {
 
   const askForImport = (): void => {
     setPostmanFile('')
-    setPostmanDest('')
+    // OUR FOLDER, before anything is chosen. `proposedDestination` completes
+    // this to <defaultRoot>/<stem> the moment a source is named, but until
+    // then the field said nothing at all and its placeholder said
+    // /work/acme-api — an arbitrary path rather than the place this product
+    // keeps collections, which is the same place `Create` next door puts one
+    // without asking (nocx-cx442).
+    //
+    // Written through the signal rather than through `onDest`, so it does
+    // not set `destTyped`: the surface proposing a value is not the person
+    // having said one, and a later pick must still be able to complete it.
+    const root = store.defaultRoot()
+    setPostmanDest(root === '' ? '' : `${root.replace(/[\\/]+$/, '')}/`)
     setDestTyped(false)
     setImportRefused('')
     setImporting(true)
@@ -1001,6 +1012,7 @@ export function ApiPane(props: ApiPaneProps) {
             setDestTyped(true)
             setPostmanDest(value)
           }}
+          defaultRoot={store.defaultRoot()}
           error={importRefused()}
           busy={importingBusy()}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}

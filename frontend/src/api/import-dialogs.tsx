@@ -33,6 +33,11 @@ export interface PostmanImportDialogProps {
   dest: string
   onFile: (value: string) => void
   onDest: (value: string) => void
+  /** The place collections go, as the backend gave it, or '' where this
+   *  build has none. The ask needs it to recognise its own proposal: the
+   *  field opens holding it, and the root by itself names a folder that is
+   *  already there. */
+  defaultRoot: string
   /** The backend's reason the last attempt was refused, or ''. */
   error: string
   busy: boolean
@@ -49,7 +54,24 @@ export interface PostmanImportDialogProps {
 }
 
 export function PostmanImportDialog(props: PostmanImportDialogProps) {
-  const ready = () => props.file.trim() !== '' && props.dest.trim() !== '' && !props.busy
+  /** The root the ask proposed, with or without its trailing separator —
+   *  the two values `askForImport` can leave in the field before anybody
+   *  has said anything. */
+  const isBareRoot = (value: string): boolean => {
+    if (props.defaultRoot === '') return false
+    const root = props.defaultRoot.replace(/[\\/]+$/, '')
+    return value === root || value === `${root}/`
+  }
+
+  // A blank was already refused here because a call that could only be
+  // refused is a round trip spent to learn what the form knew. The prefill
+  // introduces a second value of exactly that kind: the collections root
+  // certainly exists, so Import on it comes back "a folder is already
+  // there" about a folder the person never chose.
+  const ready = () => {
+    const dest = props.dest.trim()
+    return props.file.trim() !== '' && dest !== '' && !isBareRoot(dest) && !props.busy
+  }
   const refusal = (): string | undefined => (props.error !== '' ? props.error : undefined)
 
   const submit = (): void => {
@@ -115,7 +137,6 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         id="api-import-postman-dest"
         label="New collection folder"
         description="Must not exist yet — the import arrives whole or not at all."
-        placeholder="/work/acme-api"
         value={props.dest}
         error={refusal()}
         onInput={props.onDest}

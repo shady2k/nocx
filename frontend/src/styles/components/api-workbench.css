@@ -166,6 +166,15 @@
   grid-area: request;
   overflow-y: auto;
   min-height: 0;
+  /* AND min-width, which is the half that was missing (nocx-kdawd). A grid
+     item's min-width is `auto`, so it refuses to shrink below its content:
+     one long line in the body editor pushed this column wider than its track
+     and the COLUMN scrolled sideways instead of the editor. The editor's own
+     box was already right — `.api-body-editor` clips and its `.cm-scroller`
+     scrolls — but nothing downstream can scroll if an ancestor grew to fit
+     the content first. Both axes are needed at every step, which is why the
+     same line appears on `.api-request` and `.api-body-editor` below. */
+  min-width: 0;
   padding: var(--space-3);
 }
 
@@ -280,6 +289,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   height: 100%;
 }
 
@@ -537,6 +547,7 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 12rem;
+  min-width: 0;
   border: 1px solid var(--color-divider);
   border-radius: var(--control-radius-md);
   overflow: hidden;

@@ -4418,3 +4418,132 @@ describe('the import report says whose it is and can be ended', () => {
     expect(notImportedPanel()).toBeNull()
   })
 })
+
+// ── What the folder ask promises about committing (nocx-flidy) ────────────
+//
+// The ask used to say "It is safe to commit: no secret value is ever written
+// into it", which was true while every credential arrived as a variable NAME
+// resolved from the vault. nocx-14exx made a pasted credential stay where the
+// person put it, so a curl line's Authorization header is TEXT in the request
+// file — in the folder the sentence is about.
+
+/** A request carrying a credential the way a pasted curl line leaves one:
+ *  the header, as text, exactly as it was typed. */
+function withPastedCredential(): ApiRequest {
+  return {
+    ...REQUEST,
+    id: '',
+    name: 'ping',
+    auth: { kind: 'none', var: '', user: '' },
+    headers: [
+      { name: 'Content-Type', value: 'application/json', enabled: true },
+      { name: 'Authorization', value: 'Bearer ghp_liveTokenTypedByHand', enabled: true },
+    ],
+  }
+}
+
+/** What the New collection ask says under its field. */
+function newCollectionNote(): string {
+  return newCollectionDialog().textContent ?? ''
+}
+
+describe('the folder ask says what it actually covers', () => {
+  it('promises only the variable half, and does not warn, when nothing pasted is open', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => button('New collection'))
+    fireEvent.click(button('New collection'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+
+    const note = newCollectionNote()
+    // The promise that was false is gone.
+    expect(note).not.toContain('safe to commit')
+    expect(note).not.toContain('no secret value is ever written')
+    // What is true is still said.
+    expect(note).toContain('bound to a variable')
+    // And the ordinary case — a collection with nothing pasted in it — is
+    // not made frightening by a caveat about somebody else's folder.
+    expect(note).not.toContain('Authorization')
+  })
+
+  it('says so when the request about to go in carries a credential as text', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({ request: withPastedCredential(), unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await convertCurl("curl -H 'Authorization: Bearer ghp_liveTokenTypedByHand' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    fireEvent.click(button('New collection'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+
+    const note = newCollectionNote()
+    expect(note).toContain('Authorization')
+    expect(note).toContain('bound to a variable')
+    // The VALUE is never repeated back — naming the header is the whole of
+    // what the sentence has to say.
+    expect(note).not.toContain('ghp_liveTokenTypedByHand')
+  })
+
+  it('says nothing about a header whose credential IS a variable', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({
+        request: {
+          ...withPastedCredential(),
+          headers: [{ name: 'Authorization', value: 'Bearer {{token}}', enabled: true }],
+        },
+        unsupported: [],
+      }),
+    })
+    await openWorkbench(bar)
+    await convertCurl("curl -H 'Authorization: Bearer {{token}}' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    fireEvent.click(button('New collection'))
+    await vi.waitFor(() => expect(newCollectionDialog().open).toBe(true))
+
+    expect(newCollectionNote()).not.toContain('Authorization')
+  })
+
+  it('and nothing is rewritten, refused or sanitised on the way in', async () => {
+    // nocx-14exx, re-confirmed: the product does not hide or relocate what a
+    // person typed. The sentence is the only thing this bead changes.
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({ request: withPastedCredential(), unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await convertCurl("curl -H 'Authorization: Bearer ghp_liveTokenTypedByHand' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    fireEvent.click(button('Headers 2'))
+    await vi.waitFor(() =>
+      expect(
+        [...workbench().querySelectorAll<HTMLInputElement>('input')].some(
+          (i) => i.value === 'Bearer ghp_liveTokenTypedByHand',
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('the open-a-folder ask says the same thing, in both states', async () => {
+    const { bar } = await mountApp({
+      ...noCollections(),
+      importCurl: vi.fn().mockResolvedValue({ request: withPastedCredential(), unsupported: [] }),
+    })
+    await openWorkbench(bar)
+    await openFolderAsk()
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
+    expect(openFolderDialog().textContent ?? '').not.toContain('safe to commit')
+    expect(openFolderDialog().textContent ?? '').not.toContain('Authorization')
+    fireEvent.click(button('Cancel'))
+
+    await convertCurl("curl -H 'Authorization: Bearer ghp_liveTokenTypedByHand' https://h/v1/ping")
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+    await openFolderAsk()
+    await vi.waitFor(() => expect(openFolderDialog().open).toBe(true))
+    expect(openFolderDialog().textContent ?? '').toContain('Authorization')
+  })
+})

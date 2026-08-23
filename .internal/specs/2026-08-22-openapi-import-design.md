@@ -185,6 +185,16 @@ One operation becomes one `apicoll.Request`, written as a `.json` file like ever
 
 ## 7. The surface
 
+> **Superseded, 2026-08-23, by
+> [`2026-08-23-import-ask-postman-shape-design.md`](2026-08-23-import-ask-postman-shape-design.md).**
+> There is no second dialog. The one import ask already takes a file, a pasted
+> document or a URL, already carries the connection picker beside the URL, and
+> already proposes its destination — so an OpenAPI document arrives as a third
+> document shape inside `ImportInto` (`nocx-wacz2`) and needs no surface of its
+> own. What follows is the plan that was replaced, kept because the reasoning
+> below about kit components and the `Unsupported` list still holds for the one
+> ask; only the second dialog is gone.
+
 `PostmanImportDialog` is the precedent and its grammar is repeated. `OpenAPIImportDialog`
 carries a source switch (file / text / URL), a URL field with the connection picker beside
 it, and the destination folder field with Browse. Kit components only — a surface may

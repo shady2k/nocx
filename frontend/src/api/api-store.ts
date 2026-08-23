@@ -3,6 +3,23 @@
 // runs. Plain Solid signals; nothing here renders, and no method is called
 // during a render.
 //
+// THAT RULE STANDS, AND ONE CALL IS IN BREACH OF IT TODAY. `importCurl`
+// raises the kit's `showConfirm` before it discards unsaved work
+// (nocx-86wvw), so this file imports a UI module and puts a dialog on a
+// screen. It is not a new rule replacing the old one, and it should not be
+// read as a precedent: the surface's own grammar is the other way round —
+// api-pane.tsx raises the confirmation for a delete and the store just
+// deletes — and owning "is there unsaved work" does not make this file the
+// owner of "ask the person". Those are two questions and the second one
+// belongs where the other asks in this surface already are.
+//
+// It is here because the worker who fixed the defect did not own
+// api-pane.tsx that wave, which is a scheduling fact and not an argument.
+// The call site says what has to move and what moving it must preserve; the
+// bill, meanwhile, is in api-store.test.ts, which carries a
+// `vi.mock('../ui/dialog')` that no test of a store with nothing to render
+// would ever need.
+//
 // Three rules, each with the thing it stops:
 //
 // 1. SEND WRITES FIRST, BECAUSE THE FILE IS WHAT GETS SENT. `api.request.send`
@@ -1563,6 +1580,29 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // "unsaved work is destroyed", so the choice is put to the person whose
     // work it is, in the kit's own `showConfirm`, which is where "are you
     // sure" lives in this product.
+    //
+    // AND THIS RAISE DOES NOT BELONG IN THIS FILE — see the header. It goes
+    // beside the delete's confirmation in api-pane.tsx, which is where this
+    // surface asks. Whoever owns that file moves it, and it is not a lift:
+    // two properties have to survive the move, and neither is obvious from
+    // the lines being moved.
+    //
+    //  1. THE ASK COMES AFTER THE PARSE, and `store.importCurl` IS the
+    //     parse. A pane that asks before calling it asks somebody to discard
+    //     their work for a line that is then refused as not a curl command
+    //     at all. `a line that is not a curl command is refused without
+    //     asking anybody to discard anything` is the test that fails when
+    //     that is got wrong.
+    //  2. THE CONDITION AND THE SENTENCE STAY HERE. `unsavedWork` is a fact
+    //     about the form, and which of the two sentences is true is read off
+    //     `selected` — both belong to whoever holds `draft`, `saved` and
+    //     `selected`, which is this file and not a component.
+    //
+    // So the move needs a seam, and there are two that work: split this into
+    // a parse and an apply, with the pane asking between them; or give
+    // `importCurl` the ask as a parameter, so the store keeps the order and
+    // the sentence while the pane keeps the modal. The second is smaller and
+    // leaves every test here standing. The choice is the pane owner's.
     const open = draft()
     if (open !== null && unsavedWork()) {
       const proceed = await showConfirm(replacementQuestion(open), 'Discard and import', 'Cancel')

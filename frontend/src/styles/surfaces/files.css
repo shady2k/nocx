@@ -74,8 +74,21 @@
 
 /* The drop target while a files drag is over it (terminal-drop.ts sets the
    attribute). An outline rather than a background: the terminal underneath
-   is a live grid and tinting it would repaint somebody's output. */
-[data-file-drop-target][data-drop-active] {
+   is a live grid and tinting it would repaint somebody's output.
+
+   SCOPED TO .pane, and the scope is the point. Written as a bare attribute
+   pair it matched ANY element carrying the two attributes — which was every
+   element that could, while the pane was the only drop surface in the
+   product. `ui/drop-zone.tsx` ended that: the kit now owns a drop surface
+   with its own dashed hint, and this rule would have drawn a second, outer
+   dashed outline around it from a SURFACE stylesheet — a surface repainting
+   a kit component, which is the defect the kit rules exist to stop.
+   check-css-integrity cannot see it either: its surface-paints-kit rule
+   derives kit identity by CLASS, and this selector had none (nocx-jwiee,
+   escalated by the worker that added the kit component rather than edited
+   this file). The pane's own affordance moves onto the kit in nocx-c892h;
+   until then it keeps its outline and stops lending it to everybody. */
+.pane[data-file-drop-target][data-drop-active] {
   outline: 2px dashed var(--color-accent);
   outline-offset: calc(-1 * var(--space-1));
 }

@@ -85,11 +85,21 @@ export interface TabsProps {
   /**
    * A slot at the trailing end of the tab row — HORIZONTAL only.
    *
-   * For the control that belongs to the section on screen rather than to the
-   * form inside it: which body kind is being edited, which auth scheme is in
-   * use. Those are one choice each, they change what the panel contains, and
-   * putting them INSIDE the panel costs a labelled row of their own above
-   * every section they govern.
+   * For what belongs to the WHOLE set of sections and is the same whichever
+   * one is open: the run card puts its status, size and elapsed here, and
+   * those three are facts about the exchange rather than about the view of it
+   * a person happens to have chosen.
+   *
+   * NOT for a control drawn on one tab only. That was this slot's first use —
+   * the request form's body kind and auth scheme — and it made the row that
+   * NAMES the sections also hold one section's contents, swapped under the
+   * tabs as a person moved between them. It also made the row overflow: the
+   * bar measured 566px in a 496px column and the excess travelled up until
+   * the surface drew a horizontal scrollbar (nocx-kdawd). A control present
+   * for exactly one section IS that section's content, and it belongs at the
+   * top of the panel it governs (nocx-n9npi). The test is mechanical: if what
+   * you are about to pass is wrapped in a `<Show when={active === …}>`, it
+   * does not go here.
    *
    * It sits beside the tablist and never inside it: a `tablist` whose
    * children are not tabs is a broken one, so the row is a box holding both.

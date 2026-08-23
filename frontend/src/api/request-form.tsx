@@ -558,44 +558,6 @@ export function RequestEditor(props: RequestEditorProps) {
             ariaLabel="This request"
             active={tab()}
             onChange={setTab}
-            actions={
-              <>
-                {/* ABSENT WHERE THERE IS NO FORMATTER, which is the rule
-                    this row already follows: the body kind is not offered on
-                    the auth tab and the auth scheme is not offered on the
-                    body tab, because a control that is present and inert
-                    advertises something the surface cannot do. A `raw` or a
-                    `form` body has no layout to be put into, so there is no
-                    Format beside it — not a greyed one. */}
-                <Show when={tab() === 'body' && hasFormatter(req().body.kind)}>
-                  <Button onClick={formatBody}>Format</Button>
-                </Show>
-                <Show when={tab() === 'body'}>
-                  <div data-api-field="body-kind">
-                    <Select
-                      ariaLabel="Body kind"
-                      value={req().body.kind}
-                      onChange={(v) =>
-                        patch({ body: { ...req().body, kind: v as ApiRequest['body']['kind'] } })
-                      }
-                      options={BODY_KINDS}
-                    />
-                  </div>
-                </Show>
-                <Show when={tab() === 'auth'}>
-                  <div data-api-field="auth-kind">
-                    <Select
-                      ariaLabel="Auth scheme"
-                      value={req().auth.kind}
-                      onChange={(v) =>
-                        patch({ auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] } })
-                      }
-                      options={AUTH_KINDS}
-                    />
-                  </div>
-                </Show>
-              </>
-            }
             items={[
               {
                 id: 'params',
@@ -733,6 +695,37 @@ export function RequestEditor(props: RequestEditorProps) {
                 // when the branch actually flips.
                 content: () => (
                   <>
+                    {/* THE SECTION'S OWN ROW — which mode this body is in and
+                        what can be done to it, immediately above the editor
+                        both of them govern (nocx-n9npi). They were in the tab
+                        row's trailing slot, where they were one section's
+                        contents sitting in the row that names all five and
+                        changing under the tabs as a person moved. That slot is
+                        for a control that belongs to the SURFACE, the way the
+                        run card's status, size and elapsed do; it stays in the
+                        kit and this form now hands it nothing.
+
+                        ABSENT WHERE THERE IS NO FORMATTER, which is the rule
+                        the pickers already followed: a `raw` or a `form` body
+                        has no layout to be put into, so there is no Format
+                        beside it — not a greyed one, because a control that is
+                        present and inert advertises something the surface
+                        cannot do. */}
+                    <div class="api-request__controls">
+                      <div class="api-request__mode" data-api-field="body-kind">
+                        <Select
+                          ariaLabel="Body kind"
+                          value={req().body.kind}
+                          onChange={(v) =>
+                            patch({ body: { ...req().body, kind: v as ApiRequest['body']['kind'] } })
+                          }
+                          options={BODY_KINDS}
+                        />
+                      </div>
+                      <Show when={hasFormatter(req().body.kind)}>
+                        <Button onClick={formatBody}>Format</Button>
+                      </Show>
+                    </div>
                     <Show when={req().body.kind === 'none'}>
                       <p class="api-request__idle">No body is sent with this request.</p>
                     </Show>
@@ -818,58 +811,77 @@ export function RequestEditor(props: RequestEditorProps) {
                 id: 'auth',
                 label: authLabel(req()),
                 content: () => (
-                  <Show
-                    when={req().auth.kind !== 'none'}
-                    fallback={
-                      <p class="api-request__idle">No credential is sent with this request.</p>
-                    }
-                  >
-                    <Show when={req().auth.kind === 'basic'}>
-                      <TextField
-                        id="api-auth-user"
-                        label="User"
-                        value={req().auth.user}
-                        onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
-                      />
-                    </Show>
-                    {/* THE NAME, and the field is still its only owner. The
-                        placeholder is what the product would call a secret
-                        made below, so the proposal is on screen before
-                        anything is pressed and typing over it is how a person
-                        chooses their own. */}
-                    <TextField
-                      id="api-auth-var"
-                      label="Secret variable"
-                      description="The NAME of a variable. Its value lives in the vault, and this file keeps the name and nothing else."
-                      placeholder={proposeSecretName(req().auth)}
-                      value={req().auth.var}
-                      onInput={(v) => patch({ auth: { ...req().auth, var: v } })}
-                    />
-                    {/* NO CHIP UNDER THE FIELD. It used to print `Sends
-                        🔒name` — the field's own contents, verbatim, two
-                        lines apart. The chip earns its place in the RUN view,
-                        where it stands where a credential's BYTES were and
-                        says whose they are without showing them; here there
-                        is nothing hidden for it to stand for, and the one
-                        fact it could have added — that the name resolves to a
-                        bound value — is not a fact this side has: the
-                        renderer never learns what the vault holds (ADR-0021),
-                        and a name bound through the door below is not
-                        declared in the environment file either. A line that
-                        can only guess is worse than no line (nocx-qoavg). */}
-                    <Show when={props.onCreateSecret && props.secretTarget}>
-                      {(target) => (
-                        <AuthSecret
-                          auth={req().auth}
-                          target={target()}
-                          onName={(name) => patch({ auth: { ...req().auth, var: name } })}
-                          onCreate={(variable, value) =>
-                            props.onCreateSecret?.(variable, value) ?? Promise.resolve()
+                  <>
+                    {/* THE SAME ROW, THE SAME REASON. The scheme decides what
+                        the rest of this panel asks for — a user, a variable
+                        name, a place to paste a value — so it stands at the
+                        top of the panel it governs rather than in the row of
+                        section names (nocx-n9npi). */}
+                    <div class="api-request__controls">
+                      <div class="api-request__mode" data-api-field="auth-kind">
+                        <Select
+                          ariaLabel="Auth scheme"
+                          value={req().auth.kind}
+                          onChange={(v) =>
+                            patch({ auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] } })
                           }
+                          options={AUTH_KINDS}
                         />
-                      )}
+                      </div>
+                    </div>
+                    <Show
+                      when={req().auth.kind !== 'none'}
+                      fallback={
+                        <p class="api-request__idle">No credential is sent with this request.</p>
+                      }
+                    >
+                      <Show when={req().auth.kind === 'basic'}>
+                        <TextField
+                          id="api-auth-user"
+                          label="User"
+                          value={req().auth.user}
+                          onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
+                        />
+                      </Show>
+                      {/* THE NAME, and the field is still its only owner. The
+                          placeholder is what the product would call a secret
+                          made below, so the proposal is on screen before
+                          anything is pressed and typing over it is how a person
+                          chooses their own. */}
+                      <TextField
+                        id="api-auth-var"
+                        label="Secret variable"
+                        description="The NAME of a variable. Its value lives in the vault, and this file keeps the name and nothing else."
+                        placeholder={proposeSecretName(req().auth)}
+                        value={req().auth.var}
+                        onInput={(v) => patch({ auth: { ...req().auth, var: v } })}
+                      />
+                      {/* NO CHIP UNDER THE FIELD. It used to print `Sends
+                          🔒name` — the field's own contents, verbatim, two
+                          lines apart. The chip earns its place in the RUN view,
+                          where it stands where a credential's BYTES were and
+                          says whose they are without showing them; here there
+                          is nothing hidden for it to stand for, and the one
+                          fact it could have added — that the name resolves to a
+                          bound value — is not a fact this side has: the
+                          renderer never learns what the vault holds (ADR-0021),
+                          and a name bound through the door below is not
+                          declared in the environment file either. A line that
+                          can only guess is worse than no line (nocx-qoavg). */}
+                      <Show when={props.onCreateSecret && props.secretTarget}>
+                        {(target) => (
+                          <AuthSecret
+                            auth={req().auth}
+                            target={target()}
+                            onName={(name) => patch({ auth: { ...req().auth, var: name } })}
+                            onCreate={(variable, value) =>
+                              props.onCreateSecret?.(variable, value) ?? Promise.resolve()
+                            }
+                          />
+                        )}
+                      </Show>
                     </Show>
-                  </Show>
+                  </>
                 ),
               },
             ]}

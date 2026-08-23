@@ -321,6 +321,36 @@
   max-width: 12rem;
 }
 
+/* A SECTION'S OWN CONTROLS, at the top of the section (nocx-n9npi). Placement
+   only: the row decides where the kit's Select and Button sit and paints
+   neither.
+
+   BOTH BOUNDS, because either alone leaves the old overflow. A flex item is
+   `min-width: auto`, so the wrapper round the select refuses to shrink below
+   its content and hands the excess back to the row; and a native <select>
+   takes its INTRINSIC width — the longest option, `From a file in the
+   collection` here — which `min-width: 0` does not touch and `max-width`
+   does. Measured on the tab row this moved off: the wrapper had shrunk to
+   178px with the select still at 204, and the 26px hung past the box until
+   `max-width` bound it (nocx-kdawd). The row is inside `.ui-tabs__panel`,
+   which is `min-width: 0`, so the shrink has somewhere to go. */
+.api-request__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-bottom: var(--space-2);
+}
+
+.api-request__controls > * {
+  min-width: 0;
+}
+
+.api-request__mode .ui-select {
+  max-width: 100%;
+}
+
 .api-request__row {
   display: flex;
   align-items: flex-end;

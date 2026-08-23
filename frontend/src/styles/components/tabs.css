@@ -105,22 +105,25 @@
   min-width: 0;
 }
 
-/* AND WHAT A SURFACE PUTS IN THERE. A section's control usually arrives
-   wrapped in a plain div — `data-api-field="body-kind"` is one — and a plain
-   div is a flex item with `min-width: auto`, so it refuses to shrink below
-   its content and hands the overflow back to the bar. Measured: with the bar
-   and the actions both at 0 the row still reported 522 in a 496 box, and the
-   26px were the mode select inside its wrapper. The kit says it here once,
-   rather than every surface remembering to say it about every wrapper. */
+/* AND WHAT A SURFACE PUTS IN THERE. A slot's contents usually arrive wrapped
+   in a plain div, and a plain div is a flex item with `min-width: auto`, so it
+   refuses to shrink below its content and hands the overflow back to the bar.
+   Measured on the request form's mode picker, which used to sit here: with the
+   bar and the actions both at 0 the row still reported 522 in a 496 box, and
+   the 26px were the select inside its wrapper. That picker has since moved
+   into the panel it governs (nocx-n9npi) and these two rules stay, because the
+   shape is the slot's and not that caller's. The kit says it here once, rather
+   than every surface remembering to say it about every wrapper. */
 .ui-tabs__actions > * {
   min-width: 0;
 }
 
 /* A native <select> takes its INTRINSIC width — the longest option — and
-   `min-width: 0` does not touch that: measured, the mode select sat at 204px
+   `min-width: 0` does not touch that: measured, that select sat at 204px
    inside a wrapper that had already shrunk to 178 and hung 26px past the
    bar's right edge, which is the whole of the overflow the request column
-   was scrolling. `max-width` is what binds an intrinsic width to its box. */
+   was scrolling. `max-width` is what binds an intrinsic width to its box, and
+   `.api-request__controls` carries the same pair for the same reason. */
 .ui-tabs__actions .ui-select {
   max-width: 100%;
 }

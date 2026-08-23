@@ -117,8 +117,19 @@ function field(name: string): HTMLInputElement | HTMLTextAreaElement {
   return el
 }
 
+/** A picker a person can reach right now.
+ *
+ *  REACHABLE, not merely rendered — the same distinction every helper below
+ *  asks for, and it became load-bearing here when the two mode pickers moved
+ *  out of the tab row and into the panels they govern (nocx-n9npi). Tabs
+ *  renders every section and marks the inactive ones `hidden`, so the auth
+ *  scheme is in the document while Body is open; without this filter
+ *  "the picker is not offered on a tab it does not govern" is not a question
+ *  this file can ask. */
 function control(field: string): HTMLSelectElement {
-  const el = workbench().querySelector<HTMLSelectElement>(`[data-api-field="${field}"] select`)
+  const el = [...workbench().querySelectorAll<HTMLSelectElement>(
+    `[data-api-field="${field}"] select`,
+  )].find(reachable)
   if (!el) throw new Error(`no control for ${field}`)
   return el
 }
@@ -1626,6 +1637,129 @@ describe('a body that arrived on one line can be laid out', () => {
 
     fireEvent.click(button('Auth •'))
     await vi.waitFor(() => expect(buttonNames()).not.toContain('Format'))
+  })
+})
+
+// ── A section's own controls are inside that section ──────────────────────
+//
+// nocx-n9npi. The row that NAMES the four sections also held one section's
+// contents: Format and the mode picker while Body was open, the scheme picker
+// while Auth was, swapped under the tabs as a person moved between them. The
+// kit's trailing slot is for a control that belongs to the SURFACE — the run
+// card's status, size and elapsed sit there and are the same three whichever
+// view is open — and a control drawn for exactly one tab is that tab's
+// content, not the row's.
+//
+// Three costs, and the first is measured: the bar reported 566px in a 496px
+// column and the overflow travelled up until the whole request column drew a
+// horizontal scrollbar (nocx-kdawd); the mode picker decides how the editor
+// below it reads and sat above the tab row instead of beside it; and Postman,
+// the owner's reference, puts the tabs in one row and the body's own controls
+// in a second row inside the Body panel.
+
+/** A panel of the REQUEST editor's tabs. Scoped, because a run card's tabs
+ *  use the ids `body` and `headers` too — with an exchange on screen the
+ *  document holds two `#ui-tabpanel-body`s and the first one is the run's. */
+function requestPanel(id: string): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>(`.api-request #ui-tabpanel-${id}`)
+  if (!el) throw new Error(`no request panel ${id}`)
+  return el
+}
+
+/** The row of section names in the request editor. */
+function requestTabList(): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>('.api-request .ui-tabs__list')
+  if (!el) throw new Error('no tab list on the request editor')
+  return el
+}
+
+/** The trailing slot of the request editor's tab row. */
+function requestTabActions(): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>('.api-request .ui-tabs__bar .ui-tabs__actions')
+  if (!el) throw new Error('no actions slot on the request tab row')
+  return el
+}
+
+/** A reachable button inside one element, by its words. */
+function buttonIn(el: HTMLElement, name: string): HTMLButtonElement | undefined {
+  return [...el.querySelectorAll('button')]
+    .filter(reachable)
+    .find((b) => (b.getAttribute('aria-label') ?? b.textContent ?? '').trim() === name)
+}
+
+/** True when `first` comes before `second` in document order. */
+function precedes(first: Element, second: Element): boolean {
+  return (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+}
+
+describe("a section's own controls are inside that section", () => {
+  it('the body mode and Format are in the Body panel, above the editor', async () => {
+    await openBody()
+
+    const panel = requestPanel('body')
+    expect(panel.querySelector('[data-api-field="body-kind"] select')).not.toBeNull()
+    const format = buttonIn(panel, 'Format')
+    expect(format).toBeDefined()
+
+    // ABOVE the editor, which is the half that makes it a control of this
+    // panel rather than a control that merely lives in it.
+    const editor = panel.querySelector('.api-body-editor')
+    if (!editor) throw new Error('no body editor in the panel')
+    expect(precedes(format!, editor)).toBe(true)
+    expect(precedes(panel.querySelector('[data-api-field="body-kind"]')!, editor)).toBe(true)
+  })
+
+  it('the auth scheme is in the Auth panel', async () => {
+    await openAuth()
+
+    expect(requestPanel('auth').querySelector('[data-api-field="auth-kind"] select')).not.toBeNull()
+  })
+
+  it('neither picker is offered on a tab it does not govern, and neither is greyed', async () => {
+    // Tabs renders every section and hides the inactive ones, so both pickers
+    // are in the document at all times — the question is which one a person
+    // can reach, and the answer must still be exactly one.
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest() }),
+    })
+    await openRequest(bar)
+
+    fireEvent.click(button('Body •'))
+    await vi.waitFor(() => expect(control('body-kind').value).toBe('json'))
+    expect(() => control('auth-kind')).toThrow()
+
+    fireEvent.click(button('Auth •'))
+    await vi.waitFor(() => expect(() => control('auth-kind')).not.toThrow())
+    expect(() => control('body-kind')).toThrow()
+
+    // ABSENCE, NOT A GREYED CONTROL — neither row ever holds an inert one.
+    expect(
+      workbench().querySelectorAll('.api-request__controls [disabled]'),
+    ).toHaveLength(0)
+  })
+
+  it('the tab row of this surface passes no actions at all, on every tab', async () => {
+    // Nothing tab-independent is left over, so the slot is handed nothing —
+    // and the slot itself STAYS in the kit, because the run card's tabs put
+    // a genuinely section-independent thing in it.
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest() }),
+    })
+    await openRequest(bar)
+
+    // Every tab, named the way the row names them rather than by a list this
+    // test keeps in step by hand.
+    const tabs = [...requestTabList().querySelectorAll('button')].map((b) =>
+      (b.textContent ?? '').trim(),
+    )
+    expect(tabs).toHaveLength(5)
+
+    for (const tab of tabs) {
+      fireEvent.click(button(tab))
+      await vi.waitFor(() => expect(button(tab).getAttribute('aria-selected')).toBe('true'))
+      expect(requestTabActions().childElementCount).toBe(0)
+      expect(requestTabActions().textContent).toBe('')
+    }
   })
 })
 

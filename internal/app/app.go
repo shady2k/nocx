@@ -21,6 +21,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
@@ -619,10 +620,18 @@ func New(opts ...Option) (*App, error) {
 	// constructed before the store that holds the values.
 	apiCollections := apicoll.NewCollections(paths)
 	apiRoutes := &apiRouteLeaser{client: sshClient}
+	// The import's URL entrance gets the SAME route table the sender has,
+	// so "through prod-bastion" means one thing in this product: a fetch
+	// and a send that name one connection lease the same pooled SSH
+	// connection, and a connection that cannot be leased refuses both. A
+	// second table here would be a second answer to "how do I get there",
+	// agreeing until the day one of them was edited.
+	apiRouteTable := apisend.NewRoutes(apiRoutes)
 	apiSender := apisend.New(
 		apisend.WithLogger(logger),
-		apisend.WithRoutes(apisend.NewRoutes(apiRoutes)),
+		apisend.WithRoutes(apiRouteTable),
 	)
+	apiFetcher := apifetch.New(apiRouteTable, logger)
 
 	// The UI-state document (ADR-0033): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
@@ -919,6 +928,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
 		transport.WithAPI(apiCollections, apiSender),
+		transport.WithAPIImportFetcher(apiFetcher),
 		transport.WithAPIBindings(apiBindings),
 		transport.WithAPIVariables(apiBindings),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather

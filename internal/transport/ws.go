@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
@@ -172,10 +173,16 @@ type WSServer struct {
 	// through which an identifier could arrive. The send path is given only
 	// the second, so no identifier for credential material exists anywhere
 	// on the path from a collection file to a header (design §8).
+	//
+	// apiFetch is the fifth: it acquires an import document by URL, over
+	// the same route table the sender dials through. It wires separately
+	// too — a build without it still imports by path and by document, and
+	// answers the URL entrance by name rather than pretending.
 	apiCollections apicoll.Collections
 	apiSender      apisend.Sender
 	apiBindings    apibind.Store
 	apiVariables   apibind.ValueResolver
+	apiFetch       apifetch.Fetcher
 	// uiState owns what the app remembers without being asked (ADR-0033);
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
 	// -32601 and the shell keeps its declared defaults.
@@ -903,6 +910,19 @@ func WithAPIBindings(store apibind.Store) WSServerOption {
 // is the plausible-looking request §6.5 spends a paragraph refusing.
 func WithAPIVariables(values apibind.ValueResolver) WSServerOption {
 	return func(s *WSServer) { s.apiVariables = values }
+}
+
+// WithAPIImportFetcher attaches the seam that acquires an import document by
+// URL (internal/apifetch), enabling api.import.postman's third source.
+//
+// It is a third option rather than a parameter of WithAPI because it wires
+// apart from the sender in exactly the way the other three do: a build with
+// a sender and no fetcher can send requests and cannot fetch an export, and
+// says so. Without it, `url` is refused by name (ErrImportURLUnavailable)
+// while `path` and `document` go on working — absence is the capability, and
+// the renderer draws the entrance from what the backend answers.
+func WithAPIImportFetcher(f apifetch.Fetcher) WSServerOption {
+	return func(s *WSServer) { s.apiFetch = f }
 }
 
 // WithBuildInfo attaches the running binary's description, which is what

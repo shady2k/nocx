@@ -23,6 +23,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
@@ -5603,10 +5604,28 @@ func (b *apiFakeBindings) count() int {
 // newAPIWSServer starts a server with the whole api.* surface wired, the way
 // the composition root wires it plus the binding store that does not exist
 // yet.
+//
+// The import fetcher gets a route table with NO leaser, which is the shape
+// the app has whenever the SSH side is not wired: the direct route dials and
+// every connection route refuses by name. A test that needs a connection
+// route to carry bytes supplies its own pool through the variant below.
 func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket.Conn) {
 	t.Helper()
+	return newAPIWSServerWithPool(t, bindings, nil)
+}
+
+// newAPIWSServerWithPool is the same server with the import fetcher's route
+// table built over the caller's pool. Only the POOL is a double — the
+// fetcher, the route table, the transport, the capability and the writer are
+// all the real ones, because a fetcher double would certify the test's own
+// object instead of the seam.
+func newAPIWSServerWithPool(t *testing.T, bindings apibind.Store, leaser apisend.ConnectionLeaser) (*WSServer, *websocket.Conn) {
+	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	opts := []WSServerOption{WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)))}
+	opts := []WSServerOption{
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger))),
+		WithAPIImportFetcher(apifetch.New(apisend.NewRoutes(leaser), logger)),
+	}
 	if bindings != nil {
 		opts = append(opts, WithAPIBindings(bindings))
 		// The read half is a separate option because the two halves wire
@@ -6766,6 +6785,40 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	})
 	if walkErr != nil {
 		t.Fatalf("walk %s: %v", dest, walkErr)
+	}
+
+	// AND THE THIRD ENTRANCE, off the same socket. A conformance test that
+	// certifies two entrances out of three certifies the wrong thing: the
+	// URL route reaches the same writer by a different path through the
+	// handler, and it is the only one whose result nobody had validated
+	// against the schema.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "variable": [{"key": "token", "value": "sk-secret-value", "type": "secret"}],
+      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
+    }`))
+	}))
+	defer srv.Close()
+
+	byURL := filepath.Join(t.TempDir(), "fetched")
+	fetched := vaultCall(t, conn, "api.import.postman", map[string]any{
+		"url":   srv.URL + "/export.json",
+		"route": map[string]any{"kind": "direct"},
+		"dest":  byURL,
+	}, 3)
+	if fetched.Error != nil {
+		t.Fatalf("api.import.postman by url: %+v", fetched.Error)
+	}
+	validateJSON(t, schema, fetched.Result, "api.import.postman result (url)")
+	// `unsupported: []` and not `null`: an export that converts whole says
+	// so with an empty LIST, which is what the renderer's first .map walks.
+	if !strings.Contains(string(fetched.Result), `"unsupported":[]`) {
+		t.Errorf("result = %s, want an empty unsupported list on an export that converts whole", fetched.Result)
+	}
+	openAPICollection(t, conn, byURL, 4)
+	if bindings.count() != 2 {
+		t.Errorf("bound values = %d, want 2 — the secret must reach the binding store on this route too", bindings.count())
 	}
 }
 

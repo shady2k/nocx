@@ -327,6 +327,10 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
 		stubBindWriter{},
+		// No fetcher: this test is about the two entrances that reach no
+		// network, and a build without one is a coherent build (it refuses
+		// the URL entrance by name — api_import_url_test.go).
+		nil,
 	)
 	dir := t.TempDir()
 
@@ -386,6 +390,10 @@ func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
 		stubBindWriter{},
+		// No fetcher: this test is about the two entrances that reach no
+		// network, and a build without one is a coherent build (it refuses
+		// the URL entrance by name — api_import_url_test.go).
+		nil,
 	)
 	const export = `{"info":{"name":"acme",` +
 		`"schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},` +

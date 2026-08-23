@@ -1479,6 +1479,131 @@ describe('a long line is read by moving inside the box that holds it', () => {
   })
 })
 
+// ── Laying the request body out ───────────────────────────────────────────
+//
+// nocx-7c39h. A body pasted from a shell, a log or a colleague arrives on one
+// line and there was no control to lay it out, so a person either read the
+// line or took the body to another program and pasted it back.
+
+/** A request whose body is JSON on one line, which is how a pasted one
+ *  arrives. `over` is for the tests that need a different document. */
+function jsonBodyRequest(text = '{"email":"a@b.c","meta":{"n":1}}') {
+  return { ...REQUEST, body: { kind: 'json' as const, text, fileRef: '' } }
+}
+
+/** The body as the editor holds it, joined the way CM6 stores it. */
+function bodyText(): string {
+  return editorLines(bodyEditor()).join('\n')
+}
+
+/** Open the workbench on a request with the given body, and wait until the
+ *  editor is holding it — the point at which a person could press anything. */
+async function openBody(text?: string): Promise<void> {
+  const { bar } = await mountApp({
+    readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest(text) }),
+  })
+  await openRequest(bar)
+  fireEvent.click(button('Body •'))
+  await vi.waitFor(() => expect(bodyText()).not.toBe(''))
+}
+
+describe('a body that arrived on one line can be laid out', () => {
+  it('lays it out into one field per line, indented', async () => {
+    await openBody()
+    expect(bodyText()).toBe('{"email":"a@b.c","meta":{"n":1}}')
+
+    fireEvent.click(button('Format'))
+
+    await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
+    const laid = bodyText()
+    expect(laid).toContain('\n  "email": "a@b.c"')
+    expect(laid).toContain('\n    "n": 1')
+  })
+
+  // ONLY WHITESPACE MOVED, asserted on what is SENT rather than on what is
+  // shown: the file behind the request is what the backend reads, so the
+  // document that matters is the one Save writes.
+  it('what is saved afterwards parses to the document that was there before', async () => {
+    const write = vi.fn().mockResolvedValue({})
+    const before = '{"email":"a@b.c","meta":{"n":1},"tags":[1,2]}'
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest(before) }),
+      writeRequest: write,
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Body •'))
+    await vi.waitFor(() => expect(bodyText()).toBe(before))
+
+    fireEvent.click(button('Format'))
+    await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
+    fireEvent.click(button('Save'))
+
+    await vi.waitFor(() => expect(write).toHaveBeenCalled())
+    const written = write.mock.calls[0][2] as { body: { text: string } }
+    expect(written.body.text).not.toBe(before)
+    expect(JSON.parse(written.body.text)).toEqual(JSON.parse(before))
+  })
+
+  it('is idempotent: pressing it a second time moves nothing', async () => {
+    await openBody()
+    fireEvent.click(button('Format'))
+    await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
+    const once = bodyText()
+
+    fireEvent.click(button('Format'))
+    // Waited on rather than read straight back, so a second layout that DID
+    // move something would have landed before the assertion.
+    await vi.waitFor(() => expect(bodyText()).toBe(once))
+  })
+
+  // NOT MANGLED, AND NOT SILENT. A body a person is about to send is the last
+  // place for a best effort, and a control that appears to do nothing is
+  // indistinguishable from a broken one.
+  it('a body that is not JSON is left exactly as it was, and the control says why', async () => {
+    const notJson = 'name=a&email=a@b.c'
+    await openBody(notJson)
+
+    fireEvent.click(button('Format'))
+
+    await vi.waitFor(() => expect(toasts()).toHaveLength(1))
+    expect(toasts()[0].message).toContain('not valid JSON')
+    expect(bodyText()).toBe(notJson)
+  })
+
+  // ABSENCE IS THE CAPABILITY — the rule this row already follows for its
+  // pickers. A `raw` body has no formatter, so there is no Format beside it;
+  // a greyed one would advertise something the surface cannot do.
+  it('the control is absent where the body mode has no formatter, not present and inert', async () => {
+    const { bar } = await mountApp()
+    await openRequest(bar)
+    fireEvent.click(button('Body •'))
+    // The worked example's body is `raw`.
+    await vi.waitFor(() => expect(control('body-kind').value).toBe('raw'))
+    expect(buttonNames()).not.toContain('Format')
+
+    fireEvent.change(control('body-kind'), { target: { value: 'json' } })
+
+    await vi.waitFor(() => expect(buttonNames()).toContain('Format'))
+
+    // And it leaves again when the kind does, rather than lingering as a
+    // control for a mode that no longer has one.
+    fireEvent.change(control('body-kind'), { target: { value: 'form' } })
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Format'))
+  })
+
+  it('offers nothing to format on the tabs that are not the body', async () => {
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest() }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Body •'))
+    await vi.waitFor(() => expect(buttonNames()).toContain('Format'))
+
+    fireEvent.click(button('Auth •'))
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Format'))
+  })
+})
+
 // ── The Import section has an entrance ────────────────────────────────────
 //
 // nocx-6siis. The section was written `collapsible open={false} onToggle={()

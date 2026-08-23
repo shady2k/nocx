@@ -49,6 +49,8 @@ import { TextField, type TextFieldMark } from '../ui/text-field'
 import { EditableRowList } from '../ui/row-list'
 import { BodyEditor } from './body-editor'
 import { Tabs } from '../ui/tabs'
+import { layOutJSON } from '../ui/format-json'
+import { showToast } from '../ui/toast'
 import { createSecretChip } from '../ui/secret-chip'
 import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
@@ -88,6 +90,18 @@ function counted(label: string, rows: readonly unknown[]): string {
  *  view. */
 function isTextBody(kind: ApiRequest['body']['kind']): boolean {
   return kind === 'raw' || kind === 'json' || kind === 'form'
+}
+
+/** The kinds this surface can lay out for reading, which today is one.
+ *
+ *  A PREDICATE RATHER THAN A CHECK AT THE CALL SITE, because it is the thing
+ *  the control's presence is derived from: the day a formatter arrives for
+ *  another kind, the control appears for it by adding a case here rather than
+ *  by somebody remembering there were two places to edit. `raw` and `form`
+ *  are deliberately not in it — a form body is not JSON and laying it out
+ *  would be this panel arguing with a person who already said what it is. */
+function hasFormatter(kind: ApiRequest['body']['kind']): boolean {
+  return kind === 'json'
 }
 
 /** Whether the body tab is holding anything. It has no rows to count, so the
@@ -320,6 +334,50 @@ export function RequestEditor(props: RequestEditorProps) {
     over: Partial<T>,
   ): T[] => rows.map((r, i) => (i === index ? { ...r, ...over } : r))
 
+  // HOW MANY TIMES THIS BODY HAS BEEN LAID OUT — the editor's docKey carries
+  // it, and that is the whole mechanism.
+  //
+  // BodyEditor re-fills from the draft only when its `docKey` changes, and
+  // deliberately: pushing the draft back on every keystroke would move the
+  // caret to the end of the document on every character. So the draft alone
+  // cannot put formatted text on screen — the store would hold the laid-out
+  // body while the editor went on showing the one line the person pressed the
+  // control to be rid of. Bumping the counter says "the document in this
+  // editor was replaced", which is what formatting is, and `fill` is already
+  // a no-op when the text has not moved (body-editor.tsx).
+  const [laidOut, setLaidOut] = createSignal(0)
+
+  /**
+   * Lay the body out, or say why not and change nothing.
+   *
+   * The refusals are the point. A body a person is about to send is the last
+   * place for a best effort, so text that does not parse comes back untouched
+   * with a sentence about it, and one too large to lay out cheaply says that
+   * instead of freezing the pane it is being read in. Neither is silent: a
+   * control that appears to do nothing is indistinguishable from a broken one.
+   */
+  const formatBody = (): void => {
+    const current = request()
+    if (!current) return
+    const result = layOutJSON(current.body.text)
+    if (result.kind === 'unreadable') {
+      showToast({
+        level: 'warning',
+        message: 'This body is not valid JSON, so it was left exactly as it is.',
+      })
+      return
+    }
+    if (result.kind === 'too-large') {
+      showToast({
+        level: 'warning',
+        message: `This body is over ${result.limit / 1024}K characters — too large to lay out here, so it was left exactly as it is.`,
+      })
+      return
+    }
+    patch({ body: { ...current.body, text: result.text } })
+    setLaidOut((n) => n + 1)
+  }
+
   return (
     <div class="api-request">
       <Show
@@ -338,6 +396,16 @@ export function RequestEditor(props: RequestEditorProps) {
             onChange={setTab}
             actions={
               <>
+                {/* ABSENT WHERE THERE IS NO FORMATTER, which is the rule
+                    this row already follows: the body kind is not offered on
+                    the auth tab and the auth scheme is not offered on the
+                    body tab, because a control that is present and inert
+                    advertises something the surface cannot do. A `raw` or a
+                    `form` body has no layout to be put into, so there is no
+                    Format beside it — not a greyed one. */}
+                <Show when={tab() === 'body' && hasFormatter(req().body.kind)}>
+                  <Button onClick={formatBody}>Format</Button>
+                </Show>
                 <Show when={tab() === 'body'}>
                   <div data-api-field="body-kind">
                     <Select
@@ -516,7 +584,9 @@ export function RequestEditor(props: RequestEditorProps) {
                     <Show when={isTextBody(req().body.kind)}>
                       <BodyEditor
                         text={req().body.text}
-                        docKey={req().id}
+                        // The request being edited, plus how many times its
+                        // body has been laid out — see `laidOut` above.
+                        docKey={`${req().id}#${laidOut()}`}
                         language={req().body.kind === 'json' ? 'json' : 'text'}
                         onChange={(text) => patch({ body: { ...req().body, text } })}
                       />

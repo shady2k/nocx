@@ -259,6 +259,32 @@ The gate verifies its own work: focus is only attempted on a control that is
 present and not hidden, and afterwards `document.activeElement` must actually
 be on it.
 
+## Laying out JSON: format-json.ts
+
+`layOutJSON(text)` is the one owner of "put this JSON on more than one line",
+and it is in the kit for the reason `format-bytes.ts` is: two surfaces ask the
+same question about the same bytes — the API workbench's request body, where a
+person presses a control and the document they will SEND is rewritten, and its
+response body, where the answer is laid out for reading while Raw keeps the
+octets. A second copy would agree with the first everywhere anybody looked and
+disagree the day one of them changed its indent.
+
+It answers **three** things, never two: `laid-out` with the text, `unreadable`,
+and `too-large` carrying `JSON_LAYOUT_LIMIT`. The last two are different facts
+and a caller says different things about them — one body is invalid, the other
+is valid and expensive — and collapsing them tells a person their valid body
+was rejected as broken. What it promises is narrow and stated in the module:
+only whitespace moves (the result parses to the same value), it is idempotent,
+and it refuses rather than guesses. It is NOT a round-trip of the bytes, which
+is why the surface that must show the bytes shows them from the raw view.
+
+`JSON_LAYOUT_LIMIT` is 256 KiB of text, and it is a cap rather than a spinner
+because `JSON.parse` plus `JSON.stringify` run on the main thread and cannot be
+interrupted: a body big enough to be slow freezes the pane it is being read in.
+Past it the surface shows the bytes as they arrived **and says so** — a silent
+degrade the UI contradicts is how a feature that does not exist survives a
+release.
+
 ## Telling the user something happened: Toast
 
 **Toast** (`toast.tsx`) is the only notification affordance. An operation's outcome is

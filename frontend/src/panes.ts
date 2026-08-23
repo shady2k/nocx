@@ -23,12 +23,14 @@
 
 import type { WSClient } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
+import { WorkFinishedWatch } from './pane-work-finished'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import type { ProfileClient, SSHProfile } from './profiles'
 import { adoptAliasProfile, parseQuickConnect } from './profiles'
 import { resolveSshProfileOverlay } from './quick-connect-assembly'
 import { cardQuote } from './overview/overview-model'
+import { NotifyClient } from './notify-client'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
 import {
@@ -111,6 +113,20 @@ export class Pane implements PaneHost {
   private _groupKey = ''
   private _depth = 0
   private _agentStatus: AgentStatus | null = null
+  /** The settle window between "this pane looks idle" and "its work
+   *  finished" (nocx-n3nfg, notification design §3.4). The pane owns the
+   *  STATUS; the watch owns only the timer over it, so the two are not two
+   *  copies of one fact. Constructed unconditionally: a surface that is not
+   *  a terminal never produces a program title, so its watch never arms. */
+  private readonly _workWatch = new WorkFinishedWatch({
+    session: () => this.content.lineage?.()?.sessionId ?? null,
+    onFinished: (sessionId) => this.onWorkFinished?.(sessionId),
+  })
+  /** Where a settled pane is reported. Wired by PaneManager, which is the
+   *  half of this that holds a client — a Pane is chrome and asks nobody
+   *  anything. Read at FIRE time, so a pane whose reporting is rewired
+   *  mid-window reports through the new one. */
+  onWorkFinished: ((sessionId: string) => void) | null = null
   private _tooltip = ''
   private _subtitle = ''
   private _adoptable = false
@@ -428,6 +444,10 @@ export class Pane implements PaneHost {
 
   close(): void {
     this._disposed = true
+    // Cancel three of §3.4's four: the tab is going, so whatever it was
+    // about to say about itself is no longer true. The other three cancels
+    // are transitions and live in updateAgentStatus.
+    this._workWatch.cancel()
     this._mountAbort.abort()
     this._viewportObserver?.disconnect()
     this._viewportObserver = null
@@ -456,7 +476,21 @@ export class Pane implements PaneHost {
     if (this._disposed) return
     const next = detectAgentStatus(programTitle)
     if (next === this._agentStatus) return
+    const prev = this._agentStatus
     this._agentStatus = next
+    // The EDGE, not the value. detectAgentStatus is stateless and answers
+    // about one title; "work finished" is a transition held for a while,
+    // and pane-work-finished.ts is the state machine over it (design §3.4).
+    // The transition is handed over rather than re-derived there, so the
+    // pane's status keeps one owner.
+    //
+    // Nothing here asks whether the tab is active. Suppressing what the
+    // person is already looking at is the ROUTER's rule (design §6.1) and
+    // it owns it for every other source; deciding it a second time here
+    // would be a second owner of "where does this go" — and it would also
+    // silence the feed row, which is the half that exists precisely so a
+    // person can find out what they missed.
+    this._workWatch.edge(prev, next)
     if (next === 'idle' && !this._active) {
       this.markActivity()
     }
@@ -1252,6 +1286,28 @@ export class PaneManager {
     pane.setupViewportObserver()
 
     pane.onCloseRequested = () => void this.closePane(pane)
+    // A settled pane, reported to the pipeline (ADR-0029). Wired HERE and
+    // not in Pane for the same reason the close intent is: a Pane holds no
+    // client. Its OWN method, because kind is stamped from the method
+    // invoked — notify.paneWorkFinished is what makes this heuristic, and
+    // there is no argument here or on NotifyClient by which it could become
+    // a kind that reaches push.
+    //
+    // Fire-and-forget and fail-quiet, exactly as the bell is. Every refusal
+    // is final rather than retryable: the method missing means a backend
+    // built without the pipeline, and an unknown session means the pane
+    // reattached inside the settle window, which is a notification that
+    // should not happen rather than one to try again.
+    pane.onWorkFinished = (sessionId) => {
+      void new NotifyClient(this.client.dispatcher)
+        .paneWorkFinished({ sessionId })
+        .catch((err: unknown) => {
+          log.warn('nocx: finished work not reported', {
+            sid: sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+    }
     this.tabStrip.addPane(pane)
     if (activateNow) {
       void this.activate(pane)

@@ -6197,3 +6197,59 @@ func TestNotifyBell_DTOConformsToContract(t *testing.T) {
 		})
 	}
 }
+
+// ── notify.paneWorkFinished (nocx-n3nfg) ───────────────────────────────
+
+// TestNotifyPaneWorkFinished_DTOConformsToContract pins the Go struct
+// against contracts/notify.paneWorkFinished.schema.json in BOTH directions,
+// which is the only way `additionalProperties: false` plus an explicit
+// `required` is worth anything: the positive case says the DTO marshals to
+// something the schema accepts, and the refusals say the schema actually
+// refuses — a contract whose negative cases are untested has never been
+// shown to refuse a thing.
+//
+// The refusals are the wire half of the provenance rule, and for this method
+// they are the wire half of the TRUST rule too. It is the pipeline's only
+// heuristic source: design §3.1 confines heuristic to local attention and
+// forbids it push, and a record that could carry `trust` would be an
+// inference able to arrive claiming `attested` — with a push route and the
+// completion-subscription override behind it. `title` is the other one that
+// matters, and more here than for the bell: this source has text within
+// reach — the pane title the inference was drawn from — and that title is a
+// string a PROGRAM wrote.
+//
+// The over-the-socket half lives in ws_notify_pane_work_finished_test.go
+// beside the rest of the method's behaviour
+// (TestNotifyPaneWorkFinished_OverTheWireConformsToContract), the same place
+// notify.raise and notify.bell keep their own.
+func TestNotifyPaneWorkFinished_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.paneWorkFinished.schema.json")
+
+	raw, err := json.Marshal(notifyPaneWorkFinishedParams{SessionID: "0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "notify.paneWorkFinished params DTO")
+
+	refusals := map[string]any{
+		"sessionId absent":       map[string]any{},
+		"sessionId not a string": map[string]any{"sessionId": 7},
+		// Every field the backend stamps. A record that could carry one of
+		// these is a record whose provenance is validated rather than
+		// structural, which is the thing ADR-0029 §2.2 rules out.
+		"a title":        map[string]any{"sessionId": "s", "title": "⣿ Ваш банк: подтвердите вход"},
+		"a body":         map[string]any{"sessionId": "s", "body": "tap here"},
+		"a kind":         map[string]any{"sessionId": "s", "kind": "block.finished"},
+		"a trust":        map[string]any{"sessionId": "s", "trust": "attested"},
+		"a level":        map[string]any{"sessionId": "s", "level": "danger"},
+		"an attribution": map[string]any{"sessionId": "s", "attribution": map[string]any{"host": "h"}},
+		"an at":          map[string]any{"sessionId": "s", "at": "2026-08-23T00:00:00Z"},
+	}
+	for name, payload := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, mustMarshal(payload)); err == nil {
+				t.Fatalf("the contract accepts %s; it is not exact", name)
+			}
+		})
+	}
+}

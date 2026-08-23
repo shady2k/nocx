@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import {
   createRendererMock,
   resetSessionCounter,
@@ -18,6 +18,7 @@ import {
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
 import { Pane, PaneManager } from './panes'
+import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
 import {
@@ -1922,6 +1923,97 @@ describe('Tab agent-status channel (nocx-n8n82)', () => {
     // string) reaches this channel too and resets the status.
     tab.updateProgramTitle('')
     expect(tab.agentStatus).toBeNull()
+  })
+})
+
+// ── A pane whose work finished reports it (nocx-n3nfg, design §3.4) ─────
+//
+// The classifier's caller is where the settle window is fed, so this is
+// where the wiring is proven: a program title arriving on the channel a
+// real terminal pushes it on, and a report coming out the other end. The
+// window's own rules are pane-work-finished.test.ts's; what is asserted
+// here is that the two are connected and that closing the tab disconnects
+// them.
+//
+// Fake timers, and the interval is named from the module. Five real seconds
+// per case would be a test that depends on timing, which AGENTS.md forbids
+// because it is broken on a fast machine too.
+describe('a pane reports work that finished (nocx-n3nfg)', () => {
+  /** A pane content that is on a session, and can be taken off one. */
+  class SessionedContent extends CountingTestContent {
+    sessionId: string | null = 'sess-1'
+    lineage(): { sessionId: string; parentSessionId: string | null } | null {
+      if (this.sessionId === null) return null
+      return { sessionId: this.sessionId, parentSessionId: null }
+    }
+  }
+
+  function sessionedPane(): { pane: Pane; content: SessionedContent; reported: string[] } {
+    const content = new SessionedContent()
+    const pane = new Pane(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      1,
+      'tab-wire-work-finished',
+    )
+    const reported: string[] = []
+    pane.onWorkFinished = (sessionId) => reported.push(sessionId)
+    return { pane, content, reported }
+  }
+
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('reports the session once a spinner has given way to a settled idle title', () => {
+    const { pane, reported } = sessionedPane()
+
+    pane.updateProgramTitle('⣾ building')
+    pane.updateProgramTitle('✳ done')
+    expect(reported).toEqual([])
+
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS)
+    expect(reported).toEqual(['sess-1'])
+  })
+
+  it('reports nothing for a pane that was never working', () => {
+    // null → idle. A title that never mentioned an agent is not an idle
+    // agent, and this is the seam where the old caller got it wrong.
+    const { pane, reported } = sessionedPane()
+
+    pane.updateProgramTitle('~/src/nocx')
+    pane.updateProgramTitle('✳ done')
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS * 10)
+    expect(reported).toEqual([])
+  })
+
+  it('says nothing about a tab that has been closed', () => {
+    const { pane, reported } = sessionedPane()
+
+    pane.updateProgramTitle('⣾ building')
+    pane.updateProgramTitle('✳ done')
+    pane.close()
+
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS * 10)
+    expect(reported).toEqual([])
+  })
+
+  it('says nothing about a session the pane no longer has', () => {
+    const { pane, content, reported } = sessionedPane()
+
+    pane.updateProgramTitle('⣾ building')
+    pane.updateProgramTitle('✳ done')
+    // A reattach inside the window mints a new id (AD-7). The window was
+    // armed on the old one and speaks for that run of work or for nothing.
+    content.sessionId = 'sess-2'
+
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS * 10)
+    expect(reported).toEqual([])
   })
 })
 

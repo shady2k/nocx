@@ -197,11 +197,15 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 // ordinary lane: Raise is synchronous and can block on a sink invocation, so
 // neither may run on the read loop.
 //
-// There are two of them and there is one reason: kind is stamped from the
+// There are three of them and there is one reason: kind is stamped from the
 // method invoked, so a second SOURCE is a second METHOD (ws_notify_bell.go
-// says why at length). Anything that would let one method answer for both —
+// says why at length). Anything that would let one method answer for two —
 // a kind argument, a variant, a header — would put the caller in charge of
-// the field this design keeps off the wire.
+// the field this design keeps off the wire. notify.paneWorkFinished is the
+// third and it is where that rule earns the most: it is the only renderer-
+// callable source whose trust is heuristic, and the trust class is what
+// keeps an inference off push (design §3.1). A caller able to name its own
+// kind could have named a different one.
 func (s *WSServer) notifySpecs() []methodSpec {
 	return []methodSpec{
 		reg(s.lane, "notify.raise", params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -214,5 +218,6 @@ func (s *WSServer) notifySpecs() []methodSpec {
 			}.handleNotifyRaise
 		}),
 		s.notifyBellSpec(),
+		s.notifyPaneWorkFinishedSpec(),
 	}
 }

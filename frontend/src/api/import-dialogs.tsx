@@ -44,12 +44,28 @@ export interface PostmanImportDialogProps {
    *  field opens holding it, and the root by itself names a folder that is
    *  already there. */
   defaultRoot: string
-  /** The local session a drop on this ask belongs to, or null — null draws no
-   *  drop target, and so does a build whose composition root passed no drop
-   *  capability at all. The ask does not decide either half: whether there is
-   *  a Wails runtime is the build's, and which local tab is open is the pane
-   *  manager's. */
+  /** The local session a NATIVE drop on this ask belongs to, or null.
+   *
+   *  It addresses the Wails window's own drop and nothing else: Go reads the
+   *  session off the dropped-on element, and a target naming none is refused.
+   *  Null everywhere there is no Wails runtime — and the ask is not
+   *  diminished by it, because the browser's drop needs no session at all
+   *  (`onFiles` below). The ask decides neither half: which local tab is open
+   *  is the pane manager's, and whether Go can take a drop is the build's. */
   dropSession: string | null
+  /** True where this window hands drops to the BACKEND rather than to the
+   *  DOM — the Wails webview. It is not a build question the ask asks: it is
+   *  the capability it was handed, and the composition root read the runtime
+   *  once when it decided whether to hand one over (main.tsx). The kit needs
+   *  it to know whether a DOM drop would answer a gesture Go has already
+   *  taken (drop-zone.tsx). */
+  nativeWindow: boolean
+  /** The files a BROWSER drop or the region's file input yielded — the
+   *  general route, because bytes reach the backend wherever it runs while a
+   *  path names a file on the backend's own machine (spec §1a). Every file is
+   *  handed over; refusing several is this ask's own rule and is stated in
+   *  ONE place, beside the native half's refusal. */
+  onFiles?: (files: File[]) => void
   /** The backend's reason the last attempt was refused, or ''. */
   error: string
   busy: boolean
@@ -117,18 +133,34 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           api-pane.tsx, which is the same code path the export picker
           already goes through.
 
+          BOTH HALVES ARE HANDED IN AND THE ASK CHOOSES NEITHER. `dropSession`
+          addresses the native drop and `onFiles` takes the browser's bytes;
+          which of them can answer is the kit's question, asked once inside
+          DropZone, and asking it a second time here would be a second answer
+          to it. The region is drawn wherever
+          EITHER can — which is everywhere, and it used not to be: gated on a
+          Wails runtime and a live terminal session, the ask drew nothing at
+          all under `make dev-web` (nocx-1gfbw).
+
           Its picker control is handed `onBrowseFile` — the very handler the
           export field's trailing button below calls. Two controls, ONE
           derivation of "choose an export": a second one would agree with the
           first everywhere anybody looked and disagree about the proposed
           destination somewhere nobody did. Absent (no Wails file picker) the
-          region draws the drop half alone. */}
+          region offers the kit's own file input instead, whose answer is a
+          FILE and therefore goes to `onFiles`, where the drop goes. */}
       <DropZone
         target={API_IMPORT_DROP_TARGET}
         sessionId={props.dropSession}
         hint="Drop a Postman export here to import it"
         pickLabel="Or select a file"
+        // What the browser picker offers. The export is a JSON document
+        // (design §10, Postman v2.1), and it bounds the PICKER only — a drop
+        // can carry anything, which the backend refuses on its own terms.
+        accept="application/json,.json"
+        native={props.nativeWindow}
         onPick={props.onBrowseFile}
+        onFiles={props.onFiles}
       >
         {/* THE EXPORT HAS A PICKER TOO, and it is the same control in the same
           slot as the destination's below. Without it this field named a

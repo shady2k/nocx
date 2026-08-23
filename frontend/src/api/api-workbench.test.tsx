@@ -12,6 +12,7 @@
 // What is faked is exactly one thing: the eight api.* calls. Everything
 // between the click and the DOM — sidebar, registry, pane manager, pane
 // lifecycle, Solid root, kit components — is the real code.
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
@@ -1427,7 +1428,7 @@ describe('a Postman export is imported through an ask', () => {
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
     fireEvent.click(button('Import'))
     await vi.waitFor(() =>
-      expect(importPostman).toHaveBeenCalledWith('/w/acme.json', '/w/acme-api'),
+      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
     )
   })
 
@@ -1547,7 +1548,7 @@ describe('a Postman export is imported through an ask', () => {
     fireEvent.click(button('Import'))
 
     await vi.waitFor(() =>
-      expect(importPostman).toHaveBeenCalledWith('/w/acme.json', '/w/acme-api'),
+      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
     )
   })
 })
@@ -1781,7 +1782,11 @@ describe('the import ask accepts a drop', () => {
   // no Wails still has local sessions — `make dev-web` and the e2e harness
   // both do — so a target gated on the session alone would light up under a
   // drag there and then deliver nothing.
-  it('draws no drop target where there is no native drop at all', async () => {
+  it('names no NATIVE drop target where there is no Wails runtime', async () => {
+    // The attributes are what Wails reads off the dropped-on element, so
+    // without a runtime they would name a route nothing travels. The REGION
+    // is a different question and is drawn anyway — the browser half answers
+    // it (see the browser-drop block below).
     await openAskWithDrop(undefined)
 
     expect(importAskBody().querySelector('[data-file-drop-target]')).toBeNull()
@@ -1815,16 +1820,17 @@ describe('the import ask accepts a drop', () => {
     expect(isBelowRegion(field('api-import-postman-dest'))).toBe(true)
   })
 
-  it('draws no region, and no gap where it was, on a build with no native drop', async () => {
+  it('still draws the region on a build with no native drop — the browser half has one', async () => {
+    // This test asserted the opposite until nocx-1gfbw, and it was wrong the
+    // day it was written: the owner opened the ask at localhost:5180 and
+    // found no drop region at all. A browser drop carries the BYTES, which
+    // reach whichever machine the backend is on, so a build with no Wails is
+    // not a build with no drop.
     await openAskWithDrop(undefined)
 
     const zone = importAskBody().querySelector<HTMLElement>('.ui-drop-zone')!
-    expect(zone.querySelector('.ui-drop-zone__region')).toBeNull()
-    // And nothing stands between the body and the fields: the zone's first
-    // child IS the export field. The other half of "no gap" is `display:
-    // contents` on the wrapper, which jsdom cannot see — drop-zone.test.tsx
-    // reads the stylesheet for it.
-    expect(zone.firstElementChild?.contains(field('api-import-postman-file'))).toBe(true)
+    expect(zone.querySelector('.ui-drop-zone__region')).not.toBeNull()
+    expect(zone.hasAttribute('data-file-drop-target')).toBe(false)
   })
 
   it("the region's picker is the export field's picker — one capability, two controls", async () => {
@@ -1848,6 +1854,181 @@ describe('the import ask accepts a drop', () => {
     // assertion that the two controls are one capability rather than two.
     fireEvent.click(button('Choose export…'))
     await vi.waitFor(() => expect(openFile).toHaveBeenCalledTimes(2))
+  })
+})
+
+// ── The ask accepts a BROWSER drop, and imports the DOCUMENT ─────────────
+//
+// nocx-1gfbw. The drop region was gated on a Wails runtime AND an open local
+// terminal session, so `make dev-web` — where every contributor works and
+// where a browser user lives — drew nothing at all. Both conditions were
+// wrong (spec §1a): a browser drop carries `File` objects with BYTES, and
+// bytes reach whichever machine the backend runs on, while a PATH names a
+// file on the backend's machine and is right only when that machine is also
+// the person's. So the browser is the general case, not the degraded one,
+// and the import is not a terminal session's gesture.
+
+/** A DataTransfer jsdom does not have, carrying what a browser drop carries. */
+function browserTransfer(files: File[]): DataTransfer {
+  return { types: ['Files'], files } as unknown as DataTransfer
+}
+
+/** The gesture itself, on the ask's own zone. */
+function dropOnAsk(files: File[]): void {
+  const zone = importAskBody().querySelector<HTMLElement>('.ui-drop-zone')
+  if (!zone) throw new Error('the ask has no drop zone')
+  const e = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+  Object.defineProperty(e, 'dataTransfer', { value: browserTransfer(files) })
+  zone.dispatchEvent(e)
+}
+
+const EXPORT_TEXT = '{"info":{"name":"Acme"},"item":[]}'
+
+function exportFile(name: string, text = EXPORT_TEXT): File {
+  return new File([text], name, { type: 'application/json' })
+}
+
+/** The ask on a build with NO Wails at all — no native drop, no system
+ *  pickers. It is `make dev-web`, the e2e harness and every browser. */
+async function openBrowserAsk(over: Partial<ApiWorkbenchServices> = {}) {
+  const mounted = await mountApp({
+    listCollections: vi
+      .fn()
+      .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+    ...over,
+  })
+  await openImportAsk(mounted.bar)
+  return mounted
+}
+
+describe('the import ask accepts a browser drop', () => {
+  it('draws the region with no Wails runtime and no session whatever', async () => {
+    await openBrowserAsk()
+
+    const region = importAskBody().querySelector<HTMLElement>('.ui-drop-zone__region')
+    expect(region).not.toBeNull()
+    expect(region!.textContent).toMatch(/drop/i)
+    // And it names no terminal tab: the import writes to the BACKEND's disk
+    // and is not a session gesture, so borrowing a local tab's id here was
+    // the bug rather than the addressing (spec §1a).
+    expect(importAskBody().querySelector('.ui-drop-zone')!.hasAttribute('data-session-id')).toBe(
+      false,
+    )
+  })
+
+  it('takes a dropped file and imports it as the DOCUMENT, not as a path', async () => {
+    // The renderer holds the bytes and the backend may be on another host —
+    // `make dev-web` is documented as forwarding both ports over SSH — so
+    // the file's name is not a path anybody could open there.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    await openBrowserAsk({ importPostman })
+
+    dropOnAsk([exportFile('acme.postman_collection.json')])
+
+    // The gesture answers BOTH halves of the ask, exactly as the picker's
+    // answer does: what was chosen, and where its collection lands.
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('acme.postman_collection.json'),
+    )
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
+
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { document: EXPORT_TEXT },
+        '/data/collections/acme',
+      ),
+    )
+  })
+
+  it('refuses several dropped files with the sentence the native half uses', async () => {
+    // One import makes one collection, and N collections is N destinations.
+    // The same sentence because it is the same rule, derived once.
+    await openBrowserAsk()
+
+    dropOnAsk([exportFile('a.json'), exportFile('b.json')])
+
+    await vi.waitFor(() => expect(destError()).toMatch(/one export/i))
+    expect(field('api-import-postman-file').value).toBe('')
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/')
+  })
+
+  it('a file chosen with the kit input reaches the handler a dropped file reaches', async () => {
+    // ONE derivation of "here is the export". Two would agree everywhere
+    // anybody looked and disagree about the proposed destination somewhere
+    // nobody did.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    await openBrowserAsk({ importPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    expect(input).not.toBeNull()
+    const file = exportFile('acme.postman_collection.json')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('acme.postman_collection.json'),
+    )
+    expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
+
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { document: EXPORT_TEXT },
+        '/data/collections/acme',
+      ),
+    )
+  })
+
+  it('sends a TYPED path as a path, on the very same build', async () => {
+    // The two routes are chosen by what the gesture could answer with, never
+    // by what kind of build this is: a person naming a file on the backend's
+    // own machine still gets the path route in a browser.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    await openBrowserAsk({ importPostman })
+
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
+    )
+  })
+
+  it('forgets the document the moment a path is typed over it', async () => {
+    // Two sources for one field would be two owners of the answer, and the
+    // stale one wins by evaluation order: the person edits the field, and
+    // the import silently sends the bytes they replaced.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    await openBrowserAsk({ importPostman })
+
+    dropOnAsk([exportFile('acme.postman_collection.json')])
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe('acme.postman_collection.json'),
+    )
+    fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/other.json' } })
+    fireEvent.click(button('Import'))
+
+    // And the destination follows the new source, because nobody has typed
+    // into that field — the `nocx-6hg2w.14` rule, unchanged by any of this.
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { path: '/w/other.json' },
+        '/data/collections/other',
+      ),
+    )
+  })
+
+  it('is gated on no build question — neither file reads the Wails runtime', () => {
+    // The capability is what the GESTURE can answer with, never what kind of
+    // build this is. `hasWailsWebview()` has exactly one caller in this
+    // path — the kit's DropZone, deciding whether Go has already taken the
+    // drop — and the ask asking it again would be a second answer to a
+    // question that has an owner (AD-8).
+    for (const file of ['src/api/import-dialogs.tsx', 'src/api/api-pane.tsx']) {
+      expect(readFileSync(file, 'utf8')).not.toMatch(/hasWailsWebview/)
+    }
   })
 })
 

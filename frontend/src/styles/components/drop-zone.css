@@ -16,8 +16,15 @@
 
 /* Live, the wrapper becomes that column's inner stack. --space-4 is the
    dialog body's own gap: the region is one more thing in the stack, spaced
-   like the fields under it rather than like a banner stuck to them. */
-.ui-drop-zone[data-file-drop-target] {
+   like the fields under it rather than like a banner stuck to them.
+
+   `data-drop-live` and not `data-file-drop-target`: the region is drawn for
+   EITHER half — the native one, which is what that attribute names, or a
+   browser drop, which names no target because Wails is what reads it
+   (nocx-1gfbw). Keying the layout on the native attribute left the browser's
+   region as a `contents` child of the dialog body, outside the
+   `max-width: 100%` the body gives its own children. */
+.ui-drop-zone[data-drop-live] {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

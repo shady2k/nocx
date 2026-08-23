@@ -408,7 +408,7 @@ describe('ApiStore — import', () => {
       }),
       listCollections: list,
     })
-    await store.importPostman('/w/acme.json', '/w/acme-api')
+    await store.importPostman({ path: '/w/acme.json' }, '/w/acme-api')
     expect(list).toHaveBeenCalled()
     expect(store.notes().map((n) => n.what)).toEqual(['pre-request script'])
   })

@@ -26,10 +26,17 @@
  *
  * A stand with no Wails is not a degraded case here: it is the state every
  * contributor develops in, and `make dev-web` ships to a browser. So the ask
- * must be fully usable with nothing but a keyboard, and it must NOT advertise
- * a drop surface it cannot honour — a zone that highlights under a drag and
- * then delivers nothing has already promised. Absence is the capability, the
- * same rule the ask's two system pickers follow.
+ * must be fully usable with nothing but a keyboard — and it must offer the
+ * drop it CAN honour. That is the browser's own: a DOM drop carrying `File`
+ * objects with the bytes, which reach the backend wherever it runs, where a
+ * path only names a file on the machine running Go (spec §1a). What it must
+ * not advertise is the NATIVE route — `data-file-drop-target` and
+ * `data-session-id` are what Wails reads off the dropped-on element, and
+ * naming them here would name a route nothing travels.
+ *
+ * This file asserted the opposite until nocx-1gfbw — "no Wails runtime means
+ * no drop target" was read as "no drop", and the ask drew nothing at all at
+ * localhost:5180 where the owner opened it.
  *
  * ITS OWN BACKEND, like `api-testing.spec.ts` and `api-secret-in-path.spec.ts`
  * and for the same two reasons. The import writes a secret VALUE, so this run
@@ -225,31 +232,36 @@ test.describe('the import ask on a stand with no Wails', () => {
     ).toBeVisible({ timeout: 10_000 })
   })
 
-  test('no Wails runtime means no drop target, not a dead one', async ({ page }) => {
+  test('no Wails runtime still offers the drop the browser can honour', async ({ page }) => {
     const { ask } = await openTheAsk(page)
 
-    // The ask is really here and really usable — otherwise the absence below
-    // would pass on a dialog that never opened, which is the way an
+    // The ask is really here and really usable — otherwise the assertions
+    // below would pass on a dialog that never opened, which is the way an
     // absence assertion usually lies.
     await expect(page.locator('#api-import-postman-file')).toBeVisible()
 
-    // The zone IS rendered: the ask wears the kit's DropZone whatever the
-    // build, and what the build decides is whether it names itself a target.
     const zone = ask.locator('.ui-drop-zone')
     await expect(zone).toHaveCount(1)
 
-    // And it draws NOTHING: the region — the icon, the line naming the
-    // gesture and its picker button — is the affordance, and here it is
-    // absent rather than merely inert. A region inviting a drop that cannot
-    // arrive has already promised (nocx-9hb5g).
-    await expect(zone.locator('.ui-drop-zone__region')).toHaveCount(0)
+    // THE REGION IS DRAWN, and this spec asserted the opposite until
+    // nocx-1gfbw. A browser drop is a DOM event carrying the bytes, so this
+    // stand can honour one; the affordance saying so is the whole of what
+    // makes the gesture discoverable (nocx-9hb5g).
+    await expect(zone.locator('.ui-drop-zone__region')).toHaveCount(1)
 
-    // And it names nothing. `data-file-drop-target` is the attribute the
-    // backend reads off the dropped-on element, `data-session-id` is the tab
-    // it would be attributed to, and here there is no Wails to deliver either
-    // — so advertising them would be advertising a gesture that cannot
-    // arrive. Asserted on the whole page rather than inside the ask, because
-    // an api-import target anywhere is the same broken promise.
+    // And the picker beside it is the kit's file input, not the system one:
+    // `dialog.openFile` answers -32601 with no Wails, and what this build has
+    // instead yields a `File` — the same currency the drop yields, which is
+    // why both answers go to one handler.
+    await expect(zone.locator('.ui-file-input__native')).toHaveCount(1)
+
+    // What is still absent is the NATIVE route. `data-file-drop-target` is
+    // the attribute Wails reads off the dropped-on element and
+    // `data-session-id` is the tab it would be attributed to; there is no
+    // Wails here to read either, and the import is not a terminal session's
+    // gesture in any case (spec §1a). Asserted on the whole page rather than
+    // inside the ask, because an api-import target anywhere is the same
+    // broken promise.
     await expect(page.locator('[data-file-drop-target="api-import"]')).toHaveCount(0)
     await expect(zone).not.toHaveAttribute('data-session-id', /.*/)
   })

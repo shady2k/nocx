@@ -8,8 +8,9 @@
 //
 // One rule this file keeps rather than remembers. Design §13.1: opening a
 // collection mints a backend-held handle, and a ROOT is never accepted
-// again. Only `openCollection` and `importPostman` put a filesystem path on
-// the wire; every other method addresses a folder by that handle plus a path
+// again. Only `openCollection` and `importPostman` can put a filesystem path
+// on the wire — and the import only when the gesture answered with one
+// (ImportSource); every other method addresses a folder by that handle plus a path
 // RELATIVE to it. The Go side refuses a stray one strictly
 // (decodeAPIParams); this is the half that never spells one, and
 // api-client.test.ts asserts it across the whole surface rather than per
@@ -202,9 +203,13 @@ class ApiClient {
 
   /** Convert a Postman v2.1 export into a collection folder at `dest`, and
    *  answer what the conversion did NOT carry over — a result rather than a
-   *  log line, so a soft degrade is visible in the product. */
-  importPostman(path: string, dest: string): Promise<ApiImportPostmanResult> {
-    return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', { path, dest })
+   *  log line, so a soft degrade is visible in the product.
+   *
+   *  The export arrives as an ImportSource: a path on the backend's machine,
+   *  or the document itself. The two spread onto the params as the one field
+   *  each carries, so this method never has to know which is which. */
+  importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
+    return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', { ...source, dest })
   }
 
   /** Convert one pasted curl command line into a request. The line is
@@ -227,6 +232,29 @@ class ApiClient {
  * here decodes a payload.
  */
 type ChosenPath = { path: string }
+
+/**
+ * WHERE THE EXPORT AN IMPORT READS COMES FROM — the one question
+ * `api.import.postman` asks about its source, with two answers rather than
+ * one, chosen by what the gesture could answer with.
+ *
+ * `path` names a file on the BACKEND'S machine, which is the narrow case:
+ * `apicoll.DefaultRoot()` is `paths.DataDir()` of the process running Go,
+ * and `make dev-web` is documented as forwarding both ports over SSH, so
+ * that machine is not always the person's. Typed into the field, or handed
+ * over by the Wails window's own drop — where Go took the path off the
+ * runtime and the backend IS the person's machine.
+ *
+ * `document` is the export itself, and it is the general case: a browser
+ * drop and the kit's file input both yield bytes, and bytes reach a backend
+ * wherever it runs (spec §1a). `apiimport.ImportInto` already takes a
+ * READER; only `capability.ImportPostman` opened a file first.
+ *
+ * Never both. A union rather than two optional fields, because "a path AND a
+ * document" is a state with no meaning and the type is where it stops being
+ * expressible.
+ */
+export type ImportSource = { path: string } | { document: string }
 
 /**
  * The native directory picker, as this surface consumes it.
@@ -259,6 +287,12 @@ export type FilePicker = () => Promise<ChosenPath>
  * and the e2e harness — and that is a different question from whether this
  * window has a local session, which is why the port answers the session and
  * the composition root decides whether the port exists at all.
+ *
+ * ABSENT IS NOT "NO DROP" — it is the OTHER drop. Where there is no runtime a
+ * drop is an ordinary DOM event carrying `File` objects, and the workbench
+ * takes those and imports the document itself (ImportSource). This port is
+ * the route that answers with a PATH, and its presence is also how the
+ * surface knows a DOM drop belongs to Go rather than to it.
  *
  * There is no `onDrop` and cannot be one: in the Wails window the drop never
  * becomes a DOM event carrying a path, so the answer arrives as a
@@ -385,7 +419,7 @@ export interface ApiWorkbenchServices {
   ): Promise<ApiRequestSendResult>
   /** Stop the exchange running under a token this surface minted. */
   cancelRequest(token: string): Promise<ApiRequestCancelResult>
-  importPostman(path: string, dest: string): Promise<ApiImportPostmanResult>
+  importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
    * The SSH connections this window knows about, for an environment that
@@ -440,10 +474,12 @@ export interface ApiWorkbenchServices {
    * that never fires, when it does not.
    *
    * Optionality is the capability for a third time, and the cause here is
-   * neither picker's: there is no Wails runtime. A browser drop hands the
-   * renderer `File` objects with no location and `api.import.postman` takes a
-   * path, so a surface that advertised a drop target under `make dev-web` or
-   * the e2e harness would highlight under a drag and then deliver nothing.
+   * neither picker's: there is no Wails runtime. What that absence means has
+   * changed and the comment here said the older thing: a browser drop hands
+   * the renderer `File` objects with no location, and since
+   * `api.import.postman` also takes the DOCUMENT, no location is needed —
+   * bytes reach the backend wherever it runs. So the ask offers a drop under
+   * `make dev-web` too, and this port's absence selects which route it is.
    */
   nativeDrop?: NativeDropPort
 }
@@ -493,7 +529,7 @@ export function createApiWorkbenchServices(
     sendRequest: (handle, relPath, envRelPath, token) =>
       client.sendRequest(handle, relPath, envRelPath, token),
     cancelRequest: (token) => client.cancelRequest(token),
-    importPostman: (path, dest) => client.importPostman(path, dest),
+    importPostman: (source, dest) => client.importPostman(source, dest),
     importCurl: (line) => client.importCurl(line),
   }
 }

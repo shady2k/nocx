@@ -57,7 +57,7 @@ import { RequestCrumbs } from './request-crumbs'
 import { RequestEditor, RequestLine } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
-import type { DirectoryPicker, FilePicker, NativeDropPort } from './api-client'
+import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
 import type { ApiRoute } from './api-model'
 
 export interface ApiPaneProps {
@@ -84,10 +84,12 @@ export interface ApiPaneProps {
    * The native window drop, when the build has one.
    *
    * Absent wherever there is no Wails runtime, which is every `make dev-web`
-   * run and the whole e2e harness — a browser drop delivers `File` objects
-   * with no location, and `api.import.postman` takes a path. So the ask draws
-   * no drop surface there rather than one that highlights and delivers
-   * nothing.
+   * run and the whole e2e harness. That is no longer the same thing as "no
+   * drop": there the drop is a DOM event carrying the BYTES, which the ask
+   * takes and sends as a document (spec §1a). What this port carries is the
+   * other route — the paths Go took off the runtime — and its ABSENCE is
+   * also what tells the ask that a DOM drop is its own to act on
+   * (`nativeWindow`, below).
    */
   nativeDrop?: NativeDropPort
 }
@@ -97,6 +99,12 @@ export interface ApiPaneProps {
  *  a name-and-value row. */
 const MIN_TREE_WIDTH = 180
 const MIN_REQUEST_WIDTH = 320
+
+/** What a drop of several exports is told, in ONE place: the native half
+ *  and the browser half are the same rule — an import makes one collection,
+ *  and N collections is N destinations, which is a different question and
+ *  not one this ask can answer by guessing which of them was meant. */
+const MULTIPLE_EXPORTS_REFUSAL = 'Drop one export at a time — an import makes one collection.'
 
 /** The empty set a filtered tree is flattened against — one object rather
  *  than a new Set per read, because `rows()` runs on every keystroke. */
@@ -250,6 +258,21 @@ export function ApiPane(props: ApiPaneProps) {
 
   const [importing, setImporting] = createSignal(false)
   const [postmanFile, setPostmanFile] = createSignal('')
+  /**
+   * The export as a DOCUMENT rather than as a place — the file a browser
+   * drop or the kit's file input handed over, holding the bytes.
+   *
+   * It is what makes the import work at all when the backend is not on the
+   * person's machine: `srcPath` names a file on the machine running Go, and
+   * `make dev-web` is documented as forwarding both ports over SSH, so a
+   * path typed there names a file on the server (spec §1a).
+   *
+   * Null the moment a PATH is named instead — typed, picked or dropped
+   * natively — because two sources for one field would be two owners of the
+   * answer and the stale one would win by evaluation order: the person edits
+   * the field, and the import sends the bytes they had just replaced.
+   */
+  const [postmanDoc, setPostmanDoc] = createSignal<File | null>(null)
   const [postmanDest, setPostmanDest] = createSignal('')
   const [importRefused, setImportRefused] = createSignal('')
   /**
@@ -459,28 +482,77 @@ export function ApiPane(props: ApiPaneProps) {
   const browseForImportDest = (): void => browseInto(setPostmanDest, setImportRefused)
 
   /**
-   * Choose the EXPORT with the system picker, and propose where its
-   * collection lands.
+   * PROPOSE WHERE THE COLLECTION LANDS, from whatever named the export.
    *
-   * The proposal is the second half of the same gesture, and it is here
-   * rather than in the dialog because only this level knows both the chosen
-   * file and the backend's default location. It is skipped once somebody has
-   * typed a destination: a person who has said where the folder goes has
-   * said it, and a later pick that overwrote them would be the surface
-   * arguing.
+   * The second half of every one of these gestures — the picker's answer, a
+   * native drop's path, a browser drop's file — and one derivation of it, so
+   * that answering the ask one way cannot propose a different folder from
+   * answering it another. It is here rather than in the dialog because only
+   * this level knows both what was chosen and the backend's default location.
+   *
+   * It is skipped once somebody has typed a destination: a person who has
+   * said where the folder goes has said it, and a later pick that overwrote
+   * them would be the surface arguing.
+   *
+   * A NAME does as well as a path — `proposedDestination` takes the basename
+   * and then its stem, and a bare `acme.postman_collection.json` is already
+   * both (api-paths.ts).
    */
-  const chooseExport = (path: string): void => {
-    setPostmanFile(path)
+  const proposeDestination = (nameOrPath: string): void => {
     // Both reads below are READS AT A MOMENT rather than subscriptions —
-    // this runs from a click or a picker's answer, never from a render — so
-    // they are untracked: nothing here should re-run when the listing
-    // refreshes and rewrite a field somebody is typing into.
+    // this runs from a click, a picker's answer or a drop, never from a
+    // render — so they are untracked: nothing here should re-run when the
+    // listing refreshes and rewrite a field somebody is typing into.
     if (untrack(destTyped)) return
     const proposal = proposedDestination(
       untrack(() => store.defaultRoot()),
-      path,
+      nameOrPath,
     )
     if (proposal !== '') setPostmanDest(proposal)
+  }
+
+  /** Choose the EXPORT as a PLACE — typed, picked with the system picker, or
+   *  dropped into the Wails window, all three of which answer with a path on
+   *  the machine running Go. */
+  const chooseExport = (path: string): void => {
+    setPostmanFile(path)
+    // A path is the OTHER source, so whatever document was held stops being
+    // the answer the moment one is named — including when the person types
+    // over the name a drop left in the field.
+    setPostmanDoc(null)
+    proposeDestination(path)
+  }
+
+  /**
+   * THE EXPORT AS A DOCUMENT — a browser drop, or the kit's file input in the
+   * region beside it, both of which yield `File` objects.
+   *
+   * The same gesture as `chooseExport` above and answered the same way: what
+   * was chosen goes in the field, and the destination is proposed from it.
+   * What differs is the currency — bytes rather than a location — and that is
+   * the whole of the difference, because bytes reach a backend wherever it
+   * runs while a path only names a file on the machine running Go.
+   *
+   * The field shows the file's NAME. It is not a path and is never sent as
+   * one: the document route is chosen by what this gesture answered with, so
+   * `importPostman` below spells `{ document }` and never `{ path }` while a
+   * file is held. The name is there because it is what the person recognises
+   * from their downloads folder, and because the destination is proposed from
+   * its stem exactly as it is from a path's.
+   */
+  const chooseDocument = (files: File[]): void => {
+    if (files.length > 1) {
+      // The same rule and the same sentence as the native half below: one
+      // import makes one collection, and N collections is N destinations.
+      setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
+      return
+    }
+    const file = files[0]
+    if (file === undefined) return
+    setImportRefused('')
+    setPostmanFile(file.name)
+    setPostmanDoc(file)
+    proposeDestination(file.name)
   }
 
   const browseForExport = (): void => {
@@ -518,7 +590,7 @@ export function ApiPane(props: ApiPaneProps) {
           // One import makes one collection, and N collections is N
           // destinations — a different question, and not one this ask can
           // answer by guessing which of them was meant.
-          setImportRefused('Drop one export at a time — an import makes one collection.')
+          setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
           return
         }
         const path = p.sources[0]?.localPath
@@ -560,6 +632,7 @@ export function ApiPane(props: ApiPaneProps) {
 
   const askForImport = (): void => {
     setPostmanFile('')
+    setPostmanDoc(null)
     // OUR FOLDER, before anything is chosen. `proposedDestination` completes
     // this to <defaultRoot>/<stem> the moment a source is named, but until
     // then the field said nothing at all and its placeholder said
@@ -854,10 +927,23 @@ export function ApiPane(props: ApiPaneProps) {
   const importPostman = (): void => {
     const file = postmanFile().trim()
     const dest = postmanDest().trim()
-    if (file === '' || dest === '') return
+    const doc = postmanDoc()
+    if ((doc === null && file === '') || dest === '') return
     setImportingBusy(true)
-    void store
-      .importPostman(file, dest)
+    // WHICH ROUTE IS DECIDED BY WHAT THE GESTURE ANSWERED WITH, never by
+    // what kind of build this is: a held document goes as bytes, a named
+    // place goes as a path, and a person naming a file on the backend's own
+    // machine gets the path route in a browser too (api-client.ts,
+    // ImportSource).
+    //
+    // Reading the file can fail — it may have moved, or been revoked —
+    // between the drop and the press, so the read is INSIDE the chain and
+    // its refusal goes where the backend's own refusals go: under the field,
+    // with the ask still open.
+    const source: Promise<ImportSource> =
+      doc !== null ? doc.text().then((document) => ({ document })) : Promise.resolve({ path: file })
+    void source
+      .then((chosen) => store.importPostman(chosen, dest))
       .then(async (): Promise<void> => {
         const refused = store.error()
         setImportRefused(refused)
@@ -872,6 +958,9 @@ export function ApiPane(props: ApiPaneProps) {
           return
         }
         showToast({ level: 'success', message: `Imported into ${dest}` })
+      })
+      .catch((err: unknown) => {
+        setImportRefused(err instanceof Error ? err.message : String(err))
       })
       .finally(() => {
         setImportingBusy(false)
@@ -1109,6 +1198,13 @@ export function ApiPane(props: ApiPaneProps) {
           }}
           defaultRoot={store.defaultRoot()}
           dropSession={nativeDrop?.session() ?? null}
+          // Whether the WINDOW takes drops natively — a different question from
+          // whether a session is open for one to be attributed to. The
+          // capability IS the answer: the composition root builds this port
+          // only where there is a Wails runtime (main.tsx), so no surface here
+          // asks that runtime a second time.
+          nativeWindow={nativeDrop !== undefined}
+          onFiles={chooseDocument}
           error={importRefused()}
           busy={importingBusy()}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}

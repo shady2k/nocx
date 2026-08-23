@@ -152,9 +152,31 @@ describe('ApiClient — one method per contract', () => {
 
   it('imports a Postman export from a path into a destination', async () => {
     const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
-    await createApiWorkbenchServices(dispatcher).importPostman('/w/acme.json', '/w/acme-api')
+    await createApiWorkbenchServices(dispatcher).importPostman(
+      { path: '/w/acme.json' },
+      '/w/acme-api',
+    )
     expect(call).toHaveBeenCalledWith('api.import.postman', {
       path: '/w/acme.json',
+      dest: '/w/acme-api',
+    })
+  })
+
+  it('imports the DOCUMENT itself when that is what the gesture answered with', async () => {
+    // A browser drop and the kit's file input hold bytes and no location, and
+    // the backend is not always on the person's machine (spec §1a). The two
+    // routes are one method: exactly one source field goes on the wire, so a
+    // backend reading `path` cannot also be handed a document.
+    const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
+    await createApiWorkbenchServices(dispatcher).importPostman(
+      { document: '{"info":{"name":"Acme"}}' },
+      '/w/acme-api',
+    )
+    // Exactly these params: `toHaveBeenCalledWith` is an equality on the
+    // whole object, so this is also the assertion that no `path` went out
+    // beside the document — the union is what keeps that unexpressible.
+    expect(call).toHaveBeenCalledWith('api.import.postman', {
+      document: '{"info":{"name":"Acme"}}',
       dest: '/w/acme-api',
     })
   })
@@ -196,7 +218,7 @@ describe('ApiClient — every call has a test where it fails', () => {
     ['bindSecret', (s) => s.bindSecret('h1', 'environments/dev.json', 'token', 'v')],
     ['sendRequest', (s) => s.sendRequest('h1', 'a.json', 'environments/dev.json', 'run-1')],
     ['cancelRequest', (s) => s.cancelRequest('run-1')],
-    ['importPostman', (s) => s.importPostman('/w/a.json', '/w/b')],
+    ['importPostman', (s) => s.importPostman({ path: '/w/a.json' }, '/w/b')],
     ['importCurl', (s) => s.importCurl('curl https://a')],
   ]
 

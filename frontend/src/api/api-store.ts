@@ -43,7 +43,7 @@
 // nineteen above it.
 
 import { createSignal, untrack } from 'solid-js'
-import type { ApiConnection, ApiWorkbenchServices } from './api-client'
+import type { ApiConnection, ApiWorkbenchServices, ImportSource } from './api-client'
 import type { FilesChanged } from '../generated/files.changed'
 import {
   adoptCreatedCollection,
@@ -388,7 +388,11 @@ export interface ApiStore {
    *  re-list so the picker names what is now on disk. */
   writeEnvironment(relPath: string, environment: ApiEnvironment): Promise<void>
   importCurl(line: string): Promise<void>
-  importPostman(path: string, dest: string): Promise<void>
+  /** Convert an export into a collection folder at `dest`. The export is an
+   *  ImportSource — a path on the backend's machine, or the document itself
+   *  — because a browser drop and the kit's file input hold BYTES and no
+   *  location, and bytes reach a backend wherever it runs (api-client.ts). */
+  importPostman(source: ImportSource, dest: string): Promise<void>
   setRunView(id: number, view: ApiRunView): void
 }
 
@@ -1288,9 +1292,9 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
   }
 
-  const importPostman = async (path: string, dest: string): Promise<void> => {
+  const importPostman = async (source: ImportSource, dest: string): Promise<void> => {
     try {
-      const result = await services.importPostman(path, dest)
+      const result = await services.importPostman(source, dest)
       // Both importers' "what did not come across" is one vocabulary — a
       // feature named, and why — so the surface holds one list of them.
       const carried: ApiImportNote[] = result.unsupported satisfies PostmanNote[]

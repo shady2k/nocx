@@ -42,6 +42,14 @@ var ErrRootChanged = errors.New("apicoll: the collection folder has been replace
 // ErrRequestNotFound — nothing at that path inside the collection.
 var ErrRequestNotFound = errors.New("apicoll: no such request in the collection")
 
+// ErrRequestExists — a move's destination already holds a request file of
+// that name. Refused rather than overwritten, which is the rule every
+// create on this surface follows, and it is THE one this package cannot
+// paper over: the move is a rename, and a rename that replaced the
+// destination would be the second copy of one file that the method exists
+// to forbid.
+var ErrRequestExists = errors.New("apicoll: a request with that name is already there")
+
 // ErrMalformedRequest — the file exists and is not a request. It is named, so
 // that one bad file is a bad file rather than a collection that will not open.
 var ErrMalformedRequest = errors.New("apicoll: request file is malformed")

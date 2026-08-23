@@ -40,6 +40,15 @@ type Service interface {
 	// property being asserted: a caller that cannot name a file cannot
 	// delete one.
 	DeleteRequest(h HandleID, relPath string) error
+	// MoveRequest moves one request file to another path inside the SAME
+	// collection, and answers the new relPath. It is on Service for
+	// DeleteRequest's reason — it is addressed by the handle plus two paths
+	// relative to it, so §13.1 holds — and it is ONE operation: a
+	// no-replace rename, never a write-then-delete, so the file is at
+	// exactly one of the two paths from before the call until after it.
+	// The destination folder must already exist; making one is
+	// CreateFolder's job.
+	MoveRequest(h HandleID, fromRelPath, toRelPath string) (string, error)
 	// CreateFolder makes one folder inside the collection: a NAME, and the
 	// EXISTING folder to put it in ("" is the root). It is here for
 	// DeleteRequest's reason — it is addressed by the handle plus a path

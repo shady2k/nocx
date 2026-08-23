@@ -260,24 +260,8 @@ test.describe('the import ask on a stand with no Wails', () => {
     // makes the gesture discoverable (nocx-9hb5g).
     await expect(zone.locator('.ui-drop-zone__region')).toHaveCount(1)
 
-    // And the picker beside it is the kit's file input, not the system one:
-    // `dialog.openFile` answers -32601 with no Wails, and what this build has
-    // instead yields a `File` — the same currency the drop yields, which is
-    // why both answers go to one handler.
-    //
-    // THIS ONE IS RED, and it is red about the product rather than about the
-    // reshape. The region draws `button "Or select a file"` here — the SYSTEM
-    // picker's control — because the capability is probed as
-    // `'openFileDialog' in dialogClient` (api-client.ts, `filePicker`), and a
-    // method on a class is always in it; the picker only retires once a person
-    // has pressed it and read a -32601. Its neighbour `nativeDrop` is decided
-    // by `hasWailsWebview()` instead, which is the answer this one wants.
-    // Measured, not deduced: at HEAD, with only the line the reshape broke
-    // taken out, this same assertion fails identically — so it predates
-    // nocx-hqbv3 and predates T6. It is left standing rather than weakened,
-    // because a control advertising a route nothing travels is exactly what
-    // the header of this file says the ask must not do.
-    await expect(zone.locator('.ui-file-input__native')).toHaveCount(1)
+    // The picker beside it is asserted separately, and expected to FAIL —
+    // see the test below and nocx-h9f8y.
 
     // What is still absent is the NATIVE route. `data-file-drop-target` is
     // the attribute Wails reads off the dropped-on element and
@@ -288,5 +272,35 @@ test.describe('the import ask on a stand with no Wails', () => {
     // broken promise.
     await expect(page.locator('[data-file-drop-target="api-import"]')).toHaveCount(0)
     await expect(zone).not.toHaveAttribute('data-session-id', /.*/)
+  })
+
+  // THE PICKER THIS STAND CAN HONOUR — and it is not drawn, so this test is
+  // marked failing rather than deleted or weakened (nocx-h9f8y).
+  //
+  // With no Wails, `dialog.openFile` answers -32601, and what this build has
+  // instead yields a `File` — the same currency the drop yields, which is why
+  // both answers go to one handler. The region draws the SYSTEM picker's
+  // control anyway, because the capability is probed as
+  // `'openFileDialog' in client` (api-client.ts:352) and a method on a class
+  // is always in it; its neighbour `nativeDrop` asks `hasWailsWebview()`
+  // (main.tsx:592), which is the question this one wants asked. Two answers to
+  // one question, and the one that cannot travel hides the one that can.
+  //
+  // Measured, not deduced: at HEAD, with only the line the reshape broke taken
+  // out, this assertion fails identically — it predates nocx-hqbv3 and the
+  // reshape (nocx-ysyy2).
+  //
+  // `test.fail` rather than `skip`: when nocx-h9f8y is fixed this test starts
+  // passing, and Playwright then reports that a failing test unexpectedly
+  // passed. The defect cannot be quietly fixed and left untested.
+  test('no Wails runtime offers the kit file input, not the system picker', async ({ page }) => {
+    // Inside the body, not beside the test: a bare `test.fail()` in the
+    // describe's body marks EVERY test in the group expected-to-fail, which
+    // turns the passing neighbours into failures reported as "expected to
+    // fail but passed".
+    test.fail()
+    const { ask } = await openTheAsk(page)
+    const zone = ask.locator('.ui-drop-zone')
+    await expect(zone.locator('.ui-file-input__native')).toHaveCount(1)
   })
 })

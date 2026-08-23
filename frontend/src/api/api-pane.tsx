@@ -119,6 +119,11 @@ const MULTIPLE_EXPORTS_REFUSAL = 'Drop one export at a time — an import makes 
 const NOT_AN_EXPORT_REFUSAL =
   "That is not a Postman export or a URL — paste the export's text, or drop the file below."
 
+/** A fetch that leaves from this machine. One object rather than a literal
+ *  per site, because "direct" is one state and three spellings of it is
+ *  three states that agree until they do not. */
+const DIRECT_ROUTE: ApiRoute = { kind: 'direct', profileId: '', insecureTls: false }
+
 /**
  * The one source the import ask is holding.
  *
@@ -349,6 +354,19 @@ export function ApiPane(props: ApiPaneProps) {
   /** Whether the destination is open as a FIELD. False is the summary line;
    *  the pencil is what changes it, and `askForImport` puts it back. */
   const [editingDest, setEditingDest] = createSignal(false)
+  /**
+   * HOW THE FETCH TRAVELS, and it exists only because one of the four
+   * entrances is a URL: that is the source the BACKEND goes and gets, so it
+   * is the only one with a network between the person and the document. An
+   * export served inside a network reachable only through a bastion was
+   * askable for and unfetchable before this, and the collection it minted
+   * would have carried `direct` into every request under it (nocx-zz3cy).
+   *
+   * Direct is the resting state and is spelled out rather than left as a
+   * blank, so the picker and the call meet one spelling of one state — but
+   * it is never SENT as a key: see `importPostman` below.
+   */
+  const [importRoute, setImportRoute] = createSignal<ApiRoute>(DIRECT_ROUTE)
   const [postmanDest, setPostmanDest] = createSignal('')
   const [importRefused, setImportRefused] = createSignal('')
   /**
@@ -666,6 +684,10 @@ export function ApiPane(props: ApiPaneProps) {
     setPostmanSource({ kind: 'none' })
     clearPaste()
     setImportRefused('')
+    // The route belonged to the source that travelled. Letting it stand
+    // would leave a connection chosen for a URL nobody is importing any
+    // more, ready to ride out with the next one unasked.
+    setImportRoute(DIRECT_ROUTE)
   }
 
   /**
@@ -783,6 +805,12 @@ export function ApiPane(props: ApiPaneProps) {
     // it is an offer, and an ask that opened with the field already out
     // would be asking the question the reshape removed.
     setEditingDest(false)
+    setImportRoute(DIRECT_ROUTE)
+    // Read on every open, the same reason `openEnvironments` reads them: a
+    // person may have added the connection they are about to fetch through
+    // since the panel started. Absent on a build with no profile store, and
+    // the store's own method is what knows that (api-store.ts).
+    void store.loadConnections()
     // OUR FOLDER, before anything is chosen. `proposedDestination` completes
     // this to <defaultRoot>/<stem> the moment a source is named, but until
     // then the field said nothing at all and its placeholder said
@@ -1074,6 +1102,19 @@ export function ApiPane(props: ApiPaneProps) {
    * sentence, because the person must never read "Imported into X" while X
    * is not in the tree.
    */
+  /**
+   * A URL, with the route it travels only when there IS one.
+   *
+   * The direct case omits the key rather than spelling `route: undefined`:
+   * the Go side decodes strictly and an absent route already reads as
+   * direct, so a key holding nothing is a third spelling of a state that has
+   * two — and the one the decoder refuses.
+   */
+  const urlSource = (url: string): ImportSource => {
+    const route = importRoute()
+    return route.kind === 'connection' ? { url, route } : { url }
+  }
+
   const importPostman = (): void => {
     const dest = postmanDest().trim()
     const held = postmanSource()
@@ -1098,7 +1139,7 @@ export function ApiPane(props: ApiPaneProps) {
               ? { path: held.path }
               : held.kind === 'document'
                 ? { document: held.text }
-                : { url: held.url },
+                : urlSource(held.url),
           )
     void source
       .then((chosen) => store.importPostman(chosen, dest))
@@ -1352,6 +1393,10 @@ export function ApiPane(props: ApiPaneProps) {
           pasteRefusal={pasteRefused()}
           sourceLabel={sourceLabel(postmanSource())}
           onClearSource={clearSource}
+          sourceIsURL={postmanSource().kind === 'url'}
+          connections={store.connections()}
+          route={importRoute()}
+          onRoute={setImportRoute}
           file={sourcePath(postmanSource())}
           dest={postmanDest()}
           editingDest={editingDest()}

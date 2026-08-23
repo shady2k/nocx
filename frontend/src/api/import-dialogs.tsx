@@ -28,9 +28,13 @@ import { Show } from 'solid-js'
 import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
 import { DropZone } from '../ui/drop-zone'
+import { Field } from '../ui/field'
 import { IconButton } from '../ui/icon-button'
 import { CloseIcon, FolderOpenIcon, PencilIcon } from '../ui/icons'
+import { Select } from '../ui/select'
 import { TextField } from '../ui/text-field'
+import type { ApiConnection } from './api-client'
+import type { ApiRoute } from './api-model'
 
 /** This ask's name in `data-file-drop-target`. Exported so the element that
  *  carries it and the subscriber that filters on it read one constant — two
@@ -66,6 +70,33 @@ export interface PostmanImportDialogProps {
    */
   sourceLabel: string
   onClearSource: () => void
+  /**
+   * Whether the held source is a URL — the one source the BACKEND goes and
+   * gets, and therefore the only one that travels anywhere. A path is read
+   * where Go runs; a pasted export and a dropped file are already in hand.
+   * Nothing that does not travel can be asked which connection it travels
+   * through, which is why the picker below hangs off this and not off
+   * "is this ask holding something".
+   *
+   * A boolean rather than the held source's KIND, because that union has one
+   * owner (api-pane.tsx, `HeldSource`) and a second spelling of its members
+   * here would be a second answer to what the ask is holding.
+   */
+  sourceIsURL: boolean
+  /**
+   * The connections a fetch may travel through, in the order the store holds
+   * them. Handed in, never fetched: the workbench already reads them for the
+   * environment editor, and an ask that read them a second time would be a
+   * second owner of the same list.
+   *
+   * Empty is the ordinary state of a build with no profile store —
+   * `listConnections` is optional and its absence IS the capability — and
+   * the picker then offers the one answer there is.
+   */
+  connections: readonly ApiConnection[]
+  /** How the fetch travels, as the route the import will carry. */
+  route: ApiRoute
+  onRoute: (route: ApiRoute) => void
   /** Where the export lands. Still the field's value, still typed into by
    *  the same handler — what changed is that it is only SHOWN once somebody
    *  asks to change it. */
@@ -209,6 +240,39 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         onInput={props.onPaste}
         autoFocus
       />
+      {/* AND, FOR A URL, WHICH CONNECTION IT TRAVELS THROUGH. Only a URL is
+          FETCHED, so only a URL has a route: the other three sources are
+          already where the backend can read them. The picker appears with
+          the URL and goes again with it, because a control that outlived the
+          source it governs would be offering an answer to a question nobody
+          is being asked.
+
+          The grammar is environment-view.tsx's, deliberately — "Direct"
+          plus one option per connection, the id as the value and the name as
+          the label, in the store's order. Where there are no connections
+          only Direct is drawn, exactly as the route control next door
+          reduces to "This machine": one vocabulary for one concept, because
+          a second spelling of "route through a connection" is two answers
+          that agree until they do not. */}
+      <Show when={props.sourceIsURL}>
+        <Field for="api-import-route" label="Fetch through">
+          <Select
+            id="api-import-route"
+            ariaLabel="The connection this fetch goes through"
+            value={props.route.kind === 'connection' ? props.route.profileId : ''}
+            onChange={(profileId) =>
+              props.onRoute(
+                profileId === ''
+                  ? { kind: 'direct', profileId: '', insecureTls: false }
+                  : { kind: 'connection', profileId, insecureTls: false },
+              )
+            }
+            options={props.connections.map((c) => ({ value: c.id, label: c.name }))}
+            placeholder="Direct"
+            placeholderValue=""
+          />
+        </Field>
+      </Show>
       {/* THE ASK IS A DROP TARGET, AND SAYS SO AT REST. It is the BODY that carries the
           attributes rather than the `<dialog>`: the kit's Dialog does not
           forward arbitrary `data-*`, and reaching past it to stamp them on

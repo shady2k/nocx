@@ -17,7 +17,12 @@ import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import type { SingletonKey, SurfaceType } from '../pane-content'
 import { ApiPane } from './api-pane'
 import { createApiStore, type ApiStore } from './api-store'
-import type { ApiWorkbenchServices, DirectoryPicker, FilePicker } from './api-client'
+import type {
+  ApiWorkbenchServices,
+  DirectoryPicker,
+  FilePicker,
+  NativeDropPort,
+} from './api-client'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────────
 
@@ -41,12 +46,17 @@ export class ApiContent extends SolidPaneContent {
    *  own, and a surface that read one capability for both would draw a
    *  control it cannot honour. */
   private readonly openFile?: FilePicker
+  /** The native window drop, when this build has one. Held beside the
+   *  pickers and never merged with them: no Wails runtime means no drop, and
+   *  that is independent of whether either picker exists. */
+  private readonly nativeDrop?: NativeDropPort
 
   constructor(services: ApiWorkbenchServices) {
     super()
     this.store = createApiStore(services)
     this.openDirectory = services.openDirectory
     this.openFile = services.openFile
+    this.nativeDrop = services.nativeDrop
   }
 
   renderContent(root: HTMLElement): () => void {
@@ -56,6 +66,7 @@ export class ApiContent extends SolidPaneContent {
           store: this.store,
           openDirectory: this.openDirectory,
           openFile: this.openFile,
+          nativeDrop: this.nativeDrop,
         }),
       root,
     )

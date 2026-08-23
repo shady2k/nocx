@@ -34,6 +34,7 @@ import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesWatchResult } from '../generated/files.watch'
 import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesChanged } from '../generated/files.changed'
+import type { FilesDropped } from '../generated/files.dropped'
 import type { ApiEnvironment, ApiRequest } from './api-model'
 
 class ApiClient {
@@ -250,6 +251,29 @@ export type DirectoryPicker = () => Promise<ChosenPath>
 export type FilePicker = () => Promise<ChosenPath>
 
 /**
+ * The native window drop, as the workbench needs it.
+ *
+ * A THIRD optional capability beside the two pickers, and separate from them
+ * for the reason they are separate from each other: each can be absent on its
+ * own. This one is absent whenever there is no Wails runtime — `make dev-web`
+ * and the e2e harness — and that is a different question from whether this
+ * window has a local session, which is why the port answers the session and
+ * the composition root decides whether the port exists at all.
+ *
+ * There is no `onDrop` and cannot be one: in the Wails window the drop never
+ * becomes a DOM event carrying a path, so the answer arrives as a
+ * `files.dropped` notification.
+ */
+export interface NativeDropPort {
+  /** The local session a drop belongs to, READ AT CALL TIME — a latched id
+   *  outlives its tab, and the backend refuses a target naming a session it
+   *  does not have open. */
+  session(): string | null
+  /** files.dropped. Returns the unsubscribe. */
+  subscribe(handler: (p: FilesDropped) => void): () => void
+}
+
+/**
  * Bind the directory picker off the dialog client, when the build has one.
  *
  * `dialog.openDirectory` and its client method are the OTHER half of this
@@ -411,6 +435,17 @@ export interface ApiWorkbenchServices {
    * quietly stopped following the disk.
    */
   watchCollections?: CollectionWatchPort
+  /**
+   * The native window drop, when this build has one — and ABSENT, not a port
+   * that never fires, when it does not.
+   *
+   * Optionality is the capability for a third time, and the cause here is
+   * neither picker's: there is no Wails runtime. A browser drop hands the
+   * renderer `File` objects with no location and `api.import.postman` takes a
+   * path, so a surface that advertised a drop target under `make dev-web` or
+   * the e2e harness would highlight under a drag and then deliver nothing.
+   */
+  nativeDrop?: NativeDropPort
 }
 
 /** One connection an environment may route through: the id the route
@@ -434,6 +469,7 @@ export function createApiWorkbenchServices(
   watchCollections?: CollectionWatchPort,
   listConnections?: () => Promise<readonly ApiConnection[]>,
   files?: FilePicker,
+  nativeDrop?: NativeDropPort,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
@@ -441,6 +477,7 @@ export function createApiWorkbenchServices(
     ...(files ? { openFile: files } : {}),
     ...(watchCollections ? { watchCollections } : {}),
     ...(listConnections ? { listConnections } : {}),
+    ...(nativeDrop ? { nativeDrop } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),

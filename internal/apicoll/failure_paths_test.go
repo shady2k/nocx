@@ -77,13 +77,14 @@ func TestOpen_AnUnlistableFolderIsReportedNotAnsweredAsEmpty(t *testing.T) {
 	chmodDir(t, root, 0o300) // write + traverse, no read: openable, not listable
 
 	svc := newService()
-	h, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		if errors.Is(err, ErrNoManifest) {
 			t.Errorf("an unlistable folder was reported as having no manifest: %v", err)
 		}
 		return // reported as an error: that is one honest answer
 	}
+	h, coll := op.Handle, op.Collection
 	if len(coll.Requests) == 0 && len(coll.Malformed) == 0 {
 		t.Fatal("Open answered with an EMPTY collection for a folder it could not list; " +
 			"the request that is still on disk was reported as absent")
@@ -104,7 +105,7 @@ func TestOpen_AFolderThatCannotBeTraversedIsReported(t *testing.T) {
 	root := seedCollection(t)
 	chmodDir(t, root, 0o000)
 
-	if _, _, err := newService().Open(root); err == nil {
+	if _, err := newService().Open(root); err == nil {
 		t.Fatal("Open succeeded on a folder this process cannot read at all")
 	} else if errors.Is(err, ErrNoManifest) {
 		t.Errorf("an unreadable folder was reported as having no manifest: %v", err)
@@ -118,7 +119,7 @@ func TestOpen_ListsTheFolderOnceItIsReadable(t *testing.T) {
 	skipIfRoot(t)
 	root := seedCollection(t)
 	chmodDir(t, root, 0o000)
-	if _, _, err := newService().Open(root); err == nil {
+	if _, err := newService().Open(root); err == nil {
 		t.Fatal("Open succeeded on an unreadable folder; the pair below would prove nothing")
 	}
 
@@ -127,10 +128,11 @@ func TestOpen_ListsTheFolderOnceItIsReadable(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 	svc := newService()
-	h, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open on a readable folder: %v", err)
 	}
+	h, coll := op.Handle, op.Collection
 	if len(coll.Requests) != 1 || coll.Requests[0].RelPath != "req.json" {
 		t.Fatalf("Requests = %+v, want the one request on disk", coll.Requests)
 	}
@@ -153,10 +155,11 @@ func TestWriteRequest_ReportsAReadOnlyFolder(t *testing.T) {
 	skipIfRoot(t)
 	root := seedCollection(t)
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	chmodDir(t, root, 0o500) // read + traverse, no write
 
 	if err := svc.WriteRequest(h, "new.json", Request{ID: "2", Name: "two", Method: "GET", URL: "http://x/b"}); err == nil {
@@ -174,10 +177,11 @@ func TestWriteRequest_WritesOnceTheFolderIsWritableAgain(t *testing.T) {
 	skipIfRoot(t)
 	root := seedCollection(t)
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	r := Request{ID: "2", Name: "two", Method: "GET", URL: "http://x/b"}
 
 	chmodDir(t, root, 0o500)
@@ -217,10 +221,11 @@ func TestOperations_ReportARootReplacedByASymlinkToTheSameDirectory(t *testing.T
 	writeFile(t, root, "req.json", requestJSON("1", "one", "GET", "http://x/a"))
 
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 
 	// Move the real directory aside and put a symlink to it at the name.
 	real := filepath.Join(parent, "real")
@@ -254,10 +259,11 @@ func TestHandle_IsUsableUntilTheRootChangesAndNotAfterwards(t *testing.T) {
 	writeFile(t, root, "req.json", requestJSON("1", "one", "GET", "http://x/a"))
 
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 
 	// The open end: every method answers, repeatedly, while nothing moves.
 	for i := 0; i < 3; i++ {

@@ -10,13 +10,17 @@
  */
 
 /**
- * Result of the api.collections.open JSON-RPC method: the backend-minted handle for the opened folder, and the collection as it is on disk. This is the ONLY api.* result carrying a handle the caller did not already have, because api.collections.open is the only method that accepts a root — every later call names this handle and a path relative to it, and a root is never accepted again (design §13.1).
+ * Result of the api.collections.open JSON-RPC method: the backend-minted handle for the opened folder, whether this call is what opened it, and the collection as it is on disk. This is the ONLY api.* result carrying a handle the caller did not already have, because api.collections.open is the only method that accepts a root — every later call names this handle and a path relative to it, and a root is never accepted again (design §13.1).
  */
 export interface ApiCollectionsOpenResult {
   /**
-   * Opaque, backend-minted, 32 lowercase hex characters. Not a bearer token — the folder is re-validated on every call — but an enumerable one would let a renderer bug reach a folder it never opened.
+   * Opaque, backend-minted, 32 lowercase hex characters. Not a bearer token — the folder is re-validated on every call — but an enumerable one would let a renderer bug reach a folder it never opened. ONE FOLDER HAS ONE HANDLE for as long as it is open: opening a path that is already open answers with the handle that exists rather than minting a second identity for one directory, and identity is the directory itself — a symlink, a trailing slash or a `.` segment are the same collection.
    */
   handle: string
+  /**
+   * Whether this call is what opened the folder. false is an open; true means the folder was already open and this answers with the handle it already had — the same handle, the same collection, and no second row anywhere. It is on the wire so a surface can tell the two apart and reveal the row it has instead of adding one; deriving it from the tree would make the renderer a second reader of collection identity, which is the defect this field was added to close (nocx-ghuq3). api.collections.create carries no such field: a folder minted a moment ago cannot have been open, so the question has no answer worth sending there.
+   */
+  alreadyOpen: boolean
   collection: Collection
 }
 export interface Collection {

@@ -35,10 +35,11 @@ func newEnvCollection(t *testing.T) (Collections, HandleID, string) {
 		t.Fatalf("write manifest: %v", err)
 	}
 	svc := NewCollections(nil)
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	return svc, h, root
 }
 

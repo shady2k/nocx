@@ -30,10 +30,11 @@ func TestNewDefaultCollection_CreatesACollectionThatOpens(t *testing.T) {
 	}
 
 	svc := newService()
-	_, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open the collection that was just created: %v", err)
 	}
+	coll := op.Collection
 	if coll.Name != "acme" {
 		t.Errorf("name = %q, want %q", coll.Name, "acme")
 	}
@@ -53,10 +54,11 @@ func TestNewDefaultCollection_RefusesToClobberAnExistingOne(t *testing.T) {
 		t.Fatalf("first: %v", err)
 	}
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	if err := svc.WriteRequest(h, "keep.json", Request{ID: "1", Name: "Keep", Method: "GET", URL: "http://x/"}); err != nil {
 		t.Fatalf("WriteRequest: %v", err)
 	}

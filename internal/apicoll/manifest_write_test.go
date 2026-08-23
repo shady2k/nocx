@@ -24,10 +24,11 @@ func TestMarshalManifest_ProducesAManifestThisPackageOpens(t *testing.T) {
 	writeFile(t, root, ManifestName, string(raw))
 	writeFile(t, root, "ping.json", requestJSON("r1", "ping", "GET", "https://example.test/"))
 
-	_, coll, err := newService().Open(root)
+	op, err := newService().Open(root)
 	if err != nil {
 		t.Fatalf("Open a folder holding MarshalManifest's own bytes: %v", err)
 	}
+	coll := op.Collection
 	if coll.Name != "acme" {
 		t.Errorf("collection name = %q, want %q", coll.Name, "acme")
 	}

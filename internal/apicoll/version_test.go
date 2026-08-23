@@ -19,7 +19,8 @@ func TestOpen_RefusesAManifestNewerThanThisBuild(t *testing.T) {
 	writeFile(t, root, "req.json", requestJSON("1", "A", "GET", "http://x/a"))
 
 	svc := newService()
-	h, coll, err := svc.Open(root)
+	op, err := svc.Open(root)
+	h, coll := op.Handle, op.Collection
 	if !errors.Is(err, storage.ErrVersionTooNew) {
 		t.Fatalf("Open: err = %v, want storage.ErrVersionTooNew", err)
 	}
@@ -36,7 +37,7 @@ func TestOpen_AcceptsTheCurrentVersion(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "coll")
 	writeFile(t, root, ManifestName, manifestJSON)
 	svc := newService()
-	if _, _, err := svc.Open(root); err != nil {
+	if _, err := svc.Open(root); err != nil {
 		t.Fatalf("Open at the current version: %v", err)
 	}
 	if Module.Current != 1 {
@@ -54,7 +55,7 @@ func TestOpen_RefusesAManifestWithNoVersion(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "coll")
 	writeFile(t, root, ManifestName, `{"name":"acme"}`)
 	svc := newService()
-	if _, _, err := svc.Open(root); err == nil {
+	if _, err := svc.Open(root); err == nil {
 		t.Fatal("Open accepted a manifest carrying no schemaVersion")
 	}
 }
@@ -63,7 +64,7 @@ func TestOpen_RefusesAManifestThatIsNotJSON(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "coll")
 	writeFile(t, root, ManifestName, `not json at all`)
 	svc := newService()
-	if _, _, err := svc.Open(root); err == nil {
+	if _, err := svc.Open(root); err == nil {
 		t.Fatal("Open accepted a manifest that is not JSON")
 	}
 }
@@ -79,7 +80,7 @@ func TestOpen_DoesNotFollowASymlinkedManifest(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	svc := newService()
-	if _, _, err := svc.Open(root); !errors.Is(err, ErrPathOutsideCollection) {
+	if _, err := svc.Open(root); !errors.Is(err, ErrPathOutsideCollection) {
 		t.Errorf("Open with a symlinked manifest: err = %v, want ErrPathOutsideCollection", err)
 	}
 }

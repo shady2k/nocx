@@ -26,13 +26,19 @@ import (
 // relative to that handle, and the folder it creates is a NAME — a single
 // component, refused if it is anything else — so no caller can name a
 // location twice here either.
+//
+// Close arrived when Open stopped minting a second handle for a folder that
+// is already open: one folder has one handle, so something has to be able to
+// END that, and the thing that mints identity is the thing that forgets it.
+// It takes the handle and nothing else, so it widens the surface by a method
+// that cannot name a location at all.
 func TestService_OpenIsTheOnlyEntryPointThatTakesARoot(t *testing.T) {
 	svcType := reflect.TypeOf((*Service)(nil)).Elem()
 	handleType := reflect.TypeOf(HandleID(""))
 	stringType := reflect.TypeOf("")
 
-	if got := svcType.NumMethod(); got != 6 {
-		t.Fatalf("Service has %d methods, want 6 — a new method must be checked against §13.1 "+
+	if got := svcType.NumMethod(); got != 7 {
+		t.Fatalf("Service has %d methods, want 7 — a new method must be checked against §13.1 "+
 			"before this count is raised", got)
 	}
 

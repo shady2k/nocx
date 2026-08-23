@@ -73,11 +73,11 @@ func (s *service) EnsureStarter() (Created, error) {
 	_, err := os.Lstat(root)
 	switch {
 	case err == nil:
-		h, coll, openErr := s.Open(root)
+		op, openErr := s.Open(root)
 		if openErr != nil {
 			return Created{Root: root}, openErr
 		}
-		return Created{Root: root, Handle: h, Collection: coll}, nil
+		return Created{Root: root, Handle: op.Handle, Collection: op.Collection}, nil
 	case !errors.Is(err, os.ErrNotExist):
 		return Created{Root: root}, fmt.Errorf("apicoll: open the built-in collection %s: %w", root, err)
 	}

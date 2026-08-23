@@ -41,10 +41,11 @@ func TestReadRequest_RefusesEscapingTheRoot(t *testing.T) {
 	writeFile(t, root, ManifestName, manifestJSON)
 
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 
 	for _, rel := range []string{"../../id_ed25519", outside, "users/steal.json"} {
 		if _, err := svc.ReadRequest(h, rel); !errors.Is(err, ErrPathOutsideCollection) {
@@ -61,10 +62,11 @@ func openTestCollection(t *testing.T) (*service, HandleID, string) {
 	root := filepath.Join(t.TempDir(), "coll")
 	writeFile(t, root, ManifestName, manifestJSON)
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	return svc, h, root
 }
 
@@ -181,10 +183,11 @@ func TestOperations_ReportARootReplacedAfterOpen(t *testing.T) {
 	writeFile(t, root, "req.json", `{"id":"1","name":"one","method":"GET","url":"http://x/","body":{"kind":"none"},"auth":{"kind":"none"}}`)
 
 	svc := newService()
-	h, _, err := svc.Open(root)
+	op, err := svc.Open(root)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	if _, err := svc.ReadRequest(h, "req.json"); err != nil {
 		t.Fatalf("ReadRequest before the swap: %v", err)
 	}
@@ -254,7 +257,7 @@ func TestMethods_RefuseAnUnknownHandle(t *testing.T) {
 func TestOpen_RefusesANonAbsoluteRoot(t *testing.T) {
 	svc := newService()
 	for _, root := range []string{"relative/coll", "", "."} {
-		if _, _, err := svc.Open(root); err == nil {
+		if _, err := svc.Open(root); err == nil {
 			t.Errorf("Open(%q) succeeded, want a refusal", root)
 		}
 	}
@@ -267,10 +270,10 @@ func TestOpen_RefusesARootThatIsNotADirectory(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	svc := newService()
-	if _, _, err := svc.Open(file); err == nil {
+	if _, err := svc.Open(file); err == nil {
 		t.Error("Open on a regular file succeeded, want a refusal")
 	}
-	if _, _, err := svc.Open(filepath.Join(dir, "missing")); err == nil {
+	if _, err := svc.Open(filepath.Join(dir, "missing")); err == nil {
 		t.Error("Open on a missing directory succeeded, want a refusal")
 	}
 }
@@ -288,10 +291,11 @@ func TestOpen_AcceptsASymlinkedRootTheUserChose(t *testing.T) {
 	}
 
 	svc := newService()
-	h, coll, err := svc.Open(link)
+	op, err := svc.Open(link)
 	if err != nil {
 		t.Fatalf("Open a symlinked root: %v", err)
 	}
+	h, coll := op.Handle, op.Collection
 	if len(coll.Requests) != 1 {
 		t.Errorf("listed %d requests through the symlinked root, want 1", len(coll.Requests))
 	}
@@ -316,10 +320,11 @@ func TestOperations_ReportASymlinkedRootRepointed(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 	svc := newService()
-	h, _, err := svc.Open(link)
+	op, err := svc.Open(link)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	h := op.Handle
 	if err := os.Remove(link); err != nil {
 		t.Fatalf("remove the symlink: %v", err)
 	}

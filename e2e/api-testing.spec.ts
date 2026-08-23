@@ -49,11 +49,7 @@ import {
   type DisposableRoot,
 } from './harness'
 import { readStand } from './stand'
-import {
-  CREATED_USER_BODY,
-  startApiTestServer,
-  type ApiTestServer,
-} from './fixtures/api-test-server'
+import { startApiTestServer, type ApiTestServer } from './fixtures/api-test-server'
 import {
   POSTMAN_BEARER_TOKEN,
   POSTMAN_COLLECTION_NAME,
@@ -309,7 +305,16 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     // "HTTP status 201" is the text a screen reader and this spec both read.
     await expect(run.locator('.api-run__stats')).toContainText('HTTP status 201')
     // …and the DECODED body, as a body rather than as base64 (§12.3).
-    await expect(run.locator('[aria-label="Response body"]')).toContainText(CREATED_USER_BODY)
+    //
+    // FIELD BY FIELD, not byte for byte. The Body tab lays a JSON answer out
+    // for reading (nocx-dhojo) — one field per line, indented — so a minified
+    // string is no longer what it renders, and its text carries the gutter's
+    // line numbers besides. Raw is where the bytes as they arrived are
+    // asserted, three lines below; these two tabs answer two questions and
+    // this is the one that asks "can a person read the answer".
+    const responseBody = run.locator('[aria-label="Response body"]')
+    await expect(responseBody).toContainText('"id": "usr_8f21"')
+    await expect(responseBody).toContainText('"email": "a@b.c"')
 
     // ── Step 5: raw, where the token is a badge and never its bytes ─────────
     // A TAB, not a radio: the three parts of an exchange were a segmented
@@ -340,5 +345,45 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     expect(hits).toHaveLength(1)
     expect(hits[0].authorization).toBe(`Bearer ${POSTMAN_BEARER_TOKEN}`)
     expect(hits[0].body).toBe(POSTMAN_REQUEST_BODY)
+
+    // ── Step 6: a long body line moves the EDITOR, never the surface ────────
+    //
+    // Last, because it types into the body and this spec's own assertions are
+    // done by here. It is in this file rather than in a unit test because
+    // jsdom computes no layout: vitest and tsc were both green while a long
+    // line pushed the whole request column sideways and drew a scrollbar under
+    // the surface (nocx-kdawd). The defect was not the editor's — its scroller
+    // was ready — but the tab bar's, whose mode select took its intrinsic
+    // width and hung past the bar; the overflow then travelled up to the one
+    // ancestor that scrolls.
+    //
+    // Asserted as an interval rather than a moment: nothing between the editor
+    // and the pane may be wider than its own box, and the editor's scroller
+    // must hold the line instead.
+    await page.getByRole('tab', { name: /Body/ }).first().click()
+    const editor = page.locator('.api-body-editor')
+    await expect(editor).toBeVisible()
+    await editor.click()
+    await page.keyboard.type(`{"t":"${'x'.repeat(400)}"}`)
+
+    const geometry = await page.evaluate(() => {
+      const names = [
+        '.api-body-editor',
+        '.ui-tabs__panel',
+        '.ui-tabs',
+        '.api-request',
+        '.api-workbench__request',
+      ]
+      const wide = names.filter((sel) => {
+        const el = document.querySelector(sel) as HTMLElement | null
+        return el !== null && el.scrollWidth > el.clientWidth + 1
+      })
+      const sc = document.querySelector('.api-body-editor .cm-scroller') as HTMLElement | null
+      return { wide, scrollerHoldsTheLine: sc !== null && sc.scrollWidth > sc.clientWidth }
+    })
+    expect(geometry.wide, 'these elements are wider than their own box').toEqual([])
+    expect(geometry.scrollerHoldsTheLine, "the editor's own scroller takes the long line").toBe(
+      true,
+    )
   })
 })

@@ -426,7 +426,12 @@ lint-ci:
 	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
-	$(GOLANGCI_LINT) run ./...
+	@# The platform tags every other Go target here carries. Without them
+	@# golangci-lint cannot load wails' internal webview package on a Linux
+	@# host and dies before it lints anything, which took `make ci-full` --
+	@# the gate AGENTS.md names -- out entirely for anyone not on macOS.
+	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
+	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 test-ci:
 	@echo "=== go test -race ==="

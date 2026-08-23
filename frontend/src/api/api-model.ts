@@ -2,14 +2,15 @@
 // contract types and never re-declared beside them.
 //
 // Two schemas describe the request: `api.request.read` (what the file holds)
-// and `api.import.curl` (what a pasted line converted to). Three describe a
-// collection: `api.collections.list`, `api.collections.open` and
-// `api.collections.create`. Design §6.4 says the file is the truth and every
-// surface is a projection of it — "there is nothing between them to diverge"
-// — and §10 says the two import entrances share one converter. Both claims
-// are about SHAPE, and this module is where the renderer states them once, in
-// the type system: `adoptImportedRequest`, `adoptOpenedCollection` and
-// `adoptCreatedCollection` assign one door's type to the other's, so a schema
+// and `api.import.curl` (what a pasted line converted to). Four describe a
+// collection: `api.collections.list`, `api.collections.open`,
+// `api.collections.create` and `api.collections.createFolder`. Design §6.4
+// says the file is the truth and every surface is a projection of it — "there
+// is nothing between them to diverge" — and §10 says the two import entrances
+// share one converter. Both claims are about SHAPE, and this module is where
+// the renderer states them once, in the type system: `adoptImportedRequest`,
+// `adoptOpenedCollection`, `adoptCreatedCollection` and
+// `adoptFolderCollection` assign one door's type to the other's, so a schema
 // that drifts stops the build here rather than at the first field somebody
 // happens to read off the wrong result.
 //
@@ -51,6 +52,12 @@ import type {
   MalformedRef as CreatedMalformedRef,
   EnvironmentRef as CreatedEnvironmentRef,
 } from '../generated/api.collections.create'
+import type {
+  Collection as FolderedCollection,
+  RequestRef as FolderedRequestRef,
+  MalformedRef as FolderedMalformedRef,
+  EnvironmentRef as FolderedEnvironmentRef,
+} from '../generated/api.collections.createFolder'
 import type {
   Environment as ReadEnvironment,
   Route as ReadRoute,
@@ -222,6 +229,28 @@ export function adoptCreatedCollection(created: CreatedCollection): ApiCollectio
   const malformed: ApiMalformedRef[] = created.malformed satisfies CreatedMalformedRef[]
   const environments: ApiEnvironmentRef[] = created.environments satisfies CreatedEnvironmentRef[]
   return { name: created.name, requests, folders: created.folders, malformed, environments }
+}
+
+/**
+ * Adopt the collection `api.collections.createFolder` answered with — the
+ * fourth account of one collection, and the same assertion again.
+ *
+ * A folder that has just been made is invisible in `requests` — that is the
+ * state a folder spends its first minutes in — so the result carries the
+ * collection AS IT IS NOW, `folders` included, precisely so the tree can be
+ * drawn from it. A caller that listed afterwards instead would be reading one
+ * folder twice, at two moments.
+ *
+ * Its own function rather than `adoptCreatedCollection` reused, for the
+ * reason that one is not `adoptOpenedCollection` reused: they are four
+ * documents, they agree today, and this is the line that says which one grew
+ * a field the day one of them does.
+ */
+export function adoptFolderCollection(made: FolderedCollection): ApiCollection {
+  const requests: ApiRequestRef[] = made.requests satisfies FolderedRequestRef[]
+  const malformed: ApiMalformedRef[] = made.malformed satisfies FolderedMalformedRef[]
+  const environments: ApiEnvironmentRef[] = made.environments satisfies FolderedEnvironmentRef[]
+  return { name: made.name, requests, folders: made.folders, malformed, environments }
 }
 
 // ── Reading a response, in the product's words ────────────────────────────

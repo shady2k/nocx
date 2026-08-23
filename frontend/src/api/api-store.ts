@@ -47,6 +47,7 @@ import type { ApiConnection, ApiWorkbenchServices, ImportSource } from './api-cl
 import type { FilesChanged } from '../generated/files.changed'
 import {
   adoptCreatedCollection,
+  adoptFolderCollection,
   adoptImportedRequest,
   adoptOpenedCollection,
   type ApiCertificate,
@@ -314,6 +315,17 @@ export interface ApiStore {
    *  list — one call, because `api.collections.create` answers the same
    *  handle-and-collection an open does. */
   createCollection(name: string): Promise<void>
+  /**
+   * Make ONE folder inside a collection that is open, and put the collection
+   * the call answered back into the list.
+   *
+   * `parentRelPath` is an EXISTING folder inside it, `''` being the
+   * collection's own root. Nesting is repeated calls, never a path: the
+   * caller passes back the `relPath` the last one answered (api-client.ts
+   * says why), and the answer to "that folder is not there" is a refusal
+   * rather than a folder tree nobody asked for.
+   */
+  createFolder(handle: string, parentRelPath: string, name: string): Promise<void>
   closeFolder(handle: string): Promise<void>
   /** The SSH connections an environment may route through, or [] where this
    *  build offers none. Read once, when the panel first needs them: a
@@ -375,8 +387,14 @@ export interface ApiStore {
    * open one a file already held, convert a curl line into a form with no
    * file behind it, or import somebody's Postman export — and a person
    * starting from nothing had to write JSON into the folder by hand.
+   *
+   * `dir` is which folder INSIDE that collection it goes in, and its default
+   * is the root — the request a person makes from the collection's own row.
+   * It is the same parameter `freePath` has always taken for a duplicate,
+   * reached from a second door: a folder with nothing in it is not a place
+   * anybody can work until a request can be put in it.
    */
-  newRequest(): Promise<void>
+  newRequest(dir?: string): Promise<void>
   editDraft(next: ApiRequest): void
   /** Point the active collection at one of its environments, or at none
    *  ('' ). A person's choice is remembered for as long as the workbench
@@ -971,6 +989,47 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     await syncWatchSet()
   }
 
+  /**
+   * Give an open collection a folder, and redraw from what the call answered.
+   *
+   * ONE CALL, for the reason `createCollection` above is one:
+   * `api.collections.createFolder` answers the collection AS IT IS NOW, "so
+   * the caller's next move is to draw the tree" — a listing fetched in a
+   * second round trip would be a second account of one folder taken at a
+   * second moment, and a folder with nothing in it yet is exactly the thing
+   * that account could disagree about.
+   *
+   * A REFUSAL CHANGES NOTHING. An existing folder is refused rather than
+   * merged — Mkdir's own EEXIST, which is the rule the import follows for its
+   * destination — and a refused name is the backend's sentence about what was
+   * typed. Both go where every other failure goes, so the ask that is holding
+   * the name can show the reason under the field rather than closing over it.
+   *
+   * The collection is replaced in place rather than appended: the handle is
+   * the row's identity, and the row keeps its path and its own listing error,
+   * neither of which this call is about.
+   */
+  const createFolder = async (
+    handle: string,
+    parentRelPath: string,
+    name: string,
+  ): Promise<void> => {
+    try {
+      const result = await services.createFolder(handle, parentRelPath, name)
+      const collection = adoptFolderCollection(result.collection)
+      setCollections((prev) =>
+        prev.map((c) => (c.handle === handle ? { ...c, collection, error: '' } : c)),
+      )
+      setError('')
+    } catch (err) {
+      setError(message(err))
+    }
+    // No watch to republish: the SET is the open collections' roots, and a
+    // folder made inside one changes none of them. Said here rather than
+    // left to be inferred, because every other seam that touches the list
+    // does republish and the difference is the reason.
+  }
+
   const closeFolder = async (handle: string): Promise<void> => {
     try {
       await services.closeCollection(handle)
@@ -1122,7 +1181,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     setActiveCollection(handle)
   }
 
-  const newRequest = async (): Promise<void> => {
+  const newRequest = async (dir = ''): Promise<void> => {
     const handle = untrack(activeCollection)
     if (handle === '') return
     // NO ASK. A person pressing "new request" has already said what they
@@ -1132,7 +1191,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // typed (editDraft), and is renamed in the header, in place, the moment
     // the person knows better (api-pane.tsx).
     const name = UNTITLED
-    const relPath = freePath(untrack(collections), handle, name)
+    const relPath = freePath(untrack(collections), handle, name, dir)
     try {
       // A GET at no address, which is the request a person is about to type
       // rather than a template with opinions in it. The id is the file's
@@ -1549,6 +1608,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     refresh,
     openFolder,
     createCollection,
+    createFolder,
     closeFolder,
     connections,
     loadConnections,

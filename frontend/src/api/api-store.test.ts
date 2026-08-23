@@ -23,6 +23,7 @@ import {
   collectionsFixture,
   DEFAULT_ROOT,
   createdFixture,
+  folderCreatedFixture,
   folderOnDisk,
   sendFixture,
   failedSendFixture,
@@ -727,6 +728,101 @@ function emptyCollection() {
 // knows what the name was a moment ago and who changed it, which is the
 // whole of "an offer, not a derivation" — the moment a person names the
 // request themselves the offer stops for good.
+
+// ── A collection can be given a folder (nocx-8v1fu) ───────────────────────
+//
+// The half of §6.2 the product could not reach: a collection is a folder and
+// it may contain folders, the Postman importer writes them, and a collection
+// built inside nocx had none. The store's part is one call and what it does
+// with the answer.
+
+describe('ApiStore — making a folder', () => {
+  it('names the folder and the EXISTING folder to put it in, never a path', async () => {
+    const createFolder = vi.fn().mockResolvedValue(folderCreatedFixture('users/admin'))
+    const { store } = storeWith({ createFolder })
+    await store.refresh()
+
+    await store.createFolder(HANDLE, 'users', 'admin')
+
+    expect(createFolder).toHaveBeenCalledWith(HANDLE, 'users', 'admin')
+  })
+
+  it('draws the tree from the collection the call ANSWERED, without a second listing', async () => {
+    // The whole reason the result carries a collection: the caller's next
+    // move is the tree, and a listing fetched afterwards would be a second
+    // account of one folder taken at a second moment. So the listing spy
+    // must not be called again — and the folder must be there anyway.
+    const list = vi
+      .fn()
+      .mockResolvedValue({ collections: [collectionsFixture()], defaultRoot: DEFAULT_ROOT })
+    const { store } = storeWith({ listCollections: list })
+    await store.refresh()
+    expect(list).toHaveBeenCalledTimes(1)
+
+    await store.createFolder(HANDLE, '', 'reports')
+
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(store.collections()[0]?.collection.folders).toContain('reports')
+  })
+
+  it('a folder that is already there is REFUSED, and the collection is left as it was', async () => {
+    // Mkdir's own EEXIST, handed up. Merging into it is what this must not
+    // do: the import refuses an existing destination for the same reason,
+    // and a create that adopted a folder somebody else made would put two
+    // owners on one directory.
+    const createFolder = vi
+      .fn()
+      .mockRejectedValue(new Error('folder already exists: "users"'))
+    const { store } = storeWith({ createFolder })
+    await store.refresh()
+    const before = store.collections()[0]?.collection.folders
+
+    await store.createFolder(HANDLE, '', 'users')
+
+    expect(store.error()).toBe('folder already exists: "users"')
+    expect(store.collections()[0]?.collection.folders).toEqual(before)
+  })
+
+  it('a name the backend refuses leaves the reason on the store rather than sanitising it', async () => {
+    const createFolder = vi
+      .fn()
+      .mockRejectedValue(new Error('invalid folder name: a folder name is one path component'))
+    const { store } = storeWith({ createFolder })
+    await store.refresh()
+
+    await store.createFolder(HANDLE, '', 'a/b')
+
+    expect(store.error()).toContain('one path component')
+  })
+
+  it('the folder it just made is a place a new request can be saved into', async () => {
+    // The criterion in one check: a folder with nothing in it is not a
+    // folder anybody can use until a request can go in it.
+    const disk = folderOnDisk({
+      createFolder: vi.fn().mockResolvedValue(folderCreatedFixture('reports')),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.createFolder(HANDLE, '', 'reports')
+    store.pointAt(HANDLE)
+    await store.newRequest('reports')
+
+    expect(disk.files.has('reports/untitled-request.json')).toBe(true)
+    expect(store.selected()).toEqual({ handle: HANDLE, relPath: 'reports/untitled-request.json' })
+  })
+
+  it('a request made with no folder named still goes to the collection root', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    store.pointAt(HANDLE)
+
+    await store.newRequest()
+
+    expect(disk.files.has('untitled-request.json')).toBe(true)
+  })
+})
 
 describe('ApiStore — a request names itself while nobody else has', () => {
   it('takes the name from the method and the address, as the URL is edited', async () => {

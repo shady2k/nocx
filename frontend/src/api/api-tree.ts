@@ -2,10 +2,24 @@
 //
 // A collection is a FOLDER (design §6.1) and a request is one file inside it
 // (§6.2), so `relPath` carries real directory structure — `users/create.json`
-// is a request called "create" inside a folder called "users". The wire sends
-// a flat list of refs; the shape is in their paths, and this is the one place
-// that reads it. TreeRow indents by a NUMBER rather than by nested DOM, so a
-// flat row list is exactly what the kit wants.
+// is a request called "create" inside a folder called "users". TreeRow indents
+// by a NUMBER rather than by nested DOM, so a flat row list is exactly what
+// the kit wants.
+//
+// WHICH FOLDERS EXIST IS THE BACKEND'S ANSWER, and this file does not have a
+// second one. The directory rows used to be derived here from the requests'
+// paths, which agrees with `collection.folders` about every folder that holds
+// a request and disagrees about every folder that does not — and "does not"
+// is the state a folder spends its first minutes in, so a folder somebody had
+// just made was invisible until they put something in it. The open schema
+// says `folders` is the one answer in as many words; this walks it.
+//
+// A request is still placed by its path, because a path is where the file is.
+// The two meet at `drawnUnder`: a request hangs off the nearest folder the
+// backend listed. On a listing from this backend that is always its own
+// directory — both halves come off one walk — and when it is not, the request
+// is still drawn rather than silently dropped, which is the failure the
+// derivation could not have.
 //
 // Malformed files are rows, not a footnote. Design §6.2's listing puts them
 // ON the collection precisely so one bad file cannot hide every good one, and
@@ -56,6 +70,10 @@ export interface ApiTreeRow {
  *    collection, so `users/create` finds it by either half — the path is
  *    real structure (§6.2) and the only name a request with an empty `name`
  *    field has.
+ *  - A FOLDER matches by its path, and it has to match on its own account: a
+ *    folder that holds nothing has no request whose path could carry its
+ *    name, so a filter that only narrowed requests would answer "nothing
+ *    matches" about a folder that is on screen when the field is empty.
  *  - A MALFORMED file matches by its path, because that is all it has. It
  *    stays findable on purpose: a file that will not read is exactly what
  *    somebody goes looking for.
@@ -83,10 +101,46 @@ export function filterCollections(
       (ref) => hit(leafName(ref.name, ref.relPath)) || hit(ref.relPath),
     )
     const malformed = open.collection.malformed.filter((bad) => hit(bad.relPath))
-    if (requests.length === 0 && malformed.length === 0) continue
-    kept.push({ ...open, collection: { ...open.collection, requests, malformed } })
+    const folders = foldersFor(open.collection.folders, requests, hit)
+    if (requests.length === 0 && malformed.length === 0 && folders.length === 0) continue
+    kept.push({ ...open, collection: { ...open.collection, requests, folders, malformed } })
   }
   return kept
+}
+
+/**
+ * Which of the collection's folders survive a filter: the ones that matched,
+ * the ones a surviving request is inside, and every folder on the way to
+ * either.
+ *
+ * The ancestors are not decoration. A row is drawn under its parent, so
+ * keeping `v1/admin` while dropping `v1` would leave a folder hanging off the
+ * collection at a depth that says otherwise — and dropping the directory a
+ * kept request lives in would put the request there instead.
+ *
+ * It filters the ORIGINAL list rather than building one, which keeps two
+ * properties for free: the backend's order (parents before their children),
+ * and the promise that a folder on screen is a folder the backend named.
+ */
+function foldersFor(
+  folders: readonly string[],
+  requests: readonly { relPath: string }[],
+  hit: (text: string) => boolean,
+): string[] {
+  const keep = new Set<string>()
+  const keepWithAncestors = (dir: string): void => {
+    let prefix = ''
+    for (const segment of dir.split('/')) {
+      prefix = prefix === '' ? segment : `${prefix}/${segment}`
+      keep.add(prefix)
+    }
+  }
+  for (const dir of folders) if (hit(dir)) keepWithAncestors(dir)
+  for (const ref of requests) {
+    const dir = directoryOf(ref.relPath)
+    if (dir !== '') keepWithAncestors(dir)
+  }
+  return folders.filter((dir) => keep.has(dir))
 }
 
 /** The name a request row shows: the collection's `name` for it when there is
@@ -96,6 +150,35 @@ function leafName(name: string, relPath: string): string {
   if (name !== '') return name
   const base = relPath.slice(relPath.lastIndexOf('/') + 1)
   return base !== '' ? base : relPath
+}
+
+/** The folder a path is in — '' at the collection's root. */
+function directoryOf(relPath: string): string {
+  const cut = relPath.lastIndexOf('/')
+  return cut === -1 ? '' : relPath.slice(0, cut)
+}
+
+/** How far in a row is drawn: one step per path segment, with the collection
+ *  itself at nought. Read off the PATH rather than counted while walking, so
+ *  a row's depth is a fact about where the thing is and not about the order
+ *  the rows happened to be emitted in. */
+function depthOf(relPath: string): number {
+  return relPath.split('/').length
+}
+
+/** The folder a row hangs under: its own, or the nearest one above it the
+ *  backend actually listed. See the header — on a listing from this backend
+ *  the first case is the only one. */
+function drawnUnder(dir: string, listed: ReadonlySet<string>): string {
+  let at = dir
+  while (at !== '' && !listed.has(at)) at = directoryOf(at)
+  return at
+}
+
+function pushInto<T>(index: Map<string, T[]>, key: string, value: T): void {
+  const held = index.get(key)
+  if (held === undefined) index.set(key, [value])
+  else held.push(value)
 }
 
 /**
@@ -129,60 +212,57 @@ export function flattenCollections(
     })
     if (!rootExpanded) continue
 
-    // Directories are derived from the refs' paths; a directory is emitted
-    // once, the first time a request under it is reached, so the order the
-    // backend listed the requests in is the order the tree shows.
-    const emitted = new Set<string>()
-    const hidden = (dirs: string[]): boolean => {
-      let prefix = ''
-      for (const d of dirs) {
-        prefix = prefix === '' ? d : `${prefix}/${d}`
-        if (collapsed.has(`${open.handle}:${prefix}`)) return true
-      }
-      return false
+    // Both indexes are built against the SAME set of listed folders, so a
+    // folder and the requests beside it can never be drawn under different
+    // parents.
+    const listed = new Set(open.collection.folders)
+    const children = new Map<string, string[]>()
+    for (const dir of open.collection.folders) {
+      pushInto(children, drawnUnder(directoryOf(dir), listed), dir)
     }
+    const requests = new Map<string, (typeof open.collection.requests)[number][]>()
     for (const ref of open.collection.requests) {
-      const segments = ref.relPath.split('/')
-      const dirs = segments.slice(0, -1)
-      let prefix = ''
-      let cut = false
-      for (const [i, dir] of dirs.entries()) {
-        prefix = prefix === '' ? dir : `${prefix}/${dir}`
-        const key = `${open.handle}:${prefix}`
-        if (!emitted.has(key) && !hidden(dirs.slice(0, i))) {
-          emitted.add(key)
-          rows.push({
-            key,
-            kind: 'dir',
-            depth: i + 1,
-            name: dir,
-            handle: open.handle,
-            relPath: prefix,
-            method: '',
-            reason: '',
-            expandable: true,
-            expanded: !collapsed.has(key),
-          })
-        }
-        if (collapsed.has(key)) {
-          cut = true
-          break
-        }
-      }
-      if (cut) continue
-      rows.push({
-        key: `${open.handle}:${ref.relPath}`,
-        kind: 'request',
-        depth: dirs.length + 1,
-        name: leafName(ref.name, ref.relPath),
-        handle: open.handle,
-        relPath: ref.relPath,
-        method: ref.method,
-        reason: '',
-        expandable: false,
-        expanded: false,
-      })
+      pushInto(requests, drawnUnder(directoryOf(ref.relPath), listed), ref)
     }
+
+    const walk = (dir: string): void => {
+      for (const child of children.get(dir) ?? []) {
+        const key = `${open.handle}:${child}`
+        const expanded = !collapsed.has(key)
+        rows.push({
+          key,
+          kind: 'dir',
+          depth: depthOf(child),
+          name: leafName('', child),
+          handle: open.handle,
+          relPath: child,
+          method: '',
+          reason: '',
+          // Expandable whether or not anything is in it, exactly as the
+          // collection row is: a folder a person has just made is empty and
+          // is still a folder they can fold away.
+          expandable: true,
+          expanded,
+        })
+        if (expanded) walk(child)
+      }
+      for (const ref of requests.get(dir) ?? []) {
+        rows.push({
+          key: `${open.handle}:${ref.relPath}`,
+          kind: 'request',
+          depth: depthOf(ref.relPath),
+          name: leafName(ref.name, ref.relPath),
+          handle: open.handle,
+          relPath: ref.relPath,
+          method: ref.method,
+          reason: '',
+          expandable: false,
+          expanded: false,
+        })
+      }
+    }
+    walk('')
+
     for (const bad of open.collection.malformed) {
       rows.push({
         key: `${open.handle}:!${bad.relPath}`,

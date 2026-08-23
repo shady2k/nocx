@@ -21,6 +21,7 @@ import type {
 } from './api-model'
 import type { ApiRequestSendResult, Raw, Span } from '../generated/api.request.send'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
+import type { ApiCollectionsCreateFolderResult } from '../generated/api.collections.createFolder'
 
 /**
  * The value of the secret the worked example binds. It is here so the tests
@@ -136,7 +137,14 @@ export function collectionFixture(over: Partial<ApiCollection> = {}): ApiCollect
       { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
       { relPath: LIST_REL_PATH, name: 'list', method: 'GET' },
     ],
-    folders: [],
+    // THE WORKED EXAMPLE'S REQUESTS LIVE IN `users/`, so the backend's
+    // folder list says `users`. It is not derivable from the paths and must
+    // not be: `folders` is the ONE answer to what folders there are (the
+    // open schema says so in as many words), and a fixture that left it
+    // empty while its requests carried a directory would let a tree that
+    // derives directories from request paths pass every test here — which is
+    // exactly the second answer that loses a folder with nothing in it yet.
+    folders: ['users'],
     malformed: [],
     environments: [],
     ...over,
@@ -255,6 +263,31 @@ export function createdFixture(name = CREATED_NAME): ApiCollectionsCreateResult 
     handle: CREATED_HANDLE,
     collection: { name, requests: [], folders: [], malformed: [], environments: [] },
   }
+}
+
+/**
+ * What `api.collections.createFolder` answers: where the folder went, and
+ * the collection with it in.
+ *
+ * The collection is assembled from the folder list it is GIVEN rather than
+ * canned, because the whole point of the result carrying one is that the
+ * caller draws the tree from it — a fixture whose collection did not contain
+ * the folder it says it made would let a renderer that ignores the result
+ * and waits for the next listing pass.
+ */
+export function folderCreatedFixture(relPath: string): ApiCollectionsCreateFolderResult {
+  const base = collectionFixture()
+  const folders = [...base.folders]
+  // Every folder on the way to it, parents before their children — the order
+  // the schema promises. `users` is already there; a folder made beside it
+  // joins the list rather than replacing it, because the answer is the
+  // collection AS IT IS NOW and not a collection with one folder in it.
+  let prefix = ''
+  for (const segment of relPath.split('/')) {
+    prefix = prefix === '' ? segment : `${prefix}/${segment}`
+    if (!folders.includes(prefix)) folders.push(prefix)
+  }
+  return { relPath, collection: { ...base, folders } }
 }
 
 /** The local session the workbench opens its watch binding against. */
@@ -483,6 +516,11 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
       .fn()
       .mockResolvedValue({ handle: opened.handle, collection: opened.collection }),
     createCollection: vi.fn().mockResolvedValue(createdFixture()),
+    createFolder: vi
+      .fn()
+      .mockImplementation((_h: string, parent: string, name: string) =>
+        Promise.resolve(folderCreatedFixture(parent === '' ? name : `${parent}/${name}`)),
+      ),
     closeCollection: vi.fn().mockResolvedValue({}),
     readEnvironment: vi.fn().mockResolvedValue({ environment: ENVIRONMENT }),
     writeEnvironment: vi.fn().mockResolvedValue({}),

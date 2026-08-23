@@ -6,7 +6,14 @@
 // proposed nothing, because the person would have to notice and undo it.
 
 import { describe, expect, it } from 'vitest'
-import { proposedDestination, slugify, environmentPath } from './api-paths'
+import {
+  classifyPastedSource,
+  environmentPath,
+  proposedDestination,
+  proposedDestinationFromDocument,
+  proposedDestinationFromURL,
+  slugify,
+} from './api-paths'
 
 const ROOT = '/home/dev/.local/share/nocx/collections'
 
@@ -63,5 +70,64 @@ describe('slugify and environmentPath — the offers a name makes', () => {
 
   it('an environment goes under environments/', () => {
     expect(environmentPath('Local')).toBe('environments/local.json')
+  })
+})
+
+describe('classifyPastedSource — what a pasted string IS, asked in one place', () => {
+  it('calls http and https a URL, whatever the case and the surrounding space', () => {
+    expect(classifyPastedSource('  https://h/a.json \n')).toEqual({
+      kind: 'url',
+      url: 'https://h/a.json',
+    })
+    expect(classifyPastedSource('HTTP://h/a.json')).toEqual({ kind: 'url', url: 'HTTP://h/a.json' })
+  })
+
+  it('calls JSON a document', () => {
+    expect(classifyPastedSource(' {"info":{}} ')).toEqual({
+      kind: 'document',
+      document: '{"info":{}}',
+    })
+    expect(classifyPastedSource('[]')).toEqual({ kind: 'document', document: '[]' })
+  })
+
+  it('calls anything else unusable — including a curl line this ask never offered', () => {
+    // `unusable` is an answer and not an error: the ask says one sentence
+    // and spends no round trip learning what the form already knew.
+    expect(classifyPastedSource('curl https://h -X POST')).toEqual({ kind: 'unusable' })
+    expect(classifyPastedSource('')).toEqual({ kind: 'unusable' })
+    expect(classifyPastedSource('   ')).toEqual({ kind: 'unusable' })
+  })
+})
+
+describe('proposedDestinationFromDocument — what a pasted export proposes', () => {
+  it('offers the collection name, slugified', () => {
+    expect(proposedDestinationFromDocument('/root', '{"info":{"name":"Acme API"}}')).toBe(
+      '/root/acme-api',
+    )
+  })
+
+  it('offers nothing rather than throwing, for everything it cannot read', () => {
+    // It reads one field and validates nothing — the backend is the only
+    // reader of hostile input — so every failure is the same empty offer.
+    expect(proposedDestinationFromDocument('/root', 'not json')).toBe('')
+    expect(proposedDestinationFromDocument('/root', '{"info":{}}')).toBe('')
+    expect(proposedDestinationFromDocument('/root', '{"info":{"name":"***"}}')).toBe('')
+    expect(proposedDestinationFromDocument('', '{"info":{"name":"Acme"}}')).toBe('')
+  })
+})
+
+describe('proposedDestinationFromURL — what a pasted link proposes', () => {
+  it('offers the last segment without its suffixes', () => {
+    expect(proposedDestinationFromURL('/root', 'https://h/x/acme.postman_collection.json')).toBe(
+      '/root/acme',
+    )
+    expect(
+      proposedDestinationFromURL('/root', 'https://api.postman.com/collections/1234-abc'),
+    ).toBe('/root/1234-abc')
+  })
+
+  it('offers nothing when there is no last segment to take', () => {
+    expect(proposedDestinationFromURL('/root', 'https://h/')).toBe('')
+    expect(proposedDestinationFromURL('/root', 'not a url')).toBe('')
   })
 })

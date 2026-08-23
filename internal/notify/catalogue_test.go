@@ -267,15 +267,24 @@ func TestCatalogueAccessorsHandOutCopies(t *testing.T) {
 
 // ── the shipped default ────────────────────────────────────────────────
 
-// Default-deny, asserted as an exact set: the pairs that are ON by default
-// are exactly the rows the composition root's hand-written table carried
-// before this task, so nobody's notifications change the day this lands.
+// Default-deny, asserted as an EXACT set. Four of these five are the rows the
+// composition root's hand-written table carried before the matrix landed, so
+// nobody's notifications changed the day it did. The fifth is
+// transferFinished -> toast (nocx-zlxmm): a background transfer's outcome is
+// the one ending a person deliberately walks away from, so it ships reaching
+// something, and it ships reaching the toast alone — a completed download is
+// not worth taking the focus off whatever they walked away to.
+//
+// The set is exact in both directions on purpose: a default is a decision
+// somebody made about a stranger's attention, and adding one silently is how
+// a notification surface becomes something people switch off wholesale.
 func TestCatalogueDefaultsAreExactlyTodaysTable(t *testing.T) {
 	want := map[string]bool{
-		"programNotify/" + notify.ChannelBanner: true,
-		"programNotify/" + notify.ChannelToast:  true,
-		"sessionEnded/" + notify.ChannelBanner:  true,
-		"sessionEnded/" + notify.ChannelToast:   true,
+		"programNotify/" + notify.ChannelBanner:   true,
+		"programNotify/" + notify.ChannelToast:    true,
+		"sessionEnded/" + notify.ChannelBanner:    true,
+		"sessionEnded/" + notify.ChannelToast:     true,
+		"transferFinished/" + notify.ChannelToast: true,
 	}
 	got := map[string]bool{}
 	for _, p := range notify.DefaultCatalogue().Pairs() {
@@ -285,12 +294,30 @@ func TestCatalogueDefaultsAreExactlyTodaysTable(t *testing.T) {
 	}
 	for k := range want {
 		if !got[k] {
-			t.Errorf("pair %q was routed before this task and is off by default now", k)
+			t.Errorf("pair %q is meant to ship on and is off by default", k)
 		}
 	}
 	for k := range got {
 		if !want[k] {
-			t.Errorf("pair %q is on by default and was not routed before this task", k)
+			t.Errorf("pair %q is on by default and nobody decided it should be", k)
+		}
+	}
+}
+
+// And the half of that decision a set of strings cannot state: the transfer
+// kind reaches the toast and NOT the banner. Asserted separately because the
+// exact-set test above would go on passing if somebody swapped one id for the
+// other, and the swap is precisely the thing this row was argued about.
+func TestCatalogueDoesNotDefaultATransferOutcomeToTheBanner(t *testing.T) {
+	for _, p := range notify.DefaultCatalogue().Pairs() {
+		if p.Kind.Kind != notify.KindTransferFinished {
+			continue
+		}
+		if p.Channel.ID == notify.ChannelBanner && p.DefaultOn {
+			t.Error("a finished transfer defaults to the OS banner; it must default to the toast alone")
+		}
+		if p.Channel.ID == notify.ChannelToast && !p.DefaultOn {
+			t.Error("a finished transfer does not default to the toast, which is the whole reason it is catalogued")
 		}
 	}
 }

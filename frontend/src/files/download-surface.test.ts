@@ -1,13 +1,23 @@
 // @vitest-environment jsdom
 //
-// A download's failure is reported through the SAME seam an upload's is: a
-// toast, raised from the surface's own subscription to the terminal
-// notification, so it arrives wherever the person is looking rather than
-// only in the operations panel they may not have open.
+// THE FAILURE-TOAST TESTS THAT USED TO BE HERE ARE GONE WITH THE TOAST
+// (nocx-zlxmm). This surface subscribed to files.downloadDone and called
+// showToast itself on a `failed` outcome; the backend now raises that
+// outcome into the notification pipeline at `settleDownload`, and the
+// pipeline's toast sink lands in the same showToast — so the subscription
+// was a second mechanism for one fact and two toasts for one download.
 //
-// The two absences are asserted too, because a toast for a cancel the
-// person just asked for is noise, and a toast for a success would be twenty
-// notifications on a twenty-file day.
+// What replaces those four tests is not nothing, and it is deliberately not
+// here: the raise and its level per outcome are pinned in
+// internal/transport/ws_transfer_notify_test.go, over the real socket, and
+// the delivery from `notify.toast` into the kit's toast is pinned in
+// src/notify/toast-bridge.test.ts. The behaviour moved, so the test moved
+// with it.
+//
+// The ASSERTION LEFT BEHIND is the one this file can still make alone: this
+// surface raises no toast of its own for any terminal outcome. It is what
+// stops the removed subscription being reintroduced by somebody who reads
+// the operations panel and concludes a failure goes unreported.
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { downloadSurfaceFor } from './download-surface'
@@ -42,69 +52,27 @@ function fakeDispatcher(): {
 
 afterEach(() => clearToasts())
 
-describe('the one report a person must get wherever they are', () => {
-  it('a failed download is a danger toast naming the file and the reason', () => {
-    const d = fakeDispatcher()
-    downloadSurfaceFor(d.dispatcher)
-    clearToasts()
-    d.emit('files.downloadDone', {
-      transferId: 'd1',
-      outcome: 'failed',
-      name: 'big.iso',
-      bytes: 3,
-      total: 400,
-      error: 'the remote read failed',
+describe("a terminal outcome is the pipeline's to report, not this surface's", () => {
+  // One case per member of files.downloadDone's outcome enum, because the
+  // defect this guards against is a direct toast reappearing for exactly
+  // one of them — which is how it looked before nocx-zlxmm, where `failed`
+  // had one and the other two did not.
+  for (const outcome of ['failed', 'cancelled', 'sent'] as const) {
+    it(`raises no toast of its own for a ${outcome} download`, () => {
+      const d = fakeDispatcher()
+      downloadSurfaceFor(d.dispatcher)
+      clearToasts()
+      d.emit('files.downloadDone', {
+        transferId: 'd1',
+        outcome,
+        name: 'big.iso',
+        bytes: 3,
+        total: 400,
+        error: 'the remote read failed',
+      })
+      expect(toasts()).toEqual([])
     })
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].level).toBe('danger')
-    // The name, because a person shown "the download failed" and no name
-    // cannot tell which of two downloads it was.
-    expect(toasts()[0].message).toContain('big.iso')
-    expect(toasts()[0].message).toContain('the remote read failed')
-  })
-
-  it('says something useful when a failure carries no reason', () => {
-    const d = fakeDispatcher()
-    downloadSurfaceFor(d.dispatcher)
-    clearToasts()
-    d.emit('files.downloadDone', {
-      transferId: 'd1',
-      outcome: 'failed',
-      name: 'big.iso',
-      bytes: 0,
-      total: 400,
-    })
-    expect(toasts()).toHaveLength(1)
-    expect(toasts()[0].message).toContain('big.iso')
-  })
-
-  it('says nothing about a cancel — the person asked for it', () => {
-    const d = fakeDispatcher()
-    downloadSurfaceFor(d.dispatcher)
-    clearToasts()
-    d.emit('files.downloadDone', {
-      transferId: 'd1',
-      outcome: 'cancelled',
-      name: 'big.iso',
-      bytes: 3,
-      total: 400,
-    })
-    expect(toasts()).toEqual([])
-  })
-
-  it('says nothing about a success — the file arriving IS the report', () => {
-    const d = fakeDispatcher()
-    downloadSurfaceFor(d.dispatcher)
-    clearToasts()
-    d.emit('files.downloadDone', {
-      transferId: 'd1',
-      outcome: 'sent',
-      name: 'big.iso',
-      bytes: 400,
-      total: 400,
-    })
-    expect(toasts()).toEqual([])
-  })
+  }
 })
 
 describe('one surface per dispatcher', () => {

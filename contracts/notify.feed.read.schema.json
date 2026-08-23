@@ -63,7 +63,14 @@
         "kind": {
           "description": "The event kind, stamped by the source adapter from the method invoked — never carried on the wire inbound.",
           "type": "string",
-          "enum": ["block.finished", "session.ended", "program.notify", "bell", "pane.workFinished"]
+          "enum": [
+            "block.finished",
+            "session.ended",
+            "transfer.finished",
+            "program.notify",
+            "bell",
+            "pane.workFinished"
+          ]
         },
         "level": {
           "description": "Severity, stamped by nocx: a program cannot forge danger.",

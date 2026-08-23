@@ -9,14 +9,29 @@
 // already hold. One dispatcher in the app means one surface; a test that
 // builds its own dispatcher gets its own, and nothing is global.
 //
-// It also owns the one report a person must get wherever they are: a
-// transfer that FAILED, and any path a transfer left behind. Those are told
-// as toasts because they can arrive while the Files panel is not open —
-// while a running transfer's progress belongs in the panel, which is where
-// somebody watching a transfer is looking. A success is deliberately not
-// toasted: the destination directory is invalidated and the existing
-// files.changed path re-lists it, so the file appearing IS the report, and
-// a twenty-file drop would otherwise produce twenty notifications.
+// IT NO LONGER TOASTS A TRANSFER'S OUTCOME, and the removal is the point
+// (nocx-zlxmm). It used to subscribe to files.uploadDone and call showToast
+// itself for a `failed` outcome and for any stranded path — straight into
+// the overlay, past the notification pipeline entirely. The toast appeared,
+// expired, and nothing remained: the notification centre had no record of a
+// transfer, ever, so "what did I miss" could not answer the one question
+// somebody who walked away from an upload actually has.
+//
+// The backend raises that outcome now, at the point it becomes known
+// (`settleUpload`, internal/transport/ws_transfer_notify.go), as an attested
+// `transfer.finished` whose default channel is the toast. It arrives through
+// `notify.toast` and lands in this same `showToast`
+// (frontend/src/notify/toast-bridge.ts), so keeping the subscription here
+// would be a SECOND mechanism for one fact and the person would get two
+// toasts for one transfer — which is worse than the none they had before.
+// It carries what both removed toasts carried: the failure's reason, and the
+// paths an upload left behind.
+//
+// What stays is `report`, and it is not the same fact. It fires where NO
+// backend transfer exists to settle — files.upload was refused, the POST
+// never landed — or where the renderer's own half ended without an answer,
+// which is a different sentence at a different moment from the outcome the
+// backend will still raise when it settles.
 
 import type { Dispatcher } from '../dispatcher'
 import { showToast } from '../ui/toast'
@@ -42,25 +57,6 @@ function createUploadSurface(dispatcher: Dispatcher): UploadSurface {
     store,
     ask: askCollision,
     report: (message, level) => showToast({ message, level }),
-  })
-  services.subscribeDone((p) => {
-    if (p.outcome === 'failed') {
-      showToast({
-        message:
-          p.error !== undefined && p.error !== '' ? `Upload failed: ${p.error}` : 'Upload failed.',
-        level: 'danger',
-      })
-    }
-    // Orthogonal to the outcome, and never folded into it: a 'written'
-    // transfer whose backup unlink failed succeeded AND left a file on the
-    // server. Naming it is the difference between a tidy disk and a
-    // mystery file nobody can explain.
-    if (p.stranded.length > 0) {
-      showToast({
-        message: `Left behind on the server: ${p.stranded.join(', ')}`,
-        level: 'warning',
-      })
-    }
   })
   return { services, store, flow }
 }

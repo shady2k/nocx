@@ -318,6 +318,37 @@ func mustCatalogue() *Catalogue {
 				DefaultChannels: []string{ChannelBanner, ChannelToast},
 			},
 			{
+				// ONE kind for both directions, because "transfer" is
+				// already the word the backend uses for the concept —
+				// runningTransfer, transferRegistry, deliverTransferDone,
+				// files.uploadProgress and files.downloadProgress share one
+				// params shape — and because a toggle governs a KIND: two
+				// kinds would ask a person to answer twice a question they
+				// have one answer to. "finished" rather than "done" so it
+				// reads beside block.finished and session.ended, which are
+				// the other two attested endings.
+				//
+				// TOAST AND NOT BANNER, and that is the whole of this row
+				// (nocx-zlxmm). A transfer finishing is rare, the person
+				// walked away from it and it is exactly what they come back
+				// for — which is what earns it a default at all, where
+				// block.finished has none. It is still not worth taking the
+				// focus off whatever they walked away TO: a completed
+				// download is news inside nocx and an interruption anywhere
+				// else. Someone who wants the banner has a toggle for it.
+				//
+				// Attested because the fact is nocx's own: settleUpload and
+				// settleDownload are the points where the outcome becomes
+				// known to the backend, and nothing here reads a renderer's
+				// claim about it.
+				Kind: KindTransferFinished, ID: "transferFinished",
+				Label: "A file transfer finished",
+				Description: "nocx's own transfer registry recorded that an upload or " +
+					"a download reached its end.",
+				Trusts:          []Trust{TrustAttested},
+				DefaultChannels: []string{ChannelToast},
+			},
+			{
 				Kind: KindProgramNotify, ID: "programNotify",
 				Label:           "A program asked for a notification",
 				Description:     "A program printed OSC 9 or OSC 777 to ask for one.",

@@ -47,7 +47,13 @@ export interface Occurrence {
   /**
    * The event kind, stamped by the source adapter from the method invoked — never carried on the wire inbound.
    */
-  kind: 'block.finished' | 'session.ended' | 'program.notify' | 'bell' | 'pane.workFinished'
+  kind:
+    | 'block.finished'
+    | 'session.ended'
+    | 'transfer.finished'
+    | 'program.notify'
+    | 'bell'
+    | 'pane.workFinished'
   /**
    * Severity, stamped by nocx: a program cannot forge danger.
    */

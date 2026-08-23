@@ -55,6 +55,7 @@ import {
 } from './api-test-fixtures'
 import { createSecretChip } from '../ui/secret-chip'
 import { clearToasts, toasts } from '../ui/toast'
+import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -1601,6 +1602,125 @@ describe('a body that arrived on one line can be laid out', () => {
 
     fireEvent.click(button('Auth •'))
     await vi.waitFor(() => expect(buttonNames()).not.toContain('Format'))
+  })
+})
+
+// ── Reading the answer ────────────────────────────────────────────────────
+//
+// nocx-dhojo, reported by the owner from real use: a minified JSON answer was
+// shown exactly as it arrived, so a 154-byte body was read by dragging a
+// scrollbar sideways and a large one could not be read at all. Body and Raw
+// are two different questions — Raw is what came off the socket and Body is
+// what the answer SAYS — and only one of them is allowed to move.
+
+/** The response body as it is on screen, line by line. */
+function responseBodyLines(card: HTMLElement): string[] {
+  const el = card.querySelector<HTMLElement>('[aria-label="Response body"]')
+  if (!el) throw new Error('no response body on this run')
+  return editorLines(el)
+}
+
+/** Send one exchange whose response is exactly the given fixture, and answer
+ *  with a way to ASK for the card it produced.
+ *
+ *  An accessor rather than the element: choosing a tab goes through the store,
+ *  which re-renders the list, so a card captured once is a card that stops
+ *  being the one on screen the moment the test clicks anything. */
+async function sentAnswer(over: Parameters<typeof sendFixture>[0]): Promise<() => HTMLElement> {
+  const { bar } = await mountApp({ sendRequest: vi.fn().mockResolvedValue(sendFixture(over)) })
+  await openRequest(bar)
+  fireEvent.click(button('Send'))
+  await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+  return () => runCards()[0]
+}
+
+describe('the answer is laid out for reading, and Raw stays the bytes', () => {
+  const MINIFIED = '{"id":"usr_8f21","tags":["a","b"],"meta":{"n":1}}'
+
+  it('a minified JSON answer is one field per line, indented', async () => {
+    const card = await sentAnswer({ text: MINIFIED })
+
+    await vi.waitFor(() => expect(responseBodyLines(card()).length).toBeGreaterThan(1))
+    const lines = responseBodyLines(card())
+    expect(lines[0]).toBe('{')
+    expect(lines).toContain('  "id": "usr_8f21",')
+    // Indented AGAIN where it nests, which is the depth a one-line document
+    // does not show.
+    expect(lines).toContain('    "n": 1')
+    // And it is the same document: only whitespace moved.
+    expect(JSON.parse(lines.join('\n'))).toEqual(JSON.parse(MINIFIED))
+  })
+
+  // THE OTHER TAB IS THE OTHER QUESTION. The raw view is composed by the
+  // SENDER and shows what went over the socket, so the layout must be
+  // invisible to it — byte for byte, including the minified body.
+  it('Raw still shows the bytes exactly as they arrived', async () => {
+    const card = await sentAnswer({ text: MINIFIED, raw: responseRawFixture() })
+    fireEvent.click(optionIn(card(), 'Raw'))
+
+    await vi.waitFor(() => expect(currentTab(card())).toBe('Raw'))
+    const raw = rawBlockText(card(), 'Raw response')
+    expect(raw).toContain('{"id":"usr_8f21"}')
+    // Not a trace of the layout: no indented field, no line break inside the
+    // document. If this ever fails, two tabs have become one.
+    expect(raw).not.toContain('"id": "usr_8f21"')
+  })
+
+  // WHAT THE RUN RECORDED IS UNTOUCHED. The size is the backend's count of
+  // the bytes it read, and a renderer that re-derived it from the text it is
+  // showing would report the layout's whitespace as payload.
+  it('the size on the run is the bytes off the socket, not the laid-out text', async () => {
+    const card = await sentAnswer({ text: MINIFIED, size: 154 })
+    await vi.waitFor(() => expect(responseBodyLines(card()).length).toBeGreaterThan(1))
+    expect(card().textContent).toContain('154B')
+    expect(card().textContent).toContain('154 bytes')
+  })
+
+  // DECLARED JSON, NOT SENT AS JSON. Shown as it arrived and nothing claims
+  // otherwise — the panel does not argue with the header, and Raw is one tab
+  // away for exactly that case.
+  it('a body that does not parse is shown unchanged rather than mangled', async () => {
+    const broken = '{"id":"usr_8f21"'
+    const card = await sentAnswer({ text: broken })
+    await vi.waitFor(() => expect(responseBodyLines(card())).toEqual([broken]))
+    expect(card().textContent).not.toContain('laid out')
+  })
+
+  // AND A BODY THAT IS NOT DECLARED JSON IS NOT TOUCHED AT ALL. The content
+  // type is what decides whether to try; the bytes never are.
+  it('a body the server did not call JSON is shown as it arrived', async () => {
+    const html = '<html><body>hello</body></html>'
+    const card = await sentAnswer({
+      text: html,
+      headers: [{ name: 'Content-Type', value: 'text/html', enabled: true }],
+    })
+    await vi.waitFor(() => expect(responseBodyLines(card())).toEqual([html]))
+  })
+
+  // THE THRESHOLD, NAMED. Laying out a body is a main-thread parse that
+  // cannot be interrupted, so past the cap the pane shows the bytes and says
+  // why rather than freezing while a person waits for it.
+  it(`a body over ${JSON_LAYOUT_LIMIT} characters says so instead of freezing the pane`, async () => {
+    const filler = 'y'.repeat(JSON_LAYOUT_LIMIT - '{"k":""}'.length + 1)
+    const oversize = `{"k":"${filler}"}`
+    expect(oversize.length).toBe(JSON_LAYOUT_LIMIT + 1)
+
+    const card = await sentAnswer({ text: oversize, size: oversize.length })
+
+    // Shown as it arrived, on ONE line. Asserted as a PREFIX rather than as
+    // the whole document: CM6 renders only what its viewport needs of an
+    // enormous line, so the element holds the first couple of thousand
+    // characters of it and never the rest. What matters is that nothing
+    // reshaped it — a laid-out `{"k":"…"}` is more than one line and spells
+    // its field `"k": "`, with a space.
+    await vi.waitFor(() => expect(responseBodyLines(card())).toHaveLength(1))
+    const shown = responseBodyLines(card())[0]
+    expect(oversize.startsWith(shown)).toBe(true)
+    expect(shown).toContain('{"k":"')
+    // …and the pane SAYS so. A degrade nothing on screen mentions is how a
+    // feature that does not exist survives a release.
+    expect(card().textContent).toContain('too large to lay out')
+    expect(card().textContent).toContain(`${JSON_LAYOUT_LIMIT / 1024}K characters`)
   })
 })
 

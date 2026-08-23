@@ -16,10 +16,10 @@
  * to create a group while 1041 frontend tests were green, every one of them
  * mounting a component and asserting what it rendered. So every step below
  * goes through the seam a person actually reaches: the activity-bar entry, the
- * disclosure on the Import section, the two fields inside it, the folder ask,
- * a row in the tree, the Send button, the Raw segment. Nothing here calls
- * ApiClient, and nothing here calls the control plane to arrange a state the
- * product is supposed to arrange.
+ * collections menu, the import ask it opens, the region's file picker inside
+ * it, the folder ask, a row in the tree, the Send button, the Raw segment.
+ * Nothing here calls ApiClient, and nothing here calls the control plane to
+ * arrange a state the product is supposed to arrange.
  *
  * ITS OWN BACKEND, not the shared stand. Two reasons and both are hard. The
  * import writes a secret VALUE, so this run needs a vault it set up itself —
@@ -37,14 +37,7 @@
  * is broken on a fast one too; it has only not been caught yet.
  */
 import { test as base, expect } from '@playwright/test'
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -112,9 +105,6 @@ test.describe('API testing: import, send, and the token that never lands in a fi
   let disposable: DisposableRoot
   let backend: VaultBackend
   let server: ApiTestServer
-  /** The export document on disk, as a person would have it after clicking
-   *  Export in Postman. */
-  let exportPath: string
   /** Where the import puts the collection. It must NOT exist beforehand — an
    *  import refuses an occupied destination rather than replacing it (§12.2)
    *  — so it is a name under the disposable root and nothing creates it. */
@@ -123,8 +113,6 @@ test.describe('API testing: import, send, and the token that never lands in a fi
   test.beforeAll(async () => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-')) }
     server = await startApiTestServer({ expectedToken: POSTMAN_BEARER_TOKEN })
-    exportPath = join(disposable.root, 'acme.postman_collection.json')
-    writeFileSync(exportPath, postmanExport(server.baseUrl), 'utf8')
     collectionRoot = join(disposable.root, 'acme-api')
     backend = new VaultBackend(devharnessBin(), disposable, true)
   })
@@ -178,18 +166,44 @@ test.describe('API testing: import, send, and the token that never lands in a fi
 
     // ── Step 2: the export is imported THROUGH THE UI ───────────────────────
     //
-    // The Import group is a collapsed section, so a person opens it before
-    // they can type into it. `aria-expanded` is the disclosure's own account
-    // of whether its body is on screen (ui/section.tsx), so it answers the
-    // question directly instead of being inferred from the field appearing.
-    const importDisclosure = workbench.getByRole('button', { name: 'Import', exact: true })
-    await expect(importDisclosure).toBeVisible()
-    await importDisclosure.click()
-    await expect(importDisclosure).toHaveAttribute('aria-expanded', 'true')
+    // The import is an ASK off the collections menu, and it was a collapsed
+    // section in the panel when this spec was written: a panel that wears a
+    // form is a panel asking you to fill something in before it will show you
+    // anything (import-dialogs.tsx). The menu and the dialog it opens are the
+    // seam a person reaches now, so they are the seam this walks.
+    await workbench.locator('#api-collections-menu').click()
+    await page.getByRole('menuitem', { name: 'Import collection…' }).click()
+    const ask = page.getByRole('dialog').filter({ hasText: 'Import collection' })
+    await expect(ask).toBeVisible()
 
-    await workbench.locator('#api-import-postman-file').fill(exportPath)
-    await workbench.locator('#api-import-postman-dest').fill(collectionRoot)
-    await workbench.getByRole('button', { name: 'Import Postman export' }).click()
+    // THE EXPORT, AS TEXT. The ask no longer names two absolute paths
+    // (nocx-ysyy2), and on a stand with no Wails neither gesture that ANSWERS
+    // with a path exists — no system picker, no native window drop. What is
+    // left is the ask's one question, and the export's own text is a source it
+    // takes: bytes reach the backend wherever it runs, where a path only names
+    // a file on the machine running Go (spec §1a).
+    //
+    // THE CREDENTIAL ASSERTION IN STEP 5 IS UNAFFECTED, and it is worth saying
+    // why rather than hoping. Every entrance this build has hands the renderer
+    // the BYTES — a chosen file is read with `File.text()` and sent as a
+    // document too (api-pane.tsx) — and what step 5 watches is the SERIALISED
+    // DOM, where the box holds what was pasted as a property rather than as
+    // markup. It says what it always said: nothing nocx renders carries the
+    // value.
+    await page.locator('#api-import-paste').fill(postmanExport(server.baseUrl))
+    // The ask HOLDS it and says so: the source line is what a person reads to
+    // see what the ask is holding (spec §2), and waiting on it waits for the
+    // paste to have landed rather than for a duration. A pasted document has
+    // no name of its own, so the line says what it is.
+    await expect(ask.locator('.api-import-source')).toContainText('Pasted Postman export')
+
+    // AND WHERE IT GOES, through the pencil. The destination is an offer
+    // rendered as a sentence; the field behind it is still the truth and is
+    // what a person types into once they disagree — and this spec disagrees,
+    // because the walk in step 3 reads a folder it named itself.
+    await ask.getByRole('button', { name: 'Change where this goes' }).click()
+    await page.locator('#api-import-postman-dest').fill(collectionRoot)
+    await ask.getByRole('button', { name: 'Import', exact: true }).click()
 
     // THE FOLDER ARRIVING is the observable state, and §12.2 makes it the
     // exactly right one: "dest DOES NOT EXIST from before the first byte is
@@ -262,15 +276,14 @@ test.describe('API testing: import, send, and the token that never lands in a fi
 
     // ── Step 4: the request opens and Send is pressed ───────────────────────
     //
-    // An import does not open the folder it wrote, so a person opens it — the
-    // second of the panel's two asks. That is also what puts the collection in
-    // the tree, which is where the request is clicked.
-    await workbench.getByRole('button', { name: 'Open folder…' }).click()
-    const folderAsk = page.getByRole('dialog').filter({ hasText: 'Open a collection folder' })
-    await expect(folderAsk).toBeVisible()
-    await page.locator('#api-collection-path').fill(collectionRoot)
-    await folderAsk.getByRole('button', { name: 'Open', exact: true }).click()
-
+    // NOTHING IS PRESSED BETWEEN THE IMPORT AND THESE ROWS. The import OPENS
+    // what it wrote (nocx-vkp9d); it used not to — `api.collections.list`
+    // answers the open folders and the import registered nothing — so this
+    // spec used to go to the panel's other ask afterwards and type the path
+    // that had been in the field in front of it a second earlier. That second
+    // step was the defect and not the procedure, and what arrives below is the
+    // difference between a directory on disk and a collection somebody can
+    // use.
     await expect(
       workbench.locator('.api-tree__row').filter({ hasText: POSTMAN_COLLECTION_NAME }),
     ).toBeVisible({ timeout: 10_000 })

@@ -222,6 +222,7 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
     const h = harness(LOCAL, { native: true })
     h.services.emitDropped({
       sessionId: LOCAL.sessionId,
+      target: 'terminal',
       sources: [
         {
           sourceTicket: '',
@@ -244,6 +245,7 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
     const h = harness(LOCAL, { native: true })
     h.services.emitDropped({
       sessionId: LOCAL.sessionId,
+      target: 'terminal',
       sources: [
         { sourceTicket: '', name: 'my report.txt', size: 1, localPath: '/home/dev/my report.txt' },
         { sourceTicket: '', name: 'plain.txt', size: 1, localPath: '/home/dev/plain.txt' },
@@ -262,6 +264,7 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
     const h = harness(LOCAL, { native: true })
     h.services.emitDropped({
       sessionId: LOCAL.sessionId,
+      target: 'terminal',
       sources: [{ sourceTicket: '', name: 'report.pdf', size: 12 }],
     })
     await settle()
@@ -278,6 +281,7 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
     h.services.nextResult = [{ transferId: 't1', ticket: 'tk', url: '/upload/tk' }]
     h.services.emitDropped({
       sessionId: LOCAL.sessionId,
+      target: 'terminal',
       sources: [
         { sourceTicket: '', name: 'a.pdf', size: 1, localPath: '/home/dev/a.pdf' },
         { sourceTicket: '', name: 'b.pdf', size: 2, localPath: '/home/dev/b.pdf' },
@@ -321,6 +325,7 @@ describe('the native drop, which never becomes a DOM event we act on', () => {
     h.services.nextResult = [{ transferId: 't1' }]
     h.services.emitDropped({
       sessionId: REMOTE.sessionId,
+      target: 'terminal',
       sources: [{ sourceTicket: 'c'.repeat(32), name: 'notes.txt', size: 500 }],
     })
     await settle()
@@ -333,6 +338,7 @@ describe('the native drop, which never becomes a DOM event we act on', () => {
     h.services.nextResult = [{ transferId: 't1' }]
     h.services.emitDropped({
       sessionId: REMOTE.sessionId,
+      target: 'terminal',
       sources: [{ sourceTicket: 'c'.repeat(32), name: 'notes.txt', size: 500 }],
     })
     await settle()
@@ -347,6 +353,7 @@ describe('the native drop, which never becomes a DOM event we act on', () => {
     const h = harness(REMOTE, { native: true })
     h.services.emitDropped({
       sessionId: 'd'.repeat(32),
+      target: 'terminal',
       sources: [{ sourceTicket: 'c'.repeat(32), name: 'notes.txt', size: 1 }],
     })
     await settle()
@@ -412,6 +419,7 @@ describe('detaching', () => {
     h.detach()
     h.services.emitDropped({
       sessionId: REMOTE.sessionId,
+      target: 'terminal',
       sources: [{ sourceTicket: 'c'.repeat(32), name: 'a.txt', size: 1 }],
     })
     fire(h.element, 'drop', filesTransfer([new File(['a'], 'a.txt')]))

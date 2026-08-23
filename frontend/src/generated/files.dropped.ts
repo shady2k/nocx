@@ -18,6 +18,10 @@ export interface FilesDropped {
    */
   sessionId: string
   /**
+   * WHICH drop target the files landed on: the value of the drop element's data-file-drop-target attribute, non-empty. The session above says which tab; this says which surface OF that tab, and the two are different questions the moment more than one surface can legitimately name one session — the terminal pane inserts a dropped path at its prompt (D9) while the API workbench's import ask reads it as the document to import, and both belong to the local tab. Without this, one gesture reached both and the winner was evaluation order. A drop whose target names nothing is refused rather than delivered to everybody, for the same reason a drop that names no session is: a notification nobody can attribute is one every subscriber has to guess about.
+   */
+  target: string
+  /**
    * One entry per dropped file that could be read. Never empty: a drop where nothing could be minted emits nothing at all, and a drop where some members were unusable (a directory, which is out of scope) emits the rest and reports the refusal in the backend's log rather than silently claiming everything arrived.
    */
   sources: {

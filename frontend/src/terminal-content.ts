@@ -75,7 +75,7 @@ import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
-import { attachTerminalDrop } from './files/terminal-drop'
+import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
@@ -3732,7 +3732,7 @@ export class TerminalContent extends BasePaneContent {
   private markAsFileDropTarget(sessionId: string): void {
     const pane = this._paneTarget
     if (!pane) return
-    pane.setAttribute('data-file-drop-target', '')
+    pane.setAttribute('data-file-drop-target', TERMINAL_DROP_TARGET)
     pane.setAttribute('data-session-id', sessionId)
   }
 

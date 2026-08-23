@@ -295,6 +295,28 @@ describe('a native drop on a LOCAL tab inserts the path D9 promised', () => {
     expect(h.bindings).toEqual([])
     expect(h.store.transfers()).toEqual([])
   })
+
+  it('ignores a drop on another surface of the same session', async () => {
+    // The same tab, a different surface — the import ask. The pane must not
+    // type the export's path at the person's prompt because they dropped it
+    // into a dialog that happens to name this tab.
+    const h = harness(LOCAL, { native: true })
+    h.services.emitDropped({
+      sessionId: LOCAL.sessionId,
+      target: 'api-import',
+      sources: [{ sourceTicket: '', name: 'acme.json', size: 2, localPath: '/work/acme.json' }],
+    })
+    await settle()
+    expect(h.inserted).toEqual([])
+
+    h.services.emitDropped({
+      sessionId: LOCAL.sessionId,
+      target: 'terminal',
+      sources: [{ sourceTicket: '', name: 'acme.json', size: 2, localPath: '/work/acme.json' }],
+    })
+    await settle()
+    expect(h.inserted).toHaveLength(1)
+  })
 })
 
 describe('a drag that is not a files drag is left entirely alone', () => {

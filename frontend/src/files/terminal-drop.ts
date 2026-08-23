@@ -84,6 +84,11 @@ import type { UploadServices } from './upload-client'
 import { uploadMovesTheFile } from './upload-eligibility'
 import type { UploadFlow, UploadReport, UploadSource } from './upload-flow'
 
+/** This surface's name in `data-file-drop-target`. Exported so the element
+ *  that carries the attribute and the subscriber that filters on it read one
+ *  constant — two string literals is how they drift apart. */
+export const TERMINAL_DROP_TARGET = 'terminal'
+
 /** What the tab is, at the moment of the drop. A subset of ActiveOrigin —
  *  the fields a destination is derived from — so this module can be driven
  *  without a pane. */
@@ -352,10 +357,15 @@ export function attachTerminalDrop(deps: TerminalDropDeps): () => void {
   element.addEventListener('dragleave', onDragLeave)
   element.addEventListener('drop', onDrop)
 
-  /** The native half. Filtered by session, because every pane subscribes
-   *  and exactly one of them was dropped on. */
+  /** The native half. Filtered by session AND by target: every pane
+   *  subscribes and exactly one of them was dropped on — and since
+   *  nocx-cx442 a session can have more than one drop surface, because the
+   *  import ask names the local tab too. Session alone had the pane typing
+   *  an export's path at the prompt because somebody dropped it in a
+   *  dialog. */
   const unsubDropped = deps.services.subscribeDropped((p) => {
     if (p.sessionId !== origin()?.sessionId) return
+    if (p.target !== TERMINAL_DROP_TARGET) return
     void handle(
       p.sources.map((s) => ({
         name: s.name,

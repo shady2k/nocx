@@ -181,6 +181,39 @@ describe('ApiClient — one method per contract', () => {
     })
   })
 
+  it('imports from a URL, carrying the route the backend should fetch it over', async () => {
+    // The third source is the general case in the direction the document
+    // cannot serve: an export behind a network the renderer is not on. The
+    // route rides WITH the url because it is part of how that document is
+    // reached, and it spreads onto the params like the other two sources —
+    // `importPostman` never learns which member it was handed.
+    const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
+    await createApiWorkbenchServices(dispatcher).importPostman(
+      {
+        url: 'https://h/a.json',
+        route: { kind: 'connection', profileId: 'p', insecureTls: false },
+      },
+      '/w/acme',
+    )
+    expect(call).toHaveBeenCalledWith('api.import.postman', {
+      url: 'https://h/a.json',
+      route: { kind: 'connection', profileId: 'p', insecureTls: false },
+      dest: '/w/acme',
+    })
+  })
+
+  it('omits route entirely when there is none, rather than sending it undefined', async () => {
+    // `decodeAPIParams` refuses a field it does not declare, and a key
+    // present-and-undefined is still a key on the wire once it is spread.
+    // Absent route IS the direct one, so the absence is the spelling.
+    const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
+    await createApiWorkbenchServices(dispatcher).importPostman(
+      { url: 'https://h/a.json' },
+      '/w/acme',
+    )
+    expect(Object.keys(call.mock.calls[0][1] as object)).toEqual(['url', 'dest'])
+  })
+
   it('imports a curl line as a line — parsed, never executed', async () => {
     const { dispatcher, call } = fakeDispatcher({ request: REQUEST, unsupported: [] })
     await createApiWorkbenchServices(dispatcher).importCurl('curl -X POST https://a/b')

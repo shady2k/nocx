@@ -36,7 +36,7 @@ import type { FilesWatchResult } from '../generated/files.watch'
 import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesDropped } from '../generated/files.dropped'
-import type { ApiEnvironment, ApiRequest } from './api-model'
+import type { ApiEnvironment, ApiRequest, ApiRoute } from './api-model'
 
 class ApiClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -206,8 +206,9 @@ class ApiClient {
    *  log line, so a soft degrade is visible in the product.
    *
    *  The export arrives as an ImportSource: a path on the backend's machine,
-   *  or the document itself. The two spread onto the params as the one field
-   *  each carries, so this method never has to know which is which. */
+   *  the document itself, or a URL the backend fetches over a route. The
+   *  three spread onto the params as the one field each carries, so this
+   *  method never has to know which is which. */
   importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
     return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', { ...source, dest })
   }
@@ -235,7 +236,7 @@ type ChosenPath = { path: string }
 
 /**
  * WHERE THE EXPORT AN IMPORT READS COMES FROM — the one question
- * `api.import.postman` asks about its source, with two answers rather than
+ * `api.import.postman` asks about its source, with three answers rather than
  * one, chosen by what the gesture could answer with.
  *
  * `path` names a file on the BACKEND'S machine, which is the narrow case:
@@ -245,16 +246,24 @@ type ChosenPath = { path: string }
  * over by the Wails window's own drop — where Go took the path off the
  * runtime and the backend IS the person's machine.
  *
- * `document` is the export itself, and it is the general case: a browser
- * drop and the kit's file input both yield bytes, and bytes reach a backend
- * wherever it runs (spec §1a). `apiimport.ImportInto` already takes a
- * READER; only `capability.ImportPostman` opened a file first.
+ * `document` is the export itself: a browser drop and the kit's file input
+ * both yield bytes, and bytes reach a backend wherever it runs (spec §1a).
+ * `apiimport.ImportInto` already takes a READER; only
+ * `capability.ImportPostman` opened a file first.
  *
- * Never both. A union rather than two optional fields, because "a path AND a
- * document" is a state with no meaning and the type is where it stops being
- * expressible.
+ * `url` names where the backend should FETCH it, and it is the general case
+ * in the direction the document cannot serve: an export behind a network the
+ * renderer is not on. The `route` rides with the url because it is part of
+ * how that document is reached — and an absent route IS the direct one, so
+ * it is absent from the object rather than present and undefined, which is a
+ * key `decodeAPIParams` would refuse once the source is spread.
+ *
+ * Never two of them. A union rather than three optional fields, because "a
+ * path AND a document" is a state with no meaning and the type is where it
+ * stops being expressible.
  */
-export type ImportSource = { path: string } | { document: string }
+export type ImportSource =
+  { path: string } | { document: string } | { url: string; route?: ApiRoute }
 
 /**
  * The native directory picker, as this surface consumes it.

@@ -108,18 +108,27 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         </>
       }
     >
-      {/* THE ASK IS A DROP TARGET, and it is the BODY that carries the
+      {/* THE ASK IS A DROP TARGET, AND SAYS SO AT REST. It is the BODY that carries the
           attributes rather than the `<dialog>`: the kit's Dialog does not
           forward arbitrary `data-*`, and reaching past it to stamp them on
           the element itself would be the repaint rule in another form. The
           zone owns the affordance and none of the meaning — what a dropped
           file means to this ask is answered by the subscriber in
           api-pane.tsx, which is the same code path the export picker
-          already goes through. */}
+          already goes through.
+
+          Its picker control is handed `onBrowseFile` — the very handler the
+          export field's trailing button below calls. Two controls, ONE
+          derivation of "choose an export": a second one would agree with the
+          first everywhere anybody looked and disagree about the proposed
+          destination somewhere nobody did. Absent (no Wails file picker) the
+          region draws the drop half alone. */}
       <DropZone
         target={API_IMPORT_DROP_TARGET}
         sessionId={props.dropSession}
-        hint="Drop a Postman export here"
+        hint="Drop a Postman export here to import it"
+        pickLabel="Or select a file"
+        onPick={props.onBrowseFile}
       >
         {/* THE EXPORT HAS A PICKER TOO, and it is the same control in the same
           slot as the destination's below. Without it this field named a

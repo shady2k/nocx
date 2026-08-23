@@ -1794,6 +1794,61 @@ describe('the import ask accepts a drop', () => {
 
     expect(importAskBody().querySelector('[data-file-drop-target]')).toBeNull()
   })
+
+  // ── The affordance says so BEFORE the gesture ───────────────────────────
+  //
+  // nocx-9hb5g. The zone painted only under a drag, so the finished ask
+  // looked exactly as it had before the drop existed — the owner opened it in
+  // the Wails window and said the import had not changed at all. It had; the
+  // capability just never said so. Postman, this ask's reference, shows the
+  // region at rest, permanently.
+
+  it('shows the drop region above both fields, with no drag having happened', async () => {
+    await openAskWithDrop(nativeDropFixture())
+
+    const region = importAskBody().querySelector<HTMLElement>('.ui-drop-zone__region')
+    expect(region).not.toBeNull()
+    expect(region!.textContent).toMatch(/drop/i)
+    const isBelowRegion = (el: Element): boolean =>
+      (region!.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+    expect(isBelowRegion(field('api-import-postman-file'))).toBe(true)
+    expect(isBelowRegion(field('api-import-postman-dest'))).toBe(true)
+  })
+
+  it('draws no region, and no gap where it was, on a build with no native drop', async () => {
+    await openAskWithDrop(undefined)
+
+    const zone = importAskBody().querySelector<HTMLElement>('.ui-drop-zone')!
+    expect(zone.querySelector('.ui-drop-zone__region')).toBeNull()
+    // And nothing stands between the body and the fields: the zone's first
+    // child IS the export field. The other half of "no gap" is `display:
+    // contents` on the wrapper, which jsdom cannot see — drop-zone.test.tsx
+    // reads the stylesheet for it.
+    expect(zone.firstElementChild?.contains(field('api-import-postman-file'))).toBe(true)
+  })
+
+  it("the region's picker is the export field's picker — one capability, two controls", async () => {
+    // Two controls, ONE derivation of "choose an export": the region's button
+    // is threaded the handler the field's trailing button already calls, so a
+    // pick made either way proposes the destination the same way.
+    const openFile = vi.fn().mockResolvedValue({ path: '/downloads/acme.postman_collection.json' })
+    const { bar } = await mountApp({ openFile, nativeDrop: nativeDropFixture() })
+    await openImportAsk(bar)
+
+    expect(buttonNames()).toContain('Choose export…')
+    fireEvent.click(button('Or select a file'))
+
+    await vi.waitFor(() =>
+      expect(field('api-import-postman-file').value).toBe(
+        '/downloads/acme.postman_collection.json',
+      ),
+    )
+    expect(openFile).toHaveBeenCalledTimes(1)
+    // The field's own control reaches the very same mock — which is the
+    // assertion that the two controls are one capability rather than two.
+    fireEvent.click(button('Choose export…'))
+    await vi.waitFor(() => expect(openFile).toHaveBeenCalledTimes(2))
+  })
 })
 
 // ── An import opens what it wrote ─────────────────────────────────────────

@@ -238,6 +238,12 @@ test.describe('the import ask on a stand with no Wails', () => {
     const zone = ask.locator('.ui-drop-zone')
     await expect(zone).toHaveCount(1)
 
+    // And it draws NOTHING: the region — the icon, the line naming the
+    // gesture and its picker button — is the affordance, and here it is
+    // absent rather than merely inert. A region inviting a drop that cannot
+    // arrive has already promised (nocx-9hb5g).
+    await expect(zone.locator('.ui-drop-zone__region')).toHaveCount(0)
+
     // And it names nothing. `data-file-drop-target` is the attribute the
     // backend reads off the dropped-on element, `data-session-id` is the tab
     // it would be attributed to, and here there is no Wails to deliver either

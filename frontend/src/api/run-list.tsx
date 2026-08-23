@@ -18,6 +18,15 @@
 // body in one pane, each with its own scroll box, so a long body pushed the
 // headers off screen and twenty-four headers pushed the body off — two things
 // competing for one column when a person looks at one of them at a time.
+//
+// BODY AND RAW ARE TWO DIFFERENT QUESTIONS and neither may be answered with
+// the other's answer. Raw is "what came off the socket", byte for byte, and it
+// is composed by the SENDER (§11.2) — nothing here touches it. Body is "what
+// does this answer SAY", and a minified JSON payload does not say it: a
+// 154-byte reply was read by dragging a scrollbar sideways, and a large one
+// could not be read at all. So the Body tab lays JSON out for reading, and
+// everything the run RECORDED — the size, and the raw view — stays the bytes
+// off the socket (nocx-dhojo).
 
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from 'solid-js'
 import { Badge } from '../ui/badge'
@@ -28,6 +37,7 @@ import { Tabs } from '../ui/tabs'
 import { EmptyState } from '../ui/empty-state'
 import { StatusDot } from '../ui/status-dot'
 import { createSecretChip, createSecretChipDamaged } from '../ui/secret-chip'
+import { layOutJSON } from '../ui/format-json'
 import { ResponseBody } from './response-body'
 import type { ApiRun, ApiRunView } from './api-store'
 import { TimingBar } from './timing-bar'
@@ -96,6 +106,44 @@ function Run(props: {
     return acceptedUntrusted(trust) ? trust : undefined
   }
 
+  /**
+   * The body as the BODY TAB shows it, and the sentence that goes under it.
+   *
+   * WHAT DECIDES WHETHER TO TRY is still the CONTENT TYPE the server sent
+   * (api-model.ts) — the bytes are parsed only after the header has said they
+   * are JSON, so this is not the panel guessing at a payload and it cannot
+   * start arguing with a server that declared one thing and sent another.
+   *
+   * THREE OUTCOMES, and only one of them is a layout. A body that is not
+   * declared JSON is shown as it arrived. A body that is declared JSON and
+   * does not parse is shown as it arrived too — with nothing claiming it was
+   * formatted, and with the JSON grammar's own gutter marking where it stops
+   * being JSON, which is a better sentence than any this component could
+   * write. A body too large to lay out cheaply is shown as it arrived AND
+   * SAYS SO: the work is a main-thread parse that cannot be interrupted, so
+   * the alternative is freezing the pane it is being read in, and a soft
+   * degrade nothing on screen mentions is how a feature that does not exist
+   * survives a release.
+   *
+   * A memo because the body of one run never changes and the list re-renders
+   * around it — re-parsing a payload on every render of the column is the
+   * cost this is here to avoid.
+   */
+  const readableBody = createMemo((): { text: string; note: string } | null => {
+    const res = response()
+    if (!res || !hasBodyText(res)) return null
+    if (!isJSONResponse(res)) return { text: res.text, note: '' }
+    const laid = layOutJSON(res.text)
+    if (laid.kind === 'laid-out') return { text: laid.text, note: '' }
+    if (laid.kind === 'too-large') {
+      return {
+        text: res.text,
+        note: `Shown as it arrived: over ${laid.limit / 1024}K characters is too large to lay out here.`,
+      }
+    }
+    return { text: res.text, note: '' }
+  })
+
   // THE TABS EXIST FOR AN ATTEMPT, not for an answer. A failed run has a
   // request, a route and how far it got, and the raw view is where a person
   // reads them — so the tab row appears as soon as there is an exchange to
@@ -110,16 +158,28 @@ function Run(props: {
         id: 'body',
         label: 'Body',
         content: () => (
-          <Show when={hasBodyText(res)} fallback={<Caption>{bodySummary(res)}</Caption>}>
-            <ResponseBody
-              ariaLabel="Response body"
-              text={res.text}
-              language={isJSONResponse(res) ? 'json' : 'text'}
-            />
-            {/* The summary stays for the three states that are not
-                "here it is": truncated, lossy, and the size itself
-                (§12.3). Four sentences, still four. */}
-            <Caption>{bodySummary(res)}</Caption>
+          <Show when={readableBody()} fallback={<Caption>{bodySummary(res)}</Caption>}>
+            {(view) => (
+              <>
+                <ResponseBody
+                  ariaLabel="Response body"
+                  text={view().text}
+                  language={isJSONResponse(res) ? 'json' : 'text'}
+                />
+                {/* Present only when something was NOT done and the reason is
+                    worth a sentence. Nothing here ever claims a body WAS laid
+                    out — that is visible, and a label on the ordinary case is
+                    noise. */}
+                <Show when={view().note !== ''}>
+                  <Caption>{view().note}</Caption>
+                </Show>
+                {/* The summary stays for the three states that are not
+                    "here it is": truncated, lossy, and the size itself
+                    (§12.3). Four sentences, still four — and the size is the
+                    run's own, off the socket, whatever the tab is showing. */}
+                <Caption>{bodySummary(res)}</Caption>
+              </>
+            )}
           </Show>
         ),
       })
@@ -371,8 +431,16 @@ function RawExchange(props: {
 }) {
   return (
     <div class="api-run__raw">
+      {/* THE SAME ANSWER THE EDITOR GIVES, because these are the same octets:
+          the request preview does not wrap, so a long header or a one-line
+          body is reached by scrolling sideways inside the block rather than
+          folded into a paragraph that no longer looks like what went out
+          (nocx-kdawd). The connection block and the certificates below keep
+          wrapping — they are text this renderer composed out of facts, not
+          bytes off the wire, and a fingerprint is a thing people copy out of
+          a block that shows it whole. */}
       <Caption>── request ──</Caption>
-      <CodeBlock ariaLabel="Raw request">
+      <CodeBlock ariaLabel="Raw request" wrap={false}>
         <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg)}</For>
       </CodeBlock>
       <Caption>── connection ──</Caption>
@@ -402,7 +470,7 @@ function RawExchange(props: {
         {(raw) => (
           <>
             <Caption>── response ──</Caption>
-            <CodeBlock ariaLabel="Raw response">
+            <CodeBlock ariaLabel="Raw response" wrap={false}>
               <For each={rawSegments(raw())}>{(seg) => rawSegment(seg)}</For>
             </CodeBlock>
           </>

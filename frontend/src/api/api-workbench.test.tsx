@@ -55,6 +55,7 @@ import {
 } from './api-test-fixtures'
 import { createSecretChip } from '../ui/secret-chip'
 import { clearToasts, toasts } from '../ui/toast'
+import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -1366,6 +1367,360 @@ describe('the raw view and the body', () => {
     // would read them all and say nothing about what a person is looking at.
     await vi.waitFor(() => expect(currentTab(runCards()[1])).toBe('Raw'))
     expect(currentTab(runCards()[0])).toBe('Body')
+  })
+})
+
+// ── A long line, and the box it moves in ──────────────────────────────────
+//
+// nocx-kdawd, reported by the owner from real use: a JSON body with one long
+// value — a token, a base64 blob — could not be moved sideways INSIDE the
+// editor. It wrapped, so a value's continuation sat against the line numbers,
+// and the only scrollbar that moved anything was the pane's, which moved the
+// whole surface with it.
+//
+// The answer is the one the read-only hosts already gave and the one the raw
+// view now gives for the same octets: the line stays a line, and the box it
+// is in is what scrolls. ONE answer for both, which is the half of the bead
+// that is about not shipping two.
+
+/** A body whose one value is longer than any pane this product has. */
+const LONG_BODY = `{"token":"${'x'.repeat(400)}"}`
+
+function bodyEditor(): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>('.api-body-editor')
+  if (!el) throw new Error('the body editor is not on screen')
+  return el
+}
+
+/** The document as CM6 has it: one div.cm-line per line, and no newline text
+ *  nodes, so a plain textContent read would say every body is one line. */
+function editorLines(el: HTMLElement): string[] {
+  return [...el.querySelectorAll('.cm-line')].map((l) => l.textContent ?? '')
+}
+
+/** Whether a box wraps, asked of the thing that carries the decision: CM6
+ *  puts `cm-lineWrapping` on the content it wraps, and CodeBlock marks the
+ *  variant that does not on the element the stylesheet keys off. */
+function wraps(el: HTMLElement): boolean {
+  const content = el.querySelector('.cm-content')
+  if (content) return content.classList.contains('cm-lineWrapping')
+  return el.dataset.wrap !== 'false'
+}
+
+/** The product's own stylesheet, in the document, so a computed overflow is
+ *  the shipped rule and not one this file re-typed.
+ *
+ *  jsdom applies CSS from a <style> element and computes NO layout, so this
+ *  can say WHO owns the sideways scroll and can never say that a scrollbar
+ *  appeared. The second half needs a real engine (e2e/), and the first is
+ *  what this bead is about: the movement belongs to the editor's own box. */
+function injectStyles(name: string): HTMLStyleElement {
+  const style = document.createElement('style')
+  style.textContent = readFileSync(`src/styles/components/${name}`, 'utf8')
+  document.head.append(style)
+  return style
+}
+
+describe('a long line is read by moving inside the box that holds it', () => {
+  const styles: HTMLStyleElement[] = []
+  afterEach(() => {
+    for (const s of styles) s.remove()
+    styles.length = 0
+  })
+
+  async function openLongBody(): Promise<void> {
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({
+        request: { ...REQUEST, body: { kind: 'json', text: LONG_BODY, fileRef: '' } },
+      }),
+    })
+    await openRequest(bar)
+    await vi.waitFor(() => expect(editorLines(bodyEditor())).toEqual([LONG_BODY]))
+  }
+
+  it('the body editor keeps the long value on one line rather than wrapping it', async () => {
+    await openLongBody()
+    // ONE line, and it is the whole body: nothing folded it, so there is
+    // something for a sideways scroll to move. Before this the same document
+    // was a stack of rows against the gutter.
+    expect(editorLines(bodyEditor())).toHaveLength(1)
+    expect(wraps(bodyEditor())).toBe(false)
+  })
+
+  it('the scroll that moves it belongs to the editor, and the pane is not asked', async () => {
+    styles.push(injectStyles('api-workbench.css'))
+    await openLongBody()
+
+    const scroller = bodyEditor().querySelector<HTMLElement>('.cm-scroller')
+    if (!scroller) throw new Error('the editor has no scroller of its own')
+    expect(getComputedStyle(scroller).overflow).toBe('auto')
+    // …and the editor's own box CLIPS, so the long line cannot reach the pane
+    // around it and make the surface the thing that moves.
+    expect(getComputedStyle(bodyEditor()).overflow).toBe('hidden')
+  })
+
+  it('the request preview in the run list answers the same way, not a second one', async () => {
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({
+        request: { ...REQUEST, body: { kind: 'json', text: LONG_BODY, fileRef: '' } },
+      }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+    fireEvent.click(optionIn(runCards()[0], 'Raw'))
+
+    const preview = runCards()[0].querySelector<HTMLElement>('[aria-label="Raw request"]')
+    if (!preview) throw new Error('no raw request preview on this run')
+    // The preview holds the bytes the editor holds, so it gives the editor's
+    // answer. Asserted against the editor rather than against a literal:
+    // "one answer, not two" is a statement about the pair.
+    expect(wraps(preview)).toBe(wraps(bodyEditor()))
+    expect(wraps(preview)).toBe(false)
+  })
+})
+
+// ── Laying the request body out ───────────────────────────────────────────
+//
+// nocx-7c39h. A body pasted from a shell, a log or a colleague arrives on one
+// line and there was no control to lay it out, so a person either read the
+// line or took the body to another program and pasted it back.
+
+/** A request whose body is JSON on one line, which is how a pasted one
+ *  arrives. `over` is for the tests that need a different document. */
+function jsonBodyRequest(text = '{"email":"a@b.c","meta":{"n":1}}') {
+  return { ...REQUEST, body: { kind: 'json' as const, text, fileRef: '' } }
+}
+
+/** The body as the editor holds it, joined the way CM6 stores it. */
+function bodyText(): string {
+  return editorLines(bodyEditor()).join('\n')
+}
+
+/** Open the workbench on a request with the given body, and wait until the
+ *  editor is holding it — the point at which a person could press anything. */
+async function openBody(text?: string): Promise<void> {
+  const { bar } = await mountApp({
+    readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest(text) }),
+  })
+  await openRequest(bar)
+  fireEvent.click(button('Body •'))
+  await vi.waitFor(() => expect(bodyText()).not.toBe(''))
+}
+
+describe('a body that arrived on one line can be laid out', () => {
+  it('lays it out into one field per line, indented', async () => {
+    await openBody()
+    expect(bodyText()).toBe('{"email":"a@b.c","meta":{"n":1}}')
+
+    fireEvent.click(button('Format'))
+
+    await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
+    const laid = bodyText()
+    expect(laid).toContain('\n  "email": "a@b.c"')
+    expect(laid).toContain('\n    "n": 1')
+  })
+
+  // ONLY WHITESPACE MOVED, asserted on what is SENT rather than on what is
+  // shown: the file behind the request is what the backend reads, so the
+  // document that matters is the one Save writes.
+  it('what is saved afterwards parses to the document that was there before', async () => {
+    const write = vi.fn().mockResolvedValue({})
+    const before = '{"email":"a@b.c","meta":{"n":1},"tags":[1,2]}'
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest(before) }),
+      writeRequest: write,
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Body •'))
+    await vi.waitFor(() => expect(bodyText()).toBe(before))
+
+    fireEvent.click(button('Format'))
+    await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
+    fireEvent.click(button('Save'))
+
+    await vi.waitFor(() => expect(write).toHaveBeenCalled())
+    const written = write.mock.calls[0][2] as { body: { text: string } }
+    expect(written.body.text).not.toBe(before)
+    expect(JSON.parse(written.body.text)).toEqual(JSON.parse(before))
+  })
+
+  it('is idempotent: pressing it a second time moves nothing', async () => {
+    await openBody()
+    fireEvent.click(button('Format'))
+    await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
+    const once = bodyText()
+
+    fireEvent.click(button('Format'))
+    // Waited on rather than read straight back, so a second layout that DID
+    // move something would have landed before the assertion.
+    await vi.waitFor(() => expect(bodyText()).toBe(once))
+  })
+
+  // NOT MANGLED, AND NOT SILENT. A body a person is about to send is the last
+  // place for a best effort, and a control that appears to do nothing is
+  // indistinguishable from a broken one.
+  it('a body that is not JSON is left exactly as it was, and the control says why', async () => {
+    const notJson = 'name=a&email=a@b.c'
+    await openBody(notJson)
+
+    fireEvent.click(button('Format'))
+
+    await vi.waitFor(() => expect(toasts()).toHaveLength(1))
+    expect(toasts()[0].message).toContain('not valid JSON')
+    expect(bodyText()).toBe(notJson)
+  })
+
+  // ABSENCE IS THE CAPABILITY — the rule this row already follows for its
+  // pickers. A `raw` body has no formatter, so there is no Format beside it;
+  // a greyed one would advertise something the surface cannot do.
+  it('the control is absent where the body mode has no formatter, not present and inert', async () => {
+    const { bar } = await mountApp()
+    await openRequest(bar)
+    fireEvent.click(button('Body •'))
+    // The worked example's body is `raw`.
+    await vi.waitFor(() => expect(control('body-kind').value).toBe('raw'))
+    expect(buttonNames()).not.toContain('Format')
+
+    fireEvent.change(control('body-kind'), { target: { value: 'json' } })
+
+    await vi.waitFor(() => expect(buttonNames()).toContain('Format'))
+
+    // And it leaves again when the kind does, rather than lingering as a
+    // control for a mode that no longer has one.
+    fireEvent.change(control('body-kind'), { target: { value: 'form' } })
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Format'))
+  })
+
+  it('offers nothing to format on the tabs that are not the body', async () => {
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({ request: jsonBodyRequest() }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Body •'))
+    await vi.waitFor(() => expect(buttonNames()).toContain('Format'))
+
+    fireEvent.click(button('Auth •'))
+    await vi.waitFor(() => expect(buttonNames()).not.toContain('Format'))
+  })
+})
+
+// ── Reading the answer ────────────────────────────────────────────────────
+//
+// nocx-dhojo, reported by the owner from real use: a minified JSON answer was
+// shown exactly as it arrived, so a 154-byte body was read by dragging a
+// scrollbar sideways and a large one could not be read at all. Body and Raw
+// are two different questions — Raw is what came off the socket and Body is
+// what the answer SAYS — and only one of them is allowed to move.
+
+/** The response body as it is on screen, line by line. */
+function responseBodyLines(card: HTMLElement): string[] {
+  const el = card.querySelector<HTMLElement>('[aria-label="Response body"]')
+  if (!el) throw new Error('no response body on this run')
+  return editorLines(el)
+}
+
+/** Send one exchange whose response is exactly the given fixture, and answer
+ *  with a way to ASK for the card it produced.
+ *
+ *  An accessor rather than the element: choosing a tab goes through the store,
+ *  which re-renders the list, so a card captured once is a card that stops
+ *  being the one on screen the moment the test clicks anything. */
+async function sentAnswer(over: Parameters<typeof sendFixture>[0]): Promise<() => HTMLElement> {
+  const { bar } = await mountApp({ sendRequest: vi.fn().mockResolvedValue(sendFixture(over)) })
+  await openRequest(bar)
+  fireEvent.click(button('Send'))
+  await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+  return () => runCards()[0]
+}
+
+describe('the answer is laid out for reading, and Raw stays the bytes', () => {
+  const MINIFIED = '{"id":"usr_8f21","tags":["a","b"],"meta":{"n":1}}'
+
+  it('a minified JSON answer is one field per line, indented', async () => {
+    const card = await sentAnswer({ text: MINIFIED })
+
+    await vi.waitFor(() => expect(responseBodyLines(card()).length).toBeGreaterThan(1))
+    const lines = responseBodyLines(card())
+    expect(lines[0]).toBe('{')
+    expect(lines).toContain('  "id": "usr_8f21",')
+    // Indented AGAIN where it nests, which is the depth a one-line document
+    // does not show.
+    expect(lines).toContain('    "n": 1')
+    // And it is the same document: only whitespace moved.
+    expect(JSON.parse(lines.join('\n'))).toEqual(JSON.parse(MINIFIED))
+  })
+
+  // THE OTHER TAB IS THE OTHER QUESTION. The raw view is composed by the
+  // SENDER and shows what went over the socket, so the layout must be
+  // invisible to it — byte for byte, including the minified body.
+  it('Raw still shows the bytes exactly as they arrived', async () => {
+    const card = await sentAnswer({ text: MINIFIED, raw: responseRawFixture() })
+    fireEvent.click(optionIn(card(), 'Raw'))
+
+    await vi.waitFor(() => expect(currentTab(card())).toBe('Raw'))
+    const raw = rawBlockText(card(), 'Raw response')
+    expect(raw).toContain('{"id":"usr_8f21"}')
+    // Not a trace of the layout: no indented field, no line break inside the
+    // document. If this ever fails, two tabs have become one.
+    expect(raw).not.toContain('"id": "usr_8f21"')
+  })
+
+  // WHAT THE RUN RECORDED IS UNTOUCHED. The size is the backend's count of
+  // the bytes it read, and a renderer that re-derived it from the text it is
+  // showing would report the layout's whitespace as payload.
+  it('the size on the run is the bytes off the socket, not the laid-out text', async () => {
+    const card = await sentAnswer({ text: MINIFIED, size: 154 })
+    await vi.waitFor(() => expect(responseBodyLines(card()).length).toBeGreaterThan(1))
+    expect(card().textContent).toContain('154B')
+    expect(card().textContent).toContain('154 bytes')
+  })
+
+  // DECLARED JSON, NOT SENT AS JSON. Shown as it arrived and nothing claims
+  // otherwise — the panel does not argue with the header, and Raw is one tab
+  // away for exactly that case.
+  it('a body that does not parse is shown unchanged rather than mangled', async () => {
+    const broken = '{"id":"usr_8f21"'
+    const card = await sentAnswer({ text: broken })
+    await vi.waitFor(() => expect(responseBodyLines(card())).toEqual([broken]))
+    expect(card().textContent).not.toContain('laid out')
+  })
+
+  // AND A BODY THAT IS NOT DECLARED JSON IS NOT TOUCHED AT ALL. The content
+  // type is what decides whether to try; the bytes never are.
+  it('a body the server did not call JSON is shown as it arrived', async () => {
+    const html = '<html><body>hello</body></html>'
+    const card = await sentAnswer({
+      text: html,
+      headers: [{ name: 'Content-Type', value: 'text/html', enabled: true }],
+    })
+    await vi.waitFor(() => expect(responseBodyLines(card())).toEqual([html]))
+  })
+
+  // THE THRESHOLD, NAMED. Laying out a body is a main-thread parse that
+  // cannot be interrupted, so past the cap the pane shows the bytes and says
+  // why rather than freezing while a person waits for it.
+  it(`a body over ${JSON_LAYOUT_LIMIT} characters says so instead of freezing the pane`, async () => {
+    const filler = 'y'.repeat(JSON_LAYOUT_LIMIT - '{"k":""}'.length + 1)
+    const oversize = `{"k":"${filler}"}`
+    expect(oversize.length).toBe(JSON_LAYOUT_LIMIT + 1)
+
+    const card = await sentAnswer({ text: oversize, size: oversize.length })
+
+    // Shown as it arrived, on ONE line. Asserted as a PREFIX rather than as
+    // the whole document: CM6 renders only what its viewport needs of an
+    // enormous line, so the element holds the first couple of thousand
+    // characters of it and never the rest. What matters is that nothing
+    // reshaped it — a laid-out `{"k":"…"}` is more than one line and spells
+    // its field `"k": "`, with a space.
+    await vi.waitFor(() => expect(responseBodyLines(card())).toHaveLength(1))
+    const shown = responseBodyLines(card())[0]
+    expect(oversize.startsWith(shown)).toBe(true)
+    expect(shown).toContain('{"k":"')
+    // …and the pane SAYS so. A degrade nothing on screen mentions is how a
+    // feature that does not exist survives a release.
+    expect(card().textContent).toContain('too large to lay out')
+    expect(card().textContent).toContain(`${JSON_LAYOUT_LIMIT / 1024}K characters`)
   })
 })
 

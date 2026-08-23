@@ -235,10 +235,39 @@ describe('wrapping — a line that outruns the box, in both modes', () => {
   // installs, which is the thing that carries `white-space: pre-wrap` into the
   // content: jsdom does no layout, so a width measurement here would assert
   // nothing at all.
-  it('an editable host wraps', () => {
+  it('an editable host holding prose wraps', () => {
     const host = new EditableHost()
     const parent = mount(host)
     expect(parent.querySelector('.cm-content')?.classList.contains('cm-lineWrapping')).toBe(true)
+    host.dispose()
+  })
+
+  // AND AN EDITABLE HOST HOLDING CODE DOES NOT — which is the half that was
+  // missing, because wrapping was decided by the MODE and every editable
+  // surface got the prose answer. The API request body is a document: one long
+  // value came back as a stack of rows whose continuations sat against the line
+  // numbers, and nothing inside the editor could be moved sideways, so the pane
+  // around it was the only scrollbar and it moved the whole surface
+  // (nocx-kdawd). `code` is the same answer the read-only modes already give.
+  it('an editable host holding code does not, so a long line is scrolled instead', () => {
+    const host = new EditableHost('code')
+    const parent = mount(host)
+    expect(parent.querySelector('.cm-content')?.classList.contains('cm-lineWrapping')).toBe(false)
+    host.dispose()
+  })
+
+  // The keymap is not the wrapping decision's to lose. A host asked for `code`
+  // is still a FIELD — Enter must break the line rather than reach the dialog
+  // behind it — and this is the pairing the two halves of the constructor could
+  // silently stop honouring.
+  it('an editable host holding code is still editable and still binds Enter', () => {
+    const host = new EditableHost('code')
+    const parent = mount(host)
+    const contentEl = parent.querySelector('.cm-content') as HTMLElement
+    expect(contentEl.getAttribute('contenteditable')).toBe('true')
+    const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    contentEl.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
     host.dispose()
   })
 

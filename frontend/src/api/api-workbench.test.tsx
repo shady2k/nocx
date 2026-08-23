@@ -3193,6 +3193,21 @@ describe('a credential can be created from the Auth tab', () => {
     expect(authSecretField()).toBeNull()
     expect(workbench().textContent).toContain('Save this request into a collection')
   })
+
+  it('the tab says the variable name once, not twice', async () => {
+    // nocx-qoavg: under the field sat `Sends 🔒name`, which is the field's own
+    // contents read back. The chip's job is in the RUN view, where it stands
+    // where a credential's bytes were.
+    const { bar } = await mountApp()
+    await openRequest(bar)
+    fireEvent.click(button('Auth •'))
+    await vi.waitFor(() => expect(field('api-auth-var').value).toBe('API_TOKEN'))
+
+    const panel = workbench().querySelector<HTMLElement>('#ui-tabpanel-auth')
+    if (!panel) throw new Error('no auth panel')
+    expect(panel.querySelectorAll('.ui-secret-chip')).toHaveLength(0)
+    expect(panel.textContent?.match(/API_TOKEN/g) ?? []).toHaveLength(0)
+  })
 })
 
 // ── The pane's lifecycle ──────────────────────────────────────────────────

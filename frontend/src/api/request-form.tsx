@@ -54,7 +54,6 @@ import { BodyEditor } from './body-editor'
 import { Tabs } from '../ui/tabs'
 import { layOutJSON } from '../ui/format-json'
 import { showToast } from '../ui/toast'
-import { createSecretChip } from '../ui/secret-chip'
 import { SecretValueField } from '../ui/secret-value-field'
 import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
@@ -827,9 +826,18 @@ export function RequestEditor(props: RequestEditorProps) {
                       value={req().auth.var}
                       onInput={(v) => patch({ auth: { ...req().auth, var: v } })}
                     />
-                    <Show when={req().auth.var !== ''}>
-                      <p class="api-request__binding">Sends {createSecretChip(req().auth.var)}</p>
-                    </Show>
+                    {/* NO CHIP UNDER THE FIELD. It used to print `Sends
+                        🔒name` — the field's own contents, verbatim, two
+                        lines apart. The chip earns its place in the RUN view,
+                        where it stands where a credential's BYTES were and
+                        says whose they are without showing them; here there
+                        is nothing hidden for it to stand for, and the one
+                        fact it could have added — that the name resolves to a
+                        bound value — is not a fact this side has: the
+                        renderer never learns what the vault holds (ADR-0021),
+                        and a name bound through the door below is not
+                        declared in the environment file either. A line that
+                        can only guess is worse than no line (nocx-qoavg). */}
                     <Show when={props.onCreateSecret && props.secretTarget}>
                       {(target) => (
                         <AuthSecret

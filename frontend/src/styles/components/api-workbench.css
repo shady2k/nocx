@@ -318,8 +318,7 @@
   flex-wrap: wrap;
 }
 
-.api-request__idle,
-.api-request__binding {
+.api-request__idle {
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);

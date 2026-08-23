@@ -130,6 +130,50 @@ is filed as its own bead**, because `EmitFilesDropped` addresses by session
 deliberately (broadcasting was the defect it replaced) and giving a non-session
 target an address is a real design question, not a line of code.
 
+### §1a — The import needs the document, not the machine the person is on
+
+**Corrected 2026-08-23, on the owner's reading, and it invalidates two decisions
+above.** The rest of §1 was written from the terminal domain's frame — local tab
+versus remote tab, a Wails runtime versus none — and that frame does not apply
+here at all.
+
+An import writes to **the backend's** disk: `apicoll.DefaultRoot()` is
+`paths.DataDir()` of the process running Go, and `api-client.ts` already calls a
+collection folder "backend-LOCAL". Where that process runs is not the renderer's
+business, and it is not always the renderer's machine — `make dev-web` is
+documented in the Makefile as "forward both ports over SSH", so a backend on
+another host is a supported configuration, not an exotic one.
+
+Two consequences, both of which contradict what §1 says above:
+
+**`srcPath` names a file on the BACKEND'S machine.** In the desktop app that is
+also the person's machine, which is why the field reads naturally and why the
+substitution went unnoticed. Reached over a forwarded port, typing
+`/work/acme.postman_collection.json` names a file on the _server_ — almost never
+what a person means when they have just downloaded an export to their laptop.
+So the path is the NARROW case, correct only when backend and person coincide.
+
+**The document itself is the general case.** The renderer has bytes — from a
+browser drop (`dataTransfer.files`, which `terminal-drop.ts` already handles as
+its non-Wails half) or from the kit's own `ui/file-input.tsx` — and bytes reach
+any backend, wherever it runs.
+
+So the gate is not `hasWailsWebview()` and the drop is not a session gesture.
+`apiimport.ImportInto(ctx, fsys, bindings, dest, r)` already takes a READER
+rather than a path; `capability.ImportPostman` only opens the file first. The
+document route is that seam, and `maxAPICurlLineRunes` (1 MiB, `api.import.curl`
+next door) is the precedent for bounding a text parameter the control plane
+carries.
+
+**What this retires:** the `hasWailsWebview()` capability gate, and the import
+ask's borrowing of a local terminal tab's session id. `nocx-ikte5` was filed as
+a deferred addressing question; under this frame it is simply the bug.
+
+**What survives:** in the Wails window the native drop answers with `localPath`,
+a path on the machine running Go — which IS the backend there — so that route
+stays correct and stays used. Two routes into one method, chosen by what the
+gesture can answer with, never by what kind of build this is.
+
 ## §2 — The place is proposed, never asked twice
 
 **On open the destination field already holds the backend's `defaultRoot` with a

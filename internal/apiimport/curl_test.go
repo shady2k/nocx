@@ -138,7 +138,9 @@ func TestCurlFlag_d_Data(t *testing.T) {
 	if req.Method != "POST" {
 		t.Fatalf("method = %q, want POST (a body implies POST)", req.Method)
 	}
-	if req.Body.Kind != apicoll.BodyRaw || req.Body.Text != `{"a":1}` {
+	// A payload that IS a JSON document arrives in the JSON mode; the whole
+	// table of that decision is TestCurlBodyModeIsJSONWhenTheLineSaysSo.
+	if req.Body.Kind != apicoll.BodyJSON || req.Body.Text != `{"a":1}` {
 		t.Fatalf("body = %+v", req.Body)
 	}
 	// Repeated -d joins with & — curl's own rule.
@@ -234,7 +236,7 @@ func TestCurlFlag_Json(t *testing.T) {
 	if len(unsup) != 0 {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
-	if req.Body.Kind != apicoll.BodyRaw || req.Body.Text != `{"a":1}` {
+	if req.Body.Kind != apicoll.BodyJSON || req.Body.Text != `{"a":1}` {
 		t.Fatalf("body = %+v", req.Body)
 	}
 	// curl's --json implies both headers; dropping them changes what the

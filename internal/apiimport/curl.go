@@ -2,6 +2,7 @@ package apiimport
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -66,18 +67,48 @@ const (
 	credentialsStayOnRequest
 )
 
+// disposition is what becomes of one recognised flag. THREE STATES, NOT
+// TWO, and the third is the whole of nocx-q2cx5's first half.
+//
+// "Itemise everything we do not carry" was one rule doing two jobs. A
+// refusal is worth a row because the request that comes out is NOT the line
+// that went in — -k, -L and -o each change what happens on the wire or to
+// the answer. `-s` and `-S` change neither: they are how a person keeps
+// curl quiet in a shell, they are on almost every line anybody pastes, and
+// reporting them made the ordinary import arrive with a warning list that
+// said nothing. A list that is noisy on every line is one nobody reads on
+// the line where it matters, which costs exactly the visibility AGENTS.md's
+// "a soft degrade must be visible in the product" is asking for.
+//
+// So the test is not "did we carry it" but CAN THIS FLAG CHANGE THE REQUEST
+// THAT IS SENT. If it cannot, there is no degrade to be visible about.
+type disposition int
+
+const (
+	// dispCarried lands in the model. It is the zero value so that a row
+	// added without thinking about this column is one whose flag is read,
+	// rather than one silently dropped.
+	dispCarried disposition = iota
+	// dispIgnored cannot change the request that is sent. Recognised only
+	// so it does not eat the next token, and reported nowhere.
+	dispIgnored
+	// dispItemised names the flag in Unsupported with its Why. Never its
+	// argument: a refused --oauth2-bearer would otherwise itemise the token
+	// it refused.
+	dispItemised
+)
+
 // curlFlag describes one flag we recognise.
 type curlFlag struct {
-	long    string // canonical spelling, with the leading --
-	arg     bool   // takes a value
-	carried bool   // lands in the model; if false it is itemised
-	why     string // the Why for the Unsupported entry when !carried
+	long string      // canonical spelling, with the leading --
+	arg  bool        // takes a value
+	disp disposition // carried, ignored, or itemised
+	why  string      // the Why for the Unsupported entry, when itemised
 }
 
 const (
 	whyTransport = "a transport option: the send's HTTP policy owns this, not the request (design §7.3)"
 	whyMeaning   = "refused: it changes the meaning of the request, and a silently dropped one is worse than a refused one"
-	whyOutput    = "an output option: it does not change the request that is sent"
 	whyFile      = "it names a local file to read, and an import reads no file its input names"
 )
 
@@ -86,91 +117,91 @@ const (
 // second group, `--cacert ca.pem https://x` would take ca.pem for the URL.
 var curlFlags = map[string]curlFlag{
 	// Carried into the model.
-	"--request":        {"--request", true, true, ""},
-	"--header":         {"--header", true, true, ""},
-	"--data":           {"--data", true, true, ""},
-	"--data-raw":       {"--data-raw", true, true, ""},
-	"--data-binary":    {"--data-binary", true, true, ""},
-	"--data-urlencode": {"--data-urlencode", true, true, ""},
-	"--form":           {"--form", true, true, ""},
-	"--json":           {"--json", true, true, ""},
-	"--user":           {"--user", true, true, ""},
-	"--cookie":         {"--cookie", true, true, ""},
-	"--get":            {"--get", false, true, ""},
-	"--url":            {"--url", true, true, ""},
+	"--request":        {"--request", true, dispCarried, ""},
+	"--header":         {"--header", true, dispCarried, ""},
+	"--data":           {"--data", true, dispCarried, ""},
+	"--data-raw":       {"--data-raw", true, dispCarried, ""},
+	"--data-binary":    {"--data-binary", true, dispCarried, ""},
+	"--data-urlencode": {"--data-urlencode", true, dispCarried, ""},
+	"--form":           {"--form", true, dispCarried, ""},
+	"--json":           {"--json", true, dispCarried, ""},
+	"--user":           {"--user", true, dispCarried, ""},
+	"--cookie":         {"--cookie", true, dispCarried, ""},
+	"--get":            {"--get", false, dispCarried, ""},
+	"--url":            {"--url", true, dispCarried, ""},
 
 	// Recognised, and named out loud. The model has no per-request field
 	// for these three; the sender's policy decides them.
-	"--location":   {"--location", false, false, whyTransport},
-	"--insecure":   {"--insecure", false, false, whyTransport},
-	"--compressed": {"--compressed", false, false, whyTransport},
+	"--location":   {"--location", false, dispItemised, whyTransport},
+	"--insecure":   {"--insecure", false, dispItemised, whyTransport},
+	"--compressed": {"--compressed", false, dispItemised, whyTransport},
 
 	// Refused: each changes what goes on the wire or where it goes.
-	"--proxy":         {"--proxy", true, false, whyMeaning},
-	"--preproxy":      {"--preproxy", true, false, whyMeaning},
-	"--proxy-user":    {"--proxy-user", true, false, whyMeaning},
-	"--proxy-header":  {"--proxy-header", true, false, whyMeaning},
-	"--socks5":        {"--socks5", true, false, whyMeaning},
-	"--socks4":        {"--socks4", true, false, whyMeaning},
-	"--cert":          {"--cert", true, false, whyMeaning},
-	"--cert-type":     {"--cert-type", true, false, whyMeaning},
-	"--key":           {"--key", true, false, whyMeaning},
-	"--key-type":      {"--key-type", true, false, whyMeaning},
-	"--cacert":        {"--cacert", true, false, whyMeaning},
-	"--capath":        {"--capath", true, false, whyMeaning},
-	"--pubkey":        {"--pubkey", true, false, whyMeaning},
-	"--resolve":       {"--resolve", true, false, whyMeaning},
-	"--interface":     {"--interface", true, false, whyMeaning},
-	"--unix-socket":   {"--unix-socket", true, false, whyMeaning},
-	"--oauth2-bearer": {"--oauth2-bearer", true, false, whyMeaning},
-	"--aws-sigv4":     {"--aws-sigv4", true, false, whyMeaning},
-	"--negotiate":     {"--negotiate", false, false, whyMeaning},
-	"--ntlm":          {"--ntlm", false, false, whyMeaning},
-	"--digest":        {"--digest", false, false, whyMeaning},
-	"--anyauth":       {"--anyauth", false, false, whyMeaning},
-	"--netrc":         {"--netrc", false, false, whyMeaning},
-	"--netrc-file":    {"--netrc-file", true, false, whyMeaning},
-	"--head":          {"--head", false, false, whyMeaning},
-	"--next":          {"--next", false, false, "refused: it starts a second request, and an import produces one"},
-	"--form-string":   {"--form-string", true, false, whyMeaning},
-	"--user-agent":    {"--user-agent", true, false, whyMeaning},
-	"--referer":       {"--referer", true, false, whyMeaning},
-	"--max-redirs":    {"--max-redirs", true, false, whyTransport},
-	"--proto":         {"--proto", true, false, whyTransport},
-	"--tls-max":       {"--tls-max", true, false, whyTransport},
-	"--http1.0":       {"--http1.0", false, false, whyTransport},
-	"--http1.1":       {"--http1.1", false, false, whyTransport},
-	"--http2":         {"--http2", false, false, whyTransport},
-	"--ipv4":          {"--ipv4", false, false, whyTransport},
-	"--ipv6":          {"--ipv6", false, false, whyTransport},
-	"--tlsv1.2":       {"--tlsv1.2", false, false, whyTransport},
-	"--tlsv1.3":       {"--tlsv1.3", false, false, whyTransport},
+	"--proxy":         {"--proxy", true, dispItemised, whyMeaning},
+	"--preproxy":      {"--preproxy", true, dispItemised, whyMeaning},
+	"--proxy-user":    {"--proxy-user", true, dispItemised, whyMeaning},
+	"--proxy-header":  {"--proxy-header", true, dispItemised, whyMeaning},
+	"--socks5":        {"--socks5", true, dispItemised, whyMeaning},
+	"--socks4":        {"--socks4", true, dispItemised, whyMeaning},
+	"--cert":          {"--cert", true, dispItemised, whyMeaning},
+	"--cert-type":     {"--cert-type", true, dispItemised, whyMeaning},
+	"--key":           {"--key", true, dispItemised, whyMeaning},
+	"--key-type":      {"--key-type", true, dispItemised, whyMeaning},
+	"--cacert":        {"--cacert", true, dispItemised, whyMeaning},
+	"--capath":        {"--capath", true, dispItemised, whyMeaning},
+	"--pubkey":        {"--pubkey", true, dispItemised, whyMeaning},
+	"--resolve":       {"--resolve", true, dispItemised, whyMeaning},
+	"--interface":     {"--interface", true, dispItemised, whyMeaning},
+	"--unix-socket":   {"--unix-socket", true, dispItemised, whyMeaning},
+	"--oauth2-bearer": {"--oauth2-bearer", true, dispItemised, whyMeaning},
+	"--aws-sigv4":     {"--aws-sigv4", true, dispItemised, whyMeaning},
+	"--negotiate":     {"--negotiate", false, dispItemised, whyMeaning},
+	"--ntlm":          {"--ntlm", false, dispItemised, whyMeaning},
+	"--digest":        {"--digest", false, dispItemised, whyMeaning},
+	"--anyauth":       {"--anyauth", false, dispItemised, whyMeaning},
+	"--netrc":         {"--netrc", false, dispItemised, whyMeaning},
+	"--netrc-file":    {"--netrc-file", true, dispItemised, whyMeaning},
+	"--head":          {"--head", false, dispItemised, whyMeaning},
+	"--next":          {"--next", false, dispItemised, "refused: it starts a second request, and an import produces one"},
+	"--form-string":   {"--form-string", true, dispItemised, whyMeaning},
+	"--user-agent":    {"--user-agent", true, dispItemised, whyMeaning},
+	"--referer":       {"--referer", true, dispItemised, whyMeaning},
+	"--max-redirs":    {"--max-redirs", true, dispItemised, whyTransport},
+	"--proto":         {"--proto", true, dispItemised, whyTransport},
+	"--tls-max":       {"--tls-max", true, dispItemised, whyTransport},
+	"--http1.0":       {"--http1.0", false, dispItemised, whyTransport},
+	"--http1.1":       {"--http1.1", false, dispItemised, whyTransport},
+	"--http2":         {"--http2", false, dispItemised, whyTransport},
+	"--ipv4":          {"--ipv4", false, dispItemised, whyTransport},
+	"--ipv6":          {"--ipv6", false, dispItemised, whyTransport},
+	"--tlsv1.2":       {"--tlsv1.2", false, dispItemised, whyTransport},
+	"--tlsv1.3":       {"--tlsv1.3", false, dispItemised, whyTransport},
 
 	// Timings and retries: transport policy, not the request.
-	"--connect-timeout": {"--connect-timeout", true, false, whyTransport},
-	"--max-time":        {"--max-time", true, false, whyTransport},
-	"--retry":           {"--retry", true, false, whyTransport},
-	"--retry-delay":     {"--retry-delay", true, false, whyTransport},
-	"--retry-max-time":  {"--retry-max-time", true, false, whyTransport},
-	"--limit-rate":      {"--limit-rate", true, false, whyTransport},
-	"--speed-limit":     {"--speed-limit", true, false, whyTransport},
-	"--speed-time":      {"--speed-time", true, false, whyTransport},
+	"--connect-timeout": {"--connect-timeout", true, dispItemised, whyTransport},
+	"--max-time":        {"--max-time", true, dispItemised, whyTransport},
+	"--retry":           {"--retry", true, dispItemised, whyTransport},
+	"--retry-delay":     {"--retry-delay", true, dispItemised, whyTransport},
+	"--retry-max-time":  {"--retry-max-time", true, dispItemised, whyTransport},
+	"--limit-rate":      {"--limit-rate", true, dispItemised, whyTransport},
+	"--speed-limit":     {"--speed-limit", true, dispItemised, whyTransport},
+	"--speed-time":      {"--speed-time", true, dispItemised, whyTransport},
 
 	// Files we will not read or write.
-	"--output":      {"--output", true, false, whyFile},
-	"--output-dir":  {"--output-dir", true, false, whyFile},
-	"--remote-name": {"--remote-name", false, false, whyFile},
-	"--upload-file": {"--upload-file", true, false, whyFile},
-	"--cookie-jar":  {"--cookie-jar", true, false, whyFile},
-	"--config":      {"--config", true, false, whyFile},
-	"--dump-header": {"--dump-header", true, false, whyFile},
-	"--trace":       {"--trace", true, false, whyFile},
-	"--trace-ascii": {"--trace-ascii", true, false, whyFile},
-	"--continue-at": {"--continue-at", true, false, whyFile},
-	"--create-dirs": {"--create-dirs", false, false, whyFile},
-	"--remote-time": {"--remote-time", false, false, whyFile},
-	"--range":       {"--range", true, false, whyMeaning},
-	"--time-cond":   {"--time-cond", true, false, whyMeaning},
+	"--output":      {"--output", true, dispItemised, whyFile},
+	"--output-dir":  {"--output-dir", true, dispItemised, whyFile},
+	"--remote-name": {"--remote-name", false, dispItemised, whyFile},
+	"--upload-file": {"--upload-file", true, dispItemised, whyFile},
+	"--cookie-jar":  {"--cookie-jar", true, dispItemised, whyFile},
+	"--config":      {"--config", true, dispItemised, whyFile},
+	"--dump-header": {"--dump-header", true, dispItemised, whyFile},
+	"--trace":       {"--trace", true, dispItemised, whyFile},
+	"--trace-ascii": {"--trace-ascii", true, dispItemised, whyFile},
+	"--continue-at": {"--continue-at", true, dispItemised, whyFile},
+	"--create-dirs": {"--create-dirs", false, dispItemised, whyFile},
+	"--remote-time": {"--remote-time", false, dispItemised, whyFile},
+	"--range":       {"--range", true, dispItemised, whyMeaning},
+	"--time-cond":   {"--time-cond", true, dispItemised, whyMeaning},
 
 	// Ignored in silence: every one of these governs what CURL PRINTS or
 	// how it exits, and none of them can change the bytes that go out or
@@ -180,15 +211,15 @@ var curlFlags = map[string]curlFlag{
 	// different reason with the same answer: it turns curl's URL globbing
 	// OFF, and this importer never globbed, so the flag asks for what it
 	// already gets. -w takes a value and must stay in the table to eat it.
-	"--write-out":    {"--write-out", true, false, whyOutput},
-	"--silent":       {"--silent", false, false, whyOutput},
-	"--show-error":   {"--show-error", false, false, whyOutput},
-	"--verbose":      {"--verbose", false, false, whyOutput},
-	"--include":      {"--include", false, false, whyOutput},
-	"--fail":         {"--fail", false, false, whyOutput},
-	"--progress-bar": {"--progress-bar", false, false, whyOutput},
-	"--no-buffer":    {"--no-buffer", false, false, whyOutput},
-	"--globoff":      {"--globoff", false, false, whyOutput},
+	"--write-out":    {"--write-out", true, dispIgnored, ""},
+	"--silent":       {"--silent", false, dispIgnored, ""},
+	"--show-error":   {"--show-error", false, dispIgnored, ""},
+	"--verbose":      {"--verbose", false, dispIgnored, ""},
+	"--include":      {"--include", false, dispIgnored, ""},
+	"--fail":         {"--fail", false, dispIgnored, ""},
+	"--progress-bar": {"--progress-bar", false, dispIgnored, ""},
+	"--no-buffer":    {"--no-buffer", false, dispIgnored, ""},
+	"--globoff":      {"--globoff", false, dispIgnored, ""},
 }
 
 // curlShorts maps a short flag to its canonical long spelling. A letter
@@ -255,7 +286,10 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 	// handle applies one recognised flag. value is meaningful only when the
 	// flag takes one.
 	handle := func(f curlFlag, value string) {
-		if !f.carried {
+		switch f.disp {
+		case dispIgnored:
+			return
+		case dispItemised:
 			itemise(f.long, f.why)
 			return
 		}
@@ -445,6 +479,20 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 	body, bodyUnsup := assembleBody(parts)
 	req.Body = body
 	unsup = append(unsup, bodyUnsup...)
+	// THE MODE THE LINE ALREADY NAMES. assembleBody knows what the -d
+	// arguments were shaped like and nothing about the headers, so the JSON
+	// question is answered here, where both halves are in hand.
+	//
+	// Raw declares nothing (apicoll.Body): it is the mode for a body whose
+	// format only the user's own Content-Type header states. A line that
+	// says `Content-Type: application/json`, or whose payload simply IS a
+	// JSON document, has stated it — so leaving that request in raw mode
+	// made the person open the body tab and pick the mode their own line
+	// had already named, and cost the editor above it the highlighting it
+	// would then have known to do.
+	if req.Body.Kind == apicoll.BodyRaw && (headersNameJSON(req.Headers) || isJSONDocument(req.Body.Text)) {
+		req.Body.Kind = apicoll.BodyJSON
+	}
 
 	switch {
 	case method != "":
@@ -632,6 +680,45 @@ func userArgOnRequest(arg string, hasAuthHeader bool) (*apicoll.Auth, *apicoll.H
 		Value:   "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)),
 		Enabled: true,
 	}, ""
+}
+
+// headersNameJSON reports whether the line's own Content-Type says JSON.
+//
+// The media type is what is read — the parameters after the semicolon are
+// the charset and the boundary, which say nothing about the format — and
+// the `+json` structured suffix counts, because `application/vnd.api+json`
+// is a JSON document by the same registry rule that makes
+// `application/json` one.
+func headersNameJSON(hs []apicoll.Header) bool {
+	for _, h := range hs {
+		if !strings.EqualFold(h.Name, "Content-Type") {
+			continue
+		}
+		media := strings.ToLower(strings.TrimSpace(h.Value))
+		if i := strings.IndexByte(media, ';'); i >= 0 {
+			media = strings.TrimSpace(media[:i])
+		}
+		if media == "application/json" || strings.HasSuffix(media, "+json") {
+			return true
+		}
+	}
+	return false
+}
+
+// isJSONDocument reports whether the payload IS one — an object or an
+// array, and valid.
+//
+// A bare scalar is deliberately not enough. `-d 42` and `-d true` are valid
+// JSON texts and are also what a form field looks like, so accepting them
+// would put half the `-d name=value` world into the JSON mode on the
+// strength of the one value that has no `=` in it. An object or an array is
+// a thing a person wrote as JSON.
+func isJSONDocument(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || (t[0] != '{' && t[0] != '[') {
+		return false
+	}
+	return json.Valid([]byte(t))
 }
 
 // splitURLEncodeArg reads a --data-urlencode argument. The @ forms name a

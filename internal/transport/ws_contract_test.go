@@ -690,6 +690,7 @@ func TestFilesDropped_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.dropped.schema.json")
 	raw, err := json.Marshal(map[string]any{
 		"sessionId": "0123456789abcdef0123456789abcdef",
+		"target":    "terminal",
 		"sources": []SourcePick{
 			{Ticket: "abcdef0123456789abcdef0123456789", Name: "a.txt", Size: 2},
 		},
@@ -703,6 +704,7 @@ func TestFilesDropped_DTOConformsToContract(t *testing.T) {
 	// ticket, and the absolute path the prompt insert needs (D9).
 	rawLocal, err := json.Marshal(map[string]any{
 		"sessionId": "0123456789abcdef0123456789abcdef",
+		"target":    "api-import",
 		"sources": []SourcePick{
 			{Name: "a.txt", Size: 2, LocalPath: "/home/dev/Downloads/a.txt"},
 		},
@@ -722,7 +724,7 @@ func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
 	e := newDropEnv(t)
 	if err := e.ws.UploadSources().Dropped(
 		[]string{seedFile(t, "dropped-over-the-wire.bin", 3)},
-		map[string]string{"data-session-id": e.sid},
+		map[string]string{"data-session-id": e.sid, "data-file-drop-target": "terminal"},
 	); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
@@ -735,6 +737,19 @@ func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
 	// cannot pass for an absent one.
 	if bytes.Contains(params, []byte("localPath")) {
 		t.Fatalf("a remote tab's files.dropped carries a path: %s", params)
+	}
+	// The schema can only say the field is there and non-empty. Which
+	// surface it names is what the subscriber filters on, so the VALUE is
+	// asserted off the wire too: a target the server rewrote or defaulted
+	// would pass the schema and still deliver the drop to the wrong pane.
+	var addressed struct {
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal(params, &addressed); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, params)
+	}
+	if addressed.Target != "terminal" {
+		t.Fatalf("target = %q, want the drop element's own data-file-drop-target", addressed.Target)
 	}
 }
 
@@ -750,7 +765,7 @@ func TestFilesDropped_ALocalTabsNotificationConformsToContract(t *testing.T) {
 	path := seedFile(t, "local-drop.bin", 3)
 	if err := e.ws.UploadSources().Dropped(
 		[]string{path},
-		map[string]string{"data-session-id": sid},
+		map[string]string{"data-session-id": sid, "data-file-drop-target": "api-import"},
 	); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}

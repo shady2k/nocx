@@ -573,8 +573,7 @@ export function createApiWorkbenchServices(
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),
-    createFolder: (handle, parentRelPath, name) =>
-      client.createFolder(handle, parentRelPath, name),
+    createFolder: (handle, parentRelPath, name) => client.createFolder(handle, parentRelPath, name),
     closeCollection: (handle) => client.closeCollection(handle),
     readEnvironment: (handle, relPath) => client.readEnvironment(handle, relPath),
     writeEnvironment: (handle, relPath, environment) =>

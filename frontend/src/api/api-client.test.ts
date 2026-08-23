@@ -327,7 +327,7 @@ describe('nativePickers', () => {
     expect(client.directory).toHaveBeenCalledTimes(1)
   })
 
-  it('lets the picker\'s own refusal through rather than swallowing it', async () => {
+  it("lets the picker's own refusal through rather than swallowing it", async () => {
     // The paired failure half: a runtime that is there and a method that
     // reports itself unavailable anyway is what the surface retires on.
     const client = new FakeDialogClient()

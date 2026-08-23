@@ -519,7 +519,9 @@ describe('ApiStore — a curl import over unsaved work', () => {
 
   it('asks nothing when the open request is exactly what its file holds', async () => {
     const { store } = storeWith({
-      importCurl: vi.fn().mockResolvedValue({ request: { ...REQUEST, name: 'ping' }, unsupported: [] }),
+      importCurl: vi
+        .fn()
+        .mockResolvedValue({ request: { ...REQUEST, name: 'ping' }, unsupported: [] }),
     })
     await store.openRequest('h1', 'users/create.json')
 
@@ -917,9 +919,7 @@ describe('ApiStore — making a folder', () => {
     // do: the import refuses an existing destination for the same reason,
     // and a create that adopted a folder somebody else made would put two
     // owners on one directory.
-    const createFolder = vi
-      .fn()
-      .mockRejectedValue(new Error('folder already exists: "users"'))
+    const createFolder = vi.fn().mockRejectedValue(new Error('folder already exists: "users"'))
     const { store } = storeWith({ createFolder })
     await store.refresh()
     const before = store.collections()[0]?.collection.folders

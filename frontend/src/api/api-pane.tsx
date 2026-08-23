@@ -46,6 +46,7 @@ import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { Section } from '../ui/section'
 import { TextField } from '../ui/text-field'
 import { StatusCard } from '../ui/status-card'
+import { TreeEmpty } from '../ui/tree-empty'
 import { TreeRow } from '../ui/tree-row'
 import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
@@ -614,6 +615,7 @@ export function ApiPane(props: ApiPaneProps) {
     flattenCollections(
       filterCollections(store.collections(), filter()),
       filter().trim() === '' ? collapsed() : NOTHING_COLLAPSED,
+      filter().trim() !== '',
     )
 
   /** What a connection is CALLED, by the id a run reports. The id is the
@@ -1942,12 +1944,19 @@ export function ApiPane(props: ApiPaneProps) {
             >
               <For each={rows()}>
                 {(row) => (
-                  <div
-                    class="api-tree__row"
-                    data-rel-path={row.kind === 'request' ? row.relPath : undefined}
-                    data-row-key={row.key}
-                    onClick={() => activate(row)}
-                    /* THE RIGHT BUTTON, which this tree answered by handing
+                  <Show
+                    when={row.kind !== 'empty'}
+                    /* The kit's own answer to "this folder holds nothing"
+                       (ui/tree-empty.tsx says why it is not a row). The
+                       surface places it and paints none of it. */
+                    fallback={<TreeEmpty depth={row.depth} />}
+                  >
+                    <div
+                      class="api-tree__row"
+                      data-rel-path={row.kind === 'request' ? row.relPath : undefined}
+                      data-row-key={row.key}
+                      onClick={() => activate(row)}
+                      /* THE RIGHT BUTTON, which this tree answered by handing
                        the webview's own menu — reload, save image as — to a
                        person who had asked what they could do with a
                        request. The kit's ContextMenu says in its own first
@@ -1956,19 +1965,19 @@ export function ApiPane(props: ApiPaneProps) {
                        wire exactly this. The point is the POINTER's here,
                        unlike the control in the strip: a menu a person
                        opened by aiming should appear where they aimed. */
-                    onContextMenu={(e: MouseEvent) => {
-                      if (row.kind === 'request') {
-                        e.preventDefault()
-                        aimRequestMenu(row.handle, row.relPath, row.name)
-                        setRequestMenu({ x: e.clientX, y: e.clientY })
-                        return
-                      }
-                      if (row.kind === 'collection' || row.kind === 'dir') {
-                        e.preventDefault()
-                        aimRowMenu(row)
-                        setRowMenu({ x: e.clientX, y: e.clientY })
-                      }
-                      /* An unreadable file is left with the platform's menu,
+                      onContextMenu={(e: MouseEvent) => {
+                        if (row.kind === 'request') {
+                          e.preventDefault()
+                          aimRequestMenu(row.handle, row.relPath, row.name)
+                          setRequestMenu({ x: e.clientX, y: e.clientY })
+                          return
+                        }
+                        if (row.kind === 'collection' || row.kind === 'dir') {
+                          e.preventDefault()
+                          aimRowMenu(row)
+                          setRowMenu({ x: e.clientX, y: e.clientY })
+                        }
+                        /* An unreadable file is left with the platform's menu,
                          because there is nothing to put in one of ours: a
                          malformed row's whole answer is the reason printed
                          under it, and an empty menu is worse than no menu. A
@@ -1976,13 +1985,13 @@ export function ApiPane(props: ApiPaneProps) {
                          more — it has acts now (nocx-8v1fu), and they are the
                          collection row's own, because a collection is a
                          folder. */
-                    }}
-                  >
-                    <TreeRow
-                      name={row.name}
-                      depth={row.depth}
-                      kind={row.kind === 'request' ? 'regular' : rowKind(row)}
-                      /* WHAT THE MARK MEANS, per kind. A collection row is
+                      }}
+                    >
+                      <TreeRow
+                        name={row.name}
+                        depth={row.depth}
+                        kind={row.kind === 'request' ? 'regular' : rowKind(row)}
+                        /* WHAT THE MARK MEANS, per kind. A collection row is
                          marked when it is the one new requests go into; a
                          request row is marked when it is the one in the form
                          — the fact the header states as `Playground › test`
@@ -1994,29 +2003,29 @@ export function ApiPane(props: ApiPaneProps) {
                          open request": a curl import detaches the form from
                          every file and nulls it, and the tree then marks
                          nothing rather than the row it used to be. */
-                      selected={
-                        row.kind === 'collection'
-                          ? row.handle === store.activeCollection()
-                          : row.kind === 'request' &&
-                            store.selected()?.handle === row.handle &&
-                            store.selected()?.relPath === row.relPath
-                      }
-                      disabled={row.kind === 'malformed'}
-                      expanded={row.expanded}
-                      onToggle={() => toggle(row.key)}
-                      badge={
-                        <>
-                          <Show when={row.method !== ''}>
-                            <Badge tone="neutral">{row.method}</Badge>
-                          </Show>
-                          {/* THE ROW'S OWN PAIR, the same one the section
+                        selected={
+                          row.kind === 'collection'
+                            ? row.handle === store.activeCollection()
+                            : row.kind === 'request' &&
+                              store.selected()?.handle === row.handle &&
+                              store.selected()?.relPath === row.relPath
+                        }
+                        disabled={row.kind === 'malformed'}
+                        expanded={row.expanded}
+                        onToggle={() => toggle(row.key)}
+                        badge={
+                          <>
+                            <Show when={row.method !== ''}>
+                              <Badge tone="neutral">{row.method}</Badge>
+                            </Show>
+                            {/* THE ROW'S OWN PAIR, the same one the section
                             heading above it carries: make one, and everything
                             else. It replaced a bare ✕ on the row — one
                             unlabelled click from closing a folder, with
                             nothing between the pointer and the act. Closing
                             is a menu item now, where a destructive thing has
                             to be chosen rather than brushed past. */}
-                          {/* A REQUEST ROW CARRIES NO ACTIONS OF ITS OWN.
+                            {/* A REQUEST ROW CARRIES NO ACTIONS OF ITS OWN.
                             Duplicate was drawn here first and looked wrong,
                             and the reason it looked wrong is the reason the
                             kit has a menu: a row is a NAME in a list that is
@@ -2025,46 +2034,47 @@ export function ApiPane(props: ApiPaneProps) {
                             say. The acts are on the right button now
                             (nocx-rmjj8), where the tab strip and the Files
                             panel already put theirs. */}
-                          <Show when={row.kind === 'collection'}>
-                            <span class="api-tree__row-actions">
-                              <IconButton
-                                size="sm"
-                                title="New request"
-                                ariaLabel={`New request in ${row.name}`}
-                                onClick={(e: MouseEvent) => {
-                                  e.stopPropagation()
-                                  store.pointAt(row.handle)
-                                  // The collection's own root: this control
-                                  // is only ever on a collection row, whose
-                                  // relPath is ''.
-                                  void store.newRequest(row.relPath)
-                                }}
-                              >
-                                <PlusIcon />
-                              </IconButton>
-                              <IconButton
-                                size="sm"
-                                title="More"
-                                ariaLabel={`More actions for ${row.name}`}
-                                onClick={(e: MouseEvent) => openRowMenu(e, row)}
-                              >
-                                <MoreIcon />
-                              </IconButton>
-                            </span>
-                          </Show>
-                        </>
-                      }
-                    />
-                    <Show when={row.reason !== ''}>
-                      <p class="api-tree__reason">{row.reason}</p>
-                    </Show>
-                    {/* Why a folder that IS open has nothing under it — the
+                            <Show when={row.kind === 'collection'}>
+                              <span class="api-tree__row-actions">
+                                <IconButton
+                                  size="sm"
+                                  title="New request"
+                                  ariaLabel={`New request in ${row.name}`}
+                                  onClick={(e: MouseEvent) => {
+                                    e.stopPropagation()
+                                    store.pointAt(row.handle)
+                                    // The collection's own root: this control
+                                    // is only ever on a collection row, whose
+                                    // relPath is ''.
+                                    void store.newRequest(row.relPath)
+                                  }}
+                                >
+                                  <PlusIcon />
+                                </IconButton>
+                                <IconButton
+                                  size="sm"
+                                  title="More"
+                                  ariaLabel={`More actions for ${row.name}`}
+                                  onClick={(e: MouseEvent) => openRowMenu(e, row)}
+                                >
+                                  <MoreIcon />
+                                </IconButton>
+                              </span>
+                            </Show>
+                          </>
+                        }
+                      />
+                      <Show when={row.reason !== ''}>
+                        <p class="api-tree__reason">{row.reason}</p>
+                      </Show>
+                      {/* Why a folder that IS open has nothing under it — the
                       listing failed, and the row is where the reason belongs
                       now that the second list is gone. */}
-                    <Show when={row.kind === 'collection' && errorOf(row.handle) !== ''}>
-                      <p class="api-tree__reason">{errorOf(row.handle)}</p>
-                    </Show>
-                  </div>
+                      <Show when={row.kind === 'collection' && errorOf(row.handle) !== ''}>
+                        <p class="api-tree__reason">{errorOf(row.handle)}</p>
+                      </Show>
+                    </div>
+                  </Show>
                 )}
               </For>
             </Show>
@@ -2283,6 +2293,7 @@ export function ApiPane(props: ApiPaneProps) {
             // they are how a request is made in a collection that is not the
             // one the workbench is pointed at.
             onNew={store.activeCollection() !== '' ? () => void store.newRequest() : undefined}
+            onImportCurl={askForCurl}
           />
         </Show>
       </div>
@@ -2312,7 +2323,6 @@ export function ApiPane(props: ApiPaneProps) {
             onVariable={(name, at) => setVarMenu({ name, x: at.x, y: at.y })}
             onSend={() => void store.send()}
             onStop={() => void store.stop()}
-            onImportCurl={askForCurl}
           />
         </div>
       </Show>

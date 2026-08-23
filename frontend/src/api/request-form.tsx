@@ -45,8 +45,6 @@
 import { Show, createEffect, createSignal } from 'solid-js'
 import { Button } from '../ui/button'
 import { Checkbox } from '../ui/checkbox'
-import { IconButton } from '../ui/icon-button'
-import { ArrowDownIcon } from '../ui/icons'
 import { Select } from '../ui/select'
 import { TextField, type TextFieldMark } from '../ui/text-field'
 import { EditableRowList } from '../ui/row-list'
@@ -173,17 +171,6 @@ export interface RequestLineProps {
   onSend: () => void
   /** Stop the run that is in flight. Reached only while `sending`. */
   onStop: () => void
-  /**
-   * Ask for a curl command line to convert into this form.
-   *
-   * The door is HERE rather than in the collections menu because of what a
-   * curl line becomes: one request, in this form, with no file behind it
-   * until it is saved (api-store.ts). The menu beside the tree is about a
-   * COLLECTION arriving — create, open, import — and a command line pasted
-   * from somebody's terminal is not one. Optional, so a form mounted
-   * without an owner for the ask simply does not offer it.
-   */
-  onImportCurl?: () => void
   /**
    * What the active environment says about a name: `bound` when it answers
    * it, `unbound` when it does not, and `unknown` when nobody has said —
@@ -337,22 +324,6 @@ export function RequestLine(props: RequestLineProps) {
           }
         />
       </div>
-      {/* The import mark is the collections menu's own (ArrowDownIcon),
-          because it is the same verb one level down: something written
-          elsewhere arrives here. */}
-      <Show when={props.onImportCurl}>
-        <div class="api-request__import">
-          <IconButton
-            id="api-import-curl-open"
-            size="sm"
-            title="Import a curl command"
-            ariaLabel="Import a curl command"
-            onClick={() => props.onImportCurl?.()}
-          >
-            <ArrowDownIcon />
-          </IconButton>
-        </div>
-      </Show>
       {/* SEND BECOMES STOP, and it stays ENABLED while it does. A disabled
           button was the only signal a request was in flight, which is
           exactly backwards: the moment there is something happening is the
@@ -717,7 +688,9 @@ export function RequestEditor(props: RequestEditorProps) {
                           ariaLabel="Body kind"
                           value={req().body.kind}
                           onChange={(v) =>
-                            patch({ body: { ...req().body, kind: v as ApiRequest['body']['kind'] } })
+                            patch({
+                              body: { ...req().body, kind: v as ApiRequest['body']['kind'] },
+                            })
                           }
                           options={BODY_KINDS}
                         />
@@ -823,7 +796,9 @@ export function RequestEditor(props: RequestEditorProps) {
                           ariaLabel="Auth scheme"
                           value={req().auth.kind}
                           onChange={(v) =>
-                            patch({ auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] } })
+                            patch({
+                              auth: { ...req().auth, kind: v as ApiRequest['auth']['kind'] },
+                            })
                           }
                           options={AUTH_KINDS}
                         />

@@ -1,0 +1,23 @@
+/* TreeEmpty — the absence of rows inside an open folder (tree-empty.tsx says
+   why it is not a row). Indented like the row that would have been there, so
+   it reads as being INSIDE the folder above rather than beside it, which is
+   the entire point of it.
+
+   The indent step is TreeRow's own --tree-row-indent, read with the same
+   default the row declares, so the two cannot drift apart. The extra step is
+   the leading slot every row opens with — the disclosure's width — so this
+   line starts where a row's NAME starts rather than where its chevron would. */
+
+.ui-tree-empty {
+  --tree-row-depth: 0;
+  --tree-row-indent: var(--space-4);
+  display: flex;
+  align-items: center;
+  min-height: var(--control-height-sm);
+  margin: 0;
+  padding-left: calc(var(--tree-row-depth) * var(--tree-row-indent) + var(--space-4));
+  padding-right: var(--space-2);
+  color: var(--color-text-dim);
+  font-size: var(--font-size-sm);
+  font-style: italic;
+}

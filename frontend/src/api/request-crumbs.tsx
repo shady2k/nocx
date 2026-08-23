@@ -19,7 +19,7 @@
 import { Show, createSignal } from 'solid-js'
 import { Button } from '../ui/button'
 import { IconButton } from '../ui/icon-button'
-import { MoreIcon, PlusIcon, SaveIcon } from '../ui/icons'
+import { ArrowDownIcon, MoreIcon, PlusIcon, SaveIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
 
 export interface RequestCrumbsProps {
@@ -61,6 +61,23 @@ export interface RequestCrumbsProps {
    * question: a request in a collection that is NOT the active one.
    */
   onNew?: () => void
+  /**
+   * Ask for a curl command line to convert into the form.
+   *
+   * BESIDE THE OTHER TWO DOORS, not on the line. It sat between the URL and
+   * Send, which put a control about WHERE A REQUEST COMES FROM in the row a
+   * person edits the request in — and the line is already the busiest thing
+   * on the surface. Making one, importing one and acting on the open one are
+   * the same kind of act on the same subject, so they read as one group at
+   * the trailing end: Save, then new, then imported, then the rest.
+   *
+   * Optional, like the other two, and for the same reason: a crumb trail
+   * mounted without an owner for the ask offers nothing rather than a
+   * control that swallows the press. It is present with NO collection and no
+   * request open, though — a curl line becomes a draft with no file behind
+   * it (api-store.ts), so it is exactly the door an empty workbench needs.
+   */
+  onImportCurl?: () => void
 }
 
 export function RequestCrumbs(props: RequestCrumbsProps) {
@@ -133,7 +150,7 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
           is about the NEXT one. It stands while there is either — a
           collection with nothing open in the form still offers New request,
           and that is the state a person is in when they need it most. */}
-      <Show when={props.name !== null || props.onNew}>
+      <Show when={props.name !== null || props.onNew || props.onImportCurl}>
         <div class="api-crumbs__save">
           <Show when={props.name !== null}>
             <Button
@@ -155,6 +172,20 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
               onClick={() => props.onNew?.()}
             >
               <PlusIcon />
+            </IconButton>
+          </Show>
+          {/* The import mark is the collections menu's own (ArrowDownIcon),
+              because it is the same verb one level down: something written
+              elsewhere arrives here. */}
+          <Show when={props.onImportCurl}>
+            <IconButton
+              id="api-import-curl-open"
+              size="sm"
+              title="Import a curl command"
+              ariaLabel="Import a curl command"
+              onClick={() => props.onImportCurl?.()}
+            >
+              <ArrowDownIcon />
             </IconButton>
           </Show>
           <Show when={props.onMore}>

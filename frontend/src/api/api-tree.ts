@@ -28,7 +28,7 @@
 
 import type { ApiOpenCollection } from './api-model'
 
-type ApiTreeRowKind = 'collection' | 'dir' | 'request' | 'malformed'
+type ApiTreeRowKind = 'collection' | 'dir' | 'request' | 'malformed' | 'empty'
 
 export interface ApiTreeRow {
   /** Stable identity for the row: the handle plus the path within it. Also
@@ -193,6 +193,16 @@ function pushInto<T>(index: Map<string, T[]>, key: string, value: T): void {
 export function flattenCollections(
   collections: readonly ApiOpenCollection[],
   collapsed: ReadonlySet<string>,
+  /**
+   * Whether what arrives here has been NARROWED by a filter.
+   *
+   * It changes one thing: an empty folder stops saying "Empty". A narrowed
+   * tree is not a tree of what exists — a folder kept because its own name
+   * matched has no children in it, and calling that empty answers a question
+   * nobody asked and contradicts what the same folder says when the box is
+   * cleared. The caller is the one that knows, so it is the one that says.
+   */
+  narrowed = false,
 ): ApiTreeRow[] {
   const rows: ApiTreeRow[] = []
   for (const open of collections) {
@@ -225,6 +235,41 @@ export function flattenCollections(
       pushInto(requests, drawnUnder(directoryOf(ref.relPath), listed), ref)
     }
 
+    /**
+     * AN EXPANDED FOLDER WITH NOTHING IN IT SAYS SO.
+     *
+     * Without this the rows below it are the only thing under an open folder,
+     * and they are its SIBLINGS — drawn at its depth, with their icons in the
+     * column its icon is in — so the folder reads as their parent and its
+     * emptiness reads as "these are what is in it". The owner hit exactly
+     * that: a folder made a minute earlier appeared to have swallowed every
+     * request in the collection.
+     *
+     * Indentation cannot answer it and neither can an indent guide: there is
+     * no deeper level to draw, because there is nothing at it. The only
+     * honest signal is the absence itself, stated.
+     */
+    const nothingIn = (dir: string): boolean =>
+      (children.get(dir) ?? []).length === 0 && (requests.get(dir) ?? []).length === 0
+
+    const sayEmpty = (dir: string, depth: number): void => {
+      if (narrowed) return
+      rows.push({
+        // Not a path: no file may be called this, so the key cannot collide
+        // with a row that exists.
+        key: `${open.handle}:${dir}/\u0000empty`,
+        kind: 'empty',
+        depth,
+        name: 'Empty',
+        handle: open.handle,
+        relPath: dir,
+        method: '',
+        reason: '',
+        expandable: false,
+        expanded: false,
+      })
+    }
+
     const walk = (dir: string): void => {
       for (const child of children.get(dir) ?? []) {
         const key = `${open.handle}:${child}`
@@ -244,7 +289,10 @@ export function flattenCollections(
           expandable: true,
           expanded,
         })
-        if (expanded) walk(child)
+        if (expanded) {
+          if (nothingIn(child)) sayEmpty(child, depthOf(child) + 1)
+          else walk(child)
+        }
       }
       for (const ref of requests.get(dir) ?? []) {
         rows.push({
@@ -262,6 +310,12 @@ export function flattenCollections(
       }
     }
     walk('')
+
+    // The collection's own root, by the same rule and for the same reason:
+    // an open collection with nothing in it stands directly above the next
+    // collection's rows. Malformed files count as something in it — they are
+    // listed below, and a root that said "Empty" above them would be wrong.
+    if (nothingIn('') && open.collection.malformed.length === 0) sayEmpty('', 1)
 
     for (const bad of open.collection.malformed) {
       rows.push({

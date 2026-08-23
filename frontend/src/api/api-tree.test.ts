@@ -13,8 +13,14 @@ import { collectionFixture, collectionsFixture } from './api-test-fixtures'
 
 const NOTHING = new Set<string>()
 
-function tree(open: readonly ApiOpenCollection[], collapsed: ReadonlySet<string> = NOTHING) {
-  return flattenCollections(open, collapsed).map((r: ApiTreeRow) => `${r.kind}:${r.relPath}@${r.depth}`)
+function tree(
+  open: readonly ApiOpenCollection[],
+  collapsed: ReadonlySet<string> = NOTHING,
+  narrowed = false,
+) {
+  return flattenCollections(open, collapsed, narrowed).map(
+    (r: ApiTreeRow) => `${r.kind}:${r.relPath}@${r.depth}`,
+  )
 }
 
 describe('the tree draws the folders the BACKEND listed', () => {
@@ -26,7 +32,61 @@ describe('the tree draws the folders the BACKEND listed', () => {
         collection: collectionFixture({ requests: [], folders: ['reports'] }),
       }),
     ]
-    expect(tree(open)).toEqual(['collection:@0', 'dir:reports@1'])
+    // And it SAYS it is empty. Without the second row the folder is an open
+    // disclosure with its own siblings under it, which reads as those
+    // siblings being what is in it.
+    expect(tree(open)).toEqual(['collection:@0', 'dir:reports@1', 'empty:reports@2'])
+  })
+
+  it('an empty folder says so at the depth its contents would have had', () => {
+    const open = [
+      collectionsFixture({
+        collection: collectionFixture({
+          requests: [{ relPath: 'ping.json', name: 'ping', method: 'GET' }],
+          folders: ['reports'],
+        }),
+      }),
+    ]
+    // The row a person is misled by is `request:ping.json@1` — a SIBLING of
+    // the folder, drawn at its depth. The empty row stands between them at
+    // depth 2, so what is inside and what is beside cannot be confused.
+    expect(tree(open)).toEqual([
+      'collection:@0',
+      'dir:reports@1',
+      'empty:reports@2',
+      'request:ping.json@1',
+    ])
+  })
+
+  it('a collapsed empty folder says nothing — there is nothing open to be inside', () => {
+    const open = [
+      collectionsFixture({
+        collection: collectionFixture({ requests: [], folders: ['reports'] }),
+      }),
+    ]
+    expect(tree(open, new Set(['h1:reports']))).toEqual(['collection:@0', 'dir:reports@1'])
+  })
+
+  it('an open collection with nothing in it says so too, by the same rule', () => {
+    const open = [
+      collectionsFixture({
+        collection: collectionFixture({ requests: [], folders: [] }),
+      }),
+    ]
+    expect(tree(open)).toEqual(['collection:@0', 'empty:@1'])
+  })
+
+  it('a collection holding only malformed files is not empty — they are listed under it', () => {
+    const open = [
+      collectionsFixture({
+        collection: collectionFixture({
+          requests: [],
+          folders: [],
+          malformed: [{ relPath: 'broken.json', reason: 'not JSON' }],
+        }),
+      }),
+    ]
+    expect(tree(open)).toEqual(['collection:@0', 'malformed:broken.json@1'])
   })
 
   it('puts the requests inside the folder that holds them, folders first', () => {
@@ -94,6 +154,8 @@ describe('the tree draws the folders the BACKEND listed', () => {
       'dir:users@1',
       'collection:@0',
       'dir:users@1',
+      // The second one is open, and open and empty is the state that says so.
+      'empty:users@2',
     ])
     // Folded in the first one, and the second one's `users` is untouched —
     // which is only visible in `expanded`, so read it rather than the shape.
@@ -120,7 +182,7 @@ describe('the filter narrows the folders with the rest', () => {
   it('keeps the folder a match is inside, and drops the ones holding nothing that matched', () => {
     const kept = filterCollections(example(), 'daily')
     expect(kept[0]?.collection.folders).toEqual(['reports'])
-    expect(tree(kept)).toEqual([
+    expect(tree(kept, NOTHING, true)).toEqual([
       'collection:@0',
       'dir:reports@1',
       'request:reports/daily.json@2',
@@ -133,7 +195,9 @@ describe('the filter narrows the folders with the rest', () => {
     const kept = filterCollections(example(), 'archive')
     expect(kept[0]?.collection.folders).toEqual(['archive'])
     expect(kept[0]?.collection.requests).toEqual([])
-    expect(tree(kept)).toEqual(['collection:@0', 'dir:archive@1'])
+    // NARROWED, so `archive` does not claim to be empty: it holds nothing
+    // that matched, which is a different sentence from holding nothing.
+    expect(tree(kept, NOTHING, true)).toEqual(['collection:@0', 'dir:archive@1'])
   })
 
   it('keeps the parents of a folder that matched, so the row has something to hang under', () => {
@@ -148,7 +212,7 @@ describe('the filter narrows the folders with the rest', () => {
     ]
     const kept = filterCollections(open, 'admin')
     expect(kept[0]?.collection.folders).toEqual(['v1', 'v1/admin'])
-    expect(tree(kept)).toEqual(['collection:@0', 'dir:v1@1', 'dir:v1/admin@2'])
+    expect(tree(kept, NOTHING, true)).toEqual(['collection:@0', 'dir:v1@1', 'dir:v1/admin@2'])
   })
 
   it('a collection that matched is kept whole, folders and all', () => {

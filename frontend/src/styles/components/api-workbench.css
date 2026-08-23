@@ -308,7 +308,6 @@
 }
 
 .api-request__environment,
-.api-request__import,
 .api-request__save,
 .api-request__send {
   flex: 0 0 auto;

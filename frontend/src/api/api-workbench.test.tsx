@@ -1369,6 +1369,116 @@ describe('the raw view and the body', () => {
   })
 })
 
+// ── A long line, and the box it moves in ──────────────────────────────────
+//
+// nocx-kdawd, reported by the owner from real use: a JSON body with one long
+// value — a token, a base64 blob — could not be moved sideways INSIDE the
+// editor. It wrapped, so a value's continuation sat against the line numbers,
+// and the only scrollbar that moved anything was the pane's, which moved the
+// whole surface with it.
+//
+// The answer is the one the read-only hosts already gave and the one the raw
+// view now gives for the same octets: the line stays a line, and the box it
+// is in is what scrolls. ONE answer for both, which is the half of the bead
+// that is about not shipping two.
+
+/** A body whose one value is longer than any pane this product has. */
+const LONG_BODY = `{"token":"${'x'.repeat(400)}"}`
+
+function bodyEditor(): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>('.api-body-editor')
+  if (!el) throw new Error('the body editor is not on screen')
+  return el
+}
+
+/** The document as CM6 has it: one div.cm-line per line, and no newline text
+ *  nodes, so a plain textContent read would say every body is one line. */
+function editorLines(el: HTMLElement): string[] {
+  return [...el.querySelectorAll('.cm-line')].map((l) => l.textContent ?? '')
+}
+
+/** Whether a box wraps, asked of the thing that carries the decision: CM6
+ *  puts `cm-lineWrapping` on the content it wraps, and CodeBlock marks the
+ *  variant that does not on the element the stylesheet keys off. */
+function wraps(el: HTMLElement): boolean {
+  const content = el.querySelector('.cm-content')
+  if (content) return content.classList.contains('cm-lineWrapping')
+  return el.dataset.wrap !== 'false'
+}
+
+/** The product's own stylesheet, in the document, so a computed overflow is
+ *  the shipped rule and not one this file re-typed.
+ *
+ *  jsdom applies CSS from a <style> element and computes NO layout, so this
+ *  can say WHO owns the sideways scroll and can never say that a scrollbar
+ *  appeared. The second half needs a real engine (e2e/), and the first is
+ *  what this bead is about: the movement belongs to the editor's own box. */
+function injectStyles(name: string): HTMLStyleElement {
+  const style = document.createElement('style')
+  style.textContent = readFileSync(`src/styles/components/${name}`, 'utf8')
+  document.head.append(style)
+  return style
+}
+
+describe('a long line is read by moving inside the box that holds it', () => {
+  const styles: HTMLStyleElement[] = []
+  afterEach(() => {
+    for (const s of styles) s.remove()
+    styles.length = 0
+  })
+
+  async function openLongBody(): Promise<void> {
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({
+        request: { ...REQUEST, body: { kind: 'json', text: LONG_BODY, fileRef: '' } },
+      }),
+    })
+    await openRequest(bar)
+    await vi.waitFor(() => expect(editorLines(bodyEditor())).toEqual([LONG_BODY]))
+  }
+
+  it('the body editor keeps the long value on one line rather than wrapping it', async () => {
+    await openLongBody()
+    // ONE line, and it is the whole body: nothing folded it, so there is
+    // something for a sideways scroll to move. Before this the same document
+    // was a stack of rows against the gutter.
+    expect(editorLines(bodyEditor())).toHaveLength(1)
+    expect(wraps(bodyEditor())).toBe(false)
+  })
+
+  it('the scroll that moves it belongs to the editor, and the pane is not asked', async () => {
+    styles.push(injectStyles('api-workbench.css'))
+    await openLongBody()
+
+    const scroller = bodyEditor().querySelector<HTMLElement>('.cm-scroller')
+    if (!scroller) throw new Error('the editor has no scroller of its own')
+    expect(getComputedStyle(scroller).overflow).toBe('auto')
+    // …and the editor's own box CLIPS, so the long line cannot reach the pane
+    // around it and make the surface the thing that moves.
+    expect(getComputedStyle(bodyEditor()).overflow).toBe('hidden')
+  })
+
+  it('the request preview in the run list answers the same way, not a second one', async () => {
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({
+        request: { ...REQUEST, body: { kind: 'json', text: LONG_BODY, fileRef: '' } },
+      }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(runCards()).toHaveLength(1))
+    fireEvent.click(optionIn(runCards()[0], 'Raw'))
+
+    const preview = runCards()[0].querySelector<HTMLElement>('[aria-label="Raw request"]')
+    if (!preview) throw new Error('no raw request preview on this run')
+    // The preview holds the bytes the editor holds, so it gives the editor's
+    // answer. Asserted against the editor rather than against a literal:
+    // "one answer, not two" is a statement about the pair.
+    expect(wraps(preview)).toBe(wraps(bodyEditor()))
+    expect(wraps(preview)).toBe(false)
+  })
+})
+
 // ── The Import section has an entrance ────────────────────────────────────
 //
 // nocx-6siis. The section was written `collapsible open={false} onToggle={()

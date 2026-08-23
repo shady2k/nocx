@@ -371,8 +371,16 @@ function RawExchange(props: {
 }) {
   return (
     <div class="api-run__raw">
+      {/* THE SAME ANSWER THE EDITOR GIVES, because these are the same octets:
+          the request preview does not wrap, so a long header or a one-line
+          body is reached by scrolling sideways inside the block rather than
+          folded into a paragraph that no longer looks like what went out
+          (nocx-kdawd). The connection block and the certificates below keep
+          wrapping — they are text this renderer composed out of facts, not
+          bytes off the wire, and a fingerprint is a thing people copy out of
+          a block that shows it whole. */}
       <Caption>── request ──</Caption>
-      <CodeBlock ariaLabel="Raw request">
+      <CodeBlock ariaLabel="Raw request" wrap={false}>
         <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg)}</For>
       </CodeBlock>
       <Caption>── connection ──</Caption>
@@ -402,7 +410,7 @@ function RawExchange(props: {
         {(raw) => (
           <>
             <Caption>── response ──</Caption>
-            <CodeBlock ariaLabel="Raw response">
+            <CodeBlock ariaLabel="Raw response" wrap={false}>
               <For each={rawSegments(raw())}>{(seg) => rawSegment(seg)}</For>
             </CodeBlock>
           </>

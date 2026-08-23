@@ -19,3 +19,12 @@
   max-height: 200px;
   overflow: auto;
 }
+
+/* The block that holds BYTES rather than a list of lines. A long line is
+   reached by scrolling sideways in the box the rule above already gave it —
+   the same answer the body editor gives for the same octets (code-block.tsx,
+   nocx-kdawd). */
+.ui-code-block[data-wrap='false'] {
+  white-space: pre;
+  overflow-wrap: normal;
+}

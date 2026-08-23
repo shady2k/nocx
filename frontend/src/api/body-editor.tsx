@@ -87,7 +87,15 @@ export function BodyEditor(props: BodyEditorProps) {
     parentEl = parent
     abort?.abort()
     abort = new AbortController()
-    const next = new EditableHost()
+    // A REQUEST BODY IS CODE, not prose (cm-host.ts's EditableContent). It
+    // wrapped, which is the default the snippet body and the notes surface
+    // want and the wrong one here: one long value — a token, a base64 blob —
+    // came back as a stack of rows whose continuations sat against the line
+    // numbers, and the only thing that could be moved sideways was the pane
+    // around the editor, which moved the whole surface with it. Unwrapped,
+    // the long line is reached inside this box, and CM6's gutter is sticky
+    // so the numbers stay put while the text moves (nocx-kdawd).
+    const next = new EditableHost('code')
     host = next
     // The language is the KIND's, and the line numbers are unconditional:
     // an error a person is told about on line 14 is only useful next to a

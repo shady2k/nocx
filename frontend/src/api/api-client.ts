@@ -317,41 +317,55 @@ export interface NativeDropPort {
 }
 
 /**
- * Bind the directory picker off the dialog client, when the build has one.
- *
- * `dialog.openDirectory` and its client method are the OTHER half of this
- * change (nocx-39jek) and land beside it. Until both halves are on one tree
- * the method is not on `DialogClient`'s type, so the composition root asks
- * the object rather than the type — which is also the runtime truth it wants
- * either way: absent means the workbench offers no Browse control, and the
- * `make dev-web` harness, which has no Wails and answers `-32601`, is
- * exactly that case.
- *
- * ONE cast, in one place, and it comes out the moment both halves are
- * committed together — after that the client satisfies the shape statically
- * and this becomes `() => client.openDirectoryDialog()`.
+ * The `dialog.*` methods the workbench binds its pickers off — the SLICE of
+ * the one dialog client this surface needs (AD-8), declared structurally so
+ * this module never learns to speak that domain.
  */
-export function directoryPicker(client: object): DirectoryPicker | undefined {
-  if (!('openDirectoryDialog' in client)) return undefined
-  const carrier = client as { openDirectoryDialog: DirectoryPicker }
-  return () => carrier.openDirectoryDialog()
+export interface SystemDialogs {
+  openFileDialog(): Promise<ChosenPath>
+  openDirectoryDialog(): Promise<ChosenPath>
+}
+
+/** The two native pickers, each present only where one can be opened. */
+export interface NativePickers {
+  directory?: DirectoryPicker
+  file?: FilePicker
 }
 
 /**
- * Bind the FILE picker off the dialog client, the same way and for the same
- * reasons as the directory one above.
+ * Bind the native pickers off the dialog client — WHERE THIS BUILD HAS A
+ * RUNTIME THAT CAN SERVE `dialog.*`, and nowhere else.
  *
- * `dialog.openFile` has been a declared method with a contract since before
- * this surface existed — Connections and Secrets choose a private key with
- * it — and the workbench was simply never wired with it. That is why the
- * import ask's destination had a picker and its export did not: one
- * capability was handed in and the other was not, so a person naming a
- * Postman export opened a terminal, found the file and pasted its path.
+ * IT USED TO ASK THE OBJECT, and that was never a probe (nocx-h9f8y).
+ * `'openFileDialog' in client` is TRUE ON EVERY BUILD — the client is a class
+ * instance and the method is on its prototype — so a build with no Wails
+ * (`make dev-web`, devharness, the e2e container, a nocx reached over a
+ * forwarded port) was handed a picker that answers -32601 when it is pressed.
+ * And a handed-in picker is drawn INSTEAD of the kit's own FileInput, so the
+ * route that cannot travel hid the one that can: the person pressed a
+ * control, read an error, and only then met the picker that would have
+ * worked (drop-zone.tsx). The capability "retired" after the failure the
+ * capability check exists to prevent.
+ *
+ * `served` is the question actually being asked, and it is asked ONCE — by
+ * the composition root, off `hasWailsWebview()`, the same reading that
+ * decides whether there is a native drop (main.tsx). It is passed rather
+ * than asked here for the reason the kit's DropZone is passed it too: the
+ * answer has an owner and a place where it is read (wails-runtime.ts), and a
+ * second reading is a second answer.
+ *
+ * BOTH PICKERS, ONE CALL, because there is only ever one reason for neither
+ * to exist and this is it. They are still two capabilities that retire
+ * INDEPENDENTLY — either `dialog.*` method can report itself unavailable on
+ * its own once the runtime is there, and the surface keeps a signal per
+ * picker for exactly that (api-pane.tsx).
  */
-export function filePicker(client: object): FilePicker | undefined {
-  if (!('openFileDialog' in client)) return undefined
-  const carrier = client as { openFileDialog: FilePicker }
-  return () => carrier.openFileDialog()
+export function nativePickers(client: SystemDialogs, served: boolean): NativePickers {
+  if (!served) return {}
+  return {
+    directory: () => client.openDirectoryDialog(),
+    file: () => client.openFileDialog(),
+  }
 }
 
 /**

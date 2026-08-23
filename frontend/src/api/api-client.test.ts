@@ -11,7 +11,7 @@
 // (TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath); this is the
 // renderer's half of the same rule — it never spells one.
 import { describe, expect, it, vi } from 'vitest'
-import { createApiWorkbenchServices } from './api-client'
+import { createApiWorkbenchServices, nativePickers } from './api-client'
 import type { Dispatcher } from '../dispatcher'
 import type { ApiRequest } from './api-model'
 
@@ -261,4 +261,52 @@ describe('ApiClient — every call has a test where it fails', () => {
       await expect(invoke(s)).rejects.toThrow('the folder is gone')
     })
   }
+})
+
+// ── The pickers are bound where they can open, and nowhere else ───────────
+//
+// nocx-h9f8y. The probe used to be `'openFileDialog' in client`, which a
+// class instance answers TRUE on every build — so a Wails-less one was handed
+// a picker that answers -32601 when pressed, and the kit then drew that
+// control INSTEAD of its own FileInput, which would have worked. These assert
+// the question that is actually being asked: can this build serve `dialog.*`.
+describe('nativePickers', () => {
+  /** The dialog client's shape, as a class — a PROTOTYPE method, which is
+   *  what made the old probe answer true everywhere. */
+  class FakeDialogClient {
+    file = vi.fn().mockResolvedValue({ path: '/w/acme.json' })
+    directory = vi.fn().mockResolvedValue({ path: '/w/collections' })
+    openFileDialog(): Promise<{ path: string }> {
+      return this.file() as Promise<{ path: string }>
+    }
+    openDirectoryDialog(): Promise<{ path: string }> {
+      return this.directory() as Promise<{ path: string }>
+    }
+  }
+
+  it('hands over neither picker where no runtime serves dialog.*', () => {
+    // The method IS on the object — that is the whole point — and it is
+    // still not a capability this build has.
+    const client = new FakeDialogClient()
+    expect('openFileDialog' in client).toBe(true)
+    expect(nativePickers(client, false)).toEqual({})
+  })
+
+  it('binds both onto the dialog client where one does', async () => {
+    const client = new FakeDialogClient()
+    const pickers = nativePickers(client, true)
+    await expect(pickers.file?.()).resolves.toEqual({ path: '/w/acme.json' })
+    await expect(pickers.directory?.()).resolves.toEqual({ path: '/w/collections' })
+    expect(client.file).toHaveBeenCalledTimes(1)
+    expect(client.directory).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets the picker\'s own refusal through rather than swallowing it', async () => {
+    // The paired failure half: a runtime that is there and a method that
+    // reports itself unavailable anyway is what the surface retires on.
+    const client = new FakeDialogClient()
+    client.file.mockRejectedValue(new Error('-32601 method not found'))
+    const pickers = nativePickers(client, true)
+    await expect(pickers.file?.()).rejects.toThrow('-32601')
+  })
 })

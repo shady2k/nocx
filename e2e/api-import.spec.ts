@@ -260,8 +260,7 @@ test.describe('the import ask on a stand with no Wails', () => {
     // makes the gesture discoverable (nocx-9hb5g).
     await expect(zone.locator('.ui-drop-zone__region')).toHaveCount(1)
 
-    // The picker beside it is asserted separately, and expected to FAIL —
-    // see the test below and nocx-h9f8y.
+    // The picker beside it is asserted separately — see the test below.
 
     // What is still absent is the NATIVE route. `data-file-drop-target` is
     // the attribute Wails reads off the dropped-on element and
@@ -274,33 +273,30 @@ test.describe('the import ask on a stand with no Wails', () => {
     await expect(zone).not.toHaveAttribute('data-session-id', /.*/)
   })
 
-  // THE PICKER THIS STAND CAN HONOUR — and it is not drawn, so this test is
-  // marked failing rather than deleted or weakened (nocx-h9f8y).
+  // THE PICKER THIS STAND CAN HONOUR — and it was NOT drawn until nocx-h9f8y,
+  // which is why this test carried a `test.fail()` rather than being deleted
+  // or weakened.
   //
   // With no Wails, `dialog.openFile` answers -32601, and what this build has
   // instead yields a `File` — the same currency the drop yields, which is why
-  // both answers go to one handler. The region draws the SYSTEM picker's
-  // control anyway, because the capability is probed as
-  // `'openFileDialog' in client` (api-client.ts:352) and a method on a class
-  // is always in it; its neighbour `nativeDrop` asks `hasWailsWebview()`
-  // (main.tsx:592), which is the question this one wants asked. Two answers to
-  // one question, and the one that cannot travel hides the one that can.
+  // both answers go to one handler. The region drew the SYSTEM picker's
+  // control anyway, because the capability was probed as
+  // `'openFileDialog' in client` and a method on a class is always in it,
+  // while its neighbour `nativeDrop` asked `hasWailsWebview()` — the question
+  // this one wants asked. Two answers to one question, and the one that could
+  // not travel hid the one that could. `nativePickers(client, served)` is the
+  // single probe now, handed that one reading (api-client.ts, main.tsx).
   //
-  // Measured, not deduced: at HEAD, with only the line the reshape broke taken
-  // out, this assertion fails identically — it predates nocx-hqbv3 and the
-  // reshape (nocx-ysyy2).
-  //
-  // `test.fail` rather than `skip`: when nocx-h9f8y is fixed this test starts
-  // passing, and Playwright then reports that a failing test unexpectedly
-  // passed. The defect cannot be quietly fixed and left untested.
+  // ONE CONTROL EITHER WAY is the property, so both halves are asserted: the
+  // kit's input is there and the caller's native control is not.
   test('no Wails runtime offers the kit file input, not the system picker', async ({ page }) => {
-    // Inside the body, not beside the test: a bare `test.fail()` in the
-    // describe's body marks EVERY test in the group expected-to-fail, which
-    // turns the passing neighbours into failures reported as "expected to
-    // fail but passed".
-    test.fail()
     const { ask } = await openTheAsk(page)
     const zone = ask.locator('.ui-drop-zone')
     await expect(zone.locator('.ui-file-input__native')).toHaveCount(1)
+    // The native picker is the region's OWN button — a direct child. The
+    // child combinator is what tells it apart from the kit FileInput's
+    // trigger, which is a button too and sits one level down inside
+    // `.ui-file-input` (file-input.tsx).
+    await expect(zone.locator('.ui-drop-zone__region > button')).toHaveCount(0)
   })
 })

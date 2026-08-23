@@ -1782,6 +1782,151 @@ describe('the import ask asks one question', () => {
   })
 })
 
+// ── A URL SAYS WHICH CONNECTION IT TRAVELS THROUGH ────────────────────────
+//
+// nocx-zz3cy. A URL is the one source the BACKEND goes and gets, so it is
+// the one source that has a route at all: a path is read where Go runs, and
+// a document and a dropped file are already in hand. An export served inside
+// a network the app can only reach through a bastion was therefore askable
+// for and unfetchable, and the collection it minted would have carried
+// `direct` into every request under it.
+//
+// The picker's grammar is environment-view's, deliberately: "Direct" plus
+// one option per connection, the id as the value and the name as the label,
+// in the store's order. A second grammar for one concept is the defect
+// AGENTS.md names.
+
+/** The connection picker, or null while the ask is not offering one. */
+function routePicker(): HTMLSelectElement | null {
+  const el = importAskBody().querySelector<HTMLSelectElement>('#api-import-route')
+  return el === null || !reachable(el) ? null : el
+}
+
+/** What the picker offers, in the order it offers it. */
+function routeOptions(): string[] {
+  const el = routePicker()
+  if (el === null) throw new Error('the ask is offering no route picker')
+  return [...el.options].map((o) => o.label)
+}
+
+describe('a URL import says which connection it travels through', () => {
+  it('reveals the picker for a URL and hides it again for a document', async () => {
+    const { bar } = await mountApp({
+      listConnections: vi.fn().mockResolvedValue([{ id: 'p1', name: 'prod-bastion' }]),
+    })
+    await openImportAsk(bar)
+
+    paste('https://h/acme.json')
+    await vi.waitFor(() => expect(routePicker()).not.toBeNull())
+
+    // A pasted document is already in hand — nothing travels, so there is
+    // nothing to ask about.
+    paste('{"info":{"name":"A"}}')
+    await vi.waitFor(() => expect(routePicker()).toBeNull())
+  })
+
+  it('offers Direct plus one option per connection, in the store order', async () => {
+    const { bar } = await mountApp({
+      listConnections: vi.fn().mockResolvedValue([
+        { id: 'p1', name: 'prod-bastion' },
+        { id: 'p2', name: 'staging' },
+      ]),
+    })
+    await openImportAsk(bar)
+
+    paste('https://h/acme.json')
+    await vi.waitFor(() => expect(routeOptions()).toEqual(['Direct', 'prod-bastion', 'staging']))
+    // The VALUE is the id the route stores, never the name a person reads.
+    expect([...routePicker()!.options].map((o) => o.value)).toEqual(['', 'p1', 'p2'])
+  })
+
+  it('draws only Direct on a build with no profile store', async () => {
+    // `listConnections` is absent from the fixture, which is what a build
+    // with no profile store looks like: absence IS the capability, so the
+    // picker is over nothing and offers the one answer there is.
+    const { bar } = await mountApp({})
+    await openImportAsk(bar)
+
+    paste('https://h/acme.json')
+    await vi.waitFor(() => expect(routePicker()).not.toBeNull())
+    expect(routeOptions()).toEqual(['Direct'])
+  })
+
+  it('sends the chosen connection as the route', async () => {
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({
+      importPostman,
+      listConnections: vi.fn().mockResolvedValue([{ id: 'p1', name: 'prod-bastion' }]),
+    })
+    await openImportAsk(bar)
+
+    paste('https://h/acme.json')
+    await vi.waitFor(() => expect(routePicker()).not.toBeNull())
+    fireEvent.change(routePicker()!, { target: { value: 'p1' } })
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        {
+          url: 'https://h/acme.json',
+          route: { kind: 'connection', profileId: 'p1', insecureTls: false },
+        },
+        `${DEFAULT_ROOT}/acme`,
+      ),
+    )
+  })
+
+  it('sends no route key at all when the fetch goes direct', async () => {
+    // Not `route: undefined`: the Go side decodes strictly, and an absent
+    // route already reads as direct.
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({
+      importPostman,
+      listConnections: vi.fn().mockResolvedValue([{ id: 'p1', name: 'prod-bastion' }]),
+    })
+    await openImportAsk(bar)
+
+    paste('https://h/acme.json')
+    await vi.waitFor(() => expect(routePicker()).not.toBeNull())
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { url: 'https://h/acme.json' },
+        `${DEFAULT_ROOT}/acme`,
+      ),
+    )
+    // The KEY SET, and not only the value: `toHaveBeenCalledWith` treats an
+    // explicit `route: undefined` as equal to no route at all, and the Go
+    // side's strict decoder does not.
+    const [sent] = importPostman.mock.calls[0] as [Record<string, unknown>, string]
+    expect(Object.keys(sent)).toEqual(['url'])
+  })
+
+  it('a connection chosen for a URL is not carried into a document import', async () => {
+    const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
+    const { bar } = await mountApp({
+      importPostman,
+      listConnections: vi.fn().mockResolvedValue([{ id: 'p1', name: 'prod-bastion' }]),
+    })
+    await openImportAsk(bar)
+
+    paste('https://h/acme.json')
+    await vi.waitFor(() => expect(routePicker()).not.toBeNull())
+    fireEvent.change(routePicker()!, { target: { value: 'p1' } })
+    paste('{"info":{"name":"Acme"}}')
+
+    await vi.waitFor(() => expect(routePicker()).toBeNull())
+    fireEvent.click(button('Import'))
+    await vi.waitFor(() =>
+      expect(importPostman).toHaveBeenCalledWith(
+        { document: '{"info":{"name":"Acme"}}' },
+        `${DEFAULT_ROOT}/acme`,
+      ),
+    )
+  })
+})
+
 // ── The ask opens on our folder ───────────────────────────────────────────
 //
 // nocx-9ivof. `nocx-6hg2w.14` put `defaultRoot` on the wire and proposed a

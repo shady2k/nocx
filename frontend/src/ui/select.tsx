@@ -27,6 +27,17 @@ export interface SelectProps {
    * `<label for>` nor this is announced as unnamed.
    */
   ariaLabel?: string
+  /**
+   * The id the control answers to — what a `Field`'s `for` points at, and
+   * what a surface addresses it by.
+   *
+   * TextField has carried one since it was written and this did not, so a
+   * `Field for="…"` wrapped round a Select bound its `<label>` to nothing:
+   * the row read as labelled and the control was announced as unnamed. It is
+   * optional for the same reason TextField's is — a select whose
+   * surroundings already say what it is needs no id at all.
+   */
+  id?: string
   value: string
   onChange: (value: string) => void
   options: SelectOption[]
@@ -59,6 +70,7 @@ export function Select(props: SelectProps) {
     <select
       ref={ref}
       class="ui-select"
+      id={props.id}
       aria-label={props.ariaLabel}
       value={props.value}
       disabled={props.disabled === true}

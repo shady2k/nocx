@@ -60,7 +60,7 @@ import {
 } from './api-paths'
 import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
-import { RequestEditor, RequestLine } from './request-form'
+import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
@@ -941,6 +941,39 @@ export function ApiPane(props: ApiPaneProps) {
   /** The environment's own NAME, by the path the picker chose it under. */
   const environmentName = (relPath: string): string =>
     store.environments().find((e) => e.relPath === relPath)?.name ?? relPath
+
+  /**
+   * Where a secret made on the Auth tab would be bound — read from the same
+   * two answers the WRITE uses, so the tab cannot name one environment while
+   * `bindSecret` addresses another.
+   *
+   * Both absences are real states of this panel and neither is an error: a
+   * converted curl line has no file until it is saved, and "No environment"
+   * is a row a person can choose. The tab says which one it is; it does not
+   * draw a control that would fail.
+   */
+  const secretTarget = (): SecretTarget => {
+    if (store.selected() === null) return { kind: 'no-collection' }
+    const relPath = store.activeEnvironment()
+    if (relPath === '') return { kind: 'no-environment' }
+    return { kind: 'environment', name: environmentName(relPath) }
+  }
+
+  /**
+   * Give the auth variable its value — the store's method, not the client's.
+   * The store is what knows which collection and which environment a binding
+   * belongs to, and a form working that out for itself would be a second
+   * answer to a question that already has one.
+   *
+   * `false` becomes a REJECTION here because the store answers a boolean and
+   * keeps the reason in `error()`. Without the translation the field would
+   * empty on a refusal, and a value that never landed would look stored.
+   */
+  const createSecret = async (variable: string, value: string): Promise<void> => {
+    if (!(await store.bindSecret(variable, value))) {
+      throw new Error(store.error() || 'The value was not stored.')
+    }
+  }
 
   /**
    * Open the environment editor with this name in it, ready to be given a
@@ -1858,7 +1891,12 @@ export function ApiPane(props: ApiPaneProps) {
         }
       >
         <section class="api-workbench__request" aria-label="Request">
-          <RequestEditor request={store.draft()} onEdit={(next) => store.editDraft(next)} />
+          <RequestEditor
+            request={store.draft()}
+            onEdit={(next) => store.editDraft(next)}
+            secretTarget={secretTarget()}
+            onCreateSecret={createSecret}
+          />
         </section>
 
         {/* The seam between the question and the answer. Vertical now: the

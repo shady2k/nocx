@@ -5,14 +5,17 @@
 // Every control is a kit component and this file places them; nothing here
 // repaints one. The two things worth knowing before reading it:
 //
-// A SECRET IS NEVER A TEXT INPUT, and here it cannot be one. `auth.var` is a
-// VARIABLE NAME — design §8 leaves no field in the whole contract where a
-// secret value or a vault identifier could be spelled, so the attack is
-// unspellable rather than guarded. The field edits that name; the chip beside
-// it renders the BINDING (ADR-0021: the reference is what is stored, sent and
-// resolved, and only the rendering is a chip). Both read the same draft, so
-// they are two projections of one value and cannot disagree — the field is
-// the only owner of the input.
+// A SECRET IS NEVER A TEXT INPUT — not in the request, which is the property
+// design §8 buys by leaving no field in the whole contract where a value or a
+// vault identifier could be spelled: the attack is unspellable rather than
+// guarded. `auth.var` is a VARIABLE NAME and the field editing it is that
+// name's only owner.
+//
+// The Auth tab can nonetheless MAKE one (AuthSecret, below), and that costs
+// the property nothing: the value is typed into a control that hands it
+// straight to the vault and keeps no copy, and what lands in the draft is the
+// name. Nothing about the file changed — there is still nowhere in it a value
+// could go.
 //
 // A DISABLED ROW IS A ROW THE USER KEEPS. Header and query rows carry
 // `enabled`, and turning one off is a checkbox rather than deleting it:
@@ -52,6 +55,7 @@ import { Tabs } from '../ui/tabs'
 import { layOutJSON } from '../ui/format-json'
 import { showToast } from '../ui/toast'
 import { createSecretChip } from '../ui/secret-chip'
+import { SecretValueField } from '../ui/secret-value-field'
 import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
@@ -76,6 +80,47 @@ const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; label: string }> = 
   { value: 'basic', label: 'Basic' },
   { value: 'apikey', label: 'API key' },
 ]
+
+/**
+ * What a new secret would be CALLED, when the person has not named one.
+ *
+ * THE IMPORTER'S OWN THREE WORDS, deliberately. A curl line whose
+ * Authorization header carries a bearer token already becomes `token` and a
+ * basic one already becomes `password` (internal/apiimport/secretvar.go), so
+ * a person who imports a line and a person who pastes a token into this tab
+ * end up with a collection spelled the same way. A second vocabulary here
+ * would be one product naming one thing twice.
+ *
+ * What it deliberately does NOT repeat is the rest of that namer: the
+ * collision suffix and the sanitizer belong to a pass minting many names out
+ * of a document nobody is watching. Here a person is minting ONE, the name is
+ * in the field in front of them before they press anything, and the field is
+ * where they change it.
+ */
+function proposeSecretName(auth: ApiRequest['auth']): string {
+  switch (auth.kind) {
+    case 'basic':
+      return 'password'
+    case 'apikey':
+      return 'api_key'
+    default:
+      return 'token'
+  }
+}
+
+/**
+ * Where a value created on the Auth tab would be bound — or, when nothing
+ * can be, WHICH absence it is.
+ *
+ * ABSENCE IS THE CAPABILITY, the rule every picker in this surface keeps: a
+ * control that fails when pressed is worse than one that was never drawn. But
+ * the two reasons a binding has nowhere to go are different problems with
+ * different answers — a request with no file behind it is saved, a collection
+ * sending under nothing has an environment chosen — so the tab says which of
+ * them it is rather than going quiet.
+ */
+export type SecretTarget =
+  { kind: 'environment'; name: string } | { kind: 'no-collection' } | { kind: 'no-environment' }
 
 /** How many rows a tab is holding, for the tab's own label. A count that is
  *  zero is not shown: "Headers 0" is a longer way to write "Headers", and the
@@ -310,9 +355,110 @@ export function RequestLine(props: RequestLineProps) {
   )
 }
 
+/**
+ * THE DOOR THE AUTH TAB DID NOT HAVE.
+ *
+ * The tab asked for the NAME of a variable that had to already exist and
+ * already be bound somewhere else. A person holding a token — the only reason
+ * anybody opens this tab — could do nothing here but type a name, walk to the
+ * environments page, find the row, mark it secret, paste the value and come
+ * back. This is the same act, where they already are.
+ *
+ * IT IS THE SAME WRITE, not a second one. The value goes out through the
+ * store's `bindSecret` — the one call in this product that carries a
+ * credential, and the one the environments page has used since it was built.
+ * There is no new method, no second minter, and nothing here that could put a
+ * value in a file: the draft is patched with the NAME and the value is never
+ * in this component's hands after `onCreate` has it.
+ *
+ * IT IS AN OFFER, NEVER A REQUIREMENT. A person who pasted a credential into
+ * a header keeps it there (nocx-14exx); nothing on this tab rewrites or
+ * refuses a plain header, and nothing here happens unless somebody types a
+ * value and presses Store.
+ *
+ * The NAME lands in the draft only AFTER the write is accepted. A refusal
+ * that had already renamed the variable would leave the file pointing at a
+ * binding that was never made, which is the one state this tab exists to get
+ * a person out of.
+ */
+function AuthSecret(props: {
+  auth: ApiRequest['auth']
+  target: SecretTarget
+  onName: (name: string) => void
+  onCreate: (variable: string, value: string) => Promise<void>
+}) {
+  /** What it will be called: what the person typed, or what the product
+   *  proposes. The field above shows the proposal as its placeholder, so the
+   *  name is on screen before anything is pressed. */
+  const name = (): string => props.auth.var.trim() || proposeSecretName(props.auth)
+  const bindable = (): { name: string } | null =>
+    props.target.kind === 'environment' ? props.target : null
+
+  const create = async (value: string): Promise<void> => {
+    const variable = name()
+    const environment = bindable()?.name ?? ''
+    await props.onCreate(variable, value)
+    props.onName(variable)
+    // What a person needs to know afterwards is that there is nothing else to
+    // do — the variable and where it was bound, and no byte of the value,
+    // which the backend deliberately never answers back either.
+    showToast({
+      level: 'success',
+      message: `${variable} is stored for ${environment}. This request sends with it now.`,
+    })
+  }
+
+  return (
+    <Show
+      when={bindable()}
+      fallback={
+        <p class="api-request__idle">
+          {props.target.kind === 'no-collection'
+            ? 'Save this request into a collection to store a value for it. A secret is kept under the collection and environment it belongs to, and this request has neither yet.'
+            : 'Choose an environment to store a value under. A secret is kept under the collection and environment it belongs to, and “No environment” has nowhere to put one.'}
+        </p>
+      }
+    >
+      {(environment) => (
+        <>
+          <SecretValueField
+            id="api-auth-secret-value"
+            ariaLabel="A value for this variable, stored in the vault"
+            placeholder="Paste the value — it goes to the vault, not to this file"
+            title={`Store the value for ${name()} in the vault`}
+            onSubmit={(value) => create(value)}
+          />
+          <p class="api-request__idle">
+            The value goes to the vault under {environment().name} — never into this file, which
+            keeps the name and nothing else.
+          </p>
+        </>
+      )}
+    </Show>
+  )
+}
+
 export interface RequestEditorProps {
   request: ApiRequest | null
   onEdit: (next: ApiRequest) => void
+  /**
+   * Give the auth variable its VALUE — the one call from this form that
+   * carries a credential, and the same one the environments page makes.
+   *
+   * Handed in rather than reached for: which collection and which environment
+   * a binding belongs to is the store's answer, and a form that worked it out
+   * itself would be a second one. ABSENT on a build with nowhere to bind, and
+   * then no field to type a value into is drawn at all.
+   *
+   * A REJECTION is a refusal, and its message reaches the person on the
+   * field. A caller whose store swallows failures must translate one back
+   * into a rejection here, or a value that was never stored will look stored.
+   */
+  onCreateSecret?: (variable: string, value: string) => Promise<void>
+  /** Where such a value would go, or which absence stops it. Undefined where
+   *  the host has not said — then the tab offers nothing and claims nothing,
+   *  which is the state it was in before this existed. */
+  secretTarget?: SecretTarget
 }
 
 /** The editor: the four parts of a request, one at a time. */
@@ -668,15 +814,33 @@ export function RequestEditor(props: RequestEditorProps) {
                         onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
                       />
                     </Show>
+                    {/* THE NAME, and the field is still its only owner. The
+                        placeholder is what the product would call a secret
+                        made below, so the proposal is on screen before
+                        anything is pressed and typing over it is how a person
+                        chooses their own. */}
                     <TextField
                       id="api-auth-var"
                       label="Secret variable"
-                      description="The NAME of a variable. The value lives in the vault and never in this file — there is no field here it could be typed into."
+                      description="The NAME of a variable. Its value lives in the vault, and this file keeps the name and nothing else."
+                      placeholder={proposeSecretName(req().auth)}
                       value={req().auth.var}
                       onInput={(v) => patch({ auth: { ...req().auth, var: v } })}
                     />
                     <Show when={req().auth.var !== ''}>
                       <p class="api-request__binding">Sends {createSecretChip(req().auth.var)}</p>
+                    </Show>
+                    <Show when={props.onCreateSecret && props.secretTarget}>
+                      {(target) => (
+                        <AuthSecret
+                          auth={req().auth}
+                          target={target()}
+                          onName={(name) => patch({ auth: { ...req().auth, var: name } })}
+                          onCreate={(variable, value) =>
+                            props.onCreateSecret?.(variable, value) ?? Promise.resolve()
+                          }
+                        />
+                      )}
                     </Show>
                   </Show>
                 ),

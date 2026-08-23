@@ -43,6 +43,7 @@
 @import './styles/components/badge.css';
 @import './styles/components/watch-badge.css';
 @import './styles/components/secret-chip.css';
+@import './styles/components/secret-value-field.css';
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';

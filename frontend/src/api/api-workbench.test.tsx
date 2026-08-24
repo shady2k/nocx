@@ -1631,9 +1631,9 @@ describe('a body that arrived on one line can be laid out', () => {
 
     fireEvent.click(button('Format'))
     await vi.waitFor(() => expect(editorLines(bodyEditor()).length).toBeGreaterThan(1))
-    fireEvent.click(button('Save'))
 
-    await vi.waitFor(() => expect(write).toHaveBeenCalled())
+    // Nothing is pressed: the draft reaches its file when typing stops.
+    await vi.waitFor(() => expect(write).toHaveBeenCalled(), { timeout: 3000 })
     const written = write.mock.calls[0][2] as { body: { text: string } }
     expect(written.body.text).not.toBe(before)
     expect(JSON.parse(written.body.text)).toEqual(JSON.parse(before))
@@ -3383,8 +3383,11 @@ describe('a credential can be created from the Auth tab', () => {
   it('a request with no file behind it says so instead of offering a control that cannot work', async () => {
     // A converted curl line lands in the form with nothing on disk behind it
     // — there is no collection and no environment for a binding to belong
-    // to, and that is a different sentence from the one above.
+    // to, and that is a different sentence from the one above. It takes NO
+    // collection open to reach that state now: with one, the import writes
+    // the file as it converts.
     const { bar } = await mountApp({
+      ...noCollections(),
       importCurl: vi.fn().mockResolvedValue({ request: unauthenticated(), unsupported: [] }),
     })
     await openWorkbench(bar)
@@ -3398,7 +3401,7 @@ describe('a credential can be created from the Auth tab', () => {
 
     await vi.waitFor(() => expect(field('api-auth-var').value).toBe(''))
     expect(authSecretField()).toBeNull()
-    expect(workbench().textContent).toContain('Save this request into a collection')
+    expect(workbench().textContent).toContain('Open a collection to store a value for it')
   })
 
   it('the tab says the reference once, not twice', async () => {
@@ -4158,7 +4161,7 @@ describe('the tree says which request is open', () => {
     await vi.waitFor(() => expect(marked()).toEqual(['users/archive.json']))
   })
 
-  it('a request detached from its file leaves no row marked', async () => {
+  it('an import moves the mark onto the file it just made, never leaves it behind', async () => {
     const disk = folderOnDisk({
       importCurl: vi
         .fn()
@@ -4170,16 +4173,18 @@ describe('the tree says which request is open', () => {
     fireEvent.click(row(CREATE_REL_PATH))
     await vi.waitFor(() => expect(marked()).toEqual([CREATE_REL_PATH]))
 
-    // A curl line converted into the form is a request with no file behind
-    // it (api-store.ts nulls `selected`), so the mark must GO rather than sit
-    // on a row the form is no longer showing. This is the half a mark driven
+    // The import writes the converted line into a file of its own and opens
+    // THAT. The mark must follow the form; what it must never do is stay on
+    // the row the form has stopped showing, which is the half a mark driven
     // by anything other than `store.selected()` would get wrong.
     fireEvent.click(button('Import a curl command'))
     fireEvent.input(field('api-import-curl'), { target: { value: 'curl https://h/v1/ping' } })
     fireEvent.click(button('Convert to a request'))
 
     await vi.waitFor(() => expect(crumbName()).toBe('ping'))
-    expect(marked()).toEqual([])
+    await vi.waitFor(() => expect(marked()).not.toEqual([CREATE_REL_PATH]))
+    expect(marked()).toHaveLength(1)
+    expect(marked()[0]).toContain('ping')
   })
 })
 
@@ -4722,39 +4727,42 @@ describe('a request can be moved to a folder', () => {
     expect(moveSubmit()).toBeTruthy()
   })
 
-  it('an unsaved draft on the open request is refused, and nothing moves', async () => {
+  it('a move takes the last edit with it, because the file already holds it', async () => {
+    // THE RULE THIS REPLACES: a move used to be REFUSED while the open
+    // request had unsaved edits, with "save, then move" as the remedy — a
+    // move that wrote the draft first would have been a second act nobody
+    // asked for. Nothing on this surface is saved by a gesture any more, so
+    // there is no second act to perform: the edit reaches its file on its
+    // own, and the move that follows renames a file that already holds it.
     const disk = movingDisk()
-    const { bar } = await mountApp(disk.services)
+    // This fixture's `files` is moved by `moveRequest` and never written to,
+    // so the write the autosave performs has to land in it for the move to
+    // be able to carry anything.
+    const write = vi.fn((_h: string, relPath: string, request: ApiRequest) => {
+      disk.files.set(relPath, request)
+      return Promise.resolve({})
+    })
+    const { bar } = await mountApp({ ...disk.services, writeRequest: write })
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
     fireEvent.click(row(CREATE_REL_PATH))
     await vi.waitFor(() => expect(crumbName()).toBe('create'))
     fireEvent.input(field('api-url'), { target: { value: 'https://h/edited' } })
-    await vi.waitFor(() => expect(saveArmed()).toBe(true))
+    await vi.waitFor(() => expect(write).toHaveBeenCalled(), { timeout: 3000 })
 
     await pickOnRow(CREATE_REL_PATH, 'Move to folder…')
     await vi.waitFor(() => moveChooser())
     fireEvent.click(moveOption('users'))
     fireEvent.click(moveSubmit())
 
-    // THE RULE, STATED IN THE PRODUCT: a move carries the file and not the
-    // draft. The person is told the remedy — save, then move — in a toast,
-    // and the request stays where it is.
     await vi.waitFor(() =>
-      expect(toasts().some((t) => t.message.includes('Save the request first'))).toBe(true),
+      expect(disk.moveRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, 'users/create.json'),
     )
-    expect(disk.moveRequest).not.toHaveBeenCalled()
-    expect(disk.files.has(CREATE_REL_PATH)).toBe(true)
-    expect(disk.files.has('users/create.json')).toBe(true)
+    // The edit is in the moved file, and nobody was told to go and save.
+    expect(disk.files.get('users/create.json')?.url).toBe('https://h/edited')
+    expect(toasts().some((t) => t.message.includes('Save the request first'))).toBe(false)
   })
-
-  /** True when Save is armed — the surface's own public state for "the
-   *  draft differs from its file". */
-  function saveArmed(): boolean {
-    const btn = document.querySelector<HTMLButtonElement>('#api-save-request')
-    return btn !== null && !btn.disabled
-  }
 
   it('makes the folder from the same place, then moves — one gesture for a young collection', async () => {
     const disk = movingDisk(['users'])
@@ -5304,10 +5312,10 @@ describe('the import report says whose it is and can be ended', () => {
 
     // A dismiss ends ONE import's report. The next import is a new one, and
     // a panel that stayed dismissed would be the silent degrade the panel
-    // exists to prevent.
-    // The first import left a request in the form with no file behind it, so
-    // this one is replacing unsaved work and is asked about it first.
-    await convertCurl('curl --proxy http://p https://h/v1/pong', true)
+    // exists to prevent. Nothing is asked in between: the first import wrote
+    // its request into the collection as it converted, so the second is not
+    // replacing anything unsaved.
+    await convertCurl('curl --proxy http://p https://h/v1/pong')
     await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
     expect(notImportedPanel()?.textContent ?? '').toContain('pong')
     expect(notImportedPanel()?.textContent ?? '').toContain('--proxy')
@@ -5497,6 +5505,85 @@ describe('a folder is something you open', () => {
     expect(pageRows()).toContain('create')
   })
 
+  it('opening it does not fold it away — that is the disclosure alone', async () => {
+    // The row toggled before, which is what a row does when clicking it
+    // means nothing else. Once it means "go in", a click that shut the
+    // column was the surface arguing with the person.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+
+    // What is in it is still in the column, and a second press on the folder
+    // a person is already in changes nothing.
+    expect(row(CREATE_REL_PATH)).toBeTruthy()
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+    expect(row(CREATE_REL_PATH)).toBeTruthy()
+
+    // And the disclosure still folds, which is now the only thing that does.
+    fireEvent.click(button('Collapse users'))
+    await vi.waitFor(() =>
+      expect(workbench().querySelector(`[data-rel-path="${CREATE_REL_PATH}"]`)).toBeNull(),
+    )
+  })
+
+  it('every row carries what it can be, on the row', async () => {
+    // The acts stand on the row the way the Snippets and Endpoints lists put
+    // theirs — this is a page, not the narrow column the tree is, and a ⋮
+    // here would be a click spent reaching three things that fit.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(pageRows()).toContain('create'))
+
+    // The row says which FILE it is, under the name — the only thing that
+    // tells two requests somebody named the same apart.
+    expect(workbench().querySelector('.api-folder')?.textContent).toContain('create.json')
+
+    // And every act the tree's menu offers is a control here, firing the
+    // same thing: duplicating from this row makes the copy.
+    expect(buttonNames()).toEqual(
+      expect.arrayContaining(['Duplicate create', 'Move create', 'Delete create']),
+    )
+    fireEvent.click(button('Duplicate create'))
+
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'users/create-copy.json',
+        expect.objectContaining({ name: 'create copy' }),
+      ),
+    )
+  })
+
+  it('a folder row offers what a folder can hold', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:`))
+    await vi.waitFor(() => expect(pageRows()).toContain('users'))
+
+    expect(buttonNames()).toEqual(
+      expect.arrayContaining(['New request in users', 'New folder in users']),
+    )
+    fireEvent.click(button('New request in users'))
+
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'users/untitled-request.json',
+        expect.objectContaining({ name: 'Untitled request' }),
+      ),
+    )
+  })
+
   it('the plus on that page makes the request IN that folder', async () => {
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
@@ -5539,6 +5626,10 @@ describe('a folder is something you open', () => {
     await vi.waitFor(() => expect(crumbHere()).toBe('reports'))
     expect(workbench().textContent).toContain('This folder is empty')
     expect(buttonNames()).toContain('New request')
+    // A folder in the column says how much is in it before anybody goes in.
+    fireEvent.click(folderRow(`${HANDLE}:`))
+    await vi.waitFor(() => expect(crumbHere()).toBe(''))
+    expect(workbench().querySelector('.api-folder')?.textContent).toContain('Empty')
   })
 
   it('opening a request from the page puts it in the form', async () => {
@@ -5582,31 +5673,21 @@ describe('a request can be put down', () => {
     expect(crumbHere()).toBe('users')
   })
 
-  it('asks before it takes unsaved edits, and a no changes nothing', async () => {
+  it('asks nothing and loses nothing — the last edit is written as it closes', async () => {
+    // The ask this replaces was about unsaved edits. There are none to be
+    // about: closing flushes the draft to its file first, so the honest
+    // answer to "are you sure" is to do the save and let go.
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openRequest(bar)
-    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/users?page=2' } })
-    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users?page=2'))
+    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/tenants' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/tenants'))
 
     await pickOnOpenRequest('Close request')
 
-    // The kit's confirmation, naming what is on the table.
-    const ask = await vi.waitFor(() => {
-      const el = [...document.querySelectorAll('dialog')].find(
-        (d) => d.open && (d.textContent ?? '').includes('unsaved changes'),
-      )
-      if (!el) throw new Error('no confirmation on screen')
-      return el
-    })
-    const no = [...ask.querySelectorAll('button')].find(
-      (b) => (b.textContent ?? '').trim() === 'Cancel',
-    )
-    fireEvent.click(no as HTMLButtonElement)
-
-    // Nothing moved: the request is still in the form with the edit in it.
-    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users?page=2'))
-    expect(crumbName()).toBe('create')
+    await vi.waitFor(() => expect(crumbName()).toBe(''))
+    expect(openDialogs()).toEqual([])
+    expect(disk.files.get(CREATE_REL_PATH)?.url).toBe('{{baseUrl}}/tenants')
   })
 
   it('a row nobody has opened is not offered a close', async () => {
@@ -5650,7 +5731,7 @@ describe('an imported curl line lands where the ask said', () => {
     expect([...dest.options][0]?.textContent).toBe('acme-api')
   })
 
-  it('converts, and Save writes the file into that folder', async () => {
+  it('converts, and the file is in that folder with nothing pressed', async () => {
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openWorkbench(bar)
@@ -5665,21 +5746,19 @@ describe('an imported curl line lands where the ask said', () => {
     })
     fireEvent.click(button('Convert to a request'))
 
-    // The form holds it and nothing has been written yet — the conversion is
-    // a value, not a file (design §10).
+    // "Nothing is written until the request is saved" (design §10) resolves
+    // to the import itself now that nothing on this surface is saved by a
+    // gesture: the request is in the folder the ask named, and it is in the
+    // tree, before anybody presses anything.
     await vi.waitFor(() => expect(crumbName()).not.toBe(''))
-    expect(disk.writeRequest).not.toHaveBeenCalled()
-
-    fireEvent.click(button('Save'))
-
     await vi.waitFor(() => expect(disk.writeRequest.mock.calls[0]?.[1]).toMatch(/^users\//))
+    expect(row(disk.writeRequest.mock.calls[0][1])).toBeTruthy()
   })
 
-  it('the trail says where it will go, before anybody has saved it', async () => {
-    // Between Convert and Save the destination exists and nothing is on
-    // disk. The trail is where a person looks to see where they are, so it
-    // is where the pending folder has to appear — otherwise the ask's answer
-    // is invisible until the file is already written.
+  it('the trail says which folder it went into', async () => {
+    // The trail is where a person looks to see where they are, so it is
+    // where the ask's answer has to appear — an import whose destination the
+    // surface never states is one a person has to go and look for.
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openWorkbench(bar)
@@ -5695,7 +5774,6 @@ describe('an imported curl line lands where the ask said', () => {
     await vi.waitFor(() => expect(crumbName()).not.toBe(''))
     const folder = workbench().querySelector<HTMLElement>('.api-crumbs__folder')
     expect((folder?.textContent ?? '').trim()).toBe('users')
-    expect(disk.writeRequest).not.toHaveBeenCalled()
   })
 
   it('the root is a destination somebody can choose, standing in a folder', async () => {
@@ -5712,9 +5790,6 @@ describe('an imported curl line lands where the ask said', () => {
     fireEvent.change(dest as HTMLSelectElement, { target: { value: '' } })
     fireEvent.input(field('api-import-curl'), { target: { value: 'curl https://h/v1/ping' } })
     fireEvent.click(button('Convert to a request'))
-    await vi.waitFor(() => expect(crumbName()).not.toBe(''))
-
-    fireEvent.click(button('Save'))
 
     await vi.waitFor(() => expect(disk.writeRequest).toHaveBeenCalled())
     expect(disk.writeRequest.mock.calls[0]?.[1]).not.toContain('/')

@@ -22,7 +22,16 @@
 // comment gives: a picker with nothing in it is a control that governs
 // nothing.
 
-import { For, Show, createEffect, createSignal, onCleanup, onMount, untrack } from 'solid-js'
+import {
+  For,
+  Show,
+  createEffect,
+  createSignal,
+  onCleanup,
+  onMount,
+  untrack,
+  type JSX,
+} from 'solid-js'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Caption } from '../ui/caption'
@@ -61,7 +70,7 @@ import {
 } from './api-tree'
 import { malformedReason } from './malformed-reason'
 import { CollectionDialog } from './collection-dialog'
-import { FolderView } from './folder-view'
+import { FolderView, type FolderEntry } from './folder-view'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
 import {
   classifyPastedSource,
@@ -77,7 +86,7 @@ import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
-import type { ApiRequest, ApiRequestRef, ApiRoute } from './api-model'
+import type { ApiOpenCollection, ApiRequest, ApiRoute } from './api-model'
 import { findVariables } from './variable-reference'
 
 export interface ApiPaneProps {
@@ -302,11 +311,14 @@ function sourcePath(held: HeldSource): string {
  *  than a new Set per read, because `rows()` runs on every keystroke. */
 const NOTHING_COLLAPSED: ReadonlySet<string> = new Set()
 
-/** The request a move is about: where it is, and what to say it by. It is
- *  the same three facts the request menu's target holds, which is what the
- *  menu door hands in — the chooser's one signal for "open, and about
- *  THIS". */
-interface MoveTarget {
+/** ONE REQUEST, ADDRESSED: where it is, and what to say it by.
+ *
+ *  The three facts every act about a request needs, and one shape for all of
+ *  them — the menu's target, the move chooser's "open, and about THIS", and
+ *  the row a button on the folder page acts on. It was `MoveTarget` and
+ *  carried a comment saying it was the same three facts the request menu
+ *  held; a second name for one shape is how the two drift. */
+interface RequestTarget {
   handle: string
   relPath: string
   name: string
@@ -455,7 +467,7 @@ export function ApiPane(props: ApiPaneProps) {
    * closes the menu before it calls `onSelect`, and close is what clears the
    * signal.
    */
-  let requestMenuTarget: { handle: string; relPath: string; name: string } | null = null
+  let requestMenuTarget: RequestTarget | null = null
   /** Where a malformed file's menu hangs — its own menu, because what a file
    *  can do is not what a folder can do: Delete and Copy Absolute Path,
    *  the two acts that need no decoded request (api.request.delete never
@@ -674,7 +686,7 @@ export function ApiPane(props: ApiPaneProps) {
   // chooser showed "Root of " and no folders. Everything the chooser shows
   // reads this one signal, so every expression re-runs together and the
   // open chooser is built from the target it opened with.
-  const [moveAsk, setMoveAsk] = createSignal<MoveTarget | null>(null)
+  const [moveAsk, setMoveAsk] = createSignal<RequestTarget | null>(null)
   const [moveBusy, setMoveBusy] = createSignal(false)
   const [moveRefused, setMoveRefused] = createSignal('')
 
@@ -1039,13 +1051,118 @@ export function ApiPane(props: ApiPaneProps) {
     })
   }
 
-  /** What is in the folder the person is standing in. Read through the ONE
-   *  owner of that question (api-tree.ts), so the page and the column beside
-   *  it can never disagree about what a folder holds. */
-  const here = (): { folders: readonly string[]; requests: readonly ApiRequestRef[] } => {
-    const open = store.collections().find((c) => c.handle === store.activeCollection())
-    if (open === undefined) return { folders: [], requests: [] }
-    return contentsOf(open.collection, store.activeFolder())
+  /** The collection the pointer is on, or undefined while it is on none. */
+  const activeOpenCollection = (): ApiOpenCollection | undefined =>
+    store.collections().find((c) => c.handle === store.activeCollection())
+
+  /** The last segment of a path — what a thing is CALLED, as against where
+   *  it is. */
+  const leafOf = (relPath: string): string => relPath.slice(relPath.lastIndexOf('/') + 1)
+
+  /**
+   * The rows of the folder page: what is in the folder the person is standing
+   * in, in the words a record row renders.
+   *
+   * Read through the ONE owner of "what hangs under here" (api-tree.ts), so
+   * the page and the column beside it can never disagree. The WORDS are
+   * decided here rather than in the page, because how many things a folder
+   * holds is a question about the listing and the page does not have one.
+   */
+  const here = (): FolderEntry[] => {
+    const open = activeOpenCollection()
+    if (open === undefined) return []
+    const at = contentsOf(open.collection, store.activeFolder())
+    const folders: FolderEntry[] = at.folders.map((relPath) => {
+      const inside = contentsOf(open.collection, relPath)
+      const count = inside.folders.length + inside.requests.length
+      return {
+        relPath,
+        name: leafOf(relPath),
+        kind: 'Folder',
+        // A folder's line says whether going in is worth it. "Empty" rather
+        // than "0 items", because that is the word the tree uses for the
+        // same state one column to the left.
+        meta: count === 0 ? 'Empty' : count === 1 ? '1 item' : `${count} items`,
+        folder: true,
+      }
+    })
+    const requests: FolderEntry[] = at.requests.map((ref) => ({
+      relPath: ref.relPath,
+      // The name the FILE declares, and its own basename when it declares
+      // none — the rule the tree's rows follow, so one request cannot read
+      // as two things in two places.
+      name: ref.name !== '' ? ref.name : leafOf(ref.relPath),
+      kind: ref.method !== '' ? ref.method : 'Request',
+      // THE FILE, which the name is not: a collection is a folder in git and
+      // the file is what a colleague sees in the diff. It is also the only
+      // thing that tells two requests a person named the same apart.
+      meta: leafOf(ref.relPath),
+      folder: false,
+    }))
+    return [...folders, ...requests]
+  }
+
+  /**
+   * What one row of the folder page can be, as controls standing on it.
+   *
+   * The acts are the ones the tree's menus fire — the same functions, not a
+   * second spelling of them — and they stand on the row rather than behind a
+   * ⋮ because this is a page and not the narrow column the tree is. Three
+   * buttons fit; a menu here would be a click spent to reach them.
+   */
+  const entryActions = (entry: FolderEntry): JSX.Element => {
+    const handle = store.activeCollection()
+    if (entry.folder) {
+      return (
+        <>
+          <IconButton
+            size="sm"
+            title="New request in this folder"
+            ariaLabel={`New request in ${entry.name}`}
+            onClick={() => void store.newRequest(entry.relPath).then(showRequest)}
+          >
+            <PlusIcon />
+          </IconButton>
+          <IconButton
+            size="sm"
+            title="New folder inside this one"
+            ariaLabel={`New folder in ${entry.name}`}
+            onClick={() => askForNewFolder(handle, entry.relPath, entry.name)}
+          >
+            <FolderIcon />
+          </IconButton>
+        </>
+      )
+    }
+    const target: RequestTarget = { handle, relPath: entry.relPath, name: entry.name }
+    return (
+      <>
+        <IconButton
+          size="sm"
+          title="Duplicate"
+          ariaLabel={`Duplicate ${entry.name}`}
+          onClick={() => duplicateRequest(target)}
+        >
+          <CopyIcon />
+        </IconButton>
+        <IconButton
+          size="sm"
+          title="Move to folder…"
+          ariaLabel={`Move ${entry.name}`}
+          onClick={() => askToMove(target)}
+        >
+          <FolderOpenIcon />
+        </IconButton>
+        <IconButton
+          size="sm"
+          title="Delete request…"
+          ariaLabel={`Delete ${entry.name}`}
+          onClick={() => askToDelete(target)}
+        >
+          <TrashIcon />
+        </IconButton>
+      </>
+    )
   }
 
   /** Make a request where the person is standing, and show it. The store
@@ -1075,11 +1192,18 @@ export function ApiPane(props: ApiPaneProps) {
     if (row.kind === 'collection' || row.kind === 'dir') {
       store.enterFolder(row.handle, row.relPath)
       setView('folder')
+      // OPENING NEVER CLOSES. The row toggled before, which is what a row
+      // does when clicking it means nothing else — and once it means "open
+      // this", a click that folded the thing away was the surface arguing
+      // with the person: they asked to go in and the column shut. So it
+      // unfolds, and folding is the disclosure's alone (it owns its click,
+      // ui/tree-row.tsx). A second click on a row a person is already in is
+      // then a no-op, which is the honest answer to asking for what you have.
+      expand(row.key)
+      return
     }
     // A malformed file has nothing to open — the row's own text is the whole
-    // answer — and everything that can be folded folds, the way every file
-    // tree in the product does (the disclosure is a 16px target and the row
-    // is the whole width).
+    // answer — and nothing else in this tree folds.
     if (row.expandable) toggle(row.key)
   }
 
@@ -1457,24 +1581,6 @@ export function ApiPane(props: ApiPaneProps) {
   // The two import asks open the way the other two do: empty, with no
   // reason under the field, because a fresh ask holding the last answer is
   // an offer nobody wrote (askForName says the rest).
-  /**
-   * Save the request in the form.
-   *
-   * IT ASKS NOTHING, either way. With a file behind it this writes. Without
-   * one — a converted curl line — the store gives it a file named after the
-   * request it already is, uniquified against the folder (api-store.ts). The
-   * ask that used to stand here wanted a FILE name for something that had a
-   * name, in the currency of paths rather than of names, at the moment
-   * somebody was reaching for Send. The name is renamed in the header, in
-   * place, whenever they know what it should be.
-   */
-  const saveRequest = (): void => {
-    const write = store.selected() !== null ? store.saveDraft() : store.saveDraftAs()
-    void write.then(() => {
-      if (store.error() === '') showToast({ level: 'success', message: 'Saved' })
-    })
-  }
-
   const askForCurl = (): void => {
     setCurlLine('')
     setCurlRefused('')
@@ -1958,6 +2064,42 @@ export function ApiPane(props: ApiPaneProps) {
    * read from a signal at build time is read from a signal that close has
    * already cleared.
    */
+  /**
+   * WHAT ONE REQUEST CAN BE — the acts themselves, as functions.
+   *
+   * Three doors reach them: the right button on a tree row, the ⋮ over the
+   * request in the form, and the buttons on the folder page's rows. A menu
+   * item holding an act inline and a button holding it again would be two
+   * owners of one behaviour, agreeing until the day one of them grew a
+   * confirmation the other did not.
+   */
+  const duplicateRequest = (target: RequestTarget): void => {
+    void store.duplicateRequest(target.handle, target.relPath)
+  }
+
+  const askToMove = (target: RequestTarget): void => {
+    // Captured at the door, for the reason every other target on this
+    // surface is: the kit closes the menu before onSelect fires, and the
+    // chooser's handlers read this instead of re-deriving it.
+    setMoveRefused('')
+    setMoveAsk(target)
+  }
+
+  const askToDelete = (target: RequestTarget): void => {
+    // "are you sure" lives in this product. A delete removes a file from a
+    // folder somebody shares through git, and the only undo is a working
+    // tree they may not have committed. The question NAMES what goes,
+    // because "are you sure" is a question about nothing — and it names the
+    // row that was AIMED AT, which is the whole reason the target is not the
+    // open request any more.
+    void showConfirm(
+      `Delete ${target.name}? The file is removed from the collection folder.`,
+      'Delete',
+    ).then((yes) => {
+      if (yes) void store.deleteRequest(target.handle, target.relPath)
+    })
+  }
+
   const requestMenuItems = (): ContextMenuItem[] => {
     const items: ContextMenuItem[] = [
       {
@@ -1966,8 +2108,7 @@ export function ApiPane(props: ApiPaneProps) {
         icon: CopyIcon,
         onSelect: () => {
           const target = requestMenuTarget
-          if (target === null) return
-          void store.duplicateRequest(target.handle, target.relPath)
+          if (target !== null) duplicateRequest(target)
         },
       },
       {
@@ -1976,12 +2117,7 @@ export function ApiPane(props: ApiPaneProps) {
         icon: FolderOpenIcon,
         onSelect: () => {
           const target = requestMenuTarget
-          if (target === null) return
-          // Captured HERE, at the door, for the reason every other target on
-          // this surface is: the kit closes the menu before onSelect fires,
-          // and the chooser's handlers read this instead of re-deriving it.
-          setMoveRefused('')
-          setMoveAsk(target)
+          if (target !== null) askToMove(target)
         },
       },
       {
@@ -1990,19 +2126,7 @@ export function ApiPane(props: ApiPaneProps) {
         icon: TrashIcon,
         onSelect: () => {
           const target = requestMenuTarget
-          if (target === null) return
-          // "are you sure" lives in this product. A delete removes a file from
-          // a folder somebody shares through git, and the only undo is a
-          // working tree they may not have committed. The question NAMES what
-          // goes, because "are you sure" is a question about nothing — and it
-          // names the row that was AIMED AT, which is the whole reason the
-          // target is not the open request any more.
-          void showConfirm(
-            `Delete ${target.name}? The file is removed from the collection folder.`,
-            'Delete',
-          ).then((yes) => {
-            if (yes) void store.deleteRequest(target.handle, target.relPath)
-          })
+          if (target !== null) askToDelete(target)
         },
       },
     ]
@@ -2050,14 +2174,12 @@ export function ApiPane(props: ApiPaneProps) {
   const closeOpenRequest = (): void => {
     const question = store.closeQuestion()
     if (question === '') {
-      store.closeRequest()
-      setView('folder')
+      void store.closeRequest().then(() => setView('folder'))
       return
     }
     void showConfirm(question, 'Discard and close', 'Cancel').then((yes) => {
       if (!yes) return
-      store.closeRequest()
-      setView('folder')
+      void store.closeRequest().then(() => setView('folder'))
     })
   }
 
@@ -2971,8 +3093,6 @@ export function ApiPane(props: ApiPaneProps) {
               const draft = store.draft()
               if (draft) store.editDraft({ ...draft, name })
             }}
-            savable={store.draft() !== null && (store.dirty() || store.selected() === null)}
-            onSave={saveRequest}
             onMore={store.selected() !== null ? openRequestMenu : undefined}
             // ABSENCE IS THE CAPABILITY. `newRequest` writes into the ACTIVE
             // collection and answers nothing when there is none, so a
@@ -3023,16 +3143,17 @@ export function ApiPane(props: ApiPaneProps) {
         <div class="api-workbench__page">
           <FolderView
             folder={store.activeFolder()}
-            folders={here().folders}
-            requests={here().requests}
-            onOpenFolder={(relPath) => {
-              store.enterFolder(store.activeCollection(), relPath)
-              expand(`${store.activeCollection()}:${relPath}`)
-            }}
-            onOpenRequest={(relPath) => {
-              void store.openRequest(store.activeCollection(), relPath)
+            entries={here()}
+            onOpen={(entry) => {
+              if (entry.folder) {
+                store.enterFolder(store.activeCollection(), entry.relPath)
+                expand(`${store.activeCollection()}:${entry.relPath}`)
+                return
+              }
+              void store.openRequest(store.activeCollection(), entry.relPath)
               showRequest()
             }}
+            actions={entryActions}
             onNewRequest={newRequestHere}
           />
         </div>

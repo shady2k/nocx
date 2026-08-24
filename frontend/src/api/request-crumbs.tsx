@@ -19,7 +19,7 @@
 import { Show, createSignal } from 'solid-js'
 import { Button } from '../ui/button'
 import { IconButton } from '../ui/icon-button'
-import { ArrowDownIcon, MoreIcon, PlusIcon, SaveIcon } from '../ui/icons'
+import { ArrowDownIcon, MoreIcon, PlusIcon } from '../ui/icons'
 import { TextField } from '../ui/text-field'
 
 export interface RequestCrumbsProps {
@@ -35,9 +35,6 @@ export interface RequestCrumbsProps {
    *  segment changes to the new place (nocx-8aczn.2). */
   folder?: string | null
   onRename: (name: string) => void
-  /** True when the draft differs from its file, or has no file yet. */
-  savable: boolean
-  onSave: () => void
   /**
    * Everything else this request can be — deleted, today.
    *
@@ -166,20 +163,14 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
       {/* The trailing group: what this request can be, and the one door that
           is about the NEXT one. It stands while there is either — a
           collection with nothing open in the form still offers New request,
-          and that is the state a person is in when they need it most. */}
+          and that is the state a person is in when they need it most.
+          SAVE USED TO OPEN IT and does not exist any more: the draft reaches
+          its file when typing stops (api-store.ts), so the button was being
+          pressed for insurance rather than for a decision — Send already
+          wrote the file before sending, and the only thing Save bought was
+          not losing an experiment on the way to it. */}
       <Show when={props.name !== null || props.onNew || props.onImportCurl}>
         <div class="api-crumbs__save">
-          <Show when={props.name !== null}>
-            <Button
-              id="api-save-request"
-              disabled={!props.savable}
-              title={props.savable ? 'Write this request to its file' : 'Nothing to save'}
-              onClick={props.onSave}
-            >
-              <SaveIcon />
-              Save
-            </Button>
-          </Show>
           <Show when={props.onNew}>
             <IconButton
               id="api-new-request"

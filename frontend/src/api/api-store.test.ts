@@ -5,7 +5,7 @@
 // handle and a path and sends what the FILE holds. A form that could send
 // something the file does not contain would be a second truth.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApiStore } from './api-store'
+import { createApiStore, type ApiStoreOptions } from './api-store'
 import type { ApiWorkbenchServices } from './api-client'
 import type { ApiEnvironmentRef, ApiRequest } from './api-model'
 import {
@@ -46,8 +46,8 @@ vi.mock('../ui/dialog', () => ({
   showConfirm: (...args: unknown[]) => showConfirmMock(...args),
 }))
 
-function storeWith(over: Partial<ApiWorkbenchServices> = {}) {
-  return { store: createApiStore(servicesFixture(over)) }
+function storeWith(over: Partial<ApiWorkbenchServices> = {}, options: ApiStoreOptions = {}) {
+  return { store: createApiStore(servicesFixture(over), options) }
 }
 
 /** A store that is watching, as the pane's mount leaves it: subscribed, with
@@ -448,10 +448,11 @@ describe('ApiStore — import', () => {
 // edits with it and asked nothing.
 //
 // The answer is the kit's `showConfirm`, NAMING what goes, and it is asked
-// only when there is something to lose. Both halves are tested here: the ask
-// appears where work would be destroyed, and it stays away where a person
-// had nothing to lose — an empty form, and a request open exactly as its
-// file holds it.
+// only when there is something to lose — which, since the draft reaches its
+// file on its own, is exactly one state: a draft with nowhere to be written,
+// which is a curl line converted with no collection open. Everything else
+// the ask used to cover is now SAVED rather than asked about, and that is
+// the stronger answer to the defect that bought it.
 describe('ApiStore — a curl import over unsaved work', () => {
   /** A store with a request open and one field typed into, which is the
    *  state the defect was reported from. */
@@ -472,40 +473,34 @@ describe('ApiStore — a curl import over unsaved work', () => {
     showConfirmMock.mockResolvedValue(true)
   })
 
-  it('asks before replacing a request with unsaved edits, naming the request', async () => {
-    const store = await withEditedRequest()
-    showConfirmMock.mockResolvedValue(false)
+  it('does not ask about edits it is about to SAVE — it writes them and imports', async () => {
+    // The ask was bought by an import that took somebody's unsaved edits
+    // (nocx-86wvw). Nothing takes them now: the draft reaches its file on
+    // its own, and this path flushes before it asks anything, so the state
+    // the question was about no longer occurs. The criterion it was written
+    // for still holds — the edits are not destroyed — by the other answer.
+    const write = vi.fn().mockResolvedValue({})
+    const { store } = storeWith({
+      writeRequest: write,
+      importCurl: vi.fn().mockResolvedValue({
+        request: { ...REQUEST, name: 'ping', url: 'https://h/v1/ping' },
+        unsupported: [],
+      }),
+    })
+    await store.openRequest('h1', 'users/create.json')
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://example.test/edited' })
 
     await store.importCurl('curl https://h/v1/ping')
 
-    expect(showConfirmMock).toHaveBeenCalledTimes(1)
-    const [message] = showConfirmMock.mock.calls[0]
-    // The question names what is about to go. "Are you sure" is a question
-    // about nothing.
-    expect(message).toContain('create')
-    expect(message).toContain('unsaved')
-  })
-
-  it('answering no leaves the edited request in the form, still attached to its file', async () => {
-    const store = await withEditedRequest()
-    showConfirmMock.mockResolvedValue(false)
-
-    await store.importCurl('curl https://h/v1/ping')
-
-    expect(store.draft()?.url).toBe('https://example.test/edited')
-    expect(store.draft()?.name).toBe('create')
-    expect(store.selected()).toEqual({ handle: 'h1', relPath: 'users/create.json' })
-    expect(store.dirty()).toBe(true)
-  })
-
-  it('answering yes imports, and the form is detached from the file as before', async () => {
-    const store = await withEditedRequest()
-    showConfirmMock.mockResolvedValue(true)
-
-    await store.importCurl('curl https://h/v1/ping')
-
+    expect(showConfirmMock).not.toHaveBeenCalled()
+    // The edit is in the file it was an edit to, written before the form
+    // stopped being about it.
+    expect(write).toHaveBeenCalledWith(
+      'h1',
+      'users/create.json',
+      expect.objectContaining({ url: 'https://example.test/edited' }),
+    )
     expect(store.draft()?.url).toBe('https://h/v1/ping')
-    expect(store.selected()).toBeNull()
   })
 
   it('asks nothing when the form is empty — nothing was there to lose', async () => {
@@ -1260,9 +1255,9 @@ describe('ApiStore — the folder the panel is pointed at', () => {
 
     await store.importCurl('curl https://h/v1/ping')
 
-    // The import detaches the form from its file on purpose (nocx-86wvw).
-    // Where the person STANDS is not the form's business.
-    expect(store.selected()).toBeNull()
+    // The imported request got its own file, in the folder the ask named —
+    // and where the person STANDS did not move with it.
+    expect(store.selected()?.relPath.startsWith('users/')).toBe(true)
     expect(store.activeFolder()).toBe('users')
   })
 })
@@ -1320,7 +1315,7 @@ describe('ApiStore — closing the request', () => {
     await store.refresh()
     await store.openRequest(HANDLE, CREATE_REL_PATH)
 
-    store.closeRequest()
+    await store.closeRequest()
 
     expect(store.draft()).toBeNull()
     expect(store.selected()).toBeNull()
@@ -1329,41 +1324,152 @@ describe('ApiStore — closing the request', () => {
     expect(store.activeFolder()).toBe('users')
   })
 
-  it('says what closing would cost, in the two ways a form holds work', async () => {
+  it('asks nothing about a request that has a file — closing writes the last edit', async () => {
     const disk = folderOnDisk()
-    const { store } = storeWith(disk.services)
+    const { store } = storeWith(disk.services, { idleMs: 0 })
     await store.refresh()
 
     // Nothing in the form: nothing to say.
-    expect(store.unsavedWork()).toBe(false)
     expect(store.closeQuestion()).toBe('')
 
-    // A file it has drifted from.
+    // A file it has drifted from is not a cost: the close writes it.
     await store.openRequest(HANDLE, CREATE_REL_PATH)
-    expect(store.unsavedWork()).toBe(false)
     store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v9/moved' })
-    expect(store.unsavedWork()).toBe(true)
-    expect(store.closeQuestion()).toContain('unsaved changes')
+    expect(store.closeQuestion()).toBe('')
 
-    // A form that never had a file — the curl import's state. The import
-    // asks before it takes the edits above, and the answer here is yes.
-    showConfirmMock.mockResolvedValue(true)
-    await store.importCurl('curl https://h/v1/ping')
-    expect(store.unsavedWork()).toBe(true)
-    expect(store.closeQuestion()).toContain('never been saved')
-  })
-
-  it('closing a draft that was never saved writes nothing at all', async () => {
-    const disk = folderOnDisk()
-    const { store } = storeWith(disk.services)
-    await store.refresh()
-    await store.importCurl('curl https://h/v1/ping')
-    const before = [...disk.files.keys()]
-
-    store.closeRequest()
+    await store.closeRequest()
 
     expect(store.draft()).toBeNull()
-    expect([...disk.files.keys()]).toEqual(before)
+    expect(disk.files.get(CREATE_REL_PATH)?.url).toBe('https://h/v9/moved')
+  })
+
+  it('asks about the one draft that has nowhere to be written', async () => {
+    // A curl line converted with no collection open. There is no folder to
+    // write it into, so closing it does take it — and that is the only state
+    // left in which closing takes anything.
+    const { store } = storeWith({
+      importCurl: vi.fn().mockResolvedValue({ request: REQUEST, unsupported: [] }),
+    })
+    await store.importCurl('curl https://h/v1/ping')
+
+    expect(store.selected()).toBeNull()
+    expect(store.closeQuestion()).toContain('never been saved')
+
+    await store.closeRequest()
+    expect(store.draft()).toBeNull()
     expect(store.draftFolder()).toBe('')
+  })
+})
+
+// ── Saving is not a gesture ───────────────────────────────────────────────
+//
+// The Save button was pressed for insurance rather than for a decision: Send
+// already wrote the file before sending, so the only thing it bought was not
+// losing an experiment on the way there. The file is written when typing
+// stops instead — the rhythm the note tab already settled on in this product
+// — and the tests wait on the WRITE, never on a duration (`idleMs: 0`).
+
+describe('ApiStore — the draft reaches its file by itself', () => {
+  it('an edit lands in the file with nothing pressed', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services, { idleMs: 0 })
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v2/typed' })
+
+    await vi.waitFor(() => expect(disk.files.get(CREATE_REL_PATH)?.url).toBe('https://h/v2/typed'))
+    expect(store.dirty()).toBe(false)
+  })
+
+  it('a burst of typing is ONE write, not one per keystroke', async () => {
+    // The whole reason it waits for the pause: a write per character is a
+    // disk write on the hot path of somebody's thinking, and a file a
+    // colleague sees in a diff churning once per keystroke.
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services, { idleMs: 20 })
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+    disk.writeRequest.mockClear()
+
+    for (const url of ['https://h/v', 'https://h/v2', 'https://h/v2/t']) {
+      store.editDraft({ ...(store.draft() as ApiRequest), url })
+    }
+
+    await vi.waitFor(() => expect(disk.files.get(CREATE_REL_PATH)?.url).toBe('https://h/v2/t'))
+    expect(disk.writeRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('opening another request writes the one being left first', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services, { idleMs: 10_000 })
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v3/left' })
+
+    // The timer has not fired and will not for ten seconds; the open is what
+    // lands the edit.
+    await store.newRequest()
+
+    expect(disk.files.get(CREATE_REL_PATH)?.url).toBe('https://h/v3/left')
+  })
+
+  it('a DELETE is not undone by a write that was already scheduled', async () => {
+    // The partial-failure question this rhythm raises: between the last
+    // keystroke and the write, the file can stop existing. A timer that
+    // fired afterwards would put it back, and the delete would look like it
+    // had worked until the next listing.
+    const disk = folderOnDisk({ deleteRequest: vi.fn().mockResolvedValue({}) })
+    const { store } = storeWith(disk.services, { idleMs: 0 })
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v4/doomed' })
+    disk.writeRequest.mockClear()
+
+    await store.deleteRequest(HANDLE, CREATE_REL_PATH)
+
+    expect(store.draft()).toBeNull()
+    // Nothing is written after the delete, however long anybody waits.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(disk.writeRequest).not.toHaveBeenCalled()
+  })
+
+  it('a MOVE writes to the path the edits belonged to, before the rename', async () => {
+    const disk = folderOnDisk({
+      moveRequest: vi.fn((_h: string, _from: string, to: string) =>
+        Promise.resolve({ relPath: to }),
+      ),
+    })
+    const { store } = storeWith(disk.services, { idleMs: 10_000 })
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v5/moving' })
+
+    await store.moveRequest(HANDLE, CREATE_REL_PATH, 'create.json')
+
+    // Written where it was, then renamed — and the move is no longer refused
+    // for edits nobody could have saved by hand.
+    expect(disk.writeRequest).toHaveBeenCalledWith(
+      HANDLE,
+      CREATE_REL_PATH,
+      expect.objectContaining({ url: 'https://h/v5/moving' }),
+    )
+    expect(store.error()).toBe('')
+  })
+
+  it('a write that FAILS is said out loud — a silent one is typing that goes nowhere', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(
+      { ...disk.services, writeRequest: vi.fn().mockRejectedValue(new Error('read-only volume')) },
+      { idleMs: 0 },
+    )
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v6/nowhere' })
+
+    await vi.waitFor(() => expect(store.error()).toContain('read-only volume'))
+    // And it still reads as unsaved, because it is.
+    expect(store.dirty()).toBe(true)
   })
 })

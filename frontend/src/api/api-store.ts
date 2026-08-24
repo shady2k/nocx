@@ -397,7 +397,7 @@ export interface ApiStore {
    * `unsavedWork` and `closeQuestion` below — this file is not where this
    * product raises dialogs (see the header).
    */
-  closeRequest(): void
+  closeRequest(): Promise<void>
   /** True while the form holds work that is not on disk: a draft that has
    *  drifted from its file, or one that never had a file. The ONE owner of
    *  that question — the pane derived it a second time for Save's enabled
@@ -610,7 +610,24 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-export function createApiStore(services: ApiWorkbenchServices): ApiStore {
+/** How long after the last edit the draft is written to its file. Long
+ *  enough that a sentence typed into a URL is one write, short enough that
+ *  closing the lid a second later keeps it. The same rhythm and the same
+ *  argument as the note tab (note-content.ts), which is where this product
+ *  already decided what "saves by itself" means. */
+const SAVE_IDLE_MS = 500
+
+export interface ApiStoreOptions {
+  /** Injected by tests, which cannot wait half a second per case and must
+   *  not depend on a real clock (AGENTS.md: a test waits on a state, never
+   *  on a duration). */
+  idleMs?: number
+}
+
+export function createApiStore(
+  services: ApiWorkbenchServices,
+  options: ApiStoreOptions = {},
+): ApiStore {
   const [collections, setCollections] = createSignal<readonly ApiOpenCollection[]>([])
   const [activeCollection, setActiveCollection] = createSignal('')
   // WHERE THE PERSON IS STANDING inside it. A place, not a fact about the
@@ -1165,6 +1182,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         next.delete(handle)
         return next
       })
+      if (selected()?.handle === handle) cancelPendingSave()
       if (activeCollection() === handle) {
         setActiveCollection('')
         // The folder a person was standing in belonged to the collection
@@ -1189,6 +1207,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   }
 
   const openRequest = async (handle: string, relPath: string): Promise<void> => {
+    // THE FORM IS ABOUT TO HOLD SOMETHING ELSE. Whatever the last edit was,
+    // it belongs in the file it was an edit to — and the timer that would
+    // have written it is about to be pointed at a different request.
+    await flushDraft()
     try {
       const result = await services.readRequest(handle, relPath)
       setSelected({ handle, relPath })
@@ -1237,7 +1259,44 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   // this variable is, in a component that is rebuilt whenever the pane is.
   let offered = ''
 
-  const editDraft = (next: ApiRequest): void => {
+  // ── SAVING IS NOT A GESTURE ───────────────────────────────────────────
+  //
+  // There was a Save button, and it was pressed for insurance rather than
+  // for a decision: Send already wrote the file before sending, so the only
+  // thing the button bought was not losing an experiment on the way to it.
+  // The file is written when typing stops instead, and every act that would
+  // REPLACE or REMOVE the draft flushes or cancels first — a write that
+  // landed after a delete would put the file back, and one that landed after
+  // a move would put the old path back.
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+
+  const cancelPendingSave = (): void => {
+    if (saveTimer === null) return
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+
+  /** Write the draft to its file NOW, if it has drifted from it. Awaited by
+   *  everything that is about to take the draft away, so the last thing a
+   *  person typed is in the file before it goes. */
+  const flushDraft = async (): Promise<void> => {
+    cancelPendingSave()
+    if (untrack(selected) === null || untrack(draft) === null || !untrack(dirty)) return
+    await saveDraft()
+  }
+
+  const scheduleSave = (): void => {
+    cancelPendingSave()
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      void flushDraft()
+    }, options.idleMs ?? SAVE_IDLE_MS)
+  }
+
+  /** What an edit DOES to the draft — the naming rule, unchanged. `editDraft`
+   *  is this plus the save it schedules, so there is no edit anywhere that
+   *  does not reach the file. */
+  const applyDraft = (next: ApiRequest): void => {
     const current = untrack(draft)
     if (current === null || next.name !== current.name) {
       // A PERSON NAMED IT. Not when the URL changes, not ever: the offer is
@@ -1262,6 +1321,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     }
     offered = name
     setDraft({ ...next, name })
+  }
+
+  const editDraft = (next: ApiRequest): void => {
+    applyDraft(next)
+    scheduleSave()
   }
 
   const saveDraftAs = async (): Promise<void> => {
@@ -1450,6 +1514,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       await services.deleteRequest(handle, relPath)
       const open = untrack(selected)
       if (open !== null && open.handle === handle && open.relPath === relPath) {
+        // CANCELLED, NOT FLUSHED. A scheduled write for the file that was
+        // just deleted would put it back — the delete would look like it
+        // worked and the row would return on the next listing.
+        cancelPendingSave()
         setSelected(null)
         setDraft(null)
         setSaved(null)
@@ -1470,6 +1538,10 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     fromRelPath: string,
     toRelPath: string,
   ): Promise<void> => {
+    // WRITTEN TO THE OLD PATH FIRST, which is the path the edits were edits
+    // to. A scheduled write landing after the rename would recreate the file
+    // where it used to be, and the collection would hold two.
+    if (untrack(selected)?.relPath === fromRelPath) await flushDraft()
     const open = untrack(selected)
     const movingTheOpenOne = open !== null && open.handle === handle && open.relPath === fromRelPath
     // THE UNSAVED-DRAFT RULE, stated (nocx-8aczn.2): a move does not carry
@@ -1514,6 +1586,9 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const send = async (): Promise<void> => {
     let request = untrack(draft)
     if (request === null) return
+    // This path writes the file itself, below, and a timer firing beside it
+    // would be a second writer of the same bytes.
+    cancelPendingSave()
     // A REQUEST WITH NO FILE GETS ONE, HERE. `api.request.send` sends the
     // FILE — the backend snapshots it off disk, which is what makes the run
     // and the folder agree (§6.4) — so a converted curl line could not be
@@ -1732,11 +1807,18 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       : `${named} has unsaved changes. Closing it now discards them.`
   }
 
-  /** What closing would cost, or '' when it would cost nothing. The pane
-   *  raises the ask; this is the sentence and the fact behind it. */
+  /**
+   * What closing would cost, or '' when it would cost nothing.
+   *
+   * A draft with a FILE behind it costs nothing: closing writes the last
+   * edit before it lets go. The only work a close can take is a draft that
+   * has nowhere to be written — a curl line converted with no collection
+   * open — so that is the only state with a question in it. The pane raises
+   * the ask; this is the sentence and the fact behind it.
+   */
   const closeQuestion = (): string => {
     const open = draft()
-    return open === null || !unsavedWork() ? '' : unsavedQuestion(open, 'close')
+    return open === null || selected() !== null ? '' : unsavedQuestion(open, 'close')
   }
 
   /**
@@ -1751,7 +1833,8 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
    * It does not ask. Whoever closes it has already been told what it costs
    * (`closeQuestion`), the way the delete on this surface works.
    */
-  const closeRequest = (): void => {
+  const closeRequest = async (): Promise<void> => {
+    await flushDraft()
     setSelected(null)
     setDraft(null)
     setSaved(null)
@@ -1805,6 +1888,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // `importCurl` the ask as a parameter, so the store keeps the order and
     // the sentence while the pane keeps the modal. The second is smaller and
     // leaves every test here standing. The choice is the pane owner's.
+    // WHATEVER WAS IN THE FORM IS IN ITS FILE — BEFORE THE QUESTION, which
+    // is what decides whether there is one. Edits reach the file on their
+    // own now, so the only work an import can still take is a draft with
+    // nowhere to be written: a curl line converted with no collection open.
+    // Asking first would name edits this line is about to save.
+    await flushDraft()
     const open = draft()
     if (open !== null && unsavedWork()) {
       const proceed = await showConfirm(
@@ -1836,6 +1925,14 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     setDraft(foldQueryIntoParams(adoptImportedRequest(result.request)))
     setNotes(result.unsupported)
     setError('')
+    // AND IT GETS ITS FILE NOW. Nothing is saved by a gesture on this
+    // surface any more, so "nothing is written until the request is saved"
+    // (design §10) resolves to this line: the request appears in the tree,
+    // in the folder the ask named, and Send is legal because there is
+    // something on disk for it to send. With no collection open there is
+    // nowhere to write it and the draft stays fileless, which is the honest
+    // state and the one `unsavedWork` still describes.
+    await saveDraftAs()
   }
 
   const importPostman = async (source: ImportSource, dest: string): Promise<void> => {

@@ -419,7 +419,7 @@ function AuthSecret(props: {
       fallback={
         <p class="api-request__idle">
           {props.target.kind === 'no-collection'
-            ? 'Save this request into a collection to store a value for it. A secret is kept under the collection and environment it belongs to, and this request has neither yet.'
+            ? 'Open a collection to store a value for it. A secret is kept under the collection and environment it belongs to, and this request has neither yet — it was converted from a curl line with nothing open to write it into.'
             : 'Choose an environment to store a value under. A secret is kept under the collection and environment it belongs to, and “No environment” has nowhere to put one.'}
         </p>
       }

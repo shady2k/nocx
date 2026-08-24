@@ -358,11 +358,19 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     // SENT it and did not rewrite it is the server's own account, asserted
     // after the row appears rather than on any timing.
     const pasted = '88730fee-9a4c-4c9d-8f4c-a1b2c3d4e5f6'
+    // The field is on the request editor's AUTH TAB, which this walk has
+    // not opened. The four sections of the editor are Tabs and the
+    // inactive panels stay in the DOM yet are `hidden` (ui/tabs.tsx), so
+    // the {{token}} assertion above could READ the value while an edit
+    // cannot reach it — opening the tab is the gesture a person makes
+    // before pasting here.
+    await workbench.locator('.api-request').getByRole('tab', { name: 'Auth' }).click()
+    await expect(workbench.locator('#api-auth-var')).toBeVisible()
     await workbench.locator('#api-auth-var').fill(pasted)
     await expect(workbench.locator('#api-auth-var')).toHaveValue(pasted)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
-    const literalRun = workbench.locator('.api-run').nth(1)
+    const literalRun = workbench.locator('.api-run').first()
     await expect(literalRun).toBeVisible({ timeout: 20_000 })
     await expect(literalRun.locator('.api-run__stats')).toContainText('HTTP status 401')
 

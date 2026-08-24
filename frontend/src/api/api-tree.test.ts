@@ -7,7 +7,13 @@
 // do with a folder is asserted in api-workbench.test.tsx, where the control
 // is clicked; what a folder IS lives here.
 import { describe, expect, it } from 'vitest'
-import { directoryOf, filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
+import {
+  contentsOf,
+  directoryOf,
+  filterCollections,
+  flattenCollections,
+  type ApiTreeRow,
+} from './api-tree'
 import type { ApiOpenCollection } from './api-model'
 import { collectionFixture, collectionsFixture } from './api-test-fixtures'
 
@@ -236,5 +242,37 @@ describe('directoryOf — one owner of where a path lives (AD-8)', () => {
 
   it('several folders deep, parents included', () => {
     expect(directoryOf('v1/admin/create.json')).toBe('v1/admin')
+  })
+})
+
+describe('contentsOf — what is DIRECTLY inside a folder', () => {
+  // The folder page reads one entry of the index the tree walks whole, so a
+  // folder cannot say one thing in the column and another in the page.
+  const example = () =>
+    collectionFixture({
+      requests: [
+        { relPath: 'ping.json', name: 'ping', method: 'GET' },
+        { relPath: 'users/create.json', name: 'create', method: 'POST' },
+        { relPath: 'users/admin/grant.json', name: 'grant', method: 'POST' },
+      ],
+      folders: ['users', 'users/admin'],
+    })
+
+  it("the collection's root holds what is beside it, not what is under it", () => {
+    const at = contentsOf(example(), '')
+    expect(at.folders).toEqual(['users'])
+    expect(at.requests.map((r) => r.relPath)).toEqual(['ping.json'])
+  })
+
+  it('a folder holds its own subfolders and the requests beside them', () => {
+    const at = contentsOf(example(), 'users')
+    expect(at.folders).toEqual(['users/admin'])
+    expect(at.requests.map((r) => r.relPath)).toEqual(['users/create.json'])
+  })
+
+  it('a folder with nothing in it answers with nothing, not with its parent', () => {
+    const at = contentsOf(collectionFixture({ requests: [], folders: ['reports'] }), 'reports')
+    expect(at.folders).toEqual([])
+    expect(at.requests).toEqual([])
   })
 })

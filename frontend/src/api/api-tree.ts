@@ -26,7 +26,7 @@
 // a row is where a person can see which file and what was wrong with it — a
 // soft degrade that lives only in a log is a feature that does not exist.
 
-import type { ApiOpenCollection } from './api-model'
+import type { ApiCollection, ApiOpenCollection, ApiRequestRef } from './api-model'
 
 type ApiTreeRowKind = 'collection' | 'dir' | 'request' | 'malformed' | 'empty'
 
@@ -185,6 +185,42 @@ function pushInto<T>(index: Map<string, T[]>, key: string, value: T): void {
 }
 
 /**
+ * Everything a collection holds, indexed by the folder it hangs under.
+ *
+ * Both indexes are built against the SAME set of listed folders, so a folder
+ * and the requests beside it can never be drawn under different parents.
+ * ONE OWNER of "what is in there" (AD-8): the tree walks the whole index and
+ * the folder page reads a single entry of it, so a folder cannot show one
+ * thing in the column and another in the page.
+ */
+function indexByFolder(collection: ApiCollection): {
+  children: Map<string, string[]>
+  requests: Map<string, ApiRequestRef[]>
+} {
+  const listed = new Set(collection.folders)
+  const children = new Map<string, string[]>()
+  for (const dir of collection.folders) {
+    pushInto(children, drawnUnder(directoryOf(dir), listed), dir)
+  }
+  const requests = new Map<string, ApiRequestRef[]>()
+  for (const ref of collection.requests) {
+    pushInto(requests, drawnUnder(directoryOf(ref.relPath), listed), ref)
+  }
+  return { children, requests }
+}
+
+/** What is DIRECTLY inside one folder — its subfolders and the requests
+ *  beside them, in the order the tree draws them. `dir` is '' for the
+ *  collection's own root. */
+export function contentsOf(
+  collection: ApiCollection,
+  dir: string,
+): { folders: readonly string[]; requests: readonly ApiRequestRef[] } {
+  const { children, requests } = indexByFolder(collection)
+  return { folders: children.get(dir) ?? [], requests: requests.get(dir) ?? [] }
+}
+
+/**
  * Flatten every open collection into the rows the tree renders, in the order
  * they appear: directories before the requests beside them, and each
  * collection's malformed files at its foot.
@@ -225,18 +261,7 @@ export function flattenCollections(
     })
     if (!rootExpanded) continue
 
-    // Both indexes are built against the SAME set of listed folders, so a
-    // folder and the requests beside it can never be drawn under different
-    // parents.
-    const listed = new Set(open.collection.folders)
-    const children = new Map<string, string[]>()
-    for (const dir of open.collection.folders) {
-      pushInto(children, drawnUnder(directoryOf(dir), listed), dir)
-    }
-    const requests = new Map<string, (typeof open.collection.requests)[number][]>()
-    for (const ref of open.collection.requests) {
-      pushInto(requests, drawnUnder(directoryOf(ref.relPath), listed), ref)
-    }
+    const { children, requests } = indexByFolder(open.collection)
 
     /**
      * AN EXPANDED FOLDER WITH NOTHING IN IT SAYS SO.

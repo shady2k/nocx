@@ -52,9 +52,16 @@ import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
 import { showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
-import { directoryOf, filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
+import {
+  contentsOf,
+  directoryOf,
+  filterCollections,
+  flattenCollections,
+  type ApiTreeRow,
+} from './api-tree'
 import { malformedReason } from './malformed-reason'
 import { CollectionDialog } from './collection-dialog'
+import { FolderView } from './folder-view'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
 import {
   classifyPastedSource,
@@ -70,7 +77,7 @@ import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
-import type { ApiRequest, ApiRoute } from './api-model'
+import type { ApiRequest, ApiRequestRef, ApiRoute } from './api-model'
 import { findVariables } from './variable-reference'
 
 export interface ApiPaneProps {
@@ -478,12 +485,30 @@ export function ApiPane(props: ApiPaneProps) {
   const [curlLine, setCurlLine] = createSignal('')
   const [curlRefused, setCurlRefused] = createSignal('')
   const [converting, setConverting] = createSignal(false)
+  // WHERE THE IMPORTED REQUEST WILL GO. The ask's answer, kept here while the
+  // ask is open and handed to the store on Convert, which is what makes it
+  // the draft's destination rather than a place that follows the person
+  // around afterwards (api-store.ts, `draftFolder`).
+  const [curlDest, setCurlDest] = createSignal('')
 
   // THE ENVIRONMENT PAGE'S DRAFT. It used to keep the file it read as well,
   // because two of its fields — the route and the secret names — could not be
   // edited and had to be carried back untouched. Both are the editor's now,
   // so the draft IS the answer and there is nothing to carry.
-  const [envOpen, setEnvOpen] = createSignal(false)
+  // WHAT THE RIGHT HALF IS SHOWING — one value, not a flag per page. With
+  // the folder page (nocx-8aczn.8) a second boolean would have made "the
+  // environments are open" and "a folder is open" independently true, which
+  // is this repo's most recurrent defect wearing a new hat: two owners of
+  // one input. `envOpen` stays as a READER of it so every call site that
+  // asks "is the request on screen" reads the one value.
+  const [view, setView] = createSignal<'request' | 'environments' | 'folder'>('request')
+  const envOpen = (): boolean => view() === 'environments'
+  /** Put the request back on screen. Every act that fills the FORM ends
+   *  here — making one, importing one, opening one — because a form nobody
+   *  can see is a request that did not arrive. */
+  const showRequest = (): void => {
+    setView('request')
+  }
   const [envDirty, setEnvDirty] = createSignal(false)
   const [envCreating, setEnvCreating] = createSignal(false)
   const [envEditing, setEnvEditing] = createSignal('')
@@ -672,11 +697,21 @@ export function ApiPane(props: ApiPaneProps) {
    *  directory half of `selected()`'s path, or null when nothing is open
    *  or the request is at the collection's root. After a move it is the
    *  new path, which is how the header names where the request went. */
+  /**
+   * The folder segment of the trail: where the thing in the FORM lives, or
+   * null when there is nothing to name.
+   *
+   * Read off the store's `draftFolder`, which is the one owner of that — it
+   * is set to the request's own folder when one is opened, and to the answer
+   * the curl ask gave when a fileless draft arrives. Deriving it here from
+   * `selected` a second time left an imported request with no folder segment
+   * at all, so between Convert and Save the destination existed and was
+   * invisible; the trail is where a person looks to see it.
+   */
   const openFolderPath = (): string | null => {
-    const open = store.selected()
-    if (open === null) return null
-    const cut = open.relPath.lastIndexOf('/')
-    return cut === -1 ? null : open.relPath.slice(0, cut)
+    if (store.draft() === null) return null
+    const folder = store.draftFolder()
+    return folder === '' ? null : folder
   }
 
   /** The request being moved, for the chooser's title — the SAME the menu
@@ -972,6 +1007,13 @@ export function ApiPane(props: ApiPaneProps) {
     return open.collection.name !== '' ? open.collection.name : open.path
   }
 
+  /** Every folder of the active collection, as the BACKEND lists them —
+   *  never derived from the request paths, which is the derivation that
+   *  loses a folder with nothing in it yet. The move chooser reads the same
+   *  field of the same collection. */
+  const activeCollectionFolders = (): readonly string[] =>
+    store.collections().find((c) => c.handle === store.activeCollection())?.collection.folders ?? []
+
   /** Why an open collection listed as nothing. '' when it listed. */
   const errorOf = (handle: string): string =>
     store.collections().find((c) => c.handle === handle)?.error ?? ''
@@ -985,13 +1027,57 @@ export function ApiPane(props: ApiPaneProps) {
     })
   }
 
+  /** Unfold a row, whatever state it was in. Walking into a folder from the
+   *  PAGE has to leave the column agreeing with it — a folder a person just
+   *  stepped into, drawn folded, is the tree contradicting the trail. */
+  const expand = (key: string): void => {
+    setCollapsed((prev) => {
+      if (!prev.has(key)) return prev
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+  }
+
+  /** What is in the folder the person is standing in. Read through the ONE
+   *  owner of that question (api-tree.ts), so the page and the column beside
+   *  it can never disagree about what a folder holds. */
+  const here = (): { folders: readonly string[]; requests: readonly ApiRequestRef[] } => {
+    const open = store.collections().find((c) => c.handle === store.activeCollection())
+    if (open === undefined) return { folders: [], requests: [] }
+    return contentsOf(open.collection, store.activeFolder())
+  }
+
+  /** Make a request where the person is standing, and show it. The store
+   *  decides WHERE — `newRequest` with no folder named means "here" — and
+   *  this only puts what it made on screen, which a folder page otherwise
+   *  covers. */
+  const newRequestHere = (): void => {
+    void store.newRequest().then(showRequest)
+  }
+
   const activate = (row: ApiTreeRow): void => {
     if (row.kind === 'request') {
       void store.openRequest(row.handle, row.relPath)
+      showRequest()
       return
     }
+    // A COLLECTION OR A FOLDER IS SOMETHING YOU OPEN, and it still folds.
+    //
+    // It only folded before, and folding is not an answer to either question
+    // a person asks by clicking one: what is in here, and where am I now.
+    // The trail above went on naming a request from somewhere else and the
+    // plus beside it made its request somewhere else too, because nothing on
+    // this surface held "the place" — `activeFolder` does now, and this is
+    // the gesture that moves it (nocx-8aczn.8). Postman and Bruno both make
+    // a folder openable for the same reason; the shape here is the one this
+    // surface already has for the environments.
+    if (row.kind === 'collection' || row.kind === 'dir') {
+      store.enterFolder(row.handle, row.relPath)
+      setView('folder')
+    }
     // A malformed file has nothing to open — the row's own text is the whole
-    // answer — and a collection or directory row toggles, the way every file
+    // answer — and everything that can be folded folds, the way every file
     // tree in the product does (the disclosure is a 16px target and the row
     // is the whole width).
     if (row.expandable) toggle(row.key)
@@ -1392,6 +1478,10 @@ export function ApiPane(props: ApiPaneProps) {
   const askForCurl = (): void => {
     setCurlLine('')
     setCurlRefused('')
+    // A FRESH ASK OPENS WHERE THE PERSON IS. It is an offer, not a question:
+    // somebody who imports a curl line while standing in `iaam` has already
+    // said where it goes, and only somebody who disagrees answers this.
+    setCurlDest(store.activeFolder())
     setCurling(true)
   }
 
@@ -1584,7 +1674,7 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const defineVariable = (name: string): void => {
     setVarMenu(null)
-    setEnvOpen(true)
+    setView('environments')
     void store.loadConnections()
     const current = store.activeEnvironment()
     // Through pickEnvironment's own parameter rather than after it: filling
@@ -1610,7 +1700,7 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   const openEnvironments = (): void => {
-    setEnvOpen(true)
+    setView('environments')
     // Read on every open: a person may have added the connection they are
     // about to route through since the panel started.
     void store.loadConnections()
@@ -1703,7 +1793,7 @@ export function ApiPane(props: ApiPaneProps) {
     const line = curlLine().trim()
     if (line === '') return
     setConverting(true)
-    void store.importCurl(line).then(() => {
+    void store.importCurl(line, curlDest()).then(() => {
       setConverting(false)
       setCurlRefused(store.error())
       // A converted curl line lands in the FORM — there is no file behind
@@ -1716,6 +1806,9 @@ export function ApiPane(props: ApiPaneProps) {
       // there is no state where this attributes a report that is not shown.
       setReport(reportOf(store.draft()?.name ?? 'a curl line'))
       setCurling(false)
+      // The form is what the person looks at next, and a folder page open
+      // over it would hide the request they just made.
+      showRequest()
     })
   }
 
@@ -1865,53 +1958,108 @@ export function ApiPane(props: ApiPaneProps) {
    * read from a signal at build time is read from a signal that close has
    * already cleared.
    */
-  const requestMenuItems = (): ContextMenuItem[] => [
-    {
-      id: 'api-row-duplicate',
-      label: 'Duplicate',
-      icon: CopyIcon,
-      onSelect: () => {
-        const target = requestMenuTarget
-        if (target === null) return
-        void store.duplicateRequest(target.handle, target.relPath)
+  const requestMenuItems = (): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [
+      {
+        id: 'api-row-duplicate',
+        label: 'Duplicate',
+        icon: CopyIcon,
+        onSelect: () => {
+          const target = requestMenuTarget
+          if (target === null) return
+          void store.duplicateRequest(target.handle, target.relPath)
+        },
       },
-    },
-    {
-      id: 'api-row-move',
-      label: 'Move to folder…',
-      icon: FolderOpenIcon,
-      onSelect: () => {
-        const target = requestMenuTarget
-        if (target === null) return
-        // Captured HERE, at the door, for the reason every other target on
-        // this surface is: the kit closes the menu before onSelect fires,
-        // and the chooser's handlers read this instead of re-deriving it.
-        setMoveRefused('')
-        setMoveAsk(target)
+      {
+        id: 'api-row-move',
+        label: 'Move to folder…',
+        icon: FolderOpenIcon,
+        onSelect: () => {
+          const target = requestMenuTarget
+          if (target === null) return
+          // Captured HERE, at the door, for the reason every other target on
+          // this surface is: the kit closes the menu before onSelect fires,
+          // and the chooser's handlers read this instead of re-deriving it.
+          setMoveRefused('')
+          setMoveAsk(target)
+        },
       },
-    },
-    {
-      id: 'api-row-delete',
-      label: 'Delete request…',
-      icon: TrashIcon,
-      onSelect: () => {
-        const target = requestMenuTarget
-        if (target === null) return
-        // "are you sure" lives in this product. A delete removes a file from
-        // a folder somebody shares through git, and the only undo is a
-        // working tree they may not have committed. The question NAMES what
-        // goes, because "are you sure" is a question about nothing — and it
-        // names the row that was AIMED AT, which is the whole reason the
-        // target is not the open request any more.
-        void showConfirm(
-          `Delete ${target.name}? The file is removed from the collection folder.`,
-          'Delete',
-        ).then((yes) => {
-          if (yes) void store.deleteRequest(target.handle, target.relPath)
-        })
+      {
+        id: 'api-row-delete',
+        label: 'Delete request…',
+        icon: TrashIcon,
+        onSelect: () => {
+          const target = requestMenuTarget
+          if (target === null) return
+          // "are you sure" lives in this product. A delete removes a file from
+          // a folder somebody shares through git, and the only undo is a
+          // working tree they may not have committed. The question NAMES what
+          // goes, because "are you sure" is a question about nothing — and it
+          // names the row that was AIMED AT, which is the whole reason the
+          // target is not the open request any more.
+          void showConfirm(
+            `Delete ${target.name}? The file is removed from the collection folder.`,
+            'Delete',
+          ).then((yes) => {
+            if (yes) void store.deleteRequest(target.handle, target.relPath)
+          })
+        },
       },
-    },
-  ]
+    ]
+    // CLOSE IS ABOUT THE REQUEST IN THE FORM, and only about that one. The
+    // list is reached by two doors and the other one aims at a ROW, which
+    // may be any request in any open collection — a row nobody has opened
+    // has nothing to close, and an item that did nothing there would be a
+    // control that swallows the press.
+    //
+    // It exists at all because there was no way to put the form down: every
+    // other client closes a tab, and this surface has one form by design
+    // (one draft, one selection), so the act is one item rather than a strip
+    // (nocx-8aczn.9).
+    const open = store.selected()
+    const aimed = requestMenuTarget
+    if (
+      open !== null &&
+      aimed !== null &&
+      open.handle === aimed.handle &&
+      open.relPath === aimed.relPath
+    ) {
+      items.splice(items.length - 1, 0, {
+        id: 'api-row-close',
+        label: 'Close request',
+        icon: CloseIcon,
+        onSelect: closeOpenRequest,
+      })
+    }
+    return items
+  }
+
+  /**
+   * Put the form down.
+   *
+   * The store clears the form and touches no file; the ASK is here, where
+   * this surface's other "are you sure" lives (the delete above). The
+   * sentence is the store's — which of the two is true is read off
+   * `selected`, which the store owns — and '' is how it says there is
+   * nothing to lose, so nobody is asked a question about nothing.
+   *
+   * What is left on screen afterwards is the FOLDER the person is standing
+   * in: the right half has to show something, and an empty request form says
+   * less than the place they are still in.
+   */
+  const closeOpenRequest = (): void => {
+    const question = store.closeQuestion()
+    if (question === '') {
+      store.closeRequest()
+      setView('folder')
+      return
+    }
+    void showConfirm(question, 'Discard and close', 'Cancel').then((yes) => {
+      if (!yes) return
+      store.closeRequest()
+      setView('folder')
+    })
+  }
 
   /** Point the malformed file's menu at one file. One door, the right button
    *  on its row — the same plain-variable discipline as the two above. */
@@ -2292,6 +2440,10 @@ export function ApiPane(props: ApiPaneProps) {
           busy={converting()}
           onCancel={() => setCurling(false)}
           onSubmit={importCurl}
+          dest={curlDest()}
+          onDest={setCurlDest}
+          folders={activeCollectionFolders()}
+          collectionName={store.activeCollection() === '' ? '' : activeCollectionName()}
         />
         {/* ONE REFUSAL, ONE PLACE. `store.error()` is the last failure of any
             call, and when an ask is on screen that ask is already showing it
@@ -2601,7 +2753,7 @@ export function ApiPane(props: ApiPaneProps) {
                   title="New environment"
                   ariaLabel="New environment"
                   onClick={() => {
-                    setEnvOpen(true)
+                    setView('environments')
                     newEnvironment()
                   }}
                 >
@@ -2742,29 +2894,75 @@ export function ApiPane(props: ApiPaneProps) {
             `Playground › Create user` for a request — one trail, one place a
             person reads where they are, and the page below it no longer
             needs a title of its own. */}
-        <Show
-          when={!envOpen()}
-          fallback={
-            <header class="api-crumbs">
-              <span class="api-crumbs__collection">{activeCollectionName()}</span>
+        <Show when={view() === 'environments'}>
+          <header class="api-crumbs">
+            <span class="api-crumbs__collection">{activeCollectionName()}</span>
+            <span class="api-crumbs__sep" aria-hidden="true">
+              ›
+            </span>
+            <span class="api-crumbs__here">Environments</span>
+            <span class="api-crumbs__save">
+              <IconButton
+                id="api-environments-close"
+                size="sm"
+                title="Back to the request"
+                ariaLabel="Back to the request"
+                onClick={showRequest}
+              >
+                <CloseIcon />
+              </IconButton>
+            </span>
+          </header>
+        </Show>
+        {/* A FOLDER'S OWN TRAIL. The same line, saying the same kind of
+            thing: which collection, and where in it. The doors in its tail
+            act HERE — that is the whole point of standing somewhere — and
+            the way back is offered only while there is a request to go back
+            to, because a control that returns to nothing is one that
+            swallows the press. */}
+        <Show when={view() === 'folder'}>
+          <header class="api-crumbs">
+            <span class="api-crumbs__collection">{activeCollectionName()}</span>
+            <Show when={store.activeFolder() !== ''}>
               <span class="api-crumbs__sep" aria-hidden="true">
                 ›
               </span>
-              <span class="api-crumbs__here">Environments</span>
-              <span class="api-crumbs__save">
+              <span class="api-crumbs__here">{store.activeFolder()}</span>
+            </Show>
+            <span class="api-crumbs__save">
+              <IconButton
+                id="api-folder-new-request"
+                size="sm"
+                title="New request in this folder"
+                ariaLabel="New request in this folder"
+                onClick={newRequestHere}
+              >
+                <PlusIcon />
+              </IconButton>
+              <IconButton
+                id="api-folder-import-curl"
+                size="sm"
+                title="Import a curl command into this folder"
+                ariaLabel="Import a curl command into this folder"
+                onClick={askForCurl}
+              >
+                <ArrowDownIcon />
+              </IconButton>
+              <Show when={store.draft() !== null}>
                 <IconButton
-                  id="api-environments-close"
+                  id="api-folder-close"
                   size="sm"
                   title="Back to the request"
                   ariaLabel="Back to the request"
-                  onClick={() => setEnvOpen(false)}
+                  onClick={showRequest}
                 >
                   <CloseIcon />
                 </IconButton>
-              </span>
-            </header>
-          }
-        >
+              </Show>
+            </span>
+          </header>
+        </Show>
+        <Show when={view() === 'request'}>
           <RequestCrumbs
             collection={activeCollectionName()}
             name={store.draft()?.name ?? null}
@@ -2782,7 +2980,7 @@ export function ApiPane(props: ApiPaneProps) {
             // the press. The row's plus and the row's menu are untouched:
             // they are how a request is made in a collection that is not the
             // one the workbench is pointed at.
-            onNew={store.activeCollection() !== '' ? () => void store.newRequest() : undefined}
+            onNew={store.activeCollection() !== '' ? newRequestHere : undefined}
             onImportCurl={askForCurl}
           />
         </Show>
@@ -2794,10 +2992,10 @@ export function ApiPane(props: ApiPaneProps) {
           request and what came back sit SIDE BY SIDE — before this the
           response was below a form two screens tall, so reading the answer
           meant scrolling away from the question. */}
-      {/* The line belongs to a REQUEST. With the environments page open there
-          is none, and a disabled method-and-URL row above a page about
-          something else is a control that governs nothing. */}
-      <Show when={!envOpen()}>
+      {/* The line belongs to a REQUEST. With a page open there is none, and a
+          disabled method-and-URL row above a page about something else is a
+          control that governs nothing. */}
+      <Show when={view() === 'request'}>
         <div class="api-workbench__line">
           <RequestLine
             request={store.draft()}
@@ -2817,12 +3015,30 @@ export function ApiPane(props: ApiPaneProps) {
         </div>
       </Show>
 
-      {/* The environments TAKE THE HALF while they are open — the request and
-          its response are still there, underneath, and Back puts them on
-          screen again. A page rather than an overlay: nothing is dimmed and
-          nothing is covered, so the tree beside it still works. */}
+      {/* A PAGE TAKES THE HALF while it is open — the request and its response
+          are still there, underneath, and Back puts them on screen again. A
+          page rather than an overlay: nothing is dimmed and nothing is
+          covered, so the tree beside it still works. */}
+      <Show when={view() === 'folder'}>
+        <div class="api-workbench__page">
+          <FolderView
+            folder={store.activeFolder()}
+            folders={here().folders}
+            requests={here().requests}
+            onOpenFolder={(relPath) => {
+              store.enterFolder(store.activeCollection(), relPath)
+              expand(`${store.activeCollection()}:${relPath}`)
+            }}
+            onOpenRequest={(relPath) => {
+              void store.openRequest(store.activeCollection(), relPath)
+              showRequest()
+            }}
+            onNewRequest={newRequestHere}
+          />
+        </div>
+      </Show>
       <Show
-        when={!envOpen()}
+        when={view() !== 'environments'}
         fallback={
           <div class="api-workbench__page">
             <EnvironmentView
@@ -2866,47 +3082,49 @@ export function ApiPane(props: ApiPaneProps) {
           </div>
         }
       >
-        <section class="api-workbench__request" aria-label="Request">
-          <RequestEditor
-            request={store.draft()}
-            onEdit={(next) => store.editDraft(next)}
-            secretTarget={secretTarget()}
-            onCreateSecret={createSecret}
-          />
-        </section>
+        <Show when={view() === 'request'}>
+          <section class="api-workbench__request" aria-label="Request">
+            <RequestEditor
+              request={store.draft()}
+              onEdit={(next) => store.editDraft(next)}
+              secretTarget={secretTarget()}
+              onCreateSecret={createSecret}
+            />
+          </section>
 
-        {/* The seam between the question and the answer. Vertical now: the
+          {/* The seam between the question and the answer. Vertical now: the
             two halves are beside each other, so what a person drags is how
             much of the width the request keeps. */}
-        <div class="api-workbench__seam" data-seam="request">
-          <ResizeHandle
-            ariaLabel="Resize the request half"
-            value={requestWidth()}
-            min={MIN_REQUEST_WIDTH}
-            max={requestMax()}
-            onChange={setRequestWidth}
-            onCommit={setRequestWidth}
-          />
-        </div>
+          <div class="api-workbench__seam" data-seam="request">
+            <ResizeHandle
+              ariaLabel="Resize the request half"
+              value={requestWidth()}
+              min={MIN_REQUEST_WIDTH}
+              max={requestMax()}
+              onChange={setRequestWidth}
+              onCommit={setRequestWidth}
+            />
+          </div>
 
-        <section class="api-workbench__runs" aria-label="Runs">
-          {/* The column says what it is. Every run under it carries its own
+          <section class="api-workbench__runs" aria-label="Runs">
+            {/* The column says what it is. Every run under it carries its own
               status, elapsed time and size (run-list.tsx), so this names the
               column and does not restate one run's numbers at the top of a
               list of many — which would be two owners of one fact the moment
               a second run arrived. */}
-          <div class="api-workbench__runs-head">
-            <Caption>Response</Caption>
-            <Show when={store.runs().length > 0}>
-              <Badge tone="neutral">{String(store.runs().length)}</Badge>
-            </Show>
-          </div>
-          <RunList
-            runs={store.runs()}
-            onView={(id, view) => store.setRunView(id, view)}
-            connectionName={connectionName}
-          />
-        </section>
+            <div class="api-workbench__runs-head">
+              <Caption>Response</Caption>
+              <Show when={store.runs().length > 0}>
+                <Badge tone="neutral">{String(store.runs().length)}</Badge>
+              </Show>
+            </div>
+            <RunList
+              runs={store.runs()}
+              onView={(id, at) => store.setRunView(id, at)}
+              connectionName={connectionName}
+            />
+          </section>
+        </Show>
       </Show>
     </div>
   )

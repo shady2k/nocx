@@ -82,7 +82,10 @@ type ApiBody = ReadBody
 type ApiAuth = ReadAuth
 
 export type ApiCollection = ListedCollection
-type ApiRequestRef = ListedRequestRef
+/** One request as a LISTING names it: where its file is, what it is called,
+ *  and its verb. Exported because the tree and the folder page both hold
+ *  rows of them — never the request itself, which lives in its file. */
+export type ApiRequestRef = ListedRequestRef
 type ApiMalformedRef = ListedMalformedRef
 /** One environment a person can send under: the path that names it on
  *  `api.request.send`, and the name the FILE declares. There is no third

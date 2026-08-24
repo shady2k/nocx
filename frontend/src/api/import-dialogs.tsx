@@ -39,7 +39,7 @@ import { DropZone } from '../ui/drop-zone'
 import { Field } from '../ui/field'
 import { IconButton } from '../ui/icon-button'
 import { CloseIcon, FolderOpenIcon, PencilIcon } from '../ui/icons'
-import { Select } from '../ui/select'
+import { Select, type SelectOption } from '../ui/select'
 import { TextField } from '../ui/text-field'
 import type { ApiConnection } from './api-client'
 import type { ApiRoute } from './api-model'
@@ -418,11 +418,44 @@ export interface CurlImportDialogProps {
   busy: boolean
   onCancel: () => void
   onSubmit: () => void
+  /**
+   * WHERE THE REQUEST WILL LAND — a folder inside the active collection, ''
+   * being its root.
+   *
+   * The ask is the one moment this request's destination is on screen, and
+   * before it existed every imported curl line went to the collection's root
+   * and had to be moved by hand (nocx-8aczn.10). It is OFFERED rather than
+   * demanded, the way the Postman ask offers its destination: it arrives
+   * holding the folder the person is standing in, so an answer is only
+   * needed by somebody who disagrees.
+   *
+   * Nothing is written when this is answered. The conversion is a value and
+   * not a file (design §10); this rides with the draft and is spent at Save.
+   */
+  dest: string
+  onDest: (value: string) => void
+  /** Every folder of the active collection, as paths within it — the same
+   *  list the move chooser offers, and the collection's own `folders`. */
+  folders: readonly string[]
+  /** The active collection's name, for the root option's label. '' when
+   *  there is no collection open, and then there is no destination control
+   *  at all: nothing to choose, and Save would refuse anyway. */
+  collectionName: string
 }
 
 export function CurlImportDialog(props: CurlImportDialogProps) {
   const ready = () => props.value.trim() !== '' && !props.busy
   const refusal = (): string | undefined => (props.error !== '' ? props.error : undefined)
+
+  /** The collection's root, then its folders in the order the listing gave.
+   *  The root is named after the COLLECTION rather than called "root": a
+   *  person choosing where a request goes is choosing between places they
+   *  can see in the tree, and "Playground" is what that place is called
+   *  there. */
+  const destinations = (): SelectOption[] => [
+    { value: '', label: props.collectionName },
+    ...props.folders.map((path) => ({ value: path, label: path })),
+  ]
 
   const submit = (): void => {
     if (!ready()) return
@@ -457,6 +490,21 @@ export function CurlImportDialog(props: CurlImportDialogProps) {
         autoFocus
         required
       />
+      {/* WHERE IT GOES. Absent with no collection open, because there is
+          then nothing to choose between and a picker offering one dead
+          option is a control that governs nothing. The kit's Select owns
+          "one of N"; this places it in a Field, which is what gives it its
+          visible label. */}
+      <Show when={props.collectionName !== ''}>
+        <Field for="api-import-curl-dest" label="Save it in">
+          <Select
+            id="api-import-curl-dest"
+            value={props.dest}
+            onChange={props.onDest}
+            options={destinations()}
+          />
+        </Field>
+      </Show>
     </Dialog>
   )
 }

@@ -138,6 +138,16 @@
   font-weight: 500;
 }
 
+/* WHAT IS IN A FOLDER, inside the page that takes the right half. Placement
+   only: the rows are the kit's records and paint themselves. The column is
+   what a list of records is everywhere else in this product. */
+.api-folder {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+}
+
 .api-workbench__tree {
   grid-area: tree;
   display: flex;

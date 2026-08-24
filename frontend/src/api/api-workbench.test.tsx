@@ -5459,3 +5459,275 @@ describe('the folder ask says what it actually covers', () => {
     expect(openFolderDialog().textContent ?? '').toContain('Authorization')
   })
 })
+
+// ── A folder is a place, not a fold ───────────────────────────────────────
+//
+// Clicking a folder answered with the ABSENCE of its children, which is no
+// answer to "what is in here" and none at all to "where am I": the trail
+// went on naming a request from somewhere else, and the plus beside it made
+// its request somewhere else too. These drive the three doors that changed —
+// the click, the ⋮ that puts the form down, and the ask that says where an
+// imported curl line goes — each from the state a person starts in.
+
+/** The trail's last segment when it names a PAGE. */
+function crumbHere(): string {
+  const el = workbench().querySelector<HTMLElement>('.api-crumbs__here')
+  return (el?.textContent ?? '').trim()
+}
+
+/** The rows of the folder page, as a person reads them. */
+function pageRows(): string[] {
+  return [...workbench().querySelectorAll<HTMLElement>('.api-folder .ui-record-row__title')].map(
+    (el) => (el.textContent ?? '').trim(),
+  )
+}
+
+describe('a folder is something you open', () => {
+  it('clicking one shows what is in it, and says where you are', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+
+    // The trail says the place — the question the fold could not answer.
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+    // And the page says what is in it, in the words the tree uses.
+    expect(pageRows()).toContain('create')
+  })
+
+  it('the plus on that page makes the request IN that folder', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+
+    fireEvent.click(button('New request in this folder'))
+
+    await vi.waitFor(() =>
+      expect(disk.writeRequest).toHaveBeenCalledWith(
+        HANDLE,
+        'users/untitled-request.json',
+        expect.objectContaining({ name: 'Untitled request' }),
+      ),
+    )
+    // And what it made is on screen: a page left open over it would hide the
+    // request the person just asked for.
+    await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+  })
+
+  it('a folder with nothing in it says so and offers the door', async () => {
+    const disk = folderOnDisk({
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({
+            collection: collectionFixture({ requests: [], folders: ['reports'] }),
+          }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+    })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => folderRow(`${HANDLE}:reports`))
+
+    fireEvent.click(folderRow(`${HANDLE}:reports`))
+
+    await vi.waitFor(() => expect(crumbHere()).toBe('reports'))
+    expect(workbench().textContent).toContain('This folder is empty')
+    expect(buttonNames()).toContain('New request')
+  })
+
+  it('opening a request from the page puts it in the form', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(pageRows()).toContain('create'))
+
+    const created = [
+      ...workbench().querySelectorAll<HTMLElement>('.api-folder .ui-collection-row'),
+    ].find((el) => (el.textContent ?? '').includes('create'))
+    fireEvent.click(created as HTMLElement)
+
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users'))
+  })
+})
+
+describe('a request can be put down', () => {
+  /** Open the ⋮ over the request in the form and pick one of its acts. */
+  async function pickOnOpenRequest(label: string): Promise<void> {
+    fireEvent.click(button('More actions for this request'))
+    await vi.waitFor(() => menuItem(label))
+    fireEvent.click(menuItem(label))
+  }
+
+  it('closes it, empties the form, and leaves the file alone', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+
+    await pickOnOpenRequest('Close request')
+
+    // The form is empty and the tree still has the row: this is a close, not
+    // a delete.
+    await vi.waitFor(() => expect(crumbName()).toBe(''))
+    expect(disk.files.get(CREATE_REL_PATH)).toBeTruthy()
+    expect(disk.writeRequest).not.toHaveBeenCalled()
+    // What is left on screen is the place the person is still in.
+    expect(crumbHere()).toBe('users')
+  })
+
+  it('asks before it takes unsaved edits, and a no changes nothing', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openRequest(bar)
+    fireEvent.input(field('api-url'), { target: { value: '{{baseUrl}}/users?page=2' } })
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users?page=2'))
+
+    await pickOnOpenRequest('Close request')
+
+    // The kit's confirmation, naming what is on the table.
+    const ask = await vi.waitFor(() => {
+      const el = [...document.querySelectorAll('dialog')].find(
+        (d) => d.open && (d.textContent ?? '').includes('unsaved changes'),
+      )
+      if (!el) throw new Error('no confirmation on screen')
+      return el
+    })
+    const no = [...ask.querySelectorAll('button')].find(
+      (b) => (b.textContent ?? '').trim() === 'Cancel',
+    )
+    fireEvent.click(no as HTMLButtonElement)
+
+    // Nothing moved: the request is still in the form with the edit in it.
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users?page=2'))
+    expect(crumbName()).toBe('create')
+  })
+
+  it('a row nobody has opened is not offered a close', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    // Right-clicked, never opened: the form is empty and this row is a name
+    // in a list.
+    fireEvent.contextMenu(row(CREATE_REL_PATH))
+    await vi.waitFor(() => menuItem('Duplicate'))
+
+    const labels = [...document.querySelectorAll('.ui-context-menu__item')].map((b) =>
+      (b.textContent ?? '').trim(),
+    )
+    expect(labels).not.toContain('Close request')
+  })
+})
+
+describe('an imported curl line lands where the ask said', () => {
+  it('the ask opens holding the folder the person is standing in', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+
+    fireEvent.click(button('Import a curl command into this folder'))
+
+    const dest = await vi.waitFor(() => {
+      const el = workbench().querySelector<HTMLSelectElement>('#api-import-curl-dest')
+      if (!el) throw new Error('the ask offers no destination')
+      return el
+    })
+    // Offered, not demanded: it arrives answered.
+    expect(dest.value).toBe('users')
+    // And the collection's own root is sayable, under the name the tree uses.
+    expect([...dest.options].map((o) => o.value)).toEqual(['', 'users'])
+    expect([...dest.options][0]?.textContent).toBe('acme-api')
+  })
+
+  it('converts, and Save writes the file into that folder', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+    fireEvent.click(button('Import a curl command into this folder'))
+    await vi.waitFor(() => field('api-import-curl'))
+
+    fireEvent.input(field('api-import-curl'), {
+      target: { value: 'curl https://h/v1/ping' },
+    })
+    fireEvent.click(button('Convert to a request'))
+
+    // The form holds it and nothing has been written yet — the conversion is
+    // a value, not a file (design §10).
+    await vi.waitFor(() => expect(crumbName()).not.toBe(''))
+    expect(disk.writeRequest).not.toHaveBeenCalled()
+
+    fireEvent.click(button('Save'))
+
+    await vi.waitFor(() => expect(disk.writeRequest.mock.calls[0]?.[1]).toMatch(/^users\//))
+  })
+
+  it('the trail says where it will go, before anybody has saved it', async () => {
+    // Between Convert and Save the destination exists and nothing is on
+    // disk. The trail is where a person looks to see where they are, so it
+    // is where the pending folder has to appear — otherwise the ask's answer
+    // is invisible until the file is already written.
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+    fireEvent.click(button('Import a curl command into this folder'))
+    await vi.waitFor(() => field('api-import-curl'))
+
+    fireEvent.input(field('api-import-curl'), { target: { value: 'curl https://h/v1/ping' } })
+    fireEvent.click(button('Convert to a request'))
+
+    await vi.waitFor(() => expect(crumbName()).not.toBe(''))
+    const folder = workbench().querySelector<HTMLElement>('.api-crumbs__folder')
+    expect((folder?.textContent ?? '').trim()).toBe('users')
+    expect(disk.writeRequest).not.toHaveBeenCalled()
+  })
+
+  it('the root is a destination somebody can choose, standing in a folder', async () => {
+    const disk = folderOnDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+    fireEvent.click(button('Import a curl command into this folder'))
+    await vi.waitFor(() => field('api-import-curl'))
+
+    const dest = workbench().querySelector<HTMLSelectElement>('#api-import-curl-dest')
+    fireEvent.change(dest as HTMLSelectElement, { target: { value: '' } })
+    fireEvent.input(field('api-import-curl'), { target: { value: 'curl https://h/v1/ping' } })
+    fireEvent.click(button('Convert to a request'))
+    await vi.waitFor(() => expect(crumbName()).not.toBe(''))
+
+    fireEvent.click(button('Save'))
+
+    await vi.waitFor(() => expect(disk.writeRequest).toHaveBeenCalled())
+    expect(disk.writeRequest.mock.calls[0]?.[1]).not.toContain('/')
+  })
+
+  it('with no collection open the ask offers no destination at all', async () => {
+    const { bar } = await mountApp(noCollections())
+    await openWorkbench(bar)
+    await vi.waitFor(() => expect(workbench().textContent).toContain('No collections open'))
+
+    fireEvent.click(button('Import a curl command'))
+    await vi.waitFor(() => field('api-import-curl'))
+
+    expect(workbench().querySelector('#api-import-curl-dest')).toBeNull()
+  })
+})

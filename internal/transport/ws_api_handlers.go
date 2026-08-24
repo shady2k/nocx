@@ -244,6 +244,22 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 				return nil
 			}
 			_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
+		case "api.request.move":
+			var p apiRequestMoveParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			moved, err := svc.MoveRequest(apicoll.HandleID(p.Handle), p.RelPath, p.ToRelPath)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			// The result carries the new relPath because the caller's next
+			// act is to address the file again — a request that is open in
+			// the form has to be re-pointed at the new path, and deriving it
+			// itself would be the second answer this surface refuses to
+			// make.
+			_ = h.r.TryResult(req.ID, mustMarshal(apiRequestMoveResponse{RelPath: moved}))
 		}
 		return nil
 	})
@@ -256,7 +272,7 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 // held for the snapshot and released before the dial.
 //
 // TWO INTERVALS, both stated with both ends.
-//
+
 // The GATE: the api gate is acquired before the request file is opened and
 // released when Run returns with the request value in hand; from that moment
 // until the response is captured no domain gate is held at all, so a server
@@ -676,6 +692,7 @@ func apiMethodErrorCode(err error) int {
 		errors.Is(err, apicoll.ErrInvalidFolderName),
 		errors.Is(err, apicoll.ErrFolderExists),
 		errors.Is(err, apicoll.ErrFolderNotFound),
+		errors.Is(err, apicoll.ErrRequestExists),
 		errors.Is(err, capability.ErrImportNotAFile):
 		return -32602
 	default:
@@ -717,6 +734,21 @@ type apiHandleParams struct {
 type apiRequestParams struct {
 	Handle  string `json:"handle"`
 	RelPath string `json:"relPath"`
+}
+
+// apiRequestMoveParams names the request's two places, and both are addressed
+// exactly as every other api.* method addresses a file: the backend-held
+// handle plus a path relative to it, never a root (§13.1). There is no
+// second handle and no way to name another collection: the move is between
+// two paths inside the ONE collection the handle names.
+//
+// toRelPath is spelled out rather than derived on the caller's side, for the
+// same reason every other path is carried: a renderer joining a folder and a
+// stem itself would be a second answer to "where does this land now".
+type apiRequestMoveParams struct {
+	Handle    string `json:"handle"`
+	RelPath   string `json:"relPath"`
+	ToRelPath string `json:"toRelPath"`
 }
 
 // apiCollectionsCreateParams carries a NAME and not a path. That is the
@@ -918,6 +950,15 @@ type apiCreateResponse struct {
 type apiCollectionsCreateFolderResponse struct {
 	RelPath    string            `json:"relPath"`
 	Collection apiCollectionWire `json:"collection"`
+}
+
+// apiRequestMoveResponse is a move's whole answer: the new relPath. The
+// bytes that moved were the bytes at the source — the file is the truth
+// (§6.4), and nothing here re-reads them — and the tree is re-read by the
+// caller through the listing, so echoing anything else back would be a
+// second account of one act.
+type apiRequestMoveResponse struct {
+	RelPath string `json:"relPath"`
 }
 
 type apiCollectionWire struct {
@@ -1960,6 +2001,20 @@ func validateAPIRequestWriteRaw(raw json.RawMessage) string {
 	return validateAPIRequestBody(p.Request)
 }
 
+func validateAPIRequestMoveRaw(raw json.RawMessage) string {
+	var p apiRequestMoveParams
+	if msg := decodeAPIParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateAPIHandle(p.Handle); msg != "" {
+		return msg
+	}
+	if msg := validateAPIRelPath(p.RelPath); msg != "" {
+		return msg
+	}
+	return validateAPIRelPath(p.ToRelPath)
+}
+
 // validateAPIRequestBody bounds every field of a request being written back.
 // Each one reaches something real: the URL is dialled on the next send, the
 // headers ride the request verbatim, the body is the payload.
@@ -2219,6 +2274,10 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
 		whenAvailable(regResponder(sub, "api.request.write", params(validateAPIRequestWriteRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.request.move", params(validateAPIRequestMoveRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),

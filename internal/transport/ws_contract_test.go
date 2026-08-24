@@ -6011,6 +6011,168 @@ func TestAPICollectionsCreateFolder_RefusesOverTheWire(t *testing.T) {
 	refused("a name that is already taken", map[string]any{"handle": made.Handle, "name": "users"})
 }
 
+// api.request.move answers ONE string: the request's new path. The DTO's
+// conformance is a single populated case — there is exactly one field, and
+// every interesting thing about it is "it is there and it is the path the
+// move landed at", which the shape itself says (apiMethodErrorCode owns the
+// refusal half).
+func TestAPIRequestMove_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.request.move.schema.json")
+
+	cases := map[string]apiRequestMoveResponse{
+		"into a folder":       {RelPath: "users/ping.json"},
+		"back to the root":    {RelPath: "ping.json"},
+		"a deeply nested one": {RelPath: "v1/users/admin/ping.json"},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.request.move DTO")
+		})
+	}
+}
+
+// The real method through the real socket, against a real folder: the file
+// is written, moved, and read back at the new path — the address the result
+// handed back is the address that WORKS, which is what "the result carries
+// the new relPath" has to mean. The bytes at the new path are the bytes at
+// the old, and the old path no longer answers.
+func TestAPIRequestMove_OverTheWireConformsToContract(t *testing.T) {
+	moveSchema := loadSchema(t, "api.request.move.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	// A folder to move into, made the way the product makes one.
+	folder := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": handle, "name": "users"}, 2)
+	if folder.Error != nil {
+		t.Fatalf("api.collections.createFolder: %+v", folder.Error)
+	}
+
+	moved := vaultCall(t, conn, "api.request.move",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "users/ping.json"}, 3)
+	if moved.Error != nil {
+		t.Fatalf("api.request.move: %+v", moved.Error)
+	}
+	validateJSON(t, moveSchema, moved.Result, "api.request.move result")
+	var got apiRequestMoveResponse
+	if err := json.Unmarshal(moved.Result, &got); err != nil {
+		t.Fatalf("unmarshal move result: %v", err)
+	}
+	if got.RelPath != "users/ping.json" {
+		t.Errorf("relPath = %q, want users/ping.json", got.RelPath)
+	}
+
+	// The path the result carried is a path that READS. The request that
+	// was at the root answers at the folder now, bytes and all.
+	read := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": handle, "relPath": "users/ping.json"}, 4)
+	if read.Error != nil {
+		t.Fatalf("api.request.read at the new path: %+v", read.Error)
+	}
+	var back apiRequestReadResponse
+	if err := json.Unmarshal(read.Result, &back); err != nil {
+		t.Fatalf("unmarshal read result: %v", err)
+	}
+	if back.Request.Name != "ping" || back.Request.URL != "https://example.test/ping" {
+		t.Errorf("read at the new path = %+v, want the request that was at the root", back.Request)
+	}
+
+	// And the old path no longer answers: a move leaves exactly one place
+	// the file is.
+	gone := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": handle, "relPath": "ping.json"}, 5)
+	if gone.Error == nil {
+		t.Fatal("api.request.read still answers at the OLD path after the move; the request is at both")
+	}
+
+	// And back to the root, which is the other direction a person moves.
+	backMove := vaultCall(t, conn, "api.request.move",
+		map[string]any{"handle": handle, "relPath": "users/ping.json", "toRelPath": "ping.json"}, 6)
+	if backMove.Error != nil {
+		t.Fatalf("api.request.move back to the root: %+v", backMove.Error)
+	}
+	validateJSON(t, moveSchema, backMove.Result, "api.request.move result (back to the root)")
+	var backGot apiRequestMoveResponse
+	if err := json.Unmarshal(backMove.Result, &backGot); err != nil {
+		t.Fatalf("unmarshal move result: %v", err)
+	}
+	if backGot.RelPath != "ping.json" {
+		t.Errorf("relPath = %q, want ping.json", backGot.RelPath)
+	}
+}
+
+// A move that CANNOT happen is refused over the wire, each by the sentence
+// a surface can show, and each paired with the success it belongs to in the
+// happy-path test above (AGENTS.md testing rule 3). A collision is the one
+// that matters most: the whole reason the move is a no-replace rename.
+func TestAPIRequestMove_RefusesOverTheWire(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	if fe := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": handle, "name": "users"}, 2); fe.Error != nil {
+		t.Fatalf("createFolder: %+v", fe.Error)
+	}
+	// A second file colliding with the move.
+	if we := vaultCall(t, conn, "api.request.write", map[string]any{
+		"handle": handle, "relPath": "users/ping.json",
+		"request": map[string]any{
+			"id": "r9", "name": "other", "method": "GET",
+			"url": "https://example.test/other", "body": map[string]any{"kind": "none"},
+			"auth": map[string]any{"kind": "none"},
+		},
+	}, 3); we.Error != nil {
+		t.Fatalf("write users/ping: %+v", we.Error)
+	}
+
+	id := 10
+	refused := func(what string, params map[string]any) {
+		t.Helper()
+		id++
+		resp := vaultCall(t, conn, "api.request.move", params, id)
+		if resp.Error == nil {
+			t.Errorf("%s was accepted, want a refusal", what)
+			return
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("%s answered %d, want -32602 — the caller's move is to name something else",
+				what, resp.Error.Code)
+		}
+		if resp.Error.Message == "" {
+			t.Errorf("%s answered no sentence; a surface has nothing to show", what)
+		}
+	}
+
+	refused("a destination that already holds a file",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "users/ping.json"})
+	refused("a destination folder that is not there",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "nope/ping.json"})
+	refused("a destination outside the collection",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "../ping.json"})
+	refused("a source that is not there",
+		map[string]any{"handle": handle, "relPath": "ghost.json", "toRelPath": "users/ghost.json"})
+	refused("a handle nobody minted",
+		map[string]any{
+			"handle":  "0123456789abcdef0123456789abcdef",
+			"relPath": "ping.json", "toRelPath": "users/ping.json",
+		})
+
+	// And on an ordinary machine the same move succeeds — the pair that
+	// proves the refusals are the method's and not this build's.
+	ok := vaultCall(t, conn, "api.request.move",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "users/other-ping.json"}, id+1)
+	if ok.Error != nil {
+		t.Fatalf("an ordinary move was refused: %+v", ok.Error)
+	}
+}
+
 func TestAPIRequestRead_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.request.read.schema.json")
 
@@ -6962,7 +7124,8 @@ func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
 
 	for _, method := range []string{
 		"api.collections.list", "api.collections.open", "api.collections.close",
-		"api.request.read", "api.request.write", "api.request.send", "api.import.postman",
+		"api.request.read", "api.request.write", "api.request.move",
+		"api.request.send", "api.import.postman",
 	} {
 		resp := vaultCall(t, conn, method, map[string]any{}, 1)
 		if resp.Error == nil {

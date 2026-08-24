@@ -27,6 +27,13 @@ export interface RequestCrumbsProps {
   collection: string
   /** The request in the form, or null when nothing is open. */
   name: string | null
+  /** The folder the open request lives in, INSIDE the collection — the
+   *  path segment between the collection and the name. Absent (undefined)
+   *  on a request at the collection's root, because there is nothing to
+   *  name then. It is what makes a move's outcome visible in the header:
+   *  after api.request.move re-points the form at the new path, this
+   *  segment changes to the new place (nocx-8aczn.2). */
+  folder?: string | null
   onRename: (name: string) => void
   /** True when the draft differs from its file, or has no file yet. */
   savable: boolean
@@ -104,6 +111,16 @@ export function RequestCrumbs(props: RequestCrumbsProps) {
       <Show when={props.collection !== ''}>
         <span class="api-crumbs__collection">{props.collection}</span>
         <Show when={props.name !== null}>
+          <span class="api-crumbs__sep" aria-hidden="true">
+            ›
+          </span>
+        </Show>
+        {/* The folder segment: only when there IS a folder. It sits between
+            the collection and the request the way the path does, and it is
+            what shows a move landed — the value changes with the file. It
+            is placement only: the same muted text the collection gets. */}
+        <Show when={props.name !== null && props.folder !== undefined && props.folder !== null}>
+          <span class="api-crumbs__folder">{props.folder}</span>
           <span class="api-crumbs__sep" aria-hidden="true">
             ›
           </span>

@@ -14,11 +14,11 @@ import (
 // path fails here, which is the whole point — the guard has to break when
 // somebody widens the surface, not when somebody misuses it.
 //
-// It has been raised twice, deliberately. DeleteRequest arrived when the panel
-// grew a way to remove a request (before it, a file made by mistake could
-// only be removed with a file manager). It takes the handle and a path
-// RELATIVE to it, like the two accessors beside it, so §13.1 holds — a caller
-// that cannot name a file still cannot delete one.
+// It has been raised, deliberately, four times. DeleteRequest arrived when
+// the panel grew a way to remove a request (before it, a file made by
+// mistake could only be removed with a file manager). It takes the handle
+// and a path RELATIVE to it, like the two accessors beside it, so §13.1
+// holds — a caller that cannot name a file still cannot delete one.
 //
 // CreateFolder arrived when a collection built inside nocx gained the
 // structure §6.2 always described and only the importer could write. Its
@@ -32,13 +32,19 @@ import (
 // END that, and the thing that mints identity is the thing that forgets it.
 // It takes the handle and nothing else, so it widens the surface by a method
 // that cannot name a location at all.
+//
+// MoveRequest arrived when a request gained a home inside the collection
+// other than the one it was created in. It takes the handle and TWO paths
+// relative to it — where the file is, and where it is going — and no caller
+// can name a location twice: both are inside the collection the handle
+// names, and the move is refused the moment either is not (§13.1).
 func TestService_OpenIsTheOnlyEntryPointThatTakesARoot(t *testing.T) {
 	svcType := reflect.TypeOf((*Service)(nil)).Elem()
 	handleType := reflect.TypeOf(HandleID(""))
 	stringType := reflect.TypeOf("")
 
-	if got := svcType.NumMethod(); got != 7 {
-		t.Fatalf("Service has %d methods, want 7 — a new method must be checked against §13.1 "+
+	if got := svcType.NumMethod(); got != 8 {
+		t.Fatalf("Service has %d methods, want 8 — a new method must be checked against §13.1 "+
 			"before this count is raised", got)
 	}
 

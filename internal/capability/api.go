@@ -273,6 +273,13 @@ type APICollectionService interface {
 	// that takes something away, and it takes away exactly one file: a
 	// collection is closed through Close and never emptied through this.
 	DeleteRequest(h apicoll.HandleID, relPath string) error
+	// MoveRequest moves one request file to another path inside the SAME
+	// collection, and answers the new relPath. It is addressed by the
+	// handle plus two paths relative to it, exactly like the accessors
+	// beside it, so §13.1 holds — and it is one operation on the backend:
+	// a no-replace rename, never a write-then-delete. The destination
+	// folder must already exist; CreateFolder makes it.
+	MoveRequest(h apicoll.HandleID, fromRelPath, toRelPath string) (string, error)
 	// CreateFolder makes ONE folder inside an open collection: a NAME, and
 	// the existing folder to put it in ("" is the collection root).
 	//
@@ -668,6 +675,21 @@ func (s *apiCollectionService) CreateFolder(h apicoll.HandleID, parentRelPath, n
 		return apicoll.FolderCreated{}, err
 	}
 	return s.svc.CreateFolder(h, parentRelPath, name)
+}
+
+// MoveRequest answers out of a folder the user still has open, and refuses
+// one they have closed — the rule every method beside it keeps, and it
+// binds here as on the write half: a move is the one act that changes
+// WHERE a file is, and doing it in a collection the user believes they
+// have shut would move a file in a folder they are not looking at.
+func (s *apiCollectionService) MoveRequest(h apicoll.HandleID, fromRelPath, toRelPath string) (string, error) {
+	if err := s.guard.check(); err != nil {
+		return "", err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return "", err
+	}
+	return s.svc.MoveRequest(h, fromRelPath, toRelPath)
 }
 
 func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {

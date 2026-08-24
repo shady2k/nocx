@@ -28,6 +28,7 @@ import type { ApiEnvironmentBindSecretResult } from '../generated/api.environmen
 import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
+import type { ApiRequestMoveResult } from '../generated/api.request.move'
 import type { ApiRequestSendResult } from '../generated/api.request.send'
 import type { ApiRequestCancelResult } from '../generated/api.request.cancel'
 import type { ApiImportPostmanResult } from '../generated/api.import.postman'
@@ -195,6 +196,19 @@ class ApiClient {
    *  this", and the two would agree until somebody renamed an environment
    *  without renaming its file. '' is no environment, which is the request
    *  as written on the direct route. */
+  /** Move one request file to another path INSIDE the same collection — a
+   *  rename on the backend, never a write-then-delete. The result carries
+   *  the NEW relPath, which is the address the caller must use afterwards:
+   *  a request open in the form has to be re-pointed at it, and deriving
+   *  the new path itself would be the second answer this surface refuses
+   *  to make. */
+  moveRequest(handle: string, relPath: string, toRelPath: string): Promise<ApiRequestMoveResult> {
+    return this.dispatcher.call<ApiRequestMoveResult>('api.request.move', {
+      handle,
+      relPath,
+      toRelPath,
+    })
+  }
   sendRequest(
     handle: string,
     relPath: string,
@@ -466,6 +480,7 @@ export interface ApiWorkbenchServices {
   ): Promise<ApiEnvironmentBindSecretResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
+  moveRequest(handle: string, relPath: string, toRelPath: string): Promise<ApiRequestMoveResult>
   deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult>
   sendRequest(
     handle: string,
@@ -580,9 +595,10 @@ export function createApiWorkbenchServices(
       client.writeEnvironment(handle, relPath, environment),
     bindSecret: (handle, relPath, variable, value) =>
       client.bindSecret(handle, relPath, variable, value),
-    deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),
+    deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
+    moveRequest: (handle, relPath, toRelPath) => client.moveRequest(handle, relPath, toRelPath),
     sendRequest: (handle, relPath, envRelPath, token) =>
       client.sendRequest(handle, relPath, envRelPath, token),
     cancelRequest: (token) => client.cancelRequest(token),

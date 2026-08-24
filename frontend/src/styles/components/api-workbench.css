@@ -71,6 +71,16 @@
   white-space: nowrap;
 }
 
+/* The folder segment in the same register the collection sits in: muted,
+   ellipsised, and not a control — the name beyond it is the thing a
+   person can rename. */
+.api-crumbs__folder {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
 .api-crumbs__sep {
   color: var(--color-text-dim);
 }
@@ -728,4 +738,21 @@
   gap: var(--space-2);
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* ── THE MOVE-TO-FOLDER CHOOSER ───────────────────────────────────────── */
+/* The folder list is a column of kit Radios; this owns the layout and the
+   role, nothing else — the rows paint themselves. */
+.api-move__folders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* The refusal, under the group when no field is holding the ask. It is the
+   backend's own sentence, placed here rather than composed. */
+.api-move__refused {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+  margin-top: var(--space-2);
 }

@@ -63,6 +63,7 @@ import {
 } from './api-paths'
 import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
+import { MoveToFolderDialog } from './move-dialog'
 import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
@@ -278,6 +279,16 @@ function sourcePath(held: HeldSource): string {
 /** The empty set a filtered tree is flattened against — one object rather
  *  than a new Set per read, because `rows()` runs on every keystroke. */
 const NOTHING_COLLAPSED: ReadonlySet<string> = new Set()
+
+/** The request a move is about: where it is, and what to say it by. It is
+ *  the same three facts the request menu's target holds, which is what the
+ *  menu door hands in — the chooser's one signal for "open, and about
+ *  THIS". */
+interface MoveTarget {
+  handle: string
+  relPath: string
+  name: string
+}
 
 export function ApiPane(props: ApiPaneProps) {
   // The store is constructed once by ApiContent and handed in; it is a
@@ -592,6 +603,101 @@ export function ApiPane(props: ApiPaneProps) {
     /** What to call that place in the ask, so the question names where. */
     label: string
   } | null>(null)
+
+  // ── The move-to-folder chooser (nocx-8aczn.2) ─────────────────────────
+  //
+  // ONE SIGNAL for open AND target, and that is structural, not tidy: the
+  // kit's Dialog renders its `open` prop through one expression and the
+  // chooser's rows through others, and Solid re-runs each expression only
+  // when THE SIGNAL IT READS changes. A plain target variable read by the
+  // row expressions made them evaluate ONCE — at first render, when the
+  // target was null — and keep that empty answer forever, so opening the
+  // chooser showed "Root of " and no folders. Everything the chooser shows
+  // reads this one signal, so every expression re-runs together and the
+  // open chooser is built from the target it opened with.
+  const [moveAsk, setMoveAsk] = createSignal<MoveTarget | null>(null)
+  const [moveBusy, setMoveBusy] = createSignal(false)
+  const [moveRefused, setMoveRefused] = createSignal('')
+
+  /** What the chooser's destination rows are: the folders of the collection
+   *  holding the target, exactly as the store's last listing has them. The
+   *  root is the chooser's own row, before them. */
+  const moveFolders = (): readonly string[] => {
+    const t = moveAsk()
+    if (t === null) return []
+    return store.collections().find((c) => c.handle === t.handle)?.collection.folders ?? []
+  }
+  const moveCollectionName = (): string => {
+    const t = moveAsk()
+    if (t === null) return ''
+    const open = store.collections().find((c) => c.handle === t.handle)
+    return open !== undefined && open.collection.name !== '' ? open.collection.name : ''
+  }
+
+  /** The folder the OPEN request lives in, for the crumb trail — the
+   *  directory half of `selected()`'s path, or null when nothing is open
+   *  or the request is at the collection's root. After a move it is the
+   *  new path, which is how the header names where the request went. */
+  const openFolderPath = (): string | null => {
+    const open = store.selected()
+    if (open === null) return null
+    const cut = open.relPath.lastIndexOf('/')
+    return cut === -1 ? null : open.relPath.slice(0, cut)
+  }
+
+  /** The request being moved, for the chooser's title — the SAME the menu
+   *  aimed at, read off the one signal that also says whether it is open,
+   *  so the title and the destination rows re-evaluate together. */
+  const moveRequestName = (): string => moveAsk()?.name ?? ''
+
+  /** Move into an existing folder: ONE store call, and the store says
+   *  whether it landed. The refusal stays in the chooser, like every ask on
+   *  this surface; the destination is the row the person picked. */
+  const moveTo = (folderRelPath: string): void => {
+    const t = moveAsk()
+    if (t === null) return
+    // The chooser offers FOLDERS; the wire takes two file paths, so the
+    // destination file is the folder joined to the request's own name.
+    // The RESULT is still the backend's word on where it landed — this
+    // join only names where it is going.
+    const base = t.relPath.slice(t.relPath.lastIndexOf('/') + 1)
+    const toRelPath = folderRelPath === '' ? base : `${folderRelPath}/${base}`
+    setMoveBusy(true)
+    void store
+      .moveRequest(t.handle, t.relPath, toRelPath)
+      .then(() => {
+        setMoveBusy(false)
+        setMoveRefused(store.error())
+        if (store.error() !== '') return
+        setMoveAsk(null)
+        revealFolder(t.handle, folderRelPath)
+      })
+      .catch(() => setMoveBusy(false))
+  }
+  /** Make a folder at the collection's root and move into it — the two
+   *  acts a young collection needs, as one gesture. The create's refusal
+   *  stays in the chooser; a create that landed is followed by the move,
+   *  whose refusal is the move's. */
+  const moveToNewFolder = (name: string): void => {
+    const t = moveAsk()
+    if (t === null) return
+    setMoveBusy(true)
+    void store.createFolder(t.handle, '', name).then(() => {
+      setMoveRefused(store.error())
+      if (store.error() !== '') {
+        setMoveBusy(false)
+        return
+      }
+      const base = t.relPath.slice(t.relPath.lastIndexOf('/') + 1)
+      void store.moveRequest(t.handle, t.relPath, `${name}/${base}`).then(() => {
+        setMoveBusy(false)
+        setMoveRefused(store.error())
+        if (store.error() !== '') return
+        setMoveAsk(null)
+        revealFolder(t.handle, name)
+      })
+    })
+  }
 
   /**
    * Whether the folder ask still offers Browse.
@@ -1554,13 +1660,26 @@ export function ApiPane(props: ApiPaneProps) {
       },
     },
     {
+      id: 'api-row-move',
+      label: 'Move to folder…',
+      icon: FolderOpenIcon,
+      onSelect: () => {
+        const target = requestMenuTarget
+        if (target === null) return
+        // Captured HERE, at the door, for the reason every other target on
+        // this surface is: the kit closes the menu before onSelect fires,
+        // and the chooser's handlers read this instead of re-deriving it.
+        setMoveRefused('')
+        setMoveAsk(target)
+      },
+    },
+    {
       id: 'api-row-delete',
       label: 'Delete request…',
       icon: TrashIcon,
       onSelect: () => {
         const target = requestMenuTarget
         if (target === null) return
-        // AND THEN IT ASKS — through the kit's own confirm, which is where
         // "are you sure" lives in this product. A delete removes a file from
         // a folder somebody shares through git, and the only undo is a
         // working tree they may not have committed. The question NAMES what
@@ -1818,6 +1937,17 @@ export function ApiPane(props: ApiPaneProps) {
           busy={folderCreating()}
           onCancel={() => setFoldering(false)}
           onSubmit={createFolder}
+        />
+        <MoveToFolderDialog
+          open={moveAsk() !== null}
+          requestName={moveRequestName()}
+          collectionName={moveCollectionName()}
+          folders={moveFolders()}
+          error={moveRefused()}
+          busy={moveBusy()}
+          onCancel={() => setMoveAsk(null)}
+          onMove={moveTo}
+          onNewFolderAndMove={moveToNewFolder}
         />
         <PostmanImportDialog
           open={importing()}
@@ -2295,6 +2425,7 @@ export function ApiPane(props: ApiPaneProps) {
           <RequestCrumbs
             collection={activeCollectionName()}
             name={store.draft()?.name ?? null}
+            folder={openFolderPath()}
             onRename={(name) => {
               const draft = store.draft()
               if (draft) store.editDraft({ ...draft, name })

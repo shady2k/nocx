@@ -51,7 +51,9 @@ import { TreeRow } from '../ui/tree-row'
 import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
 import { showToast } from '../ui/toast'
+import { createClipboardAccess } from '../clipboard'
 import { filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
+import { malformedReason } from './malformed-reason'
 import { CollectionDialog } from './collection-dialog'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
 import {
@@ -304,6 +306,11 @@ export function ApiPane(props: ApiPaneProps) {
   const filePicker = props.openFile
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const nativeDrop = props.nativeDrop
+  // The clipboard a copied path lands on (AD-8). The composition root
+  // injects one into the surfaces whose copy was designed with it; the
+  // workbench predates that seam, so it makes its own through the same
+  // factory the other surfaces fall back to.
+  const clipboard = createClipboardAccess()
   const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(new Set())
   // The Import section used to be a collapsible form here, and its
   // disclosure was written `open={false} onToggle={() => undefined}` — a
@@ -429,6 +436,20 @@ export function ApiPane(props: ApiPaneProps) {
    * signal.
    */
   let requestMenuTarget: { handle: string; relPath: string; name: string } | null = null
+  /** Where a malformed file's menu hangs — its own menu, because what a file
+   *  can do is not what a folder can do: Delete and Copy Absolute Path,
+   *  the two acts that need no decoded request (api.request.delete never
+   *  decodes; the path IS the file). It shares one discipline with the two
+   *  menus above: only one can be open, so one signal and one target. */
+  const [malformedMenu, setMalformedMenu] = createSignal<{ x: number; y: number } | null>(null)
+  /**
+   * WHICH malformed file the menu is about — the handle, the path within
+   * the collection and the name to say it by. A plain variable rather than
+   * a signal for the reason its two neighbours above are: the kit closes
+   * the menu BEFORE it calls `onSelect`, so a value read out of a signal
+   * at that moment is read out of a signal that close has already cleared.
+   */
+  let malformedMenuTarget: { handle: string; relPath: string; name: string } | null = null
 
   const [filter, setFilter] = createSignal('')
   const [menuOpen, setMenuOpen] = createSignal(false)
@@ -1696,6 +1717,72 @@ export function ApiPane(props: ApiPaneProps) {
     },
   ]
 
+  /** Point the malformed file's menu at one file. One door, the right button
+   *  on its row — the same plain-variable discipline as the two above. */
+  const aimMalformedMenu = (row: ApiTreeRow): void => {
+    malformedMenuTarget = { handle: row.handle, relPath: row.relPath, name: row.name }
+  }
+
+  /** The clipboard a copy lands on. The composition root injects one into
+   *  the surfaces whose copy was designed with it (Files, Settings); the
+   *  workbench predates that seam, so it makes its own through the same
+   *  factory the other surfaces fall back to. */
+  const copyMalformedPath = async (target: { handle: string; relPath: string }): Promise<void> => {
+    const collection = store.collections().find((c) => c.handle === target.handle)
+    const text = collection === undefined ? target.relPath : `${collection.path}/${target.relPath}`
+    try {
+      await clipboard.writeText(text)
+      showToast({ level: 'success', message: 'Copied absolute path' })
+    } catch (e) {
+      showToast({ level: 'danger', message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  /**
+   * WHAT A MALFORMED FILE CAN BE — one list, and it is the whole point of
+   * this row's menu: a file whose request will not decode is still a file,
+   * and the two acts that need no decoded request are both real. The old
+   * rule — "there is nothing to put in one of ours" — was written for a
+   * menu of REQUEST acts. Delete and Copy Absolute Path are FILE acts.
+   *
+   * Every item reads `malformedMenuTarget` when it FIRES, for the reason
+   * the request menu's items do: the kit closes the menu before it calls
+   * `onSelect`, so anything read from a signal at build time is read from
+   * a signal that close has already cleared.
+   */
+  const malformedMenuItems = (): ContextMenuItem[] => [
+    {
+      id: 'api-malformed-delete',
+      label: 'Delete…',
+      icon: TrashIcon,
+      onSelect: () => {
+        const target = malformedMenuTarget
+        if (target === null) return
+        // "are you sure" lives in this product, exactly as it does for a
+        // request: a delete removes a file from a folder somebody shares
+        // through git, and the only undo is a working tree they may not
+        // have committed. The question NAMES what goes, because "are you
+        // sure" is a question about nothing.
+        void showConfirm(
+          `Delete ${target.name}? The file is removed from the collection folder.`,
+          'Delete',
+        ).then((yes) => {
+          if (yes) void store.deleteRequest(target.handle, target.relPath)
+        })
+      },
+    },
+    {
+      id: 'api-malformed-copy-path',
+      label: 'Copy Absolute Path',
+      icon: CopyIcon,
+      onSelect: () => {
+        const target = malformedMenuTarget
+        if (target === null) return
+        void copyMalformedPath(target)
+      },
+    },
+  ]
+
   /**
    * WHAT A FOLDER CAN BE — one list, built once, reached by two doors: the ⋮
    * beside a collection's row and the right button on any folder row,
@@ -1866,6 +1953,22 @@ export function ApiPane(props: ApiPaneProps) {
           data-testid="api-folder-row-menu"
           onClose={() => setRowMenu(null)}
           items={rowMenuItems()}
+        />
+
+        {/* What a MALFORMED file can do — its own menu, for the same reason
+            the folder's is one list and not a second copy of the request's:
+            a file whose request will not decode is still a FILE, and the two
+            acts that need no decoded request — delete it, copy its path —
+            are real. The old rule ("there is nothing to put in one of
+            ours") was written for a menu of request acts; there was, it
+            turned out, a menu of file acts all along. */}
+        <ContextMenu
+          open={malformedMenu() !== null}
+          x={malformedMenu()?.x ?? 0}
+          y={malformedMenu()?.y ?? 0}
+          data-testid="api-malformed-row-menu"
+          onClose={() => setMalformedMenu(null)}
+          items={malformedMenuItems()}
         />
         {/* WHAT THIS VARIABLE IS, where it was clicked. A menu rather than a
             panel of its own: the kit already owns "a small thing anchored at
@@ -2118,19 +2221,25 @@ export function ApiPane(props: ApiPaneProps) {
                           setRequestMenu({ x: e.clientX, y: e.clientY })
                           return
                         }
+                        if (row.kind === 'malformed') {
+                          e.preventDefault()
+                          aimMalformedMenu(row)
+                          setMalformedMenu({ x: e.clientX, y: e.clientY })
+                          return
+                        }
                         if (row.kind === 'collection' || row.kind === 'dir') {
                           e.preventDefault()
                           aimRowMenu(row)
                           setRowMenu({ x: e.clientX, y: e.clientY })
                         }
-                        /* An unreadable file is left with the platform's menu,
-                         because there is nothing to put in one of ours: a
-                         malformed row's whole answer is the reason printed
-                         under it, and an empty menu is worse than no menu. A
-                         DIRECTORY used to be in that sentence and is not any
-                         more — it has acts now (nocx-8v1fu), and they are the
-                         collection row's own, because a collection is a
-                         folder. */
+                        /* AN UNREADABLE FILE WAS ONCE LEFT WITH THE PLATFORM'S
+                         menu, on the reasoning that there is nothing to put
+                         in one of ours. That was written for a menu of
+                         REQUEST acts — Duplicate, Rename, Send — all of
+                         which need a decoded request. It is false for acts
+                         on a FILE: delete and copy-path need no decode, so
+                         a malformed row is right-clickable like every other
+                         row, and the row above it now carries a menu. */
                       }}
                     >
                       <TreeRow
@@ -2156,7 +2265,23 @@ export function ApiPane(props: ApiPaneProps) {
                               store.selected()?.handle === row.handle &&
                               store.selected()?.relPath === row.relPath
                         }
-                        disabled={row.kind === 'malformed'}
+                        /* THE REASON A ROW IS WHAT IT IS, on hover. A
+                         malformed file's own words are the decoder's, not a
+                         person's — `malformedReason` rewrites them — and a
+                         collection whose listing failed says why in the
+                         listing's own words (already written for a person,
+                         api.collections.list's `error`). Both used to be
+                         red paragraphs in the document flow, which the kit
+                         forbids: a message about an action does not live in
+                         the document flow. The row's `title` is the seam
+                         the kit provides. */
+                        hint={
+                          row.reason !== ''
+                            ? malformedReason(row.reason)
+                            : row.kind === 'collection' && errorOf(row.handle) !== ''
+                              ? errorOf(row.handle)
+                              : undefined
+                        }
                         expanded={row.expanded}
                         onToggle={() => toggle(row.key)}
                         badge={
@@ -2210,15 +2335,6 @@ export function ApiPane(props: ApiPaneProps) {
                           </>
                         }
                       />
-                      <Show when={row.reason !== ''}>
-                        <p class="api-tree__reason">{row.reason}</p>
-                      </Show>
-                      {/* Why a folder that IS open has nothing under it — the
-                      listing failed, and the row is where the reason belongs
-                      now that the second list is gone. */}
-                      <Show when={row.kind === 'collection' && errorOf(row.handle) !== ''}>
-                        <p class="api-tree__reason">{errorOf(row.handle)}</p>
-                      </Show>
                     </div>
                   </Show>
                 )}

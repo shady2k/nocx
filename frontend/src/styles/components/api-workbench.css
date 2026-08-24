@@ -272,16 +272,6 @@
   cursor: default;
 }
 
-/* A file the format did not recognise, and why. It sits under its row rather
-   than in a tooltip: design §6.2 puts malformed files ON the collection so
-   one bad file cannot hide every good one, and that is only true if the
-   reason is readable without hovering. */
-.api-tree__reason {
-  margin: 0 0 0 var(--space-6);
-  color: var(--color-danger);
-  font-size: var(--font-size-sm);
-}
-
 /* ── The request ───────────────────────────────────────────────────────── */
 
 /* The line's controls carry no visible labels — the verb, the address and

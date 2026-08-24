@@ -34,6 +34,21 @@ describe('TreeRow', () => {
     expect(row?.textContent).toContain('src')
   })
 
+  it('defaults the row title to the name when no hint is given', () => {
+    render(() => <TreeRow name="src" depth={0} kind="dir" />)
+    const title = screen.getByRole('treeitem', { name: 'src' })
+    const nameSpan = title.querySelector('.ui-tree-row__name') as HTMLElement
+    expect(nameSpan.getAttribute('title')).toBe('src')
+  })
+
+  it('a hint becomes the hover title while the name stays the text and accessible name', () => {
+    render(() => <TreeRow name="secret.key" depth={0} kind="regular" hint="permission denied" />)
+    const row = screen.getByRole('treeitem', { name: 'secret.key' })
+    const nameSpan = row.querySelector('.ui-tree-row__name') as HTMLElement
+    expect(nameSpan.getAttribute('title')).toBe('permission denied')
+    expect(nameSpan.textContent).toBe('secret.key')
+  })
+
   it('offers a keyboard-operable disclosure for a directory and announces its expanded state', () => {
     const onToggle = vi.fn()
     const { container } = render(() => (

@@ -58,9 +58,37 @@ import {
 import { createSecretChip } from '../ui/secret-chip'
 import { clearToasts, toasts } from '../ui/toast'
 import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
+import { malformedReason } from './malformed-reason'
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
+}))
+
+// The pane makes its own clipboard through `createClipboardAccess` (no
+// composition-root seam exists for the workbench yet), so the Copy Path
+// tests replace the module seam with a recorder — the same controlled
+// instrument the Files panel gets by injection.
+const clipboardMock = vi.hoisted(() => {
+  const writes: string[] = []
+  return {
+    writes,
+    access: {
+      writeText: (text: string): Promise<void> => {
+        writes.push(text)
+        return Promise.resolve()
+      },
+      readText: (): Promise<string> => Promise.resolve(''),
+    },
+  }
+})
+
+// PARTIAL, and it has to be. `panes-fixtures.ts` constructs a real
+// `ClipboardGate` out of this same module for every mount in this file, so a
+// whole-module replacement takes the gate away with the factory and every
+// test that mounts the app dies before it reaches its own subject.
+vi.mock('../clipboard', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../clipboard')>()),
+  createClipboardAccess: () => clipboardMock.access,
 }))
 
 const liveHandles: SidebarHandle[] = []
@@ -505,7 +533,22 @@ describe('a request goes out from the workbench', () => {
       }),
     })
     await openWorkbench(bar)
-    await vi.waitFor(() => expect(workbench().textContent).toContain('the folder was replaced'))
+    const collection = await vi.waitFor(() =>
+      workbench().querySelector<HTMLElement>(`[data-row-key="${HANDLE}:"]`),
+    )
+    if (!collection) throw new Error('no collection row on screen')
+    // A DEAD FOLDER IS STILL VISIBLE — the claim this test guards is that a
+    // collection whose listing was replaced was not silently dropped, and
+    // that is still true: the row is in the tree. What changed is WHERE the
+    // reason lives — on the row's `title` (a title is an attribute, not text
+    // content), so the old assertion against the tree's text is asserted on
+    // the hover instead.
+    expect(collection.querySelector('.ui-tree-row__name')?.getAttribute('title')).toBe(
+      'the folder was replaced',
+    )
+    const tree = workbench().querySelector('.api-tree')
+    if (!tree) throw new Error('no tree on screen')
+    expect(tree.textContent).not.toContain('the folder was replaced')
   })
 
   it('a file the format does not recognise is visible, with what was wrong', async () => {
@@ -525,8 +568,23 @@ describe('a request goes out from the workbench', () => {
       }),
     })
     await openWorkbench(bar)
-    await vi.waitFor(() => expect(workbench().textContent).toContain('oops.json'))
-    expect(workbench().textContent).toContain('unexpected end of JSON input')
+    const rowEl = await vi.waitFor(() =>
+      workbench().querySelector<HTMLElement>(`[data-row-key="${HANDLE}:!users/oops.json"]`),
+    )
+    if (!rowEl) throw new Error('no malformed row on screen')
+    // ONE BAD FILE DOES NOT HIDE THE GOOD ONES — the claim this test guards:
+    // a file the parser cannot read is a ROW rather than a silently dropped
+    // entry, so it stays findable. What changed is WHERE what-was-wrong
+    // lives: on the row's `title`, in the person-facing words, and the raw
+    // decoder sentence appears nowhere in the tree's text (a title is an
+    // attribute, not content).
+    expect(rowEl.querySelector('.ui-tree-row__name')?.textContent).toContain('oops.json')
+    expect(rowEl.querySelector('.ui-tree-row__name')?.getAttribute('title')).toBe(
+      malformedReason('unexpected end of JSON input'),
+    )
+    const tree = workbench().querySelector('.api-tree')
+    if (!tree) throw new Error('no tree on screen')
+    expect(tree.textContent).not.toContain('unexpected end of JSON input')
   })
 
   it('pressing Send reaches the client method and the run appears afterwards', async () => {
@@ -4280,10 +4338,71 @@ describe('a collection can be given a folder', () => {
     await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
   })
 
-  it('a file that will not read is left with the platform menu — an empty one of ours is worse', async () => {
-    // ABSENCE IS THE CAPABILITY. A malformed row's whole answer is the reason
-    // printed under it; there is nothing to put in a menu, so the right
-    // button is not taken over and the event is not cancelled.
+  it('a file that will not read is still a file: its row carries the reason on hover and two acts', async () => {
+    // THE OLD RULE WAS ABSENCE. A malformed row's whole answer was the
+    // reason printed under it, so the right button was left to the platform
+    // and the row's reason sat in the document flow as a red paragraph. The
+    // rule was written for a menu of REQUEST acts — Duplicate, Rename, Send
+    // — all of which need a decoded request; it is false for acts on a
+    // FILE, and a reason the kit forbids in the document flow (a message
+    // about an action does not live there) has a home the kit provides: the
+    // row's own hover.
+    const remove = vi.fn().mockResolvedValue({})
+    const { bar } = await mountApp({
+      deleteRequest: remove,
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({
+            collection: collectionFixture({
+              requests: [],
+              folders: [],
+              malformed: [{ relPath: 'users/oops.json', reason: 'unexpected end of JSON input' }],
+            }),
+          }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+    })
+    await openWorkbench(bar)
+    const rowEl = await vi.waitFor(() => treeRow('!users/oops.json'))
+
+    // The reason is the row's hover — whatever the person-facing sentence
+    // is, the row's title IS that function's answer (the sentences are the
+    // other module's tests) — and it lives nowhere else.
+    expect(rowEl.querySelector('.ui-tree-row__name')?.getAttribute('title')).toBe(
+      malformedReason('unexpected end of JSON input'),
+    )
+    // THE DECODER'S OWN WORDS ARE NOWHERE IN THE TREE. The class check this
+    // replaced was vacuous — the stylesheet rule for `.api-tree__reason`
+    // left with the paragraphs, so nothing could wear the class even if the
+    // raw reason were still printed. What matters is the TEXT: the reason
+    // lives on the hover and only on the hover, so the raw sentence appears
+    // in no descendant's content (a `title` is an attribute, not content).
+    const tree = workbench().querySelector('.api-tree')
+    if (!tree) throw new Error('no tree on screen')
+    expect(tree.textContent).not.toContain('unexpected end of JSON input')
+
+    // Right-clicking opens ONE of ours, with the two acts that need no
+    // decoded request.
+    const e = rightClick(rowEl)
+    expect(e.defaultPrevented).toBe(true)
+    await vi.waitFor(() => menuItem('Delete…'))
+    expect(menuItem('Copy Absolute Path')).toBeTruthy()
+    expect(document.querySelectorAll('.ui-context-menu__item')).toHaveLength(2)
+
+    // Delete names the file that goes, and only a confirmation reaches the
+    // backend with this row's handle and path.
+    fireEvent.click(menuItem('Delete…'))
+    await vi.waitFor(() => expect(confirmText()).toContain('oops.json'))
+    fireEvent.click(
+      [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
+        (b) => (b.textContent ?? '').trim() === 'Delete',
+      ) as HTMLButtonElement,
+    )
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(HANDLE, 'users/oops.json'))
+  })
+
+  it('Copy Path on a malformed file puts the collection path and relPath on the clipboard', async () => {
     const { bar } = await mountApp({
       listCollections: vi.fn().mockResolvedValue({
         collections: [
@@ -4299,15 +4418,44 @@ describe('a collection can be given a folder', () => {
       }),
     })
     await openWorkbench(bar)
-    await vi.waitFor(() => treeRow('!users/oops.json'))
+    const rowEl = await vi.waitFor(() => treeRow('!users/oops.json'))
 
-    rightClick(treeRow('!users/oops.json'))
-    // Nothing of ours opens. The assertion is what a person SEES rather than
-    // `defaultPrevented`: this pane's element is reused by the terminal
-    // content in these tests, and that surface cancels contextmenu for its
-    // own paste — so the flag answers about a neighbour and the menu answers
-    // about this row.
-    expect(document.querySelector('.ui-context-menu__item')).toBeNull()
+    rightClick(rowEl)
+    await vi.waitFor(() => menuItem('Copy Absolute Path'))
+    fireEvent.click(menuItem('Copy Absolute Path'))
+
+    // The same seam Files uses for the same wording: the collection's own
+    // path joined to the row's relPath, written through the clipboard seam.
+    await vi.waitFor(() =>
+      expect(clipboardMock.writes).toContain(`${COLLECTION_PATH}/users/oops.json`),
+    )
+  })
+
+  it('a collection whose listing failed carries the error on hover, not as a paragraph', async () => {
+    const { bar } = await mountApp({
+      listCollections: vi.fn().mockResolvedValue({
+        collections: [
+          collectionsFixture({
+            error: 'no such folder',
+            collection: collectionFixture({ requests: [], folders: [], malformed: [] }),
+          }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+    })
+    await openWorkbench(bar)
+    const collection = await vi.waitFor(() => treeRow(''))
+    const tree = workbench().querySelector('.api-tree')
+    if (!tree) throw new Error('no tree on screen')
+    // The listing's own words (written for a person) are the row's hover —
+    // they do NOT go through malformedReason — and live nowhere else. The
+    // same pair as a malformed row's: the error is a `title`, and the
+    // listing's own words appear in no descendant's content (the class
+    // check this replaced was vacuous once the stylesheet rule left).
+    expect(collection.querySelector('.ui-tree-row__name')?.getAttribute('title')).toBe(
+      'no such folder',
+    )
+    expect(tree.textContent).not.toContain('no such folder')
   })
 
   it('with no collection open there is no folder door at all', async () => {

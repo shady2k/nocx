@@ -37,6 +37,8 @@
  * - `data-disabled="true"` — unreadable (permission denied is a real state
  *   that renders, never a silently empty row). Disables the disclosure too.
  * - `data-busy="true"` — a directory is loading; its disclosure is disabled.
+ * - `hint` — the row's hover text, what the name span says in its `title`.
+ *   Defaults to the name.
  *
  * Accessibility: the row is a `treeitem` with `aria-level` (1-based), the
  * expanded state is announced on the row, and the disclosure is a native
@@ -82,6 +84,8 @@ export interface TreeRowProps {
   expanded?: boolean
   /** Called when the disclosure is activated (click, Enter, Space). */
   onToggle?: (e: MouseEvent) => void
+  /** What the row says on hover. Defaults to the name. */
+  hint?: string
   /** Optional trailing slot, e.g. a kit Badge. */
   badge?: JSX.Element
 }
@@ -166,7 +170,7 @@ export function TreeRow(props: TreeRowProps) {
       <span class="ui-tree-row__type-icon">
         <Dynamic component={glyph()} />
       </span>
-      <span class="ui-tree-row__name" title={props.name}>
+      <span class="ui-tree-row__name" title={props.hint ?? props.name}>
         {props.name}
       </span>
       <Show when={props.badge}>

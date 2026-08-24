@@ -68,11 +68,11 @@
  * two, agreeing until the day one of them learnt about a new ancestor.
  */
 import { test as base, expect, type Locator, type Page } from '@playwright/test'
-import { mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
+import { bindEndpoint, collectionsDir, VaultBackend, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 const test = base
@@ -108,13 +108,28 @@ const INNER_FOLDER = 'weekly'
 const SAVED_NAME = 'Weekly summary'
 const SAVED_URL = 'https://example.invalid/weekly'
 
+/** The malformed request file the fourth test seeds, and the decoder's own
+ *  words for it. The owner's real file used `var` where the format wants
+ *  `variables`, and this is that case: a file the decoder reads as `json:
+ *  unknown field "var"`, which the tree must show a person rather than the
+ *  machine. Seeded into Playground's root so it lists beside Zen and Rate
+ *  limit, and deleted at the end of the walk so the tree and the disk agree
+ *  again. */
+const MALFORMED_NAME = 'post-broker-access.json'
+const MALFORMED_REASON = 'json: unknown field "var"'
+
 /**
  * A row in the tree, by the name it shows.
  *
- * By the name span's `title`, which the kit sets to the row's name and to
- * nothing else (ui/tree-row.tsx), so this matches EXACTLY. A text filter
- * would not: `Zen` is a prefix of `Zen copy`, and the whole subject of the
- * second test is that both are on screen at once.
+ * By the name span's `title`, which the kit sets to the row's name — or,
+ * on a malformed row, to the reason it could not be read (ui/tree-row.tsx
+ * takes a `hint`, and api-pane.tsx passes the malformed file's reason;
+ * the title is the exception to the "name and nothing else" rule). So
+ * this matches a request or folder row EXACTLY, and a malformed row is
+ * found by its `data-row-key` (`${handle}:!${relPath}`) instead — which
+ * is how the fourth test locates one. A text filter would not: `Zen` is
+ * a prefix of `Zen copy`, and the whole subject of the second test is
+ * that both are on screen at once.
  */
 function treeRow(page: Page, workbench: Locator, name: string): Locator {
   return workbench
@@ -420,5 +435,87 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     )
     await expect(marked).toHaveCount(1)
     await expect(page.locator('.api-crumbs__name')).toHaveText(RATE_LIMIT)
+  })
+
+  test('a file the format does not recognise is a row that says why, and can be deleted', async ({
+    page,
+  }) => {
+    const workbench = await openWorkbench(page)
+
+    // ── The file, seeded on disk AFTER the first listing ──────────────────
+    //
+    // The malformed row is the product answering a listing that already
+    // happened, exactly as a colleague's git pull lands one: drop the bad
+    // file on disk, then re-read the open folders the way a person asks the
+    // tree to look again (the same door the first test's save uses). The
+    // seed is the owner's case — a request with `var` where the format wants
+    // `variables` — so the decoder's reason is `json: unknown field "var"`.
+    writeFileSync(
+      join(collectionsDir(backend.isolatedHome, PLAYGROUND), MALFORMED_NAME),
+      '{"var": true}',
+    )
+    await workbench.locator('#api-collections-menu').click()
+    await page
+      .getByTestId('api-collections-menu-popover')
+      .getByRole('menuitem', { name: 'Re-read the open folders' })
+      .click()
+
+    // ── THE ROW IS THERE (not hidden), by its file name ───────────────────
+    //
+    // Not found by `treeRow`: a malformed row's title is its reason, not its
+    // name (the corrected contract on `treeRow`), so this locates the row by
+    // its `data-row-key` — `api-tree.ts` builds one for a malformed file as
+    // `${handle}:!${relPath}`, and the '!' prefix means it cannot collide
+    // with the request or folder key of the same path.
+    const malformedKey = workbench.locator(`.api-tree__row[data-row-key$=":!${MALFORMED_NAME}"]`)
+    await expect(malformedKey).toHaveCount(1)
+    await expect(malformedKey).toBeVisible({ timeout: 10_000 })
+
+    // ── WHAT HOVERING IT SAYS — a person's sentence, not the decoder's ────
+    //
+    // The name span's `title` carries the row's `hint` (ui/tree-row.tsx),
+    // which api-pane.tsx fills with `malformedReason(row.reason)`. Only the
+    // CONTAINS is asserted — `var` named, `variables` suggested — so a
+    // rewording in malformed-reason.ts is not a red e2e run.
+    const hint = await malformedKey.locator('.ui-tree-row__name').getAttribute('title')
+    expect(hint).toContain('"var"')
+    expect(hint).toContain('"variables"')
+    await expect(workbench).not.toContainText(MALFORMED_REASON)
+
+    // ── THE RIGHT BUTTON OFFERS EXACTLY THE TWO FILE ACTS ─────────────────
+    const malformedMenu = page.getByTestId('api-malformed-row-menu')
+    // The row's own text is STILL the file's name — a row whose visible text
+    // were the reason would be a tree that lost the name it lists by.
+    await expect(malformedKey.locator('.ui-tree-row__name')).toHaveText(MALFORMED_NAME)
+    await malformedKey.click({ button: 'right' })
+    expect(await menuLabels(malformedMenu)).toEqual(['Delete…', 'Copy Absolute Path'])
+
+    // ── DELETE: the confirm is asked and answered, and BOTH sides go ──────
+    await malformedMenu.getByRole('menuitem', { name: 'Delete…' }).click()
+    await expect(page.locator('.nocx-dialog__message')).toHaveText(
+      `Delete ${MALFORMED_NAME}? The file is removed from the collection folder.`,
+    )
+    // The only undo is a working tree somebody may not have committed, so
+    // the question is asked before the act — and answered here.
+    await page.getByRole('button', { name: 'Delete', exact: true }).click()
+
+    // Both, and each is its own assertion: the row could vanish because the
+    // listing broke, and the file could vanish while the row lingered. The
+    // row read is on an observable state, the file read on the disk — delete
+    // re-lists (api-store.ts's `deleteRequest` refreshes), so the row going
+    // from the tree and the file going from the folder are one act's two
+    // witnesses.
+    await expect(malformedKey).toHaveCount(0)
+    await expect
+      .poll(() =>
+        existsSync(join(collectionsDir(backend.isolatedHome, PLAYGROUND), MALFORMED_NAME)),
+      )
+      .toBe(false)
+    // The seed's good neighbours came back from the same re-listing, which
+    // is the other half of "the row vanished because it was deleted": a
+    // listing that stopped seeing everything would satisfy the two asserts
+    // above.
+    await expect(treeRow(page, workbench, ZEN)).toHaveCount(1)
+    await expect(treeRow(page, workbench, RATE_LIMIT)).toHaveCount(1)
   })
 })

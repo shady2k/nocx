@@ -39,11 +39,11 @@
  * machine to pass is broken on a fast one too.
  */
 import { test as base, expect, type Locator, type Page } from '@playwright/test'
-import { existsSync, mkdtempSync, realpathSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
+import { bindEndpoint, collectionsDir, VaultBackend, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 const test = base
@@ -65,32 +65,12 @@ const ZEN = 'Zen'
 const FOLDER = 'reports'
 
 /**
- * The collection's folder on disk, resolved the way internal/storage does:
- * collections live under the app data dir (`<home>/.local/share/nocx-dev` on
- * linux, `~/Library/Application Support/nocx-dev` on darwin — paths.go
- * sends darwin's CONFIG and DATA to the same Application Support directory).
- * The home boundary strips XDG_DATA_HOME, so on linux the data dir is
- * `~/.local/share/<app>`.
- *
- * Resolved from the disposable home through createHomeIsolation's own layout
- * (`<root>/home`) rather than re-deriving it, so this and the backend agree
- * on what the isolation is. realpathSync matches the canonical home the
- * backend recv passed in.
- */
-function collectionRoot(disposableRoot: string): string {
-  const home = realpathSync(join(disposableRoot, 'home'))
-  const dataDir =
-    process.platform === 'darwin'
-      ? join(home, 'Library', 'Application Support', 'nocx-dev')
-      : join(home, '.local', 'share', 'nocx-dev')
-  return join(dataDir, 'collections', PLAYGROUND)
-}
-
-/**
  * A row in the tree, by the name it shows — the same exact-name contract
- * api-tree.spec.ts uses (the kit sets the name span's title to the row name
- * and nothing else, so a text filter would not distinguish `Zen` from a
- * `Zen copy`).
+ * api-tree.spec.ts uses (the kit sets the name span's title to the row
+ * name — or, on a malformed row, to the reason it could not be read, since
+ * ui/tree-row.tsx takes a `hint` that api-pane.tsx fills with a malformed
+ * file's reason; find one by its `data-row-key` `${handle}:!${relPath}`
+ * instead of by title).
  */
 function treeRow(page: Page, workbench: Locator, name: string): Locator {
   return workbench
@@ -139,7 +119,7 @@ test.describe('a request can be moved into a folder, and stays open', () => {
     await expect(page.locator('.api-crumbs__name')).toHaveText(ZEN)
     await expect(workbench.locator('#api-url')).toHaveValue('{{baseUrl}}/zen')
 
-    const root = collectionRoot(disposable.root)
+    const root = collectionsDir(backend.isolatedHome, PLAYGROUND)
     const oldFile = join(root, 'zen.json')
     const movedFile = join(root, FOLDER, 'zen.json')
     // The bytes the request held before anything moves — asserted as the

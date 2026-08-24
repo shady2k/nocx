@@ -454,6 +454,37 @@ export function documentDir(isolatedHome: string): string {
 }
 
 /**
+ * Where an API collection's folder lives under a given isolated home.
+ *
+ * Two functions rather than one, because two directories: documentDir above
+ * resolves the CONFIG dir and a collection lives under the DATA dir. They
+ * coincide on darwin only — internal/storage/paths.go sends both to
+ * `~/Library/Application Support/<app>` there, while everything else splits
+ * os.UserConfigDir() (`~/.config/<app>`) from resolveDataDir, which reads
+ * XDG_DATA_HOME or falls back to `~/.local/share/<app>`. The home boundary
+ * strips XDG_DATA_HOME, so the fallback is the one that runs here.
+ *
+ * It takes the isolated home rather than a DisposableRoot for the same reason
+ * documentDir does, and because there is already an owner of "what is the
+ * home inside this root": home-isolation.ts, which canonicalises it (a tmpdir
+ * path is an alias on macOS) and which VaultBackend hands back as
+ * `backend.isolatedHome`. A caller re-deriving `<root>/home` here would be
+ * the third derivation of that, and this file's own documentDir comment
+ * records what the second one cost.
+ *
+ * api-tree.spec.ts and api-move.spec.ts both seed and assert files inside a
+ * collection, and each had written this out for itself.
+ */
+export function collectionsDir(isolatedHome: string, name: string): string {
+  const app = 'nocx-dev'
+  const dataDir =
+    process.platform === 'darwin'
+      ? join(isolatedHome, 'Library', 'Application Support', app)
+      : join(isolatedHome, '.local', 'share', app)
+  return join(dataDir, 'collections', name)
+}
+
+/**
  * Point the page at a backend THIS SPEC started, by supplying the two wails
  * bindings the frontend reads at startup.
  *

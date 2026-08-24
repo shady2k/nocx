@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@solidjs/testing-library'
 import { KeyMaterialInput, publicKeyMistake } from './key-material-input'
+import { toasts, clearToasts } from './ui/toast'
 import type { InventoryEntry } from './vault-client'
 
 // Uploading `id_ed25519.pub` instead of `id_ed25519` is the mistake this
@@ -47,12 +48,13 @@ describe('publicKeyMistake', () => {
     ).toBeUndefined()
   })
 })
-
 // One message about the material, not a stack of them. Choosing a .pub used to
 // render "That is a public key…" and "not a valid private key: ssh: no key
 // found" one above the other, plus a toast — the same news three times, and
 // the two the eye lands on first were the least useful.
 describe('KeyMaterialInput error reporting', () => {
+  beforeEach(() => clearToasts())
+
   function renderWith(error: string | undefined) {
     return render(() => (
       <KeyMaterialInput
@@ -71,9 +73,10 @@ describe('KeyMaterialInput error reporting', () => {
   it('shows the parent verdict when nothing local was found', async () => {
     const { container } = renderWith('not a valid private key: ssh: no key found')
     await Promise.resolve()
-    const shown = container.querySelectorAll('.cm-key-file-error')
+    const shown = Array.from(container.querySelectorAll('.ui-field-error')).filter((e) =>
+      e.textContent?.includes('ssh: no key found'),
+    )
     expect(shown.length).toBe(1)
-    expect(shown[0].textContent).toContain('ssh: no key found')
   })
 
   it('shows exactly one message, never two', async () => {
@@ -84,11 +87,36 @@ describe('KeyMaterialInput error reporting', () => {
     fireEvent.change(native)
 
     await vi.waitFor(() => {
-      const shown = container.querySelectorAll('.cm-key-file-error')
+      const shown = Array.from(container.querySelectorAll('.ui-field-error')).filter((e) =>
+        e.textContent?.includes('.pub'),
+      )
       expect(shown.length).toBe(1)
       // And it is the local one, which names the file the user wants.
       expect(shown[0].textContent).toContain('.pub')
     })
+  })
+
+  it('raises a toast, not a field paragraph, when the chosen file cannot be read', async () => {
+    const { container } = renderWith(undefined)
+    const native = container.querySelector('.ui-file-input__native') as HTMLInputElement
+    const unreadable = {
+      name: 'broken.key',
+      text: () => Promise.reject(new Error('read failure')),
+    }
+    Object.defineProperty(native, 'files', { value: [unreadable], configurable: true })
+    fireEvent.change(native)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some((t) => t.level === 'danger' && t.message.includes('Could not read')),
+      ).toBe(true)
+    })
+    // A read failure is the outcome of the read, not a verdict on the field.
+    expect(
+      Array.from(container.querySelectorAll('.ui-field-error')).some((e) =>
+        e.textContent?.includes('Could not read'),
+      ),
+    ).toBe(false)
   })
 })
 

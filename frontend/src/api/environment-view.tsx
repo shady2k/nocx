@@ -22,7 +22,8 @@
 // `secretVars`, the value field goes away with the value, and the row says
 // where the value has to come from instead of pretending it can be typed.
 
-import { For, Show } from 'solid-js'
+import { For, Show, createEffect } from 'solid-js'
+import { showToast } from '../ui/toast'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { Caption } from '../ui/caption'
@@ -148,6 +149,23 @@ export interface EnvironmentViewProps {
 
 export function EnvironmentView(props: EnvironmentViewProps) {
   const refusal = (): string | undefined => (props.error !== '' ? props.error : undefined)
+  // The outcome of a Save, in a toast. The path field carries the refusal
+  // while one is being made (it is the control to fix); an edit of an
+  // existing environment has no field the refusal belongs to, so it is said
+  // where the kit says outcomes are said. Edge-triggered on the refusal
+  // itself, so a re-render cannot stack a second sticky toast for the same
+  // error.
+  let lastRefused = ''
+  createEffect(() => {
+    const err = props.error
+    if (err === '' || props.creating) {
+      lastRefused = ''
+      return
+    }
+    if (err === lastRefused) return
+    lastRefused = err
+    showToast({ level: 'danger', message: err })
+  })
   const editingSomething = () => props.creating || props.editing !== ''
   const path = () =>
     props.relPath.trim() !== '' ? props.relPath.trim() : environmentPath(props.name)
@@ -406,9 +424,6 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                 <Button onClick={props.onReset}>Reset</Button>
               </Show>
             </div>
-            <Show when={!props.creating && refusal() !== undefined}>
-              <p class="api-environments__refusal">{props.error}</p>
-            </Show>
           </Show>
         </div>
       </div>

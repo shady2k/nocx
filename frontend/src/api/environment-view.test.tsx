@@ -9,19 +9,22 @@
 // is the write. What every test below is really asking is where the value
 // ends up: on the wire once, and in no signal, no row and no field
 // afterwards.
-import { describe, expect, it, afterEach, vi } from 'vitest'
+import { describe, expect, it, afterEach, beforeEach, vi } from 'vitest'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
+import { clearToasts, toasts } from '../ui/toast'
 import { EnvironmentView, type ValueRow } from './environment-view'
 import type { ApiRoute } from './api-model'
 
+beforeEach(() => clearToasts())
+
 afterEach(() => cleanup())
 
-const VALUE = 'sk-live-9f2c4e7a11b3d8'
-
 const DIRECT: ApiRoute = { kind: 'direct', profileId: '', insecureTls: false }
-
+const VALUE = 'sk-live-9f2c4e7a11b3d8'
 function mount(over: {
   rows?: ValueRow[]
+  creating?: boolean
+  error?: string
   onBindSecret?: (n: string, v: string) => Promise<void>
 }) {
   return render(() => (
@@ -29,13 +32,13 @@ function mount(over: {
       environments={[{ relPath: 'environments/dev.json', name: 'dev' }]}
       editing="environments/dev.json"
       active="environments/dev.json"
-      creating={false}
+      creating={over.creating ?? false}
       name="dev"
       relPath="environments/dev.json"
       rows={over.rows ?? [{ name: 'token', value: '', secret: true }]}
       dirty={false}
       busy={false}
-      error=""
+      error={over.error ?? ''}
       onPick={() => {}}
       onNew={() => {}}
       onName={() => {}}
@@ -135,5 +138,22 @@ describe('a secret row can be given its value', () => {
     expect(secretField()).toBeNull()
     const plain = document.querySelector<HTMLInputElement>('#api-environment-var-value-0')
     expect(plain?.value).toBe('https://api.example.com')
+  })
+})
+
+describe('the outcome of a refused Save', () => {
+  it('is said in a toast when there is no field the refusal belongs to', async () => {
+    mount({ error: 'save refused on disk' })
+    await vi.waitFor(() => expect(toasts()).toHaveLength(1))
+    const told = toasts()[0]
+    expect(told.level).toBe('danger')
+    expect(told.message).toBe('save refused on disk')
+  })
+
+  it('stays on the path field while one is being made, and says no toast', () => {
+    mount({ creating: true, error: 'a file with that name is already there' })
+    const field = document.querySelector<HTMLInputElement>('#api-environment-path')
+    expect(field?.getAttribute('aria-invalid')).toBe('true')
+    expect(toasts()).toHaveLength(0)
   })
 })

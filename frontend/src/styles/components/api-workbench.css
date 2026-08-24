@@ -548,12 +548,6 @@
   font-size: var(--font-size-sm);
 }
 
-.api-environments__refusal {
-  margin: 0;
-  color: var(--color-danger);
-  font-size: var(--font-size-sm);
-}
-
 /* The panel fills the tab box, so what is inside it can too. PLACEMENT of a
    kit component, which a surface may do — nothing here paints the panel. */
 .api-request .ui-tabs__panel {
@@ -737,12 +731,4 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-}
-
-/* The refusal, under the group when no field is holding the ask. It is the
-   backend's own sentence, placed here rather than composed. */
-.api-move__refused {
-  color: var(--color-danger);
-  font-size: var(--font-size-sm);
-  margin-top: var(--space-2);
 }

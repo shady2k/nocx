@@ -1986,7 +1986,7 @@ describe('native file picker — path mode', () => {
   })
 
   // The dev-web harness has no Wails runtime: the picker rejects, and the
-  // surface must degrade — a hint beside the field, the field still
+  // surface must degrade — the outcome is a toast, the path field still
   // hand-typable — not fail.
   it('degrades when the native picker is unavailable', async () => {
     const openFileDialog = vi.fn().mockRejectedValue(new Error('dialog not available'))
@@ -2007,11 +2007,15 @@ describe('native file picker — path mode', () => {
     const browse = container.querySelector(
       '[aria-label="Browse for a private key file"]',
     ) as HTMLButtonElement
+    expect(browse, 'Browse button should be present when a dialog client is wired').toBeTruthy()
     browse.click()
 
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('The native file picker is not available here')
+      expect(
+        toasts().some((t) => t.message.includes('The native file picker is not available here')),
+      ).toBe(true)
     })
+    expect(toasts().some((t) => t.level === 'danger')).toBe(true)
 
     // The path field still works by hand.
     const pathInput = container.querySelector('#profile-key-path') as HTMLInputElement
@@ -2695,9 +2699,12 @@ describe('stored forwards editor', () => {
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
     clickButtonByText(container, 'Save Connection', dialog)
 
-    // The editor surfaces the row error and nothing is persisted.
+    // The editor surfaces the row error through the kit — `.ui-field-error`
+    // at the foot of the list — and nothing is persisted.
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('destination is required')
+      const listError = container.querySelector('.ui-row-list .ui-field-error')
+      expect(listError, 'no kit ui-field-error at the foot of the forwards list').toBeTruthy()
+      expect(listError!.textContent).toContain('destination is required')
     })
     expect(patchSpy).not.toHaveBeenCalled()
     expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()

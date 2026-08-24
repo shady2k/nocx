@@ -17,6 +17,7 @@
 // the dialog only says which was asked for.
 
 import { For, Show, createEffect, createSignal } from 'solid-js'
+import { showToast } from '../ui/toast'
 import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
 import { Radio } from '../ui/radio'
@@ -70,6 +71,23 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
     }
   })
   const refusal = (): string | undefined => (props.error !== '' ? props.error : undefined)
+  // The outcome of a Move, in a toast. The refusal sits on the new-folder
+  // field when THAT is the destination (the box to fix); a move into an
+  // existing folder or the root has no field, so it is said where the kit
+  // says outcomes are said. Edge-triggered on the refusal itself, so a
+  // re-render cannot stack a second sticky toast for the same error.
+  let lastRefused = ''
+  createEffect(() => {
+    const err = props.error
+    if (err === '') {
+      lastRefused = ''
+      return
+    }
+    if (chosen() === NEW_FOLDER_VALUE) return
+    if (err === lastRefused) return
+    lastRefused = err
+    showToast({ level: 'danger', message: err })
+  })
 
   const ready = (): boolean => {
     if (chosen() === NEW_FOLDER_VALUE) return newName().trim() !== ''
@@ -152,9 +170,6 @@ export function MoveToFolderDialog(props: MoveToFolderDialogProps) {
           autoFocus
           required
         />
-      </Show>
-      <Show when={chosen() !== NEW_FOLDER_VALUE && props.error !== ''}>
-        <p class="api-move__refused">{props.error}</p>
       </Show>
     </Dialog>
   )

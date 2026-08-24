@@ -139,5 +139,11 @@ describe('AboutSection', () => {
       <AboutSection load={() => Promise.reject(new Error('down'))} clipboard={fakeClipboard()} />
     ))
     await waitFor(() => expect(screen.getByText(/could not read/i)).toBeTruthy())
+    // A surface's failed state is the kit StatusCard (nocx-8sudy 3/4) — a
+    // state, not a notification, and never a private <p>.
+    const card = document.querySelector('.ui-status-card')
+    expect(card).not.toBeNull()
+    expect(card?.getAttribute('data-tone')).toBe('danger')
+    expect(screen.getByText(/could not read this build's details/i)).toBeTruthy()
   })
 })

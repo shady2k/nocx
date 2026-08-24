@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@solidjs/testing-library'
 import { BackupRestoreSection } from './backup-restore-section'
 import type { ProfileClient, BackupCreateResult, RestorePreview, RestoreResult } from './profiles'
+import { MAX_BACKUP_BYTES } from './backup-file'
 
 const toasts: { message: string; level?: string }[] = []
 vi.mock('./ui/toast', () => ({
@@ -312,5 +313,58 @@ describe('restoring a backup', () => {
 
     await waitFor(() => expect(screen.queryByText(/Restore strategy/i)).toBeNull())
     expect(spies.preview).not.toHaveBeenCalled()
+  })
+
+  it('a backup file over the size cap is refused and says the limit in a person\u2019s unit', async () => {
+    // readBackupText throws exactly one error of its own — the size cap — and
+    // it is the only rejection that reach the catch in loadPreview with a
+    // nameable cause. The toast must say the limit in MiB, not the raw byte
+    // count the error string carries.
+    const { client, spies } = mockClient()
+    render(() => <BackupRestoreSection profileClient={client} />)
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    // A 1-byte body with an overridden `size` — exercising the size guard
+    // without allocating an 8 MiB buffer.
+    const file = new File(['x'], 'big.json', { type: 'application/json' })
+    Object.defineProperty(file, 'size', { value: MAX_BACKUP_BYTES + 1 })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    fireEvent.change(input)
+
+    await waitFor(() => {
+      expect(
+        toasts.some((t) => t.level === 'danger' && t.message.includes('larger than 8 MiB')),
+      ).toBe(true)
+    })
+    expect(spies.preview).not.toHaveBeenCalled()
+  })
+
+  it('a preview the backend refuses reaches the user as a toast, not in the flow', async () => {
+    // Readable bytes can still be refused by the backend — a wrong format, an
+    // unsupported version. The outcome of the preview action is a toast
+    // (ui/README.md "Toast"); the private `.backup-restore__error` div is
+    // gone.
+    const { client, spies } = mockClient({
+      preview: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('invalid backup document: expected format "nocx-backup", got "other"'),
+        ),
+    })
+    render(() => <BackupRestoreSection profileClient={client} />)
+
+    await chooseFile()
+
+    await waitFor(() => {
+      expect(
+        toasts.some(
+          (t) =>
+            t.level === 'danger' &&
+            t.message.includes('expected format "nocx-backup", got "other"'),
+        ),
+      ).toBe(true)
+    })
+    expect(document.querySelector('.backup-restore__error')).toBeNull()
+    expect(spies.preview).toHaveBeenCalled()
   })
 })

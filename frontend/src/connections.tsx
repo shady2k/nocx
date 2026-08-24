@@ -2494,12 +2494,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     onRemove={removeForward}
                     onAdd={addForward}
                     renderRow={(row, i) => renderForwardRow(row, i)}
+                    error={profileValidation.error('forwards')}
                   />
-                  <Show when={profileValidation.error('forwards')}>
-                    <p class="cm-forwards-error" role="alert">
-                      {profileValidation.error('forwards')}
-                    </p>
-                  </Show>
                 </Stack>
               ),
             },

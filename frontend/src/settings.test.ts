@@ -26,6 +26,13 @@ import { log } from './log'
 // ── Test declarations ────────────────────────────────────────────────
 // 5 declarations spanning 3 sections and all control types.
 
+const toasts: { message: string; level?: string }[] = []
+vi.mock('./ui/toast', () => ({
+  showToast: (t: { message: string; level?: string }) => {
+    toasts.push(t)
+  },
+}))
+
 const TEST_DECLARATIONS: Declaration[] = [
   {
     key: 'terminal.fontSize',
@@ -183,6 +190,7 @@ describe('SettingsContent', () => {
 
   beforeEach(() => {
     document.body.replaceChildren()
+    toasts.length = 0
     target = document.createElement('div')
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
@@ -878,8 +886,12 @@ describe('SettingsContent', () => {
   // backend's `settings: "history.diskCeilingMiB" validation failed: value 1
   // below minimum 128` rendered directly under the caption that already said
   // "Must be at least 128 MiB", in the backend's language and wider than the
-  // field's column.
-  it('the backend rejection is not repeated under a field whose caption already says it', async () => {
+  // The caption slot is the field's own home for the range fact, and it is
+  // the only one: a refusal the surface already predicts must not ALSO be
+  // raised as the outcome of the save — the same fact twice, once under the
+  // field and once in a toast, is the double-fact defect fieldSaveError's
+  // comment records.
+  it('a refusal the caption already predicts stays on the field and is not toasted', async () => {
     const decl: Declaration = {
       key: 'history.diskCeilingMiB',
       section: 'History',
@@ -909,14 +921,20 @@ describe('SettingsContent', () => {
       const slot = target.querySelector('.ui-text-field__caption[data-tone="error"]')
       expect(slot?.textContent).toBe('Must be at least 128 MiB')
     })
-    expect(target.querySelector('.ui-settings-error')).toBeNull()
     expect(target.textContent).not.toContain('validation failed')
+    // The Connections page that mounts first may raise its own toast; none
+    // of them may be the settings-save outcome, which the caption already
+    // owns on the field.
+    expect(toasts.some((t) => t.message.includes('Could not save'))).toBe(false)
   })
 
   // The narrowness of that suppression is the point: a rejection the screen
-  // could NOT predict still reaches the user verbatim, because a save that
-  // fails silently is the worse defect.
-  it('a rejection the declaration does not predict still reaches the user verbatim', async () => {
+  // could NOT predict still reaches the user — now as the outcome of the
+  // save they triggered, in the toast home, mapped out of the backend's
+  // `settings:` prefix into a sentence (ui/README.md "Toast"; a backend
+  // string passed through untouched is the defect malformed-reason.ts exists
+  // to prevent).
+  it('a rejection the declaration does not predict reaches the user as a toast', async () => {
     const decl: Declaration = {
       key: 'history.diskCeilingMiB',
       section: 'History',
@@ -937,16 +955,20 @@ describe('SettingsContent', () => {
       expect(target.querySelector('input[type="number"]')).toBeTruthy()
     })
 
-    // In range — the caption slot has nothing to say, so the surface must.
+    // In range — the caption slot has nothing to say, so the outcome of the
+    // save must.
     const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
     fireEvent.input(input, { target: { value: '4096' } })
 
     await vi.waitFor(() => {
-      expect(target.querySelector('.ui-settings-error')?.textContent).toBe(
-        'settings: store is read-only',
+      expect(toasts.some((t) => t.level === 'danger' && t.message.includes('Could not save'))).toBe(
+        true,
       )
     })
-    expect(target.querySelector('.ui-text-field__caption[data-tone="error"]')).toBeNull()
+    const toast = toasts.find((t) => t.message.includes('Could not save'))
+    expect(toast?.message).toBe(
+      'Could not save "Disk space limit": This setting could not be saved — the store is read-only',
+    )
   })
 })
 

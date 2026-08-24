@@ -4699,9 +4699,11 @@ describe('a request can be moved to a folder', () => {
     fireEvent.click(moveOption('users'))
     fireEvent.click(moveSubmit())
 
-    // The backend's own sentence, on the chooser, which stays open.
+    // The backend's own sentence, in a toast — a move into an existing
+    // folder has no field the refusal belongs to, so it is said where the
+    // kit says outcomes are said. The chooser stays open, so the person can retry.
     await vi.waitFor(() =>
-      expect(moveChooser().closest('dialog')?.textContent).toContain('already there'),
+      expect(toasts().some((t) => t.message.includes('already there'))).toBe(true),
     )
     expect(row(CREATE_REL_PATH)).toBeTruthy()
     expect(moveSubmit()).toBeTruthy()
@@ -4724,10 +4726,10 @@ describe('a request can be moved to a folder', () => {
     fireEvent.click(moveSubmit())
 
     // THE RULE, STATED IN THE PRODUCT: a move carries the file and not the
-    // draft. The person is told the remedy — save, then move — and the
-    // request stays where it is.
+    // draft. The person is told the remedy — save, then move — in a toast,
+    // and the request stays where it is.
     await vi.waitFor(() =>
-      expect(moveChooser().closest('dialog')?.textContent).toContain('Save the request first'),
+      expect(toasts().some((t) => t.message.includes('Save the request first'))).toBe(true),
     )
     expect(disk.moveRequest).not.toHaveBeenCalled()
     expect(disk.files.has(CREATE_REL_PATH)).toBe(true)

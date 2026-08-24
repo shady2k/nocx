@@ -209,14 +209,6 @@
   color: var(--color-accent);
 }
 
-/* ── Error message ────────────────────────────────────────────────── */
-
-.ui-settings-error {
-  font-size: var(--font-size-2xs);
-  color: var(--color-danger);
-  margin-top: 4px;
-}
-
 /* ── Status states (loading, failed, empty, no-match) ──────────────── */
 
 .ui-settings-status {

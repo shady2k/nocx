@@ -65,8 +65,9 @@
   display: flex;
 }
 
-.ab-loading,
-.ab-failed {
+/* The reading state is a plain line in the quiet register; the failed state
+   belongs to the kit's StatusCard (nocx-8sudy sweep 3/4). */
+.ab-loading {
   margin: 0;
   color: var(--color-text-muted);
 }

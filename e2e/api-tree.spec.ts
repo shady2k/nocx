@@ -320,9 +320,10 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     // Right-clicking a request handed over reload/save-image-as before this
     // landed. The list is read in full for the reason the folder list is:
     // "two doors, one list" is only checked by comparing the whole thing.
+    // `Move to folder…` is the act nocx-8aczn.2 added beside these two.
     await treeRow(page, workbench, ZEN).click({ button: 'right' })
     const fromTheRow = await menuLabels(requestMenu)
-    expect(fromTheRow).toEqual(['Duplicate', 'Delete request…'])
+    expect(fromTheRow).toEqual(['Duplicate', 'Move to folder…', 'Delete request…'])
 
     // ── Duplicate makes a copy that appears in the tree ───────────────────
     await requestMenu.getByRole('menuitem', { name: 'Duplicate' }).click()

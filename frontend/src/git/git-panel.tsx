@@ -130,10 +130,11 @@ function diffSideFor(letter: FileStatus): GitDiffSide {
  *  refusal arrives with the fixed message "Control plane busy", and the
  *  dispatcher already raised its own deduplicated danger toast for it — a
  *  second toast would be the same news twice.
- *
- *  Not mapped here: "git: unknown binding" (the store re-resolves through
- *  git.open before the error is stored) and a failed commit's OUTPUT (that
- *  is the commit state, shown in the panel, D11 — never a rejection).
+ *  Not mapped here: "git: unknown binding" (the store re-resolves that ONE
+ *  refusal — reason "unknown-binding" on the wire, nocx-bpqil — through
+ *  git.open before the error is stored; every other -32602 refusal reaches
+ *  this mapper as itself) and a failed commit's OUTPUT (that is the commit
+ *  state, shown in the panel, D11 — never a rejection).
  */
 function mutationFailureMessage(reason: string): string | null {
   if (reason === 'Control plane busy') return null

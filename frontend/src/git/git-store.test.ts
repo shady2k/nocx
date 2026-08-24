@@ -424,13 +424,14 @@ describe('race 3 — the mutation lane (D18)', () => {
     expect(mockHandle(services, 'stageAll')).not.toHaveBeenCalled()
     expect(mockHandle(services, 'unstageAll')).not.toHaveBeenCalled()
   })
-
-  it('a mutation answers unknownBinding → the store re-resolves through git.open', async () => {
+  it('a mutation answers unknownBinding (reason unknown-binding) → the store re-resolves through git.open', async () => {
     const { store, services } = await openStore()
     const open = mockHandle(services, 'open')
     const stage = mockHandle(services, 'stage')
     open.mockClear()
-    stage.mockRejectedValueOnce(new RpcError('git: unknown binding "b1"', -32602))
+    stage.mockRejectedValueOnce(
+      new RpcError('git: unknown binding "b1"', -32602, { reason: 'unknown-binding' }),
+    )
 
     store.stage(['a.txt'])
     await settle()
@@ -440,6 +441,77 @@ describe('race 3 — the mutation lane (D18)', () => {
   })
 })
 
+// ── the -32602 discriminator (nocx-bpqil) ────────────────────────────────
+
+describe('a -32602 is only an unknown binding when the reason says so', () => {
+  it('an unknown binding (reason unknown-binding) re-resolves through git.open', async () => {
+    const { store, services } = await openStore()
+    const open = mockHandle(services, 'open')
+    const stage = mockHandle(services, 'stage')
+    open.mockClear()
+    stage.mockRejectedValueOnce(
+      new RpcError('git: unknown binding "b1"', -32602, { reason: 'unknown-binding' }),
+    )
+
+    store.stage(['a.txt'])
+    await settle()
+    expect(store.mutationInFlight()).toBe(false)
+    // Re-resolved: a fresh git.open against the current origin.
+    expect(open).toHaveBeenCalledWith('s1', '/home/dev/repo')
+    // The refusal was never stored as a mutation error.
+    expect(store.mutationError()).toBeNull()
+  })
+
+  it('a conflicted refusal (reason conflicted) does NOT re-resolve; it reaches the caller', async () => {
+    const { store, services } = await openStore()
+    const open = mockHandle(services, 'open')
+    const stage = mockHandle(services, 'stage')
+    open.mockClear()
+    stage.mockRejectedValueOnce(
+      new RpcError('git: cannot stage or unstage all while "conf.txt" is conflicted', -32602, {
+        reason: 'conflicted',
+      }),
+    )
+
+    store.stage(['a.txt'])
+    await settle()
+    // NOT re-resolved: the binding is fine, the repository refused.
+    expect(open).not.toHaveBeenCalled()
+    // The refusal is stored — the panel maps it to a sentence.
+    expect(store.mutationError()?.message).toContain('conflicted')
+  })
+
+  it('a nothing-to-commit refusal (reason nothing-to-commit) does NOT re-resolve', async () => {
+    const { store, services } = await openStore()
+    const open = mockHandle(services, 'open')
+    const commit = mockHandle(services, 'commit')
+    open.mockClear()
+    store.setCommitSubject('doomed')
+    commit.mockRejectedValueOnce(
+      new RpcError('git: nothing is staged to commit', -32602, {
+        reason: 'nothing-to-commit',
+      }),
+    )
+
+    store.commit()
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(store.mutationError()?.message).toContain('nothing is staged')
+  })
+
+  it('a bare -32602 with no data (a malformed-params refusal) does NOT re-resolve', async () => {
+    const { store, services } = await openStore()
+    const open = mockHandle(services, 'open')
+    const stage = mockHandle(services, 'stage')
+    open.mockClear()
+    stage.mockRejectedValueOnce(new RpcError('Invalid params: bindingId required', -32602))
+
+    store.stage(['a.txt'])
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(store.mutationError()?.message).toContain('Invalid params')
+  })
+})
 // ── Race 4: a diff for a row clicked before the panel re-bound ────────────
 
 // The diff fetch itself is worker G's (git-diff/); the panel's half — the
@@ -869,7 +941,9 @@ describe('the commits read', () => {
     store.setVisible(true)
     await settle()
     const log = mockHandle(services, 'log')
-    log.mockRejectedValueOnce(new RpcError('git.log', -32602, 'unknown binding'))
+    log.mockRejectedValueOnce(
+      new RpcError('git: unknown binding "b1"', -32602, { reason: 'unknown-binding' }),
+    )
     const open = mockHandle(services, 'open')
     const before = open.mock.calls.length
     store.refresh()

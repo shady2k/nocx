@@ -78,6 +78,7 @@ import type { GitOpenResult } from '../generated/git.open'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitLogResult } from '../generated/git.log'
 import type { Status } from '../generated/git.status'
+import type { GitError } from '../generated/git.error'
 
 /** The panel's phases — the interstitial and failure scaffolding around the
  *  eight render states. The view renders 'opening' as a spinner and 'failed'
@@ -258,11 +259,34 @@ interface ScopeCtx {
   epoch: number
 }
 
-/** unknownBinding — the wire's -32602, mapped by the git transport from
+/** unknownBinding — the wire's -32602 mapped by the git transport from
  *  git.ErrUnknownBinding (ws_git.go). The answer to "the binding is
- *  gone", and the trigger for re-resolving through git.open. */
+ *  gone", and the trigger for re-resolving through git.open.
+ *
+ *  The code alone cannot say that: six distinct domain refusals share
+ *  -32602 (gitErrorCode maps them all to invalid-params), so the transport
+ *  now carries data.reason on the wire (contracts/git.error.schema.json,
+ *  nocx-bpqil) and THIS is the only reason the store re-resolves on. A
+ *  conflicted stage-all, an amend on an unborn branch or a nothing-to-
+ *  commit refusal is a repository state a person should read — re-opening
+ *  the repository cannot fix it, and swallowing it made the operation
+ *  appear to do nothing. */
 function isUnknownBinding(e: unknown): boolean {
-  return e instanceof RpcError && e.code === -32602
+  if (!(e instanceof RpcError) || e.code !== -32602) return false
+  // The discriminator is the schema-declared vocabulary
+  // (contracts/git.error.schema.json): only the fixed reason separates an
+  // unknown binding from the other five refusals that share the code.
+  return isGitErrorReason(e.data, 'unknown-binding')
+}
+
+/** True when `data` is a git error payload (contracts/git.error.schema.json)
+ *  carrying exactly the given reason. Mirrors the dispatcher's
+ *  isSaturationData: the payload is checked by shape, then the fixed reason
+ *  discriminates. */
+function isGitErrorReason(data: unknown, reason: GitError['reason']): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as GitError
+  return d.reason === reason
 }
 
 export function createGitStore(

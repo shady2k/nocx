@@ -1189,3 +1189,179 @@ func tryReadNotification(t *testing.T, conn *websocket.Conn, method string, d ti
 	}
 	return params
 }
+
+// ── the error discriminator (nocx-bpqil) ─────────────────────────────────
+//
+// isUnknownBinding in the renderer treated EVERY -32602 as an unknown
+// binding, so a conflicted stage-all (which also rides -32602) was silently
+// re-resolved through git.open instead of surfacing as the refusal it is.
+// The fix is a machine-readable reason on the wire: every git domain error
+// that maps to -32602 carries data.reason so the renderer can distinguish
+// them. These tests prove the reason arrives over the real socket — not
+// only that the DTO could carry it, but that the handler actually sends it.
+
+// gitErrorDataWire is the on-wire shape of a git error's data payload.
+// Mirrors the Go gitErrorData struct (ws_git.go) for test-side decoding.
+type gitErrorDataWire struct {
+	Reason string `json:"reason"`
+}
+
+// gitErrorEnvelope decodes a JSON-RPC error response's data field.
+type gitErrorEnvelope struct {
+	Error *struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	} `json:"error"`
+}
+
+func decodeGitErrorData(t *testing.T, raw json.RawMessage) gitErrorDataWire {
+	t.Helper()
+	if len(raw) == 0 || string(raw) == "null" {
+		t.Fatalf("error data is absent; the handler must send data.reason")
+	}
+	// The payload must satisfy the declared contract — the closed enum and
+	// additionalProperties:false make the discriminator exact in both
+	// directions (contracts/git.error.schema.json, AGENTS.md rule 5).
+	validateJSON(t, loadSchema(t, "git.error.schema.json"), raw, "git error data (real socket)")
+	var d gitErrorDataWire
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal error data: %v (raw: %s)", err, raw)
+	}
+	return d
+}
+
+// TestGitError_UnknownBindingCarriesReasonOverTheWire: a git.status on a
+// binding that never existed answers -32602 with data.reason =
+// "unknown-binding" — the discriminator the renderer's isUnknownBinding
+// reads to decide whether to re-resolve through git.open.
+func TestGitError_UnknownBindingCarriesReasonOverTheWire(t *testing.T) {
+	e := newGitTestEnv(t, WithGitRepoFactory(newStubGitFactory()))
+
+	// A well-formed 32-hex binding id the registry never minted: it passes
+	// the shape validator and Acquire answers ErrUnknownBinding — the path
+	// the renderer's re-resolve listens for. (A malformed id is refused by
+	// validation with a bare -32602 that carries no reason.)
+	resp := jsonrpcCallWithID(t, e.conn, "git.status",
+		map[string]any{"bindingId": "00000000000000000000000000000000"}, 1)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "unknown-binding" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "unknown-binding")
+	}
+}
+
+// TestGitError_ConflictedCarriesReasonOverTheWire: a git.stageAll that is
+// refused because a merge conflict is unresolved answers -32602 with
+// data.reason = "conflicted" — NOT "unknown-binding", so the renderer
+// does not re-resolve and the refusal reaches the user.
+func TestGitError_ConflictedCarriesReasonOverTheWire(t *testing.T) {
+	repo := newStubGitRepo()
+	repo.mutateErr = &git.ErrConflicted{Path: "conf.txt"}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "git.stageAll", map[string]any{"bindingId": bid}, 3)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "conflicted" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "conflicted")
+	}
+}
+
+// TestGitError_NothingToCommitCarriesReasonOverTheWire: a git.commit
+// refused because nothing is staged answers -32602 with data.reason =
+// "nothing-to-commit" — NOT "unknown-binding".
+func TestGitError_NothingToCommitCarriesReasonOverTheWire(t *testing.T) {
+	repo := newStubGitRepo()
+	repo.commitErr = &git.ErrNothingToCommit{}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "git.commit", map[string]any{
+		"bindingId": bid, "message": "subject", "amend": false,
+	}, 3)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "nothing-to-commit" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "nothing-to-commit")
+	}
+}
+
+// TestGitError_AmendUnbornCarriesReasonOverTheWire: a git.commit with
+// amend=true on an unborn branch answers -32602 with data.reason =
+// "amend-unborn" — NOT "unknown-binding".
+func TestGitError_AmendUnbornCarriesReasonOverTheWire(t *testing.T) {
+	repo := newStubGitRepo()
+	repo.commitErr = &git.ErrAmendUnborn{}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "git.commit", map[string]any{
+		"bindingId": bid, "message": "subject", "amend": true,
+	}, 3)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "amend-unborn" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "amend-unborn")
+	}
+}
+
+// TestGitErrorReasonMapping verifies the reason mapping for every git
+// domain error that shares -32602, so the renderer can distinguish them.
+// This is the function-level check; the over-the-wire tests above prove
+// the handler actually sends the reason for the two shapes the acceptance
+// criteria name.
+func TestGitErrorReasonMapping(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"unknown-binding":   {&git.ErrUnknownBinding{ID: "x"}, "unknown-binding"},
+		"not-owned":         {&git.ErrNotOwned{ID: "x", SessionID: session.ID("")}, "not-owned"},
+		"handle-released":   {&git.ErrHandleReleased{}, "handle-released"},
+		"nothing-to-commit": {&git.ErrNothingToCommit{}, "nothing-to-commit"},
+		"amend-unborn":      {&git.ErrAmendUnborn{}, "amend-unborn"},
+		"conflicted":        {&git.ErrConflicted{Path: "p"}, "conflicted"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := gitErrorReason(tc.err)
+			if got == nil || got.Reason != tc.want {
+				t.Fatalf("gitErrorReason(%v) = %+v, want reason %q", tc.err, got, tc.want)
+			}
+		})
+	}
+
+	// A non-git error carries no reason — it is an invocation failure,
+	// not a domain refusal, and the renderer must not treat it as one.
+	if got := gitErrorReason(errors.New("some io error")); got != nil {
+		t.Fatalf("gitErrorReason(arbitrary error) = %+v, want nil", got)
+	}
+}

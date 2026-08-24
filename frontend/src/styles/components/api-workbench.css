@@ -272,6 +272,27 @@
   cursor: default;
 }
 
+/* ── Drag-to-move feedback (nocx-9db1m) ─────────────────────────────────
+   What the row under the pointer says while a request drag is over it. The
+   verdict rides the SURFACE's own wrapper (`data-drop-target` on
+   `api-tree__row`), never the kit's row: `ok` draws an accent ring around
+   the row, `no` dims it. A drag with no feedback is a drag people do not
+   trust, and a row that says neither while a request hangs over it leaves
+   the person guessing whether the release will land. */
+.api-tree__row[data-drop-target='ok'] {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.api-tree__row[data-drop-target='no'] {
+  opacity: 0.55;
+}
+
+/* A request row is grabbable; a folder row is not a source, only a target. */
+.api-tree__row[draggable='true'] {
+  cursor: grab;
+}
+
 /* ── The request ───────────────────────────────────────────────────────── */
 
 /* The line's controls carry no visible labels — the verb, the address and

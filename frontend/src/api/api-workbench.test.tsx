@@ -4486,6 +4486,66 @@ describe('a collection can be given a folder', () => {
 // a real row, the destination is picked in the chooser, and what appears
 // afterwards is the assertion. Nothing calls the store directly.
 
+interface MovingDisk {
+  files: Map<string, ApiRequest>
+  moveRequest: ReturnType<typeof vi.fn>
+  listCollections: ReturnType<typeof vi.fn>
+  readRequest: ReturnType<typeof vi.fn>
+  createFolder: ReturnType<typeof vi.fn>
+  services: Partial<ApiWorkbenchServices>
+}
+
+function movingDisk(folders: string[] = ['users', 'reports']): MovingDisk {
+  const files = new Map<string, ApiRequest>([
+    [CREATE_REL_PATH, REQUEST],
+    ['ping.json', { ...REQUEST, id: 'ping', name: 'ping', url: 'https://example.test/ping' }],
+  ])
+  const listCollections = vi.fn(() =>
+    Promise.resolve({
+      collections: [
+        collectionsFixture({
+          collection: collectionFixture({
+            requests: [...files].map(([relPath, request]) => ({
+              relPath,
+              name: request.name,
+              method: request.method,
+            })),
+            folders,
+          }),
+        }),
+      ],
+      defaultRoot: DEFAULT_ROOT,
+    }),
+  )
+  const readRequest = vi.fn((_handle: string, relPath: string) => {
+    const file = files.get(relPath)
+    return file === undefined
+      ? Promise.reject(new Error(`no such request: ${relPath}`))
+      : Promise.resolve({ request: file })
+  })
+  const moveRequest = vi.fn((_handle: string, from: string, to: string) => {
+    const file = files.get(from)
+    if (file === undefined) return Promise.reject(new Error(`no such request: ${from}`))
+    files.delete(from)
+    files.set(to, file)
+    return Promise.resolve({ relPath: to })
+  })
+  const createFolder = vi.fn().mockResolvedValue(folderCreatedFixture('reports'))
+  return {
+    files,
+    moveRequest,
+    listCollections,
+    readRequest,
+    createFolder,
+    services: {
+      listCollections,
+      readRequest,
+      moveRequest,
+      createFolder,
+    },
+  }
+}
+
 describe('a request can be moved to a folder', () => {
   /** The chooser's folder group — the dialog is found THROUGH it, because
    *  the kit's Dialog takes no data-* and a field id appears inside it only
@@ -4525,66 +4585,6 @@ describe('a request can be moved to a folder', () => {
   /** A backend whose FOLDER actually changes under a move: the file leaves
    *  one path and lands at another, so "the row is under the new folder
    *  afterwards" is a question the test can ask at all. */
-  interface MovingDisk {
-    files: Map<string, ApiRequest>
-    moveRequest: ReturnType<typeof vi.fn>
-    listCollections: ReturnType<typeof vi.fn>
-    readRequest: ReturnType<typeof vi.fn>
-    createFolder: ReturnType<typeof vi.fn>
-    services: Partial<ApiWorkbenchServices>
-  }
-
-  function movingDisk(folders: string[] = ['users', 'reports']): MovingDisk {
-    const files = new Map<string, ApiRequest>([
-      [CREATE_REL_PATH, REQUEST],
-      ['ping.json', { ...REQUEST, id: 'ping', name: 'ping', url: 'https://example.test/ping' }],
-    ])
-    const listCollections = vi.fn(() =>
-      Promise.resolve({
-        collections: [
-          collectionsFixture({
-            collection: collectionFixture({
-              requests: [...files].map(([relPath, request]) => ({
-                relPath,
-                name: request.name,
-                method: request.method,
-              })),
-              folders,
-            }),
-          }),
-        ],
-        defaultRoot: DEFAULT_ROOT,
-      }),
-    )
-    const readRequest = vi.fn((_handle: string, relPath: string) => {
-      const file = files.get(relPath)
-      return file === undefined
-        ? Promise.reject(new Error(`no such request: ${relPath}`))
-        : Promise.resolve({ request: file })
-    })
-    const moveRequest = vi.fn((_handle: string, from: string, to: string) => {
-      const file = files.get(from)
-      if (file === undefined) return Promise.reject(new Error(`no such request: ${from}`))
-      files.delete(from)
-      files.set(to, file)
-      return Promise.resolve({ relPath: to })
-    })
-    const createFolder = vi.fn().mockResolvedValue(folderCreatedFixture('reports'))
-    return {
-      files,
-      moveRequest,
-      listCollections,
-      readRequest,
-      createFolder,
-      services: {
-        listCollections,
-        readRequest,
-        moveRequest,
-        createFolder,
-      },
-    }
-  }
-
   it("the menu offers Move to folder…, and the chooser lists this collection's folders, its root, and New folder", async () => {
     const { bar } = await mountApp({})
     await openWorkbench(bar)
@@ -4776,6 +4776,393 @@ describe('a request can be moved to a folder', () => {
   }
 })
 
+// ── Drag a request into a folder (nocx-9db1m) ───────────────────────────
+//
+// The right-button menu's "Move to folder…" already reaches `moveRequest`;
+// these tests are about the ACCELERATOR — dragging a request row onto a
+// folder row — calling that same method. The grammar is decided once and
+// the decisions are written in the code where it makes them.
+
+/** A DataTransfer jsdom does not implement, carrying a request row's
+ *  identity the way a real drag carries the tab strip's own type. The MIME
+ *  type keeps OS file drags out of the move path (they carry `Files`) and
+ *  gives the drop handler an authoritative source even after a rerender. */
+function requestTransfer(handle: string, relPath: string): DataTransfer {
+  const data = new Map<string, string>()
+  data.set('application/x-nocx-api-request', JSON.stringify({ handle, relPath }))
+  return {
+    get types() {
+      return ['application/x-nocx-api-request']
+    },
+    files: [],
+    getData: (type: string) => data.get(type) ?? '',
+    setData: (type: string, value: string) => data.set(type, value),
+    clearData: () => data.clear(),
+    setDragImage: () => {},
+  } as unknown as DataTransfer
+}
+
+/** A DataTransfer carrying nothing — a drag from outside this surface, the
+ *  way an OS file drag or the tab strip's own drag arrives. */
+function foreignTransfer(): DataTransfer {
+  return { types: ['Files'], files: [] } as unknown as DataTransfer
+}
+
+/** The row a FOLDER is, by the data-row-key the tree builds for every row.
+ *  A collection row ('handle:') and a directory row ('handle:path') are
+ *  both folders for drag purposes — a collection IS a folder (§6.1). */
+function folderRow(key: string): HTMLElement {
+  const el = workbench().querySelector<HTMLElement>(`[data-row-key="${key}"]`)
+  if (!el) throw new Error(`no row for key ${key}`)
+  return el
+}
+
+describe('a request can be dragged into a folder', () => {
+  it('drags a request row onto a folder and finds the request inside it', async () => {
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    // A request at the root, dragged onto the `users` folder.
+    const source = row('ping.json')
+    const target = folderRow(`${HANDLE}:users`)
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(source, { dataTransfer: transfer })
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    // The folder shows it is a legal drop target.
+    expect(target.dataset.dropTarget).toBe('ok')
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    // The same call the menu makes: from the row's path to the destination
+    // file inside the chosen folder.
+    await vi.waitFor(() =>
+      expect(disk.moveRequest).toHaveBeenCalledWith(HANDLE, 'ping.json', 'users/ping.json'),
+    )
+    // The tree draws it there.
+    await vi.waitFor(() => row('users/ping.json'))
+    expect(disk.files.has('ping.json')).toBe(false)
+    expect(disk.files.has('users/ping.json')).toBe(true)
+  })
+
+  it('dragging the OPEN request leaves it open, pointed at the new path', async () => {
+    const disk = movingDisk(['users', 'reports'])
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    // Open the request so it is the one in the form.
+    fireEvent.click(row('ping.json'))
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+
+    const target = folderRow(`${HANDLE}:reports`)
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    // Still the same request in the form — the move did not throw it away —
+    // and the crumb trail names the folder it lives in now. The URL field
+    // is the form's own seam: a header that just re-pointed could pass the
+    // crumb check while the form held a different request.
+    await vi.waitFor(() => expect(crumbName()).toBe('ping'))
+    await vi.waitFor(() => expect(folderCrumb()).toContain('reports'))
+    await vi.waitFor(() => expect(field('api-url').value).toBe('https://example.test/ping'))
+    expect(disk.files.has('reports/ping.json')).toBe(true)
+  })
+
+  it('a drop onto the folder it is already in sends no call and reports no error', async () => {
+    // The tree is sorted, not free-order: a request's position is its path.
+    // Moving to the folder it is already in is a no-op the surface knows
+    // about and does not send — `api.request.move` refuses a move to where
+    // it already is, and sending a call we know will be refused is a call
+    // wasted and an error for a gesture that was a no-op.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    // CREATE_REL_PATH is `users/create.json`, already inside `users`.
+    const target = folderRow(`${HANDLE}:users`)
+    const transfer = requestTransfer(HANDLE, CREATE_REL_PATH)
+    fireEvent.dragStart(row(CREATE_REL_PATH), { dataTransfer: transfer })
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    // The folder does not offer itself: a move into the folder the request
+    // already sits in would change nothing, and `api.request.move` would
+    // refuse it. The row says so with `no` feedback rather than pretending.
+    expect(target.dataset.dropTarget).toBe('no')
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    // No call was made, no error reported, and the request is still there.
+    await vi.waitFor(() => expect(disk.moveRequest).not.toHaveBeenCalled())
+    expect(toasts().some((t) => t.level === 'danger')).toBe(false)
+    expect(row(CREATE_REL_PATH)).toBeTruthy()
+  })
+
+  it('a drop onto the row it came from sends no call and reports no error', async () => {
+    // Dragging a request onto itself: the same handle and the same path.
+    // This is a no-op, not an error — the gesture said nothing by doing it.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    const source = row('ping.json')
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(source, { dataTransfer: transfer })
+    // A request row is not a folder, so it shows `no` — it is not a target.
+    fireEvent.dragOver(source, { dataTransfer: transfer })
+    expect(source.dataset.dropTarget).toBe('no')
+    fireEvent.drop(source, { dataTransfer: transfer })
+
+    expect(disk.moveRequest).not.toHaveBeenCalled()
+    expect(toasts().some((t) => t.level === 'danger')).toBe(false)
+  })
+
+  it('a drop onto a request row does not move — only folders take drops', async () => {
+    // Between two rows is not a drop target either: the tree is sorted,
+    // not free-order, and a request's position is its path, not its row
+    // index. Reordering is not a concept here.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+    // A request row is not a folder: dragover sees it, refuses the drop.
+    fireEvent.dragOver(row(CREATE_REL_PATH), { dataTransfer: transfer })
+    expect(row(CREATE_REL_PATH).dataset.dropTarget).toBe('no')
+    fireEvent.drop(row(CREATE_REL_PATH), { dataTransfer: transfer })
+
+    expect(disk.moveRequest).not.toHaveBeenCalled()
+  })
+
+  it('a drop onto a malformed row does not move — it is not a folder', async () => {
+    // A malformed file is not a folder, so it is not a drop target. Its
+    // row renders so one bad file cannot hide every good one, and the drag
+    // grammar treats it exactly like a request row: `no` feedback, no call.
+    const listCollections = vi.fn(() =>
+      Promise.resolve({
+        collections: [
+          collectionsFixture({
+            collection: collectionFixture({
+              requests: [
+                { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
+                { relPath: 'ping.json', name: 'ping', method: 'GET' },
+              ],
+              folders: ['users'],
+              malformed: [{ relPath: 'broken.json', reason: 'not valid JSON' }],
+            }),
+          }),
+        ],
+        defaultRoot: DEFAULT_ROOT,
+      }),
+    )
+    const moveRequest = vi.fn((_h: string, _from: string, _to: string) =>
+      Promise.resolve({ relPath: _to }),
+    )
+    const { bar } = await mountApp({ listCollections, moveRequest })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+    await vi.waitFor(() => folderRow(`${HANDLE}:!broken.json`))
+
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+    const malformed = folderRow(`${HANDLE}:!broken.json`)
+    fireEvent.dragOver(malformed, { dataTransfer: transfer })
+    expect(malformed.dataset.dropTarget).toBe('no')
+    fireEvent.drop(malformed, { dataTransfer: transfer })
+
+    expect(moveRequest).not.toHaveBeenCalled()
+  })
+
+  it("the scrolled tree's empty edge is not a drop target — no reorder, no auto-scroll", async () => {
+    // The tree scrolls inside `.api-tree`; its empty edge (above the first
+    // row and below the last) is NOT a drop target. A drop there cannot
+    // reorder — the tree is sorted, and a request's position is its path,
+    // not where the pointer let go — and the surface does not add
+    // auto-scroll for a gesture the tree cannot answer anyway. The gesture
+    // is refused silently: no call, no feedback, no scroll.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    const tree = workbench().querySelector<HTMLElement>('.api-tree')
+    if (!tree) throw new Error('no tree container')
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+
+    // Over the container itself, not over any row: no target is offered.
+    fireEvent.dragOver(tree, { dataTransfer: transfer })
+    expect(tree.dataset.dropTarget).toBeUndefined()
+    expect(tree.scrollTop).toBe(0)
+    fireEvent.drop(tree, { dataTransfer: transfer })
+
+    expect(disk.moveRequest).not.toHaveBeenCalled()
+    // The request is still at the root — nothing moved, nothing scrolled.
+    expect(row('ping.json')).toBeTruthy()
+    expect(tree.scrollTop).toBe(0)
+  })
+
+  it('a drop onto the collection row moves into the collection root', async () => {
+    // A collection IS a folder (§6.1) and its `relPath` is '' — the root.
+    // Dragging a request from inside `users` onto the collection row moves
+    // it to the root, exactly the way the menu's "Root of…" does.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    const target = folderRow(`${HANDLE}:`)
+    const transfer = requestTransfer(HANDLE, CREATE_REL_PATH)
+    fireEvent.dragStart(row(CREATE_REL_PATH), { dataTransfer: transfer })
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    expect(target.dataset.dropTarget).toBe('ok')
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    // From `users/create.json` to `create.json` at the root.
+    await vi.waitFor(() =>
+      expect(disk.moveRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH, 'create.json'),
+    )
+    await vi.waitFor(() => row('create.json'))
+  })
+
+  it('a drop onto another collection says it cannot move there', async () => {
+    // `api.request.move` does not cross collections — nocx-8aczn put that
+    // out of the METHOD, not just out of the gesture. The drag refuses and
+    // SAYS so, rather than silently doing nothing.
+    // The FIRST collection carries `ping.json` (the source), the second
+    // (`other`) is the foreign collection the drop lands on.
+    const first = collectionsFixture({
+      collection: collectionFixture({
+        requests: [
+          { relPath: CREATE_REL_PATH, name: 'create', method: 'POST' },
+          { relPath: 'ping.json', name: 'ping', method: 'GET' },
+        ],
+        folders: ['users'],
+      }),
+    })
+    const other = collectionsFixture({
+      handle: 'h2',
+      path: '/w/other-api',
+      collection: collectionFixture({ name: 'other-api', requests: [], folders: [] }),
+    })
+    const listCollections = vi.fn(() =>
+      Promise.resolve({ collections: [first, other], defaultRoot: DEFAULT_ROOT }),
+    )
+    const readRequest = vi.fn((_h: string, relPath: string) => {
+      const files = new Map<string, ApiRequest>([
+        [CREATE_REL_PATH, REQUEST],
+        ['ping.json', { ...REQUEST, id: 'ping', name: 'ping', url: 'https://example.test/ping' }],
+      ])
+      const file = files.get(relPath)
+      return file === undefined
+        ? Promise.reject(new Error(`no such request: ${relPath}`))
+        : Promise.resolve({ request: file })
+    })
+    const moveRequest = vi.fn((_h: string, _from: string, _to: string) =>
+      Promise.resolve({ relPath: _to }),
+    )
+    const { bar } = await mountApp({ listCollections, readRequest, moveRequest })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    // Drag a request from the first collection onto the second collection's row.
+    const target = folderRow('h2:')
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    // The foreign collection's row is NOT offered: the row says `no`, but
+    // the drop is still accepted so the refusal can be SAID (a dragover
+    // that refuses preventDefault never fires a drop event).
+    expect(target.dataset.dropTarget).toBe('no')
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    // No call was made and the person was told why.
+    await vi.waitFor(() => expect(moveRequest).not.toHaveBeenCalled())
+    await vi.waitFor(() =>
+      expect(toasts().some((t) => t.message.includes('own collection'))).toBe(true),
+    )
+  })
+
+  it('a foreign drag (OS files) does not start a request move', async () => {
+    // The private MIME type keeps drags from outside this surface out of
+    // the move path. An OS file drag carries `Files`, not the request type.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    const target = folderRow(`${HANDLE}:users`)
+    const transfer = foreignTransfer()
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    // A foreign drag is not recognised: no drop-target feedback.
+    expect(target.dataset.dropTarget).toBeUndefined()
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    expect(disk.moveRequest).not.toHaveBeenCalled()
+  })
+
+  it('a folder shows drop feedback while a legal drag is over it', async () => {
+    // A drag with no feedback is a drag people do not trust. The folder
+    // under the pointer says `data-drop-target="ok"` while a request drag
+    // is in flight over it, and nothing when the drag leaves.
+    const disk = movingDisk()
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    const target = folderRow(`${HANDLE}:users`)
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+
+    // Before the drag is over the target, no feedback.
+    expect(target.dataset.dropTarget).toBeUndefined()
+
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    expect(target.dataset.dropTarget).toBe('ok')
+
+    // A request row under the same drag says it is not a target.
+    fireEvent.dragOver(row('ping.json'), { dataTransfer: transfer })
+    expect(row('ping.json').dataset.dropTarget).toBe('no')
+
+    // Back to the folder, then leaving: feedback clears.
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    fireEvent.dragLeave(target, { dataTransfer: transfer })
+    expect(target.dataset.dropTarget).toBeUndefined()
+  })
+
+  it('a refusal from the backend reaches the person, and the request stays put', async () => {
+    // The drag is a new path to the same `moveRequest` call the menu uses,
+    // and a backend refusal is visible the same way: a toast, because a
+    // drag has no field the refusal could belong to. The fixture is
+    // movingDisk's, with the move made to refuse.
+    const disk = movingDisk()
+    disk.moveRequest.mockRejectedValue(new Error('a request with that name is already there'))
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row('ping.json'))
+
+    const target = folderRow(`${HANDLE}:users`)
+    const transfer = requestTransfer(HANDLE, 'ping.json')
+    fireEvent.dragStart(row('ping.json'), { dataTransfer: transfer })
+    fireEvent.dragOver(target, { dataTransfer: transfer })
+    fireEvent.drop(target, { dataTransfer: transfer })
+
+    await vi.waitFor(() =>
+      expect(toasts().some((t) => t.message.includes('already there'))).toBe(true),
+    )
+    expect(row('ping.json')).toBeTruthy()
+  })
+
+  /** The crumb segment between the collection and the request name. */
+  function folderCrumb(): string {
+    const el = workbench().querySelector<HTMLElement>('.api-crumbs__folder')
+    return (el?.textContent ?? '').trim()
+  }
+})
 // ── The import's report: whose it is, and how it ends (nocx-q2cx5) ────────
 //
 // The "Not imported" panel is the soft degrade AGENTS.md asks to be visible

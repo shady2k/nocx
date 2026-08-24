@@ -673,13 +673,13 @@ func (h gitBindingHandlers) handleStatus(ctx context.Context, state *connState, 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		status, err := hnd.Status(ctx)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		// The environment fact rides the poll (nocx-69ey): the panel switches
@@ -721,13 +721,13 @@ func (h gitBindingHandlers) handleDiff(ctx context.Context, state *connState, re
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		d, err := hnd.Diff(ctx, params.Path, git.Side(params.Side), params.MaxBytes)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitDiffResult{
@@ -759,7 +759,7 @@ func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, r
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
@@ -770,7 +770,7 @@ func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, r
 			status, err = hnd.Stage(ctx, params.Paths)
 		}
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
@@ -803,7 +803,7 @@ func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState,
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
@@ -822,7 +822,7 @@ func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState,
 				}))
 				return nil
 			}
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitUnstageResult{
@@ -854,13 +854,13 @@ func (h gitBindingHandlers) handleStageAll(ctx context.Context, state *connState
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		status, err := hnd.StageAll(ctx)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
@@ -888,13 +888,13 @@ func (h gitBindingHandlers) handleUnstageAll(ctx context.Context, state *connSta
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		status, err := hnd.UnstageAll(ctx)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
@@ -922,13 +922,13 @@ func (h gitBindingHandlers) handleCommit(ctx context.Context, state *connState, 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		outcome, err := hnd.Commit(ctx, params.Message, params.Amend)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		res := gitCommitResult{
@@ -967,13 +967,13 @@ func (h gitBindingHandlers) handleHeadMessage(ctx context.Context, state *connSt
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		hm, err := hnd.HeadMessage(ctx)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitHeadMessageResult{
@@ -1007,13 +1007,13 @@ func (h gitBindingHandlers) handleLog(ctx context.Context, state *connState, req
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
 		lg, err := hnd.Log(ctx, git.MaxLogEntries)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)}))
@@ -1046,7 +1046,7 @@ func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		hnd, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		defer release()
@@ -1057,7 +1057,7 @@ func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, 
 				_ = h.r.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "none"}))
 				return nil
 			}
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url}))
@@ -1085,14 +1085,14 @@ func (h gitBindingHandlers) handleClose(ctx context.Context, state *connState, r
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
 		_, release, err := svc.Acquire(params.BindingID, state)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		release()
 
 		h.bindings.forgetBinding(params.BindingID)
 		if err := svc.Close(params.BindingID); err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error(), Data: gitErrorReason(err)})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(gitCloseResult{Closed: true}))
@@ -1169,6 +1169,39 @@ func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 }
 
 // ── wire mapping helpers ──────────────────────────────────────────────────
+// gitErrorData carries a machine-readable reason in the JSON-RPC error
+// data, so the renderer can distinguish the domain refusals that share
+// -32602. The vault surface uses the same pattern (vaultErrorData,
+// reasonForError) for the same reason: a bare code is indistinguishable,
+// and matching on message text is the brittleness a discriminator exists
+// to avoid (ADR-0026 §6, the control-saturated precedent; nocx-bpqil).
+type gitErrorData struct {
+	Reason string `json:"reason"`
+}
+
+// gitErrorReason maps a git domain error to its wire reason, so the
+// renderer's isUnknownBinding can ask "is this an unknown binding?" rather
+// than "is this -32602?" — the code is shared by six distinct refusals.
+// Returns nil for a non-git error: an invocation failure carries no
+// reason, and the renderer must not treat it as a domain refusal.
+func gitErrorReason(err error) *gitErrorData {
+	switch err.(type) {
+	case *git.ErrUnknownBinding:
+		return &gitErrorData{Reason: "unknown-binding"}
+	case *git.ErrNotOwned:
+		return &gitErrorData{Reason: "not-owned"}
+	case *git.ErrHandleReleased:
+		return &gitErrorData{Reason: "handle-released"}
+	case *git.ErrNothingToCommit:
+		return &gitErrorData{Reason: "nothing-to-commit"}
+	case *git.ErrAmendUnborn:
+		return &gitErrorData{Reason: "amend-unborn"}
+	case *git.ErrConflicted:
+		return &gitErrorData{Reason: "conflicted"}
+	default:
+		return nil
+	}
+}
 
 // gitErrorCode maps git domain errors to JSON-RPC codes: the
 // request-shaped refusals — a binding the caller cannot use, an operation

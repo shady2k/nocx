@@ -52,7 +52,7 @@ import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
 import { showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
-import { filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
+import { directoryOf, filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
 import { malformedReason } from './malformed-reason'
 import { CollectionDialog } from './collection-dialog'
 import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-view'
@@ -130,6 +130,19 @@ const NOT_AN_EXPORT_REFUSAL =
  *  per site, because "direct" is one state and three spellings of it is
  *  three states that agree until they do not. */
 const DIRECT_ROUTE: ApiRoute = { kind: 'direct', profileId: '', insecureTls: false }
+
+/** What a REQUEST drag carries, so the drop handler can tell its own drag
+ *  from a foreign one (an OS file drop carries `Files`, the tab strip
+ *  carries its own type). The payload is the request's handle and path as
+ *  JSON — the two facts the move call needs — and the DATA is read only at
+ *  the drop, which is the one moment the browser hands it over. */
+const API_DRAG_MIME = 'application/x-nocx-api-request'
+
+/** What a drop onto ANOTHER COLLECTION is told. `api.request.move` takes
+ *  one handle — nocx-8aczn put cross-collection out of the METHOD, not
+ *  just out of the gesture — so the drop is refused, and it SAYS so rather
+ *  than silently doing nothing. */
+const CROSS_COLLECTION_REFUSAL = 'A request can only be moved within its own collection.'
 
 /** The two header names HTTP itself defines as carrying credentials. A LIST
  *  OF NAMES, not a detector: `internal/secrets.Detect` is the one owner of
@@ -738,6 +751,189 @@ export function ApiPane(props: ApiPaneProps) {
    *  methods retire independently, so a build whose `dialog.openDirectory`
    *  is missing must not take the export's Browse down with it. */
   const [filePickerLive, setFilePickerLive] = createSignal(filePicker !== undefined)
+
+  // ── The drag accelerator for the same move (nocx-9db1m) ───────────────
+  //
+  // The right-button menu's "Move to folder…" reaches `moveRequest` through
+  // the chooser above; dragging a request row onto a folder row is the
+  // ACCELERATOR — the same call, no dialog. The menu stays: it is the
+  // keyboard-equivalent and the only door that names every destination.
+  //
+  // THE DROP GRAMMAR, decided here and written where each rule is made:
+  //
+  // ONTO A FOLDER ROW, NOT BETWEEN TWO ROWS. The tree is sorted — folders
+  // before the requests beside them, parents before children, each list
+  // in the order the backend emitted it (api-tree.ts) — so reordering is
+  // not a concept: a request's position is its path, not its row index.
+  // There is no `api.request.reorder` call, and a drop between rows would
+  // have to mean one. Only folder rows (a collection or a directory) are
+  // drop targets; a request row, a malformed row and an empty row are not.
+  //
+  // WHAT THE ROW UNDER THE POINTER SAYS. A folder that may take the drop
+  // carries `data-drop-target="ok"`; every row that may not carries
+  // `data-drop-target="no"`. A drag with no feedback is a drag people do
+  // not trust, and a row that says nothing while a request hangs over it
+  // leaves the person guessing whether the release will land.
+  //
+  // THE SCROLLED TREE'S EDGES. The tree container itself is never a drop
+  // target — drops land on ROWS, not on gaps above the first or below the
+  // last row, and there is no auto-scroll for a gesture the tree cannot
+  // answer anyway. Reaching a folder off-screen means scrolling to it
+  // first, which is what a person does with a mouse in hand.
+  //
+  // A DROP ONTO ANOTHER COLLECTION is refused, and it SAYS so. nocx-8aczn
+  // put cross-collection out of the METHOD (api.request.move takes one
+  // handle), not just out of the gesture, so the refusal is a sentence the
+  // person sees — never a silent nothing.
+  //
+  // A DROP ONTO THE ROW IT CAME FROM, and onto the folder it is already
+  // in, sends NO call and reports NO error. `api.request.move` refuses a
+  // move to where it already is; sending a call we know will be refused is
+  // a wasted round trip, and reporting an error for a gesture that was a
+  // no-op is a lie. The gesture simply ends.
+  //
+  // THE SOURCE IS THE DATATRANSFER, not the row it left. The drop handler
+  // reads `API_DRAG_MIME` off the event: the DataTransfer withholds its
+  // DATA during a dragover (a target can only see the TYPES — the same
+  // rule the tab strip's drag relies on), so the source that decides the
+  // grammar on dragover lives in `dragSource`, and the source that ACTS at
+  // the drop is re-read from the transfer, which is authoritative even if
+  // the tree re-rendered under the gesture.
+  const [dragSource, setDragSource] = createSignal<{
+    handle: string
+    relPath: string
+  } | null>(null)
+  /** Which row the pointer is over during a drag, and what the drop there
+   *  would do: `ok` is a legal folder, `no` is anything else. Null when no
+   *  drag is in flight. One signal, because only one row can be under the
+   *  pointer at a time and a menu per row would be as many states as the
+   *  tree has entries. */
+  const [dropOver, setDropOver] = createSignal<{ key: string; verdict: 'ok' | 'no' } | null>(null)
+
+  /** THE SINGLE GATE for both dragover and drop. One discriminated answer
+   *  so a row cannot look droppable and then refuse, or look refused and
+   *  then accept:
+   *
+   *  - `legal` — a folder row in the SAME collection, not the folder the
+   *    request is already in. The drop moves the request.
+   *  - `crossCollection` — a folder row in ANOTHER collection. nocx-8aczn
+   *    put this out of the METHOD (api.request.move takes one handle), so
+   *    the drop is refused and SAYS so.
+   *  - `noOp` — a folder row that is the request's own directory: a move
+   *    to where it already is would be refused by the backend, and this
+   *    surface knows it before sending. The gesture simply ends.
+   *  - `notFolder` — a request, malformed or empty row. The tree is
+   *    sorted, so reordering is not a concept and these are not targets. */
+  const dropVerdict = (
+    source: { handle: string; relPath: string },
+    row: ApiTreeRow,
+  ): 'legal' | 'crossCollection' | 'noOp' | 'notFolder' => {
+    if (row.kind !== 'collection' && row.kind !== 'dir') return 'notFolder'
+    if (row.handle !== source.handle) return 'crossCollection'
+    if (row.relPath === directoryOf(source.relPath)) return 'noOp'
+    return 'legal'
+  }
+
+  /** Put the request's identity on the transfer so a REAL drop carries the
+   *  source off the wire (and so the dragover grammar can tell this drag
+   *  from an OS file drop, which carries `Files` and never this type). */
+  const onDragStart = (e: DragEvent, row: ApiTreeRow): void => {
+    if (row.kind !== 'request') return
+    e.dataTransfer?.setData?.(
+      API_DRAG_MIME,
+      JSON.stringify({ handle: row.handle, relPath: row.relPath }),
+    )
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+    setDragSource({ handle: row.handle, relPath: row.relPath })
+  }
+
+  /** The drag is over — wherever it landed. Both the source and the row
+   *  under the pointer stop being states. */
+  const onDragEnd = (): void => {
+    setDragSource(null)
+    setDropOver(null)
+  }
+
+  /** The row under the pointer says what a drop there would do. A LEGAL
+   *  target accepts the drop (preventDefault is what allows it to fire)
+   *  and a CROSS-COLLECTION folder accepts it too — not because the move
+   *  is possible, but because the refusal must be SAID at the drop, and a
+   *  dragover that never calls preventDefault never delivers the drop
+   *  event. Every other row refuses on the way in and shows `no`, so the
+   *  person is told before the release rather than at it. */
+  const onDragOver = (e: DragEvent, row: ApiTreeRow): void => {
+    const source = dragSource()
+    if (source === null) return
+    const verdict = dropVerdict(source, row)
+    setDropOver({ key: row.key, verdict: verdict === 'legal' ? 'ok' : 'no' })
+    if (verdict === 'legal' || verdict === 'crossCollection') e.preventDefault()
+  }
+
+  /** Leaving a row clears its verdict. The drag is still in flight; the
+   *  next row under the pointer will say its own. */
+  const onDragLeave = (row: ApiTreeRow): void => {
+    setDropOver((prev) => (prev?.key === row.key ? null : prev))
+  }
+
+  /** THE DROP. The source is read off the DataTransfer — NOT from the
+   *  `dragSource` signal — because the transfer is the one fact that did
+   *  not change if the tree re-rendered under the gesture, and because a
+   *  drag that carried no payload (an OS file, a corrupted transfer) is
+   *  a no-op, never a move. The same gate dragover ran decides what the
+   *  drop does. */
+  const onDrop = (e: DragEvent, row: ApiTreeRow): void => {
+    setDragSource(null)
+    setDropOver(null)
+    const raw = e.dataTransfer?.getData?.(API_DRAG_MIME)
+    if (raw === undefined || raw === '') return
+    let carried: { handle: string; relPath: string } | null = null
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        'handle' in parsed &&
+        typeof parsed.handle === 'string' &&
+        'relPath' in parsed &&
+        typeof parsed.relPath === 'string'
+      ) {
+        carried = { handle: parsed.handle, relPath: parsed.relPath }
+      }
+    } catch {
+      carried = null
+    }
+    // A syntactically valid payload with the wrong shape is still a corrupt
+    // transfer: no move without a handle and a path to move.
+    if (carried === null) return
+    const verdict = dropVerdict(carried, row)
+    if (verdict === 'crossCollection') {
+      showToast({ level: 'warning', message: CROSS_COLLECTION_REFUSAL })
+      return
+    }
+    if (verdict !== 'legal') return
+    // The same join the chooser makes: the folder the person dropped onto,
+    // joined to the request's own name. The RESULT is still the backend's
+    // word on where it landed.
+    const base = carried.relPath.slice(carried.relPath.lastIndexOf('/') + 1)
+    const toRelPath = row.relPath === '' ? base : `${row.relPath}/${base}`
+    void store
+      .moveRequest(carried.handle, carried.relPath, toRelPath)
+      .then(() => {
+        const refused = store.error()
+        if (refused !== '') {
+          // A drag has no field the refusal could belong to, so it is said
+          // where the kit says outcomes are said: a toast.
+          showToast({ level: 'danger', message: refused })
+          return
+        }
+        revealFolder(carried.handle, row.relPath)
+      })
+      .catch(() => {
+        // The store maps failures into error() and resolves; a rejection
+        // here is unexpected but must not be silent.
+        showToast({ level: 'danger', message: 'The request could not be moved.' })
+      })
+  }
 
   /**
    * The rows, narrowed by the filter.
@@ -2171,7 +2367,20 @@ export function ApiPane(props: ApiPaneProps) {
             </>
           }
         >
-          <div class="api-tree" role="tree" aria-label="Collections">
+          <div
+            class="api-tree"
+            role="tree"
+            aria-label="Collections"
+            /* THE SCROLLED TREE'S EDGES (nocx-9db1m): the container itself
+               is never a drop target, and a drag over the gap above the
+               first row or below the last must clear the last row's
+               verdict rather than leave it glowing. `target ===
+               currentTarget` is the gap: a dragover on a row has the row
+               as its target and bubbles here with a different one. */
+            onDragOver={(e: DragEvent) => {
+              if (e.target === e.currentTarget) setDropOver(null)
+            }}
+          >
             <Show
               when={rows().length > 0}
               fallback={
@@ -2204,6 +2413,24 @@ export function ApiPane(props: ApiPaneProps) {
                       class="api-tree__row"
                       data-rel-path={row.kind === 'request' ? row.relPath : undefined}
                       data-row-key={row.key}
+                      /* THE DRAG ACCELERATOR (nocx-9db1m). A request row is
+                         draggable; a folder row is a drop target. The
+                         grammar — which rows take a drop, what the row
+                         under the pointer says, the scrolled edges, the
+                         cross-collection refusal, the no-op drops — is
+                         decided in the drag handlers above, and the
+                         verdict (`data-drop-target`) is the ONE answer both
+                         dragover and drop use. The source rides the
+                         DataTransfer, not the DOM. */
+                      draggable={row.kind === 'request'}
+                      data-drop-target={
+                        dropOver()?.key === row.key ? dropOver()?.verdict : undefined
+                      }
+                      onDragStart={(e: DragEvent) => onDragStart(e, row)}
+                      onDragEnd={onDragEnd}
+                      onDragOver={(e: DragEvent) => onDragOver(e, row)}
+                      onDragLeave={() => onDragLeave(row)}
+                      onDrop={(e: DragEvent) => onDrop(e, row)}
                       onClick={() => activate(row)}
                       /* THE RIGHT BUTTON, which this tree answered by handing
                        the webview's own menu — reload, save image as — to a

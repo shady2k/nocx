@@ -7,7 +7,7 @@
 // do with a folder is asserted in api-workbench.test.tsx, where the control
 // is clicked; what a folder IS lives here.
 import { describe, expect, it } from 'vitest'
-import { filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
+import { directoryOf, filterCollections, flattenCollections, type ApiTreeRow } from './api-tree'
 import type { ApiOpenCollection } from './api-model'
 import { collectionFixture, collectionsFixture } from './api-test-fixtures'
 
@@ -222,5 +222,19 @@ describe('the filter narrows the folders with the rest', () => {
 
   it('a collection with nothing left is dropped rather than shown empty', () => {
     expect(filterCollections(example(), 'nothing-of-the-sort')).toEqual([])
+  })
+})
+
+describe('directoryOf — one owner of where a path lives (AD-8)', () => {
+  it("'' at the collection's root", () => {
+    expect(directoryOf('ping.json')).toBe('')
+  })
+
+  it('one folder deep', () => {
+    expect(directoryOf('users/create.json')).toBe('users')
+  })
+
+  it('several folders deep, parents included', () => {
+    expect(directoryOf('v1/admin/create.json')).toBe('v1/admin')
   })
 })

@@ -152,8 +152,11 @@ function leafName(name: string, relPath: string): string {
   return base !== '' ? base : relPath
 }
 
-/** The folder a path is in — '' at the collection's root. */
-function directoryOf(relPath: string): string {
+/** The folder a path is in — '' at the collection's root. Exported
+ *  because the surface asks the same question when it decides whether a
+ *  drop is a no-op (a request dragged onto the folder it is already in):
+ *  one owner of "where does this path live", per AD-8. */
+export function directoryOf(relPath: string): string {
   const cut = relPath.lastIndexOf('/')
   return cut === -1 ? '' : relPath.slice(0, cut)
 }

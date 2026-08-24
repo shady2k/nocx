@@ -35,11 +35,18 @@
       "required": ["kind"],
       "properties": {
         "kind": { "type": "string", "enum": ["none", "bearer", "basic", "apikey"] },
-        "var": {
-          "description": "A VARIABLE NAME. This is the load-bearing property of the whole format: there is deliberately no field in which a file can spell an identifier for stored credential material, so a folder arriving in a pull request has no way to reach the password behind an SSH profile (design §8). The binding from a variable name to a stored value lives in internal/apibind, which never enters this folder.",
+        "user": {
+          "description": "The basic-auth username, or the api-key header name.",
           "type": "string"
         },
-        "user": { "type": "string" }
+        "token": {
+          "description": "The bearer token or the api-key value. TEXT, like every other field in this file (nocx-6hg2w.20): a literal the person pasted is sent and is written here, and a {{name}} written into it resolves on send. The plain-vs-vault distinction is by construction, not by heuristic: a name the binding document answers is a secret, and the binding lives in internal/apibind, which never enters this folder. Design §8 still holds — there is no syntax in which a file names a secret; an identifier typed here is the literal it is.",
+          "type": "string"
+        },
+        "password": {
+          "description": "The basic-auth password, the same text.",
+          "type": "string"
+        }
       }
     }
   },

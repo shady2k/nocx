@@ -68,9 +68,13 @@ export const REQUEST: ApiRequest = {
   // say so.
   variables: [],
   body: { kind: 'raw', text: '{"email":"a@b.c","name":"A"}', fileRef: '' },
-  // A VARIABLE NAME. There is deliberately no field in the contract where a
-  // secret value or an identifier for one could be spelled (design §8).
-  auth: { kind: 'bearer', var: 'API_TOKEN', user: '' },
+  // AUTH IS TEXT LIKE EVERY OTHER FIELD: a literal the person pasted is sent
+  // and is written to the file, and a {{name}} written into it resolves
+  // through the same substitution as the URL (nocx-6hg2w.20). A variable
+  // name here is the ordinary `{{API_TOKEN}}` reference — there is
+  // deliberately no field in the contract where a secret VALUE or an
+  // identifier for one could be spelled (design §8).
+  auth: { kind: 'bearer', token: '{{API_TOKEN}}', password: '', user: '' },
 }
 
 /**

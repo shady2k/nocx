@@ -690,7 +690,7 @@ func writeHeaderLines(b *strings.Builder, rows []apicoll.Header) {
 // needs per redirect hop.
 func buildRequest(ctx context.Context, r apicoll.Request) (*http.Request, []string, string, error) {
 	if r.Auth.Kind != "" && r.Auth.Kind != apicoll.AuthNone {
-		return nil, nil, "", fmt.Errorf("%w (kind %q, variable %q)", ErrAuthUnresolved, r.Auth.Kind, r.Auth.Var)
+		return nil, nil, "", fmt.Errorf("%w (kind %q)", ErrAuthUnresolved, r.Auth.Kind)
 	}
 	u, err := url.Parse(strings.TrimSpace(r.URL))
 	if err != nil {

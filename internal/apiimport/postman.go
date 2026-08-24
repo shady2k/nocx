@@ -527,11 +527,11 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 		token := a.param(a.Bearer, "token")
 		if name, ok := varRef(token); ok {
 			c.namer.reserve(name)
-			req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Var: name}
+			req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}
 			return headers
 		}
 		v := c.namer.take("token")
-		req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Var: v}
+		req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + v + "}}"}
 		c.offerSecret(secretOffer{Variable: v, Value: []byte(token)})
 		return headers
 
@@ -540,11 +540,11 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 		pass := a.param(a.Basic, "password")
 		if name, ok := varRef(pass); ok {
 			c.namer.reserve(name)
-			req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Var: name}
+			req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + name + "}}"}
 			return headers
 		}
 		v := c.namer.take("password")
-		req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Var: v}
+		req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + v + "}}"}
 		c.offerSecret(secretOffer{Variable: v, Value: []byte(pass)})
 		return headers
 

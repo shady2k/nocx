@@ -3180,7 +3180,7 @@ describe('the environment a request goes out under', () => {
 
 /** The worked example with nothing authenticating it. */
 function unauthenticated(): ApiRequest {
-  return { ...REQUEST, auth: { kind: 'none', var: '', user: '' } }
+  return { ...REQUEST, auth: { kind: 'none', token: '', password: '', user: '' } }
 }
 
 /** Open the worked example with no credential on it, on the Auth tab, under
@@ -3225,6 +3225,7 @@ describe('a credential can be created from the Auth tab', () => {
     await vi.waitFor(() => expect(authSecretField()).not.toBeNull())
     expect(field('api-auth-var').value).toBe('')
     expect(field('api-auth-var').getAttribute('placeholder')).toBe('token')
+    expect(document.querySelector('label[for="api-auth-var"]')?.textContent).toBe('Token')
 
     fireEvent.input(authSecretField()!, { target: { value: SECRET_VALUE } })
     fireEvent.click(button('Store'))
@@ -3236,10 +3237,10 @@ describe('a credential can be created from the Auth tab', () => {
     )
     expect(bindSecret).toHaveBeenCalledTimes(1)
 
-    // The NAME is what lands in the form, and the value is not on screen
-    // anywhere afterwards — not in the field it was typed into, not in a
-    // chip, not in an attribute a text assertion would miss.
-    await vi.waitFor(() => expect(field('api-auth-var').value).toBe('token'))
+    // The REFERENCE is what lands in the form — the field carries `{{token}}`
+    // text, resolved by the same substitution as the URL — and the value is
+    // not on screen anywhere afterwards.
+    await vi.waitFor(() => expect(field('api-auth-var').value).toBe('{{token}}'))
     expect(authSecretField()!.value).toBe('')
     expect(workbench().innerHTML).not.toContain(SECRET_VALUE)
 
@@ -3255,42 +3256,33 @@ describe('a credential can be created from the Auth tab', () => {
     )
 
     // What the client was ASKED TO WRITE — the assertion that no screenshot
-    // could make. The request file carries the name and no byte of the value,
-    // and no environment file was rewritten at all: a binding is not a row.
+    // could make. The request file carries the reference and no byte of the
+    // value, and no environment file was rewritten at all: a binding is not
+    // a row.
     const calls = writeRequest.mock.calls
     const written = calls[calls.length - 1][2] as ApiRequest
-    expect(written.auth).toEqual({ kind: 'bearer', var: 'token', user: '' })
+    expect(written.auth).toEqual({ kind: 'bearer', token: '{{token}}', password: '', user: '' })
     expect(JSON.stringify(written)).not.toContain(SECRET_VALUE)
     expect(writeEnvironment).not.toHaveBeenCalled()
   })
-
-  it('a name the person types is the name it is bound under', async () => {
+  it('a name already referenced is the name the value is bound under', async () => {
     // Creating is an ADDITION to the tab: a variable somebody already bound
-    // elsewhere is still referenced by typing its name, and a name typed here
-    // is what the value is stored under rather than the proposal.
+    // elsewhere is still referenced by writing `{{name}}` into the field —
+    // that is the name's spelling now, since the field is text — and a
+    // value created here is stored under that name rather than under the
+    // scheme's proposal.
     const { bindSecret } = await openAuth()
     fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
     await vi.waitFor(() => expect(authSecretField()).not.toBeNull())
 
-    fireEvent.input(field('api-auth-var'), { target: { value: 'API_TOKEN' } })
+    fireEvent.input(field('api-auth-var'), { target: { value: '{{API_TOKEN}}' } })
     fireEvent.input(authSecretField()!, { target: { value: SECRET_VALUE } })
     fireEvent.click(button('Store'))
 
     await vi.waitFor(() =>
       expect(bindSecret).toHaveBeenCalledWith(HANDLE, DEV_ENV.relPath, 'API_TOKEN', SECRET_VALUE),
     )
-  })
-
-  it('each scheme proposes the word the importer already uses for it', async () => {
-    await openAuth()
-    fireEvent.change(control('auth-kind'), { target: { value: 'basic' } })
-    await vi.waitFor(() =>
-      expect(field('api-auth-var').getAttribute('placeholder')).toBe('password'),
-    )
-    fireEvent.change(control('auth-kind'), { target: { value: 'apikey' } })
-    await vi.waitFor(() =>
-      expect(field('api-auth-var').getAttribute('placeholder')).toBe('api_key'),
-    )
+    expect(field('api-auth-var').value).toBe('{{API_TOKEN}}')
   })
 
   it('a refusal keeps the pasted value and changes nothing on the request', async () => {
@@ -3351,19 +3343,59 @@ describe('a credential can be created from the Auth tab', () => {
     expect(workbench().textContent).toContain('Save this request into a collection')
   })
 
-  it('the tab says the variable name once, not twice', async () => {
+  it('the tab says the reference once, not twice', async () => {
     // nocx-qoavg: under the field sat `Sends 🔒name`, which is the field's own
     // contents read back. The chip's job is in the RUN view, where it stands
     // where a credential's bytes were.
     const { bar } = await mountApp()
     await openRequest(bar)
     fireEvent.click(button('Auth •'))
-    await vi.waitFor(() => expect(field('api-auth-var').value).toBe('API_TOKEN'))
-
     const panel = workbench().querySelector<HTMLElement>('#ui-tabpanel-auth')
     if (!panel) throw new Error('no auth panel')
     expect(panel.querySelectorAll('.ui-secret-chip')).toHaveLength(0)
-    expect(panel.textContent?.match(/API_TOKEN/g) ?? []).toHaveLength(0)
+    // The input's VALUE is not textContent, so the panel text must carry no
+    // copy of the reference at all — the "once, not twice" claim: field
+    // plus no second rendering.
+    expect(panel.textContent?.match(/{{API_TOKEN}}/g) ?? []).toHaveLength(0)
+  })
+})
+
+describe('a token pasted into the Auth tab is sent as the literal it is', () => {
+  it('the value the person typed is the value the file records and Send is reached', async () => {
+    // nocx-6hg2w.20, from the FORM: a literal pasted into the bearer field
+    // is text like every other field — it is written to the file as-is, is
+    // sent (the backend substitutes nothing for it), and nothing rewrites
+    // or refuses it. The web of assertions below pins the whole route from
+    // the field the person touches to the request that goes out.
+    const literal = '88730fee-9a4c-4c9d-8f4c-a1b2c3d4e5f6'
+    const sendRequest = vi.fn().mockResolvedValue(sendFixture())
+    const writeRequest = vi.fn().mockResolvedValue({})
+    const { bar } = await mountApp({ sendRequest, writeRequest })
+    await openRequest(bar)
+
+    fireEvent.click(button('Auth •'))
+    fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
+    fireEvent.input(field('api-auth-var'), { target: { value: literal } })
+
+    fireEvent.click(button('Send'))
+    await vi.waitFor(() => expect(sendRequest).toHaveBeenCalled())
+
+    // The value is on the wire: what the client was asked to write carries
+    // the literal verbatim, and the send reach is reached.
+    const calls = writeRequest.mock.calls
+    const written = calls[calls.length - 1][2] as ApiRequest
+    expect(written.auth).toEqual({ kind: 'bearer', token: literal, password: '', user: '' })
+    expect(JSON.stringify(written)).toContain(literal)
+    // And it went out as ITSELF: nothing here renamed it `{{token}}` or
+    // decided it was a variable nobody bound. That is the whole of the
+    // decision — the product does not hide or move a credential a person
+    // typed.
+    expect(sendRequest).toHaveBeenCalledWith(
+      HANDLE,
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+    )
   })
 })
 
@@ -4463,7 +4495,7 @@ function withPastedCredential(): ApiRequest {
     ...REQUEST,
     id: '',
     name: 'ping',
-    auth: { kind: 'none', var: '', user: '' },
+    auth: { kind: 'none', token: '', password: '', user: '' },
     headers: [
       { name: 'Content-Type', value: 'application/json', enabled: true },
       { name: 'Authorization', value: 'Bearer ghp_liveTokenTypedByHand', enabled: true },

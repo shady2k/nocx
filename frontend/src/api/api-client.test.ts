@@ -39,7 +39,7 @@ const REQUEST: ApiRequest = {
   query: [],
   variables: [],
   body: { kind: 'raw', text: '{"email":"a@b.c"}', fileRef: '' },
-  auth: { kind: 'bearer', var: 'API_TOKEN', user: '' },
+  auth: { kind: 'bearer', token: 'API_TOKEN', password: '', user: '' },
 }
 
 describe('ApiClient — one method per contract', () => {

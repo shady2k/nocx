@@ -585,8 +585,14 @@ func hasHeader(hs []apicoll.Header, name string) bool {
 
 // authFromHeader maps an Authorization value onto the model. The third
 // return is the scheme we could not map, named so it can be itemised — and
-// in that case the credential is dropped rather than written anywhere,
-// because there is no field in which a file may spell one (§8).
+// in that case the credential is dropped rather than written anywhere.
+//
+// A credential this entrance carries into a FILE is written as a variable
+// reference, `{{name}}`, and the value is offered to the BindWriter — a
+// file never carries the value's TEXT, which is the whole of §8 (see the
+// package doc). The auth field is text like any other (nocx-6hg2w.20): the
+// reference is ordinary `{{name}}` text, resolved by the same substitution
+// as the URL.
 func authFromHeader(value string, namer *varNamer) (apicoll.Auth, *secretOffer, string) {
 	value = strings.TrimSpace(value)
 	scheme, cred, _ := strings.Cut(value, " ")
@@ -595,14 +601,14 @@ func authFromHeader(value string, namer *varNamer) (apicoll.Auth, *secretOffer, 
 	case "bearer":
 		if name, ok := varRef(cred); ok {
 			namer.reserve(name)
-			return apicoll.Auth{Kind: apicoll.AuthBearer, Var: name}, nil, ""
+			return apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}, nil, ""
 		}
 		v := namer.take("token")
-		return apicoll.Auth{Kind: apicoll.AuthBearer, Var: v}, &secretOffer{Variable: v, Value: []byte(cred)}, ""
+		return apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + v + "}}"}, &secretOffer{Variable: v, Value: []byte(cred)}, ""
 	case "basic":
 		if name, ok := varRef(cred); ok {
 			namer.reserve(name)
-			return apicoll.Auth{Kind: apicoll.AuthBasic, Var: name}, nil, ""
+			return apicoll.Auth{Kind: apicoll.AuthBasic, User: "", Password: "{{" + name + "}}"}, nil, ""
 		}
 		raw, err := base64.StdEncoding.DecodeString(cred)
 		if err != nil {
@@ -613,7 +619,7 @@ func authFromHeader(value string, namer *varNamer) (apicoll.Auth, *secretOffer, 
 			return apicoll.Auth{}, nil, "Basic (not user:password)"
 		}
 		v := namer.take("password")
-		return apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Var: v}, &secretOffer{Variable: v, Value: []byte(pass)}, ""
+		return apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + v + "}}"}, &secretOffer{Variable: v, Value: []byte(pass)}, ""
 	default:
 		if scheme == "" {
 			return apicoll.Auth{}, nil, "(empty)"
@@ -622,23 +628,24 @@ func authFromHeader(value string, namer *varNamer) (apicoll.Auth, *secretOffer, 
 	}
 }
 
-// basicFromUserArg maps -u. A -u with no colon is curl's "prompt me": the
-// variable is named and left unbound, so the send blocks and says which
-// variable is missing instead of sending an empty password.
+// basicFromUserArg maps -u for the entrance that BINDS. A -u with no colon
+// is curl's "prompt me": the variable is named and left unbound, so the
+// send blocks and says which variable is missing instead of sending an
+// empty password.
 func basicFromUserArg(arg string, namer *varNamer) (apicoll.Auth, *secretOffer) {
 	user, pass, ok := strings.Cut(arg, ":")
 	auth := apicoll.Auth{Kind: apicoll.AuthBasic, User: user}
 	if !ok {
-		auth.Var = namer.take("password")
+		auth.Password = "{{" + namer.take("password") + "}}"
 		return auth, nil
 	}
 	if name, isRef := varRef(pass); isRef {
 		namer.reserve(name)
-		auth.Var = name
+		auth.Password = "{{" + name + "}}"
 		return auth, nil
 	}
 	v := namer.take("password")
-	auth.Var = v
+	auth.Password = "{{" + v + "}}"
 	return auth, &secretOffer{Variable: v, Value: []byte(pass)}
 }
 
@@ -673,7 +680,7 @@ func userArgOnRequest(arg string, hasAuthHeader bool) (*apicoll.Auth, *apicoll.H
 			"so no credential was carried: give it in the Auth tab"
 	}
 	if name, isRef := varRef(pass); isRef {
-		return &apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Var: name}, nil, ""
+		return &apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + name + "}}"}, nil, ""
 	}
 	return nil, &apicoll.Header{
 		Name:    "Authorization",

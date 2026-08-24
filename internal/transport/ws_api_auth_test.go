@@ -1,18 +1,23 @@
 package transport
 
-// api.request.send resolves the request's AUTH VARIABLE (design §8) — the
-// last step of the path from a collection file to a header, and the one that
-// was missing: apisend.Apply had no caller anywhere, so an auth kind other
-// than "none" was refused by name and no bearer, basic or api-key request
-// could be sent at all.
+// api.request.send carries the request's AUTH TEXT (design §8, nocx-6hg2w.20)
+// — the last step of the path from a collection file to a header. An auth
+// field is text like every other: a literal the person pasted is SENT, and
+// a `{{name}}` written into one resolves through the SAME substitution as
+// the URL. There is one resolver, not two.
 //
 // Everything here is driven over the real socket, against a real HTTP server,
 // with the REAL binding store (apibind.JSONStore over a real document store
 // and a fake vault). A fake binding store would prove the handler calls
 // whatever it was handed; the real one is what proves the variable a person
 // bound is the value the server receives, and — the test that matters — that
-// a vault identifier written into a collection file resolves to nothing
-// because it is a name nobody bound, not because something inspected it.
+// a vault identifier written into a collection file is sent as the LITERAL it
+// is, not resolved, because it is text and not a name the binding answered.
+//
+// Design §8 still holds: a file cannot NAME a secret, because there is no
+// syntax in which a file names one — an identifier typed into an auth field
+// is the literal it is in the file, and the binding from a name to a stored
+// value lives in the binding document.
 
 import (
 	"context"
@@ -44,7 +49,6 @@ import (
 // the dependency and never the thing under test.
 type apiAuthVault struct {
 	mu     sync.Mutex
-	n      int
 	values map[credential.SecretID][]byte
 }
 
@@ -53,30 +57,24 @@ func newAPIAuthVault() *apiAuthVault {
 }
 
 func (v *apiAuthVault) CreateNamed(_ context.Context, value credential.Secret, _ vault.SecretMeta) (credential.SecretID, error) {
-	var raw []byte
-	if err := value.Use(func(b []byte) error { raw = append([]byte(nil), b...); return nil }); err != nil {
-		return "", err
-	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.n++
-	// Deliberately id-shaped: the identifier a hostile file would love to be
-	// able to spell is a real one in this test.
-	id := credential.SecretID("keychain:nocx-secret-" + string(rune('a'+v.n-1)))
-	v.values[id] = raw
+	id := credential.SecretID(fmt.Sprintf("sec:%d", len(v.values)))
+	var got []byte
+	if err := value.Use(func(b []byte) error {
+		got = append([]byte(nil), b...)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	v.values[id] = got
 	return id, nil
 }
 
 func (v *apiAuthVault) Get(_ context.Context, id credential.SecretID) (credential.Secret, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	raw, ok := v.values[id]
-	if !ok {
-		// The vault's contract: an absent id is an empty Secret and a nil
-		// error.
-		return credential.Secret{}, nil
-	}
-	return credential.NewSecretBytes(raw), nil
+	return credential.NewSecretBytes(v.values[id]), nil
 }
 
 func (v *apiAuthVault) Delete(_ context.Context, id credential.SecretID) error {
@@ -88,10 +86,10 @@ func (v *apiAuthVault) Delete(_ context.Context, id credential.SecretID) error {
 
 // ── the collection a person would have ───────────────────────────────────
 
-// apiAuthCollection writes a collection whose request authenticates through a
-// variable, plus one environment naming that variable secret. authVar is what
-// the FILE says — which is the knob the hostile-file test turns.
-func apiAuthCollection(t *testing.T, baseURL, authVar string) string {
+// apiAuthCollection writes a collection whose request authenticates through
+// a variable, plus one environment naming that variable secret. authToken is
+// what the FILE's `token` field says — the knob the hostile-file test turns.
+func apiAuthCollection(t *testing.T, baseURL, authToken string) string {
 	t.Helper()
 	root := t.TempDir()
 	write := func(rel, body string) {
@@ -107,7 +105,7 @@ func apiAuthCollection(t *testing.T, baseURL, authVar string) string {
 	write("nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
 	write("private.json", `{"id":"r1","name":"private","method":"GET","url":"{{baseUrl}}/private",`+
 		`"headers":[],"query":[],"body":{"kind":"none"},`+
-		`"auth":{"kind":"bearer","var":`+mustJSON(t, authVar)+`}}`)
+		`"auth":{"kind":"bearer","token":`+mustJSON(t, authToken)+`}}`)
 	write("environments/dev.json", `{"name":"dev","values":{"baseUrl":`+mustJSON(t, baseURL)+`},`+
 		`"secretVars":["token"],"route":{"kind":"direct"}}`)
 	return root
@@ -167,11 +165,11 @@ func sendRaw(t *testing.T, conn *websocket.Conn, params map[string]any, id int) 
 	}
 }
 
-// ── 1. the bound variable becomes the header, and never crosses ──────────
+// ── 1. a bound {{token}} becomes the header, and never crosses ────────────
 
 // A person binds `token` in their `dev` environment; the file says
-// `"auth":{"kind":"bearer","var":"token"}`. The server receives the header,
-// and the value appears in NO frame the renderer is sent — the raw
+// `"auth":{"kind":"bearer","token":"{{token}}"}`. The server receives the
+// header, and the value appears in NO frame the renderer is sent — the raw
 // diagnostic shows the badge instead, which is §11.2's property arriving
 // through the seam that actually resolves the credential.
 func TestAPIRequestSend_ABoundAuthVariableBecomesTheHeaderAndNeverCrosses(t *testing.T) {
@@ -187,7 +185,7 @@ func TestAPIRequestSend_ABoundAuthVariableBecomesTheHeaderAndNeverCrosses(t *tes
 
 	bindings, _ := apiAuthStore(t)
 	_, conn := newAPIWSServer(t, bindings)
-	root := apiAuthCollection(t, srv.URL, "token")
+	root := apiAuthCollection(t, srv.URL, "{{token}}")
 
 	if err := bindings.Bind(context.Background(),
 		apibind.Key{Collection: root, Environment: "dev", Variable: "token"}, []byte(secret)); err != nil {
@@ -253,6 +251,58 @@ func unresolvedRun(t *testing.T, resp *vaultRPCResult) apiSendResponse {
 	return got
 }
 
+// ── 1b. a literal the person pasted is SENT and shows, both halves ───────
+
+// The owner's decision (nocx-tg9l8): the product does not hide or move a
+// credential a person typed. The same file with the LITERAL in the token
+// field sends it, and the raw request SHOWS it — no badge, because there is
+// no variable to name it by. Both halves of the "still elided / NOT elided"
+// pair are asserted here so this cannot later be read as a reversal.
+func TestAPIRequestSend_ALiteralPastIntoTheBearerFieldIsSentAndShown(t *testing.T) {
+	const literal = "88730fee-9a4c-4c9d-8f4c-a1b2c3d4e5f6"
+
+	var gotAuth atomic.Value
+	gotAuth.Store("")
+	var reached atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		gotAuth.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte("pong"))
+	}))
+	defer srv.Close()
+
+	bindings, _ := apiAuthStore(t)
+	_, conn := newAPIWSServer(t, bindings)
+	root := apiAuthCollection(t, srv.URL, literal)
+
+	handle := openAPICollection(t, conn, root, 1)
+	resp, frame := sendRaw(t, conn, map[string]any{
+		"handle": handle, "relPath": "private.json", "envRelPath": "environments/dev.json",
+	}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.request.send: %+v", resp.Error)
+	}
+	if reached.Load() != 1 {
+		t.Fatalf("the server was reached %d times, want 1", reached.Load())
+	}
+	if got, _ := gotAuth.Load().(string); got != "Bearer "+literal {
+		t.Errorf("the server received Authorization %q, want the literal %q", got, "Bearer "+literal)
+	}
+
+	var got apiSendResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal send result: %v", err)
+	}
+	// The literal is NOT elided: the frame carries it, and the rendered raw
+	// request shows it. Nothing here rewrites, refuses or hides it.
+	if !strings.Contains(string(frame), literal) {
+		t.Errorf("the literal never reached the renderer: the raw diagnostic elided a value it must show")
+	}
+	if !strings.Contains(got.Request.Text, literal) {
+		t.Errorf("the raw request does not show the literal the person typed:\n%s", got.Request.Text)
+	}
+}
+
 // ── 2. an unbound variable blocks the send and names itself ──────────────
 
 // `Authorization: Bearer ` is a plausible-looking request that teaches the
@@ -268,7 +318,7 @@ func TestAPIRequestSend_AnUnboundAuthVariableBlocksTheSendAndNamesItself(t *test
 
 	bindings, vlt := apiAuthStore(t)
 	_, conn := newAPIWSServer(t, bindings)
-	root := apiAuthCollection(t, srv.URL, "token")
+	root := apiAuthCollection(t, srv.URL, "{{token}}")
 
 	handle := openAPICollection(t, conn, root, 1)
 	resp, _ := sendRaw(t, conn, map[string]any{
@@ -280,15 +330,11 @@ func TestAPIRequestSend_AnUnboundAuthVariableBlocksTheSendAndNamesItself(t *test
 		t.Errorf("the refusal reads %q and does not name the variable the person has to bind",
 			got.Failure.Reason)
 	}
-	// The remedy is "bind this variable", and it has to read that way. A
-	// send path that never resolves auth at all refuses every one of these
-	// too, with apisend.ErrAuthUnresolved — an answer that is about the
-	// program rather than about anything the person can do.
 	if strings.Contains(got.Failure.Reason, "cannot resolve") {
 		t.Errorf("the refusal reads %q: that is the sender saying auth was never resolved, "+
 			"not this environment saying the variable is unbound", got.Failure.Reason)
 	}
-	// And the run says which environment it was asked of, which is half of
+	// The run says which environment it was asked of, which is half of
 	// "where do I go to fix this".
 	if got.Environment != "dev" {
 		t.Errorf("environment = %q, want dev", got.Environment)
@@ -301,19 +347,20 @@ func TestAPIRequestSend_AnUnboundAuthVariableBlocksTheSendAndNamesItself(t *test
 	}
 }
 
-// ── 3. a vault identifier in the file is just a name nobody bound ────────
+// ── 3. a vault identifier in the file is a literal, and it is SENT ───────
 
-// The file says `"auth":{"kind":"bearer","var":"keychain:nocx-secret-a"}` —
-// a REAL identifier, minted by this test's own vault for the value the same
-// person bound under `token`. §8's claim is that this buys the file nothing:
-// not because a guard rejects it, but because there is no syntax in which a
-// file names a secret, so an identifier is an unbound variable like any
-// other misspelling.
+// The file says `"auth":{"kind":"bearer","token":"keychain:nocx-secret-a"}`
+// — a REAL identifier, minted by this test's own vault for the value the
+// same person bound under `token`. Since auth is TEXT, the identifier is a
+// literal: the send path has no syntax through which a file could name the
+// bound value, so the request goes out with the identifier itself as the
+// credential — the sentence "the auth variable is not bound in this
+// environment" is gone, and nothing inspects the file's content.
 //
-// The ordinary bound path runs in the SAME test, against the same store and
-// the same server, so the refusal is evidence about identifiers and not
-// about a store that resolves nothing.
-func TestAPIRequestSend_AVaultIdentifierInTheFileResolvesToNothing(t *testing.T) {
+// The bound path runs in the SAME test, against the same store and the
+// same server, so the literal-is-sent claim is evidence about identifiers
+// and not about a store that resolves nothing.
+func TestAPIRequestSend_AVaultIdentifierInTheFileIsSentAsText(t *testing.T) {
 	var reached atomic.Int64
 	var gotAuth atomic.Value
 	gotAuth.Store("")
@@ -328,7 +375,7 @@ func TestAPIRequestSend_AVaultIdentifierInTheFileResolvesToNothing(t *testing.T)
 	_, conn := newAPIWSServer(t, bindings)
 
 	// One collection, honestly bound: `token` in `dev` is worth something.
-	honest := apiAuthCollection(t, srv.URL, "token")
+	honest := apiAuthCollection(t, srv.URL, "{{token}}")
 	if err := bindings.Bind(context.Background(),
 		apibind.Key{Collection: honest, Environment: "dev", Variable: "token"}, []byte("the reader's own token")); err != nil {
 		t.Fatalf("Bind: %v", err)
@@ -353,19 +400,28 @@ func TestAPIRequestSend_AVaultIdentifierInTheFileResolvesToNothing(t *testing.T)
 	resp, frame := sendRaw(t, conn, map[string]any{
 		"handle": hostileHandle, "relPath": "private.json", "envRelPath": "environments/dev.json",
 	}, 2)
-	hostileRun := unresolvedRun(t, resp)
-	if !strings.Contains(hostileRun.Failure.Reason, string(id)) {
-		t.Errorf("the reason reads %q and does not name what the file asked for", hostileRun.Failure.Reason)
+	if resp.Error != nil {
+		t.Fatalf("the identifier request was refused, want it sent as the literal it is: %+v", resp.Error)
 	}
-	if reached.Load() != 0 {
-		t.Errorf("the server was reached %d times, want 0", reached.Load())
+	var hostileRun apiSendResponse
+	if err := json.Unmarshal(resp.Result, &hostileRun); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
+	if got, _ := gotAuth.Load().(string); !strings.Contains(got, string(id)) {
+		t.Errorf("the server received Authorization %q, want the identifier typed into the file", got)
+	}
+	if !strings.Contains(string(frame), string(id)) {
+		t.Errorf("the literal identifier was elided from the frame: %s", frame)
+	}
+	// The bound VALUE never crossed as part of this: the file could not
+	// reach it, which is the whole of §8.
 	if strings.Contains(string(frame), "the reader's own token") {
 		t.Errorf("the refusal frame carries the value the identifier points at: %s", frame)
 	}
 
-	// And the ordinary path, same store, same server: the refusal above is
-	// about identifiers, not about a world in which nothing resolves.
+	// And the ordinary bound path, same store, same server: the literal
+	// claim above is about identifiers, not about a world in which nothing
+	// resolves.
 	honestHandle := openAPICollection(t, conn, honest, 3)
 	ok, _ := sendRaw(t, conn, map[string]any{
 		"handle": honestHandle, "relPath": "private.json", "envRelPath": "environments/dev.json",
@@ -373,7 +429,14 @@ func TestAPIRequestSend_AVaultIdentifierInTheFileResolvesToNothing(t *testing.T)
 	if ok.Error != nil {
 		t.Fatalf("the ordinary bound variable failed too: %+v", ok.Error)
 	}
+	var okRun apiSendResponse
+	if err := json.Unmarshal(ok.Result, &okRun); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 	if got, _ := gotAuth.Load().(string); got != "Bearer the reader's own token" {
 		t.Errorf("the server received Authorization %q, want the bound value", got)
+	}
+	if !strings.Contains(okRun.Request.Text, "⟦token⟧") {
+		t.Errorf("the bound value's place is not badged: %s", okRun.Request.Text)
 	}
 }

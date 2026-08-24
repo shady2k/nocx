@@ -74,7 +74,7 @@ func secretCollection(t *testing.T, baseURL string) string {
 		`"url":"{{baseUrl}}/bot{{token}}/sendMessage",`+
 		`"headers":[{"name":"X-Probe","value":"h-{{token}}","enabled":true}],`+
 		`"query":[{"name":"q","value":"q-{{token}}","enabled":true}],`+
-		`"body":{"kind":"raw","text":"b-{{token}}"},"auth":{"kind":"none"}}`)
+		`"body":{"kind":"raw","text":"b-{{token}}"},"auth":{"kind":"bearer","token":"{{token}}"}}`)
 	// The file declares the NAME and never the value — there is no field in
 	// this format one could be typed into (§8).
 	write("environments/dev.json", `{"name":"dev","values":{"baseUrl":`+mustJSON(t, baseURL)+`},`+
@@ -89,6 +89,7 @@ type received struct {
 	path  string
 	query string
 	head  string
+	auth  string
 	body  string
 	hits  int
 }
@@ -100,13 +101,14 @@ func (r *received) record(req *http.Request, body string) {
 	r.path = req.URL.Path
 	r.query = req.URL.RawQuery
 	r.head = req.Header.Get("X-Probe")
+	r.auth = req.Header.Get("Authorization")
 	r.body = body
 }
 
 func (r *received) snapshot() received {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return received{path: r.path, query: r.query, head: r.head, body: r.body, hits: r.hits}
+	return received{path: r.path, query: r.query, head: r.head, auth: r.auth, body: r.body, hits: r.hits}
 }
 
 // secretServer answers anything and remembers what it was sent.
@@ -289,6 +291,7 @@ func TestAPIRequestSend_ASecretResolvesInEveryFieldTextIsSubstitutedInto(t *test
 		{"the query", arrived.query},
 		{"the header", arrived.head},
 		{"the body", arrived.body},
+		{"the auth header", arrived.auth},
 	} {
 		if !strings.Contains(field.saw, secretValue) {
 			t.Errorf("%s arrived as %q — the variable was not resolved into it", field.what, field.saw)
@@ -305,14 +308,14 @@ func TestAPIRequestSend_ASecretResolvesInEveryFieldTextIsSubstitutedInto(t *test
 		t.Errorf("the value crossed to the renderer in the send frame: %s", frame)
 	}
 	// …because it was ELIDED rather than absent: the raw request shows the
-	// placeholder in all four places, which is what makes the assertion
+	// placeholder in all five places, which is what makes the assertion
 	// above about redaction rather than about an empty diagnostic.
 	var run apiSendResponse
 	if err := json.Unmarshal(resp.Result, &run); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if n := strings.Count(run.Request.Text, "⟦token⟧"); n != 4 {
-		t.Errorf("the raw request marks the secret %d times, want 4 (path, query, header, body):\n%s",
+	if n := strings.Count(run.Request.Text, "⟦token⟧"); n != 5 {
+		t.Errorf("the raw request marks the secret %d times, want 5 (path, query, header, body, auth):\n%s",
 			n, run.Request.Text)
 	}
 }

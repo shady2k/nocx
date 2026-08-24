@@ -146,30 +146,34 @@ function isOneVariableReference(s: string): boolean {
 }
 
 /**
- * The header a credential is sitting in AS TEXT, or '' when there is none.
+ * Where a credential sits in the request AS TEXT, or '' when there is none.
  *
  * WHY THE SURFACE ASKS AT ALL (nocx-flidy). The folder ask used to promise
  * "no secret value is ever written into it", which was true while every
  * credential arrived as a variable NAME resolved from the vault. nocx-14exx
  * decided — deliberately, and re-confirmed since — that a credential a person
- * pastes stays where they put it, so a curl line's Authorization header is
- * text in the request file, in the folder that sentence is about. Nothing
- * here rewrites, refuses or sanitises it; the sentence is the only thing that
- * changes.
+ * pastes stays where they put it, so a curl line's Authorization header and
+ * an auth field's literal are text in the request file, in the folder that
+ * sentence is about. Nothing here rewrites, refuses or sanitises it; the
+ * sentence is the only thing that changes.
  *
  * THE RULE IS `authFromHeader`'s, mirrored: an Authorization value is a
  * scheme, a space, and the credential, and the credential is variable-bound
  * exactly when it is one `{{name}}`. `Bearer {{token}}` therefore carries
  * nothing, and `Bearer ghp_…` carries everything. A value with no space at
- * all is the whole credential.
+ * all is the whole credential. THE AUTH BLOCK IS THE SAME QUESTION ANSWERED
+ * FOR ITS FIELDS: since nocx-6hg2w.20 the token and password fields are text
+ * like the headers, so a literal in either is exactly as much text in the
+ * file as one in an Authorization header — and one grammar decides both, so
+ * the two cannot diverge.
  *
  * IT ANSWERS ABOUT THE REQUEST IN THE FORM, which is what is about to be
  * saved into the folder being named, and never about the collection's other
- * files: `api.collections.list` carries a request's path, name and method and
- * no header at all, so a claim about the whole folder would be one the
+ * files: `api.collections.list` carries a request's path, name and method
+ * and no header at all, so a claim about the whole folder would be one the
  * renderer cannot make. That is why the sentence NAMES what it looked at.
  */
-function literalCredentialHeader(req: ApiRequest | null): string {
+function literalCredentialIn(req: ApiRequest | null): string {
   if (req === null) return ''
   for (const h of req.headers) {
     if (!h.enabled) continue
@@ -180,6 +184,18 @@ function literalCredentialHeader(req: ApiRequest | null): string {
     const credential = space < 0 ? value : value.slice(space + 1).trim()
     if (credential === '' || isOneVariableReference(credential)) continue
     return h.name.trim()
+  }
+  const auth = req.auth
+  if (auth.kind === 'bearer' || auth.kind === 'apikey') {
+    const v = auth.token.trim()
+    if (v !== '' && !isOneVariableReference(v)) return auth.kind === 'apikey' ? 'API key' : 'Bearer'
+  }
+  if (
+    auth.kind === 'basic' &&
+    auth.password.trim() !== '' &&
+    !isOneVariableReference(auth.password.trim())
+  ) {
+    return 'Basic password'
   }
   return ''
 }
@@ -513,9 +529,9 @@ export function ApiPane(props: ApiPaneProps) {
    *  state — and a report that outlived the workbench would be one nobody
    *  could attribute. */
   const [report, setReport] = createSignal<ImportReport | null>(null)
-  /** The header a credential is sitting in as text, in the request that is in
-   *  the form — '' when there is none. See literalCredentialHeader. */
-  const pastedCredential = (): string => literalCredentialHeader(store.draft())
+  /** Where a credential sits as TEXT in the request that is in the form —
+   *  '' when there is none. See literalCredentialIn. */
+  const pastedCredential = (): string => literalCredentialIn(store.draft())
   /**
    * What a folder ask says under its field about committing the folder.
    *

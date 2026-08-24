@@ -68,6 +68,7 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apiimport"
+	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -97,10 +98,10 @@ type OpenCollection struct {
 // lifetime — see the file comment.
 type SendInputs struct {
 	// Request is the request with the environment's plain variables
-	// resolved into it, and nothing else: a body naming a file and an auth
-	// naming a variable are still the caller's to resolve, and apisend
-	// refuses both rather than guessing. With no environment named it is
-	// the request exactly as the file has it.
+	// resolved into it, and nothing else: a body naming a file is still the
+	// caller's to resolve, and apisend refuses it rather than guessing.
+	// With no environment named it is the request exactly as the file has
+	// it.
 	//
 	// The substitution happens HERE rather than in the sender because it
 	// needs the environment, which needs the folder, which is what the gate
@@ -108,6 +109,15 @@ type SendInputs struct {
 	// projection of it (§6.4), so nothing written back can carry a value
 	// the user did not type.
 	Request apicoll.Request
+	// RawRequest is the request exactly as the FILE has it, before
+	// substitution. The sender maps a resolved auth block back onto it by
+	// FIELD, so it can know whether an auth credential came from the
+	// binding document without ever comparing resolved text against a
+	// recorded value: `auth.token` in the raw file is `{{name}}` exactly
+	// when the file says so, and the binding document answers a name
+	// exactly when it answered that name. There is no heuristic, because
+	// neither comparison is about the VALUE.
+	RawRequest apicoll.Request
 	// CookieScope is the collection's identity, and it is what keys the
 	// sender's client instance so two collections never share a jar. The
 	// path the user named is the stable identity across handles; a handle
@@ -116,17 +126,23 @@ type SendInputs struct {
 	// Environment is the environment's NAME as its file declares it —
 	// empty when no environment was named. It is carried out of the
 	// snapshot because it is half of the binding key (collection,
-	// environment, variable) the send path needs to resolve an auth
-	// variable, and it is READ HERE for the same reason the route is: the
-	// name and the values must come from one record at one moment, or a
-	// request resolves its address from one environment and its credential
-	// from another.
+	// environment, variable) the send path resolves variables under, and
+	// it is READ HERE for the same reason the route is: the name and the
+	// values must come from one record at one moment, or a request
+	// resolves its address from one environment and its credential from
+	// another.
 	//
 	// It is the name in the file and never the file's path. apiimport binds
 	// under the name, so deriving one from the other at the send would be a
 	// second answer to "which environment is this" — and the two would agree
 	// until somebody renamed an environment without renaming its file.
 	Environment string
+	// AuthSecrets records which of the request's auth FIELDS resolved
+	// through the binding document, by variable name — the field-to-source
+	// map apisend.Apply needs to elide by construction (nocx-6hg2w.20). A
+	// zero AuthSecrets means every auth field is a literal the person
+	// typed, which the product sends and shows.
+	AuthSecrets apisend.SecretSource
 	// Route is the environment's answer to "how do I get there" (§6.5). It
 	// comes from the SAME record as the address that was just substituted,
 	// which is the whole reason the route lives on the environment: the two
@@ -622,11 +638,11 @@ func (s *apiCollectionService) WriteRequest(h apicoll.HandleID, relPath string, 
 // unresolved and blocks the send — the honest state, and the same one the
 // user sees for a variable they have not given a value.
 //
-// The AUTH variable is the exception, and it is resolved by the caller
-// rather than here: the auth block names a variable rather than containing
-// one, so it is not substitution's business, and the resolved credential
-// must reach the sender as a NAMED SECRET or it would appear in the raw
-// diagnostic (§11.2). What this snapshot contributes to that is the
+// Since nocx-6hg2w.20 the AUTH is not an exception: its fields are text
+// like every other, resolved by the same substitution below, and the
+// field-wise provenance of which one the binding document answered is
+// carried out (AuthSecrets) so the sender can elide those bytes and show a
+// literal (§11.2). What this snapshot also contributes is the
 // environment's NAME, below — the half of the binding key that only the
 // record just read can supply.
 func (s *apiCollectionService) DeleteRequest(h apicoll.HandleID, relPath string) error {
@@ -671,7 +687,7 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 	// before the substitution rather than after, because it is what a run
 	// that CANNOT be substituted has to be built from — see the unresolved
 	// branch below.
-	inputs := SendInputs{Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
+	inputs := SendInputs{RawRequest: req, Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
 
 	// No environment is a LOOKUP THAT ANSWERS NOTHING, not a substitution
 	// skipped. Skipping it is what made `{{baseUrl}}/zen` with nothing bound
@@ -694,11 +710,11 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 		inputs.Route = env.Route
 		look = env.Lookup()
 		// THE SECOND LOOKUP, which is what Chain has always existed for and
-		// what was never built. A vault-held value reached exactly one field
-		// — the auth variable, resolved by the sender — so a token that goes
-		// in a PATH could only be sent by typing it into a file that goes
-		// into git. Telegram is the shape that names the gap:
-		// `/bot<TOKEN>/sendMessage`.
+		// what was never built. A vault-held value used to reach exactly
+		// one field — the auth variable, resolved by the sender — so a
+		// token that goes in a PATH could only be sent by typing it into a
+		// file that goes into git. Telegram is the shape that names the
+		// gap: `/bot<TOKEN>/sendMessage`.
 		//
 		// BEHIND the environment, never in front of it. Environment.Value
 		// already refuses a name the file declares secret, so the two halves
@@ -743,8 +759,39 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 		// has to fix is visible in the text they are shown.
 		return inputs, err
 	}
+
+	// WHICH AUTH FIELD CAME FROM THE BINDING DOCUMENT, answered by
+	// FIELD-WISE comparison of the file's text against the names the
+	// binding just answered — never by inspecting a RESOLVED VALUE. A field
+	// the file wrote as exactly one `{{name}}` is named by a binding when
+	// that name is one of Secrets; a literal the person typed is not a
+	// reference at all; `Bearer {{name}}` text is a reference not covering
+	// the whole field, which the file has no way to be bound AS a secret —
+	// it is resolved like any other mixed text and shown like any other
+	// text. A name that resolves to a PLAIN environment value is also
+	// absent here: the plain values are not secrets, which is the point of
+	// the construction (apicoll.Chain: env first, binding second).
+	inputs.AuthSecrets.Token = authFieldSource(req.Auth.Token, inputs.Secrets)
+	inputs.AuthSecrets.Password = authFieldSource(req.Auth.Password, inputs.Secrets)
 	inputs.Request = resolved
 	return inputs, nil
+}
+
+// authFieldSource answers which variable name a raw auth FIELD resolved
+// through the binding document, or "" when it is a literal (or mixed text,
+// or an environment-plain value). See the Snapshot comment above for why
+// this is by construction rather than by inspecting resolved text.
+func authFieldSource(raw string, placed []PlacedSecret) string {
+	name, ok := apicoll.ExactReference(raw)
+	if !ok {
+		return ""
+	}
+	for _, p := range placed {
+		if p.Name == name {
+			return name
+		}
+	}
+	return ""
 }
 
 // recordPlaced wraps a lookup so the caller learns WHICH values it answered.

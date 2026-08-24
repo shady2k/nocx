@@ -291,7 +291,10 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     // form is a projection of it (§6.4), so `{{baseUrl}}` is what a person
     // sees here and the environment is what resolves it at send time.
     await expect(workbench.locator('#api-url')).toHaveValue('{{baseUrl}}/users')
-    await expect(workbench.locator('#api-auth-var')).toHaveValue(SECRET_VAR)
+    // The auth field is TEXT: the file carries the `{{token}}` reference,
+    // exactly as it does in the URL above — one resolver, not two
+    // (nocx-6hg2w.20).
+    await expect(workbench.locator('#api-auth-var')).toHaveValue('{{' + SECRET_VAR + '}}')
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
 
@@ -345,6 +348,35 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     expect(hits).toHaveLength(1)
     expect(hits[0].authorization).toBe(`Bearer ${POSTMAN_BEARER_TOKEN}`)
     expect(hits[0].body).toBe(POSTMAN_REQUEST_BODY)
+
+    // ── Step 5b: a literal pasted into the Auth tab is sent as the literal ─
+    //
+    // nocx-6hg2w.20's acceptance through the REAL wire: the same form, the
+    // auth field's token text replaced with a raw literal, Send, and the
+    // test server — which answers 401 for any Authorization that is not the
+    // exact bound token — receives the literal as the header. That both
+    // SENT it and did not rewrite it is the server's own account, asserted
+    // after the row appears rather than on any timing.
+    const pasted = '88730fee-9a4c-4c9d-8f4c-a1b2c3d4e5f6'
+    await workbench.locator('#api-auth-var').fill(pasted)
+    await expect(workbench.locator('#api-auth-var')).toHaveValue(pasted)
+
+    await workbench.getByRole('button', { name: 'Send', exact: true }).click()
+    const literalRun = workbench.locator('.api-run').nth(1)
+    await expect(literalRun).toBeVisible({ timeout: 20_000 })
+    await expect(literalRun.locator('.api-run__stats')).toContainText('HTTP status 401')
+
+    // The second request reached the wire and carried the LITERAL, not the
+    // bound token and not a rewritten reference — the server's own record,
+    // matched by its Authorization header.
+    const literalHits = server.requests().filter((r) => r.authorization === `Bearer ${pasted}`)
+    expect(literalHits).toHaveLength(1)
+    expect(literalHits[0].path).toBe('/users')
+
+    // And the raw view of THE LITERAL RUN shows the pasted value, unelided:
+    // a literal is shown, which is the other half of the elision pair.
+    await literalRun.getByRole('tab', { name: 'Raw' }).click()
+    await expect(literalRun.locator('[aria-label="Raw request"]')).toContainText(pasted)
 
     // ── Step 6: a long body line moves the EDITOR, never the surface ────────
     //

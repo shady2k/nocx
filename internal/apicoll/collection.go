@@ -97,15 +97,28 @@ const (
 	AuthAPIKey = "apikey"
 )
 
-// Auth names a VARIABLE, never a secret. Var is looked up as a variable name
-// in the current environment; a file that puts a vault identifier here has
-// merely named a variable nobody bound, and the send is blocked as
-// unresolved. That is the whole of §8: the attack is unspellable rather than
-// guarded.
+// Auth holds TEXT, like every other field in the format. The bearer token,
+// the basic password and the username are the values the person typed —
+// possibly `{{variable}}` references, resolved by the same substitution as
+// the URL, a header or the body (design §6.5, nocx-6hg2w.20).
+//
+// The plain-vs-vault distinction is BY CONSTRUCTION, not by heuristic: a
+// variable the binding document answers is a secret. A literal the person
+// pasted stays text in the file, is SENT, and is written to their file —
+// the decision recorded in nocx-tg9l8: the product does not hide or move a
+// credential a person typed. Design §8 is unchanged: a file still cannot
+// NAME a secret, because there is no syntax in which a file names one — a
+// vault identifier typed here is simply the literal it is, and the binding
+// from a name to a stored value lives in internal/apibind, nowhere in this
+// folder.
 type Auth struct {
 	Kind string `json:"kind"`
-	Var  string `json:"var,omitempty"`
 	User string `json:"user,omitempty"`
+	// Token is the bearer token, or the api-key value. Text: it may be a
+	// literal the person pasted or a `{{variable}}` reference.
+	Token string `json:"token,omitempty"`
+	// Password is the basic-auth password, as the same text.
+	Password string `json:"password,omitempty"`
 }
 
 // RouteKind values. The route lives on the ENVIRONMENT, never on a request

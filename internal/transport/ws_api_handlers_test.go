@@ -163,7 +163,7 @@ func apiEnvironmentFolder(t *testing.T) string {
 	write("in-body.json", `{"id":"r3","name":"in-body","method":"POST","url":"http://127.0.0.1:1/x",`+
 		`"body":{"kind":"raw","text":"{\"who\":\"{{tenant}}\"}"},"auth":{"kind":"none"}}`)
 	write("in-auth.json", `{"id":"r4","name":"in-auth","method":"GET","url":"http://127.0.0.1:1/x",`+
-		`"body":{"kind":"none"},"auth":{"kind":"bearer","var":"tenant"}}`)
+		`"body":{"kind":"none"},"auth":{"kind":"bearer","token":"{{tenant}}"}}`)
 	return root
 }
 

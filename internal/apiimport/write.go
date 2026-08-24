@@ -243,10 +243,21 @@ func curlImport(line string) (postmanResult, error) {
 		env.SecretVars = append(env.SecretVars, o.Variable)
 		res.Secrets = append(res.Secrets, o)
 	}
-	// A request whose auth names a variable nobody bound still needs that
-	// variable declared, or the send has nothing to report as unresolved.
-	if req.Auth.Var != "" && !contains(env.SecretVars, req.Auth.Var) {
-		env.SecretVars = append(env.SecretVars, req.Auth.Var)
+	// An auth field that is EXACTLY one reference — which is what the
+	// importers write, and what "carries the name, not the value" means in
+	// the model — needs that name declared secret too, or the send has
+	// nothing to report as unresolved when the binding is absent.
+	sawAuth := map[string]bool{}
+	if n, ok := apicoll.ExactReference(req.Auth.Token); ok {
+		sawAuth[n] = true
+	}
+	if n, ok := apicoll.ExactReference(req.Auth.Password); ok {
+		sawAuth[n] = true
+	}
+	for n := range sawAuth {
+		if !contains(env.SecretVars, n) {
+			env.SecretVars = append(env.SecretVars, n)
+		}
 	}
 	res.Environments = []apicoll.Environment{env}
 	return res, nil

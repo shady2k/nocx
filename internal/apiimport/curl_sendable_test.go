@@ -70,7 +70,7 @@ func TestCurlImportedRequestSendsOnNoEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Substitute refused the imported request: %v", err)
 	}
-	sending, used, err := apisend.Apply(resolved, nil)
+	sending, used, err := apisend.Apply(resolved, apisend.SecretSource{})
 	if err != nil {
 		t.Fatalf("Apply refused the imported request: %v", err)
 	}

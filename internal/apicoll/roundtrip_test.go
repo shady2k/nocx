@@ -40,7 +40,7 @@ func TestReadWriteRequest_RoundTrips(t *testing.T) {
 				Headers: []Header{{Name: "{{hname}}", Value: "{{hvalue}}", Enabled: true}},
 				Query:   []Param{{Name: "{{qname}}", Value: "{{qvalue}}", Enabled: false}},
 				Body:    Body{Kind: BodyRaw, Text: "{{payload}}"},
-				Auth:    Auth{Kind: AuthBearer, Var: "{{tokenVar}}", User: "{{user}}"},
+				Auth:    Auth{Kind: AuthBearer, Token: "{{tokenVar}}", User: "{{user}}"},
 			},
 		},
 		{
@@ -70,7 +70,7 @@ func TestReadWriteRequest_RoundTrips(t *testing.T) {
 			req: Request{
 				ID: "6", Name: "File body", Method: "PUT", URL: "http://x/",
 				Body: Body{Kind: BodyFile, FileRef: "bodies/payload.bin"},
-				Auth: Auth{Kind: AuthAPIKey, Var: "apiKey"},
+				Auth: Auth{Kind: AuthAPIKey, Token: "apiKey"},
 			},
 		},
 		{

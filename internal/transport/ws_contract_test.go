@@ -6027,7 +6027,7 @@ func TestAPIRequestRead_DTOConformsToContract(t *testing.T) {
 				{Name: "term", Value: "unused", Enabled: false},
 			},
 			Body: apiBodyWire{Kind: "raw", Text: "hello"},
-			Auth: apiAuthWire{Kind: "bearer", Var: "token"},
+			Auth: apiAuthWire{Kind: "bearer", Token: "{{token}}"},
 		}},
 		// A request with no headers, no query and no variables: all three
 		// are [], never null.

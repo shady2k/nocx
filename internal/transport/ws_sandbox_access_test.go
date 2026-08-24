@@ -27,12 +27,13 @@ func (r *accessRPCResponder) TryError(_ json.RawMessage, rpcErr RPCError) error 
 func (r *accessRPCResponder) TryNotify(string, json.RawMessage) error { return nil }
 
 type accessGrantStore struct {
-	access sandbox.AccessClass
-	path   string
+	workspaceID string
+	access      sandbox.AccessClass
+	path        string
 }
 
-func (s *accessGrantStore) AppendSandboxPath(access sandbox.AccessClass, path string) (int, error) {
-	s.access, s.path = access, path
+func (s *accessGrantStore) PromoteSandboxPath(workspaceID string, access sandbox.AccessClass, path string) (int64, error) {
+	s.workspaceID, s.access, s.path = workspaceID, access, path
 	return 9, nil
 }
 
@@ -57,14 +58,14 @@ func TestSandboxAccessHandlersListAndResolveByEventID(t *testing.T) {
 		t.Fatalf("list result = %s, err = %v", responder.result, err)
 	}
 
-	params, _ := json.Marshal(sandboxAccessResolveParams{EventID: page.Events[0].ID, Decision: sandbox.AccessDecisionGlobalReadWrite})
+	params, _ := json.Marshal(sandboxAccessResolveParams{EventID: page.Events[0].ID, Decision: sandbox.AccessDecisionWorkspaceReadWrite})
 	responder.result, responder.rpcErr = nil, nil
 	handlers.handleResolve(t.Context(), jsonrpcRequest{ID: json.RawMessage(`2`), Params: params})
 	if responder.rpcErr != nil || grant.access != sandbox.AccessReadWrite || grant.path != directory {
 		t.Fatalf("resolve err = %#v, grant = %#v", responder.rpcErr, grant)
 	}
 	var resolved sandbox.AccessEvent
-	if err := json.Unmarshal(responder.result, &resolved); err != nil || resolved.State != sandbox.AccessStateGranted || resolved.SettingsRevision != 9 {
+	if err := json.Unmarshal(responder.result, &resolved); err != nil || resolved.State != sandbox.AccessStateGranted || resolved.ProfileRevision != 9 {
 		t.Fatalf("resolve result = %s, err = %v", responder.result, err)
 	}
 

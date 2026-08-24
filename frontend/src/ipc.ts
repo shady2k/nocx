@@ -26,6 +26,10 @@ import type {
 } from './generated/sandbox.access.list'
 import type { SandboxAccessResolve } from './generated/sandbox.access.resolve'
 import type { SandboxAccessStatus } from './generated/sandbox.access.status'
+import type { SandboxProfileGet } from './generated/sandbox.profile.get'
+import type { SandboxProfileSet } from './generated/sandbox.profile.set'
+import type { SandboxProfileDelete } from './generated/sandbox.profile.delete'
+import type { SandboxGrantGet } from './generated/sandbox.grant.get'
 
 // ── Sandbox wire types (ADR-0030 §3.3, §4.2) ────────────────────────────
 
@@ -36,6 +40,10 @@ export type {
   SandboxAccessList,
   SandboxAccessResolve,
   SandboxAccessStatus,
+  SandboxProfileGet,
+  SandboxProfileSet,
+  SandboxProfileDelete,
+  SandboxGrantGet,
 }
 /** Immutable sandbox metadata for a sandboxed session (ADR-0030 §3.3, ADR-0036 §8). */
 interface HomeProjection {
@@ -61,6 +69,7 @@ export interface SessionSandboxInfo {
  */
 export interface SandboxLaunch {
   readonly settingsRevision: number
+  readonly profileRevision: number | null
   readonly addWritable: string[]
   readonly removeWritable: string[]
   readonly addReadOnly: string[]
@@ -837,6 +846,7 @@ export class WSClient {
     const sandbox: {
       workspace: string
       settingsRevision: number
+      profileRevision: number | null
       addWritable?: string[]
       removeWritable?: string[]
       addReadOnly?: string[]
@@ -844,6 +854,7 @@ export class WSClient {
     } = {
       workspace: request.workspace,
       settingsRevision: request.settingsRevision,
+      profileRevision: request.profileRevision,
     }
     // Empty deltas are omitted, not sent as empty arrays: the DTO treats the
     // four arrays as optional, so only non-empty deltas ride the wire.
@@ -868,6 +879,37 @@ export class WSClient {
   sandboxStatus(): Promise<SandboxStatus | null> {
     return this.dispatcher.call<SandboxStatus | null>('sandbox.status', {})
   }
+  sandboxProfileGet(paneId: string): Promise<SandboxProfileGet> {
+    return this.dispatcher.call<SandboxProfileGet>('sandbox.profile.get', { paneId })
+  }
+
+  sandboxProfileSet(
+    workspaceId: string,
+    expectedRevision: number,
+    writablePaths: string[],
+    readOnlyPaths: string[],
+  ): Promise<SandboxProfileSet> {
+    return this.dispatcher.call<SandboxProfileSet>('sandbox.profile.set', {
+      workspaceId,
+      expectedRevision,
+      writablePaths,
+      readOnlyPaths,
+    })
+  }
+
+  sandboxProfileDelete(
+    workspaceId: string,
+    expectedRevision: number,
+  ): Promise<SandboxProfileDelete> {
+    return this.dispatcher.call<SandboxProfileDelete>('sandbox.profile.delete', {
+      workspaceId,
+      expectedRevision,
+    })
+  }
+
+  sandboxGrantGet(paneId: string): Promise<SandboxGrantGet> {
+    return this.dispatcher.call<SandboxGrantGet>('sandbox.grant.get', { paneId })
+  }
 
   sandboxAccessStatus(): Promise<SandboxAccessStatus | null> {
     return this.dispatcher.call<SandboxAccessStatus | null>('sandbox.access.status', {})
@@ -879,7 +921,7 @@ export class WSClient {
 
   sandboxAccessResolve(
     eventId: string,
-    decision: 'dismiss' | 'globalReadOnly' | 'globalReadWrite',
+    decision: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite',
   ): Promise<SandboxAccessResolve> {
     return this.dispatcher.call<SandboxAccessResolve>('sandbox.access.resolve', {
       eventId,

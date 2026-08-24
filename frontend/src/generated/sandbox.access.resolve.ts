@@ -10,13 +10,15 @@
  */
 
 /**
- * Resolved sandbox access event returned after dismissing it or atomically promoting its backend-owned directory to a global rule.
+ * Resolved sandbox access event returned after dismissing it or atomically promoting its backend-owned directory to the event's workspace profile.
  */
 export interface SandboxAccessResolve {
   id: string
   sessionId: string
   instanceId: string
   sessionEpoch: number
+  paneId: string
+  workspaceId: string
   shell?: string
   executable?: string
   path: string
@@ -30,6 +32,6 @@ export interface SandboxAccessResolve {
   lastSeen: string
   count: number
   state: 'pending' | 'dismissed' | 'granted' | 'expired'
-  decision?: 'dismiss' | 'globalReadOnly' | 'globalReadWrite'
-  settingsRevision?: number
+  decision?: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite'
+  profileRevision?: number
 }

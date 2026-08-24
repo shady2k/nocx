@@ -349,13 +349,3 @@
 .st-vis-hidden {
   display: none;
 }
-
-/* ── Sandbox denied-access inbox — placement only ──────────────────────
-   The inbox is a CollectionView of RecordRows and its state lines are
-   StatusCards, so appearance lives in the kit. What is left here is one
-   thing the surface owns: a denied path is long and arbitrary, so the row's
-   title and detail lines wrap instead of stretching the column. */
-.sandbox-access-settings .ui-record-row__title,
-.sandbox-access-settings .ui-record-row__detail {
-  overflow-wrap: anywhere;
-}

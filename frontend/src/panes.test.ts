@@ -2928,6 +2928,7 @@ describe('newSandboxedTab (ADR-0036)', () => {
     const { manager } = await mountTabManager(client)
     const launch = {
       settingsRevision: 1,
+      profileRevision: null,
       addWritable: ['/a'],
       removeWritable: ['/b'],
       addReadOnly: ['/r1'],
@@ -2948,6 +2949,7 @@ describe('newSandboxedTab (ADR-0036)', () => {
       expect(openSandboxedSession).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), {
         workspace: '/w',
         settingsRevision: 1,
+        profileRevision: null,
         addWritable: ['/a'],
         removeWritable: ['/b'],
         addReadOnly: ['/r1'],

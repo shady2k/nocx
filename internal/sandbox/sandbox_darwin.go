@@ -210,7 +210,7 @@ func (s *darwinService) Prepare(ctx context.Context, req Request, spec CommandSp
 	var accessMonitor *darwinAccessMonitor
 	var accessSession *AccessSession
 	if accessToken != "" {
-		accessSession = s.access.BeginSession(req.Identity)
+		accessSession = s.access.BeginSession(req.Identity, req.PaneID, req.WorkspaceID)
 	}
 	if accessToken != "" {
 		accessMonitor, err = startDarwinAccessMonitor(accessSession, spec.Path, accessToken, func(error) {

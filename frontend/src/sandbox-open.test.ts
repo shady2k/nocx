@@ -1,18 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import {
-  openSandboxedShell,
-  SANDBOX_WRITABLE_PATHS_KEY,
-  SANDBOX_READ_ONLY_PATHS_KEY,
-} from './sandbox-open'
+import { openSandboxedShell } from './sandbox-open'
 
 function deps(overrides: Partial<Parameters<typeof openSandboxedShell>[0]> = {}) {
   return {
-    getSnapshot: vi.fn().mockResolvedValue({
-      values: {
-        [SANDBOX_WRITABLE_PATHS_KEY]: ['/a', '/b'],
-        [SANDBOX_READ_ONLY_PATHS_KEY]: ['/r1'],
-      },
-      revision: 7,
+    getSnapshot: vi.fn().mockResolvedValue({ values: {}, revision: 7 }),
+    getProfile: vi.fn().mockResolvedValue({
+      source: 'workspace' as const,
+      revision: 4,
+      writablePaths: ['/a', '/b'],
+      readOnlyPaths: ['/r1'],
     }),
     openDirectory: vi.fn().mockResolvedValue({ path: '/workspace' }),
     showPermissions: vi.fn().mockResolvedValue({
@@ -28,11 +24,12 @@ function deps(overrides: Partial<Parameters<typeof openSandboxedShell>[0]> = {})
 }
 
 describe('openSandboxedShell', () => {
-  it('reads one fresh snapshot, shows both baselines, and forwards only revision + deltas', async () => {
+  it('reads one fresh profile, shows both defaults, and forwards only revisions + deltas', async () => {
     const d = deps()
-    await openSandboxedShell(d)
+    await openSandboxedShell(d, { paneId: 'pane-1' })
 
     expect(d.getSnapshot).toHaveBeenCalledTimes(1)
+    expect(d.getProfile).toHaveBeenCalledWith('pane-1')
     expect(d.openDirectory).toHaveBeenCalledTimes(1)
     expect(d.showPermissions).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -43,6 +40,7 @@ describe('openSandboxedShell', () => {
     )
     expect(d.newSandboxedTab).toHaveBeenCalledWith('/workspace', {
       settingsRevision: 7,
+      profileRevision: 4,
       addWritable: ['/d'],
       removeWritable: ['/b'],
       addReadOnly: ['/r2'],
@@ -53,7 +51,7 @@ describe('openSandboxedShell', () => {
 
   it('uses a verified workspace override without opening the initial picker', async () => {
     const d = deps()
-    await openSandboxedShell(d, { workspace: '/verified/project' })
+    await openSandboxedShell(d, { workspace: '/verified/project', paneId: 'pane-1' })
 
     expect(d.openDirectory).not.toHaveBeenCalled()
     expect(d.showPermissions).toHaveBeenCalledWith(
@@ -64,13 +62,14 @@ describe('openSandboxedShell', () => {
 
   it('never sends either baseline or an effective root', async () => {
     const d = deps()
-    await openSandboxedShell(d)
+    await openSandboxedShell(d, { paneId: 'pane-1' })
 
     const launch = vi.mocked(d.newSandboxedTab).mock.calls[0][1] as Record<string, unknown>
     // The launch object carries only the revision and four deltas — no baseline.
     expect(Object.keys(launch).sort()).toEqual([
       'addReadOnly',
       'addWritable',
+      'profileRevision',
       'removeReadOnly',
       'removeWritable',
       'settingsRevision',
@@ -79,7 +78,7 @@ describe('openSandboxedShell', () => {
 
   it('a cancelled workspace picker creates no tab and no dialog', async () => {
     const d = deps({ openDirectory: vi.fn().mockResolvedValue({ path: '' }) })
-    await openSandboxedShell(d)
+    await openSandboxedShell(d, { paneId: 'pane-1' })
 
     expect(d.showPermissions).not.toHaveBeenCalled()
     expect(d.newSandboxedTab).not.toHaveBeenCalled()
@@ -87,7 +86,7 @@ describe('openSandboxedShell', () => {
 
   it('a cancelled permission dialog creates no tab', async () => {
     const d = deps({ showPermissions: vi.fn().mockResolvedValue(null) })
-    await openSandboxedShell(d)
+    await openSandboxedShell(d, { paneId: 'pane-1' })
 
     expect(d.newSandboxedTab).not.toHaveBeenCalled()
   })
@@ -96,26 +95,29 @@ describe('openSandboxedShell', () => {
     const d = deps({
       getSnapshot: vi.fn().mockRejectedValue(new Error('settings unavailable')),
     })
-    await openSandboxedShell(d)
+    await openSandboxedShell(d, { paneId: 'pane-1' })
 
     expect(d.reportError).toHaveBeenCalledWith('settings unavailable')
     expect(d.newSandboxedTab).not.toHaveBeenCalled()
   })
 
-  it('a non-array baseline reads as empty rather than throwing', async () => {
+  it('a standard profile sends null profileRevision', async () => {
     const d = deps({
-      getSnapshot: vi.fn().mockResolvedValue({
-        values: {
-          [SANDBOX_WRITABLE_PATHS_KEY]: 'not-an-array',
-          [SANDBOX_READ_ONLY_PATHS_KEY]: { also: 'not-an-array' },
-        },
+      getProfile: vi.fn().mockResolvedValue({
+        source: 'standard',
         revision: 3,
+        writablePaths: [],
+        readOnlyPaths: [],
       }),
     })
-    await openSandboxedShell(d)
+    await openSandboxedShell(d, { paneId: 'pane-1' })
 
     expect(d.showPermissions).toHaveBeenCalledWith(
       expect.objectContaining({ baselineWritable: [], baselineReadOnly: [] }),
+    )
+    expect(d.newSandboxedTab).toHaveBeenCalledWith(
+      '/workspace',
+      expect.objectContaining({ profileRevision: null }),
     )
   })
 })

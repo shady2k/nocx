@@ -347,6 +347,48 @@ func TestGetSnapshot_RevisionBumpsAfterMutation(t *testing.T) {
 	}
 }
 
+func TestWithSnapshotRejectsStaleRevisionBeforeDependentWrite(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	called := false
+	err := reg.WithSnapshot(1, func(settings.SettingsSnapshot) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, settings.ErrRevisionMismatch) || called {
+		t.Fatalf("WithSnapshot(stale) = %v, called=%v", err, called)
+	}
+	if err := reg.WithSnapshot(0, func(snapshot settings.SettingsSnapshot) error {
+		called = true
+		if snapshot.Revision != 0 {
+			t.Fatalf("callback revision = %d, want 0", snapshot.Revision)
+		}
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("WithSnapshot(current) = %v, called=%v", err, called)
+	}
+}
+
+func TestSandboxProfileFromSnapshotIsStrictAndNonNil(t *testing.T) {
+	writable, readOnly, err := settings.SandboxProfileFromSnapshot(settings.SettingsSnapshot{
+		Values: map[string]any{
+			settings.SandboxAllowedWritablePaths.Key(): []string{},
+			settings.SandboxAllowedReadOnlyPaths.Key(): []string{},
+		},
+	})
+	if err != nil || writable == nil || readOnly == nil {
+		t.Fatalf("SandboxProfileFromSnapshot = %#v, %#v, %v; want non-nil empty lists", writable, readOnly, err)
+	}
+	_, _, err = settings.SandboxProfileFromSnapshot(settings.SettingsSnapshot{
+		Values: map[string]any{
+			settings.SandboxAllowedWritablePaths.Key(): []any{},
+			settings.SandboxAllowedReadOnlyPaths.Key(): []string{},
+		},
+	})
+	if err == nil {
+		t.Fatal("malformed []any authority profile was coerced instead of refused")
+	}
+}
+
 func TestGetSnapshot_RevisionBumpsAfterSecretMutation(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
 

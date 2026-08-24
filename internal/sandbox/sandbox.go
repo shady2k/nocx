@@ -64,6 +64,12 @@ type Request struct {
 	// It never comes from the renderer and binds access observations to one
 	// exact backend/session incarnation.
 	Identity SessionIdentity `json:"-"`
+	// PaneID and WorkspaceID are backend-owned provenance (design 2026-08-23
+	// §4.4): the pane this session is the pipe of and the layout workspace it
+	// belongs to, resolved by handleOpen. They never come from open.sandbox
+	// and are carried to AccessInbox.BeginSession.
+	PaneID      string `json:"-"`
+	WorkspaceID string `json:"-"`
 }
 
 // Status reports backend availability. It is the payload of sandbox.status

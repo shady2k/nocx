@@ -1,12 +1,12 @@
 # Sandbox grant model and shield conversion
 
-**Status:** Approved  
-**Date:** 2026-08-22  
-**Decision:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
+- **Status:** Approved; entry-point and diagnostics/profile sections amended by [ADR-0044](../../decisions/0044-sandbox-command-statistics-and-workspace-profiles.md)
+- **Date:** 2026-08-22
+- **Decision:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
 
 ## Goal
 
-Represent sandbox authority as an immutable pane-subject grant and provide one launch path: converting the active local terminal through the activity-bar shield beside the Files view icon.
+Represent sandbox authority as an immutable pane-subject grant and provide the initial launch path through the activity-bar shield. ADR-0044 subsequently adds the exact `/sandbox` command as a second entry into the same conversion controller; it does not add a second authority path.
 
 ## Persistence and startup
 

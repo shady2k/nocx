@@ -275,7 +275,7 @@ func TestLinuxAccessMonitorReportsListenerFailure(t *testing.T) {
 	failed := make(chan error, 1)
 	monitor := newLinuxAccessMonitor(-1, NewAccessInbox(nil).BeginSession(SessionIdentity{
 		SessionID: "session", InstanceID: "instance", Epoch: 1,
-	}), "/bin/sh", &Policy{}, func(err error) {
+	}, "pane-1", "ws-1"), "/bin/sh", &Policy{}, func(err error) {
 		failed <- err
 	})
 	monitor.Start()

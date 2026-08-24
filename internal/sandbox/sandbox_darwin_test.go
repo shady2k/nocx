@@ -107,7 +107,7 @@ func TestSeatbeltEnforcement(t *testing.T) {
 	}
 
 	inbox := NewAccessInbox(nil)
-	accessSession := inbox.BeginSession(SessionIdentity{SessionID: "seatbelt-smoke", InstanceID: "native", Epoch: 1})
+	accessSession := inbox.BeginSession(SessionIdentity{SessionID: "seatbelt-smoke", InstanceID: "native", Epoch: 1}, "pane-1", "ws-1")
 	monitor, err := startDarwinAccessMonitor(accessSession, exe, token, nil)
 	if err != nil {
 		t.Fatalf("start denied-access monitor: %v", err)

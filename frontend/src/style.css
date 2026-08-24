@@ -100,6 +100,7 @@
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';
+@import './styles/surfaces/sandbox-statistics.css';
 @import './styles/surfaces/backup-restore.css';
 @import './styles/surfaces/connections.css';
 @import './styles/surfaces/secrets.css';

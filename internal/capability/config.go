@@ -865,6 +865,7 @@ type SettingsService interface {
 	Groups() []settings.SettingsGroup
 	SectionGroups() map[string]string
 	GetSnapshot() (settings.SettingsSnapshot, error)
+	WithSnapshot(expectedRevision int, fn func(settings.SettingsSnapshot) error) error
 	Reset(d settings.Descriptor) error
 	SetBool(b *settings.Bool, v bool) error
 	SetString(s *settings.String, v string) error
@@ -914,6 +915,13 @@ func (s *settingsService) GetSnapshot() (settings.SettingsSnapshot, error) {
 		return settings.SettingsSnapshot{}, err
 	}
 	return s.reg.GetSnapshot()
+}
+
+func (s *settingsService) WithSnapshot(expectedRevision int, fn func(settings.SettingsSnapshot) error) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.reg.WithSnapshot(expectedRevision, fn)
 }
 
 func (s *settingsService) Reset(d settings.Descriptor) error {

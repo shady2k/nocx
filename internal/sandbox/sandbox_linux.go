@@ -96,7 +96,7 @@ func (s *linuxService) Prepare(ctx context.Context, req Request, spec CommandSpe
 	monitorEnabled := s.access != nil && req.Identity.valid()
 	var accessSession *AccessSession
 	if monitorEnabled {
-		accessSession = s.access.BeginSession(req.Identity)
+		accessSession = s.access.BeginSession(req.Identity, req.PaneID, req.WorkspaceID)
 	}
 	monitorChildFD := 0
 	if monitorEnabled {

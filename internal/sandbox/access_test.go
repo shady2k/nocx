@@ -10,17 +10,18 @@ import (
 )
 
 type fakeGrantStore struct {
-	access AccessClass
-	path   string
-	rev    int
-	err    error
+	workspaceID string
+	access      AccessClass
+	path        string
+	rev         int64
+	err         error
 }
 
-func (s *fakeGrantStore) AppendSandboxPath(access AccessClass, path string) (int, error) {
+func (s *fakeGrantStore) PromoteSandboxPath(workspaceID string, access AccessClass, path string) (int64, error) {
 	if s.err != nil {
 		return 0, s.err
 	}
-	s.access, s.path = access, path
+	s.workspaceID, s.access, s.path = workspaceID, access, path
 	s.rev++
 	return s.rev, nil
 }
@@ -47,11 +48,11 @@ func TestAccessInboxCoalescesAndResolvesAtomically(t *testing.T) {
 		t.Fatalf("state = %q, want pending", page.Events[0].State)
 	}
 
-	resolved, err := inbox.Resolve(AccessResolveRequest{EventID: page.Events[0].ID, Decision: AccessDecisionGlobalReadOnly})
+	resolved, err := inbox.Resolve(AccessResolveRequest{EventID: page.Events[0].ID, Decision: AccessDecisionWorkspaceReadOnly})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if resolved.State != AccessStateGranted || store.access != AccessReadOnly || store.path != page.Events[0].Directory || resolved.SettingsRevision != 1 {
+	if resolved.State != AccessStateGranted || store.access != AccessReadOnly || store.path != page.Events[0].Directory || resolved.ProfileRevision != 1 {
 		t.Fatalf("resolved = %#v, store = %#v", resolved, store)
 	}
 	if _, err := inbox.Resolve(AccessResolveRequest{EventID: page.Events[0].ID, Decision: AccessDecisionDismiss}); !errors.Is(err, ErrAccessEventResolved) {
@@ -93,7 +94,7 @@ func TestAccessInboxRejectsInvalidObservationAndUnknownEvent(t *testing.T) {
 func TestAccessSessionCommitsOnlyAfterReadinessAndRejectsLateDelivery(t *testing.T) {
 	inbox := NewAccessInbox(nil)
 	identity := SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 9}
-	session := inbox.BeginSession(identity)
+	session := inbox.BeginSession(identity, "pane-1", "ws-1")
 	observation := AccessObservation{
 		Path: "/tmp/outside.txt", Access: AccessReadOnly, Source: AccessSourceLinuxSeccomp, At: time.Unix(1, 0),
 	}
@@ -115,7 +116,7 @@ func TestAccessSessionCommitsOnlyAfterReadinessAndRejectsLateDelivery(t *testing
 
 func TestAccessSessionCloseCannotOvertakeActivationDelivery(t *testing.T) {
 	inbox := NewAccessInbox(nil)
-	session := inbox.BeginSession(SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 10})
+	session := inbox.BeginSession(SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 10}, "pane-1", "ws-1")
 	session.Record(AccessObservation{
 		Path: "/tmp/outside.txt", Access: AccessReadOnly, Source: AccessSourceLinuxSeccomp, At: time.Unix(1, 0),
 	})
@@ -183,7 +184,7 @@ func TestAccessInboxRejectsChangedGrantDirectoryIdentity(t *testing.T) {
 	if err := os.Symlink(second, alias); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionGlobalReadOnly}); !errors.Is(err, ErrAccessGrantUnavailable) {
+	if _, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionWorkspaceReadOnly}); !errors.Is(err, ErrAccessGrantUnavailable) {
 		t.Fatalf("Resolve err = %v, want ErrAccessGrantUnavailable", err)
 	}
 	updated := inbox.List(AccessListOptions{Limit: 10}).Events[0]
@@ -237,7 +238,7 @@ func TestAccessInboxRejectsWritableProtectedSystemRoot(t *testing.T) {
 	if !event.CanGrant {
 		t.Skip("/usr is not an existing directory on this platform")
 	}
-	if _, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionGlobalReadWrite}); !errors.Is(err, ErrAccessGrantUnavailable) {
+	if _, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionWorkspaceReadWrite}); !errors.Is(err, ErrAccessGrantUnavailable) {
 		t.Fatalf("Resolve err = %v, want ErrAccessGrantUnavailable", err)
 	}
 	if store.path != "" {

@@ -64,7 +64,7 @@ func validateSandboxAccessResolveRaw(raw json.RawMessage) string {
 		return "eventId must be 32 lowercase hex characters"
 	}
 	switch params.Decision {
-	case sandbox.AccessDecisionDismiss, sandbox.AccessDecisionGlobalReadOnly, sandbox.AccessDecisionGlobalReadWrite:
+	case sandbox.AccessDecisionDismiss, sandbox.AccessDecisionWorkspaceReadOnly, sandbox.AccessDecisionWorkspaceReadWrite:
 		return ""
 	default:
 		return "decision is invalid"

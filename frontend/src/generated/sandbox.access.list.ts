@@ -25,6 +25,8 @@ export interface Event {
   sessionId: string
   instanceId: string
   sessionEpoch: number
+  paneId: string
+  workspaceId: string
   shell?: string
   executable?: string
   path: string
@@ -38,6 +40,6 @@ export interface Event {
   lastSeen: string
   count: number
   state: 'pending' | 'dismissed' | 'granted' | 'expired'
-  decision?: 'dismiss' | 'globalReadOnly' | 'globalReadWrite'
-  settingsRevision?: number
+  decision?: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite'
+  profileRevision?: number
 }

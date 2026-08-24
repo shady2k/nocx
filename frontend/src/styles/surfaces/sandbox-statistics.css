@@ -1,0 +1,25 @@
+/* ── Sandbox statistics surface — placement only ──────────────────────
+   The surface is built from the kit (PageSection, StatusCard, EditableRowList,
+   Button, Stack, EmptyState), so appearance lives there. This file only places
+   caller-owned content: path rows wrap instead of stretching, and profile
+   action buttons sit side by side. */
+
+.sandbox-statistics-path {
+  word-break: break-all;
+}
+
+.sandbox-statistics-path-list {
+  min-width: 0;
+}
+
+.sandbox-statistics-profile-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Denied paths are long and arbitrary; wrap rather than stretching the page. */
+.sandbox-denied-access .ui-record-row__title,
+.sandbox-denied-access .ui-record-row__detail {
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.profile.set.schema.json",
+  "title": "SandboxProfileSet",
+  "description": "Result of the sandbox.profile.set JSON-RPC method: the workspace's newly written explicit profile (design 2026-08-23 §4.3). The revision is the new per-workspace optimistic-concurrency token. Paths are PrivateMetadata and appear only in this explicit result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceId", "revision", "writablePaths", "readOnlyPaths"],
+  "properties": {
+    "workspaceId": {
+      "description": "The named workspace whose profile was written.",
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "description": "The new monotonic per-workspace revision after the write.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "writablePaths": {
+      "description": "The canonicalized, validated read-write paths as stored.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "readOnlyPaths": {
+      "description": "The canonicalized, validated read-only paths as stored.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

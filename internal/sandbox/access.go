@@ -29,9 +29,9 @@ const (
 type AccessDecision string
 
 const (
-	AccessDecisionDismiss         AccessDecision = "dismiss"
-	AccessDecisionGlobalReadOnly  AccessDecision = "globalReadOnly"
-	AccessDecisionGlobalReadWrite AccessDecision = "globalReadWrite"
+	AccessDecisionDismiss            AccessDecision = "dismiss"
+	AccessDecisionWorkspaceReadOnly  AccessDecision = "workspaceReadOnly"
+	AccessDecisionWorkspaceReadWrite AccessDecision = "workspaceReadWrite"
 )
 
 type AccessState string
@@ -61,36 +61,46 @@ func (i SessionIdentity) valid() bool {
 }
 
 type AccessObservation struct {
-	Identity   SessionIdentity
-	Shell      string
-	Executable string
-	Path       string
-	Access     AccessClass
-	Operation  string
-	Source     AccessSource
-	At         time.Time
+	Identity SessionIdentity
+	// PaneID and WorkspaceID are backend-owned provenance: the pane the
+	// denied process's session is the pipe of, and the layout workspace that
+	// pane belongs to. They never come from the renderer.
+	PaneID      string
+	WorkspaceID string
+	Shell       string
+	Executable  string
+	Path        string
+	Access      AccessClass
+	Operation   string
+	Source      AccessSource
+	At          time.Time
 }
 
 type AccessEvent struct {
-	ID               string         `json:"id"`
-	SessionID        string         `json:"sessionId"`
-	InstanceID       string         `json:"instanceId"`
-	SessionEpoch     uint64         `json:"sessionEpoch"`
-	Shell            string         `json:"shell,omitempty"`
-	Executable       string         `json:"executable,omitempty"`
-	Path             string         `json:"path"`
-	Directory        string         `json:"directory"`
-	CanGrant         bool           `json:"canGrant"`
-	GrantReason      string         `json:"grantReason,omitempty"`
-	Access           AccessClass    `json:"access"`
-	Operation        string         `json:"operation,omitempty"`
-	Source           AccessSource   `json:"source"`
-	FirstSeen        time.Time      `json:"firstSeen"`
-	LastSeen         time.Time      `json:"lastSeen"`
-	Count            uint32         `json:"count"`
-	State            AccessState    `json:"state"`
-	Decision         AccessDecision `json:"decision,omitempty"`
-	SettingsRevision int            `json:"settingsRevision,omitempty"`
+	ID           string `json:"id"`
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
+	// PaneID and WorkspaceID are backend-owned provenance carried beside the
+	// session identity (design 2026-08-23 §4.4). They are never supplied by
+	// the renderer and never redirect authority.
+	PaneID          string         `json:"paneId"`
+	WorkspaceID     string         `json:"workspaceId"`
+	Shell           string         `json:"shell,omitempty"`
+	Executable      string         `json:"executable,omitempty"`
+	Path            string         `json:"path"`
+	Directory       string         `json:"directory"`
+	CanGrant        bool           `json:"canGrant"`
+	GrantReason     string         `json:"grantReason,omitempty"`
+	Access          AccessClass    `json:"access"`
+	Operation       string         `json:"operation,omitempty"`
+	Source          AccessSource   `json:"source"`
+	FirstSeen       time.Time      `json:"firstSeen"`
+	LastSeen        time.Time      `json:"lastSeen"`
+	Count           uint32         `json:"count"`
+	State           AccessState    `json:"state"`
+	Decision        AccessDecision `json:"decision,omitempty"`
+	ProfileRevision int64          `json:"profileRevision,omitempty"`
 }
 
 type AccessListOptions struct {
@@ -118,7 +128,12 @@ type AccessMonitorStatus struct {
 }
 
 type AccessGrantStore interface {
-	AppendSandboxPath(access AccessClass, path string) (revision int, err error)
+	// PromoteSandboxPath atomically appends a validated directory to the
+	// profile of the backend-owned workspace the event belongs to. A
+	// default-workspace event appends to the standard profile; a named
+	// workspace without a profile receives a copy-on-write profile. It
+	// returns the profile revision after the write.
+	PromoteSandboxPath(workspaceID string, access AccessClass, path string) (revision int64, err error)
 }
 
 var (
@@ -157,24 +172,27 @@ func (c accessGrantCheck) validNow() bool {
 	return err == nil && filepath.Clean(canonical) == c.canonical
 }
 
-// AccessSession is the only observer-facing recorder. It buffers reports
-// until native readiness is acknowledged and permanently rejects late
-// delivery after Close, so a reused PID or session id cannot attach an old
-// report to a new incarnation.
 type AccessSession struct {
 	mu       sync.Mutex
 	inbox    *AccessInbox
 	identity SessionIdentity
-	active   bool
-	closed   bool
-	pending  []AccessObservation
+	// paneID and workspaceID are backend-owned provenance recorded on every
+	// observation this session raises.
+	paneID      string
+	workspaceID string
+	active      bool
+	closed      bool
+	pending     []AccessObservation
 }
 
-func (i *AccessInbox) BeginSession(identity SessionIdentity) *AccessSession {
+func (i *AccessInbox) BeginSession(identity SessionIdentity, paneID, workspaceID string) *AccessSession {
 	if i == nil || !identity.valid() {
 		return nil
 	}
-	return &AccessSession{inbox: i, identity: identity, pending: make([]AccessObservation, 0, 16)}
+	return &AccessSession{
+		inbox: i, identity: identity, paneID: paneID, workspaceID: workspaceID,
+		pending: make([]AccessObservation, 0, 16),
+	}
 }
 
 func (s *AccessSession) Record(observation AccessObservation) {
@@ -188,6 +206,8 @@ func (s *AccessSession) Record(observation AccessObservation) {
 		return
 	}
 	observation.Identity = s.identity
+	observation.PaneID = s.paneID
+	observation.WorkspaceID = s.workspaceID
 	if !s.active {
 		if len(s.pending) >= 32 {
 			s.mu.Unlock()
@@ -357,7 +377,8 @@ func (i *AccessInbox) Record(observation AccessObservation) {
 	}
 	i.events = append(i.events, AccessEvent{
 		ID: id, SessionID: observation.Identity.SessionID, InstanceID: observation.Identity.InstanceID,
-		SessionEpoch: observation.Identity.Epoch, Shell: observation.Shell, Executable: observation.Executable,
+		SessionEpoch: observation.Identity.Epoch, PaneID: observation.PaneID, WorkspaceID: observation.WorkspaceID,
+		Shell: observation.Shell, Executable: observation.Executable,
 		Path: observation.Path, Directory: directory, CanGrant: directory != "", Access: observation.Access, Operation: observation.Operation,
 		Source: observation.Source, FirstSeen: observation.At, LastSeen: observation.At, Count: 1, State: AccessStatePending,
 	})
@@ -410,7 +431,7 @@ func (i *AccessInbox) Resolve(req AccessResolveRequest) (AccessEvent, error) {
 	switch req.Decision {
 	case AccessDecisionDismiss:
 		event.State = AccessStateDismissed
-	case AccessDecisionGlobalReadOnly, AccessDecisionGlobalReadWrite:
+	case AccessDecisionWorkspaceReadOnly, AccessDecisionWorkspaceReadWrite:
 		if !event.CanGrant || event.Directory == "" {
 			return AccessEvent{}, ErrAccessGrantUnavailable
 		}
@@ -427,7 +448,7 @@ func (i *AccessInbox) Resolve(req AccessResolveRequest) (AccessEvent, error) {
 			return AccessEvent{}, errors.New("sandbox access grant store unavailable")
 		}
 		access := AccessReadOnly
-		if req.Decision == AccessDecisionGlobalReadWrite {
+		if req.Decision == AccessDecisionWorkspaceReadWrite {
 			access = AccessReadWrite
 		}
 		if access == AccessReadWrite {
@@ -441,12 +462,12 @@ func (i *AccessInbox) Resolve(req AccessResolveRequest) (AccessEvent, error) {
 				return AccessEvent{}, ErrAccessGrantUnavailable
 			}
 		}
-		revision, err := i.grant.AppendSandboxPath(access, event.Directory)
+		revision, err := i.grant.PromoteSandboxPath(event.WorkspaceID, access, event.Directory)
 		if err != nil {
 			return AccessEvent{}, err
 		}
 		event.State = AccessStateGranted
-		event.SettingsRevision = revision
+		event.ProfileRevision = revision
 	default:
 		return AccessEvent{}, ErrInvalidAccessDecision
 	}

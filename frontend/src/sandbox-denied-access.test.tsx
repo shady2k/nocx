@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
+import { SandboxDeniedAccessSection, type SandboxAccessClient } from './sandbox-denied-access'
 import type { SandboxAccessList } from './ipc'
 
 afterEach(() => cleanup())
@@ -11,6 +11,8 @@ const event: SandboxAccessList['events'][number] = {
   sessionId: 'session',
   instanceId: 'instance',
   sessionEpoch: 1,
+  paneId: 'pane-wire',
+  workspaceId: 'workspace-1',
   shell: '/bin/zsh',
   executable: '/usr/bin/python3',
   path: '/private/data/report.txt',
@@ -60,9 +62,9 @@ function client(overrides: Partial<SandboxAccessClient> = {}): SandboxAccessClie
   }
 }
 
-describe('SandboxAccessSettings', () => {
+describe('SandboxDeniedAccessSection', () => {
   it('shows attribution and all three explicit decisions', async () => {
-    render(() => <SandboxAccessSettings client={client()} />)
+    render(() => <SandboxDeniedAccessSection client={client()} />)
     expect(await screen.findByText('/private/data/report.txt')).toBeTruthy()
     // The row's own grammar is the kit's (RecordRow): the observed program is
     // the meta line and the shell is the first detail line. What this asserts
@@ -71,8 +73,8 @@ describe('SandboxAccessSettings', () => {
       screen.getByText('/usr/bin/python3', { selector: '.ui-record-row__meta-text' }),
     ).toBeTruthy()
     expect(screen.getByText('/bin/zsh')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Add global read-only' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Add global read-write' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Add workspace read-only' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Add workspace read-write' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy()
     expect(screen.getByText(/read-only rule will not satisfy this write attempt/i)).toBeTruthy()
   })
@@ -84,13 +86,13 @@ describe('SandboxAccessSettings', () => {
       .mockResolvedValueOnce({ events: [event], revision: 1, lost: 0 })
       .mockResolvedValueOnce({ events: [{ ...event, state: 'granted' }], revision: 2, lost: 0 })
     const api = client({ sandboxAccessResolve: resolve, sandboxAccessList: list })
-    render(() => <SandboxAccessSettings client={api} />)
+    render(() => <SandboxDeniedAccessSection client={api} />)
     const keywords = await screen.findByRole<HTMLInputElement>('searchbox', {
       name: 'Filter by keywords',
     })
     fireEvent.input(keywords, { target: { value: 'report' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add global read-write' }))
-    await waitFor(() => expect(resolve).toHaveBeenCalledWith(event.id, 'globalReadWrite'))
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace read-write' }))
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(event.id, 'workspaceReadWrite'))
     await waitFor(() => expect(list).toHaveBeenCalledTimes(2))
     expect(keywords.value).toBe('report')
   })
@@ -103,16 +105,16 @@ describe('SandboxAccessSettings', () => {
       grantReason: 'Target directory no longer exists.',
     }
     render(() => (
-      <SandboxAccessSettings
+      <SandboxDeniedAccessSection
         client={client({
           sandboxAccessList: vi.fn().mockResolvedValue({ events: [blocked], revision: 1, lost: 0 }),
         })}
       />
     ))
-    const readOnly = await screen.findByRole('button', { name: 'Add global read-only' })
+    const readOnly = await screen.findByRole('button', { name: 'Add workspace read-only' })
     expect(readOnly.hasAttribute('disabled')).toBe(true)
     expect(
-      screen.getByRole('button', { name: 'Add global read-write' }).hasAttribute('disabled'),
+      screen.getByRole('button', { name: 'Add workspace read-write' }).hasAttribute('disabled'),
     ).toBe(true)
     expect(screen.getByRole('button', { name: 'Dismiss' }).hasAttribute('disabled')).toBe(false)
     expect(screen.getByText('Target directory no longer exists.')).toBeTruthy()
@@ -120,7 +122,7 @@ describe('SandboxAccessSettings', () => {
 
   it('shows honest monitor unavailability', async () => {
     render(() => (
-      <SandboxAccessSettings
+      <SandboxDeniedAccessSection
         client={client({
           sandboxAccessStatus: vi.fn().mockResolvedValue({
             available: false,
@@ -143,7 +145,7 @@ describe('SandboxAccessSettings', () => {
       revision: 1,
       lost: 0,
     })
-    render(() => <SandboxAccessSettings client={client({ sandboxAccessList: list })} />)
+    render(() => <SandboxDeniedAccessSection client={client({ sandboxAccessList: list })} />)
 
     const application = await screen.findByRole<HTMLSelectElement>('combobox', {
       name: 'Filter by application',
@@ -168,7 +170,7 @@ describe('SandboxAccessSettings', () => {
       revision: 1,
       lost: 0,
     })
-    render(() => <SandboxAccessSettings client={client({ sandboxAccessList: list })} />)
+    render(() => <SandboxDeniedAccessSection client={client({ sandboxAccessList: list })} />)
 
     const keywords = await screen.findByRole<HTMLInputElement>('searchbox', {
       name: 'Filter by keywords',
@@ -189,7 +191,7 @@ describe('SandboxAccessSettings', () => {
       revision: 1,
       lost: 0,
     })
-    render(() => <SandboxAccessSettings client={client({ sandboxAccessList: list })} />)
+    render(() => <SandboxDeniedAccessSection client={client({ sandboxAccessList: list })} />)
 
     const application = await screen.findByRole<HTMLSelectElement>('combobox', {
       name: 'Filter by application',
@@ -223,7 +225,7 @@ describe('SandboxAccessSettings', () => {
       .mockResolvedValueOnce({ events: [refreshedEvent, alternateEvent], revision: 2, lost: 0 })
       .mockResolvedValueOnce({ events: [alternateEvent], revision: 3, lost: 0 })
     render(() => (
-      <SandboxAccessSettings
+      <SandboxDeniedAccessSection
         client={client({ sandboxAccessList: list, onSandboxAccessChanged: subscribe })}
       />
     ))

@@ -2270,10 +2270,14 @@ type openParentParams struct {
 type openSandboxParams struct {
 	Workspace        string
 	SettingsRevision int
-	AddWritable      []string
-	RemoveWritable   []string
-	AddReadOnly      []string
-	RemoveReadOnly   []string
+	// ProfileRevision is the nullable per-workspace profile revision the
+	// dialog displayed (design 2026-08-23 §4.3): null for a standard-source
+	// launch, the exact sandboxProfile.revision for a workspace-source one.
+	ProfileRevision *int64
+	AddWritable     []string
+	RemoveWritable  []string
+	AddReadOnly     []string
+	RemoveReadOnly  []string
 }
 
 // resizeParams is the payload of the "resize" RPC method.

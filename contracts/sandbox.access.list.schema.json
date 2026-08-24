@@ -24,6 +24,8 @@
         "sessionId",
         "instanceId",
         "sessionEpoch",
+        "paneId",
+        "workspaceId",
         "path",
         "directory",
         "canGrant",
@@ -39,6 +41,8 @@
         "sessionId": { "type": "string" },
         "instanceId": { "type": "string" },
         "sessionEpoch": { "type": "integer", "minimum": 1 },
+        "paneId": { "type": "string" },
+        "workspaceId": { "type": "string", "minLength": 1 },
         "shell": { "type": "string" },
         "executable": { "type": "string" },
         "path": { "type": "string" },
@@ -55,8 +59,11 @@
         "lastSeen": { "type": "string", "format": "date-time" },
         "count": { "type": "integer", "minimum": 1 },
         "state": { "type": "string", "enum": ["pending", "dismissed", "granted", "expired"] },
-        "decision": { "type": "string", "enum": ["dismiss", "globalReadOnly", "globalReadWrite"] },
-        "settingsRevision": { "type": "integer", "minimum": 1 }
+        "decision": {
+          "type": "string",
+          "enum": ["dismiss", "workspaceReadOnly", "workspaceReadWrite"]
+        },
+        "profileRevision": { "type": "integer", "minimum": 1 }
       }
     }
   }

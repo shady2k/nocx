@@ -41,7 +41,7 @@ function eventDetail(event: SandboxAccessEvent): string[] {
     event.shell ?? 'Unknown shell',
     `Last seen ${new Date(event.lastSeen).toLocaleString()} · ${attempts}`,
   ]
-  if (event.directory !== '') lines.push(`Global rule directory: ${event.directory}`)
+  if (event.directory !== '') lines.push(`Workspace profile directory: ${event.directory}`)
   if (event.access === 'readWrite' && event.state === 'pending') {
     lines.push('A read-only rule will not satisfy this write attempt.')
   }
@@ -54,12 +54,12 @@ export interface SandboxAccessClient {
   sandboxAccessList(limit?: number): Promise<SandboxAccessList>
   sandboxAccessResolve(
     eventId: string,
-    decision: 'dismiss' | 'globalReadOnly' | 'globalReadWrite',
+    decision: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite',
   ): Promise<SandboxAccessResolve>
   onSandboxAccessChanged(callback: (change: SandboxAccessChanged) => void): () => void
 }
 
-export interface SandboxAccessSettingsProps {
+export interface SandboxDeniedAccessSectionProps {
   client?: SandboxAccessClient
 }
 
@@ -112,7 +112,7 @@ function matchesKeywords(event: SandboxAccessEvent, query: string): boolean {
   return terms.every((term) => haystack.includes(term))
 }
 
-export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
+export function SandboxDeniedAccessSection(props: SandboxDeniedAccessSectionProps) {
   const [state, setState] = createSignal<LoadState>('loading')
   const [status, setStatus] = createSignal<SandboxAccessStatus | null>(null)
   const [page, setPage] = createSignal<SandboxAccessList>({ events: [], revision: 0, lost: 0 })
@@ -164,7 +164,7 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
 
   const resolve = async (
     event: SandboxAccessEvent,
-    decision: 'dismiss' | 'globalReadOnly' | 'globalReadWrite',
+    decision: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite',
   ): Promise<void> => {
     if (!props.client || event.state !== 'pending') return
     setResolving(event.id)
@@ -173,17 +173,19 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
       await props.client.sandboxAccessResolve(event.id, decision)
       await load()
     } catch {
-      setActionError('The event changed or the global rule was rejected. Reload and try again.')
+      setActionError(
+        'The event changed or the workspace profile update was rejected. Reload and try again.',
+      )
     } finally {
       setResolving(null)
     }
   }
 
   return (
-    <div class="sandbox-access-settings">
+    <div class="sandbox-denied-access">
       <PageSection
-        title="Sandbox access"
-        description="Denied filesystem attempts from sandboxed shells. This diagnostic inbox is bounded and kept only in memory; new global rules apply to future sandboxed tabs."
+        title="Denied access"
+        description="Denied filesystem attempts from sandboxed shells. This diagnostic inbox is bounded and kept only in memory; new rules apply to future sandboxed tabs."
       >
         <Show when={state() === 'loading'}>
           <EmptyState title="Loading sandbox access" />
@@ -275,9 +277,9 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
                                 !event.canGrant ||
                                 resolving() === event.id
                               }
-                              onClick={() => void resolve(event, 'globalReadOnly')}
+                              onClick={() => void resolve(event, 'workspaceReadOnly')}
                             >
-                              Add global read-only
+                              Add workspace read-only
                             </Button>
                             <Button
                               disabled={
@@ -285,9 +287,9 @@ export function SandboxAccessSettings(props: SandboxAccessSettingsProps) {
                                 !event.canGrant ||
                                 resolving() === event.id
                               }
-                              onClick={() => void resolve(event, 'globalReadWrite')}
+                              onClick={() => void resolve(event, 'workspaceReadWrite')}
                             >
-                              Add global read-write
+                              Add workspace read-write
                             </Button>
                             <Button
                               disabled={event.state !== 'pending' || resolving() === event.id}

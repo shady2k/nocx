@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.profile.delete.schema.json",
+  "title": "SandboxProfileDelete",
+  "description": "Result of the sandbox.profile.delete JSON-RPC method: the named workspace whose explicit profile was removed, returning it to live standard-profile inheritance (design 2026-08-23 §7). Running grants are unaffected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceId"],
+  "properties": {
+    "workspaceId": {
+      "description": "The named workspace returned to standard-profile inheritance.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

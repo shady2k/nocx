@@ -103,6 +103,13 @@
   font-size: var(--font-size-sm);
 }
 
+/* The consent prompt's accept failure: inline beside the offer, never a
+   toast that evaporates (the mutation-error rule, for the accept). */
+.git-consent-error {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
 /* The whole-index controls sit above the lists; the refusal below them
    carries the D19 reason. The two actions split the rail between them. Sized to their
    labels they left a ragged block of dead space beside them; at full width

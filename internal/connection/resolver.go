@@ -31,7 +31,7 @@ type Resolver struct {
 	// When nil, host resolution is a no-op (original host returned as-is).
 	configResolver ssh.ConfigResolver
 	// remoteInstaller publishes the integration bundle over SFTP for a
-	// saved connection in script mode (P8's carrier). Wired at the
+	// saved connection in an integrating mode (P8's carrier). Wired at the
 	// composition root; nil means no publish happens.
 	remoteInstaller ssh.RemoteInstaller
 	// asker is the transport's wire ask for a connection password. When
@@ -184,14 +184,15 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	cfg.AgentForward = eff.ResolvedOptions.AgentForward
 
 	// Desired mode (nocx-mlm7): the effective desiredMode is the
-	// connection-scope delivery axis (raw|script|relay) and rides the
+	// connection-scope delivery axis (auto|raw|script|relay) and rides the
 	// config verbatim; the ssh layer gates open-time integration on it
-	// directly (script publishes and integrates, raw and relay open a
-	// plain shell — relay is inert this epic).
+	// through profile.DesiredMode.DeliversScripts, which owns that rule
+	// (auto, script and relay publish and integrate; raw alone opens a
+	// plain shell).
 	cfg.DesiredMode = string(eff.ResolvedOptions.DesiredMode)
 
 	// A saved connection publishes the integration bundle over SFTP in
-	// script mode. The installer is attached here, on the profile path,
+	// every integrating mode. The installer is attached here, on the profile path,
 	// so the publish happens only when nocx owns the transport.
 	cfg.RemoteInstaller = r.remoteInstaller
 

@@ -29,6 +29,11 @@ type RealChannel struct {
 	// at that point, and the transport reads it from another goroutine.
 	reasonMu               sync.Mutex
 	shellIntegrationReason RefusalReason
+	// hostKeyFingerprint is the SHA256 fingerprint of the target host's
+	// public key, as presented and verified when the connection was dialed
+	// (the consent design keys consent by it). Empty for channels not
+	// created from a dial that captured it (stubs, tests).
+	hostKeyFingerprint string
 
 	// waitMu guards waitErr/waitSet: the watcher records the outcome of
 	// session.Wait before closing done, but an explicit Close may close done
@@ -189,6 +194,11 @@ func (c *RealChannel) ShellIntegrationReason() RefusalReason {
 	defer c.reasonMu.Unlock()
 	return c.shellIntegrationReason
 }
+
+// HostKeyFingerprint returns the target host's public-key fingerprint
+// observed at dial time — the consent key (consent design §3.2). Empty
+// when the channel was not created from a capturing dial.
+func (c *RealChannel) HostKeyFingerprint() string { return c.hostKeyFingerprint }
 
 // Resize sends a window-change request to the remote end.
 //

@@ -42,6 +42,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -268,11 +269,13 @@ type gitOpenParams struct {
 	Cwd       string `json:"cwd,omitempty"`
 }
 
-// gitOpenResult is the open outcome table (spec §5.1). state is the
-// discriminator: every outcome is a RESULT state, never a JSON-RPC error,
-// because each one is something the panel can render. The optional fields
-// are present iff their state needs them; status rides the open result so
-// an open is one round trip (spec §5.2).
+// gitOpenResult is the open outcome table (spec §5.1, remote-helper design
+// §6). state is the discriminator: every outcome is a RESULT state, never
+// a JSON-RPC error, because each one is something the panel can render.
+// The optional fields are present iff their state needs them; message is
+// the refusal's account (what failed and what to do), present when state
+// is one of the §6 refusal states; status rides the open result so an open
+// is one round trip (spec §5.2).
 type gitOpenResult struct {
 	State      string         `json:"state"`
 	BindingID  string         `json:"bindingId,omitempty"`  // present iff ok
@@ -280,6 +283,7 @@ type gitOpenResult struct {
 	GitVersion string         `json:"gitVersion,omitempty"` // present when the probe ran
 	EnvState   string         `json:"envState,omitempty"`   // "resolved" | "degraded" (D6)
 	EnvReason  string         `json:"envReason,omitempty"`  // why degraded; present when degraded
+	Message    string         `json:"message,omitempty"`    // the refusal's account; present iff a §6 refusal state
 	Status     *gitStatusWire `json:"status,omitempty"`     // first status; absent when the inline read failed
 }
 
@@ -535,11 +539,18 @@ func (s *WSServer) forgetBinding(bid string) {
 // nil operation is a registry wired without a repo factory, which leaves
 // only git.open unavailable.
 type gitOpenHandlers struct {
-	op       capability.GitOpenOperation
-	r        Responder
-	bindings gitBindingsSeam
-	log      log.Logger
-	wired    bool
+	op capability.GitOpenOperation
+	// helperFor resolves the helper-backed factory for an SSH session
+	// (the remote-helper design). nil — or a selection answering none of
+	// Factory, ConsentRequired and Refusal — is the not-available answer:
+	// an error carrying the reason, the one exception to the outcome
+	// table's "every outcome is a RESULT state" rule (the machine has no
+	// earned state — raw, a denied answer).
+	helperFor GitFactoryFor
+	r         Responder
+	bindings  gitBindingsSeam
+	log       log.Logger
+	wired     bool
 }
 
 // handleOpen resolves a session the requesting connection owns and
@@ -547,11 +558,14 @@ type gitOpenHandlers struct {
 // call carries. sessionId appears exactly once on the wire — here (D1) —
 // and the authorisation is connState's, not the global registry's (D15).
 //
-// noCwd and remoteUnsupported are decided HERE, from the session's origin,
-// before the factory is invoked; the factory itself answers ok,
-// notARepository, gitUnavailable or gitTooOld (spec §5.1). The remote
-// refusal is a RESULT state, not an error: on an SSH tab the panel shows
-// one honest state and offers nothing (D3, D14).
+// noCwd and the §6 refusal states are decided HERE, from the session's
+// origin, before the factory is invoked; the factory itself answers ok,
+// notARepository, gitUnavailable or gitTooOld (spec §5.1, remote-helper
+// design §6). The refusals are RESULT states, not errors: on an SSH tab
+// the panel shows one honest state naming what to do (D3, D14). The one
+// exception is a machine the selection refuses with no earned state (raw,
+// a denied answer): that answers the not-available error carrying the
+// reason, and the panel renders the reason with its recovery.
 func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req jsonrpcRequest) {
 	if h.op == nil {
 		if h.wired {
@@ -578,9 +592,36 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 			return nil
 		}
 		if sess.Kind() != session.KindLocal {
-			// D3: the remote case waits for the relay (nocx-if6 phase B).
-			_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
-			return nil
+			// D3 as amended 2026-08-13: the remote case is the helper's.
+			// The selection answers one of a factory, consentRequired, a
+			// §6 refusal (unsupportedPlatform, deployFailed,
+			// execForbidden) or — for a machine with no earned state
+			// (raw, denied) — nothing, and the not-available error is
+			// the answer (remote-helper design §6).
+			if h.helperFor == nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open not available for SSH sessions (no helper factory wired)"})
+				return nil
+			}
+			sel := h.helperFor(sess)
+			if sel.ConsentRequired {
+				_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenConsentRequired)}))
+				return nil
+			}
+			if sel.Factory == nil {
+				if sel.Refusal != nil && sel.Refusal.State != "" {
+					_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
+						State:   string(sel.Refusal.State),
+						Message: sel.Refusal.Message,
+					}))
+					return nil
+				}
+				reason := "no helper available for this SSH session"
+				if sel.Refusal != nil && sel.Refusal.Message != "" {
+					reason = sel.Refusal.Message
+				}
+				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open: " + reason})
+				return nil
+			}
 		}
 		if params.Cwd == "" {
 			// No verified OSC 7 cwd to resolve from (D2).
@@ -591,7 +632,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 		// repo on a refusing outcome is closed before the refusal is
 		// returned, a Register failure closes the repo, and after Register
 		// succeeds the registry owns it.
-		bid, outcome, err := svc.OpenBinding(ctx, sid, params.Cwd)
+		bid, outcome, err := svc.OpenBinding(ctx, sess, params.Cwd)
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return nil
@@ -600,6 +641,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 			_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
 				State:      string(outcome.State),
 				GitVersion: outcome.GitVersion,
+				Message:    outcome.Message,
 			}))
 			return nil
 		}
@@ -1178,7 +1220,7 @@ func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 // panel surfaces.
 func gitErrorCode(err error) int {
 	switch err.(type) {
-	case *git.ErrUnknownBinding, *git.ErrNotOwned, *git.ErrHandleReleased,
+	case *registry.ErrUnknownBinding, *registry.ErrNotOwned, *registry.ErrHandleReleased,
 		*git.ErrNothingToCommit, *git.ErrAmendUnborn, *git.ErrConflicted:
 		return -32602
 	default:
@@ -1201,7 +1243,23 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 	gitWired := s.git != nil
 	var openOp capability.GitOpenOperation
 	if gitWired && s.gitFactory != nil {
-		openOp = capability.NewGitOpenOperation(sessionGate, gitGate, lane, s.registry, s.gitFactory, s.git)
+		// The factory selection is the composition root's answer to
+		// "which git runs for this session" (AD-8): local sessions get
+		// the local factory; SSH sessions get the helper-backed selection.
+		factoryFor := capability.GitOpenFactory(func(sess session.Session) git.RepoFactory {
+			if sess.Kind() != session.KindLocal {
+				if s.gitHelperFor == nil {
+					return nil
+				}
+				// The refusal decision has already answered
+				// consentRequired and the refusal states; this second
+				// consultation is the open itself, and only a selection
+				// carrying a factory may proceed (D8).
+				return s.gitHelperFor(sess).Factory
+			}
+			return s.gitFactory
+		})
+		openOp = capability.NewGitOpenOperation(sessionGate, gitGate, lane, s.registry, factoryFor, s.git)
 	}
 	var bindingOp capability.GitBindingOperation
 	if gitWired {
@@ -1212,7 +1270,7 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 
 	return []methodSpec{
 		reg(openSub, "git.open", params(validateGitOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := gitOpenHandlers{op: openOp, r: r, bindings: s, log: s.log, wired: gitWired}
+			h := gitOpenHandlers{op: openOp, helperFor: s.gitHelperFor, r: r, bindings: s, log: s.log, wired: gitWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
 		reg(bindingSub, "git.status", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

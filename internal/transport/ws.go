@@ -28,6 +28,8 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -215,6 +217,19 @@ type WSServer struct {
 	// the footprint surface answers an empty list (the P7 observation RPC
 	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
+	// helperInstalls is the observed helper footprint (remote-helper
+	// design D8): the persisted memory of which machines carry an
+	// installed helper, recorded when the install completed. Wired through
+	// WithHelperInstallStore; when nil, the footprint surface answers an
+	// empty helpers list — nothing is claimed installed that cannot be
+	// shown.
+	helperInstalls *consent.InstallStore
+	// helperConsent is the per-machine relay-tier answer store
+	// (remote-helper design D8): the write half shell.footprint.consent
+	// persists grants through. Wired through WithHelperConsentStore; when
+	// nil, the method refuses — the consent prompt is never offered by a
+	// server that cannot record the answer.
+	helperConsent *consent.Store
 	// installedFactSeen bounds the write to once per domain: a lane
 	// publishes a fact at every prompt, and the installation it reports does
 	// not change while the shell that reported it is alive.
@@ -226,6 +241,20 @@ type WSServer struct {
 	// when nil, shell.footprint.uninstall answers an error and removes
 	// nothing — the status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
+
+	// helperUninstaller removes a helper install tree on a remote host,
+	// owning the dial-and-call (remote-helper design D25). Wired through
+	// WithRemoteHelperUninstaller; when nil, shell.footprint.helperUninstall
+	// answers an error and removes nothing — the status surface never
+	// offers the button without it.
+	helperUninstaller RemoteHelperUninstaller
+	// helperCloser closes every live helper channel on a machine before
+	// its install directory is removed — the D25 order (remote-helper
+	// design D25). Wired through WithHelperChannelCloser; when nil,
+	// shell.footprint.helperUninstall refuses: without a closer the
+	// handler cannot prove the close-before-remove invariant that is the
+	// whole point of the rule.
+	helperCloser HelperChannelCloser
 
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
@@ -380,8 +409,14 @@ type WSServer struct {
 	// §5.1). When nil, those methods return -32601. The repo factory rides
 	// a separate option; the transport never constructs a repository
 	// itself (AD-8).
-	git        *git.Registry
+	git        *registry.Registry
 	gitFactory git.RepoFactory
+	// gitHelperFor resolves the helper-backed repo factory selection
+	// git.open uses for an SSH session (the remote-helper design). When
+	// nil, or when the selection answers none of Factory, ConsentRequired
+	// and Refusal, git.open answers the not-available error for that
+	// session.
+	gitHelperFor GitFactoryFor
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -912,7 +947,7 @@ func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 // composition root constructs the registry (internal/app/app.go); without
 // this line the whole git package is reachable from its own tests and
 // nowhere else (AGENTS.md check 5).
-func WithGitRegistry(r *git.Registry) WSServerOption {
+func WithGitRegistry(r *registry.Registry) WSServerOption {
 	return func(s *WSServer) { s.git = r }
 }
 
@@ -923,6 +958,53 @@ func WithGitRegistry(r *git.Registry) WSServerOption {
 // error.
 func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
 	return func(s *WSServer) { s.gitFactory = f }
+}
+
+// GitOpenRefusal is the honest non-factory answer the selection carries for
+// one SSH session (remote-helper design §6): a §6 state
+// (unsupportedPlatform, deployFailed, execForbidden) with the message
+// naming what to do about it. State "" is the resolver's Refused — raw, a
+// denied answer, nothing to offer — a machine that has no earned state,
+// and git.open answers the not-available error carrying the reason.
+type GitOpenRefusal struct {
+	State   git.OpenState
+	Message string
+}
+
+// GitOpenSelection is the composition root's selection for one SSH session
+// (remote-helper design D8): a factory to open through, consentRequired to
+// answer, or a refusal naming the §6 state and what to do about it.
+// ConsentRequired, Refusal and Factory are mutually exclusive — the ask and
+// the refusal are the alternatives to opening, never a factory that
+// answers them.
+type GitOpenSelection struct {
+	Factory git.RepoFactory
+	// ConsentRequired — the session's machine has no relay-tier answer;
+	// git.open must answer the consentRequired state and the panel offers
+	// the consent flow. Set means Factory is nil.
+	ConsentRequired bool
+	// Refusal — the honest refusal when the machine cannot be served:
+	// unsupportedPlatform, deployFailed or execForbidden with the message
+	// naming what to do, or State "" with the reason for the resolver's
+	// Refused (raw, a denied answer). Set means Factory is nil.
+	Refusal *GitOpenRefusal
+}
+
+// GitFactoryFor resolves the helper-backed factory selection git.open uses
+// for an SSH session — the composition root's answer to "is a helper
+// available for this host, and may it be used" (the remote-helper design).
+// ConsentRequired and Refusal answer their states instead of opening; a
+// selection with none of the three answers the not-available error.
+// It must be side-effect-free: git.open consults it twice (the handler's
+// refusal decision, then the open), and the two calls must agree.
+type GitFactoryFor func(sess session.Session) GitOpenSelection
+
+// WithGitHelperFactory attaches the helper-backed factory selection for SSH
+// sessions (the remote-helper design). The composition root wires it from
+// the helper's install configuration and the consent store; when absent,
+// git.open answers the not-available error for SSH sessions.
+func WithGitHelperFactory(f GitFactoryFor) WSServerOption {
+	return func(s *WSServer) { s.gitHelperFor = f }
 }
 
 // WithFilesRevealer attaches the OS file-manager reveal capability
@@ -2209,18 +2291,25 @@ func (s *WSServer) emitSaturatedNotification(wconn Responder, method string, rej
 // (nocx-mlm7). The resolver stamps the mode on the ConnectConfig it builds
 // from the profile's effective desiredMode; a direct-host open (alias or
 // ad-hoc — no profile to say otherwise) and a local session keep the
-// hardcoded default: script (N3 — wrap and install automatically). Unknown
-// values fall back to the same default so malformed profile data can never
-// violate the open schema over the real socket.
+// hardcoded default. Unknown values fall back to that same default so
+// malformed profile data can never violate the open schema over the real
+// socket.
+//
+// The default is auto, and it must stay the same value the cascade's
+// hardcoded default carries (ADR-0033) — not a literal that merely happens
+// to agree today. Two defaults for one absent mode is what let the ack call
+// a connection `script` while the consent resolver read the same absence as
+// `auto` and offered an upgrade, which is exactly what D8 forbids for a
+// machine at script.
 func desiredModeForAck(remote *ssh.ConnectConfig) string {
 	if remote == nil || remote.DesiredMode == "" {
-		return string(profile.DesiredScript)
+		return string(profile.DefaultDesiredMode())
 	}
 	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
 		return remote.DesiredMode
 	default:
-		return string(profile.DesiredScript)
+		return string(profile.DefaultDesiredMode())
 	}
 }
 

@@ -39,7 +39,19 @@ type pooledSSHConn struct {
 	// agentForwardOnce guards agent.ForwardToRemote so it is called exactly
 	// once per pooled connection, even when multiple tabs share the client.
 	agentForwardOnce sync.Once
+
+	// fingerprint is the SHA256 fingerprint of the TARGET host's public
+	// key, as presented and verified when this connection was dialed (the
+	// consent design keys consent by it — ADR-0023's route identity was a
+	// proxy for the machine, and the host key is the machine). For a jump
+	// route this is the target's key, never the bastion's. Empty for test
+	// fakes that bypass the dial callback.
+	fingerprint string
 }
+
+// HostKeyFingerprint returns the target host's public-key fingerprint
+// observed at dial time.
+func (c *pooledSSHConn) HostKeyFingerprint() string { return c.fingerprint }
 
 // initAgentForward registers the auth-agent@openssh.com channel handler on
 // the underlying *gossh.Client exactly once per pooled connection. It is a

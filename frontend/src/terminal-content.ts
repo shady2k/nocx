@@ -541,10 +541,15 @@ export class TerminalContent extends BasePaneContent {
   private host: PaneHost | null = null
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
-  /** The resolved destination mode from the open ack (raw|script|relay):
-   *  the connection-scope default the capability control starts from. raw
-   *  refuses every rewrite and remote write; relay is consent-gated. */
-  private _policy: DesiredMode = 'script'
+  /** The resolved destination mode from the open ack
+   *  (auto|raw|script|relay): the connection-scope default the capability
+   *  control starts from. auto is the initial value because it is what an
+   *  unanswered destination resolves to everywhere else (ADR-0033) — the
+   *  ack is authoritative and arrives shortly, and a placeholder that
+   *  disagreed with the cascade's default is the two-defaults defect that
+   *  ADR closed on the backend. raw refuses every rewrite and remote
+   *  write; relay allows the Tier-B binary. */
+  private _policy: DesiredMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
    *  which could not report the two failures that matter most because both
@@ -2390,7 +2395,7 @@ export class TerminalContent extends BasePaneContent {
       // reason (nocx-4t37.2): the capability control starts from the
       // backend's own resolution, never from a second fetch that could
       // disagree with it.
-      this._policy = session.desiredMode ?? 'script'
+      this._policy = session.desiredMode ?? 'auto'
       // The integration axis is a SUBSCRIPTION, not a field of the ack: the
       // backend revises it as it learns (starting → integrated, or →
       // conventional with a reason, or → lost). Subscribed before anything

@@ -10,7 +10,7 @@
  */
 
 /**
- * The visible footprint of nocx's silent install (P10, delivery-modes design §4.1): every resolved destination with an installed fact — what was written (generation, protocol and script version), where (~/.nocx), and when nocx last SAW it. Read-only and fact-backed: this call never connects, so lastObservedAt is an observation, never a claim about what is on the host right now. removableProfileId names a saved connection that resolves to the destination and can remove it; its absence IS the explanation — the surface renders the manual-removal note from that one field and offers no button.
+ * The visible footprint of nocx's silent install (P10, delivery-modes design §4.1): every resolved destination with an installed fact — what was written (generation, protocol and script version), where (~/.nocx), and when nocx last SAW it. Read-only and fact-backed: this call never connects, so lastObservedAt is an observation, never a claim about what is on the host right now. removableProfileId names a saved connection that resolves to the destination and can remove it; its absence IS the explanation — the surface renders the manual-removal note from that one field and offers no button. helpers lists the observed remote-helper installs (remote-helper design D8): recorded when an install completed, keyed by the host public-key fingerprint, never a claim about the host's current state.
  */
 export interface ShellFootprintStatusResult {
   /**
@@ -43,6 +43,35 @@ export interface ShellFootprintStatusResult {
     lastObservedAt: string
     /**
      * The saved connection that resolves to this destination and can remove it, or null when none does. Absence is the explanation: removal needs a saved connection, and the path field is what a user removes by hand instead.
+     */
+    removableProfileId: string | null
+  }[]
+  /**
+   * Every observed helper installation, ordered by identity. Absent when nothing has been recorded (never null).
+   */
+  helpers?: {
+    /**
+     * The destination identity (user@host:port) the footprint screen shows.
+     */
+    identity: string
+    /**
+     * The host public-key fingerprint the consent answer is keyed by (consent design §3.2) — the same machine reached any way is one row.
+     */
+    fingerprint: string
+    /**
+     * The versioned helper install directory on the remote host, e.g. ~/.nocx/helper/1-linux-amd64-<hash>/.
+     */
+    path: string
+    /**
+     * The content hash of the installed binary (D7).
+     */
+    hash: string
+    /**
+     * When nocx last observed this install complete.
+     */
+    installedAt: string
+    /**
+     * The saved connection that resolves to this machine and can remove the helper, or null when none does. Absence is the explanation: removal needs a saved connection, and the path field is what a user removes by hand instead.
      */
     removableProfileId: string | null
   }[]

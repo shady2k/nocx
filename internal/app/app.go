@@ -31,8 +31,9 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
-	"github.com/shady2k/nocx/internal/git"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
+	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -756,6 +757,21 @@ func New(opts ...Option) (*App, error) {
 	// produces no passport. The delivery planner reads it to choose the
 	// compact installed line; without it every host bootstraps.
 	installedFacts := ssh.NewInstalledFactStore(logger, docStore, "installed-facts.json")
+	// The helper consent (remote-helper design D8; the 2026-08-10 consent
+	// design): the per-machine relay-tier answer, keyed by the remote
+	// host's public-key fingerprint, and the observed helper installs the
+	// footprint surface lists. Both are backend-owned and persisted; the
+	// consent decision at git.open and the footprint listing read them, so
+	// without these lines the consent path is reachable from its own tests
+	// and nowhere else (AGENTS.md check 5).
+	helperConsent := consent.NewStore(logger, docStore, "helper-consent.json")
+	helperInstalls := consent.NewInstallStore(logger, docStore, "helper-installs.json")
+	// The helper-backed git factory and the registry that owns its live
+	// helper channels (remote-helper design D8, D25): one registry serves
+	// both the factory's per-session helpers and the uninstall surface's
+	// close-before-remove, so a machine's channels are closed by the same
+	// bookkeeping that started them.
+	helperFactory, helperReg := helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -1037,6 +1053,11 @@ func New(opts ...Option) (*App, error) {
 		// integration. The footprint status surface reads it; the
 		// observation RPC that used to write it was severed (ADR-0024 §1).
 		transport.WithInstalledFactStore(installedFacts),
+		// The helper footprint row (remote-helper design D8): the observed
+		// helper installs behind shell.footprint.status. Wired here so the
+		// listing and the consent path share the composition root.
+		transport.WithHelperConsentStore(helperConsent),
+		transport.WithHelperInstallStore(helperInstalls),
 		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
 		// satisfies transport.RemoteUninstaller without an adapter — the
 		// signatures are identical. The capability owns the dial-and-call
@@ -1108,15 +1129,33 @@ func New(opts ...Option) (*App, error) {
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line
 		// existed the whole package was unreachable, which is the state
-		// AGENTS.md check 5 exists to catch. There is no remote factory:
-		// git.open refuses an ssh session before it reaches this, and the
-		// remote case waits on the relay (spec D3).
-		transport.WithGitRegistry(git.New()),
-		// The factory resolves the shell environment in the background from
-		// construction (nocx-6pz0) and is stopped at shutdown, so no
-		// resolution child can outlive the process; nothing after this point
-		// in New can fail, so the factory needs no earlier-return cleanup.
+		// AGENTS.md check 5 exists to catch.
+		transport.WithGitRegistry(registry.New()),
+		// The factory resolves the shell environment in the background
+		// from construction (nocx-6pz0) and is stopped at shutdown.
 		transport.WithGitRepoFactory(gitFactory),
+		// The helper-backed factory selection (remote-helper design D8):
+		// SSH sessions get a repository served over the helper when the
+		// machine's consent resolves to relay, and the refusal (or the
+		// consentRequired ask) stands otherwise. The helper client, the
+		// git factory over it and the consent path are reachable from
+		// main() only through this line (AGENTS.md check 5). The second
+		// return is the registry that OWNS the live helper channels; the
+		// uninstall surface needs it to close them before removing an
+		// install directory (D25), so the same registry is wired there.
+		transport.WithGitHelperFactory(helperFactory),
+		// The D25 channel closer (remote-helper design D25): the registry
+		// closes every live helper channel on a machine before
+		// shell.footprint.helperUninstall removes its install directory —
+		// no helper may be running out of a directory being deleted.
+		transport.WithHelperChannelCloser(helperReg),
+		// The helper-removal capability (remote-helper design D25):
+		// *ssh.RealClient satisfies transport.RemoteHelperUninstaller
+		// without an adapter — the signatures are identical. The
+		// capability owns the dial-and-remove (acquire the write-capable
+		// install lease, discover the remote home, run deploy.Uninstall
+		// over SFTP); the raw SSH client never leaves internal/ssh.
+		transport.WithRemoteHelperUninstaller(sshClient),
 	}
 	// The lifecycle publication boundary (ADR-0024 decision 7, bead
 	// nocx-u7uh.5): one kernel, one publisher, and the transport as its

@@ -203,12 +203,17 @@ const FORWARD_DIRECTIONS: ForwardDirection[] = ['local', 'remote', 'dynamic']
 const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
 
 /** The closed desired modes, in display order (spec §3.5, nocx-mlm7), with
- *  honest labels: raw adds nothing, script wraps and installs automatically
- *  (N3), relay deploys the Tier-B binary and is consent-gated. */
+ *  honest labels: auto is the default and means "not answered" — the scripts
+ *  install automatically (N3) and the helper is OFFERED when something needs
+ *  it (D8, ADR-0033); script is that answer given explicitly, so the helper
+ *  is never offered; raw adds nothing; relay allows the Tier-B binary
+ *  outright. auto leads because it is what an unedited connection already
+ *  is — the list starts where the user starts. */
 const DESIRED_MODES: { value: DesiredMode; label: string }[] = [
+  { value: 'auto', label: 'Auto — install scripts, ask before the helper' },
+  { value: 'script', label: 'Script — scripts only, never the helper' },
   { value: 'raw', label: 'Raw — no integration' },
-  { value: 'script', label: 'Script — install automatically' },
-  { value: 'relay', label: 'Relay — requires consent' },
+  { value: 'relay', label: 'Relay — allow the helper' },
 ]
 
 /** The closed relay-consent states (spec §3.5), in display order. Consent

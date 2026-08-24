@@ -25,6 +25,7 @@ import { Button } from './ui/button'
 import { RecordRow } from './ui/record-row'
 import { EmptyState } from './ui/empty-state'
 import { PageSection } from './ui/page-section'
+import { Section } from './ui/section'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { showConfirm } from './ui/dialog'
@@ -35,6 +36,9 @@ import type { ShellFootprintStatusResult } from './generated/shell.footprint.sta
 
 /** One destination's footprint row — the generated result's element type. */
 type FootprintDestination = ShellFootprintStatusResult['destinations'][number]
+
+/** One helper install row — the generated result's element type. */
+type HelperInstall = NonNullable<ShellFootprintStatusResult['helpers']>[number]
 
 export interface FootprintSectionProps {
   /** Absent in the dev-web harness and in surfaces that predate the RPC;
@@ -54,17 +58,23 @@ function formatLastSeen(iso: string): string {
 export function FootprintSection(props: FootprintSectionProps) {
   /** null = loading; [] = loaded, nothing installed. */
   const [destinations, setDestinations] = createSignal<FootprintDestination[] | null>(null)
+  /** The observed helper footprint (remote-helper design D8); null until
+   *  the first load answers, [] once it has. */
+  const [helpers, setHelpers] = createSignal<HelperInstall[] | null>(null)
   /** The identity currently being uninstalled, to disable its row. */
   const [busy, setBusy] = createSignal<string | null>(null)
 
   const load = async (): Promise<void> => {
     if (!props.client) return
     try {
-      setDestinations((await props.client.status()).destinations)
+      const res = await props.client.status()
+      setDestinations(res.destinations)
+      setHelpers(res.helpers ?? [])
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       showToast({ level: 'danger', message: `Could not read the remote footprint: ${msg}` })
       setDestinations([])
+      setHelpers([])
     }
   }
 
@@ -93,6 +103,32 @@ export function FootprintSection(props: FootprintSectionProps) {
           message: `${res.conflicts.length} modified file(s) kept: ${res.conflicts.join(', ')}`,
         })
       }
+      await load()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      showToast({ level: 'danger', message: `Uninstall failed: ${msg}` })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const uninstallHelper = async (h: HelperInstall): Promise<void> => {
+    if (!props.client || !h.removableProfileId) return
+    const ok = await showConfirm(
+      `Remove the remote helper from ${h.identity}? The whole ${h.path} tree is removed. Consent for this machine stays — the helper is reinstalled the next time a remote feature here needs it.`,
+      'Uninstall',
+      'Cancel',
+    )
+    if (!ok) return
+    setBusy(h.identity)
+    try {
+      const res = await props.client.helperUninstall(h.removableProfileId, h.fingerprint, h.path)
+      showToast({
+        level: 'success',
+        message: res.removed
+          ? `Removed the helper from ${h.identity}`
+          : `Nothing was installed on ${h.identity}`,
+      })
       await load()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -162,6 +198,38 @@ export function FootprintSection(props: FootprintSectionProps) {
               )}
             </For>
           </Stack>
+        </Show>
+        <Show when={helpers() !== null && helpers()!.length > 0}>
+          <Section title="Remote helper" divided dense>
+            <For each={helpers()}>
+              {(h) => (
+                <RecordRow
+                  title={h.identity}
+                  kind={{ label: 'helper', tone: 'info' }}
+                  meta={`${h.path} · hash ${h.hash.slice(0, 12)}… · installed ${formatLastSeen(h.installedAt)}`}
+                  actions={
+                    h.removableProfileId !== null ? (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={busy() !== null}
+                        onClick={() => void uninstallHelper(h)}
+                        ariaLabel={`Uninstall the helper from ${h.identity}`}
+                      >
+                        <TrashIcon />
+                        {busy() === h.identity ? 'Removing…' : 'Uninstall'}
+                      </Button>
+                    ) : (
+                      <span>
+                        The helper serves git and other remote features on this machine. Removal
+                        needs a saved connection &mdash; remove {h.path} by hand
+                      </span>
+                    )
+                  }
+                />
+              )}
+            </For>
+          </Section>
         </Show>
       </PageSection>
     </Show>

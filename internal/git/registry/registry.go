@@ -1,4 +1,4 @@
-package git
+package registry
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -18,7 +19,7 @@ import (
 type Binding struct {
 	id        string
 	sessionID session.ID
-	repo      Repo
+	repo      git.Repo
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -43,21 +44,34 @@ func (b *Binding) SessionID() session.ID { return b.sessionID }
 // duration of the provider call, so close can never reach the provider under
 // a running call.
 type Handle interface {
-	Status(ctx context.Context) (Status, error)
+	Status(ctx context.Context) (git.Status, error)
 	// EnvState is on the Handle, not only the Repo, because the transport
 	// reaches repositories exclusively through Acquire — a handler cannot
 	// ask a repo it was never given. The handle forwards to the bound
 	// repo, guarding the call like every other method (nocx-69ey).
-	EnvState() (EnvState, string)
-	Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error)
-	Log(ctx context.Context, max int) (Log, error)
-	Stage(ctx context.Context, paths []string) (Status, error)
-	Unstage(ctx context.Context, paths []string) (Status, error)
-	StageAll(ctx context.Context) (Status, error)
-	UnstageAll(ctx context.Context) (Status, error)
-	Commit(ctx context.Context, msg string, amend bool) (CommitOutcome, error)
-	HeadMessage(ctx context.Context) (HeadMessage, error)
+	EnvState() (git.EnvState, string)
+	Diff(ctx context.Context, path string, side git.Side, maxBytes int64) (git.Diff, error)
+	Log(ctx context.Context, max int) (git.Log, error)
+	Stage(ctx context.Context, paths []string) (git.Status, error)
+	Unstage(ctx context.Context, paths []string) (git.Status, error)
+	StageAll(ctx context.Context) (git.Status, error)
+	UnstageAll(ctx context.Context) (git.Status, error)
+	Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error)
+	HeadMessage(ctx context.Context) (git.HeadMessage, error)
 	RemoteURL(ctx context.Context) (string, error)
+}
+
+// Caller is who is asking. registry declares it and transport satisfies it —
+// the direction internal/filesystem already established, and the only one
+// available: connState and wsConn are unexported in transport, and a package
+// that imported transport would point the dependency backwards.
+//
+// internal/filesystem declares an identical interface; the registry
+// deliberately does not import it. A consumer-declared interface is the Go
+// idiom, and importing across feature packages would couple them permanently
+// for the sake of one method signature (spec D15).
+type Caller interface {
+	Owns(sessionID session.ID) bool
 }
 
 // Registry maps bindingId → Binding (spec §5.1 "Bindings"). It is where a
@@ -77,7 +91,7 @@ func New() *Registry { return &Registry{bindings: make(map[string]*Binding)} }
 // layer calls this only after OpenOutcome.State is OpenOK; ownership of the
 // returned Repo transfers to the registry here, and on failure the caller
 // still owns it and must close it (spec §5.1, rules 1–3).
-func (r *Registry) Register(repo Repo, sessionID session.ID) (string, error) {
+func (r *Registry) Register(repo git.Repo, sessionID session.ID) (string, error) {
 	if repo == nil || isNilRepo(repo) {
 		return "", errors.New("git: Register with nil repo")
 	}
@@ -100,7 +114,7 @@ func (r *Registry) Register(repo Repo, sessionID session.ID) (string, error) {
 // isNilRepo reports whether p is an interface holding a typed nil — a
 // nil *T. `p == nil` rejects only a nil interface; an interface holding a
 // typed nil passes it, registers fine, and panics on first use or close.
-func isNilRepo(p Repo) bool {
+func isNilRepo(p git.Repo) bool {
 	v := reflect.ValueOf(p)
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
@@ -224,95 +238,95 @@ type handle struct {
 	released bool
 }
 
-func (h *handle) Status(ctx context.Context) (Status, error) {
+func (h *handle) Status(ctx context.Context) (git.Status, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Status{}, err
+		return git.Status{}, err
 	}
 	defer release()
 	return h.b.repo.Status(ctx)
 }
 
-func (h *handle) EnvState() (EnvState, string) {
+func (h *handle) EnvState() (git.EnvState, string) {
 	release, err := h.begin()
 	if err != nil {
 		// A released handle answers the conservative degraded, the same
 		// way known() reports the pre-settle window: the panel is about
 		// to hear unknownBinding anyway, and a "resolved" the binding
 		// no longer stands behind is the lie D6 exists to prevent.
-		return EnvDegraded, err.Error()
+		return git.EnvDegraded, err.Error()
 	}
 	defer release()
 	return h.b.repo.EnvState()
 }
 
-func (h *handle) Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error) {
+func (h *handle) Diff(ctx context.Context, path string, side git.Side, maxBytes int64) (git.Diff, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Diff{}, err
+		return git.Diff{}, err
 	}
 	defer release()
 	return h.b.repo.Diff(ctx, path, side, maxBytes)
 }
 
-func (h *handle) Log(ctx context.Context, max int) (Log, error) {
+func (h *handle) Log(ctx context.Context, max int) (git.Log, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Log{}, err
+		return git.Log{}, err
 	}
 	defer release()
 	return h.b.repo.Log(ctx, max)
 }
 
-func (h *handle) Stage(ctx context.Context, paths []string) (Status, error) {
+func (h *handle) Stage(ctx context.Context, paths []string) (git.Status, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Status{}, err
+		return git.Status{}, err
 	}
 	defer release()
 	return h.b.repo.Stage(ctx, paths)
 }
 
-func (h *handle) Unstage(ctx context.Context, paths []string) (Status, error) {
+func (h *handle) Unstage(ctx context.Context, paths []string) (git.Status, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Status{}, err
+		return git.Status{}, err
 	}
 	defer release()
 	return h.b.repo.Unstage(ctx, paths)
 }
 
-func (h *handle) StageAll(ctx context.Context) (Status, error) {
+func (h *handle) StageAll(ctx context.Context) (git.Status, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Status{}, err
+		return git.Status{}, err
 	}
 	defer release()
 	return h.b.repo.StageAll(ctx)
 }
 
-func (h *handle) UnstageAll(ctx context.Context) (Status, error) {
+func (h *handle) UnstageAll(ctx context.Context) (git.Status, error) {
 	release, err := h.begin()
 	if err != nil {
-		return Status{}, err
+		return git.Status{}, err
 	}
 	defer release()
 	return h.b.repo.UnstageAll(ctx)
 }
 
-func (h *handle) Commit(ctx context.Context, msg string, amend bool) (CommitOutcome, error) {
+func (h *handle) Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error) {
 	release, err := h.begin()
 	if err != nil {
-		return CommitOutcome{}, err
+		return git.CommitOutcome{}, err
 	}
 	defer release()
 	return h.b.repo.Commit(ctx, msg, amend)
 }
 
-func (h *handle) HeadMessage(ctx context.Context) (HeadMessage, error) {
+func (h *handle) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
 	release, err := h.begin()
 	if err != nil {
-		return HeadMessage{}, err
+		return git.HeadMessage{}, err
 	}
 	defer release()
 	return h.b.repo.HeadMessage(ctx)

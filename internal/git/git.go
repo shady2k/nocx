@@ -1,6 +1,9 @@
-// Package git is the session-aware git backend: the Repo and RepoFactory
-// contracts, the binding registry that guards a bound Repo, the domain types
-// every operation returns, and the errors the transport switches on.
+// Package git is the session-aware git domain: the Repo and RepoFactory
+// contracts, the domain types every operation returns, and the git-semantic
+// errors the transport switches on. The binding registry that guards a bound
+// Repo lives in internal/git/registry — it is the one part of the git plane
+// that imports internal/session, and the helper binary links this package
+// standalone (plan Task 3, D18).
 //
 // # Why the git binary, not a library (spec D5)
 //
@@ -35,19 +38,18 @@
 //
 // # The structural guarantee (spec §5.1)
 //
-// A bound Repo is unreachable except through Registry.Acquire. Binding holds
-// its repo in an unexported field, so "every handler must remember to check"
-// is not a discipline anybody has to keep: a handler cannot forget a check it
-// never performs. Acquire performs the one authorisation check — the caller
-// must Own the binding's session (D15) — and takes the use-guard that keeps
-// the binding alive for the call's duration.
+// The registry in internal/git/registry is where a bound Repo exists, and
+// Registry.Acquire is the only route to one. Binding holds its repo in an
+// unexported field, so "every handler must remember to check" is not a
+// discipline anybody has to keep: a handler cannot forget a check it never
+// performs. Acquire performs the one authorisation check — the caller must
+// Own the binding's session (D15) — and takes the use-guard that keeps the
+// binding alive for the call's duration.
 package git
 
 import (
 	"context"
 	"time"
-
-	"github.com/shady2k/nocx/internal/session"
 )
 
 // Repo is one repository on one machine. It is the whole local/remote seam:
@@ -105,23 +107,13 @@ type RepoFactory interface {
 	Open(ctx context.Context, cwd string) (Repo, OpenOutcome, error)
 }
 
-// Caller is who is asking. git declares it and transport satisfies it — the
-// direction internal/filesystem already established, and the only one
-// available: connState and wsConn are unexported in transport, and a package
-// that imported transport would point the dependency backwards.
-//
-// internal/filesystem declares an identical interface; git deliberately does
-// not import it. A consumer-declared interface is the Go idiom, and importing
-// across feature packages would couple them permanently for the sake of one
-// method signature (spec D15).
-type Caller interface {
-	Owns(sessionID session.ID) bool
-}
-
-// OpenState is the outcome table of git.open (spec §5.1). noCwd and
-// remoteUnsupported are produced by the composition layer, which decides them
-// from the caller's origin before the factory is invoked; the factory itself
-// answers ok, notARepository, gitUnavailable or gitTooOld.
+// OpenState is the outcome table of git.open (spec §5.1, remote-helper
+// design §6). noCwd is produced by the composition layer from the caller's
+// origin before the factory is invoked; the §6 refusal states
+// (consentRequired, unsupportedPlatform, deployFailed, execForbidden,
+// helperVersionMismatch) are produced by the helper selection and the
+// helper dial — the composition layer again, never the factory; the
+// factory itself answers ok, notARepository, gitUnavailable or gitTooOld.
 type OpenState string
 
 const (
@@ -131,13 +123,33 @@ const (
 	OpenNotARepository OpenState = "notARepository"
 	// OpenNoCwd — the caller had no verified cwd to offer.
 	OpenNoCwd OpenState = "noCwd"
-	// OpenRemoteUnsupported — the session is an SSH session (D3); the remote
-	// case waits for the relay (nocx-if6 phase B).
-	OpenRemoteUnsupported OpenState = "remoteUnsupported"
 	// OpenGitUnavailable — no git on the environment's PATH.
 	OpenGitUnavailable OpenState = "gitUnavailable"
 	// OpenGitTooOld — below the version floor; the result carries what it found.
 	OpenGitTooOld OpenState = "gitTooOld"
+	// OpenConsentRequired — the session is an SSH session whose machine has
+	// no relay-tier answer (remote-helper design D8): the user has not yet
+	// accepted the helper for this host. The panel offers the consent flow;
+	// accepting raises the machine to the relay tier and the next git.open
+	// proceeds. Produced by the composition layer from the consent
+	// decision, before the factory is invoked — the producer of a state
+	// owns declaring it, so the state lives here with its siblings.
+	OpenConsentRequired OpenState = "consentRequired"
+	// OpenUnsupportedPlatform — the session's host runs an OS/arch we build
+	// no helper for (D20), or the helper artifact was not built (`make
+	// helpers` has not run). Message names which, and what to do about it.
+	OpenUnsupportedPlatform OpenState = "unsupportedPlatform"
+	// OpenDeployFailed — uploading or installing the helper on the host
+	// failed (D7). Message carries what failed.
+	OpenDeployFailed OpenState = "deployFailed"
+	// OpenExecForbidden — the server refused the exec that would run the
+	// helper, or answered with something that is not our helper (D5).
+	// Message carries what was seen.
+	OpenExecForbidden OpenState = "execForbidden"
+	// OpenHelperVersionMismatch — an incompatible helper answered (D6):
+	// a protocol version or content hash that is not the one installed.
+	// Non-retryable until the helper is reinstalled.
+	OpenHelperVersionMismatch OpenState = "helperVersionMismatch"
 )
 
 // OpenOutcome carries the resolved repository's identity and the two facts
@@ -145,6 +157,11 @@ const (
 // (D6). Toplevel and GitDir are both load-bearing — they are the binding's
 // identity, because two linked worktrees of one repository are different
 // working trees (spec §5.1) — and both are set only when State is OpenOK.
+// Message is the refusal's account: what failed and what to do about it,
+// set when State is one of the §6 refusal states (unsupportedPlatform,
+// deployFailed, execForbidden, helperVersionMismatch). A state that
+// renders a generic error is not done (brief, nocx-1xxa) — the panel says
+// what the state means and names the recovery.
 type OpenOutcome struct {
 	State      OpenState
 	Toplevel   string   // the worktree root; "" unless ok
@@ -152,6 +169,7 @@ type OpenOutcome struct {
 	GitVersion string   // "2.55.0"; set when the probe ran
 	EnvState   EnvState // D6: resolved, or degraded
 	EnvReason  string   // why the environment is degraded; "" when resolved
+	Message    string   // the refusal's account; "" unless a §6 refusal state
 }
 
 // EnvState reports whether git will run in the resolved environment or in the
@@ -284,6 +302,14 @@ type CommitState string
 const (
 	CommitOK     CommitState = "ok"
 	CommitFailed CommitState = "failed"
+	// CommitIndeterminate — the transport died between a mutation's
+	// request and its response (remote-helper D12): the commit may have
+	// happened, hooks and all, and the caller must say so — never a
+	// failure (which would invite a retry that commits twice), never a
+	// retry. Produced by the helper-backed repo on transport loss; the
+	// local implementation never produces it, because a local child
+	// either ran or was killed and the process can tell which.
+	CommitIndeterminate CommitState = "indeterminate"
 )
 
 // CommitOutcome is the result of one commit. Output is git's stdout and

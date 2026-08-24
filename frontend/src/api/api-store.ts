@@ -83,6 +83,11 @@ import {
   type ApiTimings,
 } from './api-model'
 import { proposedRequestName, slugify } from './api-paths'
+// The one owner of "where does this path live" (AD-8). This file had a
+// second copy of it, three lines long and identical, until a third caller
+// arrived — and two derivations of one concept agree everywhere anybody
+// looks until the day they do not.
+import { directoryOf } from './api-tree'
 import { foldQueryIntoParams } from './api-url'
 import type { Unsupported as PostmanNote } from '../generated/api.import.postman'
 
@@ -417,11 +422,16 @@ export interface ApiStore {
    * file behind it, or import somebody's Postman export — and a person
    * starting from nothing had to write JSON into the folder by hand.
    *
-   * `dir` is which folder INSIDE that collection it goes in, and its default
-   * is the root — the request a person makes from the collection's own row.
-   * It is the same parameter `freePath` has always taken for a duplicate,
-   * reached from a second door: a folder with nothing in it is not a place
-   * anybody can work until a request can be put in it.
+   * `dir` is which folder INSIDE that collection it goes in — the same
+   * parameter `freePath` has always taken for a duplicate, reached from a
+   * second door: a folder with nothing in it is not a place anybody can work
+   * until a request can be put in it. A door that AIMS at a row passes it,
+   * and a collection row's own path is '', which is how "the root" is said
+   * deliberately.
+   *
+   * OMITTED means "here", not "the root". The header's plus aims at nothing
+   * — that is what it is for — so the only answer it can give is where the
+   * person already is: the folder the open request lives in.
    */
   newRequest(dir?: string): Promise<void>
   editDraft(next: ApiRequest): void
@@ -547,12 +557,6 @@ function freeCopyName(open: readonly ApiOpenCollection[], handle: string, name: 
     open.find((c) => c.handle === handle)?.collection.requests.map((r) => r.name) ?? [],
   )
   return firstFree(taken, (n) => (n === 1 ? `${name} copy` : `${name} copy ${n}`))
-}
-
-/** The directory a path inside a collection lives in — '' at the root. */
-function directoryOf(relPath: string): string {
-  const cut = relPath.lastIndexOf('/')
-  return cut === -1 ? '' : relPath.slice(0, cut)
 }
 
 function message(err: unknown): string {
@@ -1228,9 +1232,34 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     setActiveCollection(handle)
   }
 
-  const newRequest = async (dir = ''): Promise<void> => {
+  /**
+   * The folder a person is IN — where a door that aims at nothing puts what
+   * it makes.
+   *
+   * It is the open request's folder, and the collection's root when there is
+   * none open. The handle is CHECKED against the request in the form because
+   * the two come apart: opening a second collection re-points the workbench
+   * and leaves the first collection's request on screen, and `iaam/` is then
+   * a path in a tree that is no longer being written to — a folder name
+   * borrowed from somebody else's collection, which the allocator would
+   * happily turn into a folder nobody asked for.
+   */
+  const hereFolder = (handle: string): string => {
+    const open = untrack(selected)
+    return open === null || open.handle !== handle ? '' : directoryOf(open.relPath)
+  }
+
+  const newRequest = async (dir?: string): Promise<void> => {
     const handle = untrack(activeCollection)
     if (handle === '') return
+    // WHERE A PERSON IS is where the next request goes, when no door named
+    // a folder. The header's plus needs no aiming and so names none, and
+    // sending it to the collection's root put the file somewhere the crumb
+    // trail directly above that control did not say — `Playground › iaam ›
+    // GET tokens`, and the new request under `Playground` (nocx-8aczn.6).
+    // `duplicateRequest` already answers this question this way, and its
+    // copy lands beside the original.
+    const into = dir ?? hereFolder(handle)
     // NO ASK. A person pressing "new request" has already said what they
     // want, and answering with a dialog puts a naming decision before the
     // thing they came to do — which is type a URL. The request arrives
@@ -1238,7 +1267,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // typed (editDraft), and is renamed in the header, in place, the moment
     // the person knows better (api-pane.tsx).
     const name = UNTITLED
-    const relPath = freePath(untrack(collections), handle, name, dir)
+    const relPath = freePath(untrack(collections), handle, name, into)
     try {
       // A GET at no address, which is the request a person is about to type
       // rather than a template with opinions in it. The id is the file's

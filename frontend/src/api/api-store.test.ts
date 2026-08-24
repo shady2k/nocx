@@ -969,6 +969,75 @@ describe('ApiStore — making a folder', () => {
 
     expect(disk.files.has('untitled-request.json')).toBe(true)
   })
+
+  it('a request made with one OPEN lands beside it, in the folder it lives in', async () => {
+    // WHERE A PERSON IS is where the next request goes. The header's plus
+    // names no folder — it is the door that needs no aiming — so "no folder
+    // named" cannot mean the collection's root while a request in `users/`
+    // is in the form: the crumb trail directly above that control reads
+    // `acme-api > users > create`, and the file landed somewhere the trail
+    // did not say (nocx-8aczn.6). `duplicateRequest` already answers this
+    // question the same way, and the copy lands beside its original.
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    await store.newRequest()
+
+    expect(disk.files.has('users/untitled-request.json')).toBe(true)
+    expect(store.selected()).toEqual({
+      handle: HANDLE,
+      relPath: 'users/untitled-request.json',
+    })
+  })
+
+  it('a folder NAMED still wins over the one the person is in', async () => {
+    // The row's plus and the row's menu aim at a row, and a collection row's
+    // own path is '' — so the aimed door has to be able to say "the root"
+    // while a request in a folder is open, and be believed.
+    const disk = folderOnDisk({
+      createFolder: vi.fn().mockResolvedValue(folderCreatedFixture('reports')),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    await store.newRequest('')
+    expect(disk.files.has('untitled-request.json')).toBe(true)
+
+    await store.createFolder(HANDLE, '', 'reports')
+    await store.newRequest('reports')
+    expect(disk.files.has('reports/untitled-request.json')).toBe(true)
+  })
+
+  it("never into a folder of somebody ELSE's collection", async () => {
+    // Opening a second collection re-points the workbench and leaves the
+    // first collection's request in the form. `users/` is a path in the
+    // collection that is no longer being written to, so "beside the open
+    // request" is not answerable and the root is what is left.
+    const disk = folderOnDisk({
+      openCollection: vi.fn().mockResolvedValue({
+        handle: 'h2',
+        collection: collectionFixture({ name: 'other-api', requests: [], folders: [] }),
+      }),
+    })
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    await store.openFolder('/w/other-api')
+    expect(store.activeCollection()).toBe('h2')
+    expect(store.selected()?.handle).toBe(HANDLE)
+
+    await store.newRequest()
+
+    expect(disk.writeRequest).toHaveBeenCalledWith(
+      'h2',
+      'untitled-request.json',
+      expect.objectContaining({ name: 'Untitled request' }),
+    )
+  })
 })
 
 describe('ApiStore — a request names itself while nobody else has', () => {

@@ -3719,19 +3719,25 @@ function openDialogs(): HTMLDialogElement[] {
 }
 
 describe('a new request has a door that does not move', () => {
-  it('the control in the header makes one in the active collection and puts it in the form', async () => {
+  it('the control in the header makes one WHERE THE PERSON IS and puts it in the form', async () => {
     const disk = folderOnDisk()
     const { bar } = await mountApp(disk.services)
     await openRequest(bar)
 
+    // The trail above the control says which folder this is, and the file
+    // has to land in the one it names.
+    expect(workbench().querySelector('.api-crumbs__folder')?.textContent).toBe('users')
     fireEvent.click(button('New request'))
 
-    // The file is written into the collection the workbench is pointed at,
-    // under a path the allocator chose — nothing was asked.
+    // Written into the collection the workbench is pointed at, in the folder
+    // the open request lives in, under a path the allocator chose — nothing
+    // was asked. It went to the collection's ROOT before (nocx-8aczn.6): a
+    // control that contradicted the line it sits in, and a request a person
+    // then had to move by hand into the folder they were already in.
     await vi.waitFor(() =>
       expect(disk.writeRequest).toHaveBeenCalledWith(
         HANDLE,
-        'untitled-request.json',
+        'users/untitled-request.json',
         expect.objectContaining({ name: 'Untitled request', method: 'GET', url: '' }),
       ),
     )
@@ -3770,6 +3776,13 @@ describe('a new request has a door that does not move', () => {
     expect(crumbName()).toBe('')
     fireEvent.click(button('New request'))
     await vi.waitFor(() => expect(crumbName()).toBe('Untitled request'))
+    // With no request open there is no folder a person is in, so the
+    // collection's root is the whole answer.
+    expect(disk.writeRequest).toHaveBeenCalledWith(
+      HANDLE,
+      'untitled-request.json',
+      expect.objectContaining({ name: 'Untitled request' }),
+    )
   })
 
   it('with no collection open the control is ABSENT, not present and refusing', async () => {

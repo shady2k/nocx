@@ -97,12 +97,6 @@
   font-size: var(--font-size-sm);
 }
 
-/* A rejected mutation call: inline, never a toast that evaporates. */
-.git-mutation-error {
-  color: var(--color-danger);
-  font-size: var(--font-size-sm);
-}
-
 /* The whole-index controls sit above the lists; the refusal below them
    carries the D19 reason. The two actions split the rail between them. Sized to their
    labels they left a ragged block of dead space beside them; at full width

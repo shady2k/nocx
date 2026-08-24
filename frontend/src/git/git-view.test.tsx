@@ -24,6 +24,7 @@ import type { GitLogResult } from '../generated/git.log'
 import type { ActiveOrigin } from '../pane-content'
 import type { ClipboardAccess } from '../clipboard'
 import type { UrlOpener } from '../open-url'
+import { RpcError } from '../dispatcher'
 import { ToastHost, clearToasts } from '../ui/toast'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -558,6 +559,69 @@ describe('row actions', () => {
     fireEvent.click(rowNamed(panel, 'a.txt'))
     const target = open.mock.calls[0][0] as GitDiffTarget
     expect(target.side).toBe('staged')
+  })
+
+  it('a rejected stage is a danger toast with the mapped sentence — never a div in the panel', async () => {
+    // A dropped socket rejects with the transport's plain words (no RPC
+    // code), which is the shape the connection classifier maps. Domain
+    // refusals ride -32602 and the store re-resolves those before the
+    // error is stored (isUnknownBinding) — they never reach this toast.
+    const stage = vi.fn().mockRejectedValue(new Error('ws closed'))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    // The failure is an action outcome, announced by the kit toast the way
+    // a user sees it. The raw wire words live in the toast, never in the
+    // document flow: the panel body must not hold the message (the old
+    // git-mutation-error div rendered exactly that).
+    expect(panel.textContent).not.toContain('ws closed')
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made — the connection was lost.',
+    )
+  })
+
+  it('a rejected commit appends the raw reason — the open sentence never swallows it', async () => {
+    const commit = vi.fn().mockRejectedValue(new RpcError('index.lock exists', -32603))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: stagedFile })),
+      commit,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    fireEvent.input(panel.querySelector('#git-commit-subject') as HTMLInputElement, {
+      target: { value: 'doomed' },
+    })
+    fireEvent.click(panel.querySelector('[data-testid="git-commit"]') as HTMLButtonElement)
+    await settle()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made (index.lock exists).',
+    )
+  })
+
+  it("a saturation refusal is the dispatcher's own toast — the panel does not toast twice", async () => {
+    const stage = vi.fn().mockRejectedValue(new RpcError('Control plane busy', -32004))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    expect(document.querySelector('.ui-toast__message')).toBeNull()
+    // The store still holds the account, so the panel does not silently
+    // swallow the refusal — the stale banner carries the recovery.
+    expect(panel.querySelector('[data-testid="git-status-stale"]')).not.toBeNull()
   })
 })
 

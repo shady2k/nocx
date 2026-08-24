@@ -250,6 +250,27 @@ export interface ApiStore {
    *  a collection", and Send is gated on it. */
   activeCollection(): string
   /**
+   * WHERE THE PANEL IS POINTED inside that collection — a path, '' at its
+   * root. The one owner of "where is this person standing", which before it
+   * had none: the plus derived it from the open request, and a curl import
+   * erased it by detaching the form from its file.
+   *
+   * A PLACE A PERSON WALKED TO, not a fact about the form. Opening a request
+   * moves it (you are where you just went), clicking a folder moves it, and
+   * pointing at a collection puts it at that collection's root. What the
+   * form happens to be holding does not.
+   */
+  activeFolder(): string
+  /**
+   * Where the draft in the form WILL BE WRITTEN, for a draft with no file
+   * behind it — the answer the curl ask gave, '' being the collection's root.
+   *
+   * Deliberately not `activeFolder`: between Convert and Save a person may
+   * walk somewhere else in the tree, and a pending file that followed them
+   * around would be a promise the ask made and the surface broke.
+   */
+  draftFolder(): string
+  /**
    * WHERE A COLLECTION MADE WITH NO PLACE NAMED GOES — the directory, off
    * the backend's own listing. '' on a build with no app directory, and ''
    * before the first listing answers.
@@ -362,7 +383,30 @@ export interface ApiStore {
    *  already does, reachable for an action that must act on THAT row rather
    *  than on whatever the panel happened to be pointed at. */
   pointAt(handle: string): void
+  /** Walk into a folder of one open collection: the panel is pointed at that
+   *  collection and standing in that folder. `relPath` is '' for the
+   *  collection's own root, which is what its row means. */
+  enterFolder(handle: string, relPath: string): void
   openRequest(handle: string, relPath: string): Promise<void>
+  /**
+   * Take the request out of the form. The FILE is untouched — this is a
+   * close, not a delete, and it is what a tab's ✕ is in every other client;
+   * nocx has one form by design, so it is one act rather than a strip.
+   *
+   * IT DOES NOT ASK. The surface does, the way it does for a delete, with
+   * `unsavedWork` and `closeQuestion` below — this file is not where this
+   * product raises dialogs (see the header).
+   */
+  closeRequest(): void
+  /** True while the form holds work that is not on disk: a draft that has
+   *  drifted from its file, or one that never had a file. The ONE owner of
+   *  that question — the pane derived it a second time for Save's enabled
+   *  state, and two derivations of one predicate agree until they do not. */
+  unsavedWork(): boolean
+  /** What closing the form would cost, named, or '' when it would cost
+   *  nothing. The sentence is here because which of the two is true is read
+   *  off `selected`, and that belongs to whoever holds it. */
+  closeQuestion(): string
   /**
    * Write the draft into a file that does not exist yet, in the collection
    * the workbench is pointed at, and select it.
@@ -461,7 +505,10 @@ export interface ApiStore {
   /** Write one back, creating the file when nothing occupies the name, and
    *  re-list so the picker names what is now on disk. */
   writeEnvironment(relPath: string, environment: ApiEnvironment): Promise<void>
-  importCurl(line: string): Promise<void>
+  /** Convert a curl command line into the form. `into` is the folder the
+   *  resulting request will be SAVED to and defaults to where the person is
+   *  standing; nothing is written until then (design §10). */
+  importCurl(line: string, into?: string): Promise<void>
   /** Convert an export into a collection folder at `dest`. The export is an
    *  ImportSource — a path on the backend's machine, the document itself, or
    *  a URL the backend fetches over a route — because a browser drop and the
@@ -566,6 +613,14 @@ function message(err: unknown): string {
 export function createApiStore(services: ApiWorkbenchServices): ApiStore {
   const [collections, setCollections] = createSignal<readonly ApiOpenCollection[]>([])
   const [activeCollection, setActiveCollection] = createSignal('')
+  // WHERE THE PERSON IS STANDING inside it. A place, not a fact about the
+  // form: see the interface. Every writer of `activeCollection` is also a
+  // writer of this — arriving in a collection is arriving at its root — and
+  // the one exception is `openRequest`, which lands in the request's folder.
+  const [activeFolder, setActiveFolder] = createSignal('')
+  // Where a draft with no file behind it will be written. Only the curl
+  // import mints such a draft, and the ask is what answers this.
+  const [draftFolder, setDraftFolder] = createSignal('')
   // ── Which environment a send goes out under (nocx-pnvnn) ────────────────
   //
   // Keyed by the collection HANDLE, and the absence of a key is a state of
@@ -947,6 +1002,17 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       const listed = result.collections
       if (!listed.some((c) => c.handle === untrack(activeCollection))) {
         setActiveCollection(listed.length > 0 ? listed[0].handle : '')
+        setActiveFolder('')
+      }
+      // AND THE FOLDER UNDERNEATH THE PERSON, by the same argument one step
+      // down: a colleague's `git pull` can take a folder away while somebody
+      // is standing in it, and a place that is not there is not a place. The
+      // set consulted is `folders`, which is the ONE answer to what folders
+      // exist (the tree reads the same one).
+      const here = untrack(activeFolder)
+      if (here !== '') {
+        const holder = listed.find((c) => c.handle === untrack(activeCollection))
+        if (holder === undefined || !holder.collection.folders.includes(here)) setActiveFolder('')
       }
       setError('')
     } catch (err) {
@@ -987,6 +1053,9 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       // tree with a stale listing beside a fresh one.
       setCollections((prev) => [...prev.filter((c) => c.handle !== row.handle), row])
       setActiveCollection(row.handle)
+      // A collection that has just been opened is entered at its root: there
+      // is nowhere else in it a person could be said to be standing.
+      setActiveFolder('')
       setError('')
     } catch (err) {
       setError(message(err))
@@ -1024,6 +1093,7 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       }
       setCollections((prev) => [...prev.filter((c) => c.handle !== row.handle), row])
       setActiveCollection(row.handle)
+      setActiveFolder('')
       setError('')
     } catch (err) {
       // A refused name — blank, a path separator in it, `.`, `..`, a folder
@@ -1095,7 +1165,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
         next.delete(handle)
         return next
       })
-      if (activeCollection() === handle) setActiveCollection('')
+      if (activeCollection() === handle) {
+        setActiveCollection('')
+        // The folder a person was standing in belonged to the collection
+        // that just left the list.
+        setActiveFolder('')
+      }
       // The form was showing a request in the folder that just left. Keeping
       // it would leave a Send pointed at a handle that no longer resolves.
       if (selected()?.handle === handle) {
@@ -1118,6 +1193,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
       const result = await services.readRequest(handle, relPath)
       setSelected({ handle, relPath })
       setActiveCollection(handle)
+      // OPENING SOMETHING IS GOING THERE. The one writer of the pointer that
+      // does not land at a root: a person who opened `users/create` is
+      // standing in `users`, and the plus beside them means that folder.
+      setActiveFolder(directoryOf(relPath))
+      setDraftFolder(directoryOf(relPath))
       // FOLDED ONCE, into both. A file may carry its query in the URL, in
       // the rows, or in both — the sender concatenates them (§6.4) — and the
       // panel shows one of the two. Folding here makes the rows the one
@@ -1194,7 +1274,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // asking a second time for something already answered, in the currency
     // of paths rather than of names, at the moment somebody was trying to
     // press Send.
-    const relPath = freePath(untrack(collections), handle, request.name)
+    //
+    // THE FOLDER, THOUGH, WAS ANSWERED — in the import ask, which is the one
+    // moment this request's destination is on screen (nocx-8aczn.10). Before
+    // that this call passed no directory at all, so every curl line ever
+    // imported landed at the collection's root and had to be moved by hand.
+    const relPath = freePath(untrack(collections), handle, request.name, untrack(draftFolder))
     try {
       await services.writeRequest(handle, relPath, request)
       // Selected the moment it exists: what makes Send legal is that there
@@ -1230,23 +1315,17 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
 
   const pointAt = (handle: string): void => {
     setActiveCollection(handle)
+    // Pointing at a collection is standing at ITS root — never in whatever
+    // folder of some other collection the person was in a moment ago.
+    setActiveFolder('')
   }
 
-  /**
-   * The folder a person is IN — where a door that aims at nothing puts what
-   * it makes.
-   *
-   * It is the open request's folder, and the collection's root when there is
-   * none open. The handle is CHECKED against the request in the form because
-   * the two come apart: opening a second collection re-points the workbench
-   * and leaves the first collection's request on screen, and `iaam/` is then
-   * a path in a tree that is no longer being written to — a folder name
-   * borrowed from somebody else's collection, which the allocator would
-   * happily turn into a folder nobody asked for.
-   */
-  const hereFolder = (handle: string): string => {
-    const open = untrack(selected)
-    return open === null || open.handle !== handle ? '' : directoryOf(open.relPath)
+  /** Walk into a folder. `relPath` is '' for the collection's own root, so
+   *  this is also what a click on a collection row means, and `pointAt` is
+   *  that call with the folder left out. */
+  const enterFolder = (handle: string, relPath: string): void => {
+    setActiveCollection(handle)
+    setActiveFolder(relPath)
   }
 
   const newRequest = async (dir?: string): Promise<void> => {
@@ -1257,9 +1336,13 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // sending it to the collection's root put the file somewhere the crumb
     // trail directly above that control did not say — `Playground › iaam ›
     // GET tokens`, and the new request under `Playground` (nocx-8aczn.6).
-    // `duplicateRequest` already answers this question this way, and its
-    // copy lands beside the original.
-    const into = dir ?? hereFolder(handle)
+    //
+    // It read that folder off the open REQUEST at first, which was a second
+    // answer to "where is this person" and one the curl import erased by
+    // detaching the form from its file. `activeFolder` is the owner now
+    // (nocx-8aczn.7), and it belongs to the collection the pointer is on, so
+    // there is no foreign path to guard against here.
+    const into = dir ?? untrack(activeFolder)
     // NO ASK. A person pressing "new request" has already said what they
     // want, and answering with a dialog puts a naming decision before the
     // thing they came to do — which is type a URL. The request arrives
@@ -1636,14 +1719,48 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
    *  work that is not on disk (`unsavedWork`), said in the words that are
    *  true of each: one has a file it has drifted from, the other has never
    *  had one. */
-  const replacementQuestion = (request: ApiRequest): string => {
+  const unsavedQuestion = (request: ApiRequest, act: 'import' | 'close'): string => {
     const named = request.name.trim() === '' ? 'The request in the form' : `"${request.name}"`
-    return selected() === null
-      ? `${named} has never been saved. Importing this curl line replaces it, and it is gone.`
-      : `${named} has unsaved changes. Importing this curl line replaces it, and they are gone.`
+    const never = selected() === null
+    if (act === 'import') {
+      return never
+        ? `${named} has never been saved. Importing this curl line replaces it, and it is gone.`
+        : `${named} has unsaved changes. Importing this curl line replaces it, and they are gone.`
+    }
+    return never
+      ? `${named} has never been saved. Closing it now discards it.`
+      : `${named} has unsaved changes. Closing it now discards them.`
   }
 
-  const importCurl = async (line: string): Promise<void> => {
+  /** What closing would cost, or '' when it would cost nothing. The pane
+   *  raises the ask; this is the sentence and the fact behind it. */
+  const closeQuestion = (): string => {
+    const open = draft()
+    return open === null || !unsavedWork() ? '' : unsavedQuestion(open, 'close')
+  }
+
+  /**
+   * Take the request out of the form.
+   *
+   * THE FILE IS NOT TOUCHED. What goes is the form's attachment to it: the
+   * draft, the snapshot it is compared against, and the selection the tree
+   * marks. `activeFolder` stays — closing what was in a folder is not
+   * leaving the folder, and the plus beside the person still means the
+   * place they are still standing in.
+   *
+   * It does not ask. Whoever closes it has already been told what it costs
+   * (`closeQuestion`), the way the delete on this surface works.
+   */
+  const closeRequest = (): void => {
+    setSelected(null)
+    setDraft(null)
+    setSaved(null)
+    setDraftFolder('')
+    setNotes([])
+    setError('')
+  }
+
+  const importCurl = async (line: string, into?: string): Promise<void> => {
     let result: ApiImportCurlResult
     try {
       result = await services.importCurl(line)
@@ -1690,7 +1807,11 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // leaves every test here standing. The choice is the pane owner's.
     const open = draft()
     if (open !== null && unsavedWork()) {
-      const proceed = await showConfirm(replacementQuestion(open), 'Discard and import', 'Cancel')
+      const proceed = await showConfirm(
+        unsavedQuestion(open, 'import'),
+        'Discard and import',
+        'Cancel',
+      )
       // NOTHING MOVES ON A NO — not the draft, not the notes, not the error.
       // The import did not happen, so the form is exactly as it was found.
       if (!proceed) return
@@ -1700,6 +1821,13 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     // is nothing on disk for api.request.send to send.
     setSelected(null)
     setSaved(null)
+    // WHERE IT WILL GO WHEN IT DOES. The ask answered this, and its answer
+    // is kept here rather than re-read at Save from wherever the person has
+    // wandered to since: `undefined` is "the ask named none", and only then
+    // does the folder they are standing in decide. `activeFolder` itself is
+    // deliberately NOT moved — the import detaches the form from its file,
+    // which is a fact about the form and not about where anybody is.
+    setDraftFolder(into ?? untrack(activeFolder))
     // THE IMPORTER NAMED IT, off the line the person pasted, so there is
     // no offer to make: a curl line converted into the form arrives called
     // something, and rewriting that from the address would be this store
@@ -1795,6 +1923,12 @@ export function createApiStore(services: ApiWorkbenchServices): ApiStore {
     connections,
     loadConnections,
     pointAt,
+    enterFolder,
+    activeFolder,
+    draftFolder,
+    closeRequest,
+    unsavedWork,
+    closeQuestion,
     openRequest,
     saveDraftAs,
     saveDraft,

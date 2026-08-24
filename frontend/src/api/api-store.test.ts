@@ -1183,3 +1183,187 @@ describe('ApiStore — duplicating a request', () => {
     expect(store.selected()).toBeNull()
   })
 })
+
+// ── Where the person is, and what the form is holding ─────────────────────
+//
+// Two questions that look like one and are not. `activeFolder` is WHERE THE
+// PANEL IS POINTED — a place a person walked to in the tree, which the plus
+// and the curl ask read when nobody names a folder. `draftFolder` is where
+// THE THING IN THE FORM will be written, which only a draft with no file
+// behind it has, and which the person chose in the import ask. They agree
+// almost always and come apart the moment somebody walks off after importing
+// — and a pending file that followed the person around would be a promise the
+// ask made and the surface broke.
+
+describe('ApiStore — the folder the panel is pointed at', () => {
+  it('starts at the root and follows the request that is opened', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    expect(store.activeFolder()).toBe('')
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+    expect(store.activeFolder()).toBe('users')
+  })
+
+  it('a person can walk into a folder, and what they make lands there', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    store.enterFolder(HANDLE, 'users')
+
+    expect(store.activeCollection()).toBe(HANDLE)
+    expect(store.activeFolder()).toBe('users')
+    await store.newRequest()
+    expect(disk.files.has('users/untitled-request.json')).toBe(true)
+  })
+
+  it('pointing at a collection is standing at its root, not in the last folder', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    store.enterFolder(HANDLE, 'users')
+
+    store.pointAt(HANDLE)
+
+    expect(store.activeFolder()).toBe('')
+  })
+
+  it('a folder that leaves the listing stops being where anybody is', async () => {
+    // The same re-validation the active COLLECTION gets when a handle stops
+    // being listed: a place that is not there is not a place, and the
+    // allocator would otherwise be handed a path the backend just lost.
+    const list = vi
+      .fn()
+      .mockResolvedValue({ collections: [collectionsFixture()], defaultRoot: DEFAULT_ROOT })
+    const { store } = storeWith({ listCollections: list })
+    await store.refresh()
+    store.enterFolder(HANDLE, 'users')
+
+    list.mockResolvedValue({
+      collections: [
+        collectionsFixture({ collection: collectionFixture({ requests: [], folders: [] }) }),
+      ],
+      defaultRoot: DEFAULT_ROOT,
+    })
+    await store.refresh()
+
+    expect(store.activeFolder()).toBe('')
+  })
+
+  it('a curl import does not move the person — that is what the ask reads', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    await store.importCurl('curl https://h/v1/ping')
+
+    // The import detaches the form from its file on purpose (nocx-86wvw).
+    // Where the person STANDS is not the form's business.
+    expect(store.selected()).toBeNull()
+    expect(store.activeFolder()).toBe('users')
+  })
+})
+
+describe('ApiStore — a curl import lands where the ask said', () => {
+  it('with no folder named it takes the one the person is standing in', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    store.enterFolder(HANDLE, 'users')
+
+    await store.importCurl('curl https://h/v1/ping')
+    expect(store.draftFolder()).toBe('users')
+
+    await store.saveDraftAs()
+
+    expect(disk.files.has('users/create.json')).toBe(true)
+    expect(store.selected()?.relPath.startsWith('users/')).toBe(true)
+  })
+
+  it('the ask names one, and that is where it goes whatever the tree does after', async () => {
+    // The promise the ask made: walking somewhere else between Convert and
+    // Save must not carry the pending file along.
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    await store.importCurl('curl https://h/v1/ping', 'users')
+    store.enterFolder(HANDLE, '')
+
+    await store.saveDraftAs()
+
+    expect(
+      [...disk.files.keys()].some((k) => k.startsWith('users/') && k !== CREATE_REL_PATH),
+    ).toBe(true)
+  })
+
+  it('the collection root is still sayable, and is not "nobody named one"', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    store.enterFolder(HANDLE, 'users')
+
+    await store.importCurl('curl https://h/v1/ping', '')
+    await store.saveDraftAs()
+
+    expect(store.selected()?.relPath.includes('/')).toBe(false)
+  })
+})
+
+describe('ApiStore — closing the request', () => {
+  it('empties the form and leaves the file exactly where it was', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+
+    store.closeRequest()
+
+    expect(store.draft()).toBeNull()
+    expect(store.selected()).toBeNull()
+    expect(disk.files.get(CREATE_REL_PATH)).toEqual(REQUEST)
+    // The person did not leave the folder by closing what was in it.
+    expect(store.activeFolder()).toBe('users')
+  })
+
+  it('says what closing would cost, in the two ways a form holds work', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+
+    // Nothing in the form: nothing to say.
+    expect(store.unsavedWork()).toBe(false)
+    expect(store.closeQuestion()).toBe('')
+
+    // A file it has drifted from.
+    await store.openRequest(HANDLE, CREATE_REL_PATH)
+    expect(store.unsavedWork()).toBe(false)
+    store.editDraft({ ...(store.draft() as ApiRequest), url: 'https://h/v9/moved' })
+    expect(store.unsavedWork()).toBe(true)
+    expect(store.closeQuestion()).toContain('unsaved changes')
+
+    // A form that never had a file — the curl import's state. The import
+    // asks before it takes the edits above, and the answer here is yes.
+    showConfirmMock.mockResolvedValue(true)
+    await store.importCurl('curl https://h/v1/ping')
+    expect(store.unsavedWork()).toBe(true)
+    expect(store.closeQuestion()).toContain('never been saved')
+  })
+
+  it('closing a draft that was never saved writes nothing at all', async () => {
+    const disk = folderOnDisk()
+    const { store } = storeWith(disk.services)
+    await store.refresh()
+    await store.importCurl('curl https://h/v1/ping')
+    const before = [...disk.files.keys()]
+
+    store.closeRequest()
+
+    expect(store.draft()).toBeNull()
+    expect([...disk.files.keys()]).toEqual(before)
+    expect(store.draftFolder()).toBe('')
+  })
+})

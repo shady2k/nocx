@@ -14,13 +14,8 @@
 // what a request goes out under, and half-typed rows on disk are half-typed
 // rows in a send.
 //
-// WHAT A SECRET ROW MEANS HERE, and why its value is not editable: §8 leaves
-// no field in the whole format where a secret value can be spelled. Marking a
-// row secret declares that the value lives OUTSIDE the file, under a binding
-// in the vault — and today the only writer of bindings is the Postman
-// importer (internal/apibind). So the checkbox writes the NAME into
-// `secretVars`, the value field goes away with the value, and the row says
-// where the value has to come from instead of pretending it can be typed.
+// A secret is text, so an environment value holds the same opaque
+// `{{secret:secrow:…}}` reference as every other text field.
 
 import { For, Show, createEffect } from 'solid-js'
 import { showToast } from '../ui/toast'
@@ -34,62 +29,38 @@ import { Field } from '../ui/field'
 import { Select } from '../ui/select'
 import { IconButton } from '../ui/icon-button'
 import { PlusIcon } from '../ui/icons'
-import { SecretValueField } from '../ui/secret-value-field'
+import { SecretTextField, secretMarks, type SecretEntry, type VaultState } from './secret-text-field'
+import type { SecretPickerSource } from '../ui/secret-picker'
 import { TextField } from '../ui/text-field'
 import { environmentPath } from './api-paths'
 import type { ApiConnection } from './api-client'
 import type { ApiEnvironment, ApiEnvironmentRef, ApiRoute } from './api-model'
 
-/** One row of the values table, while it is being edited.
- *
- *  A LIST, not the object the file holds: an object cannot hold a row whose
- *  name is still empty, and it silently loses a row the moment two names
- *  collide — which is exactly what happens halfway through typing the second
- *  one. The list is the editing shape and the object is the stored shape, and
- *  `toValues` below is the one place that turns one into the other. */
+/** One row of the environment values table while it is being edited. */
 export interface ValueRow {
   name: string
   value: string
-  secret: boolean
 }
 
-/** The rows as the file holds them: the plain values in one map, the names of
- *  the secret ones in a list beside it. A row with no name is not a variable
- *  — it is a row somebody has started typing — so it is dropped rather than
- *  written as "". A later row wins a repeated name, which is what the last
- *  thing typed means. */
+/** The file shape: every named row is an ordinary value, including a secret
+ * reference. Empty names are draft-only and are omitted. */
 export function toStored(rows: readonly ValueRow[]): {
   values: Record<string, string>
-  secretVars: string[]
 } {
   const values: Record<string, string> = {}
-  const secretVars: string[] = []
   for (const row of rows) {
     const name = row.name.trim()
-    if (name === '') continue
-    if (row.secret) {
-      if (!secretVars.includes(name)) secretVars.push(name)
-      // A secret name is not also a plain value: one variable, one place its
-      // value comes from. Leaving it in both would let a stale plain value
-      // answer a send the binding was supposed to.
-      delete values[name]
-    } else {
-      values[name] = row.value
-    }
+    if (name !== '') values[name] = row.value
   }
-  return { values, secretVars }
+  return { values }
 }
 
-/** And back: the file as rows to edit, in a stable order so the table does
- *  not reshuffle itself between one open and the next. */
+/** Project the file's values into stable table rows. */
 export function toRows(env: ApiEnvironment): ValueRow[] {
-  const plain = Object.keys(env.values)
+  return Object.keys(env.values)
     .sort()
-    .map((name) => ({ name, value: env.values[name], secret: false }))
-  const secret = [...env.secretVars].sort().map((name) => ({ name, value: '', secret: true }))
-  return [...plain, ...secret]
+    .map((name) => ({ name, value: env.values[name] }))
 }
-
 export interface EnvironmentViewProps {
   /** Every environment in the collection, as the listing names them. */
   environments: readonly ApiEnvironmentRef[]
@@ -112,39 +83,18 @@ export interface EnvironmentViewProps {
   onRows: (rows: readonly ValueRow[]) => void
   onSave: () => void
   onReset: () => void
-  /**
-   * WHERE A SEND UNDER THIS ENVIRONMENT LEAVES FROM (§6.5).
-   *
-   * The route lives on the environment beside the address it belongs with,
-   * so switching environment moves the two together and a production URL
-   * cannot go out around its bastion. The backend has carried it since the
-   * sender was written — apisend leases the named profile's pooled SSH
-   * connection, the same one a tab uses, authorized the same way — and this
-   * is the half that was missing: nothing in the product could choose one,
-   * so every environment anybody made was direct.
-   */
   route: ApiRoute
   onRoute: (route: ApiRoute) => void
-  /** The connections that can be named. Empty where this build has no
-   *  profile store, and then the choice is not offered: a picker over
-   *  nothing is a control that governs nothing. */
   connections: readonly ApiConnection[]
-  /**
-   * GIVE A SECRET VARIABLE ITS VALUE — the write that did not exist.
-   *
-   * A row marked secret says its value lives outside the file, and until
-   * this there was no way to put one there: only an IMPORT could mint a
-   * binding, so a variable a person declared secret in this editor stayed
-   * unresolved for ever and the send it belonged to could never go out.
-   *
-   * The value goes straight out and is never held here: it is typed, sent
-   * and dropped, so this surface never has a signal a credential sits in.
-   *
-   * ABSENT rather than rejecting where this build has no binding store —
-   * the same rule the folder pickers keep, and the same reason: a control
-   * that fails when pressed is worse than one that was never drawn.
-   */
-  onBindSecret?: (variable: string, value: string) => Promise<void>
+  /** Shared picker and the vault facts used to paint references. */
+  secretSource?: SecretPickerSource
+  secretEntries?: () => readonly SecretEntry[]
+  vaultState?: () => VaultState
+  onSecretReference?: (
+    handle: string,
+    at: { x: number; y: number },
+    replace: () => void,
+  ) => void
 }
 
 export function EnvironmentView(props: EnvironmentViewProps) {
@@ -349,13 +299,13 @@ export function EnvironmentView(props: EnvironmentViewProps) {
               </Show>
             </div>
 
-            {/* The kit's row list in its table shape — the same component
-                the request's params and headers use, so the three tables in
-                this feature are one vocabulary rather than three. */}
+            {/* The value is ordinary text at every scope, including opaque
+                secret references. The shared adapter owns picker lifecycle,
+                marks and vault-state wording. */}
             <EditableRowList
               variant="table"
               ariaLabel="Environment values"
-              columns={[{ label: 'Name' }, { label: 'Value' }, { label: 'Secret' }]}
+              columns={[{ label: 'Name' }, { label: 'Value' }]}
               rows={props.rows}
               addLabel="Add variable"
               emptyLabel="No variables yet. A URL written in {{baseUrl}} resolves against one of these."
@@ -372,53 +322,25 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                     />
                   </td>
                   <td>
-                    <Show
-                      when={!row().secret}
-                      fallback={
-                        <Show
-                          when={props.onBindSecret && row().name.trim() !== ''}
-                          fallback={
-                            <p class="api-environments__note">
-                              Bound in the vault — there is no field in this file it could be typed
-                              into.
-                            </p>
-                          }
-                        >
-                          {/* The kit's field, placed — never a second one
-                              built here. It owns the value while it is on
-                              screen and drops it the moment the write is
-                              accepted; this surface only says which variable
-                              the value is for. */}
-                          <SecretValueField
-                            id={`api-environment-var-secret-${i}`}
-                            ariaLabel={`Variable ${i + 1} value, stored in the vault`}
-                            placeholder="Paste the value — it goes to the vault, not to the file"
-                            title={`Store the value for ${row().name.trim()} in the vault`}
-                            onSubmit={(value) => props.onBindSecret?.(row().name.trim(), value)}
-                          />
-                        </Show>
-                      }
-                    >
-                      <TextField
-                        id={`api-environment-var-value-${i}`}
-                        ariaLabel={`Variable ${i + 1} value`}
-                        placeholder="https://api.example.com"
-                        value={row().value}
-                        onInput={(v) => patchRow(i, { value: v })}
-                      />
-                    </Show>
-                  </td>
-                  <td>
-                    <Checkbox
-                      ariaLabel={`Variable ${i + 1} is secret`}
-                      checked={row().secret}
-                      onChange={(v) => patchRow(i, { secret: v })}
+                    <SecretTextField
+                      id={`api-environment-var-value-${i}`}
+                      ariaLabel={`Variable ${i + 1} value`}
+                      placeholder="https://api.example.com"
+                      value={row().value}
+                      onInput={(v) => patchRow(i, { value: v })}
+                      source={props.secretSource}
+                      marks={secretMarks(
+                        row().value,
+                        props.secretEntries?.() ?? [],
+                        props.vaultState?.() ?? 'unknown',
+                      )}
+                      onSecretReference={props.onSecretReference}
                     />
                   </td>
                 </>
               )}
               onRemove={(i) => props.onRows(props.rows.filter((_, j) => j !== i))}
-              onAdd={() => props.onRows([...props.rows, { name: '', value: '', secret: false }])}
+              onAdd={() => props.onRows([...props.rows, { name: '', value: '' }])}
             />
 
             {/* One Add control, and it is the row list's own at the foot of

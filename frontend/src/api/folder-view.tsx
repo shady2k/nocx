@@ -30,6 +30,8 @@ import { FolderIcon, PlusIcon } from '../ui/icons'
 import { StatusCard } from '../ui/status-card'
 import { Tabs } from '../ui/tabs'
 import { TextField } from '../ui/text-field'
+import { SecretTextField, secretMarks, type SecretEntry, type VaultState } from './secret-text-field'
+import type { SecretPickerSource } from '../ui/secret-picker'
 import type { ApiParam } from './api-model'
 // The label rule for a table's tab is stated once, by the surface that first
 // stated it, rather than restated here (nocx-x3cax.6).
@@ -97,6 +99,15 @@ export interface FolderViewProps {
    *  folder is exactly where a person needs it and the trail's own plus is
    *  at the other end of the line. */
   onNewRequest: () => void
+  /** Shared picker and the vault facts used to paint references. */
+  secretSource?: SecretPickerSource
+  secretEntries?: () => readonly SecretEntry[]
+  vaultState?: () => VaultState
+  onSecretReference?: (
+    handle: string,
+    at: { x: number; y: number },
+    replace: () => void,
+  ) => void
 }
 
 export function FolderView(props: FolderViewProps) {
@@ -212,12 +223,19 @@ export function FolderView(props: FolderViewProps) {
                   />
                 </td>
                 <td>
-                  <TextField
+                  <SecretTextField
                     id={`api-folder-var-value-${i}`}
                     ariaLabel={`Variable ${i + 1} value`}
                     placeholder="https://api.example.com"
                     value={row().value}
                     onInput={(value) => patchRow(i, { value })}
+                    source={props.secretSource}
+                    marks={secretMarks(
+                      row().value,
+                      props.secretEntries?.() ?? [],
+                      props.vaultState?.() ?? 'unknown',
+                    )}
+                    onSecretReference={props.onSecretReference}
                   />
                 </td>
               </>

@@ -30,8 +30,7 @@ const importDocumentFixture = `{
 // check in contracts/README.md's table and the one that matters.
 func TestAPIImportPostmanDocument_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.postman.schema.json")
-	bindings := newAPIFakeBindings()
-	_, conn := newAPIWSServer(t, bindings)
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
 
 	dest := filepath.Join(t.TempDir(), "imported")
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{
@@ -47,8 +46,9 @@ func TestAPIImportPostmanDocument_OverTheWireConformsToContract(t *testing.T) {
 	// happy path makes: you import an export in order to work in it.
 	openAPICollection(t, conn, dest, 2)
 
-	if bindings.count() != 1 {
-		t.Errorf("bound values = %d, want 1 — the secret must reach the binding store on this route too", bindings.count())
+	assertImportedSecretAbsent(t, dest)
+	if !strings.Contains(string(resp.Result), "variable token") {
+		t.Errorf("result = %s, want the dropped credential reported", resp.Result)
 	}
 }
 

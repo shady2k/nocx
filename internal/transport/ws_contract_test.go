@@ -5768,12 +5768,6 @@ func (b *apiFakeBindings) UnbindCollection(_ context.Context, collection string)
 	return nil
 }
 
-func (b *apiFakeBindings) count() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.bound)
-}
-
 // newAPIWSServer starts a server with the whole api.* surface wired, the way
 // the composition root wires it plus the binding store that does not exist
 // yet.
@@ -7359,10 +7353,29 @@ func TestAPIImportCurl_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func assertImportedSecretAbsent(t *testing.T, dest string) {
+	t.Helper()
+	walkErr := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		body, readErr := os.ReadFile(p) //nolint:gosec // a test-only path under t.TempDir()
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(body), "sk-secret-value") {
+			t.Errorf("%s contains the secret VALUE; a collection file names a variable, never a secret", p)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", dest, walkErr)
+	}
+}
+
 func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.postman.schema.json")
-	bindings := newAPIFakeBindings()
-	_, conn := newAPIWSServer(t, bindings)
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
 
 	doc := filepath.Join(t.TempDir(), "export.json")
 	if err := os.WriteFile(doc, []byte(`{
@@ -7389,26 +7402,13 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	// rather than in a test of its own.
 	openAPICollection(t, conn, dest, 2)
 
-	// The secret value went to the binding store and NOT into the folder.
-	if bindings.count() != 1 {
-		t.Errorf("bound values = %d, want 1 — the secret must reach the binding store", bindings.count())
+	// The secret value is not carried and must not appear in the folder.
+	// Imported credential material is deliberately not carried. The existing
+	// Unsupported vocabulary reports that loss to the person.
+	if !strings.Contains(string(resp.Result), "variable token") {
+		t.Errorf("result = %s, want the dropped credential reported", resp.Result)
 	}
-	walkErr := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		body, readErr := os.ReadFile(p) //nolint:gosec // a test-only path under t.TempDir()
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(body), "sk-secret-value") {
-			t.Errorf("%s contains the secret VALUE; a collection file names a variable, never a secret", p)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		t.Fatalf("walk %s: %v", dest, walkErr)
-	}
+	assertImportedSecretAbsent(t, dest)
 
 	// AND THE THIRD ENTRANCE, off the same socket. A conformance test that
 	// certifies two entrances out of three certifies the wrong thing: the
@@ -7434,32 +7434,23 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("api.import.postman by url: %+v", fetched.Error)
 	}
 	validateJSON(t, schema, fetched.Result, "api.import.postman result (url)")
-	// `unsupported: []` and not `null`: an export that converts whole says
-	// so with an empty LIST, which is what the renderer's first .map walks.
-	if !strings.Contains(string(fetched.Result), `"unsupported":[]`) {
-		t.Errorf("result = %s, want an empty unsupported list on an export that converts whole", fetched.Result)
+	// A credential-shaped variable is omitted and reported; `unsupported` is
+	// the existing vocabulary for material the importer deliberately cannot carry.
+	if !strings.Contains(string(fetched.Result), "variable token") {
+		t.Errorf("result = %s, want the dropped credential reported", fetched.Result)
 	}
 	openAPICollection(t, conn, byURL, 4)
-	if bindings.count() != 2 {
-		t.Errorf("bound values = %d, want 2 — the secret must reach the binding store on this route too", bindings.count())
-	}
+	assertImportedSecretAbsent(t, byURL)
 }
 
-// The import's failure half, both external calls that can fail: the document
-// that is not there, and the binding store that refuses. The second one
-// matters most — the folder must not survive a binding that failed.
+// The import's failure half: a source that is not there and a malformed
+// Postman document. Both fail before staging, so neither leaves a collection.
 func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
-	bindings := newAPIFakeBindings()
-	bindings.bindErr = errors.New("no vault")
-	_, conn := newAPIWSServer(t, bindings)
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
 
-	doc := filepath.Join(t.TempDir(), "export.json")
-	if err := os.WriteFile(doc, []byte(`{
-      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
-      "variable": [{"key": "token", "value": "sk-secret-value", "type": "secret"}],
-      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
-    }`), 0o600); err != nil {
-		t.Fatalf("write export: %v", err)
+	doc := filepath.Join(t.TempDir(), "malformed.json")
+	if err := os.WriteFile(doc, []byte(`{"info":`), 0o600); err != nil {
+		t.Fatalf("write malformed export: %v", err)
 	}
 
 	missing := filepath.Join(t.TempDir(), "not-there.json")
@@ -7470,9 +7461,9 @@ func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
 		t.Fatal("importing a document that is not there succeeded")
 	}
 
-	refused := vaultCall(t, conn, "api.import.postman", map[string]any{"path": doc, "dest": dest}, 2)
-	if refused.Error == nil {
-		t.Fatal("an import whose binding store refused reported success")
+	malformed := vaultCall(t, conn, "api.import.postman", map[string]any{"path": doc, "dest": dest}, 2)
+	if malformed.Error == nil {
+		t.Fatal("importing a malformed Postman document succeeded")
 	}
 	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Lstat(%s) = %v, want not-exist — a failed import leaves no collection behind", dest, err)

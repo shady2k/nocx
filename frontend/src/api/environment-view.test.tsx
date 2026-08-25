@@ -26,6 +26,8 @@ function mount(over: {
   creating?: boolean
   error?: string
   onBindSecret?: (n: string, v: string) => Promise<void>
+  route?: ApiRoute
+  onRoute?: (route: ApiRoute) => void
 }) {
   return render(() => (
     <EnvironmentView
@@ -46,8 +48,8 @@ function mount(over: {
       onRows={() => {}}
       onSave={() => {}}
       onReset={() => {}}
-      route={DIRECT}
-      onRoute={() => {}}
+      route={over.route ?? DIRECT}
+      onRoute={over.onRoute ?? (() => {})}
       connections={[]}
       onBindSecret={over.onBindSecret}
     />
@@ -155,5 +157,54 @@ describe('the outcome of a refused Save', () => {
     const field = document.querySelector<HTMLInputElement>('#api-environment-path')
     expect(field?.getAttribute('aria-invalid')).toBe('true')
     expect(toasts()).toHaveLength(0)
+  })
+})
+
+// THE CONTROL THAT TURNS VERIFICATION OFF (nocx-6hg2w.25).
+//
+// It had no test at all, and the words it wore were the defect: it read
+// "Accept self-signed certificates" while what it sets is InsecureSkipVerify,
+// which forgives every refusal a certificate can draw. Somebody refused for an
+// authority this machine does not know read the label, concluded the product
+// had no switch for their case, and asked for a second one — which would have
+// been a second owner of one input.
+describe('the switch that stops the certificate being checked', () => {
+  /** Found the way a person finds it: by the words on it. */
+  const verifySwitch = (): HTMLInputElement | undefined =>
+    [...document.querySelectorAll('label.ui-checkbox')]
+      .find((l) => /do not verify the server/i.test(l.textContent ?? ''))
+      ?.querySelector('input') ?? undefined
+
+  it('is named for the check it turns off, and turning it on reaches the route', () => {
+    const onRoute = vi.fn()
+    mount({ onRoute })
+
+    const control = verifySwitch()
+    expect(
+      control,
+      'no control on this page says it stops the certificate being verified',
+    ).toBeDefined()
+    expect(control!.checked).toBe(false)
+
+    fireEvent.click(control!)
+    expect(onRoute).toHaveBeenCalledWith({ ...DIRECT, insecureTls: true })
+  })
+
+  it('says which refusals it covers BEFORE it is on', () => {
+    // The person who needs it is reading this page because a send was
+    // refused, and the refusal they are holding is usually not the word
+    // "self-signed". A list that appears only once the switch is on is a list
+    // that cannot answer "is this my case?".
+    const { container } = mount({})
+    const text = container.textContent ?? ''
+    expect(text).toMatch(/self-signed/i)
+    expect(text).toMatch(/authority/i)
+    expect(text).toMatch(/another name|other name|name it/i)
+  })
+
+  it('with it on, the page still says what every send under it now does', () => {
+    const { container } = mount({ route: { ...DIRECT, insecureTls: true } })
+    expect(verifySwitch()!.checked).toBe(true)
+    expect(container.textContent).toContain('who it says it is')
   })
 })

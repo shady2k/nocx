@@ -305,17 +305,29 @@ export function EnvironmentView(props: EnvironmentViewProps) {
                   </div>
                 </Field>
               </Show>
-              {/* SELF-SIGNED CERTIFICATES, and the words are the point. It is
-                  not "SSL verification" with a switch beside it: what a
-                  person is turning off is the check that the host is the one
-                  it claims to be, and the sentence under it says so plainly
-                  rather than in the passive. Per environment, so dev can have
-                  it and production cannot inherit it. */}
+              {/* THE CHECK IT TURNS OFF, never one refusal it forgives.
+                  This read "Accept self-signed certificates" and sets
+                  InsecureSkipVerify, which forgives all of them — so a person
+                  refused for an authority this machine does not know read the
+                  only switch on offer, saw a case that was not theirs, and
+                  asked for a second switch beside it (nocx-6hg2w.25). A second
+                  switch would have been a second owner of one input; the words
+                  were what was wrong.
+
+                  The list is under the control and not inside the warning,
+                  because the person reading it is holding a refusal and asking
+                  "is this my case?" — a list that appears only once the switch
+                  is on cannot answer that. Per environment, so dev can have it
+                  and production cannot inherit it. */}
               <Checkbox
-                label="Accept self-signed certificates"
+                label="Do not verify the server's certificate"
                 checked={props.route.insecureTls}
                 onChange={(insecureTls) => props.onRoute({ ...props.route, insecureTls })}
               />
+              <p class="api-environments__note">
+                Covers every refusal a certificate can draw: self-signed, signed by an authority
+                this machine does not know, expired, or issued for another name.
+              </p>
               <Show when={props.route.insecureTls}>
                 <p class="api-environments__warning">
                   Sends under this environment do not check that the server is who it says it is. It

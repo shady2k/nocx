@@ -139,6 +139,12 @@ type Observer interface {
 	// not enrolled are DROPPED, not buffered — this is the hot path of every
 	// session in the product and an unenrolled pane must cost nothing.
 	Feed(paneID string, b []byte)
+	// Resize follows the pane's geometry for the life of the interval. It is
+	// not housekeeping: both permitted powers are POSITIONAL, so a grid left
+	// at the size it was enrolled at does not go stale, it goes wrong — the
+	// program repaints at the new width while the emulator keeps wrapping at
+	// the old one, and every column a caller reads is off by the difference.
+	Resize(paneID string, cols, rows int) error
 	// Frame returns what is on the screen now.
 	Frame(paneID string) (Frame, error)
 	// Enrolled reports whether a pane holds a grid.
@@ -250,6 +256,26 @@ func (s *Store) Feed(paneID string, b []byte) {
 	if _, err := g.term.Write(b); err != nil {
 		s.log.Debug("panegrid write failed", "pane_id", paneID, "error", err)
 	}
+}
+
+func (s *Store) Resize(paneID string, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return fmt.Errorf("panegrid: resize %q: size must be positive, got %dx%d", paneID, cols, rows)
+	}
+	s.mu.RLock()
+	g, ok := s.grid[paneID]
+	s.mu.RUnlock()
+	if !ok {
+		// The ordinary answer, not a failure: most panes never hold a grid
+		// and every one of them is resized. The caller sits on the session's
+		// resize path and must not have to ask first.
+		return ErrNotEnrolled
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.term.Resize(cols, rows)
+	s.log.Debug("panegrid resized", "pane_id", paneID, "cols", cols, "rows", rows)
+	return nil
 }
 
 func (s *Store) Frame(paneID string) (Frame, error) {

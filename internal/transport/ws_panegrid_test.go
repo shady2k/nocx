@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
@@ -124,5 +125,70 @@ func TestAnUnobservedSessionHasNoGrid(t *testing.T) {
 	}
 	if _, err := store.Frame(sid); err == nil {
 		t.Fatal("Frame answered for a session with no grid")
+	}
+}
+
+// The interval outlives a resize, so the grid has to follow the pane through
+// one. Both powers the AD-6 amendment grants a grid are POSITIONAL — a chrome
+// anchor is a thing at a column — so a grid left at the size it was enrolled
+// at is not merely stale: the program repaints at the new width while the
+// emulator keeps wrapping at the old one, and every column a reader trusts is
+// off by the difference.
+func TestTheGridFollowsThePaneThroughAResize(t *testing.T) {
+	ws, store, term := newGridWS(t)
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	if err := store.Enrol(sid, 20, 6); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	jsonrpcCallWithID(t, conn, "resize", map[string]any{"sessionId": sid, "cols": 60, "rows": 8}, 2)
+
+	// Waited for by hand rather than with waitFor, because the interesting
+	// failure is not "it did not arrive" — it is WHY. The grid resize happens
+	// on the lane's apply, ahead of the response this call already read, so a
+	// pane that still holds a grid and still answers at the old size is a
+	// defect in the tee. A pane that holds NO grid is a different event
+	// entirely: its session ended and the interval closed underneath the test.
+	// A bare timeout reports the first while meaning either, which is how a
+	// starved container gets read as a broken feature.
+	deadline := time.Now().Add(wantWithin)
+	for {
+		f, err := store.Frame(sid)
+		if err == nil && f.Cols == 60 && f.Rows == 8 {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			if !store.Enrolled(sid) {
+				t.Fatalf("the pane lost its grid before the resize could reach it: "+
+					"the session's output ended and closed the interval (frame error %v)", err)
+			}
+			t.Fatalf("the pane still holds a grid and it did not follow the resize: frame=%dx%d err=%v",
+				f.Cols, f.Rows, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// And the new geometry is the one the emulator actually lays out at: at
+	// twenty columns this line would have wrapped.
+	term.emit(t, "a line longer than twenty columns")
+	waitFor(t, "the line to arrive unwrapped", wantWithin, func() bool {
+		f, err := store.Frame(sid)
+		return err == nil && strings.Contains(f.Text(0), "a line longer than twenty columns")
+	})
+}
+
+// A pane nobody enrolled is resized like any other, and the grid path must be
+// silent about it: most panes never hold a grid and every one of them is
+// resized, so ErrNotEnrolled here is the ordinary answer rather than a fault.
+func TestResizingAPaneWithNoGridChangesNothing(t *testing.T) {
+	ws, store, _ := newGridWS(t)
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	jsonrpcCallWithID(t, conn, "resize", map[string]any{"sessionId": sid, "cols": 60, "rows": 8}, 2)
+
+	if store.Enrolled(sid) {
+		t.Fatal("a resize enrolled a pane; only the enrolment act may do that")
 	}
 }

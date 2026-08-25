@@ -259,3 +259,65 @@ func TestAlternateScreenIsReportedAndIsOnlyAnObservation(t *testing.T) {
 		t.Error("leaving the alternate screen was not reported")
 	}
 }
+
+// The interval outlives a resize, so the grid has to survive one. Every anchor
+// a driver reads is POSITIONAL — the input box is bounded by full-width rules,
+// the spinner sits directly above the token counter — so a grid left at the
+// size it was enrolled at does not answer about a stale screen, it answers
+// about a screen that never existed: the pane repaints at the new width while
+// the emulator keeps wrapping at the old one.
+func TestAResizedPaneAnswersAtTheNewSize(t *testing.T) {
+	s := newStore(t)
+	if err := s.Enrol("p1", 20, 4); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	if err := s.Resize("p1", 40, 6); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	s.Feed("p1", []byte("wider than twenty columns"))
+	f, err := s.Frame("p1")
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if f.Cols != 40 || f.Rows != 6 {
+		t.Fatalf("size = %dx%d, want 40x6", f.Cols, f.Rows)
+	}
+	// At 20 columns this would have wrapped onto a second row; the point of
+	// the resize is that it does not.
+	if got := strings.TrimRight(f.Text(0), " "); got != "wider than twenty columns" {
+		t.Errorf("row 0 = %q, want the whole line unwrapped", got)
+	}
+	if got := strings.TrimRight(f.Text(1), " "); got != "" {
+		t.Errorf("row 1 = %q, want it empty", got)
+	}
+}
+
+// A resize for a pane with no grid is the ordinary case, not a failure: most
+// panes never have one and every one of them is resized.
+func TestResizingAPaneWithNoGridIsNotAnError(t *testing.T) {
+	s := newStore(t)
+	if err := s.Resize("nobody", 40, 6); !errors.Is(err, panegrid.ErrNotEnrolled) {
+		t.Errorf("resize of an unenrolled pane = %v, want ErrNotEnrolled", err)
+	}
+}
+
+func TestResizeRefusesASizeThatIsNotASize(t *testing.T) {
+	s := newStore(t)
+	if err := s.Enrol("p1", 20, 4); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	if err := s.Resize("p1", 0, 6); err == nil {
+		t.Error("resize to 0 columns was accepted")
+	}
+	if err := s.Resize("p1", 40, 0); err == nil {
+		t.Error("resize to 0 rows was accepted")
+	}
+	// And the refusal left the grid usable at the size it had.
+	f, err := s.Frame("p1")
+	if err != nil {
+		t.Fatalf("frame after a refused resize: %v", err)
+	}
+	if f.Cols != 20 || f.Rows != 4 {
+		t.Errorf("size after a refused resize = %dx%d, want 20x4", f.Cols, f.Rows)
+	}
+}

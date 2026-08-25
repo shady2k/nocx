@@ -66,6 +66,13 @@ type nestedKernel struct {
 	// frame here delivers it to the kernel's read loop on the other end —
 	// which is how the stillborn tests inject a late child frame.
 	shellFile *os.File
+	// refuseEnrolment answers agent_enrol with the fail-closed shape: an
+	// answer carrying no `enrolled` field at all. The wrapper must read that
+	// as "not orchestrated", say so in the pane, and still run the agent.
+	refuseEnrolment bool
+	// enrolReason is the sentence a refusal carries, which is what the pane
+	// prints. Empty means the kernel refuses without one.
+	enrolReason string
 	// rejected counts frames the kernel rejects: a wrong addressing tuple,
 	// a stale (non-increasing) sequence, or a frame addressed to the child
 	// domain after the parent restored (the child's interval ended — it
@@ -159,6 +166,10 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 		k.sendAcceptLocked(f.Dom, f.Epoch, f.Cap)
 	case "domain_request":
 		k.grantLocked()
+	case "agent_enrol":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
+	case "agent_withdraw":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentWithdrawn)
 	case "domain_suspended":
 		k.parentSuspended = true
 	case "domain_closed":
@@ -240,6 +251,40 @@ func (k *nestedKernel) sendAcceptLocked(dom string, epoch uint64, capHex string)
 		k.t.Fatalf("encode accept: %v", err)
 	}
 	k.t.Logf("kernel accept sent for dom=%s", dom)
+}
+
+// sendAgentAnswerLocked answers the enrolment pair (protocol §15). The answer
+// is composed through the real codec, so a wrapper that reads it is reading the
+// bytes the real backend sends and not a shape the test invented.
+func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) {
+	var evt lifecycle.Event
+	switch kind {
+	case lifecycle.KindAgentEnrolled:
+		ans := &lifecycle.AgentEnrolled{
+			RequestID: lifecycle.RequestID(f.Request),
+			Agent:     f.Agent,
+			Enrolled:  !k.refuseEnrolment,
+		}
+		if k.refuseEnrolment {
+			ans.Reason = k.enrolReason
+		}
+		evt = lifecycle.Event{Kind: kind, AgentEnrolled: ans}
+	default:
+		evt = lifecycle.Event{Kind: kind, AgentWithdrawn: &lifecycle.AgentWithdrawn{
+			RequestID: lifecycle.RequestID(f.Request),
+		}}
+	}
+	env := lifecycle.Envelope{
+		Version:    lifecycle.ProtocolVersion,
+		Lane:       lifecycle.LaneID(testLane),
+		Domain:     lifecycle.DomainID(f.Dom),
+		Epoch:      f.Epoch,
+		Capability: capBytes(k.t, f.Cap),
+		Event:      evt,
+	}
+	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
+		k.t.Fatalf("encode %s: %v", kind, err)
+	}
 }
 
 // sendRefresh pushes a refresh_request envelope at the parent's connection,

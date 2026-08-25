@@ -1169,6 +1169,14 @@ func New(opts ...Option) (*App, error) {
 	// (AGENTS.md check 5); the adapter creation itself lands with the
 	// shell-spawn wiring in internal/transport/ws_shell.go.
 	lifecycleKernel := lifecycle.New(lifecycle.Options{})
+	// The backend's VT grid for ENROLLED panes (nocx-szb40.2, the AD-6
+	// amendment "A live grid for an enrolled pane"). Constructed empty and
+	// process-lifetime: nothing is observed until an agent_enrol names a pane,
+	// which is what keeps enrolment an act rather than an inference. It is
+	// built HERE, ahead of the publisher, because both ends need it — the
+	// publisher opens and closes intervals through it, and the transport feeds
+	// it from the session read path.
+	paneGrid := panegrid.New(logger)
 	// The establishment bound is stated here for the same reason the hello
 	// timeouts below are: how long a minted accept may wait for the
 	// renderer's acknowledgement before the domain is rolled back and the
@@ -1185,7 +1193,13 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)))
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)),
+		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
+		// bundle asks over this same authenticated channel, and this is what
+		// answers. Wired here rather than defaulted anywhere, because an
+		// unwired enroller refuses every enrolment — the fail-closed half of
+		// D4, and the opposite of the grant builder above it.
+		lifecyclepub.WithAgentEnroller(newPaneEnroller(logger, childSessions, paneGrid)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1475,11 +1489,9 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAssistantClient(assistant.NewClient(logger)),
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
-	// The backend's VT grid for ENROLLED panes (nocx-szb40.2, the AD-6
-	// amendment "A live grid for an enrolled pane"). Constructed empty and
-	// process-lifetime: nothing is observed until session.observe names a
-	// pane, which is what keeps enrolment an act rather than an inference.
-	tpOpts = append(tpOpts, transport.WithPaneGrid(panegrid.New(logger)))
+	// The same store the publisher enrols into, on its other end: the
+	// transport is what feeds it, from the session's own read path.
+	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries

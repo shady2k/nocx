@@ -76,10 +76,14 @@ capability is what its bootstrap holds.
 | `domain_closed`      | shell → kernel  | —                                                                        | The shell instance is ending.                                                      |
 | `domain_request`     | shell → kernel  | `request`, `env`, `host`/`user`/`port` (ssh)                             | The parent asks for a child domain for a nested environment it is entering. §9.    |
 | `domain_grant`       | kernel → shell  | `request`, `domain`, `epoch`, `bootstrap`                                | The answer: the child's identity and the opaque bootstrap the parent executes. §9. |
+| `agent_enrol`        | shell → kernel  | `request`, `agent`, `cols`, `rows`                                       | The pane is about to run an agent; keep its screen. §15.                           |
+| `agent_enrolled`     | kernel → shell  | `request`, `agent`, `enrolled`, `reason`                                 | The verdict, and the reason when it is no. §15.                                    |
+| `agent_withdraw`     | shell → kernel  | `request`                                                                | The agent has returned; the interval closes. §15.                                  |
+| `agent_withdrawn`    | kernel → shell  | `request`                                                                | The close is acknowledged. §15.                                                    |
 
-`accept`, `refresh_request` and `domain_grant` are kernel-originated;
-ingesting them from a shell is a protocol violation. Everything else is
-shell-originated.
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
+`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
+protocol violation. Everything else is shell-originated.
 
 ## 4. Authentication
 
@@ -129,9 +133,9 @@ A listener existing is not a channel being live (decision 3). The sequence:
 6. Timeout (`hello_timeout`, 10 s) or any failure leaves the visible native
    prompt in place.
 
-`accept`, `refresh_request` and `domain_grant` are kernel-originated;
-ingesting them from a shell is a protocol violation. Everything else is
-shell-originated. **Three outbound kinds, one boundary:** the transport port
+`accept`, `refresh_request`, `domain_grant`, `agent_enrolled` and
+`agent_withdrawn` are kernel-originated; ingesting them from a shell is a
+protocol violation. Everything else is shell-originated. **Three outbound kinds, one boundary:** the transport port
 carries exactly three kinds of envelope — `accept`, `refresh_request` and
 `domain_grant`, the replies the shell must see. `domain_established` (and
 every other fact about domain and attempt state) is **not** a transport
@@ -488,3 +492,95 @@ The kernel is the pure model: no transport, no shell, no `internal/pty` or
 
 The frontend receives published facts (a separate bead, `nocx-u7uh.13`/`.5`), not
 raw frames and never a capability.
+
+## 15. Agent enrolment: the interval a backend grid lives in
+
+- **Implements:** the AD-6 amendment in [`architecture.md`](architecture.md) ("A live
+  grid for an enrolled pane"), and D5/D13 of the orchestration mechanism design.
+- **Bead:** `nocx-szb40.5`.
+
+The backend may keep a live VT grid for a pane, so that what a pane is doing can be read
+while no client is attached. The amendment permits it only inside an **interval**, and
+says the interval opens by an **act** — a control-plane call naming a pane — and never by
+an inference that a title or a command word looked like an agent, because an inferred set
+has no upper bound and no audit. This is that act.
+
+### 15.1 Why it is on this channel and not a socket of its own
+
+The orchestration design's §7.1 says "requests enrolment over the private local socket",
+which reads as a new transport. It is not one, and building one would be a mistake in two
+separate ways. It would be a **second authenticator** for the same trust decision, next to
+the one decision 2 already built and §13 already bounds. And it would not work: the
+per-epoch capability is "substituted into the integration script text, never passed as an
+environment variable" (§4), so a separate binary launched by the shell can inherit the
+descriptor and cannot authenticate on it — possession of the transport is not possession
+of the domain.
+
+That is why the caller is a shell **function inside the integration bundle** rather than
+the `nocx agent run` binary §7.1 describes. The binary's reason to exist is the rest of
+§7.1 — staging an agent's config, and holding a pid a dispatcher enrolment can be pinned
+to — and both belong to `nocx-dkawo`, which is about authority. A grid grants no
+authority: it asks nocx to watch a pane the caller is already sitting in.
+
+### 15.2 The pair, and both ends of the interval
+
+`agent_enrol` names what is about to run and the geometry to start at. It does **not**
+name the pane: the pane is the envelope's lane, which the kernel authenticated, so a
+caller cannot enrol a pane that is not its own.
+
+The geometry comes from the shell rather than from the pty because at this point in the
+backend nothing owns "how big is that pane" — no read model answers it — and inventing a
+second owner of a pane's geometry to answer it once would be worse than taking the number
+from the process that is about to _be_ that pane. It is a **starting value, not the
+authority**: every subsequent window change reaches the grid from the pty's own path,
+which is authoritative, so a wrong start is corrected by the first resize rather than
+believed forever. Both dimensions are bounded (1..1000), because a grid is a real emulator
+with a real allocation and the number arrives from a shell.
+
+`agent_withdraw` closes the interval. It is the end the caller knows about — the agent it
+bracketed has returned, however it returned. The backend closes the same interval again
+when the session's output ends, which is the end that covers a caller that was killed
+rather than one that returned. **Two ends, and neither is optimistic.**
+
+The wrapper **brackets** the agent rather than `exec`ing it, which is where this differs
+from §7.1's step 5. `exec` preserves a pid so a pin can survive it; that pin is what a
+dispatcher needs and not what a grid needs, and bracketing buys the second end above.
+
+### 15.3 The verdict is fail-closed on the wire, not merely in the code
+
+`enrolled` is on the wire **only when it is true**. A refusal carries no such field at all.
+That is deliberate and it is what makes the fail-closed rule structural rather than
+careful: a truncated frame, a frame from an older backend, a frame half-composed by
+something hostile — anything a reader does not positively recognise as consent is a
+refusal, with no parsing that has to go right for the refusal to be reached.
+
+The trap, which caught the first version of the test that asserts this: the **event kind
+is itself `agent_enrolled`**, so a reader matching the bare word `enrolled` finds consent
+in every refusal ever sent. Match the field — `"enrolled":true` — never the word.
+
+An unwired backend refuses everything. This is the opposite of §9's grant, where an
+unwired builder answers with an empty bootstrap and the parent runs its command
+conventionally — right for an optional enhancement, wrong for something an invariant rests
+on (D4: no enrolment, no orchestration).
+
+### 15.4 What a refusal does, and what it does not do
+
+The refusal is **printed in the pane**, with the backend's own sentence, because "the pane
+says so" is not satisfied by a log line the person never reads — that is the silent-degrade
+shape `AGENTS.md` names, where a feature that does not exist survives a release behind a
+warning nobody sees. Every refusal the backend can produce is therefore a sentence, not a
+code.
+
+And the agent **still runs**, unorchestrated. "Failure is closed" means no enrolment
+implies no orchestration; it does not mean a terminal declines to start the program its
+user asked for because a feature of its own is unavailable. A bare agent started outside a
+nocx panel session is the same case and reads the same way.
+
+### 15.5 What enrolment may never decide
+
+Enrolment is not lifecycle state. It may not open, complete or alter an execution attempt
+(ADR-0024 decision 1), and the kernel keeps nothing about it — it authenticates the frame,
+which is the one thing only it can do, and the fact then belongs to whoever owns grids. A
+grid answers what is on the screen and where the cursor is, and nothing else; the two
+decisions the amendment permits from one — may nocx type here, what does the indicator show
+— are made by callers reading a frame, never by the grid and never here.

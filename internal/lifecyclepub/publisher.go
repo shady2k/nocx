@@ -266,6 +266,7 @@ type Option func(*options)
 type options struct {
 	establishTimeout time.Duration
 	grantBuilder     GrantBuilder
+	agentEnroller    AgentEnroller
 }
 
 // WithEstablishmentTimeout bounds how long a minted accept may wait for the
@@ -322,6 +323,34 @@ func WithGrantBuilder(b GrantBuilder) Option {
 	return func(o *options) { o.grantBuilder = b }
 }
 
+// AgentEnroller opens and closes the backend's watch on a pane (protocol doc
+// §15, and the AD-6 amendment's INTERVAL constraint). It is the seam that owns
+// grids; this package owns none and knows what none of them are.
+//
+// The asymmetry between the two methods is the amendment's, not a style
+// choice. Enrol may FAIL and its failure must reach the person — no enrolment,
+// no orchestration, and the pane says so. Withdraw cannot fail and returns
+// nothing: closing something already closed is not an error, because a caller
+// racing a session teardown should not have to care who won, and a close that
+// could be refused would be an interval with one end.
+type AgentEnroller interface {
+	Enrol(lane lifecycle.LaneID, agent string, cols, rows int) error
+	Withdraw(lane lifecycle.LaneID)
+}
+
+// WithAgentEnroller wires the seam that keeps a pane's grid behind the
+// agent_enrol / agent_withdraw pair.
+//
+// Without it every enrolment is REFUSED, and that is the whole difference
+// between this seam and the grant builder beside it. An unwired grant builder
+// answers with an empty bootstrap and the parent runs its command
+// conventionally, which is right for an optional enhancement. An unwired
+// enroller answers "not orchestrated", because something an invariant rests on
+// must not be able to look established while nothing is watching (D4).
+func WithAgentEnroller(e AgentEnroller) Option {
+	return func(o *options) { o.agentEnroller = e }
+}
+
 // Establishment sentinel errors, returned by AcknowledgeEstablishment.
 var (
 	ErrNoPendingEstablishment  = errors.New("lifecyclepub: no establishment is pending acknowledgement")
@@ -374,6 +403,7 @@ type Publisher struct {
 	pending          map[estKey]pendingAccept           // accepts awaiting the renderer's ack (decision 9)
 	establishTimeout time.Duration
 	grantBuilder     GrantBuilder
+	agentEnroller    AgentEnroller
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
@@ -392,6 +422,7 @@ func New(k Kernel, opts ...Option) *Publisher {
 		pending:          make(map[estKey]pendingAccept),
 		establishTimeout: o.establishTimeout,
 		grantBuilder:     o.grantBuilder,
+		agentEnroller:    o.agentEnroller,
 	}
 }
 
@@ -487,6 +518,47 @@ func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
 	_ = p.kernel.Deliver(out)
 }
 
+// answerAgentEnrolment fills the verdict and delivers it.
+//
+// Everything here is written so that the silent paths are refusals. A nil
+// seam, a nil payload, a seam that errors: all of them leave Enrolled false,
+// which is what the caller reads as "not orchestrated". Nothing in this
+// function can produce consent except a seam that actually opened a grid and
+// said so.
+// The ASK is read from the inbound envelope rather than echoed through the
+// answer, unlike the grant beside it: the geometry is the seam's business and
+// not the shell's, so putting it on the outbound would send the caller back a
+// number it told us in the previous frame.
+func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.Outbound) {
+	lane := out.Envelope.Lane
+	switch out.Envelope.Event.Kind {
+	case lifecycle.KindAgentEnrolled:
+		ans := out.Envelope.Event.AgentEnrolled
+		if ans == nil {
+			_ = p.kernel.Deliver(out)
+			return
+		}
+		req := ask.Event.AgentEnrol
+		switch {
+		case p.agentEnroller == nil:
+			ans.Reason = "this backend is not wired to watch panes"
+		case req == nil:
+			ans.Reason = "the enrolment carried no request"
+		default:
+			if err := p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows); err != nil {
+				ans.Reason = err.Error()
+			} else {
+				ans.Enrolled = true
+			}
+		}
+	case lifecycle.KindAgentWithdrawn:
+		if p.agentEnroller != nil {
+			p.agentEnroller.Withdraw(lane)
+		}
+	}
+	_ = p.kernel.Deliver(out)
+}
+
 // projection, ordering the replies (decision 9): mutation → publish → only
 // then the accept, and the accept only on a real acknowledgement. Published
 // on failure as well as success: the one mutation a kernel makes on a
@@ -523,12 +595,23 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// the parent is blocked waiting for it before it can launch
 			// the child.
 			p.buildAndDeliverGrant(out)
+		case lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
+			// Same shape and the same reason: the caller is blocked waiting
+			// for the verdict before it launches the agent, and the answer
+			// grants no suppression authority. The ORDER matters — the grid
+			// is opened before the answer goes out, so a caller that reads
+			// "enrolled" and starts the agent in the next instruction cannot
+			// beat the watch it was promised. That is the byte-zero guarantee
+			// the whole grid rests on.
+			p.answerAgentEnrolment(env, out)
 		}
 	}
 	p.publishLane(env.Lane)
 	for _, out := range outs {
-		if out.Envelope.Event.Kind == lifecycle.KindAccept || out.Envelope.Event.Kind == lifecycle.KindDomainGrant {
-			continue // accept is deferred (decision 9); grants were delivered by buildAndDeliverGrant
+		switch out.Envelope.Event.Kind {
+		case lifecycle.KindAccept, lifecycle.KindDomainGrant,
+			lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
+			continue // accept is deferred (decision 9); the rest were delivered with their answers
 		}
 		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
 	}

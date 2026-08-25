@@ -1,6 +1,8 @@
 package transport
 
 import (
+	"errors"
+
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -44,4 +46,22 @@ func (s *WSServer) withdrawPaneGrid(sid session.ID) {
 		return
 	}
 	s.paneGrid.Withdraw(string(sid))
+}
+
+// resizePaneGrid follows a pane's geometry for the life of the interval.
+//
+// It sits on the resize lane's APPLY, which is the only place that knows what
+// size the session actually took: the lane coalesces, so the size a caller
+// asked for is often not the size that landed. An unenrolled pane answers
+// ErrNotEnrolled and that is the ordinary case — most panes never hold a grid
+// and every one of them is resized — so it is not logged.
+func (s *WSServer) resizePaneGrid(sid session.ID, cols, rows uint16) {
+	if s.paneGrid == nil {
+		return
+	}
+	if err := s.paneGrid.Resize(string(sid), int(cols), int(rows)); err != nil &&
+		!errors.Is(err, panegrid.ErrNotEnrolled) {
+		s.log.Warn("pane grid resize failed; the grid now answers at the wrong geometry",
+			"session_id", string(sid), "cols", cols, "rows", rows, "error", err)
+	}
 }

@@ -219,7 +219,16 @@ var (
 // stopped the WAIT rather than the WORK. The name cap on this payload drops
 // from 8192 to 4096 with it: the session-local half has its own bound and
 // the shared half has another.
-const version = "41"
+// 42: bash and zsh carry the ENROLMENT ACT (nocx-szb40.5, protocol doc §15).
+// An agent wrapper — one today, `claude` — brackets the agent it runs with an
+// agent_enrol/agent_withdraw pair on the authenticated channel, so the backend
+// keeps a live screen for that pane between those two frames and for no longer.
+// It lives in the script rather than in a launcher binary because the per-epoch
+// capability is substituted into this file's text and never enters the
+// environment (ADR-0024 decision 2): a child process can reach the descriptor
+// and cannot authenticate on it. A refusal is printed in the pane and the agent
+// still runs, unorchestrated.
+const version = "42"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

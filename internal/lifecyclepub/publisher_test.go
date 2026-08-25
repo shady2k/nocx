@@ -24,12 +24,18 @@ func (noopPort) Send(lifecycle.Envelope) error { return nil }
 type recordingPort struct {
 	mu   sync.Mutex
 	sent []lifecycle.Envelope
+	// onSend runs inside Send, so a test can assert the ORDER of a delivery
+	// against whatever else the publisher did — not merely that both happened.
+	onSend func(lifecycle.Envelope)
 }
 
 func (r *recordingPort) Send(env lifecycle.Envelope) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sent = append(r.sent, env)
+	if r.onSend != nil {
+		r.onSend(env)
+	}
 	return nil
 }
 

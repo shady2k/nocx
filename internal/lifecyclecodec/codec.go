@@ -312,6 +312,15 @@ type wireEnvelope struct {
 	GrantDomain *string  `json:"grant_domain,omitempty"`
 	GrantEpoch  *uint64  `json:"grant_epoch,omitempty"`
 	Bootstrap   *string  `json:"bootstrap,omitempty"`
+	// Agent enrolment (protocol doc §15). Agent names what is about to run;
+	// Enrolled and Reason are the answer. Enrolled is a VALUE rather than a
+	// pointer on purpose: a missing field decodes to false, which is the
+	// refusal, so a truncated or hostile frame cannot read as consent.
+	Agent    *string `json:"agent,omitempty"`
+	Cols     *int    `json:"cols,omitempty"`
+	Rows     *int    `json:"rows,omitempty"`
+	Enrolled bool    `json:"enrolled,omitempty"`
+	Reason   *string `json:"reason,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -398,6 +407,28 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 			Domain:    lifecycle.DomainID(str(w.GrantDomain)),
 			Epoch:     derefU64(w.GrantEpoch),
 			Bootstrap: str(w.Bootstrap),
+		}
+	case lifecycle.KindAgentEnrol:
+		env.Event.AgentEnrol = &lifecycle.AgentEnrol{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Agent:     str(w.Agent),
+			Cols:      derefInt(w.Cols),
+			Rows:      derefInt(w.Rows),
+		}
+	case lifecycle.KindAgentEnrolled:
+		env.Event.AgentEnrolled = &lifecycle.AgentEnrolled{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Agent:     str(w.Agent),
+			Enrolled:  w.Enrolled,
+			Reason:    str(w.Reason),
+		}
+	case lifecycle.KindAgentWithdraw:
+		env.Event.AgentWithdraw = &lifecycle.AgentWithdraw{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+		}
+	case lifecycle.KindAgentWithdrawn:
+		env.Event.AgentWithdrawn = &lifecycle.AgentWithdrawn{
+			RequestID: lifecycle.RequestID(str(w.Request)),
 		}
 	default:
 		return lifecycle.Envelope{}, errFraming
@@ -491,6 +522,30 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 			if p.Bootstrap != "" {
 				we.Bootstrap = new(p.Bootstrap)
 			}
+		}
+	case lifecycle.KindAgentEnrol:
+		if p := env.Event.AgentEnrol; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Agent = new(p.Agent)
+			we.Cols = new(p.Cols)
+			we.Rows = new(p.Rows)
+		}
+	case lifecycle.KindAgentEnrolled:
+		if p := env.Event.AgentEnrolled; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Agent = new(p.Agent)
+			we.Enrolled = p.Enrolled
+			if p.Reason != "" {
+				we.Reason = new(p.Reason)
+			}
+		}
+	case lifecycle.KindAgentWithdraw:
+		if p := env.Event.AgentWithdraw; p != nil {
+			we.Request = new(string(p.RequestID))
+		}
+	case lifecycle.KindAgentWithdrawn:
+		if p := env.Event.AgentWithdrawn; p != nil {
+			we.Request = new(string(p.RequestID))
 		}
 	}
 	body, err := json.Marshal(&we)

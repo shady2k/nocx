@@ -163,6 +163,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// every shell as well is the per-session scan §8 removes.
 		"40": "ba20c03432b7b31072ba5878b07032189d73fec0d5bcc16308ebd94b86852eda",
 		"41": "aba1857806f6f43c2fbc19b418eda23f36fcd9585d581940fcf32601b9447f0d",
+		// v42: bash and zsh carry the enrolment act (nocx-szb40.5). The agent
+		// wrapper brackets the agent with agent_enrol/agent_withdraw on the
+		// authenticated channel, which is what opens and closes the interval
+		// the backend keeps a pane's screen for.
+		"42": "d3b374b7a201f78c94ab912dba940360c45f7482c0a5a02e4b5e50c6aba6eb54",
 	}
 
 	h := sha256.New()

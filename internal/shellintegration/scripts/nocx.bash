@@ -575,6 +575,143 @@ __nocx_lc_read_grant() {
     return 1
 }
 
+# ── The enrolment act (nocx-szb40.5, protocol doc §15) ────────────────────
+#
+# nocx keeps a live screen for a pane only between an explicit enrolment and
+# its withdrawal, and enrolment has to be an ACT rather than a guess: the AD-6
+# amendment forbids inferring it from a title or a command word, because an
+# inferred set has no upper bound and no audit. This is that act, and it lives
+# HERE, in the integration script, rather than in a separate launcher binary,
+# for the reason ADR-0024 decision 2 gives: the per-epoch capability is
+# substituted into this file's text and never enters the environment, so a
+# child process could reach the descriptor and could not authenticate on it.
+#
+# The wrapper BRACKETS the agent instead of exec'ing it. §7.1 describes a
+# launcher that execs so its pid survives to carry a pin; the pin is what the
+# dispatcher needs (nocx-dkawo) and not what a grid needs, and bracketing gives
+# the interval a second end this shell cannot forget — the withdrawal runs when
+# the agent returns, whatever it returned.
+
+__nocx_agent_n=0
+__nocx_agent_enrolled=0
+__nocx_agent_reason=
+
+# Read the answer to agent request $1 (bounded, same budget as a grant). Sets
+# __nocx_agent_enrolled and __nocx_agent_reason. Returns non-zero on timeout or
+# a dead channel, which the caller reads as a refusal.
+__nocx_lc_read_agent_answer() {
+    local __rid="$1" __t=0 __reason
+    __nocx_agent_enrolled=0
+    __nocx_agent_reason=
+    while (( __t < __nocx_lc_grant_timeout_s )); do
+        if ! __nocx_lc_probe_readable; then
+            sleep 1
+            __t=$(( __t + 1 ))
+            continue
+        fi
+        __nocx_lc_read_frame 1 || return 1
+        case "$__nocx_lc_frame" in
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
+            *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
+            *) continue ;; # a stale frame (a late accept, an old grant): skip
+        esac
+        case "$__nocx_lc_frame" in
+            *'"request":"'"$__rid"'"'*) : ;;
+            *) continue ;; # an answer to a different request: stale
+        esac
+        # CONSENT IS THE PRESENCE OF THE FIELD. The backend omits `enrolled`
+        # entirely when it refuses, so everything this reader does not
+        # positively recognise — a truncated frame, an older backend, a frame
+        # half-composed by something hostile — leaves the flag at 0. Matching
+        # the FIELD and not the word matters: the event kind is itself
+        # `agent_enrolled`, so a test for the bare word finds consent in every
+        # refusal ever sent.
+        case "$__nocx_lc_frame" in
+            *'"enrolled":true'*) __nocx_agent_enrolled=1 ;;
+        esac
+        case "$__nocx_lc_frame" in
+            *'"reason":"'*)
+                __reason="${__nocx_lc_frame#*\"reason\":\"}"
+                __reason="${__reason%%\"*}"
+                __nocx_lc_json_unescape "$__reason"
+                __nocx_agent_reason="$__nocx_lc_json_unescaped"
+                ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+# The pane's geometry, for the grid to start at. bash maintains COLUMNS and
+# LINES from SIGWINCH when checkwinsize is on, which an interactive shell has;
+# stty is the fallback for the case where it is not, and the last resort is a
+# conventional 80x24 rather than a refusal — a wrong starting size is corrected
+# by the first window change, which reaches the grid from the pty's own path.
+__nocx_agent_geometry() {
+    __nocx_agent_cols=${COLUMNS:-0}
+    __nocx_agent_rows=${LINES:-0}
+    if (( __nocx_agent_cols <= 0 || __nocx_agent_rows <= 0 )); then
+        local __size
+        __size="$(command stty size 2>/dev/null)" || __size=
+        if [[ "$__size" =~ ^([0-9]+)[[:space:]]+([0-9]+)$ ]]; then
+            __nocx_agent_rows="${BASH_REMATCH[1]}"
+            __nocx_agent_cols="${BASH_REMATCH[2]}"
+        fi
+    fi
+    (( __nocx_agent_cols > 0 )) || __nocx_agent_cols=80
+    (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
+}
+
+# Run agent $1 with the pane enrolled for its lifetime.
+#
+# THE REFUSAL IS VISIBLE AND THE AGENT STILL RUNS. "Failure is closed" (D4)
+# means no enrolment implies no orchestration — it does not mean nocx refuses
+# to start the program the user asked for, which would be a terminal emulator
+# declining to run a command because a feature of its own is unavailable. What
+# it does mean is that the pane says so, in the pane, where the person is
+# looking, and not only in a log the person never reads.
+__nocx_agent_run() {
+    local __agent="$1" __rid __rc
+    shift
+    if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
+        builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
+        command "$__agent" "$@"
+        return $?
+    fi
+    __nocx_agent_geometry
+    __rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
+    if ! __nocx_lc_send agent_enrol ',"request":"'"$__rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
+        || ! __nocx_lc_read_agent_answer "$__rid" || (( __nocx_agent_enrolled != 1 )); then
+        if [[ -n "$__nocx_agent_reason" ]]; then
+            builtin printf 'nocx: not orchestrated — %s\n' "$__nocx_agent_reason" >&2
+        else
+            builtin printf 'nocx: not orchestrated — nocx did not answer\n' >&2
+        fi
+        command "$__agent" "$@"
+        return $?
+    fi
+    command "$__agent" "$@"
+    __rc=$?
+    # The other end of the interval, and it runs whatever the agent returned —
+    # a crash, an interrupt and a clean exit all close it. The answer is read
+    # and discarded: nothing here can act on a failed withdrawal, and the
+    # backend closes the same interval again when the session's output ends.
+    __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || return $__rc
+    __nocx_lc_read_agent_answer "$__rid" || true
+    return $__rc
+}
+
+# The agents nocx wraps. One today, deliberately: D15 of the orchestration
+# design says one worker first, not three — the mechanism is what is being
+# built and fan-out is cheap once it works. A second name is a second line.
+#
+# A FUNCTION, not an alias, and not exported. What it wraps is what the user
+# TYPES in a nocx pane; a script that runs `claude` in a subshell gets the real
+# binary, because bash does not pass functions to children unless told to. That
+# is the right scope: orchestration is a property of the pane the person is
+# sitting in front of, not of everything that pane ever spawns.
+claude() { __nocx_agent_run claude "$@"; }
+
 # Classify a typed line as a nested environment. Conservative by design:
 # anything ambiguous is NOT nested and runs conventionally — the honest
 # fallback, never a guessed launch. Sets __nocx_nested_env (sudo|su|ssh)

@@ -54,6 +54,12 @@ type frame struct {
 	Seq   uint64 `json:"seq"`
 	Cap   string `json:"cap"`
 	Evt   string `json:"evt"`
+	// The enrolment pair's own fields (protocol §15), so a fake kernel can
+	// answer the request it was actually sent.
+	Request string `json:"request"`
+	Agent   string `json:"agent"`
+	Cols    int    `json:"cols"`
+	Rows    int    `json:"rows"`
 }
 
 // fakeKernel plays the kernel's transport side: it accepts every connection

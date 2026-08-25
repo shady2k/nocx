@@ -6254,7 +6254,7 @@ describe('secrets are doors in every request field', () => {
       readRequest: vi.fn().mockResolvedValue({ request }),
       secretSource,
       ...over,
-    } as never)
+    })
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
     fireEvent.click(row(CREATE_REL_PATH))
@@ -6577,7 +6577,7 @@ describe('secrets are doors in every request field', () => {
       }),
       readRequest: vi.fn().mockResolvedValue({ request }),
       secretSource: source,
-    } as never)
+    })
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
     fireEvent.click(row(CREATE_REL_PATH))

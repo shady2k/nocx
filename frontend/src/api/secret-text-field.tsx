@@ -63,7 +63,9 @@ export function SecretTextField(props: SecretTextFieldProps) {
     'onPickerReady',
     'onSecretReference',
   ])
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const source = pickerProps.source
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const onPickerReady = pickerProps.onPickerReady
   const picker =
     source === undefined
@@ -73,6 +75,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
           value: () => String(props.value),
           onChange: (next, caret) => {
             props.onInput?.(next)
+            // eslint-disable-next-line solid/reactivity -- queued DOM focus callback for this field
             queueMicrotask(() => {
               const input = props.id
                 ? (document.getElementById(props.id) as
@@ -116,6 +119,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
       {...fieldProps}
       onMarkClick={(mark, at) => {
         if (mark.secretHandle !== undefined && props.onSecretReference) {
+          // eslint-disable-next-line solid/reactivity -- mark callback runs only on explicit user activation
           props.onSecretReference(mark.secretHandle, at, () => openAt(mark.from, mark.to))
           return
         }

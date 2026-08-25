@@ -196,9 +196,9 @@ async function main() {
       vaultController.openUnlock('use its secrets')
       await vaultClient.inventory()
     },
-    requestSetup: async () => {
+    requestSetup: () => {
       vaultController.openSetup()
-      return true
+      return Promise.resolve(true)
     },
     requestCreate: (name) => openSettingsPane().startNewSecret(name),
   }

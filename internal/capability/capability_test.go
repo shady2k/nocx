@@ -1357,11 +1357,19 @@ func TestSecretRefs_OnlyOpaqueRowsResolveAndStoreErrorsRemainErrors(t *testing.T
 	if len(placed) != 1 || placed[0].Name != "secrow:row" || placed[0].Value != "vault-value" {
 		t.Fatalf("placed = %+v, want one opaque row", placed)
 	}
-	if _, _, err := refs.ResolveText(context.Background(), "{{secret:display name}}"); err == nil || !strings.Contains(err.Error(), "display name") {
-		t.Fatalf("display-name reference error = %v, want named refusal", err)
+	displayErr := func() error {
+		_, _, resolveErr := refs.ResolveText(context.Background(), "{{secret:display name}}")
+		return resolveErr
+	}()
+	if displayErr == nil || !strings.Contains(displayErr.Error(), "display name") {
+		t.Fatalf("display-name reference error = %v, want named refusal", displayErr)
 	}
-	if _, _, err := refs.ResolveText(context.Background(), "{{secret:secrow:missing}}"); err == nil || !strings.Contains(err.Error(), "secrow:missing") {
-		t.Fatalf("unknown-row error = %v, want named refusal", err)
+	missingErr := func() error {
+		_, _, resolveErr := refs.ResolveText(context.Background(), "{{secret:secrow:missing}}")
+		return resolveErr
+	}()
+	if missingErr == nil || !strings.Contains(missingErr.Error(), "secrow:missing") {
+		t.Fatalf("unknown-row error = %v, want named refusal", missingErr)
 	}
 
 	providerErr := errors.New("vault provider sealed")

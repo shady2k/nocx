@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	apiSecretReference = "{{secret:secrow:X}}"
+	apiSecretReference = "{{secret:secrow:X}}" // #nosec G101 -- reference fixture
 
-	apiSecretValue = "sk-api-secret-value"
+	apiSecretValue = "sk-api-secret-value" // #nosec G101 -- redaction fixture
 )
 
 func mustJSON(t *testing.T, value any) string {
@@ -161,6 +161,7 @@ func TestAPIRequestSend_SecretReferenceResolvesInEveryScopeWithoutEnvironment(t 
 			handle := openAPICollection(t, conn, root, 1)
 			resp := vaultCall(t, conn, "api.request.send", map[string]any{
 				"handle": handle, "relPath": tc.rel, "envRelPath": envRel,
+				"token": "secret-reference-" + tc.name,
 			}, 2)
 			if resp.Error != nil {
 				t.Fatalf("api.request.send: %+v", resp.Error)
@@ -210,6 +211,7 @@ func TestAPIRequestSend_DifferentValuesForOneHandleAreBothRedacted(t *testing.T)
 
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json",
+		"token": "secret-two-references",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
@@ -243,15 +245,21 @@ func apiSecretCollectionWithBody(t *testing.T, baseURL, kind, source string) str
 		}
 	}
 	write("nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
-	var bodyText string
-	switch kind {
-	case "form":
-		bodyText = "token=" + source
-	default:
-		bodyText = `{"token":` + mustJSON(t, source) + `}`
+	var bodyJSON string
+	if kind == apicoll.BodyFile {
+		write("bodies/payload.txt", source)
+		bodyJSON = `{"kind":` + mustJSON(t, kind) + `,"fileRef":"bodies/payload.txt"}`
+	} else {
+		var bodyText string
+		if kind == "form" {
+			bodyText = "token=" + source
+		} else {
+			bodyText = `{"token":` + mustJSON(t, source) + `}`
+		}
+		bodyJSON = `{"kind":` + mustJSON(t, kind) + `,"text":` + mustJSON(t, bodyText) + `}`
 	}
 	write("send.json", `{"id":"r1","name":"send","method":"POST","url":`+mustJSON(t, baseURL)+
-		`,"body":{"kind":`+mustJSON(t, kind)+`,"text":`+mustJSON(t, bodyText)+`},"auth":{"kind":"none"}}`)
+		`,"body":`+bodyJSON+`,"auth":{"kind":"none"}}`)
 	return root
 }
 
@@ -280,7 +288,17 @@ func TestAPIRequestSend_SecretReferenceCoversEveryBodyKind(t *testing.T) {
 				handle := openAPICollection(t, conn, root, 1)
 				resp := vaultCall(t, conn, "api.request.send", map[string]any{
 					"handle": handle, "relPath": "send.json",
+					"token": "secret-body-" + body.kind,
 				}, 2)
+				if body.kind == apicoll.BodyFile {
+					if resp.Error == nil || !strings.Contains(resp.Error.Message, "body that names a file") {
+						t.Fatalf("file body error = %+v, want caller refusal", resp.Error)
+					}
+					if received.snapshot().hits != 0 || calls.Load() != 0 {
+						t.Fatal("file body reached server or invoked resolver")
+					}
+					return
+				}
 				if resp.Error != nil {
 					t.Fatalf("api.request.send: %+v", resp.Error)
 				}
@@ -310,9 +328,6 @@ func TestAPIRequestSend_SecretReferenceCoversEveryBodyKind(t *testing.T) {
 					if body.kind == apicoll.BodyNone && got.hits != 1 {
 						t.Fatalf("none body reached server %d times, want once", got.hits)
 					}
-					if body.kind == apicoll.BodyFile && got.hits != 0 {
-						t.Fatal("file body reached server despite non-transmitted file contents")
-					}
 					if strings.Contains(exchange.Request.Text, apiSecretReference) && calls.Load() != 0 {
 						t.Fatalf("non-transmitted body invoked resolver and retained reference: %s", exchange.Request.Text)
 					}
@@ -330,6 +345,7 @@ func TestAPIRequestSend_SecretValueIsNotRescanned(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": envRel,
+		"token": "secret-value-not-rescanned",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
@@ -346,6 +362,7 @@ func TestAPIRequestSend_UnresolvedSecretReferenceBlocksAndNamesIt(t *testing.T) 
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": envRel,
+		"token": "unresolved-secret-reference",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
@@ -370,6 +387,7 @@ func TestAPIRequestSend_SecretResolverErrorIsNotUnresolved(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": envRel,
+		"token": "secret-resolver-error",
 	}, 2)
 	if resp.Error == nil || !strings.Contains(resp.Error.Message, providerErr.Error()) {
 		t.Fatalf("error = %+v, want provider error", resp.Error)

@@ -302,6 +302,7 @@ func TestAPIRequestSend_ARequestVariableOverridesAnEnvironmentValue(t *testing.T
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": "environments/dev.json",
+		"token": "request-variable-override",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)

@@ -51,11 +51,13 @@ func TestAPIRequestSend_AuthSecretReferenceBecomesHeaderAndIsElided(t *testing.T
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": "",
+		"token": "auth-secret-reference",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
-	if gotAuth := got.Load().(string); gotAuth != "Bearer "+value {
+	gotAuth, ok := got.Load().(string)
+	if !ok || gotAuth != "Bearer "+value {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer "+value)
 	}
 	var exchange apiSendResponse
@@ -82,11 +84,13 @@ func TestAPIRequestSend_LiteralAuthTextIsUnchanged(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": "",
+		"token": "literal-auth-text",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
-	if gotAuth := got.Load().(string); gotAuth != "Bearer "+value {
+	gotAuth, ok := got.Load().(string)
+	if !ok || gotAuth != "Bearer "+value {
 		t.Fatalf("Authorization = %q, want literal", gotAuth)
 	}
 	var exchange apiSendResponse
@@ -111,6 +115,7 @@ func TestAPIRequestSend_UnboundAuthVariableBlocksBeforeDial(t *testing.T) {
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
 		"handle": handle, "relPath": "send.json", "envRelPath": "",
+		"token": "unbound-auth-variable",
 	}, 2)
 	if resp.Error != nil {
 		t.Fatalf("api.request.send: %+v", resp.Error)

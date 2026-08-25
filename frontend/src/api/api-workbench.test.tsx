@@ -5056,6 +5056,24 @@ function foreignTransfer(): DataTransfer {
 /** The row a FOLDER is, by the data-row-key the tree builds for every row.
  *  A collection row ('handle:') and a directory row ('handle:path') are
  *  both folders for drag purposes — a collection IS a folder (§6.1). */
+/**
+ * The folder page's own tab strip (nocx-x3cax.6). The page opens on its
+ * CONTENTS, so a test that wants the variables editor has to go there the way
+ * a person does — reaching straight for the field would be a test asserting a
+ * layout the product no longer has.
+ */
+function folderTab(name: string): HTMLElement {
+  // SCOPED TO THE FOLDER PAGE. The request form has a tab strip of its own,
+  // and one of its tabs is also called Variables — an unscoped query finds
+  // whichever is first in the document and would let this suite drive the
+  // wrong surface while staying green.
+  const el = [...workbench().querySelectorAll<HTMLElement>('.api-folder [role="tab"]')].find(
+    (tab) => (tab.textContent ?? '').trim().startsWith(name),
+  )
+  if (!el) throw new Error(`no folder tab ${name}`)
+  return el
+}
+
 function folderRow(key: string): HTMLElement {
   const el = workbench().querySelector<HTMLElement>(`[data-row-key="${key}"]`)
   if (!el) throw new Error(`no row for key ${key}`)
@@ -5877,6 +5895,34 @@ describe('a folder is something you open', () => {
 
     await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users'))
   })
+  it('opens on what is in the folder, with the editor a tab away', async () => {
+    // The page used to open on the variables editor with the requests pushed
+    // under it (nocx-x3cax.6). What a person came for is the contents, so that
+    // is the section a folder opens on — and the editor is still one click
+    // away, marked with its count so they can see it holds something without
+    // going there.
+    const readFolder = vi.fn().mockResolvedValue({
+      variables: [{ name: 'baseUrl', value: 'https://api.example.test', enabled: true }],
+    })
+    const disk = folderOnDisk({ readFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+
+    // The contents are on screen and the editor is not.
+    expect(folderTab('Contents').getAttribute('aria-selected')).toBe('true')
+    expect(workbench().querySelector('#api-folder-var-name-0')).toBeNull()
+    // …and the tab says the folder declares one, in the words the request's
+    // own strip uses for the same fact.
+    await vi.waitFor(() => expect(folderTab('Variables').textContent?.trim()).toBe('Variables 1'))
+
+    fireEvent.click(folderTab('Variables'))
+    await vi.waitFor(() => expect(field('api-folder-var-name-0').value).toBe('baseUrl'))
+  })
+
   it('edits folder variables through the page and saves the rows', async () => {
     const readFolder = vi.fn().mockResolvedValue({ variables: [] })
     const writeFolder = vi.fn().mockResolvedValue({
@@ -5889,6 +5935,7 @@ describe('a folder is something you open', () => {
 
     fireEvent.click(folderRow(`${HANDLE}:users`))
     await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+    fireEvent.click(folderTab('Variables'))
     await vi.waitFor(() => expect(button('Add variable')).toBeTruthy())
     fireEvent.click(button('Add variable'))
     const table = workbench().querySelector('.ui-row-list__table')
@@ -5922,6 +5969,8 @@ describe('a folder is something you open', () => {
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
     fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+    fireEvent.click(folderTab('Variables'))
     await vi.waitFor(() => expect(field('api-folder-var-name-0').value).toBe('baseUrl'))
     expect(field('api-folder-var-value-0').value).toBe('https://api.example.test')
   })
@@ -5986,6 +6035,8 @@ describe('a folder is something you open', () => {
     await vi.waitFor(() => row(CREATE_REL_PATH))
 
     fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+    fireEvent.click(folderTab('Variables'))
     await vi.waitFor(() => expect(field('api-folder-var-name-0').value).toBe('baseUrl'))
     fireEvent.input(field('api-folder-var-value-0'), {
       target: { value: 'https://changed.example.test' },

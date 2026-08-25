@@ -19,18 +19,21 @@
 // the menus in api-pane.tsx that the tree's rows already open: this page is a
 // third door onto those lists and never a second copy of them.
 
-import { For, Show, createEffect, type JSX } from 'solid-js'
+import { For, Show, createEffect, createSignal, type JSX } from 'solid-js'
 import { showToast } from '../ui/toast'
 import { Button } from '../ui/button'
-import { Caption } from '../ui/caption'
 import { Checkbox } from '../ui/checkbox'
 import { EditableRowList } from '../ui/row-list'
 import { EmptyState } from '../ui/empty-state'
 import { RecordRow } from '../ui/record-row'
 import { FolderIcon, PlusIcon } from '../ui/icons'
 import { StatusCard } from '../ui/status-card'
+import { Tabs } from '../ui/tabs'
 import { TextField } from '../ui/text-field'
 import type { ApiParam } from './api-model'
+// The label rule for a table's tab is stated once, by the surface that first
+// stated it, rather than restated here (nocx-x3cax.6).
+import { counted } from './request-form'
 
 /**
  * One line of the page — a folder or a request, in the vocabulary the row
@@ -95,6 +98,10 @@ export interface FolderViewProps {
 }
 
 export function FolderView(props: FolderViewProps) {
+  // WHICH SECTION IS OPEN. It starts on the contents, because that is what the
+  // page is for: the variables editor is somewhere a person GOES, and it used
+  // to be the first thing they met (nocx-x3cax.6).
+  const [tab, setTab] = createSignal('contents')
   let lastRefused = ''
   createEffect(() => {
     const error = props.saveError
@@ -120,115 +127,140 @@ export function FolderView(props: FolderViewProps) {
     return reason
   }
 
-  return (
-    <div class="api-folder">
-      <section aria-label="Folder variables">
-        <Caption size="context">Folder variables</Caption>
-        <p class="api-folder__note">
-          A variable here answers for every request in this folder and below it, and a request's own
-          variable wins over it.
-        </p>
+  /** What is in the folder — the page's own subject. */
+  const contents = () => (
+    <Show
+      when={props.entries.length > 0}
+      fallback={
+        <EmptyState
+          icon={<FolderIcon />}
+          title={props.folder === '' ? 'This collection is empty' : 'This folder is empty'}
+          description="Make a request here, or import a curl command into it."
+          action={
+            <Button variant="primary" onClick={() => props.onNewRequest()}>
+              <PlusIcon />
+              New request
+            </Button>
+          }
+        />
+      }
+    >
+      <For each={props.entries}>
+        {(entry) => (
+          <RecordRow
+            title={entry.name}
+            kind={{ label: entry.kind, tone: 'neutral' }}
+            meta={entry.meta !== '' ? entry.meta : undefined}
+            onActivate={() => props.onOpen(entry)}
+            actions={props.actions(entry)}
+          />
+        )}
+      </For>
+    </Show>
+  )
+
+  /** The scope this folder declares, with its own Save, its loading state and
+   *  its refusal — all of it inside the section it belongs to. */
+  const variables = () => (
+    <>
+      <p class="api-folder__note">
+        A variable here answers for every request in this folder and below it, and a request's own
+        variable wins over it.
+      </p>
+      <Show
+        when={!props.loading}
+        fallback={
+          <StatusCard title="Loading folder variables" description="Reading this folder's file." />
+        }
+      >
         <Show
-          when={!props.loading}
+          when={props.variables !== null}
           fallback={
             <StatusCard
-              title="Loading folder variables"
-              description="Reading this folder's file."
+              title="Folder variables unavailable"
+              description={readDescription()}
+              tone="danger"
             />
           }
         >
-          <Show
-            when={props.variables !== null}
-            fallback={
-              <StatusCard
-                title="Folder variables unavailable"
-                description={readDescription()}
-                tone="danger"
-              />
-            }
-          >
-            <EditableRowList
-              variant="table"
-              ariaLabel="Folder variables"
-              columns={[
-                { label: 'Send', labelHidden: true },
-                { label: 'Name' },
-                { label: 'Value' },
-              ]}
-              rows={rows()}
-              addLabel="Add variable"
-              emptyLabel="No variables declared in this folder."
-              removeLabel={(i) => `Remove variable ${i + 1}`}
-              renderRow={(row, i) => (
-                <>
-                  <td>
-                    <Checkbox
-                      ariaLabel={`Use variable ${i + 1}`}
-                      checked={row().enabled}
-                      onChange={(enabled) => patchRow(i, { enabled })}
-                    />
-                  </td>
-                  <td>
-                    <TextField
-                      id={`api-folder-var-name-${i}`}
-                      ariaLabel={`Variable ${i + 1} name`}
-                      placeholder="baseUrl"
-                      value={row().name}
-                      onInput={(value) => patchRow(i, { name: value })}
-                    />
-                  </td>
-                  <td>
-                    <TextField
-                      id={`api-folder-var-value-${i}`}
-                      ariaLabel={`Variable ${i + 1} value`}
-                      placeholder="https://api.example.com"
-                      value={row().value}
-                      onInput={(value) => patchRow(i, { value })}
-                    />
-                  </td>
-                </>
-              )}
-              onRemove={(i) => props.onVariables(rows().filter((_, j) => j !== i))}
-              onAdd={() => props.onVariables([...rows(), { name: '', value: '', enabled: true }])}
-            />
-            <Button
-              variant="primary"
-              disabled={props.busy || !props.dirty}
-              onClick={props.onSaveVariables}
-            >
-              Save
-            </Button>
-          </Show>
-        </Show>
-      </section>
-      <Show
-        when={props.entries.length > 0}
-        fallback={
-          <EmptyState
-            icon={<FolderIcon />}
-            title={props.folder === '' ? 'This collection is empty' : 'This folder is empty'}
-            description="Make a request here, or import a curl command into it."
-            action={
-              <Button variant="primary" onClick={() => props.onNewRequest()}>
-                <PlusIcon />
-                New request
-              </Button>
-            }
+          <EditableRowList
+            variant="table"
+            ariaLabel="Folder variables"
+            columns={[{ label: 'Send', labelHidden: true }, { label: 'Name' }, { label: 'Value' }]}
+            rows={rows()}
+            addLabel="Add variable"
+            emptyLabel="No variables declared in this folder."
+            removeLabel={(i) => `Remove variable ${i + 1}`}
+            renderRow={(row, i) => (
+              <>
+                <td>
+                  <Checkbox
+                    ariaLabel={`Use variable ${i + 1}`}
+                    checked={row().enabled}
+                    onChange={(enabled) => patchRow(i, { enabled })}
+                  />
+                </td>
+                <td>
+                  <TextField
+                    id={`api-folder-var-name-${i}`}
+                    ariaLabel={`Variable ${i + 1} name`}
+                    placeholder="baseUrl"
+                    value={row().name}
+                    onInput={(value) => patchRow(i, { name: value })}
+                  />
+                </td>
+                <td>
+                  <TextField
+                    id={`api-folder-var-value-${i}`}
+                    ariaLabel={`Variable ${i + 1} value`}
+                    placeholder="https://api.example.com"
+                    value={row().value}
+                    onInput={(value) => patchRow(i, { value })}
+                  />
+                </td>
+              </>
+            )}
+            onRemove={(i) => props.onVariables(rows().filter((_, j) => j !== i))}
+            onAdd={() => props.onVariables([...rows(), { name: '', value: '', enabled: true }])}
           />
-        }
-      >
-        <For each={props.entries}>
-          {(entry) => (
-            <RecordRow
-              title={entry.name}
-              kind={{ label: entry.kind, tone: 'neutral' }}
-              meta={entry.meta !== '' ? entry.meta : undefined}
-              onActivate={() => props.onOpen(entry)}
-              actions={props.actions(entry)}
-            />
-          )}
-        </For>
+          <Button
+            variant="primary"
+            disabled={props.busy || !props.dirty}
+            onClick={props.onSaveVariables}
+          >
+            Save
+          </Button>
+        </Show>
       </Show>
+    </>
+  )
+
+  return (
+    <div class="api-folder">
+      {/* CONTENTS FIRST, AND THE KIT'S TABS RATHER THAN A SECOND VOCABULARY.
+          The variables editor was appended ABOVE the listing because that was
+          the smallest change that made the scope reachable (nocx-x3cax.2), and
+          it left the page opening on an editor for something most folders do
+          not have, with the requests pushed under it.
+
+          `Tabs` is the component the request surface already uses for exactly
+          this — sections that are views of ONE thing, where switching is not
+          navigation — and its own doc names the two-section case as what
+          `horizontal` is for. Its content closures read props live; nothing
+          here captures a value, which is the identity contract that file
+          states. */}
+      <Tabs
+        orientation="horizontal"
+        ariaLabel="This folder"
+        active={tab()}
+        onChange={setTab}
+        items={[
+          { id: 'contents', label: 'Contents', content: contents },
+          // The same words the request's own strip uses for the same fact, so
+          // one convention is read across the panel.
+          { id: 'variables', label: counted('Variables', rows()), content: variables },
+        ]}
+      />
     </div>
   )
 }

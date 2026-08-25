@@ -130,7 +130,12 @@ export type SecretTarget =
 /** How many rows a tab is holding, for the tab's own label. A count that is
  *  zero is not shown: "Headers 0" is a longer way to write "Headers", and the
  *  point of the number is to be noticed. */
-function counted(label: string, rows: readonly unknown[]): string {
+// EXPORTED because the folder page's tab strip states the same fact about the
+// same kind of table (nocx-x3cax.6). A count appended after a space when there
+// is one, and the bare word when there is not, is a rule this panel holds once
+// — restating it two files over is how two tab strips start disagreeing about
+// what "no rows" looks like.
+export function counted(label: string, rows: readonly unknown[]): string {
   return rows.length > 0 ? `${label} ${rows.length}` : label
 }
 

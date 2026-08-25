@@ -2472,9 +2472,19 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
 	})
-	// Output is over, so no further frame can exist for this pane: close the
-	// interval. The AD-6 amendment wants both ends named, and this is the end.
-	s.withdrawPaneGrid(sess.ID())
+	// THE INTERVAL'S SECOND END IS NOT HERE, and it was, which made it no end
+	// at all. StartOutput installs the handler and starts the read pump on a
+	// goroutine of its own — it does NOT block until the output is over — so a
+	// withdrawal on this line ran the instant the session opened, racing the
+	// enrolment it was meant to outlive, and nothing closed the interval when
+	// the session actually ended. The comment that used to sit here reasoned
+	// about a blocking call that is not one.
+	//
+	// The close now lives in monitorExit, which waits on sess.Done() and is
+	// the session's teardown owner, started exactly once per session. Found by
+	// the test that asserts the END rather than the start (nocx-szb40.5) —
+	// the shape AGENTS.md names: an invariant with a start and no named
+	// closing event buys a test that guards only the start.
 	if err != nil {
 		s.log.Debug("session output ended", "session_id", string(sess.ID()), "error", err)
 	}
@@ -2556,6 +2566,14 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 // so it fires even after the WebSocket connection drops (AD-9).
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
+
+	// The pane's backend grid closes here, first, because everything below
+	// this line tears down the things a frame could still be about. A session
+	// that is done can produce no further frame, which is what the AD-6
+	// amendment means by the interval's second end — and this is the end that
+	// covers an enrolment whose own withdrawal never came, because the shell
+	// holding it was killed rather than returning (nocx-szb40.5).
+	s.withdrawPaneGrid(sess.ID())
 
 	// The session died on its own: the close gate is terminal here too, so
 	// a resize in flight on a dead channel is cancelled and nothing new is

@@ -600,7 +600,10 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// every WebSocket (AD-9); the pump must survive a disconnect so the
 	// session's output keeps flowing into the ring for the next reattach.
 	// Closing event: session teardown — closeSession's registry.Close, which
-	// ends StartOutput and lets the pump return.
+	// ends the read pump StartOutput started. This call itself returns
+	// immediately: StartOutput installs the handler and starts that pump on
+	// its own goroutine rather than blocking, so nothing may hang off its
+	// return as though it meant "the output is over" (nocx-szb40.5).
 	go h.sess.pumpToRing(context.Background(), sess, rx.ring)
 
 	// Start exactly one monitorExit goroutine per session (DEFECT 2).

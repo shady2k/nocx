@@ -37,10 +37,17 @@ func (s *WSServer) feedPaneGrid(sid session.ID, data []byte) {
 	s.paneGrid.Feed(string(sid), data)
 }
 
-// withdrawPaneGrid closes the interval when a session's output ends. The
-// amendment requires an interval with both ends, and this is the end: a
-// session whose output is over cannot produce another frame, so keeping its
-// grid alive would hold an emulator for a pane nobody can observe.
+// withdrawPaneGrid closes the interval when the SESSION is done — called from
+// monitorExit, which waits on sess.Done(). The amendment requires an interval
+// with both ends, and this is the end that does not depend on the enrolling
+// shell surviving to send its own withdrawal: a session that is over cannot
+// produce another frame, so keeping its grid alive would hold an emulator for
+// a pane nobody can observe.
+//
+// It used to sit after StartOutput in pumpToRing, on the belief that the call
+// blocks until the output ends. It does not — it returns as soon as the
+// handler is installed — so the withdrawal ran at session START, raced the
+// enrolment, and left the interval with no second end at all.
 func (s *WSServer) withdrawPaneGrid(sid session.ID) {
 	if s.paneGrid == nil {
 		return

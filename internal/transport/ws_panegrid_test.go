@@ -192,3 +192,38 @@ func TestResizingAPaneWithNoGridChangesNothing(t *testing.T) {
 		t.Fatal("a resize enrolled a pane; only the enrolment act may do that")
 	}
 }
+
+// THE OTHER END OF THE INTERVAL, and the reason it is asserted separately from
+// the withdrawal the caller sends: this one covers the caller that never sends
+// it. A wrapper killed rather than returned, a shell that died, a session torn
+// down under both — in every one of those the enrolment's own close never
+// happens, and a grid whose only close is the caller's is a grid that leaks.
+//
+// AGENTS.md names exactly this shape: an invariant written with a start and no
+// named closing event buys a test that guards only the start.
+func TestTheGridIsGoneWhenTheSessionsOutputEnds(t *testing.T) {
+	ws, store, term := newGridWS(t)
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	if err := store.Enrol(sid, 40, 6); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	term.emit(t, "watched")
+	waitFor(t, "the grid to be fed", wantWithin, func() bool {
+		f, err := store.Frame(sid)
+		return err == nil && strings.Contains(f.Text(0), "watched")
+	})
+
+	// The session's output ends. Nobody withdrew anything.
+	if err := term.Close(); err != nil {
+		t.Fatalf("close the pane's pty: %v", err)
+	}
+
+	waitFor(t, "the interval to close when the output ended", wantWithin, func() bool {
+		return !store.Enrolled(sid)
+	})
+	if _, err := store.Frame(sid); err == nil {
+		t.Error("the grid still answers for a pane whose output is over")
+	}
+}

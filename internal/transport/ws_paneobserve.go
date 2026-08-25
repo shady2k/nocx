@@ -61,12 +61,15 @@ type observationChangedParams struct {
 }
 
 // runPaneObserverSweeps drives the coalescer for the life of the server.
-func (s *WSServer) runPaneObserverSweeps(ctx context.Context) {
+func (s *WSServer) runPaneObserverSweeps(ctx context.Context, done <-chan struct{}, exited chan<- struct{}) {
+	defer close(exited)
 	t := time.NewTicker(paneObserverSweep)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-done:
 			return
 		case <-t.C:
 			s.paneObserver.Sweep()

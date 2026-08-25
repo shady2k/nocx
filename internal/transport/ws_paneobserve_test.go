@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,5 +161,67 @@ func TestAReattachingClientIsToldWhatThePaneAlreadyIs(t *testing.T) {
 	}
 	if got.State != string(agentdriver.StateFreeText) || got.Agent != "claude" {
 		t.Errorf("replayed observation = %+v, want claude/free_text", got)
+	}
+}
+
+// countingObserver records how many sweeps it was asked for.
+type countingObserver struct {
+	mu     sync.Mutex
+	sweeps int
+}
+
+func (c *countingObserver) Touch(string)   {}
+func (c *countingObserver) Unwatch(string) {}
+func (c *countingObserver) Sweep() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sweeps++
+}
+
+func (c *countingObserver) Snapshot(string) (paneobserve.Observation, bool) {
+	return paneobserve.Observation{}, false
+}
+
+func (c *countingObserver) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sweeps
+}
+
+// THE COALESCER'S INTERVAL HAS BOTH ENDS, and the second one is Stop.
+//
+// Its first version ended only on the context passed to Start. That is not the
+// server's lifetime: in this package's own tests it is the background context,
+// so every server that wired an observer left a ticker firing every 120ms for
+// the remainder of the run. This package's 30-second timeouts already move
+// between test names under constrained scheduling (nocx-2h08), so a leaked
+// periodic goroutine here is not a tidiness question.
+//
+// Stop WAITS for it, so this asserts on the goroutine having returned rather
+// than on a duration: if the sweep were still running, Stop would not return.
+func TestStopEndsThePaneObservationSweep(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	term := newFeedablePTY()
+	reg := session.New(logger, &feedableFactory{p: term})
+	obs := &countingObserver{}
+	ws := NewWSServer(logger, reg, WithPaneObserver(obs))
+	// Owner: this test; closing event: the Stop below. Deliberately the
+	// background context — that it is NOT the server's lifetime is the whole
+	// point here.
+	if err := ws.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = term.Close() })
+
+	waitFor(t, "the coalescer to run at least once", wantWithin, func() bool {
+		return obs.count() > 0
+	})
+
+	// The assertion is that this RETURNS. Stop waits for the coalescer, so a
+	// sweep loop that ignored its second end would block here until the test
+	// binary's own timeout — which is how this test fails if the interval
+	// loses its close, and it is why nothing here waits on a duration.
+	if err := ws.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }

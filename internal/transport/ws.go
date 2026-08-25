@@ -182,6 +182,14 @@ type WSServer struct {
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
+	// sweepDone closes at Stop and is the coalescer's second end;
+	// sweepExited closes when the coalescer has actually returned, so Stop
+	// can be sure nothing is still sweeping. Same shape as panegrid's own
+	// drain handshake: asking a goroutine to stop is not the same as it
+	// having stopped, and an interval whose close nobody waits for is an
+	// interval with one end.
+	sweepDone   chan struct{}
+	sweepExited chan struct{}
 
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
 
@@ -1246,8 +1254,18 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// The pane-observation coalescer, for the life of the server (see
 	// ws_paneobserve.go). It runs whether or not anything is enrolled: a
 	// sweep with no watched pane touches one lock and returns.
+	//
+	// Its interval has BOTH ends, and the second one is Stop rather than the
+	// caller's context. A ticker whose only end is the context passed to
+	// Start outlives the server whenever that context does — which in this
+	// package's own tests is the background one, so three of them went on
+	// firing every 120ms for the rest of the run. In a package whose 30s
+	// timeouts already move between test names under constrained scheduling
+	// (nocx-2h08), a leaked periodic goroutine is not a tidiness question.
 	if s.paneObserver != nil {
-		go s.runPaneObserverSweeps(ctx)
+		s.sweepDone = make(chan struct{})
+		s.sweepExited = make(chan struct{})
+		go s.runPaneObserverSweeps(ctx, s.sweepDone, s.sweepExited)
 	}
 
 	// Configure the upgrader to accept only our token as the subprotocol,
@@ -1368,6 +1386,17 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// forced-abandonment policy for work outside a commit interval. Stop
 	// therefore terminates within the documented maximum against any
 	// dependency, cooperative or not.
+	// End the pane-observation coalescer with the server, not with whatever
+	// context happened to start it — and WAIT for it, so a returned Stop
+	// means no sweep is still running.
+	if s.sweepDone != nil {
+		select {
+		case <-s.sweepDone:
+		default:
+			close(s.sweepDone)
+		}
+		<-s.sweepExited
+	}
 	s.inflight.stop()
 	if !s.inflight.waitDrained(s.controlDrainTimeout) {
 		s.log.Warn("abandoning in-flight control work at shutdown", "maxWait", s.controlDrainTimeout)

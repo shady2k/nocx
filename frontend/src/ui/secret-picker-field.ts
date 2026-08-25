@@ -18,6 +18,10 @@ export interface SecretPickerFieldController {
   /** Call on keydown. Returns true when the panel consumed the key. */
   onKeyDown(e: KeyboardEvent): boolean
   close(): void
+  /** Destroy the controller and remove its mounted picker. The caller that
+   * creates a controller owns its lifetime and must call this when the field
+   * is removed. */
+  destroy(): void
 }
 
 export function createSecretPickerField(opts: {
@@ -33,6 +37,9 @@ export function createSecretPickerField(opts: {
 
   let trigger: Trigger | null = null
   let generation = 0
+  /** Escape dismisses the current @ word as ordinary text until the word
+   * changes or disappears; a later input event must not resurrect its panel. */
+  let dismissedTriggerFrom: number | null = null
   let loadedEntries: SecretEntry[] | null = null
   const idsByName = new Map<string, string>()
 
@@ -92,15 +99,22 @@ export function createSecretPickerField(opts: {
     let start = end
     while (start > 0 && !/\s/.test(value[start - 1] ?? '')) start--
     if (start >= end || value[start] !== '@') return null
-    if (start > 0 && !/\s/.test(value[start - 1] ?? '')) return null
     return { from: start, to: end, filter: value.slice(start + 1, end) }
   }
 
   const onInput = (value: string, caret: number): void => {
     const nextTrigger = findTrigger(value, caret)
     if (nextTrigger === null) {
+      dismissedTriggerFrom = null
       close()
       return
+    }
+    if (dismissedTriggerFrom !== null) {
+      if (nextTrigger.from === dismissedTriggerFrom) {
+        close()
+        return
+      }
+      dismissedTriggerFrom = null
     }
 
     trigger = nextTrigger
@@ -122,9 +136,31 @@ export function createSecretPickerField(opts: {
     closeIfNoMatch(nextTrigger.filter)
   }
 
+  const onKeyDown = (e: KeyboardEvent): boolean => {
+    const wasOpen = picker.isOpen
+    const consumed = picker.handleKey(e)
+    if (consumed && wasOpen && !picker.isOpen) {
+      // SecretPicker closes synchronously for Escape and accepted rows.
+      // Row selection clears trigger in onInsert; Escape needs this adapter
+      // state reset because it intentionally leaves the literal @ in place.
+      dismissedTriggerFrom = trigger?.from ?? null
+      generation++
+      trigger = null
+    }
+    return consumed
+  }
+
+  const destroy = (): void => {
+    generation++
+    trigger = null
+    dismissedTriggerFrom = null
+    picker.destroy()
+  }
+
   return {
     onInput,
-    onKeyDown: (e) => picker.handleKey(e),
+    onKeyDown,
     close,
+    destroy,
   }
 }

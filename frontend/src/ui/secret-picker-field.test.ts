@@ -118,7 +118,7 @@ describe('createSecretPickerField', () => {
     expect(panel()?.dataset.open).not.toBe('true')
   })
 
-  it('Esc closes without changing the literal @ text', async () => {
+  it('Esc closes, leaves @ as text, and does not resurrect the old trigger', async () => {
     const h = setup()
     h.value.current = '@prod'
     h.controller.onInput('@prod', 5)
@@ -128,6 +128,32 @@ describe('createSecretPickerField', () => {
     expect(panel()?.dataset.open).not.toBe('true')
     expect(h.value.current).toBe('@prod')
     expect(h.onChange).not.toHaveBeenCalled()
+
+    h.value.current = '@prod-k'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    await flush()
+    expect(panel()?.dataset.open).not.toBe('true')
+  })
+
+  it('destroy removes its mounted panel from the document', () => {
+    const h = setup()
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)
+
+    h.controller.destroy()
+
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(0)
+  })
+
+  it('destroying two controllers in sequence leaves no picker panels', () => {
+    const first = setup()
+    const second = setup()
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(2)
+
+    first.controller.destroy()
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)
+
+    second.controller.destroy()
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(0)
   })
 
   it('a filter with no matching secret closes the panel silently', async () => {

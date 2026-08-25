@@ -241,12 +241,12 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 # SCM_RIGHTS descriptor passing, and the probes that decide a refusal class —
 # and a package with a platform split that stays in the portable set has its
 # `!unix` half compiled by nothing at all.
-OS_PKG_DIRS := cmd/e2e-sshd internal/app internal/contentkey \
+OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
-               internal/pty internal/ssh/mux \
+               internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —

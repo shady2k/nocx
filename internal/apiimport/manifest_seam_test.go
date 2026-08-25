@@ -119,10 +119,8 @@ func TestImportedPostmanCollectionOpensItsEnvironments(t *testing.T) {
 	if envs[0].Environment.Name != converted.Environments[0].Name {
 		t.Errorf("environment is called %q, want %q", envs[0].Environment.Name, converted.Environments[0].Name)
 	}
-	// Imported credential-shaped values become empty ordinary variables.
-	if envs[0].Environment.SecretVars != nil {
-		t.Errorf("environment declares secret variables %v", envs[0].Environment.SecretVars)
-	}
+	// Imported credential-shaped values become empty ordinary variables. The
+	// environment format no longer has a place to declare one at all.
 	if got := envs[0].Environment.Values["apiToken"]; got != "" {
 		t.Errorf("apiToken = %q, want empty", got)
 	}

@@ -273,9 +273,6 @@ func TestPostmanSecretVariableBecomesAnEmptyOrdinaryVariable(t *testing.T) {
 	if got := env.Values["apiToken"]; got != "" {
 		t.Fatalf("apiToken = %q, want an empty ordinary variable", got)
 	}
-	if env.SecretVars != nil {
-		t.Fatalf("SecretVars = %v, want nil", env.SecretVars)
-	}
 	if env.Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("baseUrl = %q", env.Values["baseUrl"])
 	}
@@ -479,9 +476,6 @@ func TestPostmanEnvironmentExport(t *testing.T) {
 	}
 	if envs[0].Values["apiToken"] != "" {
 		t.Fatalf("apiToken = %q, want empty", envs[0].Values["apiToken"])
-	}
-	if envs[0].SecretVars != nil {
-		t.Fatalf("secretVars = %v, want nil", envs[0].SecretVars)
 	}
 	if !anyUnsupportedContaining(unsup, "disabled variable") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))

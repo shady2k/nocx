@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -5800,15 +5801,25 @@ func newAPIWSServerWithPool(t *testing.T, bindings apibind.Store, leaser apisend
 	}
 	if bindings != nil {
 		opts = append(opts, WithAPIBindings(bindings))
-		// The read half is a separate option because the two halves wire
-		// apart (ws.go). A store that has one gets it; apiFakeBindings does
-		// not, which is how the import tests keep exercising a build where
-		// an auth variable resolves to nothing.
-		if values, ok := bindings.(apibind.ValueResolver); ok {
-			opts = append(opts, WithAPIVariables(values))
-		}
+		// Read resolution is a separate capability-owned seam. These tests
+		// pass an explicit SecretRefs option when they exercise it.
 	}
 	ws := NewWSServer(logger, newRegWithStub(logger), opts...)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return ws, connectWS(t, ws)
+}
+
+func newAPIWSServerWithSecretRefs(t *testing.T, refs capability.SecretRefs) (*WSServer, *websocket.Conn) {
+	t.Helper()
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger),
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger))),
+		WithAPIVariables(refs),
+	)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

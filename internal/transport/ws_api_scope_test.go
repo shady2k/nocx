@@ -9,9 +9,9 @@ func TestAPIRequestScope_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.request.scope.schema.json")
 	raw, err := json.Marshal(apiRequestScopeResponse{
 		Variables: []apiRequestScopeVariableWire{
-			{Name: "id", Value: "request", Scope: "request", From: "", Overridden: false, Refused: ""},
-			{Name: "id", Value: "folder", Scope: "folder", From: "users", Overridden: true, Refused: ""},
-			{Name: "token", Value: "draft", Scope: "request", From: "", Overridden: false, Refused: `apicoll: a request variable would shadow a name this environment declares secret: "token"`},
+			{Name: "id", Value: "request", Scope: "request", From: "", Overridden: false, Refused: "", Secret: false},
+			{Name: "id", Value: "folder", Scope: "folder", From: "users", Overridden: true, Refused: "", Secret: false},
+			{Name: "token", Value: "", Scope: "request", From: "", Overridden: false, Refused: "", Secret: true},
 		},
 	})
 	if err != nil {

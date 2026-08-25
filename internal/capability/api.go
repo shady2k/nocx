@@ -68,8 +68,10 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apiimport"
-	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // OpenCollection is one folder the user has open: the handle that addresses
@@ -109,40 +111,15 @@ type SendInputs struct {
 	// projection of it (§6.4), so nothing written back can carry a value
 	// the user did not type.
 	Request apicoll.Request
-	// RawRequest is the request exactly as the FILE has it, before
-	// substitution. The sender maps a resolved auth block back onto it by
-	// FIELD, so it can know whether an auth credential came from the
-	// binding document without ever comparing resolved text against a
-	// recorded value: `auth.token` in the raw file is `{{name}}` exactly
-	// when the file says so, and the binding document answers a name
-	// exactly when it answered that name. There is no heuristic, because
-	// neither comparison is about the VALUE.
-	RawRequest apicoll.Request
 	// CookieScope is the collection's identity, and it is what keys the
 	// sender's client instance so two collections never share a jar. The
 	// path the user named is the stable identity across handles; a handle
 	// is minted fresh every run.
 	CookieScope string
-	// Environment is the environment's NAME as its file declares it —
-	// empty when no environment was named. It is carried out of the
-	// snapshot because it is half of the binding key (collection,
-	// environment, variable) the send path resolves variables under, and
-	// it is READ HERE for the same reason the route is: the name and the
-	// values must come from one record at one moment, or a request
-	// resolves its address from one environment and its credential from
-	// another.
-	//
-	// It is the name in the file and never the file's path. apiimport binds
-	// under the name, so deriving one from the other at the send would be a
-	// second answer to "which environment is this" — and the two would agree
-	// until somebody renamed an environment without renaming its file.
+	// Environment is the NAME declared by the environment file. It is carried
+	// out of the snapshot with the route so the exchange identifies the same
+	// record that supplied the destination and its connection policy.
 	Environment string
-	// AuthSecrets records which of the request's auth FIELDS resolved
-	// through the binding document, by variable name — the field-to-source
-	// map apisend.Apply needs to elide by construction (nocx-6hg2w.20). A
-	// zero AuthSecrets means every auth field is a literal the person
-	// typed, which the product sends and shows.
-	AuthSecrets apisend.SecretSource
 	// Route is the environment's answer to "how do I get there" (§6.5). It
 	// comes from the SAME record as the address that was just substituted,
 	// which is the whole reason the route lives on the environment: the two
@@ -153,27 +130,116 @@ type SendInputs struct {
 	// onto the other is apisend's (RouteIDFor), and this layer does not
 	// learn a second spelling of it.
 	Route apicoll.Route
-	// Secrets are the values the binding document answered for this
-	// substitution — the ones now sitting inside Request's URL, headers,
-	// query or body. Empty when the environment declared none.
-	//
-	// The caller hands them to the sender so they can be elided from the
-	// diagnostic. They are recorded by WHICH LOOKUP ANSWERED rather than by
-	// guessing at the text: the environment's plain values are tried first
-	// and the binding document second (apicoll.Chain), so a name the second
-	// one answers is a secret by construction — there is no heuristic here
-	// and nothing that could mistake a plain value for a credential or the
-	// other way round.
+	// Secrets are the vault values substituted into Request. The sender uses
+	// them to elide bytes from diagnostics; they never cross to the renderer.
 	Secrets []PlacedSecret
 }
 
-// SecretValues is the binding document's READ half, narrowed to the one call
-// the snapshot makes. Declared here as a consumer contract, like Secrets and
-// SecretVault beside it: this layer asks what a variable is worth and has no
-// parameter through which an identifier could travel in either direction
-// (design §8, apibind.ValueResolver).
-type SecretValues interface {
-	Variables(ctx context.Context, collection, environment string) apicoll.Lookup
+// SecretRefs resolves vault references in text a request is about to send.
+// It is narrowed to the one call Snapshot makes: there is no parameter through
+// which an identifier travels outward and no method that takes one from
+// outside (ADR-0011).
+type SecretRefs interface {
+	ResolveText(ctx context.Context, text string) (out string, placed []PlacedSecret, err error)
+}
+
+// UnresolvedSecretError blocks a request whose secret reference has no answer.
+// It is a compose refusal rather than a vault failure: the reference is named
+// so a person can fix the request, and no literal or empty value can reach the
+// sender.
+type UnresolvedSecretError struct {
+	Reference string
+}
+
+func (e *UnresolvedSecretError) Error() string {
+	return fmt.Sprintf("capability: unresolved secret reference %q", e.Reference)
+}
+
+func (e *UnresolvedSecretError) Unwrap() error { return apicoll.ErrUnresolvedVariable }
+
+// NewSecretRefs builds the API-only resolver over the secret capability's
+// existing row and read seams. It deliberately does not call ResolveLine:
+// ResolveLine accepts display names for terminal input, while a collection
+// file may spell only an opaque secrow: handle.
+func NewSecretRefs(
+	v SecretVault,
+	store credential.SecretStore,
+	profiles profile.ProfileRepository,
+	groups profile.GroupRepository,
+) SecretRefs {
+	return &secretRefs{vault: v, store: store, profiles: profiles, groups: groups}
+}
+
+type secretRefs struct {
+	vault    SecretVault
+	store    credential.SecretStore
+	profiles profile.ProfileRepository
+	groups   profile.GroupRepository
+}
+
+func (s *secretRefs) ResolveText(ctx context.Context, text string) (string, []PlacedSecret, error) {
+	locs := resolveLineRefRE.FindAllStringSubmatchIndex(text, -1)
+	if len(locs) == 0 {
+		return text, []PlacedSecret{}, nil
+	}
+	if s.vault == nil || s.store == nil {
+		return "", nil, &UnresolvedSecretError{Reference: text[locs[0][0]:locs[0][1]]}
+	}
+	inputs, err := s.inventoryInputs()
+	if err != nil {
+		return "", nil, err
+	}
+	out := make([]byte, 0, len(text))
+	out = append(out, text[:locs[0][0]]...)
+	placed := make([]PlacedSecret, 0, len(locs))
+	for i, loc := range locs {
+		ref := text[loc[0]:loc[1]]
+		payload := text[loc[2]:loc[3]]
+		if !strings.HasPrefix(payload, "secrow:") {
+			return "", nil, &UnresolvedSecretError{Reference: ref}
+		}
+		id, ok := s.vault.ResolveRow(payload, inputs)
+		if !ok {
+			return "", nil, &UnresolvedSecretError{Reference: ref}
+		}
+		secret, err := s.store.Get(ctx, id)
+		if err != nil {
+			return "", nil, err
+		}
+		var value string
+		if secret.IsEmpty() {
+			return "", nil, &UnresolvedSecretError{Reference: ref}
+		}
+		if err := secret.Use(func(b []byte) error {
+			value = string(b)
+			return nil
+		}); err != nil {
+			return "", nil, err
+		}
+		out = append(out, value...)
+		placed = append(placed, PlacedSecret{Name: payload, Value: value})
+		if i+1 < len(locs) {
+			out = append(out, text[loc[1]:locs[i+1][0]]...)
+		} else {
+			out = append(out, text[loc[1]:]...)
+		}
+	}
+	return string(out), placed, nil
+}
+
+func (s *secretRefs) inventoryInputs() ([]vault.CredentialInventory, error) {
+	if s.profiles == nil || s.groups == nil {
+		return nil, nil
+	}
+	profiles, err := s.profiles.LoadProfiles()
+	if err != nil {
+		return nil, err
+	}
+	groups, err := s.groups.LoadGroups()
+	if err != nil {
+		return nil, err
+	}
+	return inventoryInputs(profiles, groups), nil
 }
 
 // PlacedSecret is one secret value that WAS substituted into the request, by
@@ -341,26 +407,25 @@ type APICollectionOperation interface {
 // than a field set afterwards because the snapshot needs it on the first
 // call: a build wired without one resolves no secret variable at all, which
 // is a coherent half of the feature and says so by leaving them unresolved.
-func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections, values SecretValues) APICollectionOperation {
+func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections, refs SecretRefs) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
 		control.NewComposite(apiGate, lane),
 		g,
-		newAPICollectionService(g, svc, values),
+		newAPICollectionService(g, svc, refs),
 	)
 }
 
-func newAPICollectionService(g *guard, svc apicoll.Collections, values SecretValues) *apiCollectionService {
-	return &apiCollectionService{guard: g, svc: svc, values: values}
+func newAPICollectionService(g *guard, svc apicoll.Collections, refs SecretRefs) *apiCollectionService {
+	return &apiCollectionService{guard: g, svc: svc, refs: refs}
 }
 
 type apiCollectionService struct {
 	guard *guard
 	svc   apicoll.Collections
-	// values is the binding document's read half. nil is a build with no
-	// binding store, and then a secret variable resolves to nothing — which
-	// is the same answer a misspelled variable gets, and an honest one.
-	values SecretValues
+	// refs resolves the vault-reference pass after collection variables.
+	// nil is a build with no vault resolver; a reference then blocks the send.
+	refs SecretRefs
 
 	// mu guards the opened-folder list. The api gate already serialises
 	// every caller at capacity 1, so this is the lock that keeps the list
@@ -658,36 +723,6 @@ func (s *apiCollectionService) WriteRequest(h apicoll.HandleID, relPath string, 
 	return s.svc.WriteRequest(h, relPath, r)
 }
 
-// Snapshot reads the request, and — when an environment is named — the
-// environment beside it, resolves the request's variables against it and
-// carries that environment's route out.
-//
-// The three reads are one snapshot on purpose. The address and the route
-// come from ONE record (§6.5), so taking them at two moments would be the
-// drift the design exists to prevent; and doing it here, under the gate,
-// keeps every filesystem touch inside the interval the gate covers while
-// leaving the dial outside it.
-//
-// An unresolved variable does not produce a request. It comes back as
-// apicoll.ErrUnresolvedVariable naming every reference that has no value —
-// not the literal braces on the wire, not an empty string quietly
-// substituted, because an `Authorization: Bearer ` header is a
-// plausible-looking request that teaches the wrong lesson about why it was
-// rejected (§6.5).
-//
-// A variable the environment declares SECRET is not answered here: its value
-// lives in the binding document beside the vault (§8.1), which this service
-// is not given. Such a variable in the URL, a header or the body is
-// unresolved and blocks the send — the honest state, and the same one the
-// user sees for a variable they have not given a value.
-//
-// Since nocx-6hg2w.20 the AUTH is not an exception: its fields are text
-// like every other, resolved by the same substitution below, and the
-// field-wise provenance of which one the binding document answered is
-// carried out (AuthSecrets) so the sender can elide those bytes and show a
-// literal (§11.2). What this snapshot also contributes is the
-// environment's NAME, below — the half of the binding key that only the
-// record just read can supply.
 func (s *apiCollectionService) DeleteRequest(h apicoll.HandleID, relPath string) error {
 	if err := s.guard.check(); err != nil {
 		return err
@@ -728,6 +763,14 @@ func (s *apiCollectionService) MoveRequest(h apicoll.HandleID, fromRelPath, toRe
 	return s.svc.MoveRequest(h, fromRelPath, toRelPath)
 }
 
+// Snapshot reads the request and, when named, its environment under the
+// collection gate. It resolves ordinary variables first, then resolves
+// opaque vault references in the resulting text before returning the
+// request to the sender.
+//
+// An unresolved variable or secret reference does not produce a request. The
+// error names the missing reference, so literal braces and empty credentials
+// never reach the sender.
 func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error) {
 	if err := s.guard.check(); err != nil {
 		return SendInputs{}, err
@@ -745,7 +788,7 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 	// before the substitution rather than after, because it is what a run
 	// that CANNOT be substituted has to be built from — see the unresolved
 	// branch below.
-	inputs := SendInputs{RawRequest: req, Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
+	inputs := SendInputs{Request: req, CookieScope: scope, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
 
 	// No environment is a LOOKUP THAT ANSWERS NOTHING, not a substitution
 	// skipped. Skipping it is what made `{{baseUrl}}/zen` with nothing bound
@@ -756,7 +799,6 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 	// request goes out exactly as written when it HAS no references, and
 	// says which ones it cannot resolve when it has.
 	var look apicoll.Lookup
-	var secrets apicoll.Lookup
 	var env apicoll.Environment
 	if envRelPath != "" {
 		read, envErr := s.svc.ReadEnvironment(h, envRelPath)
@@ -767,121 +809,106 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 		inputs.Environment = env.Name
 		inputs.Route = env.Route
 		look = env.Lookup()
-		// THE SECOND LOOKUP, which is what Chain has always existed for and
-		// what was never built. A vault-held value used to reach exactly
-		// one field — the auth variable, resolved by the sender — so a
-		// token that goes in a PATH could only be sent by typing it into a
-		// file that goes into git. Telegram is the shape that names the
-		// gap: `/bot<TOKEN>/sendMessage`.
-		//
-		// BEHIND the environment, never in front of it. Environment.Value
-		// already refuses a name the file declares secret, so the two halves
-		// cannot both answer one name; the ORDER is what makes a collection
-		// arriving in a pull request unable to choose what a reader's
-		// request sends (§8) — a file's plain value can never shadow a
-		// binding, and a binding is only reached for a name the file did not
-		// answer.
-		if s.values != nil {
-			secrets = recordPlaced(s.values.Variables(ctx, scope, env.Name), &inputs.Secrets)
-		}
 	}
 
-	// THE REQUEST'S OWN VARIABLES GO IN FRONT, and the environment's are
-	// inherited: a name the request answers wins, and everything else falls
-	// through exactly as it did. That is the whole shape of the feature —
-	// `id` in `/users/{{id}}` belongs to the request, because two requests
-	// want different ones, while `baseUrl` belongs to the environment
-	// because every request under it wants the same one.
-	//
-	// The one case the order does NOT decide is a name the environment
-	// declares secret: the request loses, loudly (ErrSecretShadowed). A
-	// request file goes into git and a credential belongs in the vault, so
-	// the two meeting is refused rather than resolved silently in either
-	// direction.
-	look, lookupErr := requestLookup(req, env, look, secrets)
+	// requestLookup owns the variable order: request, inherited folder,
+	// environment. Secret references are text, so they are intentionally not
+	// a lookup layer and cannot shadow an ordinary variable with the same name.
+	look, lookupErr := requestLookup(req, env, look)
 	if lookupErr != nil {
 		return inputs, lookupErr
 	}
 
 	resolved, err := apicoll.Substitute(req, look)
 	if err != nil {
-		// THE INPUTS COME BACK WITH THE ERROR, and that is the one thing
-		// this signature does that a plain failure would not. An unresolved
-		// variable is a run — the `compose` phase of an exchange that never
-		// went out — and a run needs the request to show and the route to
-		// say where it would have gone. Returning the zero value here would
-		// leave the handler with a sentence and nothing to attach it to,
-		// which is the shape this whole epic replaced.
-		//
-		// The request is the UNSUBSTITUTED one, so the reference a person
-		// has to fix is visible in the text they are shown.
 		return inputs, err
 	}
-
-	// WHICH AUTH FIELD CAME FROM THE BINDING DOCUMENT, answered by
-	// FIELD-WISE comparison of the file's text against the names the
-	// binding just answered — never by inspecting a RESOLVED VALUE. A field
-	// the file wrote as exactly one `{{name}}` is named by a binding when
-	// that name is one of Secrets; a literal the person typed is not a
-	// reference at all; `Bearer {{name}}` text is a reference not covering
-	// the whole field, which the file has no way to be bound AS a secret —
-	// it is resolved like any other mixed text and shown like any other
-	// text. A name that resolves to a PLAIN environment value is also
-	// absent here: the plain values are not secrets, which is the point of
-	// the construction (apicoll.Chain: env first, binding second).
-	inputs.AuthSecrets.Token = authFieldSource(req.Auth.Token, inputs.Secrets)
-	inputs.AuthSecrets.Password = authFieldSource(req.Auth.Password, inputs.Secrets)
+	resolved, placed, err := s.resolveRequestSecrets(ctx, resolved)
+	if err != nil {
+		return inputs, err
+	}
 	inputs.Request = resolved
+	inputs.Secrets = placed
 	return inputs, nil
 }
 
-// authFieldSource answers which variable name a raw auth FIELD resolved
-// through the binding document, or "" when it is a literal (or mixed text,
-// or an environment-plain value). See the Snapshot comment above for why
-// this is by construction rather than by inspecting resolved text.
-func authFieldSource(raw string, placed []PlacedSecret) string {
-	name, ok := apicoll.ExactReference(raw)
-	if !ok {
-		return ""
+func (s *apiCollectionService) resolveRequestSecrets(ctx context.Context, req apicoll.Request) (apicoll.Request, []PlacedSecret, error) {
+	out := req
+	placed := make([]PlacedSecret, 0)
+	resolve := func(text string) (string, error) {
+		if s.refs == nil && resolveLineRefRE.MatchString(text) {
+			loc := resolveLineRefRE.FindStringIndex(text)
+			return "", &UnresolvedSecretError{Reference: text[loc[0]:loc[1]]}
+		}
+		if s.refs == nil {
+			return text, nil
+		}
+		resolved, refs, err := s.refs.ResolveText(ctx, text)
+		if err != nil {
+			return "", err
+		}
+		placed = appendUniquePlaced(placed, refs...)
+		return resolved, nil
 	}
-	for _, p := range placed {
-		if p.Name == name {
-			return name
+	var err error
+	if out.URL, err = resolve(out.URL); err != nil {
+		return apicoll.Request{}, nil, err
+	}
+	for i := range out.Headers {
+		if !out.Headers[i].Enabled {
+			continue
+		}
+		if out.Headers[i].Name, err = resolve(out.Headers[i].Name); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+		if out.Headers[i].Value, err = resolve(out.Headers[i].Value); err != nil {
+			return apicoll.Request{}, nil, err
 		}
 	}
-	return ""
+	for i := range out.Query {
+		if !out.Query[i].Enabled {
+			continue
+		}
+		if out.Query[i].Name, err = resolve(out.Query[i].Name); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+		if out.Query[i].Value, err = resolve(out.Query[i].Value); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+	}
+	if out.Auth.Kind == apicoll.AuthBearer || out.Auth.Kind == apicoll.AuthBasic || out.Auth.Kind == apicoll.AuthAPIKey {
+		if out.Auth.Token, err = resolve(out.Auth.Token); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+		if out.Auth.Password, err = resolve(out.Auth.Password); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+		if out.Auth.User, err = resolve(out.Auth.User); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+	}
+	if out.Body.Kind == apicoll.BodyRaw || out.Body.Kind == apicoll.BodyForm {
+		if out.Body.Text, err = resolve(out.Body.Text); err != nil {
+			return apicoll.Request{}, nil, err
+		}
+	}
+	return out, placed, nil
 }
 
-// recordPlaced wraps a lookup so the caller learns WHICH values it answered.
-//
-// It is a decorator rather than a change to apicoll.Substitute, and that is
-// the point: substitution's contract is that it knows nothing about where an
-// answer came from, so "which of these came from the vault" is a question
-// only the composer of the Chain can answer. Wrapping the second lookup
-// alone means the answer is exact — no scan of the text, no heuristic about
-// what a credential looks like.
-//
-// BY NAME, ONCE. A variable referenced three times is answered three times
-// and recorded once: the sender locates every occurrence of a value itself,
-// so a second identical placement would be dropped by collapse anyway, and
-// recording it would only make the list say something it does not mean.
-func recordPlaced(look apicoll.Lookup, into *[]PlacedSecret) apicoll.Lookup {
-	if look == nil {
-		return nil
-	}
-	return func(name string) (string, bool, error) {
-		value, found, err := look(name)
-		if err != nil || !found {
-			return value, found, err
-		}
-		for _, already := range *into {
-			if already.Name == name {
-				return value, true, nil
+func appendUniquePlaced(dst []PlacedSecret, refs ...PlacedSecret) []PlacedSecret {
+	for _, ref := range refs {
+		found := false
+		for _, existing := range dst {
+			if existing.Name == ref.Name {
+				found = true
+				break
 			}
 		}
-		*into = append(*into, PlacedSecret{Name: name, Value: value})
-		return value, true, nil
+		if !found {
+			dst = append(dst, ref)
+		}
 	}
+	return dst
 }
 
 // stillOpen refuses a handle the user has closed — or never opened — before

@@ -275,11 +275,9 @@ func TestAPIRequestSend_FolderVariablesResolveInNearestOrderAndListPresence(t *t
 	}
 }
 
-// THE REFUSAL, over the socket: a request row that would shadow a name the
-// environment declares secret. It comes back as a RUN at compose — a thing
-// that happened to somebody who pressed Send — naming the variable and never
-// the row's value.
-func TestAPIRequestSend_ARequestVariableShadowingASecretIsRefused(t *testing.T) {
+// A request variable and an environment value are ordinary layers. Secret
+// references are values, not a fourth layer that can refuse the request.
+func TestAPIRequestSend_ARequestVariableOverridesAnEnvironmentValue(t *testing.T) {
 	srv, got := varServer(t)
 	_, conn := newAPIWSServer(t, newAPIFakeBindings())
 
@@ -296,42 +294,26 @@ func TestAPIRequestSend_ARequestVariableShadowingASecretIsRefused(t *testing.T) 
 	}
 	write("nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
 	write("send.json", `{"id":"r1","name":"send","method":"GET","url":"{{baseUrl}}/bot{{token}}/x",`+
-		`"headers":[],"query":[],`+
-		`"variables":[{"name":"token","value":"the-file-s-own-value","enabled":true}],`+
+		`"headers":[],"query":[],"variables":[{"name":"token","value":"the-file-s-own-value","enabled":true}],`+
 		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
 	write("environments/dev.json", `{"name":"dev","values":{"baseUrl":`+mustJSON(t, srv.URL)+
-		`},"secretVars":["token"],"route":{"kind":"direct"}}`)
+		`,"token":"environment-value"},"route":{"kind":"direct"}}`)
 
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
-		"handle": handle, "relPath": "send.json",
-		"envRelPath": "environments/dev.json", "token": "t-1",
+		"handle": handle, "relPath": "send.json", "envRelPath": "environments/dev.json",
 	}, 2)
 	if resp.Error != nil {
-		t.Fatalf("expected a run, got an error: %+v", resp.Error)
+		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
 	var run apiSendResponse
 	if err := json.Unmarshal(resp.Result, &run); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if run.Outcome != "failed" {
-		t.Fatalf("outcome = %q, want failed", run.Outcome)
+	if run.Outcome != "answered" {
+		t.Fatalf("outcome = %q, want answered", run.Outcome)
 	}
-	if run.Failure == nil || run.Failure.Phase != "compose" {
-		t.Fatalf("failure = %+v, want phase compose", run.Failure)
-	}
-	if !strings.Contains(run.Failure.Reason, "token") {
-		t.Errorf("reason = %q, want it to name the variable", run.Failure.Reason)
-	}
-	if !strings.Contains(run.Failure.Reason, "secret") {
-		t.Errorf("reason = %q, want it to say why", run.Failure.Reason)
-	}
-	// NEVER THE ROW'S VALUE. The reason crosses to the renderer and reaches
-	// any log that prints it.
-	if strings.Contains(run.Failure.Reason, "the-file-s-own-value") {
-		t.Fatalf("the refusal carries the row's value: %s", run.Failure.Reason)
-	}
-	if _, hits := got.get(); hits != 0 {
-		t.Errorf("the server was reached %d times by a refused send", hits)
+	if path, hits := got.get(); hits != 1 || path != "/botthe-file-s-own-value/x" {
+		t.Fatalf("server received path %q in %d requests, want request value once", path, hits)
 	}
 }

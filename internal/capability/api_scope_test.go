@@ -2,7 +2,6 @@ package capability_test
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,7 +28,8 @@ func TestAPICollectionService_RequestScopeReturnsTheResolvedChain(t *testing.T) 
 	write("users/.variables.json", `{"variables":[{"name":"shared","value":"parent","enabled":true},{"name":"parentOnly","value":"parent-value","enabled":true}]}`)
 	write("users/private/.variables.json", `{"variables":[{"name":"shared","value":"nearest","enabled":true},{"name":"nearestOnly","value":"nearest-value","enabled":true}]}`)
 	write("users/private/get.json", `{"id":"r1","name":"get","method":"GET","url":"https://example.test/{{shared}}","variables":[{"name":"shared","value":"request","enabled":true},{"name":"requestOnly","value":"request-value","enabled":true}],"body":{"kind":"none"},"auth":{"kind":"none"}}`)
-	write("environments/dev.json", `{"name":"dev","values":{"environmentOnly":"environment-value","shared":"environment-shared"},"secretVars":["token"],"route":{"kind":"direct"}}`)
+	write("environments/dev.json", `{"name":"dev","values":{"environmentOnly":"environment-value","shared":"environment-shared","token":"{{secret:secrow:ENV}}"}`+
+		`,"route":{"kind":"direct"}}`)
 
 	// The constructor owns the collection root, so it is given the path the
 	// fixture files were written under.
@@ -37,7 +37,7 @@ func TestAPICollectionService_RequestScopeReturnsTheResolvedChain(t *testing.T) 
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
-		scopeSecrets{},
+		nil,
 	)
 
 	opened, err := openScopeCollection(op, root)
@@ -66,7 +66,7 @@ func TestAPICollectionService_RequestScopeReturnsTheResolvedChain(t *testing.T) 
 		{Name: "shared", Value: "root", Scope: "folder", From: "", Overridden: true, Refused: ""},
 		{Name: "environmentOnly", Value: "environment-value", Scope: "environment", From: "environments/dev.json", Overridden: false, Refused: ""},
 		{Name: "shared", Value: "environment-shared", Scope: "environment", From: "environments/dev.json", Overridden: true, Refused: ""},
-		{Name: "token", Value: "", Scope: "vault", From: "", Overridden: false, Refused: ""},
+		{Name: "token", Value: "", Scope: "environment", From: "environments/dev.json", Overridden: false, Refused: "", Secret: true},
 	}
 	if len(got.Variables) != len(want) {
 		t.Fatalf("variables = %+v, want %d rows", got.Variables, len(want))
@@ -78,7 +78,7 @@ func TestAPICollectionService_RequestScopeReturnsTheResolvedChain(t *testing.T) 
 	}
 }
 
-func TestAPICollectionService_RequestScopeMarksDraftSecretShadow(t *testing.T) {
+func TestAPICollectionService_RequestScopeMarksSecretReferencesAndOverrides(t *testing.T) {
 	root := t.TempDir()
 	write := func(rel, body string) {
 		t.Helper()
@@ -91,8 +91,9 @@ func TestAPICollectionService_RequestScopeMarksDraftSecretShadow(t *testing.T) {
 		}
 	}
 	write(apicoll.ManifestName, `{"schemaVersion":1,"name":"scope"}`)
-	write("users/get.json", `{"id":"r1","name":"get","method":"GET","url":"https://example.test/{{token}}","body":{"kind":"none"},"auth":{"kind":"none"}}`)
-	write("environments/dev.json", `{"name":"dev","secretVars":["token"],"route":{"kind":"direct"}}`)
+	write("get.json", `{"id":"r1","name":"get","method":"GET","url":"https://example.test","body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("environments/dev.json", `{"name":"dev","values":{"token":"{{secret:secrow:ENV}}"}`+
+		`,"route":{"kind":"direct"}}`)
 
 	op := capability.NewAPICollectionOperation(
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
@@ -107,76 +108,23 @@ func TestAPICollectionService_RequestScopeMarksDraftSecretShadow(t *testing.T) {
 	var got capability.RequestScopeResult
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APICollectionService) error {
 		var requestErr error
-		got, requestErr = svc.RequestScope(ctx, opened, "users/get.json", "environments/dev.json", []apicoll.Param{
-			{Name: "token", Value: "draft-secret", Enabled: true},
-			{Name: "visible", Value: "draft-visible", Enabled: true},
+		got, requestErr = svc.RequestScope(ctx, opened, "get.json", "environments/dev.json", []apicoll.Param{
+			{Name: "token", Value: "{{secret:secrow:REQ}}", Enabled: true},
 		})
 		return requestErr
 	}); err != nil {
 		t.Fatalf("RequestScope: %v", err)
 	}
-	if len(got.Variables) != 3 {
-		t.Fatalf("variables = %+v, want three rows", got.Variables)
+	if len(got.Variables) != 2 {
+		t.Fatalf("variables = %+v, want request and environment rows", got.Variables)
 	}
-	if got.Variables[0].Refused != `apicoll: a request variable would shadow a name this environment declares secret: "token"` {
-		t.Fatalf("refused row = %+v", got.Variables[0])
+	wantRequest := capability.ScopeVariable{Name: "token", Scope: "request", Overridden: false, Secret: true}
+	if got.Variables[0] != wantRequest {
+		t.Errorf("request row = %+v, want %+v", got.Variables[0], wantRequest)
 	}
-	if got.Variables[1].Refused != "" || got.Variables[2].Refused != "" {
-		t.Fatalf("refusal leaked to other rows: %+v", got.Variables)
-	}
-}
-
-func TestAPICollectionService_RequestScopeReportsVaultLookupFailure(t *testing.T) {
-	root := t.TempDir()
-	write := func(rel, body string) {
-		t.Helper()
-		full := filepath.Join(root, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
-			t.Fatalf("mkdir %s: %v", rel, err)
-		}
-		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
-			t.Fatalf("write %s: %v", rel, err)
-		}
-	}
-	write(apicoll.ManifestName, `{"schemaVersion":1,"name":"scope"}`)
-	write("get.json", `{"id":"r1","name":"get","method":"GET","url":"https://example.test","body":{"kind":"none"},"auth":{"kind":"none"}}`)
-	write("environments/dev.json", `{"name":"dev","secretVars":["token"],"route":{"kind":"direct"}}`)
-
-	op := capability.NewAPICollectionOperation(
-		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
-		capability.Gate("lane", 8, 64, 5*time.Second),
-		apicoll.NewCollections(apiPaths{root: root}),
-		failingScopeSecrets{},
-	)
-	opened, err := openScopeCollection(op, root)
-	if err != nil {
-		t.Fatalf("open collection: %v", err)
-	}
-	var gotErr error
-	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APICollectionService) error {
-		_, gotErr = svc.RequestScope(ctx, opened, "get.json", "environments/dev.json", nil)
-		return nil
-	}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if gotErr == nil || gotErr.Error() != "vault sealed" {
-		t.Fatalf("RequestScope error = %v, want vault sealed", gotErr)
-	}
-}
-
-type scopeSecrets struct{}
-
-func (scopeSecrets) Variables(context.Context, string, string) apicoll.Lookup {
-	return func(name string) (string, bool, error) {
-		return "secret-value", name == "token", nil
-	}
-}
-
-type failingScopeSecrets struct{}
-
-func (failingScopeSecrets) Variables(context.Context, string, string) apicoll.Lookup {
-	return func(string) (string, bool, error) {
-		return "", false, errors.New("vault sealed")
+	wantEnvironment := capability.ScopeVariable{Name: "token", Scope: "environment", From: "environments/dev.json", Overridden: true, Secret: true}
+	if got.Variables[1] != wantEnvironment {
+		t.Errorf("environment row = %+v, want %+v", got.Variables[1], wantEnvironment)
 	}
 }
 

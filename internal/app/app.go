@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
@@ -696,29 +697,18 @@ func New(opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vault init: %w", err)
 	}
+	// API requests resolve only opaque secrow handles through the capability
+	// seam. The terminal's ResolveLine remains name-based; this adapter is
+	// deliberately restricted to collection-file references.
+	apiSecretRefs := capability.NewSecretRefs(v, v, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
 
-	// The binding document (design §8, §8.1): the map from a collection's
-	// variable NAME to a value in the vault. It is constructed HERE rather
-	// than beside the collection service above because it takes the vault,
-	// and it is handed to the transport twice under two different contracts
-	// — which is apibind's own split, not a second answer to one question.
-	//
-	// apibind.Store is the WRITE half and it is what turns on
-	// api.import.postman: an import that had nowhere to put a token would
-	// have to drop it silently or write it into the collection folder, and
-	// the folder being safe to commit BY CONSTRUCTION is the whole security
-	// argument. apibind.ValueResolver is the READ half, and it is the half
-	// that never yields an identifier: a caller holding one can ask what a
-	// variable is worth and has nothing to hand an id to. The send path gets
-	// exactly that one, which is how §8's property survives the wiring as
-	// well as the format.
-	//
-	// The document store is this composition root's choice, not apibind's,
-	// and it is the same one the profiles, the snippets and the vault file
-	// provider use: one directory, one version protocol, one place a backup
-	// has to know about.
+	// The binding document is the WRITE half used by api.import.postman.
+	// Collection-file references never consult it: API sends resolve opaque
+	// secrow handles through apiSecretRefs above, while ordinary variables
+	// remain in collection files. Keeping this store at the composition root
+	// makes its vault and document-store dependencies explicit.
 	apiBindings := apibind.NewStore(docStore, v, apibind.WithLogger(logger))
 
 	// The content key opens BOTH encrypted stores — the history database
@@ -938,10 +928,10 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
+		transport.WithAPIVariables(apiSecretRefs),
 		transport.WithAPI(apiCollections, apiSender),
 		transport.WithAPIImportFetcher(apiFetcher),
 		transport.WithAPIBindings(apiBindings),
-		transport.WithAPIVariables(apiBindings),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather
 		// than inside the transport: internal/version's vars are link-time
 		// state, and the composition root is where state becomes a

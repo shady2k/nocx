@@ -50,6 +50,105 @@ export const FIXTURE_CWD = '~/Documents/repos/nocx'
 /** The tab label produced by directoryLabel(FIXTURE_CWD). */
 export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 
+/** One scripted socket for tests that must cross the real Dispatcher/WSClient
+ * boundary. Keep this transport fake here so pane and IPC tests share one
+ * wire harness rather than growing competing socket implementations. */
+export class MockWebSocket {
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+  static readonly CLOSING = 2
+  static readonly CLOSED = 3
+  static last: MockWebSocket | null = null
+
+  readyState: number = MockWebSocket.CONNECTING
+  binaryType = 'blob'
+  readonly sent: (string | ArrayBuffer)[] = []
+  closeCalled = false
+
+  onopen: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onmessage: ((event: { data: unknown }) => void) | null = null
+  onclose: (() => void) | null = null
+
+  private _listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+
+  addEventListener(type: string, fn: (...args: unknown[]) => void): void {
+    let s = this._listeners.get(type)
+    if (!s) {
+      s = new Set()
+      this._listeners.set(type, s)
+    }
+    s.add(fn)
+  }
+
+  removeEventListener(type: string, fn: (...args: unknown[]) => void): void {
+    this._listeners.get(type)?.delete(fn)
+  }
+
+  private _fire(type: string, event?: unknown): void {
+    for (const fn of this._listeners.get(type) ?? []) {
+      fn(event)
+    }
+  }
+
+  constructor(readonly url: string) {
+    MockWebSocket.last = this
+  }
+
+  send(data: string | ArrayBuffer): void {
+    this.sent.push(data)
+  }
+
+  close(): void {
+    this.closeCalled = true
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+    this._fire('close')
+  }
+
+  serverAccepts(): void {
+    this.readyState = MockWebSocket.OPEN
+    this.onopen?.()
+    this._fire('open')
+  }
+
+  serverFails(): void {
+    this.onerror?.()
+  }
+
+  serverHangsUp(): void {
+    this.readyState = MockWebSocket.CLOSED
+    this.onclose?.()
+    this._fire('close')
+  }
+
+  deliverText(payload: unknown): void {
+    const event = { data: typeof payload === 'string' ? payload : JSON.stringify(payload) }
+    this.onmessage?.(event)
+    this._fire('message', event)
+  }
+
+  deliverBinary(data: ArrayBuffer): void {
+    const event = { data }
+    this.onmessage?.(event)
+    this._fire('message', event)
+  }
+
+  requests(): { id?: number; method?: string; params?: Record<string, unknown> }[] {
+    return this.sent
+      .filter((m): m is string => typeof m === 'string')
+      .map(
+        (m) => JSON.parse(m) as { id?: number; method?: string; params?: Record<string, unknown> },
+      )
+  }
+
+  binaryFrames(): Uint8Array[] {
+    return this.sent
+      .filter((m): m is ArrayBuffer => m instanceof ArrayBuffer)
+      .map((m) => new Uint8Array(m))
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 /** The renderer mock's live-content-height measurer: a spy the tests
  *  program to stand in for the real renderer measuring the grid (the

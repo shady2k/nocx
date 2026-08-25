@@ -294,37 +294,86 @@ type channelShell struct {
 // first prompt_ready.
 func startChannelShell(t *testing.T, shell, scriptName, script string) *channelShell {
 	t.Helper()
-	return startChannelShellCfg(t, shell, scriptName, script, newFakeKernel(t, testCap), "", true)
+	return startChannelShellCfgMode(t, shell, scriptName, script, channelShellOptions{
+		kernel:        newFakeKernel(t, testCap),
+		waitHandshake: true,
+		withLifecycle: true,
+	})
+}
+
+// startChannelShellNoChannel boots the integration script without lifecycle
+// configuration. It is the conventional-session shape: the script is still
+// sourced, but no capability, descriptor, or port is available to activate.
+func startChannelShellNoChannel(t *testing.T, shell, scriptName, script string) *channelShell {
+	t.Helper()
+	return startChannelShellCfgMode(t, shell, scriptName, script, channelShellOptions{
+		fakeAgentBody: fakeAgentBody,
+	})
 }
 
 // startChannelShellCfg boots the hooks against a fake kernel over loopback
-// TCP (the remote / in-band transport shape), with the decision-9 fault
-// harness knobs: the kernel may be in a fault mode (never reading the
-// connection, or never answering hello), the shell's native prompt may carry
-// a sentinel text the assertions key on (a suppressed marker-only prompt has
-// no native text at all), and the handshake wait is optional — the fault
-// tests must observe the shell AFTER its bounded wait expires, not after a
-// completed handshake.
+// TCP, with the decision-9 fault harness knobs.
 func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fakeKernel, sentinelPrompt string, waitHandshake bool) *channelShell {
 	t.Helper()
+	return startChannelShellCfgMode(t, shell, scriptName, script, channelShellOptions{
+		kernel:         k,
+		sentinelPrompt: sentinelPrompt,
+		waitHandshake:  waitHandshake,
+		withLifecycle:  true,
+	})
+}
+
+type channelShellOptions struct {
+	kernel         *fakeKernel
+	sentinelPrompt string
+	waitHandshake  bool
+	withLifecycle  bool
+	fakeAgentBody  string
+}
+
+// startChannelShellCfgMode contains the shared real-pty setup for live-channel
+// and conventional-session tests.
+func startChannelShellCfgMode(t *testing.T, shell, scriptName, script string, opts channelShellOptions) *channelShell {
+	t.Helper()
+	k := opts.kernel
+	sentinelPrompt := opts.sentinelPrompt
+	waitHandshake := opts.waitHandshake
+	withLifecycle := opts.withLifecycle
 	sh := requireShell(t, shell)
 
-	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
-	if lnErr != nil {
-		t.Fatalf("listen: %v", lnErr)
+	var ln net.Listener
+	port := 0
+	if withLifecycle {
+		var lnErr error
+		ln, lnErr = net.Listen("tcp", "127.0.0.1:0")
+		if lnErr != nil {
+			t.Fatalf("listen: %v", lnErr)
+		}
+		port = tcpPort(t, ln)
 	}
-	port := tcpPort(t, ln)
 
 	home := t.TempDir()
 	tmpDir := t.TempDir()
-	bootstrap := filepath.Join(t.TempDir(), "bootstrap")
-	// The launcher's substitution point: __nocx_cap='@CAP@' in the rcfile
-	// text. The hooks drop the export attribute again at source time.
-	boot := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n"
-	if err := os.WriteFile(bootstrap, []byte(boot), 0o600); err != nil {
-		t.Fatalf("write bootstrap: %v", err)
+	var bootstrap string
+	if withLifecycle {
+		bootstrap = filepath.Join(t.TempDir(), "bootstrap")
+		// The launcher's substitution point: __nocx_cap='@CAP@' in the rcfile
+		// text. The hooks drop the export attribute again at source time.
+		boot := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n"
+		if err := os.WriteFile(bootstrap, []byte(boot), 0o600); err != nil {
+			t.Fatalf("write bootstrap: %v", err)
+		}
 	}
 	scriptPath := writeScriptFile(t, scriptName, script)
+	var fakeBinDir string
+	if opts.fakeAgentBody != "" {
+		fakeBinDir = t.TempDir()
+		// #nosec G306 — the stand-in agent must be executable to be found
+		// through PATH; it lives in the test's own temp directory.
+		if err := os.WriteFile(filepath.Join(fakeBinDir, "claude"), []byte(opts.fakeAgentBody), 0o755); err != nil {
+			t.Fatalf("write fake claude: %v", err)
+		}
+	}
 
 	// The shell FAMILY, which is what the rc layout and the prompt variable
 	// depend on — never the binary name, which since the version matrix is a
@@ -357,16 +406,26 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 		"NOCX_SHELL_INTEGRATION=1",
 		"NOCX_PROMPT_MODE=marker-only",
 		"NOCX_SESSION_ID=chansess",
-		"NOCX_LIFECYCLE_LANE="+testLane,
-		"NOCX_LIFECYCLE_DOMAIN="+testDom,
-		fmt.Sprintf("NOCX_LIFECYCLE_EPOCH=%d", testEpoch),
-		fmt.Sprintf("NOCX_LIFECYCLE_PORT=%d", port),
-		"NOCX_LIFECYCLE_TIMEOUT_MS=1000",
 	)
-	// The gate line: source the bootstrap (cap) then the hooks — the shape
-	// of the launcher rcfile's install section.
+	if withLifecycle {
+		cmd.Env = append(cmd.Env,
+			"NOCX_LIFECYCLE_LANE="+testLane,
+			"NOCX_LIFECYCLE_DOMAIN="+testDom,
+			fmt.Sprintf("NOCX_LIFECYCLE_EPOCH=%d", testEpoch),
+			fmt.Sprintf("NOCX_LIFECYCLE_PORT=%d", port),
+			"NOCX_LIFECYCLE_TIMEOUT_MS=1000",
+		)
+	}
+	if fakeBinDir != "" {
+		cmd.Env = append(cmd.Env, "PATH="+fakeBinDir+":"+os.Getenv("PATH"))
+	}
+	// The gate line sources the hooks, and the capability bootstrap first
+	// when this fixture has a lifecycle channel.
 	gate := filepath.Join(t.TempDir(), "gate")
-	gateBody := ". " + ShellQuote(bootstrap) + "\n. " + ShellQuote(scriptPath) + "\n"
+	gateBody := ". " + ShellQuote(scriptPath) + "\n"
+	if withLifecycle {
+		gateBody = ". " + ShellQuote(bootstrap) + "\n" + gateBody
+	}
 	if err := os.WriteFile(gate, []byte(gateBody), 0o600); err != nil {
 		t.Fatalf("write gate: %v", err)
 	}
@@ -396,7 +455,9 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 		cmd.Env = append(cmd.Env, "ZDOTDIR="+zdot)
 	}
 
-	go k.serveLoop(ln)
+	if withLifecycle {
+		go k.serveLoop(ln)
+	}
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -604,7 +665,9 @@ func (s *channelShell) close() {
 	time.Sleep(300 * time.Millisecond)
 	_ = s.ptmx.Close()
 	_ = s.cmd.Process.Kill()
-	_ = s.listener.Close()
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
 }
 
 // TestBashChannel_HandshakeAndLifecycle drives the REAL bash hooks through

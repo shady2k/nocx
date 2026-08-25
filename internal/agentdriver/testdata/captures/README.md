@@ -1,16 +1,41 @@
 # Claude Code, captured in the five states a driver has to tell apart
 
-Real byte streams off a real PTY, produced by the capture harness `nocx-szb40.1` built and
-driven by the scripts in `scripts/`. Nothing here is synthesised, for the reason
+Real byte streams off a real PTY, produced by `cmd/agent-capture` and driven by the
+scripts in `scripts/`. Nothing here is synthesised, for the reason
 [ADR-0038](../../../../docs/decisions/0038-x-vt-as-the-backend-emulator.md) gives about its
 own corpus and for the one `AGENTS.md` rule 4 gives about tests: a fixture written by the
 person writing the classifier encodes that person's model of the TUI, including the parts
 that are wrong, and then the code and the test agree and are wrong together.
 
-Replay one to any point with `replay(t, name, atMs)` in `capture_test.go`, which exists
+Replay one in a driver test with `replay(t, name, atMs)` in `capture_test.go`, which exists
 because a driver is built against MOMENTS and every one of them is gone by the end of the
-capture. It replays through `internal/panegrid`, so what a test asserts on is a frame
-produced the way production produces one.
+capture. To inspect a committed capture from the command line, run:
+
+```sh
+go run ./cmd/agent-capture replay -at 49000 internal/agentdriver/testdata/captures/claude-permission.jsonl
+```
+
+To take a NEW capture, provide a program and, optionally, a timed-keystroke script:
+
+```sh
+go run ./cmd/agent-capture capture \
+  -out /tmp/agent-capture.jsonl \
+  -script internal/agentdriver/testdata/captures/scripts/permission.script \
+  -- claude
+go run ./cmd/agent-capture replay -at 49000 /tmp/agent-capture.jsonl
+```
+
+For a local smoke capture without an agent, `bash -i` running one command is enough:
+
+```sh
+go run ./cmd/agent-capture capture -out /tmp/bash-capture.jsonl -- \
+  bash -i -c 'printf "fresh capture\n"'
+go run ./cmd/agent-capture replay -at 100 /tmp/bash-capture.jsonl
+```
+
+The command-line replay feeds `charmbracelet/x/vt`. The driver-test helper replays through
+`internal/panegrid`, so what a test asserts on is a frame produced the way production
+produces one.
 
 | capture             | script              | what it holds                                                                       |
 | ------------------- | ------------------- | ----------------------------------------------------------------------------------- |

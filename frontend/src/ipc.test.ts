@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
+import { MockWebSocket } from './test-support/panes-fixtures'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
@@ -9,102 +10,6 @@ const ACK_INTERVAL_MS = 100
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
 const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
-
-class MockWebSocket {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSING = 2
-  static readonly CLOSED = 3
-  static last: MockWebSocket | null = null
-
-  readyState: number = MockWebSocket.CONNECTING
-  binaryType = 'blob'
-  readonly sent: (string | ArrayBuffer)[] = []
-  closeCalled = false
-
-  onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
-  onmessage: ((event: { data: unknown }) => void) | null = null
-  onclose: (() => void) | null = null
-
-  private _listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-
-  addEventListener(type: string, fn: (...args: unknown[]) => void): void {
-    let s = this._listeners.get(type)
-    if (!s) {
-      s = new Set()
-      this._listeners.set(type, s)
-    }
-    s.add(fn)
-  }
-
-  removeEventListener(type: string, fn: (...args: unknown[]) => void): void {
-    this._listeners.get(type)?.delete(fn)
-  }
-
-  private _fire(type: string, event?: unknown): void {
-    for (const fn of this._listeners.get(type) ?? []) {
-      fn(event)
-    }
-  }
-
-  constructor(readonly url: string) {
-    MockWebSocket.last = this
-  }
-
-  send(data: string | ArrayBuffer): void {
-    this.sent.push(data)
-  }
-
-  close(): void {
-    this.closeCalled = true
-    this.readyState = MockWebSocket.CLOSED
-    this.onclose?.()
-    this._fire('close')
-  }
-
-  serverAccepts(): void {
-    this.readyState = MockWebSocket.OPEN
-    this.onopen?.()
-    this._fire('open')
-  }
-
-  serverFails(): void {
-    this.onerror?.()
-  }
-
-  serverHangsUp(): void {
-    this.readyState = MockWebSocket.CLOSED
-    this.onclose?.()
-    this._fire('close')
-  }
-
-  deliverText(payload: unknown): void {
-    const event = { data: typeof payload === 'string' ? payload : JSON.stringify(payload) }
-    this.onmessage?.(event)
-    this._fire('message', event)
-  }
-
-  deliverBinary(data: ArrayBuffer): void {
-    const event = { data }
-    this.onmessage?.(event)
-    this._fire('message', event)
-  }
-
-  requests(): { id?: number; method?: string; params?: Record<string, unknown> }[] {
-    return this.sent
-      .filter((m): m is string => typeof m === 'string')
-      .map(
-        (m) => JSON.parse(m) as { id?: number; method?: string; params?: Record<string, unknown> },
-      )
-  }
-
-  binaryFrames(): Uint8Array[] {
-    return this.sent
-      .filter((m): m is ArrayBuffer => m instanceof ArrayBuffer)
-      .map((m) => new Uint8Array(m))
-  }
-}
 
 function socket(): MockWebSocket {
   const ws = MockWebSocket.last

@@ -21,12 +21,14 @@ That sentence is the whole decision. The rest of this document is how it was
 measured and what the measurement does not cover, because the gaps are the
 grounds on which it could be revisited.
 
-> This ADR was `spike/vt-agreement/REPORT.md` until 2026-08-25. The harness that
-> produced it — four Go tools, three candidate libraries and an `@xterm/headless`
-> ground truth in a nested module — was removed with the spike once the question
-> it existed to answer was closed (`nocx-szb40.3`); it is in git history at
-> `d3872462`. What survived into the product is the corpus it taught us to take:
-> `internal/agentdriver/testdata/captures/`.
+> This ADR was `spike/vt-agreement/REPORT.md` until 2026-08-25. The spike's
+> comparison tools were removed once the library choice was closed; the product
+> now keeps the deliberately smaller `cmd/agent-capture` tool instead. It runs
+> real programs on real PTYs, records the byte-only JSONL corpus format, and
+> replays captures through `charmbracelet/x/vt` at the moments a driver needs to
+> inspect. The committed corpus remains in
+> `internal/agentdriver/testdata/captures/`, and the old spike is still in git
+> history at `d3872462`.
 
 ## Method
 

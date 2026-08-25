@@ -184,3 +184,48 @@ func agentWrapperSaysSoWhenEnrolmentIsRefused(t *testing.T, start nestedParentSt
 		t.Error("a refused enrolment still sent a withdrawal")
 	}
 }
+
+// NO CHANNEL IS ALSO CLOSED AND VISIBLE. This is distinct from a live channel
+// whose enrolment is refused: the integration is sourced, but the lifecycle
+// configuration is absent, so the wrapper must take its conventional branch
+// without attempting an enrolment or a withdrawal.
+func TestBashAgentWrapperSaysSoWhenLifecycleChannelIsAbsent(t *testing.T) {
+	agentWrapperSaysSoWhenLifecycleChannelIsAbsent(t, "bash", "nocx.bash", bashScript)
+}
+
+func TestZshAgentWrapperSaysSoWhenLifecycleChannelIsAbsent(t *testing.T) {
+	agentWrapperSaysSoWhenLifecycleChannelIsAbsent(t, "zsh", "nocx.zsh", zshScript)
+}
+
+func agentWrapperSaysSoWhenLifecycleChannelIsAbsent(t *testing.T, shell, scriptName, script string) {
+	t.Helper()
+	s := startChannelShellNoChannel(t, shell, scriptName, script)
+	t.Cleanup(s.close)
+
+	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
+		t.Fatalf("type claude: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		out := s.output()
+		if strings.Contains(out, "AGENT-RAN") && strings.Contains(out, "not orchestrated") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	out := s.output()
+	if !strings.Contains(out, "nocx: not orchestrated — this pane has no lifecycle channel") {
+		t.Errorf("the absent channel was not reported in the pane; output=%q", out)
+	}
+	if !strings.Contains(out, "AGENT-RAN") {
+		t.Errorf("an absent lifecycle channel stopped the user's agent; output=%q", out)
+	}
+	if n := strings.Count(out, "AGENT-RAN"); n != 1 {
+		t.Errorf("the agent ran %d times, want exactly 1; output=%q", n, out)
+	}
+	// With no descriptor there is nowhere a frame could be written, so the
+	// absence of a withdrawal is structural rather than observable here. The
+	// falsifiable withdrawal assertion lives in the refused-enrolment test,
+	// which supplies a kernel that records protocol frames.
+}

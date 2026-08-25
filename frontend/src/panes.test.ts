@@ -13,14 +13,20 @@ import {
   makeLayoutStore,
   makeUIStateBackend,
   FIXTURE_DIRECTORY_LABEL,
+  FIXTURE_CWD,
   anchoredPane,
+  MockWebSocket,
+  type ClientFake,
   type RendererMock,
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
+import { Dispatcher } from './dispatcher'
+import { WSClient } from './ipc'
 import { Pane, PaneManager } from './panes'
 import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
+import type { DriverState } from './pane-observation'
 import {
   BasePaneContent,
   SURFACE_TERMINAL,
@@ -2432,25 +2438,113 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
   // Before this the whole vocabulary was one boolean that activating the tab
   // erased, so a worker that had finished, one holding a question open and one
   // whose agent was gone were the same dot.
-  it('shows three panes in three states at once', async () => {
-    const { client, manager, bar } = await mountPaneManager()
-    manager.newPane()
-    manager.newPane()
-    await vi.waitFor(() => {
-      expect(client.openSession).toHaveBeenCalledTimes(3)
-    })
+  it('shows three panes, their sources, and refuses a stale wire observation', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher())
+    const sessionIDs = [
+      '0123456789abcdef0011223344556677',
+      '1123456789abcdef0011223344556677',
+      '2123456789abcdef0011223344556677',
+    ]
+    const identity = {
+      instanceId: 'fedcba9876543210fedcba9876543210',
+      sessionEpoch: 1,
+    }
+    // The socket is taken before the helpers that close over it, so it can be
+    // const: connect() constructs it synchronously and MockWebSocket.last is
+    // how the fixture hands it back.
+    const connecting = realClient.connect(9876)
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const realSocket: MockWebSocket = constructed
+    realSocket.serverAccepts()
+    await connecting
 
-    client._sessions[0].fireObservation('working')
-    client._sessions[1].fireObservation('permission_choice')
-    client._sessions[2].fireObservation('exited')
+    const openRequests = () => realSocket.requests().filter((request) => request.method === 'open')
+    const answerOpen = (index: number): void => {
+      const request = openRequests()[index]
+      if (request?.id === undefined) throw new Error(`missing open request ${index}`)
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: {
+          sessionId: sessionIDs[index],
+          ...identity,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+    }
+    const deliverObservation = (
+      sessionId: string,
+      state: DriverState,
+      observationIdentity = identity,
+    ): void => {
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.observationChanged',
+        params: {
+          sessionId,
+          ...observationIdentity,
+          agent: 'claude',
+          state,
+        },
+      })
+    }
+    const expected = [
+      { status: 'working', source: 'driver' },
+      { status: 'waiting', source: 'driver' },
+      { status: 'exited', source: 'driver' },
+    ]
 
-    await vi.waitFor(() => {
-      const shown = [...bar.querySelectorAll('[role="tab"]')].map((t) =>
-        t.getAttribute('data-agent-status'),
+    try {
+      const mounted = mountPaneManager(realClient as unknown as ClientFake)
+      await vi.waitFor(() => expect(openRequests()).toHaveLength(1))
+      answerOpen(0)
+      const { manager, bar, panes } = await mounted
+      const indicators = (): { status: string | null; source: string | null }[] =>
+        [...bar.querySelectorAll('[role="tab"]')].map((tab) => ({
+          status: tab.getAttribute('data-agent-status'),
+          source: tab.getAttribute('data-agent-source'),
+        }))
+
+      manager.newPane()
+      manager.newPane()
+      await vi.waitFor(() => expect(openRequests()).toHaveLength(3))
+      answerOpen(1)
+      answerOpen(2)
+      await vi.waitFor(() => {
+        expect(panes.querySelectorAll('[data-file-drop-target]').length).toBe(3)
+      })
+
+      deliverObservation(sessionIDs[0], 'working')
+      deliverObservation(sessionIDs[1], 'permission_choice')
+      deliverObservation(sessionIDs[2], 'exited')
+      await vi.waitFor(() => expect(indicators()).toEqual(expected))
+
+      manager.activateByIndex(0)
+      expect(indicators()).toEqual(expected)
+
+      deliverObservation(sessionIDs[1], 'exited', {
+        instanceId: '00000000000000000000000000000000',
+        sessionEpoch: 1,
+      })
+      deliverObservation(sessionIDs[0], 'free_text')
+      await vi.waitFor(() =>
+        expect(indicators()).toEqual([
+          { status: 'idle', source: 'driver' },
+          { status: 'waiting', source: 'driver' },
+          { status: 'exited', source: 'driver' },
+        ]),
       )
-      expect(shown).toEqual(['working', 'waiting', 'exited'])
-      expect(new Set(shown).size).toBe(3)
-    })
+      expect(indicators()[1]).toEqual(expected[1])
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
   })
 
   // And the state moves with the pane, rather than latching on the first thing

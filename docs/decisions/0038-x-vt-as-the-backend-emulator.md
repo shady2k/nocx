@@ -1,17 +1,38 @@
-# nocx-szb40.1 — choosing the VT library by measuring, not by reputation
+# ADR-0038 — charmbracelet/x/vt is the backend's emulator, chosen by column geometry
 
-**Answer: `github.com/charmbracelet/x/vt`.** It is the only candidate that reproduces
-xterm.js's **column geometry** across a double-width character, and a chrome anchor is a
-thing at a position.
+- **Status:** accepted (2026-08-25)
+- **Serves:** the AD-6 amendment at `docs/architecture.md:151`, which permits a
+  live VT grid in the backend for an enrolled pane and grants it exactly two
+  powers. Both are POSITIONAL, which is what makes this a measurement about
+  columns rather than about text.
+- **Reads, does not change:** `AD-6`, [ADR-0001](0001-xterm-js-as-vt-frontend.md)
+  (xterm.js owns VT state in the renderer, and is the ground truth here),
+  [ADR-0002](0002-native-tabs-no-embedded-multiplexer.md).
+- **Related:** `nocx-szb40.1` (the measurement), `nocx-szb40.2` (the grid),
+  `nocx-szb40.3` (its first reader).
 
-That sentence is the whole decision, and the rest of this document is how it was measured
-and what the measurement does not cover.
+## Decision
+
+**`github.com/charmbracelet/x/vt`.** It is the only candidate that reproduces
+xterm.js's **column geometry** across a double-width character, and a chrome
+anchor is a thing at a position.
+
+That sentence is the whole decision. The rest of this document is how it was
+measured and what the measurement does not cover, because the gaps are the
+grounds on which it could be revisited.
+
+> This ADR was `spike/vt-agreement/REPORT.md` until 2026-08-25. The harness that
+> produced it — four Go tools, three candidate libraries and an `@xterm/headless`
+> ground truth in a nested module — was removed with the spike once the question
+> it existed to answer was closed (`nocx-szb40.3`); it is in git history at
+> `d3872462`. What survived into the product is the corpus it taught us to take:
+> `internal/agentdriver/testdata/captures/`.
 
 ## Method
 
-Four tools, one nested Go module (`spike/vt-agreement`, deliberately separate so three
-candidate libraries stay out of the product's `go.mod`, out of `go list ./...` and out of
-the deadcode ratchet).
+Four tools in a nested Go module, deliberately separate so three candidate libraries stayed
+out of the product's `go.mod`, out of `go list ./...` and out of the deadcode ratchet. The
+module is gone; the tools are named here because the method is the part worth keeping.
 
 | tool               | what it does                                                                                                               |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
@@ -133,22 +154,3 @@ always has a reader. That is an integration requirement for `nocx-szb40.2`, not 
 
 Each gap is a reason the choice could still be revisited, and none of them is a reason to
 prefer a library whose type cannot express a column.
-
-## Reproducing
-
-```bash
-cd spike/vt-agreement
-go build -o bin/capture ./cmd/capture && go build -o bin/features ./cmd/features
-go build -o bin/render-go ./cmd/render-go && go build -o bin/diff ./cmd/diff
-npm install
-
-./bin/capture -out caps/htop.jsonl -timeout 6s -- htop      # no quit key: end inside alt screen
-./bin/features caps/htop.jsonl                              # what does this capture exercise?
-node js/render-xterm.mjs caps/htop.jsonl frames/htop.xterm.json
-./bin/render-go -name htop caps/htop.jsonl
-./bin/diff -truth frames/htop.xterm.json frames/htop.*.json
-```
-
-`GODEBUG=netdns=cgo` is needed for `go get` on this machine — Go's resolver picks an
-unreachable IPv6 address for `sum.golang.org` while curl falls back to IPv4. Checksum
-verification stays on.

@@ -92,8 +92,10 @@ func (e *UnresolvedError) Unwrap() error { return ErrUnresolvedVariable }
 // the table and something else on the wire.
 var ErrSecretShadowed = errors.New("apicoll: a request variable would shadow a name this environment declares secret")
 
-// RequestLookup answers a request's OWN variables, and refuses one that
-// would shadow a secret.
+// RequestLookup answers a request's own variables and its inherited folder
+// variables, refusing either scope when it would shadow an environment
+// secret. Folder rows arrive nearest-first from ReadRequest, so the existing
+// first-row-wins rule gives request → nearest folder → parent folders.
 //
 // Disabled rows answer nothing, exactly as a disabled header sends nothing:
 // a row the user keeps and has switched off takes no part in a send, so it
@@ -104,21 +106,29 @@ var ErrSecretShadowed = errors.New("apicoll: a request variable would shadow a n
 // so nothing is refused and the request's own variables resolve as they
 // would anywhere else.
 func RequestLookup(r Request, env Environment) (Lookup, error) {
-	values := make(map[string]string, len(r.Variables))
-	for _, v := range r.Variables {
-		name := strings.TrimSpace(v.Name)
-		if !v.Enabled || name == "" {
-			continue
+	values := make(map[string]string, len(r.Variables)+len(r.folderVariables))
+	add := func(rows []Param) error {
+		for _, v := range rows {
+			name := strings.TrimSpace(v.Name)
+			if !v.Enabled || name == "" {
+				continue
+			}
+			if env.IsSecret(name) {
+				return fmt.Errorf("%w: %q", ErrSecretShadowed, name)
+			}
+			// FIRST ROW WINS, so a duplicate name is the one nearer the top
+			// of the table — or, for inherited rows, the nearest folder.
+			if _, already := values[name]; !already {
+				values[name] = v.Value
+			}
 		}
-		if env.IsSecret(name) {
-			return nil, fmt.Errorf("%w: %q", ErrSecretShadowed, name)
-		}
-		// FIRST ROW WINS, so a duplicate name is the one nearer the top of
-		// the table — which is the one a person reading it would expect,
-		// and the same answer whichever machine the file is opened on.
-		if _, already := values[name]; !already {
-			values[name] = v.Value
-		}
+		return nil
+	}
+	if err := add(r.Variables); err != nil {
+		return nil, err
+	}
+	if err := add(r.folderVariables); err != nil {
+		return nil, err
 	}
 	if len(values) == 0 {
 		// Nothing to answer: a nil Lookup, which Chain skips. A closure

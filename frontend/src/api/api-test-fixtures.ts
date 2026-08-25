@@ -149,6 +149,10 @@ export function collectionFixture(over: Partial<ApiCollection> = {}): ApiCollect
     // derives directories from request paths pass every test here — which is
     // exactly the second answer that loses a folder with nothing in it yet.
     folders: ['users'],
+    // NO folder carries variables by default — the ordinary state, exactly
+    // as `environments: []` is. A fixture that filled this in would make
+    // every test about something else a test about inheritance too.
+    variableFolders: [],
     malformed: [],
     environments: [],
     ...over,
@@ -265,7 +269,14 @@ export function stoppedSendFixture(): ApiRequestSendResult {
 export function createdFixture(name = CREATED_NAME): ApiCollectionsCreateResult {
   return {
     handle: CREATED_HANDLE,
-    collection: { name, requests: [], folders: [], malformed: [], environments: [] },
+    collection: {
+      name,
+      requests: [],
+      folders: [],
+      variableFolders: [],
+      malformed: [],
+      environments: [],
+    },
   }
 }
 

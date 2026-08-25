@@ -34,6 +34,10 @@ export interface Collection {
    */
   folders: string[]
   /**
+   * Folders carrying the reserved `.variables.json` file, each as a path relative to the collection root, plus an empty string when the collection root carries one. Presence only; variable values stay in the collection and never cross the wire.
+   */
+  variableFolders: string[]
+  /**
    * The files inside the folder that are not requests OR not environments: bad JSON, a field the format does not declare, a symlink that was not followed. It is ON the collection rather than in an error beside it, because a caller returning early on an error would let one broken file hide every good one. ONE list for both halves of the folder on purpose — "a file in here that cannot be read" is one concept, and a second list would be a second owner of it. Never null — a clean collection is [].
    */
   malformed: MalformedRef[]

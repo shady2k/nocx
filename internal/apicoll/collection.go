@@ -33,8 +33,8 @@ type Request struct {
 	// and that is the wrong home for half of them: `id` in `/users/{{id}}`
 	// belongs to the REQUEST, because two requests legitimately want
 	// different ones and an environment that carried both would be a place
-	// to keep other people's values. The environment's are INHERITED — a
-	// name the request answers wins and everything else falls through
+	// to keep other people's values. The environment's are INHERITED —
+	// a name the request answers wins and everything else falls through
 	// (RequestLookup) — so nothing that resolves today resolves differently.
 	//
 	// ONE GRAMMAR, `{{name}}`. Postman spells a path variable `:id`, and
@@ -50,6 +50,14 @@ type Request struct {
 	Variables []Param `json:"variables,omitempty"`
 	Body      Body    `json:"body"`
 	Auth      Auth    `json:"auth"`
+
+	// folderVariables are inherited metadata attached only while a request
+	// is read for a send. They are not part of the request file or wire
+	// model: persisting or returning them would turn a folder scope into a
+	// second request scope. ReadRequest attaches the nearest-first rows so
+	// RequestLookup can keep the existing request → environment seam while
+	// adding the folder scope between them.
+	folderVariables []Param
 }
 
 // Header and Param carry Enabled because a disabled row is a row the user
@@ -180,9 +188,16 @@ type Collection struct {
 	// with a dot: they are the same exclusions the request walk already
 	// makes, because this list comes off the same walk.
 	Folders []string `json:"folders"`
+	// VariableFolders is the subset of Folders carrying the reserved
+	// `.variables.json` file, plus "" when the collection root carries one.
+	// It rides on the collection listing because the listing already answers
+	// which folders exist; asking once per folder would create a second,
+	// round-trip-separated answer to the same tree fact. Values stay on disk
+	// and never cross this listing.
+	VariableFolders []string `json:"variableFolders"`
 	// Malformed names the files that could not be read as requests. It is
-	// ON the collection, not in an error beside it, and that placement is
-	// the whole point: a caller which returns early on err != nil would
+	// ON the collection, not in an error beside it, and that placement is the
+	// whole point: a caller which returns early on err != nil would
 	// otherwise make one broken file hide every good one. One bad file is a
 	// bad file, never a collection that will not open.
 	Malformed []MalformedRef `json:"malformed,omitempty"`

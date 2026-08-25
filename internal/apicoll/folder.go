@@ -126,6 +126,10 @@ func (s *service) ReadRequest(h HandleID, relPath string) (Request, error) {
 	if err = decodeStrict(raw, &r); err != nil {
 		return Request{}, fmt.Errorf("%w: %q: %w", ErrMalformedRequest, relPath, err)
 	}
+	r, err = attachFolderVariables(hd.root, relPath, r)
+	if err != nil {
+		return Request{}, err
+	}
 	return r, nil
 }
 
@@ -202,11 +206,17 @@ func (s *service) DeleteRequest(h HandleID, relPath string) error {
 // readCollection walks the folder and builds the listing. A decode failure is
 // collected, never fatal: one bad file must not hide a collection.
 func readCollection(hd *handle, m manifest) (Collection, error) {
-	refs, folders, bad, err := listContents(hd.root)
+	refs, folders, variableFolders, bad, err := listContents(hd.root)
 	if err != nil {
 		return Collection{}, err
 	}
-	return Collection{Name: m.Name, Requests: refs, Folders: folders, Malformed: bad}, nil
+	return Collection{
+		Name:            m.Name,
+		Requests:        refs,
+		Folders:         folders,
+		VariableFolders: variableFolders,
+		Malformed:       bad,
+	}, nil
 }
 
 // listContents walks the folder for the two things a tree draws: the
@@ -219,9 +229,10 @@ func readCollection(hd *handle, m manifest) (Collection, error) {
 // applies, reached by a different route, and it has to hold here too: a
 // listing that opened `steal.json` would have read the file before anybody
 // clicked anything.
-func listContents(root string) ([]RequestRef, []string, []MalformedRef, error) {
+func listContents(root string) ([]RequestRef, []string, []string, []MalformedRef, error) {
 	var refs []RequestRef
 	var folders []string
+	var variableFolders []string
 	var bad []MalformedRef
 
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
@@ -261,6 +272,15 @@ func listContents(root string) ([]RequestRef, []string, []MalformedRef, error) {
 			return nil
 		}
 
+		if filepath.Base(rel) == folderVariablesFileName {
+			_, exists, err := readFolderVariablesFile(p, rel)
+			if err != nil {
+				bad = append(bad, MalformedRef{RelPath: rel, Reason: err.Error()})
+			} else if exists {
+				variableFolders = append(variableFolders, folderVariableFolder(rel))
+			}
+			return nil
+		}
 		if !strings.HasSuffix(rel, requestExt) || rel == ManifestName {
 			return nil
 		}
@@ -286,20 +306,23 @@ func listContents(root string) ([]RequestRef, []string, []MalformedRef, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("apicoll: list collection %s: %w", root, err)
+		return nil, nil, nil, nil, fmt.Errorf("apicoll: list collection %s: %w", root, err)
 	}
 
 	// WalkDir is lexical, so the order is already deterministic; the empty
 	// slices are explicit because a nil one marshals as null and a listing
-	// that says null has told the renderer something different from "none".
+	// that says null has told the renderer something different from none.
 	if refs == nil {
 		refs = []RequestRef{}
 	}
 	if folders == nil {
 		folders = []string{}
 	}
+	if variableFolders == nil {
+		variableFolders = []string{}
+	}
 	if bad == nil {
 		bad = []MalformedRef{}
 	}
-	return refs, folders, bad, nil
+	return refs, folders, variableFolders, bad, nil
 }

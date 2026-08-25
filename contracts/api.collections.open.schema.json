@@ -21,7 +21,7 @@
     "collection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "requests", "folders", "malformed", "environments"],
+      "required": ["name", "requests", "folders", "variableFolders", "malformed", "environments"],
       "properties": {
         "name": { "type": "string" },
         "requests": {
@@ -31,6 +31,11 @@
         },
         "folders": {
           "description": "Every directory inside the collection, each as a path relative to the root, parents before their children. It is here because a folder with nothing in it yet is invisible in `requests`, and that is the state a folder spends its first minutes in \u2014 a tree drawn from the request paths alone would lose the folder the person just made. It is also the ONE answer to \"what folders are there\": a renderer deriving them from the request paths as well would agree with this list about every folder that holds a request and disagree about every folder that does not. `environments/` is not among them (\u00a76.2), nor is anything beginning with a dot \u2014 the same exclusions the request walk makes, because this list comes off the same walk. Never null \u2014 a collection with no folders is [].",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "variableFolders": {
+          "description": "Folders carrying the reserved `.variables.json` file, each as a path relative to the collection root, plus an empty string when the collection root carries one. Presence only; variable values stay in the collection and never cross the wire.",
           "type": "array",
           "items": { "type": "string" }
         },

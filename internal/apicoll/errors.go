@@ -54,6 +54,12 @@ var ErrRequestExists = errors.New("apicoll: a request with that name is already 
 // that one bad file is a bad file rather than a collection that will not open.
 var ErrMalformedRequest = errors.New("apicoll: request file is malformed")
 
+// ErrMalformedFolderVariables — the reserved folder-variable file exists but
+// cannot be read as its strict variables document. A bad file is named rather
+// than treated as an empty scope, because silently dropping it could send a
+// request with a parent folder's value.
+var ErrMalformedFolderVariables = errors.New("apicoll: folder variables file is malformed")
+
 // ErrInvalidCollectionName — the name given for a new collection is not a
 // single folder name: it is empty, it is a path, it is `.` or `..`, it
 // starts with a dot, or it is longer than a filesystem component allows.

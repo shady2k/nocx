@@ -975,6 +975,11 @@ type apiCollectionWire struct {
 	// list about every folder that holds a request and disagree about every
 	// folder that does not. Never nil.
 	Folders []string `json:"folders"`
+	// VariableFolders names the folders carrying `.variables.json`, plus ""
+	// for the collection root. It carries presence only; values remain on
+	// disk. It is part of this listing rather than a per-folder read so the
+	// tree does not ask a second question about folders it already has.
+	VariableFolders []string `json:"variableFolders"`
 	// Malformed carries the unreadable files from BOTH halves of the folder
 	// — requests and environments — in one list, because "a file in here
 	// that cannot be read" is one concept and a second list would be a
@@ -1472,7 +1477,18 @@ func wireCollection(c apicoll.Collection, envs []apicoll.EnvironmentRef, badEnvs
 		// renderer's first .map on a null throws.
 		folders = []string{}
 	}
-	return apiCollectionWire{Name: c.Name, Requests: reqs, Folders: folders, Malformed: mal, Environments: out}
+	variableFolders := c.VariableFolders
+	if variableFolders == nil {
+		variableFolders = []string{}
+	}
+	return apiCollectionWire{
+		Name:            c.Name,
+		Requests:        reqs,
+		Folders:         folders,
+		VariableFolders: variableFolders,
+		Malformed:       mal,
+		Environments:    out,
+	}
 }
 
 // apiBodyKinds and apiAuthKinds are the closed sets the wire declares, and

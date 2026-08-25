@@ -30,6 +30,10 @@ export interface Collection {
    */
   folders: string[]
   /**
+   * Folders carrying the reserved `.variables.json` file, plus an empty string when the collection root carries one. Presence only; values remain on disk.
+   */
+  variableFolders: string[]
+  /**
    * The files inside the folder that are not requests or not environments. A collection that has just been created has none, so this is []. Never null — a renderer walking null is a crash rather than an empty view.
    */
   malformed: MalformedRef[]

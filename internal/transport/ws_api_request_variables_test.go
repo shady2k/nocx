@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -192,6 +193,85 @@ func TestAPIRequestSend_TheRequestsOwnVariableWinsOverTheEnvironments(t *testing
 	// nothing above would have reached a server at all.
 	if _, hits := got.get(); hits != 2 {
 		t.Errorf("the server was reached %d times, want 2", hits)
+	}
+}
+
+// FOLDER VARIABLES sit between request and environment, and the nearest
+// folder wins over its parent. The same real socket call also carries the
+// presence list the tree needs, so no folder gets a second read round trip.
+func TestAPIRequestSend_FolderVariablesResolveInNearestOrderAndListPresence(t *testing.T) {
+	srv, got := varServer(t)
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
+	write(".variables.json", `{"variables":[{"name":"id","value":"root","enabled":true}]}`)
+	write("users/.variables.json", `{"variables":[{"name":"id","value":"users","enabled":true}]}`)
+	write("users/private/.variables.json", `{"variables":[{"name":"id","value":"private","enabled":true}]}`)
+	write("users/own.json", `{"id":"own","name":"own","method":"GET","url":"{{baseUrl}}/users/{{id}}","variables":[{"name":"id","value":"request","enabled":true}],"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("users/inherited.json", `{"id":"inherited","name":"inherited","method":"GET","url":"{{baseUrl}}/users/{{id}}","body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("users/private/nested.json", `{"id":"nested","name":"nested","method":"GET","url":"{{baseUrl}}/users/{{id}}","body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("environments/dev.json", `{"name":"dev","values":{"baseUrl":`+mustJSON(t, srv.URL)+`,"id":"environment"},"route":{"kind":"direct"}}`)
+
+	opened := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 1)
+	if opened.Error != nil {
+		t.Fatalf("api.collections.open: %+v", opened.Error)
+	}
+	var open apiOpenResponse
+	if err := json.Unmarshal(opened.Result, &open); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	handle := open.Handle
+
+	listed := vaultCall(t, conn, "api.collections.list", map[string]any{}, 2)
+	if listed.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listed.Error)
+	}
+	var list apiCollectionsListResponse
+	if err := json.Unmarshal(listed.Result, &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	var listedFolder *apiCollectionWire
+	for i := range list.Collections {
+		if list.Collections[i].Path == root {
+			listedFolder = &list.Collections[i].Collection
+			break
+		}
+	}
+	if listedFolder == nil {
+		t.Fatalf("api.collections.list did not return %q", root)
+	}
+	if !reflect.DeepEqual(listedFolder.VariableFolders, []string{"", "users", "users/private"}) {
+		t.Fatalf("variableFolders = %v, want root and nearest folders", listedFolder.VariableFolders)
+	}
+	for rel, want := range map[string]string{
+		"users/own.json":            "/users/request",
+		"users/inherited.json":      "/users/users",
+		"users/private/nested.json": "/users/private",
+	} {
+		resp := vaultCall(t, conn, "api.request.send", map[string]any{
+			"handle": handle, "relPath": rel,
+			"envRelPath": "environments/dev.json", "token": "folder-" + rel,
+		}, 2)
+		if resp.Error != nil {
+			t.Fatalf("api.request.send %s: %+v", rel, resp.Error)
+		}
+		path, _ := got.get()
+		if path != want {
+			t.Fatalf("%s reached %q, want %q", rel, path, want)
+		}
+	}
+	if _, hits := got.get(); hits != 3 {
+		t.Fatalf("the server was reached %d times, want 3", hits)
 	}
 }
 

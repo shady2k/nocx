@@ -5701,7 +5701,8 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 				},
 				// A folder holding a request and one holding nothing: the
 				// second is the case this list exists for.
-				Folders: []string{"v1", "v1/reports"},
+				Folders:         []string{"v1", "v1/reports"},
+				VariableFolders: []string{},
 				Malformed: []apiMalformedRefWire{
 					{RelPath: "broken.json", Reason: "invalid JSON"},
 					{RelPath: "environments/bad.json", Reason: "not a regular file; symlinks are not followed"},
@@ -5719,11 +5720,12 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 		"empty": {
 			Handle: "0123456789abcdef0123456789abcdef",
 			Collection: apiCollectionWire{
-				Name:         "acme",
-				Requests:     []apiRequestRefWire{},
-				Folders:      []string{},
-				Malformed:    []apiMalformedRefWire{},
-				Environments: []apiEnvironmentRefWire{},
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
 			},
 		},
 		// The folder that was ALREADY open. It is a case here because the
@@ -5734,11 +5736,12 @@ func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
 			Handle:      "0123456789abcdef0123456789abcdef",
 			AlreadyOpen: true,
 			Collection: apiCollectionWire{
-				Name:         "acme",
-				Requests:     []apiRequestRefWire{},
-				Folders:      []string{},
-				Malformed:    []apiMalformedRefWire{},
-				Environments: []apiEnvironmentRefWire{},
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
 			},
 		},
 	}
@@ -5768,10 +5771,11 @@ func TestAPICollectionsCreate_DTOConformsToContract(t *testing.T) {
 		"a collection just made": {
 			Handle: "0123456789abcdef0123456789abcdef",
 			Collection: apiCollectionWire{
-				Name:      "acme",
-				Requests:  []apiRequestRefWire{},
-				Folders:   []string{},
-				Malformed: []apiMalformedRefWire{},
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
 				// Create makes `environments/` and leaves it empty, so a
 				// freshly minted collection carries [] rather than null.
 				Environments: []apiEnvironmentRefWire{},
@@ -5840,21 +5844,23 @@ func TestAPICollectionsCreateFolder_DTOConformsToContract(t *testing.T) {
 		"a folder at the root": {
 			RelPath: "users",
 			Collection: apiCollectionWire{
-				Name:         "acme",
-				Requests:     []apiRequestRefWire{},
-				Folders:      []string{"users"},
-				Malformed:    []apiMalformedRefWire{},
-				Environments: []apiEnvironmentRefWire{},
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{"users"},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
 			},
 		},
 		"a folder inside a folder, beside a request": {
 			RelPath: "v1/users",
 			Collection: apiCollectionWire{
-				Name:         "acme",
-				Requests:     []apiRequestRefWire{{RelPath: "ping.json", Name: "ping", Method: "GET"}},
-				Folders:      []string{"v1", "v1/users"},
-				Malformed:    []apiMalformedRefWire{},
-				Environments: []apiEnvironmentRefWire{},
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{{RelPath: "ping.json", Name: "ping", Method: "GET"}},
+				Folders:         []string{"v1", "v1/users"},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
 			},
 		},
 	}

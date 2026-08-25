@@ -209,7 +209,14 @@ export function adoptOpenedCollection(opened: OpenedCollection): ApiCollection {
   // `folders` rides through the same door as the rest, and its absence here
   // was caught by the compiler the moment the schema grew it — which is the
   // whole reason this function exists rather than a cast.
-  return { name: opened.name, requests, folders: opened.folders, malformed, environments }
+  return {
+    name: opened.name,
+    requests,
+    folders: opened.folders,
+    variableFolders: opened.variableFolders,
+    malformed,
+    environments,
+  }
 }
 
 /**
@@ -231,7 +238,14 @@ export function adoptCreatedCollection(created: CreatedCollection): ApiCollectio
   const requests: ApiRequestRef[] = created.requests satisfies CreatedRequestRef[]
   const malformed: ApiMalformedRef[] = created.malformed satisfies CreatedMalformedRef[]
   const environments: ApiEnvironmentRef[] = created.environments satisfies CreatedEnvironmentRef[]
-  return { name: created.name, requests, folders: created.folders, malformed, environments }
+  return {
+    name: created.name,
+    requests,
+    folders: created.folders,
+    variableFolders: created.variableFolders,
+    malformed,
+    environments,
+  }
 }
 
 /**
@@ -253,7 +267,14 @@ export function adoptFolderCollection(made: FolderedCollection): ApiCollection {
   const requests: ApiRequestRef[] = made.requests satisfies FolderedRequestRef[]
   const malformed: ApiMalformedRef[] = made.malformed satisfies FolderedMalformedRef[]
   const environments: ApiEnvironmentRef[] = made.environments satisfies FolderedEnvironmentRef[]
-  return { name: made.name, requests, folders: made.folders, malformed, environments }
+  return {
+    name: made.name,
+    requests,
+    folders: made.folders,
+    variableFolders: made.variableFolders,
+    malformed,
+    environments,
+  }
 }
 
 // ── Reading a response, in the product's words ────────────────────────────

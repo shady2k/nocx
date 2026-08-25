@@ -25,7 +25,7 @@ import (
 func mustImportAndOpen(t *testing.T, doc string) (apicoll.Collections, apicoll.HandleID, apicoll.Collection) {
 	t.Helper()
 	dest := destUnder(t)
-	if _, err := ImportInto(t.Context(), NewOSFS(), &recordingBinder{}, dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
+	if _, err := ImportInto(t.Context(), NewOSFS(), dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	// nil Paths: this service reads the folder the user chose and mints
@@ -119,9 +119,12 @@ func TestImportedPostmanCollectionOpensItsEnvironments(t *testing.T) {
 	if envs[0].Environment.Name != converted.Environments[0].Name {
 		t.Errorf("environment is called %q, want %q", envs[0].Environment.Name, converted.Environments[0].Name)
 	}
-	// The variable NAMES are in the file; §8 says the values never are.
-	if len(envs[0].Environment.SecretVars) != len(converted.Environments[0].SecretVars) {
-		t.Errorf("environment declares %v, want %v", envs[0].Environment.SecretVars, converted.Environments[0].SecretVars)
+	// Imported credential-shaped values become empty ordinary variables.
+	if envs[0].Environment.SecretVars != nil {
+		t.Errorf("environment declares secret variables %v", envs[0].Environment.SecretVars)
+	}
+	if got := envs[0].Environment.Values["apiToken"]; got != "" {
+		t.Errorf("apiToken = %q, want empty", got)
 	}
 }
 

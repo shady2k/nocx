@@ -261,7 +261,7 @@ func TestPostmanTemplatesSurvive(t *testing.T) {
 	}
 }
 
-func TestPostmanSecretVariableBecomesANameOnly(t *testing.T) {
+func TestPostmanSecretVariableBecomesAnEmptyOrdinaryVariable(t *testing.T) {
 	_, reqs, envs, _ := mustPostman(t, postmanFixture)
 	if len(envs) != 1 {
 		t.Fatalf("%d environments, want 1", len(envs))
@@ -270,24 +270,16 @@ func TestPostmanSecretVariableBecomesANameOnly(t *testing.T) {
 	if env.Route.Kind != apicoll.RouteDirect {
 		t.Fatalf("route = %+v, want direct", env.Route)
 	}
-	found := false
-	for _, v := range env.SecretVars {
-		if v == "apiToken" {
-			found = true
-		}
+	if got := env.Values["apiToken"]; got != "" {
+		t.Fatalf("apiToken = %q, want an empty ordinary variable", got)
 	}
-	if !found {
-		t.Fatalf("SecretVars = %v, want apiToken", env.SecretVars)
-	}
-	if _, ok := env.Values["apiToken"]; ok {
-		t.Fatal("the secret variable also landed in Values")
+	if env.SecretVars != nil {
+		t.Fatalf("SecretVars = %v, want nil", env.SecretVars)
 	}
 	if env.Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("baseUrl = %q", env.Values["baseUrl"])
 	}
 
-	// The rule, asserted over everything the converter returns: not the
-	// value, not Postman's id for it.
 	blob, err := json.Marshal(struct {
 		R []apicoll.Request
 		E []apicoll.Environment
@@ -304,17 +296,17 @@ func TestPostmanSecretVariableBecomesANameOnly(t *testing.T) {
 }
 
 // A collection whose request auth carries a live token — not a template —
-// still writes only a variable reference.
-func TestPostmanLiteralTokenBecomesAVariable(t *testing.T) {
-	coll, reqs, _, _ := mustPostman(t, postmanFixture)
+// drops the credential rather than writing a reference with no value behind it.
+func TestPostmanLiteralTokenIsDropped(t *testing.T) {
+	coll, reqs, _, unsup := mustPostman(t, postmanFixture)
 	req, _ := findRequest(t, coll, reqs, "Literal token")
-	if req.Auth.Kind != apicoll.AuthBearer {
-		t.Fatalf("auth = %+v", req.Auth)
-	}
-	if req.Auth.Token == "" {
-		t.Fatal("auth names no variable")
+	if req.Auth.Kind != apicoll.AuthNone {
+		t.Fatalf("auth = %+v, want no auth", req.Auth)
 	}
 	assertAbsent(t, req, pmSecretValue)
+	if !anyUnsupportedContaining(unsup, "Literal token") {
+		t.Fatalf("unsupported = %v, want the dropped credential named", unsupportedWhat(unsup))
+	}
 }
 
 func TestPostmanAuthInheritance(t *testing.T) {
@@ -485,11 +477,11 @@ func TestPostmanEnvironmentExport(t *testing.T) {
 	if envs[0].Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("values = %+v", envs[0].Values)
 	}
-	if len(envs[0].SecretVars) != 1 || envs[0].SecretVars[0] != "apiToken" {
-		t.Fatalf("secretVars = %v", envs[0].SecretVars)
+	if envs[0].Values["apiToken"] != "" {
+		t.Fatalf("apiToken = %q, want empty", envs[0].Values["apiToken"])
 	}
-	if _, ok := envs[0].Values["apiToken"]; ok {
-		t.Fatal("the secret value landed in Values")
+	if envs[0].SecretVars != nil {
+		t.Fatalf("secretVars = %v, want nil", envs[0].SecretVars)
 	}
 	if !anyUnsupportedContaining(unsup, "disabled variable") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
@@ -621,10 +613,9 @@ func TestPostmanRequestIDsAreDeterministicAndUnique(t *testing.T) {
 }
 
 // Postman marks perhaps half of the tokens people keep in it as "secret".
-// A collection is meant to be committed, so a live token in a variable
-// nobody marked is the exact failure §8 exists to prevent — it is treated
-// as secret and the promotion is said out loud rather than done quietly.
-func TestPostmanUnmarkedCredentialIsPromotedAndSaidOutLoud(t *testing.T) {
+// A collection is meant to be committed, so a live token is dropped even
+// when the export forgot to mark it, and the loss is said out loud.
+func TestPostmanUnmarkedCredentialIsDroppedAndSaidOutLoud(t *testing.T) {
 	const pat = "ghp_0123456789abcdefghijklmnopqrstuvwx"
 	doc := `{"info":{"name":"P"},"variable":[
 	    {"key":"legacyToken","value":"` + pat + `","type":"default"},
@@ -634,21 +625,18 @@ func TestPostmanUnmarkedCredentialIsPromotedAndSaidOutLoud(t *testing.T) {
 	if len(envs) != 1 {
 		t.Fatalf("envs = %+v", envs)
 	}
-	if len(envs[0].SecretVars) != 1 || envs[0].SecretVars[0] != "legacyToken" {
-		t.Fatalf("secretVars = %v", envs[0].SecretVars)
-	}
-	if _, ok := envs[0].Values["legacyToken"]; ok {
-		t.Fatal("the credential landed in Values")
+	if envs[0].Values["legacyToken"] != "" {
+		t.Fatalf("legacyToken = %q, want empty", envs[0].Values["legacyToken"])
 	}
 	if envs[0].Values["baseUrl"] != "https://api.acme.test" {
-		t.Fatalf("the ordinary variable was promoted too: %+v", envs[0].Values)
+		t.Fatalf("the ordinary variable was dropped too: %+v", envs[0].Values)
 	}
-	if !anyUnsupportedContaining(unsup, "not marked secret") {
-		t.Fatalf("the promotion was silent: %v", unsupportedWhat(unsup))
+	if !anyUnsupportedContaining(unsup, "legacyToken") {
+		t.Fatalf("the dropped credential was silent: %v", unsupportedWhat(unsup))
 	}
 	blob, _ := json.Marshal(envs)
 	if strings.Contains(string(blob), pat) {
-		t.Fatalf("the credential is in the environment: %s", blob)
+		t.Fatalf("the environment carries the credential: %s", blob)
 	}
 }
 
@@ -777,7 +765,7 @@ func TestImportIntoEnvironmentCarriesTheRouteTheDocumentArrivedThrough(t *testin
 	dest := destUnder(t)
 	doc := `{"info":{"name":"acme","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[],"variable":[{"key":"baseUrl","value":"https://acme.test"}]}`
 
-	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(doc),
+	if _, err := ImportInto(t.Context(), newProbeFS(), dest, strings.NewReader(doc),
 		apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "prod-bastion", InsecureTLS: true}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
@@ -811,7 +799,7 @@ func TestImportIntoZeroRouteWritesDirect(t *testing.T) {
 	dest := destUnder(t)
 	doc := `{"info":{"name":"acme","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[],"variable":[{"key":"baseUrl","value":"https://acme.test"}]}`
 
-	if _, err := ImportInto(t.Context(), newProbeFS(), &recordingBinder{}, dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
+	if _, err := ImportInto(t.Context(), newProbeFS(), dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 
@@ -824,5 +812,54 @@ func TestImportIntoZeroRouteWritesDirect(t *testing.T) {
 	}
 	if env.Route.ProfileID != "" {
 		t.Errorf("profile = %q, want empty", env.Route.ProfileID)
+	}
+}
+
+func TestImportPostmanSecretsBecomeEmptyVariablesAndReportedReferencesAreDropped(t *testing.T) {
+	const ref = "{{secret:whatever}}"
+	doc := `{
+	  "info": {"name": "secret refs", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+	  "variable": [{"key": "token", "type": "secret", "value": "must-not-write"}],
+	  "item": [{
+	    "name": "request",
+	    "request": {
+	      "method": "POST",
+	      "url": "https://example.test/` + ref + `",
+	      "header": [{"key": "X-Token", "value": "Bearer ` + ref + `"}],
+	      "body": {"mode": "raw", "raw": "payload=` + ref + `"}
+	    }
+	  }]
+	}`
+	dest := destUnder(t)
+	unsupported, err := ImportInto(t.Context(), NewOSFS(), dest, strings.NewReader(doc), apicoll.Route{})
+	if err != nil {
+		t.Fatalf("ImportInto: %v", err)
+	}
+
+	files := walkFiles(t, dest)
+	for name, body := range files {
+		if strings.Contains(body, ref) {
+			t.Fatalf("%s contains dropped secret reference %q", name, ref)
+		}
+	}
+	env, ok := files["environments/default.json"]
+	if !ok {
+		t.Fatalf("no default environment; have %v", keysOf(files))
+	}
+	if !strings.Contains(env, `"token": ""`) {
+		t.Fatalf("secret variable was not written as an ordinary empty variable: %s", env)
+	}
+	if strings.Contains(env, "secretVars") {
+		t.Fatalf("secretVars was written for an imported secret variable: %s", env)
+	}
+
+	var named int
+	for _, item := range unsupported {
+		if strings.Contains(item.What, ref) {
+			named++
+		}
+	}
+	if named < 3 {
+		t.Fatalf("unsupported = %+v, want the URL, header, and body references named", unsupported)
 	}
 }

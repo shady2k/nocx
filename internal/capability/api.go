@@ -1054,9 +1054,8 @@ type APIImportOperation interface {
 }
 
 // NewAPIImportOperation builds the import operation. fsys is every
-// filesystem touch the writer makes and bindings is where the secret values
-// go; both are apiimport's own narrow contracts, so this constructor names
-// no lifecycle the importer has no part in.
+// filesystem touch the writer makes; this constructor names no vault
+// lifecycle because imported documents never write credential material.
 //
 // fetch acquires a document by URL and may be nil, which is a build without
 // the URL entrance rather than a build with a broken one: ImportPostmanURL
@@ -1065,22 +1064,20 @@ type APIImportOperation interface {
 func NewAPIImportOperation(
 	vaultGate, apiGate, lane control.Admission,
 	fsys apiimport.FS,
-	bindings apiimport.BindWriter,
 	fetch apifetch.Fetcher,
 ) APIImportOperation {
 	g := &guard{}
 	return newOperation[APIImportService](
-		control.NewComposite(vaultGate, apiGate, lane),
+		control.NewComposite(apiGate, lane),
 		g,
-		&apiImportService{guard: g, fsys: fsys, bindings: bindings, fetch: fetch},
+		&apiImportService{guard: g, fsys: fsys, fetch: fetch},
 	)
 }
 
 type apiImportService struct {
-	guard    *guard
-	fsys     apiimport.FS
-	bindings apiimport.BindWriter
-	fetch    apifetch.Fetcher
+	guard *guard
+	fsys  apiimport.FS
+	fetch apifetch.Fetcher
 }
 
 func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error) {
@@ -1105,7 +1102,7 @@ func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest stri
 		return nil, fmt.Errorf("capability: read the import document: %w", err)
 	}
 	defer func() { _ = f.Close() }()
-	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
+	return apiimport.ImportInto(ctx, s.fsys, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
 }
 
 // ImportPostmanDocument runs the same import over the bytes it was given.
@@ -1121,7 +1118,7 @@ func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, 
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
-	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, strings.NewReader(document), apicoll.Route{Kind: apicoll.RouteDirect})
+	return apiimport.ImportInto(ctx, s.fsys, dest, strings.NewReader(document), apicoll.Route{Kind: apicoll.RouteDirect})
 }
 
 // ImportPostmanURL fetches the export and imports it over the same route.
@@ -1148,5 +1145,5 @@ func (s *apiImportService) ImportPostmanURL(ctx context.Context, rawURL string, 
 	if err != nil {
 		return nil, err
 	}
-	return apiimport.ImportInto(ctx, s.fsys, s.bindings, dest, bytes.NewReader(doc), route)
+	return apiimport.ImportInto(ctx, s.fsys, dest, bytes.NewReader(doc), route)
 }

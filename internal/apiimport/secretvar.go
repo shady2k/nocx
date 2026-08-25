@@ -7,20 +7,36 @@ import (
 	"github.com/shady2k/nocx/internal/secrets"
 )
 
-// secretOffer is one value the import will hand to the BindWriter and to
-// nobody else. It exists only inside an ImportInto call: FromCurl is
-// deliberately unable to return one and the Postman converter is not
-// exported at all, so no credential this package LIFTED OUT OF A DOCUMENT
-// AND INTO A VARIABLE can leave it by any path but the BindWriter (§8).
-//
-// That is a statement about values this package took charge of, and not
-// about every byte a line contains: FromCurl leaves a curl line's own
-// Authorization header alone, on the request, because it has no file to
-// write it into and nowhere to bind it (see FromCurl).
-type secretOffer struct {
-	Environment string
-	Variable    string
-	Value       []byte
+// dropSecretReferences removes imported vault references while preserving
+// surrounding text. Importing one is a visible loss, so callers itemise each
+// exact reference through Unsupported.
+func dropSecretReferences(value string) (string, []string) {
+	var (
+		out  strings.Builder
+		refs []string
+		pos  int
+	)
+	for pos < len(value) {
+		rel := strings.Index(value[pos:], "{{secret:")
+		if rel < 0 {
+			out.WriteString(value[pos:])
+			break
+		}
+		start := pos + rel
+		endRel := strings.Index(value[start+len("{{secret:"):], "}}")
+		if endRel < 0 {
+			out.WriteString(value[pos:])
+			break
+		}
+		end := start + len("{{secret:") + endRel + 2
+		out.WriteString(value[pos:start])
+		refs = append(refs, value[start:end])
+		pos = end
+	}
+	if pos == len(value) && len(value) == 0 {
+		return value, refs
+	}
+	return out.String(), refs
 }
 
 // varRef reports whether s is exactly one of our variable references and
@@ -128,52 +144,35 @@ func headerValueIsSecret(name, value string) bool {
 	return false
 }
 
-// absorbHeaderSecrets is the one owner of "a header may carry a
-// credential", used by both entrances that WRITE A COLLECTION — the Postman
-// document and the curl line, through ImportInto. Two derivations of that
-// question would agree on every header anyone tried and disagree on the one
-// that mattered (AGENTS.md), and the two entrances converge on one model,
-// so they converge on this too.
-//
-// The curl line converted for the FORM does not come here at all, and that
-// is not a third derivation: it is the same question answered "there is no
-// file, so nothing is absorbed" once, in parseCurl, by the argument that
-// says so.
-//
-// It returns the headers that survive, the auth an Authorization header
-// resolved to (nil when there was none), the values to offer the
-// BindWriter, and what it refused. A credential is NEVER among the headers
-// it returns: either it became a variable or the header was dropped and
-// itemised.
-func absorbHeaderSecrets(headers []apicoll.Header, namer *varNamer) ([]apicoll.Header, *apicoll.Auth, []secretOffer, []Unsupported) {
+func absorbHeaderSecrets(headers []apicoll.Header, namer *varNamer) ([]apicoll.Header, *apicoll.Auth, []Unsupported) {
 	var (
-		kept   = headers[:0:0]
-		auth   *apicoll.Auth
-		offers []secretOffer
-		unsup  []Unsupported
+		kept  = headers[:0:0]
+		auth  *apicoll.Auth
+		unsup []Unsupported
 	)
 	for _, h := range headers {
 		if strings.EqualFold(h.Name, "Authorization") {
-			a, offer, bad := authFromHeader(h.Value, namer)
+			a, bad := authFromHeader(h.Value, namer)
 			if bad != "" {
 				unsup = append(unsup, Unsupported{
-					What: "Authorization: " + bad,
-					Why:  "only Bearer and Basic map onto the model's auth, and the credential was NOT written into the request",
+					What: "Authorization",
+					Why:  "the imported credential was not written into the request; supply it after import",
 				})
 				continue
 			}
-			auth = &a
-			if offer != nil {
-				offers = append(offers, *offer)
+			if a.Kind != apicoll.AuthNone {
+				auth = &a
 			}
 			continue
 		}
 		if headerValueIsSecret(h.Name, h.Value) {
-			v := namer.take(h.Name)
-			offers = append(offers, secretOffer{Variable: v, Value: []byte(h.Value)})
-			h.Value = "{{" + v + "}}"
+			unsup = append(unsup, Unsupported{
+				What: h.Name,
+				Why:  "the imported credential was not written into the request; supply it after import",
+			})
+			continue
 		}
 		kept = append(kept, h)
 	}
-	return kept, auth, offers, unsup
+	return kept, auth, unsup
 }

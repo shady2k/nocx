@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -704,13 +703,6 @@ func New(opts ...Option) (*App, error) {
 
 	settingsRegistry := settings.New(docStore, v)
 
-	// The binding document is the WRITE half used by api.import.postman.
-	// Collection-file references never consult it: API sends resolve opaque
-	// secrow handles through apiSecretRefs above, while ordinary variables
-	// remain in collection files. Keeping this store at the composition root
-	// makes its vault and document-store dependencies explicit.
-	apiBindings := apibind.NewStore(docStore, v, apibind.WithLogger(logger))
-
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
 	// their UPGRADE rule, not in their secrecy. History rebuilds its file
@@ -928,10 +920,8 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
-		transport.WithAPIVariables(apiSecretRefs),
-		transport.WithAPI(apiCollections, apiSender),
+		transport.WithAPI(apiCollections, apiSender, apiSecretRefs),
 		transport.WithAPIImportFetcher(apiFetcher),
-		transport.WithAPIBindings(apiBindings),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather
 		// than inside the transport: internal/version's vars are link-time
 		// state, and the composition root is where state becomes a

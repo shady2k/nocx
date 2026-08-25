@@ -2,12 +2,8 @@
 // JSON format and the folder that holds it.
 //
 // The one rule that shapes every type here: A COLLECTION FILE NAMES A
-// VARIABLE, NEVER A SECRET (design §8). There is deliberately no field in
-// which a file can spell an identifier for stored credential material, so a
-// folder arriving in a pull request has no way to reach the password behind
-// an SSH profile. The binding from a variable name to a stored value lives
-// in internal/apibind, which is the only thing that holds such an
-// identifier.
+// VARIABLE, NEVER A SECRET. A secret is ordinary text in the value map;
+// the capability layer resolves its opaque vault reference at send time.
 //
 // This file is the type skeleton, landed by the coordinator so the importers
 // and the sender could be written against it in parallel. Behaviour belongs
@@ -128,15 +124,9 @@ const (
 // possibly `{{variable}}` references, resolved by the same substitution as
 // the URL, a header or the body (design §6.5, nocx-6hg2w.20).
 //
-// The plain-vs-vault distinction is BY CONSTRUCTION, not by heuristic: a
-// variable the binding document answers is a secret. A literal the person
-// pasted stays text in the file, is SENT, and is written to their file —
-// the decision recorded in nocx-tg9l8: the product does not hide or move a
-// credential a person typed. Design §8 is unchanged: a file still cannot
-// NAME a secret, because there is no syntax in which a file names one — a
-// vault identifier typed here is simply the literal it is, and the binding
-// from a name to a stored value lives in internal/apibind, nowhere in this
-// folder.
+// A secret reference is ordinary text in every field, including auth. The
+// capability layer resolves it after collection-variable substitution, while
+// literals remain text in the file and are sent as typed.
 type Auth struct {
 	Kind string `json:"kind"`
 	User string `json:"user,omitempty"`

@@ -12,12 +12,12 @@ import (
 // Auth: bearer, basic, api-key — three schemes, no more (design §2) — each
 // mapped from the request's ALREADY-SUBSTITUTED text onto the ONE header
 // Send accepts.
-// pass as the URL. apisend never calls a Lookup for auth; there is exactly
-// one resolver and it lives in apicoll. What Apply owns is the mapping from
-// a scheme onto a header, the refusal of a scheme with an empty credential
-// (§6.5 — that is still a blocked send, never a silent downgrade to
-// anonymous), and the question of WHAT WAS PLACED, answered by
-// construction rather than by inspecting the text.
+// apisend never calls a Lookup for auth; there is exactly one resolver and it
+// lives in the capability layer. What Apply owns is the mapping from a scheme
+// onto a header, the refusal of a scheme with an empty credential (§6.5 — that
+// is still a blocked send, never a silent downgrade to anonymous), and the
+// question of WHAT WAS PLACED, answered by construction rather than by
+// inspecting the text.
 //
 // # How a value is elided, and why the second argument exists
 //
@@ -27,17 +27,14 @@ import (
 //   - A LITERAL the person typed. The product does not hide or move a
 //     credential a person typed (the decision recorded in nocx-tg9l8): it
 //     is sent, and it appears in the raw view. NOTHING is placed for it.
-//   - A value the BINDING DOCUMENT answered through a variable name. That
-//     is a secret by construction (apicoll.Chain: the environment's plain
-//     values are tried first, so the binding answering means the binding
-//     answered), and its bytes must not reach the raw diagnostic — the
-//     raw view shows a chip naming the variable (ADR-0021).
+//   - A vault reference resolved from the request's text. That value is secret
+//     by construction, and its bytes must not reach the raw diagnostic — the
+//     raw view shows a chip naming the vault row (ADR-0021).
 //
-// The caller knows WHICH of the two each field was — the substitution that
-// resolved it ran beside the binding document (capability.Snapshot), so the
-// name of a binding-answered field is a fact the caller holds, never a
-// value it inferred from the text. Apply is handed that fact as
-// authSource: the variable name a field resolved from, or "" for a literal.
+// The caller knows WHICH of the two each field was — the capability resolver
+// records that fact while resolving the request, rather than inferring it from
+// the final text. Apply is handed the resolved secret name or "" for a
+// literal.
 //
 // The reported value for basic auth is the ENCODED credential and not the
 // password: nothing in the composed request contains the plaintext — it is

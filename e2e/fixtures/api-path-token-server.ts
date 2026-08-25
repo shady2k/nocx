@@ -1,6 +1,6 @@
 /**
- * The server the "a secret in the path" e2e sends to, and the reason it
- * exists rather than reusing api-test-server.ts: what it checks is the PATH.
+ * The server the "a secret in the path" e2e sends to. It exists separately
+ * because this server checks the PATH, not only the response status.
  *
  * THE ASSERTION IS THIS SERVER'S. A spec that only looked at the run would
  * pass on a request that carried the literal `{{token}}` — the workbench

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -157,25 +156,16 @@ type WSServer struct {
 	// notes is the notes library service backing the notes.* JSON-RPC
 	// methods. When nil, those methods return -32601.
 	notes *note.Service
-	// The API-testing surface (design §6, §7). Four seams that wire
-	// independently, so each is its own field and each has its own -32601:
-	// apiCollections is the collection folder service backing
-	// api.collections.* and api.request.read/write; apiSender additionally
-	// backs api.request.send; apiBindings is where an import puts a secret
-	// VALUE (design §8.1) and additionally backs api.import.postman.
-	// api.import.curl needs none of them.
-	//
-	// apiVariables is the capability-owned SecretRefs seam used by
-	// api.request.send's second resolution pass. apiBindings remains the
-	// write/import seam until the later deletion task.
+	// The API-testing surface (design §6, §7). The collection service and
+	// sender are independently optional; secret references are resolved by
+	// the capability-owned seam when one is wired.
 	apiCollections apicoll.Collections
 	apiSender      apisend.Sender
-	apiBindings    apibind.Store
-	apiVariables   capability.SecretRefs
+	apiSecretRefs  capability.SecretRefs
 	apiFetch       apifetch.Fetcher
 	// uiState owns what the app remembers without being asked (ADR-0033);
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
-	// -32601 and the shell keeps its declared defaults.
+	// -32601 and the shell falls back to its declared defaults.
 	uiState *uistate.Store
 	// build is what app.about answers with: what this binary is. Zero-valued
 	// unless the composition root passes one, and the zero value is honest —
@@ -867,29 +857,12 @@ func WithUIState(store *uistate.Store) WSServerOption {
 // service but no sender, everything but api.request.send answers — a
 // collection you can read and edit but not fire, which is an honest half of
 // the feature rather than a send that quietly does nothing.
-func WithAPI(collections apicoll.Collections, sender apisend.Sender) WSServerOption {
+func WithAPI(collections apicoll.Collections, sender apisend.Sender, refs capability.SecretRefs) WSServerOption {
 	return func(s *WSServer) {
 		s.apiCollections = collections
 		s.apiSender = sender
+		s.apiSecretRefs = refs
 	}
-}
-
-// WithAPIBindings attaches the binding document — the only thing in the API
-// surface that holds an identifier for stored credential material (design
-// §8.1) — enabling api.import.postman, which writes the secret values a
-// Postman export carries. When nil that method returns -32601: an import
-// that had nowhere to put a token would have to either drop it silently or
-// write it into the collection folder, and the folder being safe to commit
-// BY CONSTRUCTION is the whole security argument.
-func WithAPIBindings(store apibind.Store) WSServerOption {
-	return func(s *WSServer) { s.apiBindings = store }
-}
-
-// WithAPIVariables attaches the capability-owned SecretRefs seam. It
-// resolves {{secret:secrow:…}} references after collection variables and
-// never accepts an identifier from the transport.
-func WithAPIVariables(refs capability.SecretRefs) WSServerOption {
-	return func(s *WSServer) { s.apiVariables = refs }
 }
 
 // WithAPIImportFetcher attaches the seam that acquires an import document by
@@ -1136,7 +1109,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
+	specs = append(specs, s.apiSpecs(lane, gates.api)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a

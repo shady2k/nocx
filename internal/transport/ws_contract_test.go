@@ -21,7 +21,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -5717,68 +5716,15 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 // (design §13.1). That rule is what makes the backend-held handle mean
 // something, and a rule nobody can fail is a rule nobody keeps.
 
-// apiFakeBindings is an in-memory apibind.Store for the import test. The
-// real one does not exist yet (internal/apibind declares the interface
-// ahead of its implementation), and api.import.postman writes secret values
-// through it, so the test supplies the seam the composition root will.
-type apiFakeBindings struct {
-	mu    sync.Mutex
-	bound map[apibind.Key]string
-	// bindErr, when set, is what Bind returns — the failure half of
-	// "every external call has a test where it fails".
-	bindErr error
-}
-
-func newAPIFakeBindings() *apiFakeBindings {
-	return &apiFakeBindings{bound: map[apibind.Key]string{}}
-}
-
-func (b *apiFakeBindings) Lookup(k apibind.Key) (string, bool, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	v, ok := b.bound[k]
-	return v, ok, nil
-}
-
-func (b *apiFakeBindings) Bind(_ context.Context, k apibind.Key, value []byte) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.bindErr != nil {
-		return b.bindErr
-	}
-	b.bound[k] = string(value)
-	return nil
-}
-
-func (b *apiFakeBindings) Unbind(_ context.Context, k apibind.Key) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.bound, k)
-	return nil
-}
-
-func (b *apiFakeBindings) UnbindCollection(_ context.Context, collection string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for k := range b.bound {
-		if k.Collection == collection {
-			delete(b.bound, k)
-		}
-	}
-	return nil
-}
-
-// newAPIWSServer starts a server with the whole api.* surface wired, the way
-// the composition root wires it plus the binding store that does not exist
-// yet.
+// newAPIWSServer starts a server with the whole api.* surface wired.
 //
 // The import fetcher gets a route table with NO leaser, which is the shape
 // the app has whenever the SSH side is not wired: the direct route dials and
 // every connection route refuses by name. A test that needs a connection
 // route to carry bytes supplies its own pool through the variant below.
-func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket.Conn) {
+func newAPIWSServer(t *testing.T) (*WSServer, *websocket.Conn) {
 	t.Helper()
-	return newAPIWSServerWithPool(t, bindings, nil)
+	return newAPIWSServerWithPool(t, nil)
 }
 
 // newAPIWSServerWithPool is the same server with the import fetcher's route
@@ -5786,17 +5732,12 @@ func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket
 // fetcher, the route table, the transport, the capability and the writer are
 // all the real ones, because a fetcher double would certify the test's own
 // object instead of the seam.
-func newAPIWSServerWithPool(t *testing.T, bindings apibind.Store, leaser apisend.ConnectionLeaser) (*WSServer, *websocket.Conn) {
+func newAPIWSServerWithPool(t *testing.T, leaser apisend.ConnectionLeaser) (*WSServer, *websocket.Conn) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	opts := []WSServerOption{
-		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger))),
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)), nil),
 		WithAPIImportFetcher(apifetch.New(apisend.NewRoutes(leaser), logger)),
-	}
-	if bindings != nil {
-		opts = append(opts, WithAPIBindings(bindings))
-		// Read resolution is a separate capability-owned seam. These tests
-		// pass an explicit SecretRefs option when they exercise it.
 	}
 	ws := NewWSServer(logger, newRegWithStub(logger), opts...)
 	ctx := context.Background()
@@ -5811,8 +5752,7 @@ func newAPIWSServerWithSecretRefs(t *testing.T, refs capability.SecretRefs) (*WS
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	ws := NewWSServer(logger, newRegWithStub(logger),
-		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger))),
-		WithAPIVariables(refs),
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)), refs),
 	)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -5977,7 +5917,7 @@ func TestAPICollectionsCreate_OverTheWireConformsToContract(t *testing.T) {
 	createSchema := loadSchema(t, "api.collections.create.schema.json")
 	listSchema := loadSchema(t, "api.collections.list.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	resp := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
 	if resp.Error != nil {
@@ -6060,7 +6000,7 @@ func TestAPICollectionsCreateFolder_OverTheWireConformsToContract(t *testing.T) 
 	folderSchema := loadSchema(t, "api.collections.createFolder.schema.json")
 	listSchema := loadSchema(t, "api.collections.list.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
 	if created.Error != nil {
@@ -6142,7 +6082,7 @@ func TestAPICollectionsCreateFolder_OverTheWireConformsToContract(t *testing.T) 
 // name the person did not type is a surface reporting something it did not
 // do — and every one of them is the caller's error, so every one is -32602.
 func TestAPICollectionsCreateFolder_RefusesOverTheWire(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
 	if created.Error != nil {
@@ -6226,7 +6166,7 @@ func TestAPIRequestMove_DTOConformsToContract(t *testing.T) {
 func TestAPIRequestMove_OverTheWireConformsToContract(t *testing.T) {
 	moveSchema := loadSchema(t, "api.request.move.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -6295,7 +6235,7 @@ func TestAPIRequestMove_OverTheWireConformsToContract(t *testing.T) {
 // happy-path test above (AGENTS.md testing rule 3). A collision is the one
 // that matters most: the whole reason the move is a no-replace rename.
 func TestAPIRequestMove_RefusesOverTheWire(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -6405,7 +6345,7 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	writeSchema := loadSchema(t, "api.request.write.schema.json")
 	closeSchema := loadSchema(t, "api.collections.close.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 
 	// The empty list, before anything is opened: [] and never null.
@@ -6595,7 +6535,7 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 // that is not there, a path trying to leave the collection — and each is
 // paired with the success above.
 func TestAPICollections_FailuresAreReportedNotPaperedOver(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -6725,7 +6665,7 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 // does not exist survives a release.
 func TestAPICollectionsList_ReportsARootThatWasReplaced(t *testing.T) {
 	listSchema := loadSchema(t, "api.collections.list.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	parent := t.TempDir()
 	root := filepath.Join(parent, "coll")
@@ -6777,7 +6717,7 @@ func TestAPIRequestSend_OverTheWireConformsToContract(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -6831,7 +6771,7 @@ func TestAPIRequestSend_DoesNotHoldTheGateAcrossTheDial(t *testing.T) {
 	defer srv.Close()
 	defer letGo()
 
-	ws, conn := newAPIWSServer(t, newAPIFakeBindings())
+	ws, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7224,7 +7164,7 @@ func TestAPIRequestSend_AFailedExchangeIsARunOverTheWire(t *testing.T) {
 	dead := "http://" + l.Addr().String() + "/gone"
 	_ = l.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, dead)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7278,7 +7218,7 @@ func TestAPIRequestSend_AFailedExchangeIsARunOverTheWire(t *testing.T) {
 // NAME. "There was nothing to stop" and "it is stopped" are different facts,
 // and a caller that cannot tell them apart cannot report either.
 func TestAPIRequestCancel_AnUnknownTokenIsRefusedByName(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	resp := vaultCall(t, conn, "api.request.cancel", map[string]any{"token": "nothing-is-running"}, 1)
 	if resp.Error == nil {
@@ -7309,7 +7249,7 @@ func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
 		"api.collections.list", "api.collections.open", "api.collections.close",
 		"api.request.read", "api.request.write", "api.request.move",
 		"api.folder.read", "api.folder.write",
-		"api.request.send", "api.import.postman",
+		"api.request.send",
 	} {
 		resp := vaultCall(t, conn, method, map[string]any{}, 1)
 		if resp.Error == nil {
@@ -7324,7 +7264,7 @@ func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
 
 func TestAPIImportCurl_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.curl.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	resp := vaultCall(t, conn, "api.import.curl", map[string]any{
 		"line": `curl -X POST https://example.test/v1/things?page=2 -H 'X-Probe: 1' -d '{"a":1}'`,
@@ -7375,7 +7315,7 @@ func assertImportedSecretAbsent(t *testing.T, dest string) {
 
 func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.postman.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	doc := filepath.Join(t.TempDir(), "export.json")
 	if err := os.WriteFile(doc, []byte(`{
@@ -7446,7 +7386,7 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 // The import's failure half: a source that is not there and a malformed
 // Postman document. Both fail before staging, so neither leaves a collection.
 func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	doc := filepath.Join(t.TempDir(), "malformed.json")
 	if err := os.WriteFile(doc, []byte(`{"info":`), 0o600); err != nil {
@@ -7479,7 +7419,7 @@ func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
 // habit somebody has to keep. Every api.* method but collections.open and
 // import.postman is asserted here to refuse a path outright.
 func TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7728,7 +7668,7 @@ func TestAPIFolderReadAndWrite_DTOConformToContracts(t *testing.T) {
 func TestAPIFolderReadAndWrite_OverTheWireConformToContracts(t *testing.T) {
 	readSchema := loadSchema(t, "api.folder.read.schema.json")
 	writeSchema := loadSchema(t, "api.folder.write.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 

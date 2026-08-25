@@ -57,9 +57,6 @@ func TestImport_ATokenInThePathBecomesAbsentAndReportsIt(t *testing.T) {
 	if strings.Contains(env, `"token"`) {
 		t.Errorf("environment writes the imported credential; token must be absent: %s", env)
 	}
-	if strings.Contains(env, `"secretVars"`) {
-		t.Errorf("environment declares a secret variable: %s", env)
-	}
 	found := false
 	for _, item := range unsupported {
 		if strings.Contains(item.What, "token") {

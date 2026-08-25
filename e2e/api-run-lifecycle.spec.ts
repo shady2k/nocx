@@ -28,12 +28,11 @@
  * machine to pass is broken on a fast one too; it has only not been caught
  * yet.
  *
- * THE SHARED STAND IS ENOUGH, unlike api-testing.spec.ts. That one imports a
- * Postman export carrying a credential, so it needs a vault it set up itself
- * and an isolated home it can read back. Nothing here has a secret in it: the
- * requests carry no auth, the collection is a folder this spec writes, and
- * the only durable thing it leaves behind is that folder — under the OS temp
- * directory, removed afterwards.
+ * THE SHARED STAND IS ENOUGH, unlike `api-secret-in-path.spec.ts`. That spec
+ * imports a credential-bearing export and therefore needs an isolated vault;
+ * nothing here has a secret in it: the requests carry no auth, the collection
+ * is a folder this spec writes, and the only durable thing it leaves behind is
+ * that folder — under the OS temp directory, removed afterwards.
  */
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -56,11 +55,11 @@ const DEAD = 'dead'
  * A collection folder in the product's own on-disk format.
  *
  * WRITTEN RATHER THAN IMPORTED, and that is a deliberate difference from
- * api-testing.spec.ts. That spec's subject is the import; this one's is what
- * happens between pressing Send and reading the answer, and an import in
- * front of it would be a second feature this test could fail for. The folder
- * is opened THROUGH THE UI all the same — the ask, the field, the button —
- * because "can a person get to it" is part of what is being checked.
+ * `api-secret-in-path.spec.ts`. That spec's subject is the import and secret
+ * placement; this one's subject is what happens between pressing Send and reading
+ * the answer, and an import in front of it would be a second feature this test
+ * could fail for. The folder is opened THROUGH THE UI all the same — the ask,
+ * the field, the button — because "can a person get to it" is part of what is checked.
  */
 function writeCollection(root: string, slowUrl: string): void {
   mkdirSync(root, { recursive: true })

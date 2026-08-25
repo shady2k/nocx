@@ -26,10 +26,10 @@
  * halves are wired. Nothing here calls the control plane to arrange a state
  * the product is supposed to arrange.
  *
- * ITS OWN BACKEND, like api-testing.spec.ts and for the same two reasons: the
- * import writes a secret VALUE, so this run needs a vault it set up itself
- * rather than leaving one behind for every other spec — and the walk in step
- * 3 reads the collection folder off the isolated home this backend resolved.
+ * ITS OWN BACKEND, like `api-import.spec.ts`, and for the same two reasons:
+ * the import writes no credential value, while the picker-created value lives
+ * in the vault; and the walk in step 3 reads the collection folder off the
+ * isolated home this backend resolved.
  *
  * NOTHING HERE WAITS ON A DURATION. Every wait is on an observable state: a
  * dialog, a directory on disk, a row in the tree, a run in the list.
@@ -181,10 +181,18 @@ test.describe('a secret in the path: the value crosses to the server and never t
         TELEGRAM_BOT_TOKEN,
       )
     }
-    // …and it DECLARES the variable, or the absence above would pass on an
-    // import that dropped it. The name is in the file; the value is not.
+    // The importer leaves credential-shaped variables empty; the person
+    // supplies the value through the shared secret picker below.
     const env = readFileSync(join(collectionRoot, 'environments', 'default.json')).toString('utf8')
-    expect(JSON.parse(env) as { secretVars?: string[] }).toMatchObject({ secretVars: ['token'] })
+    const parsed: unknown = JSON.parse(env)
+    if (typeof parsed !== 'object' || parsed === null || !('values' in parsed)) {
+      throw new Error('imported environment has no values object')
+    }
+    const values = parsed.values
+    if (typeof values !== 'object' || values === null || Array.isArray(values)) {
+      throw new Error('imported environment values is not an object')
+    }
+    expect('token' in values).toBe(false)
 
     // ── Send, and NOTHING IS PRESSED TO GET HERE ──────────────────────────
     //
@@ -206,11 +214,42 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // form is a projection of it (§6.4). This is the address a person sees,
     // and the token is not in it.
     await expect(workbench.locator('#api-url')).toHaveValue('{{baseUrl}}/bot{{token}}/sendMessage')
+    const urlField = workbench.locator('#api-url')
+    await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
+    const picker = page.getByRole('listbox', { name: 'vault secrets' })
+    await expect(picker).toBeVisible()
+    await picker.getByRole('option', { name: /Add "token"/ }).click()
+    const addSecret = page.getByRole('dialog').filter({ hasText: 'Add secret' })
+    await expect(addSecret).toBeVisible()
+    await addSecret.locator('#sr-add-name').fill('token')
+    await addSecret.locator('#sr-add-value').fill(TELEGRAM_BOT_TOKEN)
+    await addSecret.getByRole('button', { name: 'Add secret', exact: true }).click()
+    await expect(addSecret).not.toBeVisible()
+
+    // Creating a record hands the surface to Settings. Return to the
+    // workbench, ask for the same name again, and accept the real row.
+    await page.locator('.activity-bar button[data-action="api"]').click()
+    await expect(workbench).toBeVisible()
+    await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
+    await expect(picker).toBeVisible()
+    await picker.getByRole('option', { name: 'token', exact: true }).click()
+    await expect(urlField).toHaveValue(/\{\{secret:[^}]+\}\}/)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
 
     const run = workbench.locator('.api-run').first()
     await expect(run).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
+    const savedFiles = walk(collectionRoot)
+    for (const file of savedFiles) {
+      const text = readFileSync(file, 'utf8')
+      expect(text, `${file} carries the token`).not.toContain(TELEGRAM_BOT_TOKEN)
+      expect(text, `${file} carries the secret name`).not.toContain('"token"')
+    }
+    const requestFile = savedFiles.find((file) =>
+      readFileSync(file, 'utf8').includes(`"name": "${TELEGRAM_REQUEST_NAME}"`),
+    )
+    if (requestFile === undefined) throw new Error('imported request file was not found')
+    expect(readFileSync(requestFile, 'utf8')).toContain('{{secret:')
 
     // ── 1. THE SERVER RECEIVED THE REAL VALUE ─────────────────────────────
     //

@@ -3248,7 +3248,6 @@ async function openAuth(
   envs: ApiEnvironmentRef[] = [DEV_ENV],
   over: Partial<ApiWorkbenchServices> = {},
 ) {
-  const bindSecret = vi.fn().mockResolvedValue({})
   const writeRequest = vi.fn().mockResolvedValue({})
   const writeEnvironment = vi.fn().mockResolvedValue({})
   const sendRequest = vi.fn().mockResolvedValue(sendFixture())
@@ -3258,7 +3257,6 @@ async function openAuth(
       defaultRoot: DEFAULT_ROOT,
     }),
     readRequest: vi.fn().mockResolvedValue({ request: unauthenticated() }),
-    bindSecret,
     writeRequest,
     writeEnvironment,
     sendRequest,
@@ -3266,7 +3264,7 @@ async function openAuth(
   })
   await openRequest(bar)
   fireEvent.click(button('Auth'))
-  return { bindSecret, writeRequest, writeEnvironment, sendRequest }
+  return { writeRequest, writeEnvironment, sendRequest }
 }
 
 describe('Auth uses the shared SecretSource control', () => {
@@ -3291,7 +3289,7 @@ describe('Auth uses the shared SecretSource control', () => {
 
   it('selecting an existing secret stores its opaque reference in Auth', async () => {
     const writeRequest = vi.fn().mockResolvedValue({})
-    const { sendRequest } = await openAuth([], {
+    await openAuth([], {
       secretSource: source,
       secretInventory: () => Promise.resolve(inventory),
       writeRequest,

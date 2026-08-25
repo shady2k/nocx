@@ -62,10 +62,9 @@
  * spec that needs a slow machine to pass is broken on a fast one too; it has
  * only not been caught yet.
  *
- * GEOMETRY IS NOT ASSERTED HERE. api-testing.spec.ts holds the permanent
- * "nothing from the editor up to the pane is wider than its own box" check,
- * and it is one owner of that question. A second copy in this file would be
- * two, agreeing until the day one of them learnt about a new ancestor.
+ * GEOMETRY IS NOT ASSERTED HERE. The API secret-path spec owns the
+ * credential-secrecy walk; this file owns tree geometry and keeps no second
+ * copy of that question.
  */
 import { test as base, expect, type Locator, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'

@@ -64,7 +64,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apiimport"
@@ -282,18 +281,6 @@ type APICollectionService interface {
 	// this list exactly as Open's folder does, so a caller has one thing to
 	// do afterwards rather than two.
 	Create(name string) (apicoll.Created, error)
-	// BindingKeyFor answers the pair a binding under this environment is
-	// keyed by: the collection's canonical root and the environment's NAME
-	// as its file declares it.
-	//
-	// It exists so the write half of a binding is keyed by exactly what the
-	// READ half is keyed by. Snapshot reports the same two values for the
-	// send (CookieScope and Environment), and apibind.Key is a triple for a
-	// reason — two collections with a variable of one name must not share a
-	// value. A handler that assembled the pair itself would be a second
-	// derivation of the binding key, and the two would agree until somebody
-	// renamed an environment without renaming its file.
-	BindingKeyFor(h apicoll.HandleID, envRelPath string) (collection, environment string, err error)
 	// DefaultRoot is where that default location IS, so a surface can show
 	// a person where a collection is about to land rather than asking them
 	// to name a place with nothing proposed. "" is a build with no app
@@ -372,9 +359,9 @@ type APICollectionService interface {
 	// under, addressed inside the collection like everything else; "" is no
 	// environment, which is the request as written on the direct route.
 	//
-	// It takes a context because resolving a secret variable reads the
-	// vault, which is a call that can be cancelled — the only thing in the
-	// snapshot that is not a file read.
+	// It takes a context because resolving a secret reference reads the vault,
+	// which is a call that can be cancelled — the only thing in the snapshot
+	// that is not a file read.
 	Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error)
 	// RequestScope returns the same request-to-vault resolution order as
 	// Snapshot, with every row and its source exposed for the Variables tab.
@@ -403,10 +390,10 @@ type APICollectionOperation interface {
 // because all three are reached from this one domain and all three must go
 // through one handle table and one root re-validation.
 //
-// values is the binding document's read half, and it is a parameter rather
-// than a field set afterwards because the snapshot needs it on the first
-// call: a build wired without one resolves no secret variable at all, which
-// is a coherent half of the feature and says so by leaving them unresolved.
+// refs resolves opaque vault references after collection-variable
+// substitution. It is a parameter rather than a field set afterwards because
+// the snapshot needs it on the first call; a build wired without one leaves
+// references unresolved and refuses the send.
 func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections, refs SecretRefs) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
@@ -576,28 +563,6 @@ func (s *apiCollectionService) register(h apicoll.HandleID, root string) {
 		}
 	}
 	s.open = append(s.open, openEntry{handle: h, path: root})
-}
-
-// Create mints a collection and registers it exactly as Open does.
-//
-// The registration is deliberately Open's own bookkeeping rather than a
-// second copy of it: apicoll.Create opens the folder it made, so what comes
-// back here is an opened folder and the only question left is which list it
-// belongs in. A folder that could not be created registers nothing — there
-// is no row naming a collection nobody made.
-func (s *apiCollectionService) BindingKeyFor(h apicoll.HandleID, envRelPath string) (string, string, error) {
-	if err := s.guard.check(); err != nil {
-		return "", "", err
-	}
-	scope, err := s.pathFor(h)
-	if err != nil {
-		return "", "", err
-	}
-	env, err := s.svc.ReadEnvironment(h, envRelPath)
-	if err != nil {
-		return "", "", err
-	}
-	return scope, env.Name, nil
 }
 
 func (s *apiCollectionService) DefaultRoot() (string, error) {
@@ -951,11 +916,9 @@ var ErrImportURLUnavailable = errors.New("capability: this build cannot fetch an
 // parse behind whatever the api domain happened to be doing.
 type APIImportService interface {
 	// ImportPostman reads the export at srcPath and writes the collection
-	// to dest as one atomic arrival, then hands the secret values to the
-	// binding store. It is the second and last method on this surface that
-	// accepts a path (§13.1) — and it accepts two, because an import names
-	// both what to read and where to put it.
-	//
+	// to dest as one atomic arrival. It is the second and last method on this
+	// surface that accepts a path (§13.1) — and it accepts two, because an
+	// import names both what to read and where to put it.
 	// srcPath is a path on the machine running THIS process, which is the
 	// person's machine only when the desktop app is what is calling. It is
 	// therefore the NARROW route; ImportPostmanDocument is the general one.
@@ -979,67 +942,6 @@ type APIImportService interface {
 	// mints inherits it (apiimport.ImportInto): a collection fetched from
 	// behind a bastion must not arrive routed direct.
 	ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string) ([]apiimport.Unsupported, error)
-}
-
-// SecretBinder is the binding document's WRITE half, narrowed to the one
-// call this operation makes. Declared here as a consumer contract, the way
-// apiimport declares its own BindWriter for the same method: this layer
-// needs to put one value away and has no part in the document's lifecycle.
-type SecretBinder interface {
-	Bind(ctx context.Context, k apibind.Key, value []byte) error
-}
-
-// APIBindingService is the write a person makes when they give a secret
-// variable its value: the VALUE goes to the vault under a
-// collection-and-environment binding, and the environment FILE keeps only
-// the NAME (design §8).
-//
-// Until this, only an IMPORT could mint one — apiimport's BindWriter — so a
-// variable a person declared secret in the editor had no way to be given a
-// value at all, and the only way to send a token in a URL was to type it
-// into a file that goes into git.
-type APIBindingService interface {
-	// BindSecret stores value under k. It takes the key rather than a
-	// handle and a path because the key is the collection service's to
-	// derive (BindingKeyFor) — this operation writes the vault and knows
-	// nothing about collection folders.
-	BindSecret(ctx context.Context, k apibind.Key, value []byte) error
-}
-
-// APIBindingOperation is the typed operation for the binding write. Its
-// gates are [vault, api]: it puts a value in the vault, and it writes the
-// binding document that api.import.postman also writes — the two must
-// exclude each other, and the vault gate is what makes them.
-type APIBindingOperation interface {
-	Run(context.Context, func(context.Context, APIBindingService) error) error
-}
-
-// NewAPIBindingOperation builds it over the binding store.
-func NewAPIBindingOperation(vaultGate, apiGate, lane control.Admission, bindings SecretBinder) APIBindingOperation {
-	g := &guard{}
-	return newOperation[APIBindingService](
-		control.NewComposite(vaultGate, apiGate, lane),
-		g,
-		&apiBindingService{guard: g, bindings: bindings},
-	)
-}
-
-type apiBindingService struct {
-	guard    *guard
-	bindings SecretBinder
-}
-
-// BindSecret hands the value to the binding store and nothing else.
-//
-// IT LOGS NOTHING AND WRAPS NOTHING WITH THE VALUE IN IT. The one argument
-// that is a credential appears in no message this function can produce: a
-// failure names the VARIABLE, which is what the person has to fix, and the
-// store's own errors do the same (apibind).
-func (s *apiBindingService) BindSecret(ctx context.Context, k apibind.Key, value []byte) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	return s.bindings.Bind(ctx, k, value)
 }
 
 // APIImportOperation is the typed operation for api.import.postman. The

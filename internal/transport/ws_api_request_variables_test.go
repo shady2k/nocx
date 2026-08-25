@@ -81,7 +81,7 @@ func varCollection(t *testing.T, baseURL string) string {
 // panel makes: read what is on disk, write it back edited, read it again.
 func TestAPIRequest_VariablesSurviveTheReadWriteRoundTrip(t *testing.T) {
 	srv, _ := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := varCollection(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -139,7 +139,7 @@ func TestAPIRequest_VariablesSurviveTheReadWriteRoundTrip(t *testing.T) {
 // A REQUEST WITH NO VARIABLES answers [] and never null — the renderer's
 // first .map on a null throws, and the file is allowed to omit the key.
 func TestAPIRequest_ARequestWithNoVariablesAnswersAnEmptyList(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -168,7 +168,7 @@ func TestAPIRequest_ARequestWithNoVariablesAnswersAnEmptyList(t *testing.T) {
 // and the environment's answer is what neither gets.
 func TestAPIRequestSend_TheRequestsOwnVariableWinsOverTheEnvironments(t *testing.T) {
 	srv, got := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := varCollection(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -201,7 +201,7 @@ func TestAPIRequestSend_TheRequestsOwnVariableWinsOverTheEnvironments(t *testing
 // presence list the tree needs, so no folder gets a second read round trip.
 func TestAPIRequestSend_FolderVariablesResolveInNearestOrderAndListPresence(t *testing.T) {
 	srv, got := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := t.TempDir()
 	write := func(rel, body string) {
 		t.Helper()
@@ -279,7 +279,7 @@ func TestAPIRequestSend_FolderVariablesResolveInNearestOrderAndListPresence(t *t
 // references are values, not a fourth layer that can refuse the request.
 func TestAPIRequestSend_ARequestVariableOverridesAnEnvironmentValue(t *testing.T) {
 	srv, got := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	root := t.TempDir()
 	write := func(rel, body string) {

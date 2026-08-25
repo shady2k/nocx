@@ -30,7 +30,7 @@ const importDocumentFixture = `{
 // check in contracts/README.md's table and the one that matters.
 func TestAPIImportPostmanDocument_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.postman.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	dest := filepath.Join(t.TempDir(), "imported")
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{
@@ -56,7 +56,7 @@ func TestAPIImportPostmanDocument_OverTheWireConformsToContract(t *testing.T) {
 // silent precedence rule would make one of the two parameters do nothing on
 // a call that named both, and the caller would never learn which.
 func TestAPIImportPostman_PathAndDocumentAreExclusiveAndOneIsRequired(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	doc := filepath.Join(t.TempDir(), "export.json")
 	if err := os.WriteFile(doc, []byte(importDocumentFixture), 0o600); err != nil {
@@ -99,7 +99,7 @@ func TestAPIImportPostman_PathAndDocumentAreExclusiveAndOneIsRequired(t *testing
 // bound and points at `path` as the route for a large export — otherwise the
 // person is told only that their export is too big, with nowhere to go.
 func TestAPIImportPostmanDocument_OverTheBoundNamesItAndPointsAtPath(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	dest := filepath.Join(t.TempDir(), "imported")
 	huge := strings.Repeat("x", maxAPIImportDocumentRunes+1)
@@ -123,7 +123,7 @@ func TestAPIImportPostmanDocument_OverTheBoundNamesItAndPointsAtPath(t *testing.
 // collection, whichever way they arrived. Same document, one written to a
 // file and named by path, one carried inline — compared file by file.
 func TestAPIImportPostman_DocumentAndPathProduceTheSameCollection(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	src := filepath.Join(t.TempDir(), "export.json")
 	if err := os.WriteFile(src, []byte(importDocumentFixture), 0o600); err != nil {

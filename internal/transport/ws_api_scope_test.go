@@ -22,7 +22,7 @@ func TestAPIRequestScope_DTOConformsToContract(t *testing.T) {
 
 func TestAPIRequestScope_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.request.scope.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 
 	opened := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 1)

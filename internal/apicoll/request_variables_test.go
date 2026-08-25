@@ -9,10 +9,6 @@ package apicoll_test
 // one. So the request's answer wins and the environment's is inherited —
 // nothing that resolved before resolves differently.
 //
-// The refusal: a request row whose name the environment declares SECRET. A
-// credential belongs in the vault and a request file goes into git, so the
-// two meeting is refused by name rather than decided silently in either
-// direction (design §8).
 
 import (
 	"strings"
@@ -144,13 +140,13 @@ func TestRequestVariables_ADisabledRowTakesNoPart(t *testing.T) {
 
 // A request variable may use the same name as an environment value. The
 // request layer still wins by ordinary first-answer precedence.
-func TestRequestVariables_TheSameRowIsFineWhereNothingIsDeclaredSecret(t *testing.T) {
+func TestRequestVariables_TheRequestWinsOverAnEnvironmentSecretReference(t *testing.T) {
 	req := apicoll.Request{
 		Method:    "GET",
 		URL:       "https://x.test/bot{{token}}/send",
 		Variables: []apicoll.Param{on("token", "an-ordinary-value")},
 	}
-	got, err := resolve(t, req, apicoll.Environment{Name: "dev"})
+	got, err := resolve(t, req, apicoll.Environment{Name: "dev", Values: map[string]string{"token": "{{secret:secrow:env-token}}"}})
 	if err != nil {
 		t.Fatalf("RequestLookup: %v", err)
 	}

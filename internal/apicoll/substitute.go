@@ -12,12 +12,10 @@ package apicoll
 // `Authorization: Bearer ` header is a plausible-looking request that
 // teaches the wrong lesson about why it was rejected.
 //
-// Substitution takes a Lookup rather than an Environment because a secret
-// variable's value is NOT in the environment file (§6.3): the file names it
-// and the binding document holds it. Composing the two is Chain's job, and
-// this package deliberately never learns which half an answer came from —
-// it holds no identifier for stored credential material and no way to ask
-// for one.
+// Substitution takes a Lookup rather than an Environment because callers
+// compose request, folder and environment values before the capability layer
+// resolves opaque vault references. This package deliberately never learns
+// which layer answered or how stored credential material is addressed.
 
 import (
 	"errors"
@@ -112,9 +110,9 @@ func RequestLookup(r Request, _ Environment) (Lookup, error) {
 // variable they had already bound.
 type Lookup func(name string) (value string, found bool, err error)
 
-// Chain tries each lookup in order and returns the first answer. A nil
-// entry is skipped, so a caller with no binding store composes the same way
-// as one with it.
+// Chain tries each lookup in order and returns the first answer. A nil entry
+// is skipped, so a caller can omit an optional layer without changing the
+// precedence of the remaining values.
 //
 // It is a function here rather than two lines at each call site because the
 // order is load-bearing and one behaviour has one owner (AGENTS.md): request
@@ -318,23 +316,6 @@ func validVarName(name string) bool {
 		}
 	}
 	return true
-}
-
-// ExactReference reports whether s is EXACTLY one `{{name}}` reference and
-// the name inside it — the whole string and nothing else. It is the grammar
-// validVarName applies, exported for a caller that must know whether a
-// FIELD resolved as a single variable (capability.Snapshot answers "which
-// auth field came from the binding document" this way). A value that is
-// partly text — `Bearer {{token}}` — is not a bare reference and gets "", ok.
-func ExactReference(s string) (string, bool) {
-	if !strings.HasPrefix(s, varOpen) || !strings.HasSuffix(s, varClose) || len(s) < len(varOpen)+len(varClose) {
-		return "", false
-	}
-	name := strings.TrimSpace(s[len(varOpen) : len(s)-len(varClose)])
-	if !validVarName(name) {
-		return "", false
-	}
-	return name, true
 }
 
 func cloneHeaders(in []Header) []Header {

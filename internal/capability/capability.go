@@ -58,9 +58,8 @@
 //     are vault-backed, so ConfigOperation holds [config, vault];
 //   - the vault-secret domain computes its inventory inputs from profile
 //     reads, so SecretOperation holds [config, vault];
-//   - the API-testing import writes secret VALUES through the binding store
-//     (design §8.1), which is vault-backed, so APIImportOperation holds
-//     [vault, api];
+//   - the API-testing import writes only collection files and never touches
+//     vault material, so APIImportOperation holds [api];
 //   - everything else holds its own domain's gate.
 //
 // Grain is a property of the operation implementation, refinable later

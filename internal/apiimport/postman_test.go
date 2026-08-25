@@ -844,9 +844,6 @@ func TestImportPostmanSecretsBecomeAbsentAndReportedReferencesAreDropped(t *test
 	if strings.Contains(env, `"token"`) {
 		t.Fatalf("secret variable was written to the environment; an imported credential must be absent: %s", env)
 	}
-	if strings.Contains(env, "secretVars") {
-		t.Fatalf("secretVars was written for an imported secret variable: %s", env)
-	}
 
 	var named int
 	for _, item := range unsupported {

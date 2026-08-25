@@ -121,7 +121,7 @@ func newAPIServerAndConn(t *testing.T, sender apisend.Sender) (*WSServer, *webso
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	ws := NewWSServer(logger, newRegWithStub(logger),
-		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender))
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender, nil))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

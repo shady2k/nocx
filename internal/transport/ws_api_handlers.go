@@ -41,7 +41,6 @@ import (
 	"slices"
 	"unicode/utf8"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -61,11 +60,6 @@ type apiCollectionHandlers struct {
 	// refs is the capability-owned second pass for {{secret:secrow:…}}
 	// references. It never accepts an identifier from this handler.
 	refs capability.SecretRefs
-	// bindOp is the write half of a secret variable: the VALUE into the
-	// vault, under the binding this collection and environment own. nil is
-	// a build with no binding store, and then the method answers -32601
-	// rather than accepting a credential it has nowhere to put.
-	bindOp capability.APIBindingOperation
 	// cancels is which running exchange a token names, and conn is which
 	// window minted it. Both are nil/zero for the handlers that cannot
 	// send: a read has nothing to stop (ws_api_cancel.go).
@@ -529,73 +523,6 @@ func (h apiCollectionHandlers) handleCancel(_ context.Context, req jsonrpcReques
 	_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
 }
 
-// handleBindSecret is api.environment.bindSecret: give a secret variable its
-// value.
-//
-// THIS IS THE ONE api.* METHOD THAT CARRIES A CREDENTIAL INBOUND, and the
-// shape is written around that. Three properties, each with what it stops:
-//
-//  1. THE VALUE APPEARS IN NO MESSAGE THIS FUNCTION CAN PRODUCE. Every
-//     refusal below names the variable, the environment or the handle —
-//     never `p.Value`. An error is written to a log the person did not
-//     choose, and a credential in one is a credential leaked (§11 states
-//     the same rule for the diagnostic).
-//  2. TWO OPERATIONS, NOT ONE. The collection operation derives the binding
-//     key — the collection's root and the environment's NAME, read out of
-//     the file, which is what the READ half is keyed by — and the binding
-//     operation writes the vault under [vault, api], the same pair
-//     api.import.postman holds, so the two writers of the binding document
-//     exclude each other.
-//  3. NOTHING GOES INTO THE COLLECTION FOLDER. The environment file is not
-//     rewritten here at all: it declares the variable's NAME, which the
-//     editor's own save put there, and there is no field in that format a
-//     value could be written into (design §8).
-func (h apiCollectionHandlers) handleBindSecret(ctx context.Context, req jsonrpcRequest) {
-	var p apiEnvironmentBindSecretParams
-	if !h.decode(req, &p) {
-		return
-	}
-
-	// 1. The key, under the collection's own gate.
-	var collection, environment string
-	derived := false
-	err := h.op.Run(ctx, func(_ context.Context, svc capability.APICollectionService) error {
-		root, name, keyErr := svc.BindingKeyFor(apicoll.HandleID(p.Handle), p.RelPath)
-		if keyErr != nil {
-			h.fail(req, keyErr)
-			return nil
-		}
-		collection, environment = root, name
-		derived = true
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-		return
-	}
-	if !derived {
-		return // the callback has already answered
-	}
-
-	// 2. The value, under the vault's.
-	err = h.bindOp.Run(ctx, func(ctx context.Context, svc capability.APIBindingService) error {
-		bindErr := svc.BindSecret(ctx, apibind.Key{
-			Collection:  collection,
-			Environment: environment,
-			Variable:    p.Variable,
-		}, []byte(p.Value))
-		if bindErr != nil {
-			h.fail(req, bindErr)
-			return nil
-		}
-		_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
-}
-
 // decode reads the method's params and answers -32602 itself when they will
 // not decode. The registered validator has already checked every field, so
 // reaching this is a shape the validator accepted and the handler could
@@ -819,23 +746,6 @@ type apiRequestSendParams struct {
 // second way to address it would be a second answer to "which run is this".
 type apiRequestCancelParams struct {
 	Token string `json:"token"`
-}
-
-// apiEnvironmentBindSecretParams carries a credential INBOUND, which no
-// other params struct on this surface does.
-//
-// Value is the only field in the whole api.* wire format that holds one, and
-// it goes one way: in. Nothing echoes it, no result carries it, and the
-// binding document answers values only through apibind's own resolver, which
-// has no parameter an identifier could arrive through (design §8).
-//
-// The variable is named rather than addressed by index: a row's position in
-// an editor is not a name, and the binding key is a triple of names.
-type apiEnvironmentBindSecretParams struct {
-	Handle   string `json:"handle"`
-	RelPath  string `json:"relPath"`
-	Variable string `json:"variable"`
-	Value    string `json:"value"`
 }
 
 // apiEnvironmentParams addresses one environment file the way every other
@@ -1168,10 +1078,8 @@ type apiBodyWire struct {
 
 // apiAuthWire is TEXT like every other field the wire carries: the token,
 // the password and the username are what the file holds — a literal the
-// person typed, or a `{{variable}}` reference — never an identifier for a
-// stored secret. Design §8 still holds: there is no syntax in which a file
-// names a secret, and the binding from a name to a stored value lives in
-// the binding document, nowhere in this request.
+// person typed, or an opaque `{{secret:secrow:…}}` reference. The value is
+// resolved only by the capability layer when the request is sent.
 type apiAuthWire struct {
 	Kind string `json:"kind"`
 	User string `json:"user"`
@@ -1710,11 +1618,6 @@ const (
 	// for any identifier a caller might reasonably choose and far below
 	// anything that makes a map key expensive.
 	maxAPITokenRunes = 128
-	// maxAPISecretValueRunes bounds a secret value on its way in. Generous:
-	// a bearer token, a signed JWT and a PEM private key all fit, and the
-	// bound is a wire-cost ceiling rather than an opinion about what a
-	// credential may look like.
-	maxAPISecretValueRunes = 1 << 14
 	// maxAPIRequestRows bounds how many header and query rows one request
 	// may carry. Each row is bounded individually; this bounds the count,
 	// which is the other half of the per-call work bound.
@@ -1882,43 +1785,6 @@ func validateAPISendToken(token string) string {
 		return "token is required"
 	}
 	return boundedRunes("token", token, maxAPITokenRunes)
-}
-
-// validateAPIEnvironmentBindSecretRaw bounds the one params object that
-// carries a credential.
-//
-// The VALUE is bounded and never otherwise inspected: its shape is the
-// user's business and a validator that said anything about it — a pattern, a
-// character class — would be this layer forming an opinion about a
-// credential. An empty one is refused, because "bind nothing" is not a
-// gesture anybody makes and would leave a variable resolving to the empty
-// string, which is the silent degrade §6.5 exists against.
-func validateAPIEnvironmentBindSecretRaw(raw json.RawMessage) string {
-	var p apiEnvironmentBindSecretParams
-	if msg := decodeAPIParams(raw, &p); msg != "" {
-		return msg
-	}
-	if msg := validateAPIHandle(p.Handle); msg != "" {
-		return msg
-	}
-	if msg := validateAPIRelPath(p.RelPath); msg != "" {
-		return msg
-	}
-	if p.Variable == "" {
-		return "variable is required"
-	}
-	if msg := boundedRunes("variable", p.Variable, maxConfigNameRunes); msg != "" {
-		return msg
-	}
-	if p.Value == "" {
-		return "value is required"
-	}
-	// The message says the LIMIT and never the length it saw, which would be
-	// a fact about the credential.
-	if utf8.RuneCountInString(p.Value) > maxAPISecretValueRunes {
-		return fmt.Sprintf("value exceeds %d characters", maxAPISecretValueRunes)
-	}
-	return ""
 }
 
 func validateAPIEnvironmentRaw(raw json.RawMessage) string {
@@ -2158,64 +2024,29 @@ func validateAPIImportCurlRaw(raw json.RawMessage) string {
 
 // ── registration ─────────────────────────────────────────────────────────
 
-// apiSpecs declares the api.* control methods. The two operations are built
-// here from the wired seams (composition root for this domain).
-//
-// Three availability gates, because three things wire independently: the
-// collection service backs api.collections.* and api.request.read/write; the
-// sender additionally backs api.request.send; the binding store additionally
-// backs api.import.postman, which answers -32601 without one rather than
-// pretending it can put a secret somewhere. api.import.curl needs none of
-// the three: it converts a line into a value.
-//
-// The binding document's READ half (s.apiVariables) is NOT a fourth gate.
-// api.request.send answers with or without it; what changes is whether a
-// request whose auth names a variable can resolve it. Without it every such
-// send is refused as an unbound variable — which is the same answer a
-// misspelled variable gets, and an honest one — so making the whole method
-// disappear would report a missing binding store as a missing send.
-func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.Admission) []methodSpec {
+// apiSpecs declares the api.* control methods. The collection and sender
+// seams are independently wired; importing is available without either
+// because it writes the chosen destination through apiimport's filesystem.
+func (s *WSServer) apiSpecs(lane control.Admission, apiGate control.Admission) []methodSpec {
 	collWired := s.apiCollections != nil
 	sendWired := collWired && s.apiSender != nil
-	importWired := s.apiBindings != nil
+	importWired := true
 
 	var collOp capability.APICollectionOperation
 	if collWired {
-		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections, s.apiVariables)
+		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections, s.apiSecretRefs)
 	}
-	var importOp capability.APIImportOperation
-	if importWired {
-		// s.apiFetch may be nil, and that is a build without the URL
-		// entrance rather than a broken one: the other two entrances are
-		// untouched and `url` is refused by name.
-		importOp = capability.NewAPIImportOperation(apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
-	}
-	// The import writes only a collection folder under the api gate. It does
-	// not take charge of credential material, so it does not use the vault
-	// gate or binding store.
-	var bindOp capability.APIBindingOperation
-	if importWired {
-		bindOp = capability.NewAPIBindingOperation(vaultGate, apiGate, lane, s.apiBindings)
-	}
+	importOp := capability.NewAPIImportOperation(apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
 
 	sub := s.operationQueue("api")
-	// api.request.cancel gets a submission OF ITS OWN, and that is the
-	// point of it rather than tidiness. The api queue is what running sends
-	// occupy, and a Stop that queued behind them would be a Stop that could
-	// not reach the exchange it exists to end — worst exactly when a panel
-	// is busiest. It touches no store, so it shares nothing that would make
-	// a second queue unsafe.
 	cancelSub := s.operationQueue("api-cancel")
 	cancels := newSendCancels()
 	collAvailable := func() bool { return collWired }
 	collHandlers := func(r Responder) apiCollectionHandlers {
 		return apiCollectionHandlers{
-			op: collOp, sender: s.apiSender, refs: s.apiVariables, bindOp: bindOp, r: r,
+			op: collOp, sender: s.apiSender, refs: s.apiSecretRefs, r: r,
 		}
 	}
-	// The sending half additionally needs to know WHICH WINDOW is asking:
-	// a token is a name the renderer chose, and two windows may choose the
-	// same one, so the registry is keyed by the connection as well.
 	sendHandlers := func(w *wsConn, r Responder) apiCollectionHandlers {
 		h := collHandlers(r)
 		h.cancels = cancels
@@ -2252,14 +2083,6 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		// Available only where the binding store is, and refused by name
-		// otherwise: a build with nowhere to put a value must not accept
-		// one. It is the same gate api.import.postman answers behind, and
-		// for the same reason.
-		whenAvailable(regResponder(sub, "api.environment.bindSecret", params(validateAPIEnvironmentBindSecretRaw), func(r Responder) handlerFunc {
-			h := collHandlers(r)
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleBindSecret(ctx, req) }
-		}), func() bool { return collWired && importWired }, "api collection bindings not available"),
 		whenAvailable(regResponder(sub, "api.request.read", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
@@ -2287,7 +2110,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 		whenAvailable(regResponder(sub, "api.import.postman", params(validateAPIImportPostmanRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{op: importOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePostman(ctx, req) }
-		}), func() bool { return importWired }, "api collection bindings not available"),
+		}), func() bool { return importWired }, "api import not available"),
 		regResponder(sub, "api.import.curl", params(validateAPIImportCurlRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCurl(ctx, req) }

@@ -842,7 +842,7 @@ func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
 		Row              string `json:"row"`
 		Fingerprint      string `json:"fingerprint"`
 		PassphraseWanted bool   `json:"passphraseWanted"`
-	}{Row: "secrow:abc", Fingerprint: "SHA256:abc123", PassphraseWanted: false}
+	}{Row: "secrow:0123456789abcdef0123456789abcdef", Fingerprint: "SHA256:abc123", PassphraseWanted: false}
 	raw, err := json.Marshal(dto)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -853,7 +853,7 @@ func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
 		Row              string `json:"row"`
 		Fingerprint      string `json:"fingerprint"`
 		PassphraseWanted bool   `json:"passphraseWanted"`
-	}{Row: "secrow:def", Fingerprint: "", PassphraseWanted: true}
+	}{Row: "secrow:fedcba9876543210fedcba9876543210", Fingerprint: "", PassphraseWanted: true}
 	rawEnc, err := json.Marshal(dtoEnc)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -889,6 +889,130 @@ func TestSaveKeyMaterial_OverTheWireConformsToContract(t *testing.T) {
 	// The wire carries the row handle, never a secret reference.
 	if strings.Contains(string(envelope.Result), "sec:v1:") {
 		t.Errorf("saveKeyMaterial result leaks a secret reference: %s", envelope.Result)
+	}
+}
+
+// ── secrets.savePassword ───────────────────────────────────────────────
+
+// The DTO's own conformance: the mint result is the row handle and nothing
+// else. The schema is additionalProperties:false plus required:["row"], so
+// this fails both if a field goes missing and if one is added — which is what
+// makes it exact rather than decorative.
+func TestSavePassword_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.savePassword.schema.json")
+
+	raw, err := json.Marshal(secretMintResult{Row: "secrow:0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "savePassword DTO")
+}
+
+// The real result off the real socket. The field that must not go missing is
+// row: the editor names it on the profile's options, so a result without one
+// leaves the connection pointing at nothing and failing at connect time with
+// no secret to authenticate with (nocx-yfba, ADR-0017 §1).
+func TestSavePassword_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.savePassword.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	raw := jsonrpcCall(t, h.conn, "secrets.savePassword", map[string]any{
+		"password": "contract-password",
+		"name":     "contract-pw",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("savePassword: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "savePassword result")
+
+	// The wire carries the row handle, never a secret reference (ADR-0011 §2).
+	if strings.Contains(string(envelope.Result), "sec:v1:") {
+		t.Errorf("savePassword result leaks a secret reference: %s", envelope.Result)
+	}
+	// And never the password it was just handed.
+	if strings.Contains(string(envelope.Result), "contract-password") {
+		t.Errorf("savePassword result leaks the password: %s", envelope.Result)
+	}
+}
+
+// ── secrets.saveKeyPassphrase ──────────────────────────────────────────
+
+// The DTO's own conformance: the same one-field shape as savePassword. It is
+// pinned separately because it is a separate schema — two methods agreeing
+// today is not a reason for one test, it is the reason they can drift.
+func TestSaveKeyPassphrase_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.saveKeyPassphrase.schema.json")
+
+	raw, err := json.Marshal(secretMintResult{Row: "secrow:fedcba9876543210fedcba9876543210"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "saveKeyPassphrase DTO")
+}
+
+// The real result off the real socket, through the only path that reaches it:
+// an encrypted key is minted first, and its row is what the passphrase is
+// verified against. A passphrase minted without a key to check it is not a
+// state the product has, so the test does not invent one.
+func TestSaveKeyPassphrase_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.saveKeyPassphrase.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	const passphrase = "contract-passphrase"
+	pem, _ := testEncryptedKeyPEM(t, passphrase)
+	keyRaw := jsonrpcCall(t, h.conn, "secrets.saveKeyMaterial", map[string]any{
+		"keyText": pem,
+		"name":    "contract-key",
+	})
+	var keyEnvelope struct {
+		Result struct {
+			Row string `json:"row"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(keyRaw, &keyEnvelope); err != nil {
+		t.Fatalf("unmarshal key: %v\nraw: %s", err, string(keyRaw))
+	}
+	if keyEnvelope.Error != nil {
+		t.Fatalf("saveKeyMaterial: %+v", keyEnvelope.Error)
+	}
+	if keyEnvelope.Result.Row == "" {
+		t.Fatal("saveKeyMaterial returned no row, so the passphrase has nothing to verify against")
+	}
+
+	raw := jsonrpcCall(t, h.conn, "secrets.saveKeyPassphrase", map[string]any{
+		"keyRow":     keyEnvelope.Result.Row,
+		"passphrase": passphrase,
+		"name":       "contract-passphrase-secret",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("saveKeyPassphrase: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "saveKeyPassphrase result")
+
+	// The wire carries the row handle, never a secret reference (ADR-0011 §2).
+	if strings.Contains(string(envelope.Result), "sec:v1:") {
+		t.Errorf("saveKeyPassphrase result leaks a secret reference: %s", envelope.Result)
+	}
+	// And never the passphrase it just verified.
+	if strings.Contains(string(envelope.Result), passphrase) {
+		t.Errorf("saveKeyPassphrase result leaks the passphrase: %s", envelope.Result)
 	}
 }
 

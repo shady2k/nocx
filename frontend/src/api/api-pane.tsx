@@ -324,6 +324,7 @@ export function ApiPane(props: ApiPaneProps) {
   const secretSource = props.secretSource
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const openSecrets = props.openSecrets
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const secretInventory = props.secretInventory
   let openRequestSecretPicker: (() => void) | undefined
   const [secretEntries, setSecretEntries] = createSignal<SecretEntry[]>([])
@@ -354,7 +355,7 @@ export function ApiPane(props: ApiPaneProps) {
         setSecretInventoryEntries([])
       }
     } catch {
-      setVaultState('sealed')
+      setVaultState('unknown')
       setSecretEntries([])
       setSecretInventoryEntries([])
     }
@@ -3287,6 +3288,12 @@ export function ApiPane(props: ApiPaneProps) {
             saveError={folderSaveRefused()}
             onVariables={setFolderRows}
             onNewRequest={newRequestHere}
+            secretSource={secretSource}
+            secretEntries={secretEntries}
+            vaultState={vaultState}
+            onSecretReference={(handle, at, replace) =>
+              setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+            }
           />
         </div>
       </Show>
@@ -3323,6 +3330,12 @@ export function ApiPane(props: ApiPaneProps) {
               }}
               connections={store.connections()}
               onSave={saveEnvironment}
+              secretSource={secretSource}
+              secretEntries={secretEntries}
+              vaultState={vaultState}
+              onSecretReference={(handle, at, replace) =>
+                setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+              }
               onReset={resetEnvironment}
             />
           </div>
@@ -3335,7 +3348,8 @@ export function ApiPane(props: ApiPaneProps) {
               scopeVariables={store.scopeVariables()}
               onEdit={(next) => store.editDraft(next)}
               secretSource={secretSource}
-              secretEntries={secretInventoryEntries}
+              secretEntries={secretEntries}
+              secretInventory={secretInventoryEntries}
               vaultState={vaultState}
               onSecretReference={(handle, at, replace) =>
                 setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render } from '@solidjs/testing-library'
+import { For } from 'solid-js'
 import {
   SecretTextField,
   secretMarks,
@@ -66,13 +67,15 @@ describe('the extracted secret text field seam', () => {
     render(() => (
       <>
         <SecretTextField id="resolved" value={resolvedValue} marks={resolved} />
-        {states.map((state, index) => (
-          <SecretTextField
-            id={`missing-${state}`}
-            value={missingValue}
-            marks={missingMarks[index]!}
-          />
-        ))}
+        <For each={states}>
+          {(state, index) => (
+            <SecretTextField
+              id={`missing-${state}`}
+              value={missingValue}
+              marks={missingMarks[index()]}
+            />
+          )}
+        </For>
       </>
     ))
 

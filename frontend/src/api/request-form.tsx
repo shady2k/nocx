@@ -169,7 +169,7 @@ export interface RequestLineProps {
   secretEntries?: () => readonly SecretEntry[]
   vaultState?: () => VaultState
   onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
-  onPickerReady?: (open: () => void) => void
+  onPickerReady?: (open: (() => void) | undefined) => void
 }
 
 /** The line: the verb, the address, what it goes out under, and Send. */
@@ -339,10 +339,11 @@ export interface RequestEditorProps {
   onEdit: (next: ApiRequest) => void
   /** Vault-backed source shared by every request text field. */
   secretSource?: SecretPickerSource
-  secretEntries?: () => readonly InventoryEntry[]
+  secretEntries?: () => readonly SecretEntry[]
+  secretInventory?: () => readonly InventoryEntry[]
   vaultState?: () => VaultState
   onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
-  onPickerReady?: (open: () => void) => void
+  onPickerReady?: (open: (() => void) | undefined) => void
 }
 
 /** The editor: the four parts of a request, one at a time. */
@@ -809,7 +810,7 @@ export function RequestEditor(props: RequestEditorProps) {
                             }
                           />
                         }
-                        secrets={[...(props.secretEntries?.() ?? [])]}
+                        secrets={[...(props.secretInventory?.() ?? [])]}
                         value={authReference()}
                         onValueChange={(handle) => {
                           if (handle === undefined) return

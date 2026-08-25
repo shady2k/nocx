@@ -31,11 +31,15 @@ type fakeProfileRepo struct {
 	mu       sync.Mutex
 	profiles []profile.SSHProfile
 	cleared  []string
+	loadErr  error
 }
 
 func (f *fakeProfileRepo) LoadProfiles() ([]profile.SSHProfile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
 	out := make([]profile.SSHProfile, len(f.profiles))
 	copy(out, f.profiles)
 	return out, nil
@@ -93,13 +97,17 @@ func (f *fakeProfileRepo) ClearSecretRefs(ref string) error {
 // fakeGroupRepo is an in-memory profile.GroupRepository that also
 // implements the optional DeleteGroupAtomic and ApplyGroups surfaces.
 type fakeGroupRepo struct {
-	mu     sync.Mutex
-	groups []profile.ProfileGroup
+	mu      sync.Mutex
+	groups  []profile.ProfileGroup
+	loadErr error
 }
 
 func (f *fakeGroupRepo) LoadGroups() ([]profile.ProfileGroup, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
 	out := make([]profile.ProfileGroup, len(f.groups))
 	copy(out, f.groups)
 	return out, nil
@@ -1365,5 +1373,33 @@ func TestSecretRefs_OnlyOpaqueRowsResolveAndStoreErrorsRemainErrors(t *testing.T
 	var unresolved *capability.UnresolvedSecretError
 	if errors.As(err, &unresolved) {
 		t.Fatalf("provider error was classified unresolved: %v", err)
+	}
+}
+
+func TestSecretRefsProfileLoadFailureReachesCaller(t *testing.T) {
+	vaultSeam := newFakeVault()
+	if _, err := vaultSeam.CreateNamed(context.Background(), credential.NewSecret("value"), vault.SecretMeta{Name: "secrow:row"}); err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	loadErr := errors.New("profiles unavailable")
+	refs := capability.NewSecretRefs(vaultSeam, vaultSeam, &fakeProfileRepo{loadErr: loadErr}, &fakeGroupRepo{})
+
+	_, _, err := refs.ResolveText(context.Background(), "{{secret:secrow:row}}")
+	if !errors.Is(err, loadErr) || !strings.Contains(err.Error(), loadErr.Error()) {
+		t.Fatalf("ResolveText error = %v, want profile load failure", err)
+	}
+}
+
+func TestSecretRefsGroupLoadFailureReachesCaller(t *testing.T) {
+	vaultSeam := newFakeVault()
+	if _, err := vaultSeam.CreateNamed(context.Background(), credential.NewSecret("value"), vault.SecretMeta{Name: "secrow:row"}); err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	loadErr := errors.New("groups unavailable")
+	refs := capability.NewSecretRefs(vaultSeam, vaultSeam, &fakeProfileRepo{}, &fakeGroupRepo{loadErr: loadErr})
+
+	_, _, err := refs.ResolveText(context.Background(), "{{secret:secrow:row}}")
+	if !errors.Is(err, loadErr) || !strings.Contains(err.Error(), loadErr.Error()) {
+		t.Fatalf("ResolveText error = %v, want group load failure", err)
 	}
 }

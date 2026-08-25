@@ -26,7 +26,8 @@ type clearWindowProbe struct {
 	layout *clearWindowLayout
 }
 
-func (p *clearWindowProbe) Layout() content.LayoutRepository { return p.layout }
+func (p *clearWindowProbe) Layout() content.LayoutRepository  { return p.layout }
+func (p *clearWindowProbe) APIRuns() content.APIRunRepository { return nil }
 
 type clearWindowLayout struct {
 	content.LayoutRepository

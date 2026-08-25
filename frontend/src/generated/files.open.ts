@@ -42,4 +42,8 @@ export interface FilesOpenResult {
      */
     inferredReason: string
   }
+  /**
+   * Whether this backend has a file-manager revealer wired (files.reveal). False on a platform nocx does not ship a reveal for, where files.reveal would answer -32601; the renderer must not offer 'Show in Finder' for a capability the backend refuses (nocx-ngf3u). A build fact, constant for the life of the process, repeated on every open so the binding carries its own capability.
+   */
+  revealAvailable: boolean
 }

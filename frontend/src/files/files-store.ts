@@ -175,6 +175,10 @@ export type FilesFlatRow =
 interface FilesBinding {
   bindingId: string
   endpointId: string | null
+  /** Whether this backend has a file-manager revealer wired. A build
+   *  fact carried on the open result; the panel offers "Show in Finder"
+   *  only when it is true (nocx-ngf3u). */
+  revealAvailable: boolean
 }
 export interface FilesTreeStore {
   phase(): FilesPanelPhase
@@ -771,7 +775,11 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     opening
       .then((res) => {
         if (!openCurrent(ctx)) return
-        setBinding({ bindingId: res.bindingId, endpointId: res.endpointId })
+        setBinding({
+          bindingId: res.bindingId,
+          endpointId: res.endpointId,
+          revealAvailable: res.revealAvailable,
+        })
         setRoot({
           ...emptyListing(),
           path: res.root.path,

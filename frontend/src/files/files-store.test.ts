@@ -45,6 +45,7 @@ const SSH_B: ActiveOrigin = {
 
 const OPEN_RESULT = {
   bindingId: 'b1',
+  revealAvailable: true,
   endpointId: null,
   root: { path: '/', display: '/', inferred: false, inferredReason: '' },
 }

@@ -50,6 +50,7 @@ import (
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/reveal"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -911,6 +912,16 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
+	// The file-manager revealer (nocx-ngf3u): per-OS behind the interface
+	// the transport already declares (FilesRevealer). macOS: `open -R`;
+	// Linux: xdg-open on the containing directory; other platforms: nil
+	// (files.reveal answers -32601, the menu item does not render). This
+	// is the same shape contentkey uses for the per-OS identity question.
+	filesRevealer, filesRevealerErr := reveal.New()
+	if filesRevealerErr != nil {
+		slogger.Warn("file-manager reveal unavailable", "reason", filesRevealerErr)
+	}
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithBackupService(backupService),
@@ -1034,6 +1045,16 @@ func New(opts ...Option) (*App, error) {
 		// resolution child can outlive the process; nothing after this point
 		// in New can fail, so the factory needs no earlier-return cleanup.
 		transport.WithGitRepoFactory(gitFactory),
+		// The file-manager reveal (nocx-ngf3u): the OS-specific revealer
+		// behind the interface that already exists (FilesRevealer, one
+		// method). This is the same per-OS problem internal/contentkey
+		// already solved — one behaviour, chosen at the composition root.
+		// On macOS the reveal is `open -R`; on Linux xdg-open opens the
+		// containing directory; on other platforms New returns nil and
+		// files.reveal answers -32601 (the menu item does not render).
+		// Before this line the revealer was nil in the shipped app and
+		// "Show in Finder" raised a danger toast on every use.
+		transport.WithFilesRevealer(filesRevealer),
 	}
 	// The lifecycle publication boundary (ADR-0024 decision 7, bead
 	// nocx-u7uh.5): one kernel, one publisher, and the transport as its

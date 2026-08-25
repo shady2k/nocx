@@ -5,7 +5,7 @@
   "description": "Result of the files.open JSON-RPC method: the binding that names a filesystem for every later files.* call, plus the root it starts at. sessionId appears exactly once on the wire — here — which is what keeps the wrong pairing inexpressible: no later parameter can ask for the local filesystem of an SSH session, and no caller can name a filesystem the backend did not hand out (design §5.2).",
   "type": "object",
   "additionalProperties": false,
-  "required": ["bindingId", "endpointId", "root"],
+  "required": ["bindingId", "endpointId", "root", "revealAvailable"],
   "properties": {
     "bindingId": {
       "description": "The backend-issued id every later files.* call echoes. Minted from crypto/rand so it cannot be guessed or enumerated; it is an address, not a bearer token — every later call re-checks that the binding's session is in the requesting connection's connState, one map lookup, and the check is what holds if an id ever reaches a log, a screenshot or a crash report.",
@@ -38,6 +38,10 @@
           "type": "string"
         }
       }
+    },
+    "revealAvailable": {
+      "description": "Whether this backend has a file-manager revealer wired (files.reveal). False on a platform nocx does not ship a reveal for, where files.reveal would answer -32601; the renderer must not offer 'Show in Finder' for a capability the backend refuses (nocx-ngf3u). A build fact, constant for the life of the process, repeated on every open so the binding carries its own capability.",
+      "type": "boolean"
     }
   }
 }

@@ -368,6 +368,11 @@ function FilesPanel(props: FilesPanelProps) {
       },
     ]
     const o = props.store.origin()
+    // The binding carries the backend's reveal capability (nocx-ngf3u):
+    // "Show in Finder" is offered only where a revealer is wired, exactly
+    // as it is offered only where the tab is local — absence, never a
+    // greyed-out row.
+    const b = props.store.binding()
     // Upload joins where an upload would actually MOVE the file, expressed
     // as ABSENCE — the same mechanism "Show in Finder" uses below in the
     // opposite direction, and for the same reason: where the capability does
@@ -436,7 +441,7 @@ function FilesPanel(props: FilesPanelProps) {
         onSelect: () => void downloadFile(m.node),
       })
     }
-    if (o !== null && o.kind === 'local') {
+    if (o !== null && o.kind === 'local' && (b?.revealAvailable ?? false)) {
       items.push({
         id: 'reveal',
         label: 'Show in Finder',

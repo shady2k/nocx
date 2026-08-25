@@ -116,6 +116,7 @@ const LOCAL_A: ActiveOrigin = {
 const OPEN_RESULT = {
   bindingId: 'b1',
   endpointId: null,
+  revealAvailable: true,
   root: { path: '/', display: '/', inferred: false, inferredReason: '' },
 }
 

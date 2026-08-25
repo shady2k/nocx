@@ -2569,12 +2569,16 @@ func TestFilesOpen_DTOConformsToContract(t *testing.T) {
 
 	ep := "v1:attestation"
 	cases := map[string]filesOpenResult{
-		// The state every local tab is actually in: endpointId must be
-		// null — never absent, never "" — and the root carries the
-		// inferred label when the caller sent no rootPath.
-		"local": {
-			BindingID:  "ab12cd34",
-			EndpointID: nil,
+		// A build WITH a revealer wired: revealAvailable is a build fact
+		// constant for the life of the process — the same value on every
+		// binding — so the case names the build, never the binding kind.
+		// The local/remote distinction is carried by endpointId alone
+		// (null vs attestation, D4); this case is a local binding on a
+		// supported build.
+		"supportedBuild": {
+			BindingID:       "ab12cd34",
+			EndpointID:      nil,
+			RevealAvailable: true,
 			Root: filesRootResult{
 				Path:           "/home/dev",
 				Display:        "~/",
@@ -2582,11 +2586,15 @@ func TestFilesOpen_DTOConformsToContract(t *testing.T) {
 				InferredReason: "no verified working directory — using home",
 			},
 		},
-		// A remote binding attests its resolved destination (D4); the
-		// SFTP wave stamps it here.
-		"remote": {
-			BindingID:  "ef56",
-			EndpointID: &ep,
+		// A build with NO revealer: the same binding shapes as above, with
+		// revealAvailable false — and here a remote binding attests its
+		// destination (D4), proving the field does not ride the endpoint
+		// kind. Both boolean values are exercised so the DTO is pinned for
+		// each rather than passing on the zero value's accident.
+		"unsupportedBuild": {
+			BindingID:       "ef56",
+			EndpointID:      &ep,
+			RevealAvailable: false,
 			Root: filesRootResult{
 				Path:    "/home/deploy",
 				Display: "/home/deploy",
@@ -2641,6 +2649,46 @@ func TestFilesOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Root.Inferred {
 		t.Error("root is inferred although rootPath was given and usable")
+	}
+	if got.RevealAvailable {
+		t.Error("revealAvailable is true although no revealer is wired")
+	}
+}
+
+// TestFilesOpen_RevealAvailableRidesTheWireWhenWired is the paired
+// positive: with a revealer wired through the option that exists, the
+// open result carries revealAvailable=true off the real socket. The
+// schema's required+additionalProperties:false proves the field is
+// present; this proves its VALUE is the composition seam's, not a
+// default (nocx-ngf3u).
+func TestFilesOpen_RevealAvailableRidesTheWireWhenWired(t *testing.T) {
+	schema := loadSchema(t, "files.open.schema.json")
+	e := newFilesTestEnv(t, WithFilesRevealer(&stubRevealer{}))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.open", map[string]any{
+		"sessionId": sid,
+		"rootPath":  dir,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.open result (real socket, revealer wired)")
+
+	var got filesOpenResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.RevealAvailable {
+		t.Error("revealAvailable is false although a revealer is wired")
 	}
 }
 

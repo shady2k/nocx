@@ -943,6 +943,9 @@ func secretNameProblem(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return "name is required and must not be blank"
 	}
+	if strings.HasPrefix(strings.TrimSpace(name), "secrow:") {
+		return vault.ErrSecretNameLooksLikeRow.Error()
+	}
 	if n := utf8.RuneCountInString(name); n > maxSecretNameRunes {
 		return fmt.Sprintf("name exceeds %d characters", maxSecretNameRunes)
 	}
@@ -964,6 +967,7 @@ var vaultKinds = map[string]struct{}{
 	vault.KindKeyPassphrase: {},
 	vault.KindPrivateKey:    {},
 	vault.KindPublicKey:     {},
+	vault.KindAPIToken:      {},
 	vault.KindOTPSeed:       {},
 }
 
@@ -1160,7 +1164,7 @@ func validateVaultCreateSecretRaw(raw json.RawMessage) string {
 		return msg
 	}
 	if _, ok := vaultKinds[p.Kind]; !ok {
-		return "kind must be one of password, key-passphrase, private-key, public-key, otp-seed"
+		return "kind must be one of password, key-passphrase, private-key, public-key, otp-seed, api-token"
 	}
 	if n := utf8.RuneCountInString(p.Value); n > maxSecretMaterialRunes {
 		return fmt.Sprintf("value exceeds %d characters", maxSecretMaterialRunes)

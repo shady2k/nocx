@@ -1022,6 +1022,9 @@ func (v *Vault) createNamedResolved(ctx context.Context, value credential.Secret
 		return "", "", err
 	}
 	meta.Name = strings.TrimSpace(meta.Name)
+	if err := validateSecretName(meta.Name); err != nil {
+		return "", "", err
+	}
 	return v.createNamed(ctx, value, meta, resolveCollisions)
 }
 
@@ -1517,6 +1520,9 @@ func (v *Vault) RenameSecret(ctx context.Context, row string, name string, input
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("secret name is required")
+	}
+	if err := validateSecretName(name); err != nil {
+		return err
 	}
 
 	id, kind, ok := v.resolveRowLocked(row, inputs)

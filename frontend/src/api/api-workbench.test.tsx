@@ -6215,10 +6215,27 @@ describe('secrets are doors in every request field', () => {
   }
 
   const fieldCases = [
-    { label: 'header', fieldId: 'api-header-value-0', tab: 'Headers 1' },
-    { label: 'parameter', fieldId: 'api-query-value-0', tab: 'Params 1' },
-    { label: 'URL', fieldId: 'api-url', tab: null },
-    { label: 'request variable', fieldId: 'api-variable-value-0', tab: 'Variables 1' },
+    { label: 'header', fieldId: 'api-header-value-0', tab: 'Headers 1', scope: 'request' },
+    { label: 'parameter', fieldId: 'api-query-value-0', tab: 'Params 1', scope: 'request' },
+    { label: 'URL', fieldId: 'api-url', tab: null, scope: 'request' },
+    {
+      label: 'request variable',
+      fieldId: 'api-variable-value-0',
+      tab: 'Variables 1',
+      scope: 'request',
+    },
+    {
+      label: 'folder variable',
+      fieldId: 'api-folder-var-value-0',
+      tab: 'Variables',
+      scope: 'folder',
+    },
+    {
+      label: 'environment value',
+      fieldId: 'api-environment-var-value-0',
+      tab: null,
+      scope: 'environment',
+    },
   ] as const
   async function openSecretRequest(
     secretSource: typeof source,
@@ -6245,8 +6262,8 @@ describe('secrets are doors in every request field', () => {
   }
 
   it.each(fieldCases)(
-    'from a $label value with no environment, @ inserts and saves an opaque reference',
-    async ({ fieldId, tab }) => {
+    'from a $label value, @ inserts an opaque reference',
+    async ({ fieldId, tab, scope }) => {
       const writeRequest = vi.fn().mockResolvedValue({})
       const request: ApiRequest = {
         ...REQUEST,
@@ -6256,41 +6273,140 @@ describe('secrets are doors in every request field', () => {
         variables: [{ name: 'token', value: '', enabled: true }],
         auth: { kind: 'none', token: '', password: '', user: '' },
       }
-      const { bar } = await mountApp({
-        listCollections: vi.fn().mockResolvedValue({
-          collections: [
-            collectionsFixture({
-              collection: collectionFixture({ environments: [] }),
-            }),
-          ],
-          defaultRoot: DEFAULT_ROOT,
-        }),
-        readRequest: vi.fn().mockResolvedValue({ request }),
-        writeRequest,
-        secretSource: source,
-      } as never)
 
-      await openWorkbench(bar)
-      await vi.waitFor(() => row(CREATE_REL_PATH))
-      fireEvent.click(row(CREATE_REL_PATH))
-      await vi.waitFor(() => expect(field('api-url').value).toBe('https://api.example.test?page'))
+      if (scope === 'request') {
+        await openSecretRequest(source, request, { writeRequest })
+      } else if (scope === 'folder') {
+        await openSecretRequest(source, request, {
+          readFolder: vi.fn().mockResolvedValue({
+            variables: [{ name: 'token', value: '', enabled: true }],
+          }),
+        })
+        await vi.waitFor(() => row(CREATE_REL_PATH))
+        fireEvent.click(folderRow(`${HANDLE}:users`))
+        await vi.waitFor(() => expect(crumbHere()).toBe('users'))
+        fireEvent.click(folderTab('Variables'))
+        await vi.waitFor(() => expect(field(fieldId).value).toBe(''))
+      } else {
+        await openSecretRequest(source, request, {
+          listCollections: vi.fn().mockResolvedValue({
+            collections: [
+              collectionsFixture({
+                collection: collectionFixture({ environments: [DEV_ENV] }),
+              }),
+            ],
+            defaultRoot: DEFAULT_ROOT,
+          }),
+          readEnvironment: vi.fn().mockResolvedValue({
+            environment: {
+              name: DEV_ENV.name,
+              values: { token: '' },
+              route: { kind: 'direct', profileId: '', insecureTls: false },
+            },
+          }),
+        })
+        fireEvent.click(button('Manage environments'))
+        await vi.waitFor(() => expect(field(fieldId).value).toBe(''))
+      }
 
-      if (tab !== null) fireEvent.click(button(tab))
+      if (tab !== null) fireEvent.click(tab === 'Variables' ? folderTab(tab) : button(tab))
       const target = () => field(fieldId)
       fireEvent.input(target(), { target: { value: '@dep' } })
       await vi.waitFor(() => expect(document.body.textContent).toContain('Deploy token'))
       fireEvent.keyDown(target(), { key: 'Enter' })
 
       await vi.waitFor(() => expect(target().value).toBe('{{secret:secrow:abc123}}'))
-      await vi.waitFor(() => expect(writeRequest).toHaveBeenCalled())
-      const savedBytes = JSON.stringify(
-        writeRequest.mock.calls[writeRequest.mock.calls.length - 1]?.[2],
-      )
-      expect(savedBytes).toContain('{{secret:secrow:abc123}}')
-      expect(savedBytes).not.toContain('Deploy token')
-      expect(savedBytes).not.toContain('sk-')
+      const mark = target()
+        .closest('.ui-text-field__control')
+        ?.querySelector('.ui-text-field__mark')
+      expect(mark?.textContent).toBe('Deploy token')
+      expect(mark?.textContent).not.toContain('secrow:abc123')
+
+      if (scope === 'request') {
+        await vi.waitFor(() => expect(writeRequest).toHaveBeenCalled())
+        const savedBytes = JSON.stringify(
+          writeRequest.mock.calls[writeRequest.mock.calls.length - 1]?.[2],
+        )
+        expect(savedBytes).toContain('{{secret:secrow:abc123}}')
+        expect(savedBytes).not.toContain('Deploy token')
+        expect(savedBytes).not.toContain('sk-')
+      }
     },
   )
+  it('uses the shared source list for every request reference verdict', async () => {
+    await openSecretRequest(source, {
+      ...REQUEST,
+      url: '{{secret:secrow:abc123}}',
+      headers: [{ name: 'Authorization', value: '{{secret:secrow:abc123}}', enabled: true }],
+      query: [{ name: 'page', value: '{{secret:secrow:abc123}}', enabled: true }],
+      variables: [{ name: 'token', value: '{{secret:secrow:abc123}}', enabled: true }],
+      auth: { kind: 'none', token: '', password: '', user: '' },
+    })
+
+    for (const [fieldId, tab] of [
+      ['api-url', null],
+      ['api-header-value-0', 'Headers 1'],
+      ['api-query-value-0', 'Params 1'],
+      ['api-variable-value-0', 'Variables 1'],
+    ] as const) {
+      if (tab !== null) fireEvent.click(button(tab))
+      const mark = field(fieldId)
+        .closest('.ui-text-field__control')
+        ?.querySelector('.ui-text-field__mark')
+      expect(mark?.textContent).toBe('Deploy token')
+      expect(mark?.textContent).not.toContain('Secret not on this machine')
+    }
+  })
+
+  it('keeps an unavailable vault answer unknown instead of calling it sealed', async () => {
+    const unavailableSource = {
+      ...source,
+      status: vi.fn().mockRejectedValue(new Error('dispatcher unavailable')),
+      list: vi.fn().mockResolvedValue([entry]),
+    }
+    await openSecretRequest(unavailableSource, {
+      ...REQUEST,
+      url: '{{secret:secrow:abc123}}',
+      headers: [],
+      query: [],
+      variables: [],
+      auth: { kind: 'none', token: '', password: '', user: '' },
+    })
+
+    const mark = field('api-url')
+      .closest('.ui-text-field__control')
+      ?.querySelector<HTMLElement>('.ui-text-field__mark')
+    expect(mark?.dataset.tone).toBe('reference')
+    expect(mark?.textContent).not.toContain('Vault locked — unlock to view')
+    expect(mark?.textContent).not.toContain('Secret not on this machine')
+  })
+
+  it('does not reopen a picker after its focused request row is removed', async () => {
+    await openSecretRequest(source, {
+      ...REQUEST,
+      url: 'https://api.example.test',
+      headers: [{ name: 'Authorization', value: '', enabled: true }],
+      query: [],
+      variables: [],
+      auth: { kind: 'none', token: '', password: '', user: '' },
+    })
+    fireEvent.click(button('Headers 1'))
+    const header = field('api-header-value-0')
+    fireEvent.focus(header)
+    header.setSelectionRange(header.value.length, header.value.length)
+    source.status.mockClear()
+    source.list.mockClear()
+
+    fireEvent.click(button('Remove header 1'))
+    await vi.waitFor(() => expect(workbench().querySelector('#api-header-value-0')).toBeNull())
+    fireEvent.click(button('More actions for this request'))
+    await vi.waitFor(() => expect(menuItem('Insert a secret…')).toBeTruthy())
+    fireEvent.click(menuItem('Insert a secret…'))
+    await Promise.resolve()
+
+    expect(source.status).not.toHaveBeenCalled()
+    expect(document.body.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+  })
   it('an empty vault keeps the typed create name while its list is loading', async () => {
     const requestCreate = vi.fn()
     let release: ((entries: never[]) => void) | undefined

@@ -53,7 +53,7 @@ export function secretMarks(
 
 export interface SecretTextFieldProps extends TextFieldProps {
   source?: SecretPickerSource
-  onPickerReady?: (open: () => void) => void
+  onPickerReady?: (open: (() => void) | undefined) => void
   onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
 }
 
@@ -83,7 +83,10 @@ export function SecretTextField(props: SecretTextFieldProps) {
             })
           },
         })
-  onCleanup(() => picker?.destroy())
+  onCleanup(() => {
+    onPickerReady?.(undefined)
+    picker?.destroy()
+  })
 
   const openAt = (from: number, to: number): void => {
     if (picker === null) return

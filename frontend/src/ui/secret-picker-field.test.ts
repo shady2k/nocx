@@ -156,13 +156,16 @@ describe('createSecretPickerField', () => {
     expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(0)
   })
 
-  it('a filter with no matching secret closes the panel silently', async () => {
+  it('a filter with no matching secret keeps the create row open', async () => {
     const h = setup([entry('prod-key', 'secrow:prod-id')])
     h.value.current = '@missing'
     h.controller.onInput(h.value.current, h.value.current.length)
     await flush()
 
-    expect(panel()?.dataset.open).not.toBe('true')
+    expect(panel()?.dataset.open).toBe('true')
+    expect(rows().map((row) => row.querySelector('.ui-collection-row__info')?.textContent)).toEqual(
+      ['Add "missing" to the vault…'],
+    )
     expect(h.source.requestCreate).not.toHaveBeenCalled()
   })
 
@@ -218,15 +221,15 @@ describe('createSecretPickerField', () => {
     expect(rows()[0]?.querySelector('[data-tone="danger"]')).toBeNull()
   })
 
-  it('Add a secret calls requestCreate with exactly the text typed after @', async () => {
+  it('Add a secret calls requestCreate with exactly the unmatched text typed after @', async () => {
     const h = setup([entry('prod-key', 'secrow:prod-id')])
-    h.value.current = '@prod'
+    h.value.current = '@brand-new'
     h.controller.onInput(h.value.current, h.value.current.length)
     await flush()
 
     expect(key(h.controller, { key: 'ArrowDown' })).toBe(true)
     expect(key(h.controller, { key: 'Enter' })).toBe(true)
-    expect(h.source.requestCreate).toHaveBeenCalledWith('prod')
+    expect(h.source.requestCreate).toHaveBeenCalledWith('brand-new')
     expect(h.onChange).not.toHaveBeenCalled()
   })
 

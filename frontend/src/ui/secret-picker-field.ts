@@ -9,7 +9,7 @@
 // The adapter owns only the field's trigger span and replacement. SecretPicker
 // remains the one owner of the passive panel, lifecycle offers, filtering, and
 // keyboard acceptance rules.
-import { SecretPicker, type SecretEntry, type SecretPickerSource } from './secret-picker'
+import { SecretPicker, type SecretPickerSource } from './secret-picker'
 
 export interface SecretPickerFieldController {
   /** Call on every input event. Finds the trigger word around the caret and
@@ -43,14 +43,12 @@ export function createSecretPickerField(opts: {
   /** Escape dismisses the current @ word as ordinary text until the word
    * changes or disappears; a later input event must not resurrect its panel. */
   let dismissedTriggerFrom: number | null = null
-  let loadedEntries: SecretEntry[] | null = null
   const idsByName = new Map<string, string>()
 
   const source: SecretPickerSource = {
     status: () => opts.source.status(),
     list: async () => {
       const entries = await opts.source.list()
-      loadedEntries = entries
       idsByName.clear()
       for (const entry of entries) idsByName.set(entry.name, entry.id)
       return entries
@@ -91,11 +89,9 @@ export function createSecretPickerField(opts: {
     picker.close()
   }
 
-  const closeIfNoMatch = (filter: string): void => {
-    if (loadedEntries === null || loadedEntries.length === 0 || filter === '') return
-    const needle = filter.toLowerCase()
-    if (!loadedEntries.some((entry) => entry.name.toLowerCase().includes(needle))) close()
-  }
+  // This adapter serves the insert purpose. SecretPicker keeps its create row
+  // visible for a name no vault entry matches; the resolve purpose may close
+  // silently, but a plain field has something to offer here.
   const openPicker = (filter: string): void => {
     if (!picker.isOpen) {
       const openingGeneration = generation
@@ -108,11 +104,9 @@ export function createSecretPickerField(opts: {
           picker.close()
           return
         }
-        closeIfNoMatch(trigger.filter)
       })
     }
     picker.setFilter(filter)
-    closeIfNoMatch(filter)
   }
 
   const findTrigger = (value: string, caret: number): Trigger | null => {
